@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use pluralizer::pluralize;
 use rusqlite::Connection;
 use tantivy::TantivyDocument;
@@ -119,8 +119,21 @@ fn to_hit(
     context_lines: usize,
 ) -> Result<SearchHit> {
     let file_path = workspace.root.join(&chunk.file_path);
-    let content = fs::read_to_string(&file_path)
-        .with_context(|| format!("failed reading {}", file_path.display()))?;
+    let content = match fs::read_to_string(&file_path) {
+        Ok(c) => c,
+        Err(_) => {
+            // File was deleted since indexing — fall back to stored chunk text
+            return Ok(SearchHit {
+                file_path: chunk.file_path,
+                start_line: chunk.start_line,
+                end_line: chunk.end_line,
+                preview: chunk.text,
+                reason: "file no longer on disk".to_string(),
+                score,
+                sources,
+            });
+        }
+    };
 
     let lines = content.lines().collect::<Vec<_>>();
     if lines.is_empty() {

@@ -288,15 +288,14 @@ async fn run_query(cli: Cli) -> Result<()> {
         return Ok(());
     }
 
-    if !workspace_is_indexed(&workspace) {
-        let should_index = if cli.force {
-            true
-        } else {
-            prompt_index_first_time()?
-        };
+    if !workspace_is_indexed(&workspace) && !cli.force {
+        let should_index = prompt_index_first_time()?;
         if !should_index {
             bail!("workspace is not indexed; aborting search")
         }
+    }
+
+    {
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         let _summary = index_workspace(&workspace, &model)?;
     }

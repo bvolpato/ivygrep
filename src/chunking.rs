@@ -69,7 +69,7 @@ fn is_probably_text(bytes: &[u8]) -> bool {
         return false;
     }
 
-    if sample.iter().any(|&byte| byte == 0) {
+    if sample.contains(&0) {
         return false;
     }
 

@@ -81,9 +81,10 @@ pub fn serve_stdio() -> Result<()> {
     let stdout = io::stdout();
     let mut reader = BufReader::new(stdin.lock());
     let mut writer = BufWriter::new(stdout.lock());
+    let mut mode = FramingMode::Unknown;
 
     loop {
-        let payload = match read_message(&mut reader)? {
+        let payload = match read_message(&mut reader, &mut mode)? {
             Some(payload) => payload,
             None => break,
         };
@@ -100,13 +101,13 @@ pub fn serve_stdio() -> Result<()> {
                         message: format!("parse error: {err}"),
                     }),
                 };
-                write_message(&mut writer, &response)?;
+                write_message(&mut writer, &response, mode)?;
                 continue;
             }
         };
 
         if let Some(response) = handle_request(request) {
-            write_message(&mut writer, &response)?;
+            write_message(&mut writer, &response, mode)?;
         }
     }
 
@@ -114,11 +115,8 @@ pub fn serve_stdio() -> Result<()> {
 }
 
 fn handle_request(request: JsonRpcRequest) -> Option<JsonRpcResponse> {
-    if request.id.is_none() {
-        return None;
-    }
-
-    let id = request.id;
+    let id = request.id.as_ref()?;
+    let id = Some(id.clone());
 
     match dispatch(request.method.as_str(), request.params) {
         Ok(result) => Some(JsonRpcResponse {
@@ -370,38 +368,96 @@ fn render_tool_text(
     out.join("\n")
 }
 
-fn read_message<R: BufRead>(reader: &mut R) -> Result<Option<Vec<u8>>> {
-    let mut content_length: Option<usize> = None;
+/// Detected framing mode for the stdio transport.
+#[derive(Clone, Copy, PartialEq)]
+enum FramingMode {
+    /// Auto-detect on first line (initial state).
+    Unknown,
+    /// Newline-delimited JSON-RPC (mcp-cli, MCP Inspector).
+    JsonLine,
+    /// LSP-style Content-Length header framing.
+    ContentLength,
+}
 
-    loop {
+fn read_message<R: BufRead>(reader: &mut R, mode: &mut FramingMode) -> Result<Option<Vec<u8>>> {
+    // Read first non-empty line (skip blank lines between messages).
+    let first_line = loop {
         let mut line = String::new();
         let bytes = reader.read_line(&mut line)?;
         if bytes == 0 {
             return Ok(None);
         }
-
-        let trimmed = line.trim_end_matches(['\r', '\n']);
-        if trimmed.is_empty() {
-            break;
+        let trimmed = line.trim().to_string();
+        if !trimmed.is_empty() {
+            break (trimmed, line);
         }
+    };
+    let (trimmed, _raw) = first_line;
 
-        let lower = trimmed.to_ascii_lowercase();
-        if let Some(value) = lower.strip_prefix("content-length:") {
-            let len = value.trim().parse::<usize>()?;
-            content_length = Some(len);
+    // Auto-detect framing: if first meaningful line starts with '{', it's bare JSON.
+    if *mode == FramingMode::Unknown {
+        if trimmed.starts_with('{') {
+            *mode = FramingMode::JsonLine;
+        } else {
+            *mode = FramingMode::ContentLength;
         }
     }
 
-    let len = content_length.context("missing Content-Length header")?;
-    let mut payload = vec![0u8; len];
-    reader.read_exact(&mut payload)?;
-    Ok(Some(payload))
+    match *mode {
+        FramingMode::JsonLine => {
+            // The trimmed line IS the JSON payload.
+            Ok(Some(trimmed.into_bytes()))
+        }
+        FramingMode::ContentLength => {
+            // Parse header lines for Content-Length.
+            let mut content_length: Option<usize> = None;
+            let lower = trimmed.to_ascii_lowercase();
+            if let Some(value) = lower.strip_prefix("content-length:") {
+                content_length = Some(value.trim().parse::<usize>()?);
+            }
+
+            // Read remaining headers until empty line.
+            loop {
+                let mut line = String::new();
+                let bytes = reader.read_line(&mut line)?;
+                if bytes == 0 {
+                    return Ok(None);
+                }
+                let t = line.trim_end_matches(['\r', '\n']);
+                if t.is_empty() {
+                    break;
+                }
+                let lower = t.to_ascii_lowercase();
+                if let Some(value) = lower.strip_prefix("content-length:") {
+                    content_length = Some(value.trim().parse::<usize>()?);
+                }
+            }
+
+            let len = content_length.context("missing Content-Length header")?;
+            let mut payload = vec![0u8; len];
+            reader.read_exact(&mut payload)?;
+            Ok(Some(payload))
+        }
+        FramingMode::Unknown => unreachable!(),
+    }
 }
 
-fn write_message<W: Write>(writer: &mut W, response: &JsonRpcResponse) -> Result<()> {
+fn write_message<W: Write>(
+    writer: &mut W,
+    response: &JsonRpcResponse,
+    mode: FramingMode,
+) -> Result<()> {
     let payload = serde_json::to_vec(response)?;
-    write!(writer, "Content-Length: {}\r\n\r\n", payload.len())?;
-    writer.write_all(&payload)?;
+    match mode {
+        FramingMode::JsonLine | FramingMode::Unknown => {
+            writer.write_all(&payload)?;
+            writer.write_all(b"\n")?;
+        }
+        FramingMode::ContentLength => {
+            write!(writer, "Content-Length: {}\r\n\r\n", payload.len())?;
+            writer.write_all(&payload)?;
+        }
+    }
     writer.flush()?;
     Ok(())
 }

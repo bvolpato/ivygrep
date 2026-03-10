@@ -2,15 +2,13 @@
   <img src="assets/logo.png" alt="ivygrep logo" width="220" />
 </p>
 
-<h1 align="center">ivygrep</h1>
-
 <p align="center"><strong>Semantic grep that never phones home.</strong><br/>Feels like <code>rg</code>, understands English.</p>
 
 ## Superpower Your LLM
 
 Your coding agent is only as strong as its retrieval toolchain. `ivygrep` is designed to be that retrieval layer.
 
-- Natural-language code search: `where is tax calculated?` can still find `calculateTax(...)`.
+- Natural-language code search: `where is tax calculated?` can still find `calculateTaxes(...)`.
 - Hybrid ranking: lexical BM25 + semantic vectors + RRF fusion.
 - Token-efficient context: your agent pulls only relevant chunks instead of stuffing full files into prompts.
 - Local-only privacy: no cloud indexing, no code upload.
