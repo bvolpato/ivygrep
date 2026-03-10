@@ -155,3 +155,42 @@ fn cli_query_with_explicit_path_json() {
             .any(|path| path.ends_with("rust_repo/src/lib.rs"))
     );
 }
+
+#[test]
+#[serial]
+fn cli_query_word_add_is_treated_as_query() {
+    let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ivygrep"));
+    let output = cmd
+        .current_dir(&target_root)
+        .env("IVYGREP_HOME", &home)
+        .args(["--json", "-f", "add"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let _value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+}
+
+#[test]
+#[serial]
+fn cli_add_flag_indexes_workspace() {
+    let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ivygrep"));
+    let output = cmd
+        .current_dir(&target_root)
+        .env("IVYGREP_HOME", &home)
+        .args(["--add", "."])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("Indexed") || text.contains("indexed"));
+}

@@ -4,7 +4,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use clap::{Args, Parser, Subcommand};
+use clap::Parser;
 use colored::Colorize;
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
@@ -27,6 +27,21 @@ pub struct Cli {
 
     #[arg(value_name = "PATH", required = false)]
     pub query_path: Option<PathBuf>,
+
+    #[arg(long = "index", value_name = "PATH", num_args = 0..=1, default_missing_value = ".")]
+    pub index_path: Option<PathBuf>,
+
+    #[arg(long = "add", value_name = "PATH", num_args = 0..=1, default_missing_value = ".")]
+    pub add_path: Option<PathBuf>,
+
+    #[arg(long = "rm", value_name = "PATH", num_args = 0..=1, default_missing_value = ".")]
+    pub rm_path: Option<PathBuf>,
+
+    #[arg(long, default_value_t = false)]
+    pub status: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub daemon: bool,
 
     #[arg(short, long, global = true)]
     pub force: bool,
@@ -54,29 +69,6 @@ pub struct Cli {
 
     #[arg(long, global = true)]
     pub file_name_only: bool,
-
-    #[command(subcommand)]
-    pub command: Option<Command>,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum Command {
-    Index(IndexArgs),
-    Add(IndexArgs),
-    Rm(PathArg),
-    Status,
-    Daemon,
-}
-
-#[derive(Debug, Args)]
-pub struct IndexArgs {
-    #[arg(default_value = ".")]
-    pub path: PathBuf,
-}
-
-#[derive(Debug, Args)]
-pub struct PathArg {
-    pub path: PathBuf,
 }
 
 pub async fn run() -> Result<()> {
@@ -84,19 +76,43 @@ pub async fn run() -> Result<()> {
     config::ensure_app_dirs()?;
 
     let cli = Cli::parse();
+    let action_count = [
+        cli.index_path.is_some(),
+        cli.add_path.is_some(),
+        cli.rm_path.is_some(),
+        cli.status,
+        cli.daemon,
+    ]
+    .iter()
+    .filter(|flag| **flag)
+    .count();
 
-    match cli.command {
-        Some(Command::Daemon) => {
-            daemon::run_daemon().await?;
-            Ok(())
-        }
-        Some(Command::Status) => run_status(cli.json).await,
-        Some(Command::Index(args)) | Some(Command::Add(args)) => {
-            run_index(&args.path, !cli.no_watch, cli.force, cli.json).await
-        }
-        Some(Command::Rm(arg)) => run_remove(&arg.path, cli.json).await,
-        None => run_query(cli).await,
+    if action_count > 1 {
+        bail!("use only one action at a time: --index, --add, --rm, --status, or --daemon");
     }
+
+    if cli.daemon {
+        daemon::run_daemon().await?;
+        return Ok(());
+    }
+
+    if cli.status {
+        return run_status(cli.json).await;
+    }
+
+    if let Some(path) = &cli.index_path {
+        return run_index(path, !cli.no_watch, cli.force, cli.json).await;
+    }
+
+    if let Some(path) = &cli.add_path {
+        return run_index(path, !cli.no_watch, cli.force, cli.json).await;
+    }
+
+    if let Some(path) = &cli.rm_path {
+        return run_remove(path, cli.json).await;
+    }
+
+    run_query(cli).await
 }
 
 async fn run_status(json: bool) -> Result<()> {

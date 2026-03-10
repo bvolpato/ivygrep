@@ -54,11 +54,11 @@ install -m 0755 ./target/release/ivygrep ~/.local/bin/ivygrep
 ## Quick Start
 
 ```bash
-ivygrep add .
+ivygrep --add .
 ivygrep "where is the tax calculated?"
 ```
 
-`add` registers the current workspace for indexing and daemon watch updates.
+`--add` registers the current workspace for indexing and daemon watch updates.
 
 If daemon mode is running, a plain query also auto-indexes the current workspace before searching.
 
@@ -73,11 +73,11 @@ This folder is not indexed. Index it now? [y/N]
 
 ```bash
 ivygrep "where is the tax calculated?"
-ivygrep index .
-ivygrep add .
-ivygrep rm .
-ivygrep status
-ivygrep daemon
+ivygrep --index .
+ivygrep --add .
+ivygrep --rm .
+ivygrep --status
+ivygrep --daemon
 ivygrep applyFilter ~/githubworkspace/trino
 ```
 
@@ -88,21 +88,24 @@ Useful flags:
 - `--type <lang>`: language filter (`rust`, `python`, `typescript`, ...)
 - `-C, --context <n>`: context lines around hits
 - `-n, --limit <n>`: max number of files in output (no default limit)
+- `--index [path]`: explicit index/reindex workspace (defaults to `.`)
+- `--add [path]`: register/index/watch workspace (defaults to `.`)
+- `--rm [path]`: remove workspace index/watch registration (defaults to `.`)
+- `--status`: show indexed workspaces
+- `--daemon`: run daemon process
 - `--first-line-only`: print only the first non-empty line of each semantic section
 - `--file-name-only`: print only matching file paths
 - `--json`: machine-readable grouped output
 - `--no-watch`: skip daemon watcher registration
 
-Command intent:
+Action/query split:
 
-- `ivygrep add <path>`: register/index/watch a workspace (preferred day-to-day workflow).
-- `ivygrep rm <path>`: remove workspace index and watcher registration.
-- `ivygrep index <path>`: explicit index/reindex command (manual override).
-- `ivygrep <query> <path>`: run semantic search against another workspace without `cd`.
+- Workspace actions are explicit flags (`--add`, `--rm`, `--status`, `--daemon`, `--index`), so query text like `add` is never ambiguous.
+- `ivygrep <query> <path>` runs semantic search against another workspace without `cd`.
 
 ## When to use the daemon
 
-Use `ivygrep daemon` when you want the best steady-state latency in an active repo:
+Use `ivygrep --daemon` when you want the best steady-state latency in an active repo:
 
 - You run many queries in sequence and want warm index/search state in memory.
 - You want file-watch updates continuously while editing code.
@@ -113,8 +116,8 @@ Skip daemon mode if you run one-off queries occasionally. The CLI works directly
 Typical daemon workflow:
 
 ```bash
-ivygrep daemon
-ivygrep add .
+ivygrep --daemon
+ivygrep --add .
 ivygrep "where is split assignment handled?"
 ```
 

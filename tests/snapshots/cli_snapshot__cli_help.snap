@@ -5,21 +5,18 @@ expression: text
 ---
 Semantic grep that stays local
 
-Usage: ivygrep [OPTIONS] [QUERY] [PATH] [COMMAND]
-
-Commands:
-  index   
-  add     
-  rm      
-  status  
-  daemon  
-  help    Print this message or the help of the given subcommand(s)
+Usage: ivygrep [OPTIONS] [QUERY] [PATH]
 
 Arguments:
   [QUERY]  
   [PATH]   
 
 Options:
+      --index [<PATH>]      
+      --add [<PATH>]        
+      --rm [<PATH>]         
+      --status              
+      --daemon              
   -f, --force               
       --regex               
       --json                
