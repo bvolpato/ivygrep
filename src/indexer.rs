@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use tantivy::schema::{Field, STORED, STRING, Schema, TEXT, Value};
 use tantivy::{Index as TantivyIndex, TantivyDocument, Term, doc};
 
-use crate::chunking::{Chunk, chunk_source};
+use crate::chunking::{Chunk, chunk_source, is_indexable_file};
 use crate::embedding::EmbeddingModel;
 use crate::merkle::{MerkleDiff, MerkleSnapshot};
 use crate::vector_store::VectorStore;
@@ -145,8 +145,16 @@ pub fn index_workspace(
 
         remove_file_chunks(&sqlite, &mut writer, &fields, &mut vector_index, rel_path)?;
 
-        let content = fs::read_to_string(&abs_path)
+        let content_bytes = fs::read(&abs_path)
             .with_context(|| format!("failed reading {}", abs_path.display()))?;
+        if !is_indexable_file(rel_path, &content_bytes) {
+            continue;
+        }
+
+        let content = match String::from_utf8(content_bytes) {
+            Ok(text) => text,
+            Err(err) => String::from_utf8_lossy(&err.into_bytes()).into_owned(),
+        };
 
         let chunks = chunk_source(rel_path, &content);
         for chunk in chunks {

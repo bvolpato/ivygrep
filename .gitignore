@@ -19,3 +19,6 @@
 .env
 .env.*
 .direnv/
+
+# Local stress harness fixtures (downloaded corpora and sample repos)
+/tests/stress-data/

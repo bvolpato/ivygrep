@@ -14,13 +14,14 @@ use crate::indexer::{
 };
 use crate::protocol::SearchHit;
 use crate::vector_store::VectorStore;
-use crate::workspace::Workspace;
+use crate::workspace::{Workspace, WorkspaceScope};
 
 #[derive(Debug, Clone)]
 pub struct SearchOptions {
     pub limit: Option<usize>,
     pub context: usize,
     pub type_filter: Option<String>,
+    pub scope_filter: Option<WorkspaceScope>,
 }
 
 impl Default for SearchOptions {
@@ -29,6 +30,7 @@ impl Default for SearchOptions {
             limit: None,
             context: 2,
             type_filter: None,
+            scope_filter: None,
         }
     }
 }
@@ -62,6 +64,7 @@ pub fn hybrid_search(
             let doc: TantivyDocument = searcher.doc(addr)?;
             if let Some(chunk) = fetch_chunk_by_id(doc, &fields)
                 .filter(|chunk| type_matches(chunk, options.type_filter.as_deref()))
+                .filter(|chunk| scope_matches(chunk, options.scope_filter.as_ref()))
             {
                 lexical_by_id
                     .entry(chunk.chunk_id.clone())
@@ -82,6 +85,7 @@ pub fn hybrid_search(
         for vector_match in matches {
             if let Some(chunk) = fetch_chunk_by_vector_key(&sqlite, vector_match.key)?
                 .filter(|chunk| type_matches(chunk, options.type_filter.as_deref()))
+                .filter(|chunk| scope_matches(chunk, options.scope_filter.as_ref()))
             {
                 semantic_chunks.push((chunk, vector_match.score));
             }
@@ -354,6 +358,13 @@ fn type_matches(chunk: &IndexedChunk, type_filter: Option<&str>) -> bool {
     }
 }
 
+fn scope_matches(chunk: &IndexedChunk, scope_filter: Option<&WorkspaceScope>) -> bool {
+    match scope_filter {
+        Some(scope) => scope.matches(&chunk.file_path),
+        None => true,
+    }
+}
+
 fn fuse_rrf(
     lexical: &[(IndexedChunk, f32)],
     semantic: &[(IndexedChunk, f32)],
@@ -510,7 +521,7 @@ mod tests {
     use crate::EMBEDDING_DIMENSIONS;
     use crate::embedding::HashEmbeddingModel;
     use crate::indexer::index_workspace;
-    use crate::workspace::Workspace;
+    use crate::workspace::{Workspace, WorkspaceScope};
 
     use super::*;
 
@@ -645,5 +656,52 @@ mod tests {
         assert!(!hits.is_empty());
         assert!(hits.iter().any(|hit| hit.preview.contains("applyLimit")));
         assert!(hits[0].preview.contains("applyLimit"));
+    }
+
+    #[test]
+    #[serial]
+    fn hybrid_search_respects_scope_filter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::create_dir_all(tmp.path().join("scoped")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("other")).unwrap();
+        std::fs::write(
+            tmp.path().join("scoped/match.rs"),
+            "pub fn applyFilter() -> bool { true }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("other/match.rs"),
+            "pub fn applyFilter() -> bool { true }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = hybrid_search(
+            &workspace,
+            "applyFilter",
+            &model,
+            &SearchOptions {
+                limit: None,
+                context: 2,
+                type_filter: None,
+                scope_filter: Some(WorkspaceScope {
+                    rel_path: std::path::PathBuf::from("scoped"),
+                    is_file: false,
+                }),
+            },
+        )
+        .unwrap();
+        assert!(!hits.is_empty());
+        assert!(
+            hits.iter()
+                .all(|hit| hit.file_path.starts_with(std::path::Path::new("scoped")))
+        );
     }
 }

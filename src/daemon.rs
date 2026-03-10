@@ -17,7 +17,7 @@ use crate::indexer::{index_workspace, remove_workspace_index};
 use crate::protocol::{DaemonRequest, DaemonResponse};
 use crate::regex_search::regex_search;
 use crate::search::{SearchOptions, hybrid_search};
-use crate::workspace::{Workspace, list_workspaces};
+use crate::workspace::{Workspace, WorkspaceScope, list_workspaces};
 
 #[derive(Clone)]
 struct DaemonState {
@@ -36,6 +36,7 @@ pub async fn run_daemon() -> Result<()> {
 
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("failed to bind socket {}", socket_path.display()))?;
+    eprintln!("ivygrep daemon listening on {}", socket_path.display());
 
     let (trigger_tx, mut trigger_rx) = mpsc::unbounded_channel::<PathBuf>();
 
@@ -58,10 +59,13 @@ pub async fn run_daemon() -> Result<()> {
             .await
             .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())))
             {
+                eprintln!("watch update failed for {}: {err:#}", path.display());
                 warn!(
                     "watch-triggered indexing failed for {}: {err:#}",
                     path.display()
                 );
+            } else {
+                eprintln!("watch update indexed {}", path.display());
             }
         }
     });
@@ -149,6 +153,8 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             limit,
             context,
             type_filter,
+            scope_path,
+            scope_is_file,
         } => {
             let model = state.model.clone();
             let workspace = match Workspace::resolve(&path) {
@@ -164,6 +170,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 limit,
                 context,
                 type_filter,
+                scope_filter: scope_from_request(scope_path, scope_is_file),
             };
 
             let result = tokio::task::spawn_blocking(move || {
@@ -183,6 +190,8 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             path,
             pattern,
             limit,
+            scope_path,
+            scope_is_file,
         } => {
             let workspace = match Workspace::resolve(&path) {
                 Ok(workspace) => workspace,
@@ -193,10 +202,12 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 }
             };
 
-            let result =
-                tokio::task::spawn_blocking(move || regex_search(&workspace, &pattern, limit))
-                    .await
-                    .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
+            let scope_filter = scope_from_request(scope_path, scope_is_file);
+            let result = tokio::task::spawn_blocking(move || {
+                regex_search(&workspace, &pattern, limit, scope_filter.as_ref())
+            })
+            .await
+            .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
 
             match result {
                 Ok(hits) => DaemonResponse::SearchResults { hits },
@@ -242,8 +253,16 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
 
     watcher.watch(&workspace.root, RecursiveMode::Recursive)?;
     state.watchers.lock().insert(workspace.id, watcher);
+    eprintln!("watching {}", workspace.root.display());
 
     Ok(())
+}
+
+fn scope_from_request(scope_path: Option<PathBuf>, scope_is_file: bool) -> Option<WorkspaceScope> {
+    scope_path.map(|rel_path| WorkspaceScope {
+        rel_path,
+        is_file: scope_is_file,
+    })
 }
 
 pub async fn request(request: &DaemonRequest) -> Result<Option<DaemonResponse>> {

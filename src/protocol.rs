@@ -30,11 +30,17 @@ pub enum DaemonRequest {
         limit: Option<usize>,
         context: usize,
         type_filter: Option<String>,
+        scope_path: Option<PathBuf>,
+        #[serde(default)]
+        scope_is_file: bool,
     },
     RegexSearch {
         path: PathBuf,
         pattern: String,
         limit: Option<usize>,
+        scope_path: Option<PathBuf>,
+        #[serde(default)]
+        scope_is_file: bool,
     },
     Remove {
         path: PathBuf,

@@ -19,6 +19,18 @@
 
 No network calls are required for indexing and searching.
 
+## Superpower Your LLM
+
+Your coding agent is only as strong as its retrieval toolchain. `ivygrep` is designed to be that retrieval layer.
+
+- Natural-language code search: `where is tax calculated?` can still find `calculateTax(...)`.
+- Hybrid ranking: lexical BM25 + semantic vectors + RRF fusion.
+- Token-efficient context: your agent pulls only relevant chunks instead of stuffing full files into prompts.
+- Local-only privacy: no cloud indexing, no code upload.
+- Incremental freshness: Merkle-based updates keep search results aligned with current code.
+
+In practice: the agent stops guessing and starts grounding edits in real, scoped code references.
+
 ## Install
 
 ### Homebrew tap (standalone, no cargo)
@@ -69,30 +81,137 @@ This folder is not indexed. Index it now? [y/N]
 (-f to force, --no-watch to skip daemon)
 ```
 
+## MCP Server (Agent Integration)
+
+`ivygrep` ships with an MCP server over stdio:
+
+```bash
+ivygrep --mcp
+```
+
+### Exposed tool
+
+- `ivygrep_search(query, path?, limit?, context?, type?, regex?, first_line_only?, file_name_only?, verbose?)`
+
+Behavior:
+
+- If the workspace is not indexed, `ivygrep_search` auto-indexes it on first call.
+- If `path` points to a subdirectory or a file, results are restricted to that scope only.
+- `.gitignore` is respected during indexing and regex scans.
+- Unknown extensions are indexed when content looks like text; binary content is skipped.
+
+### Claude Code
+
+```bash
+claude mcp add ivygrep --transport stdio --command ivygrep --args "--mcp"
+```
+
+Equivalent manual config (`~/.claude/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "ivygrep": {
+      "command": "ivygrep",
+      "args": ["--mcp"]
+    }
+  }
+}
+```
+
+### Cursor
+
+Project or global config (`.cursor/mcp.json` or `~/.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "ivygrep": {
+      "command": "ivygrep",
+      "args": ["--mcp"]
+    }
+  }
+}
+```
+
+Then refresh MCP servers in Cursor settings.
+
+### Codex
+
+If your Codex build supports CLI registration:
+
+```bash
+codex mcp add ivygrep --command ivygrep --args "--mcp"
+```
+
+Use your MCP server config file (commonly `~/.codex/mcp.json`) and add:
+
+```json
+{
+  "mcpServers": {
+    "ivygrep": {
+      "command": "ivygrep",
+      "args": ["--mcp"]
+    }
+  }
+}
+```
+
+### OpenCode
+
+```bash
+opencode mcp add ivygrep --command ivygrep --args "--mcp"
+```
+
+Equivalent config (`~/.opencode/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "ivygrep": {
+      "command": "ivygrep",
+      "args": ["--mcp"]
+    }
+  }
+}
+```
+
+### Example agent prompt
+
+`Refactor payment flow. First call ivygrep_search with path=src/payments and find where tax is computed.`
+
+### MCP vs Daemon
+
+- `ivygrep --mcp` starts an MCP server on stdio (for Claude/Cursor/Codex/OpenCode tool calls).
+- `ivygrep --daemon` starts the background workspace watcher/indexer over Unix socket for CLI workflows.
+- They are independent: MCP does not require daemon, and daemon does not require MCP.
+- If you want continuous file-watch reindexing across terminals, run daemon.
+- If you only need agent tool calls, run `--mcp` only.
+
 ## CLI
 
 ```bash
 ivygrep "where is the tax calculated?"
-ivygrep --index .
 ivygrep --add .
 ivygrep --rm .
 ivygrep --status
 ivygrep --daemon
+ivygrep --mcp
 ivygrep applyFilter ~/githubworkspace/trino
 ```
 
 Useful flags:
 
-- `-f, --force`: skip prompt and index now
+- `-f, --force`: skip first-query prompt; with `--add`, rebuild from scratch
 - `--regex`: regex mode
 - `--type <lang>`: language filter (`rust`, `python`, `typescript`, ...)
 - `-C, --context <n>`: context lines around the focused pointer line (default: `2`, i.e. up to 5 lines total)
 - `-n, --limit <n>`: max number of files in output (no default limit)
-- `--index [path]`: explicit index/reindex workspace (defaults to `.`)
 - `--add [path]`: register/index/watch workspace (defaults to `.`)
 - `--rm [path]`: remove workspace index/watch registration (defaults to `.`)
 - `--status`: show indexed workspaces
 - `--daemon`: run daemon process
+- `--mcp`: run MCP server on stdio
 - `--first-line-only`: print only the first non-empty line of each hit snippet
 - `--file-name-only`: print only matching file paths
 - `--verbose`: include detailed `reason` pointers for each hit
@@ -101,7 +220,7 @@ Useful flags:
 
 Action/query split:
 
-- Workspace actions are explicit flags (`--add`, `--rm`, `--status`, `--daemon`, `--index`), so query text like `add` is never ambiguous.
+- Workspace actions are explicit flags (`--add`, `--rm`, `--status`, `--daemon`), so query text like `add` is never ambiguous.
 - `ivygrep <query> <path>` runs semantic search against another workspace without `cd`.
 
 ## When to use the daemon
@@ -113,6 +232,8 @@ Use `ivygrep --daemon` when you want the best steady-state latency in an active 
 - You want indexing/search shared across terminals and scripts.
 
 Skip daemon mode if you run one-off queries occasionally. The CLI works directly in-process without it.
+The daemon is the process that watches registered workspaces and performs background incremental updates.
+If you started it and saw no logs before, run it in a terminal and you should now see startup/watch/update lines on stderr.
 
 Typical daemon workflow:
 
@@ -142,7 +263,12 @@ ivygrep "where is split assignment handled?"
 - `notify` for file watching
 - SQLite metadata store per workspace
 - `.gitignore` rules are respected by default during indexing and regex scans.
-- Workspace index root: `~/.local/share/ivygrep/indexes/<workspace-id>/`
+- Unknown extensions are indexed when content is detected as text; binary files are skipped.
+- Workspace index root: `${IVYGREP_HOME:-${XDG_DATA_HOME:-~/.local/share}/ivygrep}/indexes/<workspace-id>/`
+- Path precedence:
+  1. `IVYGREP_HOME` (if non-empty)
+  2. `XDG_DATA_HOME/ivygrep` (if non-empty)
+  3. `~/.local/share/ivygrep`
 
 ## Development
 
@@ -158,6 +284,36 @@ Test harness includes:
 - golden semantic query tests
 - CLI snapshot tests
 - property-based Merkle diff tests
+
+### Larger stress harnesses
+
+Use medium-size canonical corpora to stress indexing and hybrid retrieval without checking large assets into git.
+
+Included bootstrap targets:
+
+- Project Gutenberg Shakespeare corpus (`pg100`, complete works)
+- Project Gutenberg Alice in Wonderland (`pg11`)
+- `BurntSushi/ripgrep` (depth-1 clone)
+- `quickwit-oss/tantivy` (depth-1 clone)
+
+Bootstrap fixtures locally:
+
+```bash
+./scripts/bootstrap_stress_fixtures.sh
+```
+
+Run ignored stress tests:
+
+```bash
+cargo test --test stress_harness -- --ignored --nocapture
+```
+
+Optional custom fixture root:
+
+```bash
+IVYGREP_STRESS_ROOT=/tmp/ivygrep-stress ./scripts/bootstrap_stress_fixtures.sh /tmp/ivygrep-stress
+IVYGREP_STRESS_ROOT=/tmp/ivygrep-stress cargo test --test stress_harness -- --ignored --nocapture
+```
 
 ## License
 

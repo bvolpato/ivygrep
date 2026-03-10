@@ -231,3 +231,50 @@ fn cli_verbose_json_includes_reason() {
 
     assert!(has_reason);
 }
+
+#[test]
+#[serial]
+fn cli_query_from_subdirectory_is_scope_restricted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    let scoped = root.join("scoped");
+    let other = root.join("other");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::create_dir_all(&scoped).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+
+    std::fs::write(
+        scoped.join("match.rs"),
+        "pub fn applyFilter(values: &[i32]) -> Vec<i32> { values.to_vec() }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        other.join("match.rs"),
+        "pub fn applyFilter(values: &[i32]) -> Vec<i32> { values.to_vec() }\n",
+    )
+    .unwrap();
+
+    let home = tmp.path().join("ivygrep_home");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ivygrep"));
+    let output = cmd
+        .current_dir(&scoped)
+        .env("IVYGREP_HOME", &home)
+        .args(["--json", "-f", "applyFilter"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let files = value
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry.get("file_path").and_then(|v| v.as_str()))
+        .collect::<Vec<_>>();
+
+    assert!(!files.is_empty());
+    assert!(files.iter().all(|path| path.starts_with("scoped/")));
+}

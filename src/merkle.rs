@@ -7,7 +7,9 @@ use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::chunking::is_indexable_path;
+use crate::chunking::is_indexable_file;
+
+const MAX_INDEXABLE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MerkleSnapshot {
@@ -74,17 +76,16 @@ impl MerkleSnapshot {
                 })?
                 .to_path_buf();
 
-            if !is_indexable_path(&rel) {
-                continue;
-            }
-
             let metadata = fs::metadata(path)?;
-            if metadata.len() > 2 * 1024 * 1024 {
+            if metadata.len() > MAX_INDEXABLE_FILE_BYTES {
                 continue;
             }
 
             let content =
                 fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+            if !is_indexable_file(&rel, &content) {
+                continue;
+            }
             let mut hasher = Sha256::new();
             hasher.update(rel.to_string_lossy().as_bytes());
             hasher.update(&content);
@@ -192,5 +193,34 @@ mod tests {
 
         let mut f = fs::OpenOptions::new().append(true).open(&path).unwrap();
         f.write_all(b"\n").unwrap();
+    }
+
+    #[test]
+    fn medium_txt_files_are_included_in_snapshot() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let content = "lorem ipsum dolor sit amet\n".repeat(160_000);
+
+        fs::write(root.join("shakespeare.txt"), content).unwrap();
+
+        let snapshot = MerkleSnapshot::build(root).unwrap();
+        assert!(snapshot.files.contains_key("shakespeare.txt"));
+    }
+
+    #[test]
+    fn unknown_text_files_are_indexed_but_binary_are_skipped() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        fs::write(
+            root.join("notes.custom"),
+            "plain text in custom extension\n",
+        )
+        .unwrap();
+        fs::write(root.join("blob.custom"), b"\x89PNG\r\n\x1a\n\0\0\0IHDR").unwrap();
+
+        let snapshot = MerkleSnapshot::build(root).unwrap();
+        assert!(snapshot.files.contains_key("notes.custom"));
+        assert!(!snapshot.files.contains_key("blob.custom"));
     }
 }

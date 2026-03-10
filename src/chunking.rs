@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+const TEXT_SNIFF_BYTES: usize = 8 * 1024;
+const MIN_PRINTABLE_RATIO: f32 = 0.85;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub enum ChunkKind {
     Function,
@@ -34,6 +37,7 @@ pub fn language_for_path(path: &Path) -> Option<&'static str> {
         Some("go") => Some("go"),
         Some("rb") => Some("ruby"),
         Some("md") => Some("markdown"),
+        Some("txt") => Some("text"),
         Some("toml") | Some("yaml") | Some("yml") => Some("config"),
         _ => None,
     }
@@ -41,6 +45,46 @@ pub fn language_for_path(path: &Path) -> Option<&'static str> {
 
 pub fn is_indexable_path(path: &Path) -> bool {
     language_for_path(path).is_some()
+}
+
+pub fn is_indexable_file(path: &Path, bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+
+    if !is_probably_text(bytes) {
+        return false;
+    }
+
+    if is_indexable_path(path) {
+        return true;
+    }
+
+    true
+}
+
+fn is_probably_text(bytes: &[u8]) -> bool {
+    let sample = &bytes[..bytes.len().min(TEXT_SNIFF_BYTES)];
+    if sample.is_empty() {
+        return false;
+    }
+
+    if sample.iter().any(|&byte| byte == 0) {
+        return false;
+    }
+
+    if std::str::from_utf8(sample).is_ok() {
+        return true;
+    }
+
+    let printable = sample
+        .iter()
+        .filter(|&&byte| {
+            matches!(byte, b'\n' | b'\r' | b'\t' | 0x0C) || (0x20..=0x7E).contains(&byte)
+        })
+        .count();
+
+    (printable as f32 / sample.len() as f32) >= MIN_PRINTABLE_RATIO
 }
 
 pub fn chunk_source(rel_path: &Path, text: &str) -> Vec<Chunk> {
@@ -252,5 +296,25 @@ pub fn calculate_total(amount: f64) -> f64 {
         let chunks = chunk_source(Path::new("README.md"), &src);
         assert!(chunks.len() > 1);
         assert!(chunks.iter().all(|c| c.kind == ChunkKind::Text));
+    }
+
+    #[test]
+    fn txt_files_are_indexable() {
+        assert_eq!(language_for_path(Path::new("docs/notes.txt")), Some("text"));
+        assert!(is_indexable_path(Path::new("docs/notes.txt")));
+    }
+
+    #[test]
+    fn unknown_text_extensions_are_indexable_by_content() {
+        assert!(is_indexable_file(
+            Path::new("docs/pipeline.unknown"),
+            b"hello from a custom extension\n"
+        ));
+    }
+
+    #[test]
+    fn binary_content_is_not_indexable() {
+        let binary = b"\x89PNG\r\n\x1a\n\0\0\0IHDR";
+        assert!(!is_indexable_file(Path::new("assets/logo.dat"), binary));
     }
 }

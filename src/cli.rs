@@ -14,10 +14,11 @@ use crate::config;
 use crate::daemon;
 use crate::embedding::HashEmbeddingModel;
 use crate::indexer::{index_workspace, remove_workspace_index, workspace_is_indexed};
+use crate::mcp;
 use crate::protocol::{DaemonRequest, DaemonResponse, SearchHit};
 use crate::regex_search::regex_search;
 use crate::search::{SearchOptions, hybrid_search};
-use crate::workspace::{Workspace, list_workspaces};
+use crate::workspace::{Workspace, list_workspaces, resolve_workspace_and_scope};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Semantic grep that stays local", long_about = None)]
@@ -28,7 +29,13 @@ pub struct Cli {
     #[arg(value_name = "PATH", required = false)]
     pub query_path: Option<PathBuf>,
 
-    #[arg(long = "index", value_name = "PATH", num_args = 0..=1, default_missing_value = ".")]
+    #[arg(
+        long = "index",
+        value_name = "PATH",
+        num_args = 0..=1,
+        default_missing_value = ".",
+        hide = true
+    )]
     pub index_path: Option<PathBuf>,
 
     #[arg(long = "add", value_name = "PATH", num_args = 0..=1, default_missing_value = ".")]
@@ -42,6 +49,9 @@ pub struct Cli {
 
     #[arg(long, default_value_t = false)]
     pub daemon: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub mcp: bool,
 
     #[arg(short, long, global = true)]
     pub force: bool,
@@ -78,6 +88,10 @@ pub async fn run() -> Result<()> {
     init_tracing();
     config::ensure_app_dirs()?;
 
+    if maybe_run_legacy_mcp_stdio()? {
+        return Ok(());
+    }
+
     let cli = Cli::parse();
     let action_count = [
         cli.index_path.is_some(),
@@ -85,17 +99,23 @@ pub async fn run() -> Result<()> {
         cli.rm_path.is_some(),
         cli.status,
         cli.daemon,
+        cli.mcp,
     ]
     .iter()
     .filter(|flag| **flag)
     .count();
 
     if action_count > 1 {
-        bail!("use only one action at a time: --index, --add, --rm, --status, or --daemon");
+        bail!("use only one action at a time: --add, --rm, --status, --daemon, or --mcp");
     }
 
     if cli.daemon {
         daemon::run_daemon().await?;
+        return Ok(());
+    }
+
+    if cli.mcp {
+        mcp::serve_stdio()?;
         return Ok(());
     }
 
@@ -104,11 +124,14 @@ pub async fn run() -> Result<()> {
     }
 
     if let Some(path) = &cli.index_path {
-        return run_index(path, !cli.no_watch, cli.force, cli.json).await;
+        if !cli.json {
+            eprintln!("--index is deprecated; use --add");
+        }
+        return run_add(path, !cli.no_watch, cli.force, cli.json).await;
     }
 
     if let Some(path) = &cli.add_path {
-        return run_index(path, !cli.no_watch, cli.force, cli.json).await;
+        return run_add(path, !cli.no_watch, cli.force, cli.json).await;
     }
 
     if let Some(path) = &cli.rm_path {
@@ -148,12 +171,26 @@ async fn run_status(json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn run_index(path: &Path, watch: bool, force: bool, json: bool) -> Result<()> {
+async fn run_add(path: &Path, watch: bool, force: bool, json: bool) -> Result<()> {
     let workspace = Workspace::resolve(path)?;
+
+    if force {
+        let remove_request = DaemonRequest::Remove {
+            path: workspace.root.clone(),
+        };
+
+        if let Some(response) = daemon::request(&remove_request).await? {
+            if let DaemonResponse::Error { message } = response {
+                bail!(message);
+            }
+        } else {
+            remove_workspace_index(&workspace)?;
+        }
+    }
 
     if !force && workspace_is_indexed(&workspace) && !json {
         println!("Workspace already indexed: {}", workspace.root.display());
-        println!("Use --force to reindex immediately.");
+        println!("Use --force to rebuild from scratch.");
     }
 
     let request = DaemonRequest::Index {
@@ -210,7 +247,9 @@ async fn run_query(cli: Cli) -> Result<()> {
         Some(path) => path.clone(),
         None => env::current_dir()?,
     };
-    let workspace = Workspace::resolve(&query_path)?;
+    let (workspace, scope_filter) = resolve_workspace_and_scope(&query_path)?;
+    let scope_path = scope_filter.as_ref().map(|scope| scope.rel_path.clone());
+    let scope_is_file = scope_filter.as_ref().is_some_and(|scope| scope.is_file);
 
     let daemon_index_request = DaemonRequest::Index {
         path: workspace.root.clone(),
@@ -228,6 +267,8 @@ async fn run_query(cli: Cli) -> Result<()> {
                 path: workspace.root.clone(),
                 pattern: query.to_string(),
                 limit: cli.limit,
+                scope_path: scope_path.clone(),
+                scope_is_file,
             };
 
             match daemon::request(&request).await? {
@@ -242,6 +283,8 @@ async fn run_query(cli: Cli) -> Result<()> {
                 limit: cli.limit,
                 context: cli.context,
                 type_filter: cli.type_filter.clone(),
+                scope_path: scope_path.clone(),
+                scope_is_file,
             };
 
             match daemon::request(&request).await? {
@@ -280,12 +323,14 @@ async fn run_query(cli: Cli) -> Result<()> {
             path: workspace.root.clone(),
             pattern: query.to_string(),
             limit: cli.limit,
+            scope_path: scope_path.clone(),
+            scope_is_file,
         };
 
         match daemon::request(&request).await? {
             Some(DaemonResponse::SearchResults { hits }) => hits,
             Some(DaemonResponse::Error { message }) => bail!(message),
-            _ => regex_search(&workspace, query, cli.limit)?,
+            _ => regex_search(&workspace, query, cli.limit, scope_filter.as_ref())?,
         }
     } else {
         let request = DaemonRequest::Search {
@@ -294,6 +339,8 @@ async fn run_query(cli: Cli) -> Result<()> {
             limit: cli.limit,
             context: cli.context,
             type_filter: cli.type_filter.clone(),
+            scope_path: scope_path.clone(),
+            scope_is_file,
         };
 
         match daemon::request(&request).await? {
@@ -309,6 +356,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                         limit: cli.limit,
                         context: cli.context,
                         type_filter: cli.type_filter.clone(),
+                        scope_filter: scope_filter.clone(),
                     },
                 )?
             }
@@ -509,4 +557,22 @@ fn init_tracing() {
         .with_env_filter(EnvFilter::from_default_env())
         .with_target(false)
         .try_init();
+}
+
+fn maybe_run_legacy_mcp_stdio() -> Result<bool> {
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    if args.is_empty() {
+        return Ok(false);
+    }
+
+    if args.len() == 2 && args[0] == "mcp" && args[1] == "serve" {
+        mcp::serve_stdio()?;
+        return Ok(true);
+    }
+
+    if args.first().is_some_and(|arg| arg == "mcp") {
+        bail!("usage: ivygrep --mcp");
+    }
+
+    Ok(false)
 }

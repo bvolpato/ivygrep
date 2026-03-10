@@ -12,11 +12,11 @@ Arguments:
   [PATH]   
 
 Options:
-      --index [<PATH>]      
       --add [<PATH>]        
       --rm [<PATH>]         
       --status              
       --daemon              
+      --mcp                 
   -f, --force               
       --regex               
       --json                

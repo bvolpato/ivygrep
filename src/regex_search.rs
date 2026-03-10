@@ -5,12 +5,13 @@ use grep_searcher::{Searcher, SearcherBuilder};
 use ignore::WalkBuilder;
 
 use crate::protocol::SearchHit;
-use crate::workspace::Workspace;
+use crate::workspace::{Workspace, WorkspaceScope};
 
 pub fn regex_search(
     workspace: &Workspace,
     pattern: &str,
     limit: Option<usize>,
+    scope_filter: Option<&WorkspaceScope>,
 ) -> Result<Vec<SearchHit>> {
     let matcher = RegexMatcher::new(pattern)?;
     let mut searcher: Searcher = SearcherBuilder::new().line_number(true).build();
@@ -38,6 +39,9 @@ pub fn regex_search(
             Ok(rel) => rel.to_path_buf(),
             Err(_) => full_path.clone(),
         };
+        if scope_filter.is_some_and(|scope| !scope.matches(&rel_path)) {
+            continue;
+        }
 
         let mut local_hits = Vec::new();
         searcher.search_path(
@@ -66,4 +70,45 @@ pub fn regex_search(
     }
 
     Ok(hits)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use serial_test::serial;
+
+    use super::*;
+    use crate::workspace::{Workspace, WorkspaceScope};
+
+    #[test]
+    #[serial]
+    fn regex_search_respects_scope_filter() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("scoped")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("other")).unwrap();
+        std::fs::write(
+            tmp.path().join("scoped/match.rs"),
+            "pub fn applyFilter() -> bool { true }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("other/match.rs"),
+            "pub fn applyFilter() -> bool { true }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let scope = WorkspaceScope {
+            rel_path: PathBuf::from("scoped"),
+            is_file: false,
+        };
+
+        let hits = regex_search(&workspace, "applyFilter", None, Some(&scope)).unwrap();
+        assert!(!hits.is_empty());
+        assert!(
+            hits.iter()
+                .all(|hit| hit.file_path.starts_with(std::path::Path::new("scoped")))
+        );
+    }
 }
