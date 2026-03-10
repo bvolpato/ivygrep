@@ -49,9 +49,17 @@ fn cli_query_json_snapshot() {
     let mut value: serde_json::Value = serde_json::from_slice(&output).unwrap();
 
     if let Some(array) = value.as_array_mut() {
-        for item in array.iter_mut() {
-            if let Some(score) = item.get_mut("score") {
-                *score = serde_json::json!("<score>");
+        for file in array.iter_mut() {
+            if let Some(total_score) = file.get_mut("total_score") {
+                *total_score = serde_json::json!("<score>");
+            }
+
+            if let Some(hits) = file.get_mut("hits").and_then(|hits| hits.as_array_mut()) {
+                for hit in hits {
+                    if let Some(score) = hit.get_mut("score") {
+                        *score = serde_json::json!("<score>");
+                    }
+                }
             }
         }
     }

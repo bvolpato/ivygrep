@@ -7,9 +7,14 @@ use ignore::WalkBuilder;
 use crate::protocol::SearchHit;
 use crate::workspace::Workspace;
 
-pub fn regex_search(workspace: &Workspace, pattern: &str, limit: usize) -> Result<Vec<SearchHit>> {
+pub fn regex_search(
+    workspace: &Workspace,
+    pattern: &str,
+    limit: Option<usize>,
+) -> Result<Vec<SearchHit>> {
     let matcher = RegexMatcher::new(pattern)?;
     let mut searcher: Searcher = SearcherBuilder::new().line_number(true).build();
+    let max_hits = limit.unwrap_or(usize::MAX);
 
     let mut hits = Vec::new();
 
@@ -53,7 +58,7 @@ pub fn regex_search(workspace: &Workspace, pattern: &str, limit: usize) -> Resul
 
         for hit in local_hits {
             hits.push(hit);
-            if hits.len() >= limit {
+            if hits.len() >= max_hits {
                 break 'walk;
             }
         }

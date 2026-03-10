@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::env;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -5,6 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use colored::Colorize;
+use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 
 use crate::EMBEDDING_DIMENSIONS;
@@ -38,8 +40,8 @@ pub struct Cli {
     #[arg(long = "type", global = true)]
     pub type_filter: Option<String>,
 
-    #[arg(short = 'n', long, default_value_t = crate::DEFAULT_TOP_K, global = true)]
-    pub limit: usize,
+    #[arg(short = 'n', long, global = true)]
+    pub limit: Option<usize>,
 
     #[arg(long, global = true)]
     pub no_watch: bool,
@@ -218,7 +220,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             }
         };
 
-        render_hits(&hits, cli.json)?;
+        render_hits(&hits, cli.json, cli.limit)?;
         return Ok(());
     }
 
@@ -275,38 +277,97 @@ async fn run_query(cli: Cli) -> Result<()> {
         }
     };
 
-    render_hits(&hits, cli.json)?;
+    render_hits(&hits, cli.json, cli.limit)?;
     Ok(())
 }
 
-fn render_hits(hits: &[SearchHit], json: bool) -> Result<()> {
+#[derive(Debug, Clone, Serialize)]
+struct FileSearchResult {
+    file_path: PathBuf,
+    total_score: f32,
+    hit_count: usize,
+    hits: Vec<SearchHit>,
+}
+
+fn render_hits(hits: &[SearchHit], json: bool, limit: Option<usize>) -> Result<()> {
+    let grouped = group_hits_by_file(hits, limit);
+
     if json {
-        println!("{}", serde_json::to_string_pretty(hits)?);
+        println!("{}", serde_json::to_string_pretty(&grouped)?);
         return Ok(());
     }
 
-    if hits.is_empty() {
+    if grouped.is_empty() {
         println!("No results.");
         return Ok(());
     }
 
-    for hit in hits {
-        let source = if hit.sources.is_empty() {
-            String::new()
-        } else {
-            format!(" [{}]", hit.sources.join("+"))
-        };
-
+    for file in grouped {
         println!(
-            "{}:{}:{}{}",
-            hit.file_path.to_string_lossy().blue(),
-            hit.start_line.to_string().yellow(),
-            hit.preview,
-            source.dimmed(),
+            "{}  {}  {}",
+            file.file_path.to_string_lossy().blue().bold(),
+            format!("score={:.4}", file.total_score).green(),
+            format!("matches={}", file.hit_count).dimmed(),
         );
+
+        for hit in file.hits {
+            let source = if hit.sources.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", hit.sources.join("+"))
+            };
+            println!(
+                "  {}:{}{} {}",
+                hit.start_line.to_string().yellow(),
+                hit.preview,
+                source.dimmed(),
+                format!("score={:.4}", hit.score).dimmed(),
+            );
+        }
+
+        println!();
     }
 
     Ok(())
+}
+
+fn group_hits_by_file(hits: &[SearchHit], limit: Option<usize>) -> Vec<FileSearchResult> {
+    let mut grouped = HashMap::<PathBuf, FileSearchResult>::new();
+
+    for hit in hits {
+        let entry = grouped
+            .entry(hit.file_path.clone())
+            .or_insert_with(|| FileSearchResult {
+                file_path: hit.file_path.clone(),
+                total_score: 0.0,
+                hit_count: 0,
+                hits: vec![],
+            });
+        entry.total_score += hit.score;
+        entry.hit_count += 1;
+        entry.hits.push(hit.clone());
+    }
+
+    let mut files = grouped.into_values().collect::<Vec<_>>();
+    for file in &mut files {
+        file.hits.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.start_line.cmp(&b.start_line))
+        });
+    }
+
+    files.sort_by(|a, b| {
+        b.total_score
+            .total_cmp(&a.total_score)
+            .then_with(|| a.file_path.cmp(&b.file_path))
+    });
+
+    if let Some(limit) = limit {
+        files.truncate(limit);
+    }
+
+    files
 }
 
 fn prompt_index_first_time() -> Result<bool> {
@@ -334,7 +395,7 @@ fn print_daemon_response(response: DaemonResponse, json: bool) -> Result<()> {
             Ok(())
         }
         DaemonResponse::Error { message } => bail!(message),
-        DaemonResponse::SearchResults { hits } => render_hits(&hits, json),
+        DaemonResponse::SearchResults { hits } => render_hits(&hits, json, None),
         DaemonResponse::Status { workspaces } => {
             if json {
                 println!("{}", serde_json::to_string_pretty(&workspaces)?);

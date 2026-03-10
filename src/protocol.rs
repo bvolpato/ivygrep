@@ -25,14 +25,14 @@ pub enum DaemonRequest {
     Search {
         path: PathBuf,
         query: String,
-        limit: usize,
+        limit: Option<usize>,
         context: usize,
         type_filter: Option<String>,
     },
     RegexSearch {
         path: PathBuf,
         pattern: String,
-        limit: usize,
+        limit: Option<usize>,
     },
     Remove {
         path: PathBuf,

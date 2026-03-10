@@ -24,7 +24,7 @@ Options:
       --json                
   -C, --context <CONTEXT>   [default: 0]
       --type <TYPE_FILTER>  
-  -n, --limit <LIMIT>       [default: 10]
+  -n, --limit <LIMIT>       
       --no-watch            
   -h, --help                Print help
   -V, --version             Print version

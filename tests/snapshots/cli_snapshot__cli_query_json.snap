@@ -1,28 +1,32 @@
 ---
 source: tests/cli_snapshot.rs
-assertion_line: 59
+assertion_line: 67
 expression: value
 ---
-- end_line: 12
-  file_path: rust_repo/src/lib.rs
-  preview: "pub fn invoice_total(items: &[f64], rate: f64) -> f64 {"
-  score: "<score>"
-  sources:
-    - lexical
-    - semantic
-  start_line: 9
-- end_line: 4
-  file_path: rust_repo/src/lib.rs
-  preview: "pub fn calculate_tax(amount: f64, rate: f64) -> f64 {"
-  score: "<score>"
-  sources:
-    - lexical
-    - semantic
-  start_line: 1
-- end_line: 8
-  file_path: rust_repo/src/lib.rs
-  preview: "pub fn subtotal(items: &[f64]) -> f64 {"
-  score: "<score>"
-  sources:
-    - semantic
-  start_line: 5
+- file_path: rust_repo/src/lib.rs
+  hit_count: 3
+  hits:
+    - end_line: 12
+      file_path: rust_repo/src/lib.rs
+      preview: "pub fn invoice_total(items: &[f64], rate: f64) -> f64 {"
+      score: "<score>"
+      sources:
+        - lexical
+        - semantic
+      start_line: 9
+    - end_line: 4
+      file_path: rust_repo/src/lib.rs
+      preview: "pub fn calculate_tax(amount: f64, rate: f64) -> f64 {"
+      score: "<score>"
+      sources:
+        - lexical
+        - semantic
+      start_line: 1
+    - end_line: 8
+      file_path: rust_repo/src/lib.rs
+      preview: "pub fn subtotal(items: &[f64]) -> f64 {"
+      score: "<score>"
+      sources:
+        - semantic
+      start_line: 5
+  total_score: "<score>"

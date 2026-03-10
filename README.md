@@ -86,7 +86,8 @@ Useful flags:
 - `--regex`: regex mode
 - `--type <lang>`: language filter (`rust`, `python`, `typescript`, ...)
 - `-C, --context <n>`: context lines around hits
-- `--json`: machine-readable output
+- `-n, --limit <n>`: max number of files in output (no default limit)
+- `--json`: machine-readable grouped output
 - `--no-watch`: skip daemon watcher registration
 
 Command intent:
@@ -112,6 +113,14 @@ ivygrep daemon
 ivygrep add .
 ivygrep "where is split assignment handled?"
 ```
+
+## Result Ranking & Output
+
+- Results are grouped by file by default (not line-first).
+- File score is the sum of chunk scores in that file.
+- Files are sorted by descending file score.
+- A relevance threshold is applied automatically so low-signal chunks are dropped.
+- If you want hard truncation, use `-n`.
 
 ## Architecture
 

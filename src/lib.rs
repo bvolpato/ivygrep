@@ -12,4 +12,3 @@ pub mod vector_store;
 pub mod workspace;
 
 pub const EMBEDDING_DIMENSIONS: usize = 256;
-pub const DEFAULT_TOP_K: usize = 10;

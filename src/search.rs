@@ -15,21 +15,11 @@ use crate::protocol::SearchHit;
 use crate::vector_store::VectorStore;
 use crate::workspace::Workspace;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SearchOptions {
-    pub limit: usize,
+    pub limit: Option<usize>,
     pub context: usize,
     pub type_filter: Option<String>,
-}
-
-impl Default for SearchOptions {
-    fn default() -> Self {
-        Self {
-            limit: 10,
-            context: 0,
-            type_filter: None,
-        }
-    }
 }
 
 pub fn hybrid_search(
@@ -38,6 +28,8 @@ pub fn hybrid_search(
     embedding_model: &dyn EmbeddingModel,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
+    let candidate_limit = options.limit.unwrap_or(500).max(100);
+
     let (index, fields) = open_tantivy_index(&workspace.tantivy_dir())?;
     let reader = index.reader()?;
     let searcher = reader.searcher();
@@ -46,7 +38,7 @@ pub fn hybrid_search(
     parser.set_field_boost(fields.file_path, 2.0);
 
     let parsed_query = parser.parse_query(query_text)?;
-    let lexical_docs = searcher.search(&parsed_query, &TopDocs::with_limit(50))?;
+    let lexical_docs = searcher.search(&parsed_query, &TopDocs::with_limit(candidate_limit))?;
 
     let sqlite = open_sqlite(&workspace.sqlite_path())?;
 
@@ -65,7 +57,7 @@ pub fn hybrid_search(
 
     let mut semantic_chunks = Vec::new();
     if vector_index.size() > 0 {
-        let matches = vector_index.search(&query_vector, 50);
+        let matches = vector_index.search(&query_vector, candidate_limit);
         for vector_match in matches {
             if let Some(chunk) = fetch_chunk_by_vector_key(&sqlite, vector_match.key)?
                 .filter(|chunk| type_matches(chunk, options.type_filter.as_deref()))
@@ -134,7 +126,7 @@ fn type_matches(chunk: &IndexedChunk, type_filter: Option<&str>) -> bool {
 fn fuse_rrf(
     lexical: &[IndexedChunk],
     semantic: &[IndexedChunk],
-    limit: usize,
+    limit: Option<usize>,
 ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
     let k = 60.0f32;
 
@@ -181,8 +173,36 @@ fn fuse_rrf(
         .collect::<Vec<_>>();
 
     ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
-    ranked.truncate(limit);
-    ranked
+    let mut filtered = filter_meaningful_scores(&ranked);
+
+    if let Some(limit) = limit {
+        filtered.truncate(limit);
+    }
+
+    filtered
+}
+
+fn filter_meaningful_scores(
+    ranked: &[(IndexedChunk, f32, Vec<String>)],
+) -> Vec<(IndexedChunk, f32, Vec<String>)> {
+    if ranked.is_empty() {
+        return vec![];
+    }
+
+    let best_score = ranked[0].1;
+    let threshold = (best_score * 0.30).max(0.008);
+
+    let mut filtered = ranked
+        .iter()
+        .filter(|(_, score, _)| *score >= threshold)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if filtered.is_empty() {
+        filtered.push(ranked[0].clone());
+    }
+
+    filtered
 }
 
 pub fn workspace_has_results(workspace: &Workspace) -> Result<bool> {
