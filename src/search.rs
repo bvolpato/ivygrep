@@ -47,20 +47,30 @@ pub fn hybrid_search(
     let mut parser = QueryParser::for_index(&index, vec![fields.text, fields.file_path]);
     parser.set_field_boost(fields.file_path, 2.0);
 
-    let parsed_query = parser.parse_query(query_text)?;
-    let lexical_docs = searcher.search(&parsed_query, &TopDocs::with_limit(candidate_limit))?;
-
     let sqlite = open_sqlite(&workspace.sqlite_path())?;
 
-    let mut lexical_chunks = Vec::new();
-    for (score, addr) in lexical_docs {
-        let doc: TantivyDocument = searcher.doc(addr)?;
-        if let Some(chunk) = fetch_chunk_by_id(doc, &fields)
-            .filter(|chunk| type_matches(chunk, options.type_filter.as_deref()))
-        {
-            lexical_chunks.push((chunk, score));
+    let mut lexical_by_id = HashMap::<String, (IndexedChunk, f32)>::new();
+    for lexical_query in build_lexical_queries(query_text) {
+        let parsed_query = match parser.parse_query(&lexical_query) {
+            Ok(query) => query,
+            Err(_) => continue,
+        };
+        let lexical_docs = searcher.search(&parsed_query, &TopDocs::with_limit(candidate_limit))?;
+
+        for (score, addr) in lexical_docs {
+            let doc: TantivyDocument = searcher.doc(addr)?;
+            if let Some(chunk) = fetch_chunk_by_id(doc, &fields)
+                .filter(|chunk| type_matches(chunk, options.type_filter.as_deref()))
+            {
+                lexical_by_id
+                    .entry(chunk.chunk_id.clone())
+                    .and_modify(|(_, best)| *best = best.max(score))
+                    .or_insert((chunk, score));
+            }
         }
     }
+    let mut lexical_chunks = lexical_by_id.into_values().collect::<Vec<_>>();
+    lexical_chunks.sort_by(|a, b| b.1.total_cmp(&a.1));
 
     let vector_index = VectorStore::open(&workspace.vector_path(), embedding_model.dimensions())?;
     let query_vector = embedding_model.embed(query_text);
@@ -152,7 +162,7 @@ fn find_focus_line(chunk: &IndexedChunk, query_text: &str, lines: &[&str]) -> us
     }
 
     let query_lower = query.to_ascii_lowercase();
-    let query_compact = compact_identifier(query);
+    let query_compact = singularize_token(&compact_identifier(query));
     let query_tokens = tokenize_query(query);
 
     let mut best_line = window_start;
@@ -227,18 +237,116 @@ fn summarize_reason(query_text: &str, focus_line: &str) -> String {
     format!("top-ranked pointer: {}", truncate_for_reason(focus))
 }
 
+fn build_lexical_queries(query_text: &str) -> Vec<String> {
+    let query = query_text.trim();
+    if query.is_empty() {
+        return vec![];
+    }
+
+    let mut queries = vec![query.to_string()];
+    let normalized_tokens = tokenize_query(query);
+    if !normalized_tokens.is_empty() {
+        let normalized = normalized_tokens.join(" ");
+        if !normalized.eq_ignore_ascii_case(query) {
+            queries.push(normalized);
+        }
+
+        let compact = normalized_tokens.join("");
+        if compact.len() >= 4 && !compact.eq_ignore_ascii_case(query) {
+            queries.push(compact);
+        }
+    }
+
+    queries.sort();
+    queries.dedup();
+    queries
+}
+
 fn tokenize_query(query: &str) -> Vec<String> {
-    query
+    let mut tokens = Vec::new();
+    for raw in query
         .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .filter_map(|token| {
-            let token = token.trim();
-            if token.len() >= 2 {
-                Some(token.to_ascii_lowercase())
-            } else {
-                None
+        .filter(|token| !token.is_empty())
+    {
+        for segment in split_identifier_segments(raw) {
+            let singular = singularize_token(&segment);
+            if singular.len() >= 2 {
+                tokens.push(singular);
             }
-        })
-        .collect::<Vec<_>>()
+        }
+    }
+
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+fn split_identifier_segments(token: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut prev_is_lower = false;
+    let mut prev_is_alpha = false;
+
+    for ch in token.chars() {
+        if !ch.is_ascii_alphanumeric() {
+            if !current.is_empty() {
+                segments.push(current.to_ascii_lowercase());
+                current.clear();
+            }
+            prev_is_lower = false;
+            prev_is_alpha = false;
+            continue;
+        }
+
+        let is_upper = ch.is_ascii_uppercase();
+        let is_alpha = ch.is_ascii_alphabetic();
+
+        if !current.is_empty() && is_upper && prev_is_lower {
+            segments.push(current.to_ascii_lowercase());
+            current.clear();
+        }
+
+        if !current.is_empty() && is_alpha != prev_is_alpha {
+            segments.push(current.to_ascii_lowercase());
+            current.clear();
+        }
+
+        current.push(ch);
+        prev_is_lower = ch.is_ascii_lowercase();
+        prev_is_alpha = is_alpha;
+    }
+
+    if !current.is_empty() {
+        segments.push(current.to_ascii_lowercase());
+    }
+
+    segments
+}
+
+fn singularize_token(token: &str) -> String {
+    let len = token.len();
+    if len <= 3 {
+        return token.to_string();
+    }
+
+    if token.ends_with("ies") && len > 4 {
+        return format!("{}y", &token[..len - 3]);
+    }
+
+    if token.ends_with("ses")
+        || token.ends_with("xes")
+        || token.ends_with("zes")
+        || token.ends_with("ches")
+        || token.ends_with("shes")
+    {
+        return token[..len - 2].to_string();
+    }
+
+    if token.ends_with('s') && !token.ends_with("ss") {
+        return token[..len - 1].to_string();
+    }
+
+    token.to_string()
 }
 
 fn truncate_for_reason(line: &str) -> String {
@@ -513,5 +621,41 @@ mod tests {
         assert!(top.end_line - top.start_line <= 4);
         assert!(top.preview.lines().count() <= 5);
         assert!(!top.reason.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn hybrid_search_matches_phrase_to_camel_case_identifier() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let mut noisy = String::new();
+        for _ in 0..200 {
+            noisy.push_str("void enforceLimits() {}\n");
+        }
+
+        std::fs::write(tmp.path().join("noisy.java"), noisy).unwrap();
+        std::fs::write(
+            tmp.path().join("exact.java"),
+            "class Filters {\n    void applyLimit() {}\n}\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = hybrid_search(
+            &workspace,
+            "apply limits",
+            &model,
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert!(!hits.is_empty());
+        assert!(hits.iter().any(|hit| hit.preview.contains("applyLimit")));
+        assert!(hits[0].preview.contains("applyLimit"));
     }
 }
