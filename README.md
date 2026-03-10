@@ -6,6 +6,18 @@
 
 <p align="center"><strong>Semantic grep that never phones home.</strong><br/>Feels like <code>rg</code>, understands English.</p>
 
+## Superpower Your LLM
+
+Your coding agent is only as strong as its retrieval toolchain. `ivygrep` is designed to be that retrieval layer.
+
+- Natural-language code search: `where is tax calculated?` can still find `calculateTax(...)`.
+- Hybrid ranking: lexical BM25 + semantic vectors + RRF fusion.
+- Token-efficient context: your agent pulls only relevant chunks instead of stuffing full files into prompts.
+- Local-only privacy: no cloud indexing, no code upload.
+- Incremental freshness: Merkle-based updates keep search results aligned with current code.
+
+In practice: the agent stops guessing and starts grounding edits in real, scoped code references.
+
 ## Why ivygrep
 
 `ivygrep` is a local-first hybrid code search tool:
@@ -18,18 +30,6 @@
 - Lightweight daemon over Unix socket (opt-in)
 
 No network calls are required for indexing and searching.
-
-## Superpower Your LLM
-
-Your coding agent is only as strong as its retrieval toolchain. `ivygrep` is designed to be that retrieval layer.
-
-- Natural-language code search: `where is tax calculated?` can still find `calculateTax(...)`.
-- Hybrid ranking: lexical BM25 + semantic vectors + RRF fusion.
-- Token-efficient context: your agent pulls only relevant chunks instead of stuffing full files into prompts.
-- Local-only privacy: no cloud indexing, no code upload.
-- Incremental freshness: Merkle-based updates keep search results aligned with current code.
-
-In practice: the agent stops guessing and starts grounding edits in real, scoped code references.
 
 ## Install
 
@@ -80,6 +80,14 @@ When no daemon is running, first query in a non-indexed workspace prompts:
 This folder is not indexed. Index it now? [y/N]
 (-f to force, --no-watch to skip daemon)
 ```
+
+### Usage Demo
+
+`ivygrep` searching the `opencode` repo for `"authentication for MCPs"` in a real terminal session:
+
+<p>
+  <img src="assets/ivygrep-opencode.gif" alt="ivygrep demo on opencode" />
+</p>
 
 ## MCP Server (Agent Integration)
 

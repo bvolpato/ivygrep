@@ -29,15 +29,6 @@ pub struct Cli {
     #[arg(value_name = "PATH", required = false)]
     pub query_path: Option<PathBuf>,
 
-    #[arg(
-        long = "index",
-        value_name = "PATH",
-        num_args = 0..=1,
-        default_missing_value = ".",
-        hide = true
-    )]
-    pub index_path: Option<PathBuf>,
-
     #[arg(long = "add", value_name = "PATH", num_args = 0..=1, default_missing_value = ".")]
     pub add_path: Option<PathBuf>,
 
@@ -94,7 +85,6 @@ pub async fn run() -> Result<()> {
 
     let cli = Cli::parse();
     let action_count = [
-        cli.index_path.is_some(),
         cli.add_path.is_some(),
         cli.rm_path.is_some(),
         cli.status,
@@ -121,13 +111,6 @@ pub async fn run() -> Result<()> {
 
     if cli.status {
         return run_status(cli.json).await;
-    }
-
-    if let Some(path) = &cli.index_path {
-        if !cli.json {
-            eprintln!("--index is deprecated; use --add");
-        }
-        return run_add(path, !cli.no_watch, cli.force, cli.json).await;
     }
 
     if let Some(path) = &cli.add_path {
