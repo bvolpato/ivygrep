@@ -10,7 +10,7 @@ pub struct SearchHit {
     pub start_line: usize,
     pub end_line: usize,
     pub preview: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub reason: String,
     pub score: f32,
     pub sources: Vec<String>,

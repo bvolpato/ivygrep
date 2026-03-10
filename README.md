@@ -95,6 +95,7 @@ Useful flags:
 - `--daemon`: run daemon process
 - `--first-line-only`: print only the first non-empty line of each hit snippet
 - `--file-name-only`: print only matching file paths
+- `--verbose`: include detailed `reason` pointers for each hit
 - `--json`: machine-readable grouped output
 - `--no-watch`: skip daemon watcher registration
 
@@ -126,7 +127,8 @@ ivygrep "where is split assignment handled?"
 - Results are grouped by file by default (not line-first).
 - File score is the sum of chunk scores in that file.
 - Files are sorted by descending file score.
-- By default, each hit prints a concise focused snippet (about 5 lines), plus a `reason` pointer line.
+- By default, each hit prints a concise focused snippet (about 5 lines).
+- Use `--verbose` to include `reason` pointer lines.
 - Exact lexical/literal matches are weighted higher than fuzzy semantic-only matches.
 - A relevance threshold is applied automatically so low-signal chunks are dropped.
 - Use `--first-line-only` if you want compact grep-style previews.

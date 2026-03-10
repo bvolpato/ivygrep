@@ -69,6 +69,9 @@ pub struct Cli {
 
     #[arg(long, global = true)]
     pub file_name_only: bool,
+
+    #[arg(long, global = true)]
+    pub verbose: bool,
 }
 
 pub async fn run() -> Result<()> {
@@ -254,6 +257,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             cli.limit,
             cli.first_line_only,
             cli.file_name_only,
+            cli.verbose,
         )?;
         return Ok(());
     }
@@ -317,6 +321,7 @@ async fn run_query(cli: Cli) -> Result<()> {
         cli.limit,
         cli.first_line_only,
         cli.file_name_only,
+        cli.verbose,
     )?;
     Ok(())
 }
@@ -335,8 +340,16 @@ fn render_hits(
     limit: Option<usize>,
     first_line_only: bool,
     file_name_only: bool,
+    verbose: bool,
 ) -> Result<()> {
-    let grouped = group_hits_by_file(hits, limit);
+    let mut grouped = group_hits_by_file(hits, limit);
+    if !verbose {
+        for file in &mut grouped {
+            for hit in &mut file.hits {
+                hit.reason.clear();
+            }
+        }
+    }
 
     if file_name_only {
         if json {
@@ -386,7 +399,7 @@ fn render_hits(
                 source.dimmed(),
                 format!("score={:.4}", hit.score).dimmed(),
             );
-            if !hit.reason.is_empty() {
+            if verbose && !hit.reason.is_empty() {
                 println!("    {} {}", "reason:".dimmed(), hit.reason.trim());
             }
 
@@ -475,7 +488,9 @@ fn print_daemon_response(response: DaemonResponse, json: bool) -> Result<()> {
             Ok(())
         }
         DaemonResponse::Error { message } => bail!(message),
-        DaemonResponse::SearchResults { hits } => render_hits(&hits, json, None, false, false),
+        DaemonResponse::SearchResults { hits } => {
+            render_hits(&hits, json, None, false, false, false)
+        }
         DaemonResponse::Status { workspaces } => {
             if json {
                 println!("{}", serde_json::to_string_pretty(&workspaces)?);

@@ -194,3 +194,40 @@ fn cli_add_flag_indexes_workspace() {
     let text = String::from_utf8(output).unwrap();
     assert!(text.contains("Indexed") || text.contains("indexed"));
 }
+
+#[test]
+#[serial]
+fn cli_verbose_json_includes_reason() {
+    let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ivygrep"));
+    let output = cmd
+        .current_dir(&target_root)
+        .env("IVYGREP_HOME", &home)
+        .args(["--json", "--verbose", "-f", "where is the tax calculated?"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let mut has_reason = false;
+    if let Some(files) = value.as_array() {
+        for file in files {
+            if let Some(hits) = file.get("hits").and_then(|hits| hits.as_array()) {
+                for hit in hits {
+                    if hit
+                        .get("reason")
+                        .and_then(|reason| reason.as_str())
+                        .is_some_and(|reason| !reason.trim().is_empty())
+                    {
+                        has_reason = true;
+                    }
+                }
+            }
+        }
+    }
+
+    assert!(has_reason);
+}

@@ -26,5 +26,6 @@ Options:
       --no-watch            
       --first-line-only     
       --file-name-only      
+      --verbose             
   -h, --help                Print help
   -V, --version             Print version

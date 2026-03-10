@@ -9,7 +9,6 @@ expression: value
     - end_line: 3
       file_path: rust_repo/src/lib.rs
       preview: "pub fn calculate_tax(amount: f64, rate: f64) -> f64 {\n    amount * rate\n}"
-      reason: "line matches token `tax`: pub fn calculate_tax(amount: f64, rate: f64) -> f64 {"
       score: "<score>"
       sources:
         - lexical
@@ -18,7 +17,6 @@ expression: value
     - end_line: 12
       file_path: rust_repo/src/lib.rs
       preview: "pub fn invoice_total(items: &[f64], rate: f64) -> f64 {\n    let base = subtotal(items);\n    base + calculate_tax(base, rate)\n}"
-      reason: "line matches token `tax`: base + calculate_tax(base, rate)"
       score: "<score>"
       sources:
         - lexical
