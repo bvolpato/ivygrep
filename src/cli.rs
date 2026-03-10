@@ -25,6 +25,9 @@ pub struct Cli {
     #[arg(value_name = "QUERY", required = false)]
     pub query: Option<String>,
 
+    #[arg(value_name = "PATH", required = false)]
+    pub query_path: Option<PathBuf>,
+
     #[arg(short, long, global = true)]
     pub force: bool,
 
@@ -135,7 +138,7 @@ async fn run_index(path: &Path, watch: bool, force: bool, json: bool) -> Result<
     }
 
     let request = DaemonRequest::Index {
-        path: path.to_path_buf(),
+        path: workspace.root.clone(),
         watch,
     };
 
@@ -159,14 +162,14 @@ async fn run_index(path: &Path, watch: bool, force: bool, json: bool) -> Result<
 }
 
 async fn run_remove(path: &Path, json: bool) -> Result<()> {
+    let workspace = Workspace::resolve(path)?;
     let request = DaemonRequest::Remove {
-        path: path.to_path_buf(),
+        path: workspace.root.clone(),
     };
     if let Some(response) = daemon::request(&request).await? {
         return print_daemon_response(response, json);
     }
 
-    let workspace = Workspace::resolve(path)?;
     remove_workspace_index(&workspace)?;
 
     if json {
@@ -184,8 +187,11 @@ async fn run_query(cli: Cli) -> Result<()> {
         .as_deref()
         .context("missing query. Example: ivygrep \"where is tax calculated\"")?;
 
-    let cwd = env::current_dir()?;
-    let workspace = Workspace::resolve(&cwd)?;
+    let query_path = match &cli.query_path {
+        Some(path) => path.clone(),
+        None => env::current_dir()?,
+    };
+    let workspace = Workspace::resolve(&query_path)?;
 
     let daemon_index_request = DaemonRequest::Index {
         path: workspace.root.clone(),

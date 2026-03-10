@@ -117,3 +117,41 @@ fn cli_first_line_only_text_output() {
     assert!(text.contains("pub fn calculate_tax"));
     assert!(!text.contains("amount * rate"));
 }
+
+#[test]
+#[serial]
+fn cli_query_with_explicit_path_json() {
+    let (tmp, target_root, home) = stage_fixture_repo("rust_repo");
+    let target_root_str = target_root.to_string_lossy().into_owned();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ivygrep"));
+    let output = cmd
+        .current_dir(tmp.path())
+        .env("IVYGREP_HOME", &home)
+        .args([
+            "--json",
+            "-f",
+            "where is the tax calculated?",
+            &target_root_str,
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let files = value
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry.get("file_path").and_then(|v| v.as_str()))
+        .collect::<Vec<_>>();
+
+    assert!(!files.is_empty());
+    assert!(
+        files
+            .iter()
+            .any(|path| path.ends_with("rust_repo/src/lib.rs"))
+    );
+}

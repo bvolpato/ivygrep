@@ -43,12 +43,12 @@ pub fn hybrid_search(
     let sqlite = open_sqlite(&workspace.sqlite_path())?;
 
     let mut lexical_chunks = Vec::new();
-    for (_score, addr) in lexical_docs {
+    for (score, addr) in lexical_docs {
         let doc: TantivyDocument = searcher.doc(addr)?;
         if let Some(chunk) = fetch_chunk_by_id(doc, &fields)
             .filter(|chunk| type_matches(chunk, options.type_filter.as_deref()))
         {
-            lexical_chunks.push(chunk);
+            lexical_chunks.push((chunk, score));
         }
     }
 
@@ -62,12 +62,12 @@ pub fn hybrid_search(
             if let Some(chunk) = fetch_chunk_by_vector_key(&sqlite, vector_match.key)?
                 .filter(|chunk| type_matches(chunk, options.type_filter.as_deref()))
             {
-                semantic_chunks.push(chunk);
+                semantic_chunks.push((chunk, vector_match.score));
             }
         }
     }
 
-    let merged = fuse_rrf(&lexical_chunks, &semantic_chunks, options.limit);
+    let merged = fuse_rrf(&lexical_chunks, &semantic_chunks, query_text, options.limit);
     let hits = merged
         .into_iter()
         .map(|(chunk, score, sources)| to_hit(workspace, chunk, score, sources, options.context))
@@ -134,19 +134,25 @@ fn type_matches(chunk: &IndexedChunk, type_filter: Option<&str>) -> bool {
 }
 
 fn fuse_rrf(
-    lexical: &[IndexedChunk],
-    semantic: &[IndexedChunk],
+    lexical: &[(IndexedChunk, f32)],
+    semantic: &[(IndexedChunk, f32)],
+    query_text: &str,
     limit: Option<usize>,
 ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
-    let k = 60.0f32;
+    const K: f32 = 60.0;
+    const LEXICAL_WEIGHT: f32 = 3.2;
+    const SEMANTIC_WEIGHT: f32 = 1.0;
+    const LEXICAL_SCORE_WEIGHT: f32 = 0.05;
+    const SEMANTIC_ONLY_PENALTY: f32 = 0.82;
 
     let mut scores = HashMap::<String, f32>::new();
     let mut chunks = HashMap::<String, IndexedChunk>::new();
     let mut sources = HashMap::<String, HashSet<String>>::new();
 
-    for (rank, chunk) in lexical.iter().enumerate() {
+    for (rank, (chunk, lexical_score)) in lexical.iter().enumerate() {
         let entry = scores.entry(chunk.chunk_id.clone()).or_insert(0.0);
-        *entry += 1.0 / (k + rank as f32 + 1.0);
+        *entry += LEXICAL_WEIGHT / (K + rank as f32 + 1.0);
+        *entry += normalize_lexical_score(*lexical_score) * LEXICAL_SCORE_WEIGHT;
         chunks
             .entry(chunk.chunk_id.clone())
             .or_insert_with(|| chunk.clone());
@@ -156,9 +162,9 @@ fn fuse_rrf(
             .insert("lexical".to_string());
     }
 
-    for (rank, chunk) in semantic.iter().enumerate() {
+    for (rank, (chunk, _semantic_score)) in semantic.iter().enumerate() {
         let entry = scores.entry(chunk.chunk_id.clone()).or_insert(0.0);
-        *entry += 1.0 / (k + rank as f32 + 1.0);
+        *entry += SEMANTIC_WEIGHT / (K + rank as f32 + 1.0);
         chunks
             .entry(chunk.chunk_id.clone())
             .or_insert_with(|| chunk.clone());
@@ -170,14 +176,17 @@ fn fuse_rrf(
 
     let mut ranked = scores
         .into_iter()
-        .filter_map(|(id, score)| {
+        .filter_map(|(id, base_score)| {
             let chunk = chunks.remove(&id)?;
-            let mut source_list = sources
-                .remove(&id)
-                .unwrap_or_default()
-                .into_iter()
-                .collect::<Vec<_>>();
+            let source_set = sources.remove(&id).unwrap_or_default();
+            let mut source_list = source_set.iter().cloned().collect::<Vec<_>>();
             source_list.sort();
+
+            let mut score = base_score + literal_match_boost(query_text, &chunk);
+            if !source_set.contains("lexical") {
+                score *= SEMANTIC_ONLY_PENALTY;
+            }
+
             Some((chunk, score, source_list))
         })
         .collect::<Vec<_>>();
@@ -200,7 +209,7 @@ fn filter_meaningful_scores(
     }
 
     let best_score = ranked[0].1;
-    let threshold = (best_score * 0.55).max(0.012);
+    let threshold = (best_score * 0.60).max(0.015);
 
     let mut filtered = ranked
         .iter()
@@ -213,6 +222,58 @@ fn filter_meaningful_scores(
     }
 
     filtered
+}
+
+fn normalize_lexical_score(raw_score: f32) -> f32 {
+    if raw_score.is_finite() && raw_score > 0.0 {
+        (raw_score + 1.0).ln()
+    } else {
+        0.0
+    }
+}
+
+fn literal_match_boost(query_text: &str, chunk: &IndexedChunk) -> f32 {
+    const CASE_SENSITIVE_BOOST: f32 = 0.20;
+    const CASE_INSENSITIVE_BOOST: f32 = 0.14;
+    const NORMALIZED_IDENTIFIER_BOOST: f32 = 0.10;
+
+    let query = query_text.trim();
+    if query.is_empty() {
+        return 0.0;
+    }
+
+    let file_path = chunk.file_path.to_string_lossy();
+    if chunk.text.contains(query) || file_path.contains(query) {
+        return CASE_SENSITIVE_BOOST;
+    }
+
+    let query_lower = query.to_ascii_lowercase();
+    let text_lower = chunk.text.to_ascii_lowercase();
+    let path_lower = file_path.to_ascii_lowercase();
+    if text_lower.contains(&query_lower) || path_lower.contains(&query_lower) {
+        return CASE_INSENSITIVE_BOOST;
+    }
+
+    let query_compact = compact_identifier(query);
+    if query_compact.is_empty() {
+        return 0.0;
+    }
+
+    let text_compact = compact_identifier(&chunk.text);
+    let path_compact = compact_identifier(&file_path);
+    if text_compact.contains(&query_compact) || path_compact.contains(&query_compact) {
+        NORMALIZED_IDENTIFIER_BOOST
+    } else {
+        0.0
+    }
+}
+
+fn compact_identifier(input: &str) -> String {
+    input
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect::<String>()
 }
 
 pub fn workspace_has_results(workspace: &Workspace) -> Result<bool> {
@@ -260,5 +321,36 @@ mod tests {
 
         assert!(!hits.is_empty());
         assert!(hits[0].preview.contains("calculate_tax"));
+    }
+
+    #[test]
+    #[serial]
+    fn hybrid_search_prefers_exact_lexical_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(
+            tmp.path().join("exact.rs"),
+            "pub fn applyFilter(values: &[i32]) -> Vec<i32> { values.to_vec() }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("semantic.rs"),
+            "pub fn process_rules(items: &[i32]) -> Vec<i32> { items.to_vec() }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits =
+            hybrid_search(&workspace, "applyFilter", &model, &SearchOptions::default()).unwrap();
+
+        assert!(!hits.is_empty());
+        assert!(hits[0].preview.contains("applyFilter"));
+        assert!(hits[0].sources.iter().any(|source| source == "lexical"));
     }
 }

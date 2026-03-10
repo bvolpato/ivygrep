@@ -78,6 +78,7 @@ ivygrep add .
 ivygrep rm .
 ivygrep status
 ivygrep daemon
+ivygrep applyFilter ~/githubworkspace/trino
 ```
 
 Useful flags:
@@ -97,6 +98,7 @@ Command intent:
 - `ivygrep add <path>`: register/index/watch a workspace (preferred day-to-day workflow).
 - `ivygrep rm <path>`: remove workspace index and watcher registration.
 - `ivygrep index <path>`: explicit index/reindex command (manual override).
+- `ivygrep <query> <path>`: run semantic search against another workspace without `cd`.
 
 ## When to use the daemon
 
@@ -122,6 +124,7 @@ ivygrep "where is split assignment handled?"
 - File score is the sum of chunk scores in that file.
 - Files are sorted by descending file score.
 - By default, each hit prints the full semantic section (function/class block), not just one line.
+- Exact lexical/literal matches are weighted higher than fuzzy semantic-only matches.
 - A relevance threshold is applied automatically so low-signal chunks are dropped.
 - Use `--first-line-only` if you want compact grep-style previews.
 - Use `--file-name-only` to list only files and feed them into other tools.
