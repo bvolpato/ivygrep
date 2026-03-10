@@ -4,6 +4,21 @@ use assert_cmd::Command;
 use fs_extra::dir::{CopyOptions, copy as copy_dir};
 use serial_test::serial;
 
+fn stage_fixture_repo(name: &str) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture_root = Path::new("tests/fixtures").join(name);
+    let target_root = tmp.path().join("workspace");
+
+    std::fs::create_dir_all(&target_root).unwrap();
+    let mut opts = CopyOptions::new();
+    opts.overwrite = true;
+    opts.copy_inside = true;
+    copy_dir(&fixture_root, &target_root, &opts).unwrap();
+
+    let home = tmp.path().join("ivygrep_home");
+    (tmp, target_root, home)
+}
+
 #[test]
 #[serial]
 fn cli_help_snapshot() {
@@ -23,17 +38,7 @@ fn cli_help_snapshot() {
 #[test]
 #[serial]
 fn cli_query_json_snapshot() {
-    let tmp = tempfile::tempdir().unwrap();
-    let fixture_root = Path::new("tests/fixtures/rust_repo");
-    let target_root = tmp.path().join("workspace");
-
-    std::fs::create_dir_all(&target_root).unwrap();
-    let mut opts = CopyOptions::new();
-    opts.overwrite = true;
-    opts.copy_inside = true;
-    copy_dir(fixture_root, &target_root, &opts).unwrap();
-
-    let home = tmp.path().join("ivygrep_home");
+    let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ivygrep"));
     let output = cmd
@@ -65,4 +70,50 @@ fn cli_query_json_snapshot() {
     }
 
     insta::assert_yaml_snapshot!("cli_query_json", value);
+}
+
+#[test]
+#[serial]
+fn cli_file_name_only_json_snapshot() {
+    let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ivygrep"));
+    let output = cmd
+        .current_dir(&target_root)
+        .env("IVYGREP_HOME", &home)
+        .args([
+            "--json",
+            "--file-name-only",
+            "-f",
+            "where is the tax calculated?",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    insta::assert_yaml_snapshot!("cli_file_name_only_json", value);
+}
+
+#[test]
+#[serial]
+fn cli_first_line_only_text_output() {
+    let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ivygrep"));
+    let output = cmd
+        .current_dir(&target_root)
+        .env("IVYGREP_HOME", &home)
+        .args(["--first-line-only", "-f", "where is the tax calculated?"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("pub fn calculate_tax"));
+    assert!(!text.contains("amount * rate"));
 }

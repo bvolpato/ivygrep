@@ -46,6 +46,12 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_watch: bool,
 
+    #[arg(long, global = true)]
+    pub first_line_only: bool,
+
+    #[arg(long, global = true)]
+    pub file_name_only: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -220,7 +226,13 @@ async fn run_query(cli: Cli) -> Result<()> {
             }
         };
 
-        render_hits(&hits, cli.json, cli.limit)?;
+        render_hits(
+            &hits,
+            cli.json,
+            cli.limit,
+            cli.first_line_only,
+            cli.file_name_only,
+        )?;
         return Ok(());
     }
 
@@ -277,7 +289,13 @@ async fn run_query(cli: Cli) -> Result<()> {
         }
     };
 
-    render_hits(&hits, cli.json, cli.limit)?;
+    render_hits(
+        &hits,
+        cli.json,
+        cli.limit,
+        cli.first_line_only,
+        cli.file_name_only,
+    )?;
     Ok(())
 }
 
@@ -289,8 +307,31 @@ struct FileSearchResult {
     hits: Vec<SearchHit>,
 }
 
-fn render_hits(hits: &[SearchHit], json: bool, limit: Option<usize>) -> Result<()> {
+fn render_hits(
+    hits: &[SearchHit],
+    json: bool,
+    limit: Option<usize>,
+    first_line_only: bool,
+    file_name_only: bool,
+) -> Result<()> {
     let grouped = group_hits_by_file(hits, limit);
+
+    if file_name_only {
+        if json {
+            let files = grouped
+                .iter()
+                .map(|result| result.file_path.clone())
+                .collect::<Vec<_>>();
+            println!("{}", serde_json::to_string_pretty(&files)?);
+        } else if grouped.is_empty() {
+            println!("No results.");
+        } else {
+            for file in grouped {
+                println!("{}", file.file_path.to_string_lossy());
+            }
+        }
+        return Ok(());
+    }
 
     if json {
         println!("{}", serde_json::to_string_pretty(&grouped)?);
@@ -317,12 +358,26 @@ fn render_hits(hits: &[SearchHit], json: bool, limit: Option<usize>) -> Result<(
                 format!(" [{}]", hit.sources.join("+"))
             };
             println!(
-                "  {}:{}{} {}",
+                "  {}-{}{} {}",
                 hit.start_line.to_string().yellow(),
-                hit.preview,
+                hit.end_line.to_string().yellow(),
                 source.dimmed(),
                 format!("score={:.4}", hit.score).dimmed(),
             );
+
+            let rendered_preview = if first_line_only {
+                hit.preview
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string()
+            } else {
+                hit.preview.trim().to_string()
+            };
+            for line in rendered_preview.lines() {
+                println!("    {}", line);
+            }
         }
 
         println!();
@@ -395,7 +450,7 @@ fn print_daemon_response(response: DaemonResponse, json: bool) -> Result<()> {
             Ok(())
         }
         DaemonResponse::Error { message } => bail!(message),
-        DaemonResponse::SearchResults { hits } => render_hits(&hits, json, None),
+        DaemonResponse::SearchResults { hits } => render_hits(&hits, json, None, false, false),
         DaemonResponse::Status { workspaces } => {
             if json {
                 println!("{}", serde_json::to_string_pretty(&workspaces)?);

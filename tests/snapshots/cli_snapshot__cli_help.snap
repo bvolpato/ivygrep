@@ -26,5 +26,7 @@ Options:
       --type <TYPE_FILTER>  
   -n, --limit <LIMIT>       
       --no-watch            
+      --first-line-only     
+      --file-name-only      
   -h, --help                Print help
   -V, --version             Print version

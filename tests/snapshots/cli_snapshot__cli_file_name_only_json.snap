@@ -1,0 +1,6 @@
+---
+source: tests/cli_snapshot.rs
+assertion_line: 97
+expression: value
+---
+- rust_repo/src/lib.rs

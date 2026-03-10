@@ -87,6 +87,8 @@ Useful flags:
 - `--type <lang>`: language filter (`rust`, `python`, `typescript`, ...)
 - `-C, --context <n>`: context lines around hits
 - `-n, --limit <n>`: max number of files in output (no default limit)
+- `--first-line-only`: print only the first non-empty line of each semantic section
+- `--file-name-only`: print only matching file paths
 - `--json`: machine-readable grouped output
 - `--no-watch`: skip daemon watcher registration
 
@@ -119,7 +121,10 @@ ivygrep "where is split assignment handled?"
 - Results are grouped by file by default (not line-first).
 - File score is the sum of chunk scores in that file.
 - Files are sorted by descending file score.
+- By default, each hit prints the full semantic section (function/class block), not just one line.
 - A relevance threshold is applied automatically so low-signal chunks are dropped.
+- Use `--first-line-only` if you want compact grep-style previews.
+- Use `--file-name-only` to list only files and feed them into other tools.
 - If you want hard truncation, use `-n`.
 
 ## Architecture

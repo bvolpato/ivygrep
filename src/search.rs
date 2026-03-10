@@ -84,13 +84,7 @@ fn to_hit(
     context_lines: usize,
 ) -> Result<SearchHit> {
     let preview = if context_lines == 0 {
-        chunk
-            .text
-            .lines()
-            .find(|line| !line.trim().is_empty() && !line.trim_start().starts_with("//"))
-            .unwrap_or("")
-            .trim()
-            .to_string()
+        extract_section_text(&chunk.text)
     } else {
         let file_path = workspace.root.join(&chunk.file_path);
         let content = fs::read_to_string(&file_path)
@@ -114,6 +108,22 @@ fn to_hit(
         score,
         sources,
     })
+}
+
+fn extract_section_text(chunk_text: &str) -> String {
+    let mut lines = chunk_text.lines();
+    let first = lines.next().unwrap_or_default();
+    let mut remaining = if first.trim_start().starts_with("// ") {
+        lines.collect::<Vec<_>>()
+    } else {
+        chunk_text.lines().collect::<Vec<_>>()
+    };
+
+    while remaining.first().is_some_and(|line| line.trim().is_empty()) {
+        remaining.remove(0);
+    }
+
+    remaining.join("\n").trim().to_string()
 }
 
 fn type_matches(chunk: &IndexedChunk, type_filter: Option<&str>) -> bool {
@@ -190,7 +200,7 @@ fn filter_meaningful_scores(
     }
 
     let best_score = ranked[0].1;
-    let threshold = (best_score * 0.30).max(0.008);
+    let threshold = (best_score * 0.55).max(0.012);
 
     let mut filtered = ranked
         .iter()

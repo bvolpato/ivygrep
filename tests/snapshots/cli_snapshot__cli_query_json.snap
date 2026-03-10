@@ -4,11 +4,11 @@ assertion_line: 67
 expression: value
 ---
 - file_path: rust_repo/src/lib.rs
-  hit_count: 3
+  hit_count: 2
   hits:
     - end_line: 12
       file_path: rust_repo/src/lib.rs
-      preview: "pub fn invoice_total(items: &[f64], rate: f64) -> f64 {"
+      preview: "pub fn invoice_total(items: &[f64], rate: f64) -> f64 {\n    let base = subtotal(items);\n    base + calculate_tax(base, rate)\n}"
       score: "<score>"
       sources:
         - lexical
@@ -16,17 +16,10 @@ expression: value
       start_line: 9
     - end_line: 4
       file_path: rust_repo/src/lib.rs
-      preview: "pub fn calculate_tax(amount: f64, rate: f64) -> f64 {"
+      preview: "pub fn calculate_tax(amount: f64, rate: f64) -> f64 {\n    amount * rate\n}"
       score: "<score>"
       sources:
         - lexical
         - semantic
       start_line: 1
-    - end_line: 8
-      file_path: rust_repo/src/lib.rs
-      preview: "pub fn subtotal(items: &[f64]) -> f64 {"
-      score: "<score>"
-      sources:
-        - semantic
-      start_line: 5
   total_score: "<score>"
