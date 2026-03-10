@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 
 use anyhow::{Context, Result};
+use pluralizer::pluralize;
 use rusqlite::Connection;
 use tantivy::TantivyDocument;
 use tantivy::collector::TopDocs;
@@ -324,29 +325,16 @@ fn split_identifier_segments(token: &str) -> Vec<String> {
 }
 
 fn singularize_token(token: &str) -> String {
-    let len = token.len();
-    if len <= 3 {
+    if token.len() <= 3 || !token.chars().all(|ch| ch.is_ascii_alphabetic()) {
         return token.to_string();
     }
 
-    if token.ends_with("ies") && len > 4 {
-        return format!("{}y", &token[..len - 3]);
+    let singular = pluralize(token, 1isize, false).to_ascii_lowercase();
+    if singular.is_empty() {
+        token.to_string()
+    } else {
+        singular
     }
-
-    if token.ends_with("ses")
-        || token.ends_with("xes")
-        || token.ends_with("zes")
-        || token.ends_with("ches")
-        || token.ends_with("shes")
-    {
-        return token[..len - 2].to_string();
-    }
-
-    if token.ends_with('s') && !token.ends_with("ss") {
-        return token[..len - 1].to_string();
-    }
-
-    token.to_string()
 }
 
 fn truncate_for_reason(line: &str) -> String {
