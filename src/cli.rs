@@ -52,7 +52,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
-    #[arg(short = 'C', long, default_value_t = 0, global = true)]
+    #[arg(short = 'C', long, default_value_t = 2, global = true)]
     pub context: usize,
 
     #[arg(long = "type", global = true)]
@@ -386,6 +386,9 @@ fn render_hits(
                 source.dimmed(),
                 format!("score={:.4}", hit.score).dimmed(),
             );
+            if !hit.reason.is_empty() {
+                println!("    {} {}", "reason:".dimmed(), hit.reason.trim());
+            }
 
             let rendered_preview = if first_line_only {
                 hit.preview

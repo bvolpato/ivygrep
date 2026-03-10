@@ -86,14 +86,14 @@ Useful flags:
 - `-f, --force`: skip prompt and index now
 - `--regex`: regex mode
 - `--type <lang>`: language filter (`rust`, `python`, `typescript`, ...)
-- `-C, --context <n>`: context lines around hits
+- `-C, --context <n>`: context lines around the focused pointer line (default: `2`, i.e. up to 5 lines total)
 - `-n, --limit <n>`: max number of files in output (no default limit)
 - `--index [path]`: explicit index/reindex workspace (defaults to `.`)
 - `--add [path]`: register/index/watch workspace (defaults to `.`)
 - `--rm [path]`: remove workspace index/watch registration (defaults to `.`)
 - `--status`: show indexed workspaces
 - `--daemon`: run daemon process
-- `--first-line-only`: print only the first non-empty line of each semantic section
+- `--first-line-only`: print only the first non-empty line of each hit snippet
 - `--file-name-only`: print only matching file paths
 - `--json`: machine-readable grouped output
 - `--no-watch`: skip daemon watcher registration
@@ -126,7 +126,7 @@ ivygrep "where is split assignment handled?"
 - Results are grouped by file by default (not line-first).
 - File score is the sum of chunk scores in that file.
 - Files are sorted by descending file score.
-- By default, each hit prints the full semantic section (function/class block), not just one line.
+- By default, each hit prints a concise focused snippet (about 5 lines), plus a `reason` pointer line.
 - Exact lexical/literal matches are weighted higher than fuzzy semantic-only matches.
 - A relevance threshold is applied automatically so low-signal chunks are dropped.
 - Use `--first-line-only` if you want compact grep-style previews.

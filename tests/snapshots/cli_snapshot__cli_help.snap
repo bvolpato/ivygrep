@@ -20,7 +20,7 @@ Options:
   -f, --force               
       --regex               
       --json                
-  -C, --context <CONTEXT>   [default: 0]
+  -C, --context <CONTEXT>   [default: 2]
       --type <TYPE_FILTER>  
   -n, --limit <LIMIT>       
       --no-watch            

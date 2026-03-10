@@ -49,6 +49,7 @@ pub fn regex_search(
                     start_line: line_num as usize,
                     end_line: line_num as usize,
                     preview: line.trim().to_string(),
+                    reason: "regex line match".to_string(),
                     score: 1.0,
                     sources: vec!["regex".to_string()],
                 });

@@ -15,11 +15,21 @@ use crate::protocol::SearchHit;
 use crate::vector_store::VectorStore;
 use crate::workspace::Workspace;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct SearchOptions {
     pub limit: Option<usize>,
     pub context: usize,
     pub type_filter: Option<String>,
+}
+
+impl Default for SearchOptions {
+    fn default() -> Self {
+        Self {
+            limit: None,
+            context: 2,
+            type_filter: None,
+        }
+    }
 }
 
 pub fn hybrid_search(
@@ -70,7 +80,16 @@ pub fn hybrid_search(
     let merged = fuse_rrf(&lexical_chunks, &semantic_chunks, query_text, options.limit);
     let hits = merged
         .into_iter()
-        .map(|(chunk, score, sources)| to_hit(workspace, chunk, score, sources, options.context))
+        .map(|(chunk, score, sources)| {
+            to_hit(
+                workspace,
+                chunk,
+                query_text,
+                score,
+                sources,
+                options.context,
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
 
     Ok(hits)
@@ -79,51 +98,157 @@ pub fn hybrid_search(
 fn to_hit(
     workspace: &Workspace,
     chunk: IndexedChunk,
+    query_text: &str,
     score: f32,
     sources: Vec<String>,
     context_lines: usize,
 ) -> Result<SearchHit> {
-    let preview = if context_lines == 0 {
-        extract_section_text(&chunk.text)
-    } else {
-        let file_path = workspace.root.join(&chunk.file_path);
-        let content = fs::read_to_string(&file_path)
-            .with_context(|| format!("failed reading {}", file_path.display()))?;
+    let file_path = workspace.root.join(&chunk.file_path);
+    let content = fs::read_to_string(&file_path)
+        .with_context(|| format!("failed reading {}", file_path.display()))?;
 
-        let lines = content.lines().collect::<Vec<_>>();
-        if lines.is_empty() {
-            String::new()
-        } else {
-            let start = chunk.start_line.saturating_sub(context_lines + 1);
-            let end = (chunk.start_line + context_lines).min(lines.len());
-            lines[start..end].join("\n")
-        }
-    };
+    let lines = content.lines().collect::<Vec<_>>();
+    if lines.is_empty() {
+        return Ok(SearchHit {
+            file_path: chunk.file_path,
+            start_line: chunk.start_line,
+            end_line: chunk.start_line,
+            preview: String::new(),
+            reason: "empty file".to_string(),
+            score,
+            sources,
+        });
+    }
+
+    let focus_line = find_focus_line(&chunk, query_text, &lines);
+    let (snippet_start, snippet_end) = snippet_bounds(focus_line, context_lines, lines.len());
+    let preview = lines[snippet_start.saturating_sub(1)..snippet_end].join("\n");
+    let reason = summarize_reason(
+        query_text,
+        lines
+            .get(focus_line.saturating_sub(1))
+            .copied()
+            .unwrap_or_default(),
+    );
 
     Ok(SearchHit {
         file_path: chunk.file_path,
-        start_line: chunk.start_line,
-        end_line: chunk.end_line,
+        start_line: snippet_start,
+        end_line: snippet_end,
         preview,
+        reason,
         score,
         sources,
     })
 }
 
-fn extract_section_text(chunk_text: &str) -> String {
-    let mut lines = chunk_text.lines();
-    let first = lines.next().unwrap_or_default();
-    let mut remaining = if first.trim_start().starts_with("// ") {
-        lines.collect::<Vec<_>>()
-    } else {
-        chunk_text.lines().collect::<Vec<_>>()
-    };
-
-    while remaining.first().is_some_and(|line| line.trim().is_empty()) {
-        remaining.remove(0);
+fn find_focus_line(chunk: &IndexedChunk, query_text: &str, lines: &[&str]) -> usize {
+    let line_count = lines.len();
+    let window_start = chunk.start_line.max(1).min(line_count);
+    let window_end = chunk.end_line.max(window_start).min(line_count);
+    let query = query_text.trim();
+    if query.is_empty() {
+        return window_start;
     }
 
-    remaining.join("\n").trim().to_string()
+    let query_lower = query.to_ascii_lowercase();
+    let query_compact = compact_identifier(query);
+    let query_tokens = tokenize_query(query);
+
+    let mut best_line = window_start;
+    let mut best_score = 0.0f32;
+
+    for line_no in window_start..=window_end {
+        let line = lines[line_no - 1];
+        let line_lower = line.to_ascii_lowercase();
+        let mut line_score = 0.0f32;
+
+        if line.contains(query) {
+            line_score += 8.0;
+        } else if line_lower.contains(&query_lower) {
+            line_score += 5.0;
+        }
+
+        for token in &query_tokens {
+            if line_lower.contains(token) {
+                line_score += 1.5;
+            }
+        }
+
+        if !query_compact.is_empty() {
+            let line_compact = compact_identifier(line);
+            if line_compact.contains(&query_compact) {
+                line_score += 3.0;
+            }
+        }
+
+        if line_score > best_score {
+            best_score = line_score;
+            best_line = line_no;
+        }
+    }
+
+    best_line
+}
+
+fn snippet_bounds(focus_line: usize, context_lines: usize, line_count: usize) -> (usize, usize) {
+    let start = focus_line.saturating_sub(context_lines).max(1);
+    let end = (focus_line + context_lines).min(line_count);
+    (start, end)
+}
+
+fn summarize_reason(query_text: &str, focus_line: &str) -> String {
+    let focus = focus_line.trim();
+    if focus.is_empty() {
+        return "top hybrid relevance in this file".to_string();
+    }
+
+    let query = query_text.trim();
+    if !query.is_empty() {
+        if focus.contains(query)
+            || focus
+                .to_ascii_lowercase()
+                .contains(&query.to_ascii_lowercase())
+        {
+            return format!("line contains query terms: {}", truncate_for_reason(focus));
+        }
+
+        for token in tokenize_query(query) {
+            if focus.to_ascii_lowercase().contains(&token) {
+                return format!(
+                    "line matches token `{}`: {}",
+                    token,
+                    truncate_for_reason(focus)
+                );
+            }
+        }
+    }
+
+    format!("top-ranked pointer: {}", truncate_for_reason(focus))
+}
+
+fn tokenize_query(query: &str) -> Vec<String> {
+    query
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter_map(|token| {
+            let token = token.trim();
+            if token.len() >= 2 {
+                Some(token.to_ascii_lowercase())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+}
+
+fn truncate_for_reason(line: &str) -> String {
+    const MAX_REASON_CHARS: usize = 120;
+    if line.chars().count() <= MAX_REASON_CHARS {
+        return line.to_string();
+    }
+
+    let truncated = line.chars().take(MAX_REASON_CHARS).collect::<String>();
+    format!("{truncated}...")
 }
 
 fn type_matches(chunk: &IndexedChunk, type_filter: Option<&str>) -> bool {
@@ -352,5 +477,41 @@ mod tests {
         assert!(!hits.is_empty());
         assert!(hits[0].preview.contains("applyFilter"));
         assert!(hits[0].sources.iter().any(|source| source == "lexical"));
+    }
+
+    #[test]
+    #[serial]
+    fn default_hit_context_is_compact() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let mut content = String::new();
+        for i in 0..30 {
+            if i == 19 {
+                content.push_str(
+                    "pub fn applyFilter(values: &[i32]) -> Vec<i32> { values.to_vec() }\n",
+                );
+            } else {
+                content.push_str(&format!("// filler line {}\n", i + 1));
+            }
+        }
+
+        std::fs::write(tmp.path().join("sample.rs"), content).unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits =
+            hybrid_search(&workspace, "applyFilter", &model, &SearchOptions::default()).unwrap();
+        assert!(!hits.is_empty());
+
+        let top = &hits[0];
+        assert!(top.end_line >= top.start_line);
+        assert!(top.end_line - top.start_line <= 4);
+        assert!(top.preview.lines().count() <= 5);
+        assert!(!top.reason.is_empty());
     }
 }
