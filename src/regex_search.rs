@@ -19,6 +19,7 @@ pub fn regex_search(workspace: &Workspace, pattern: &str, limit: usize) -> Resul
         .git_exclude(true)
         .git_global(true)
         .ignore(true)
+        .require_git(false)
         .follow_links(false);
 
     'walk: for entry in walk.build() {

@@ -179,31 +179,60 @@ async fn run_query(cli: Cli) -> Result<()> {
     let cwd = env::current_dir()?;
     let workspace = Workspace::resolve(&cwd)?;
 
+    let daemon_index_request = DaemonRequest::Index {
+        path: workspace.root.clone(),
+        watch: !cli.no_watch,
+    };
+    if let Some(response) = daemon::request(&daemon_index_request).await? {
+        match response {
+            DaemonResponse::Ack { .. } => {}
+            DaemonResponse::Error { message } => bail!(message),
+            _ => {}
+        }
+
+        let hits = if cli.regex {
+            let request = DaemonRequest::RegexSearch {
+                path: workspace.root.clone(),
+                pattern: query.to_string(),
+                limit: cli.limit,
+            };
+
+            match daemon::request(&request).await? {
+                Some(DaemonResponse::SearchResults { hits }) => hits,
+                Some(DaemonResponse::Error { message }) => bail!(message),
+                _ => vec![],
+            }
+        } else {
+            let request = DaemonRequest::Search {
+                path: workspace.root.clone(),
+                query: query.to_string(),
+                limit: cli.limit,
+                context: cli.context,
+                type_filter: cli.type_filter.clone(),
+            };
+
+            match daemon::request(&request).await? {
+                Some(DaemonResponse::SearchResults { hits }) => hits,
+                Some(DaemonResponse::Error { message }) => bail!(message),
+                _ => vec![],
+            }
+        };
+
+        render_hits(&hits, cli.json)?;
+        return Ok(());
+    }
+
     if !workspace_is_indexed(&workspace) {
         let should_index = if cli.force {
             true
         } else {
             prompt_index_first_time()?
         };
-
         if !should_index {
             bail!("workspace is not indexed; aborting search")
         }
-
-        let request = DaemonRequest::Index {
-            path: workspace.root.clone(),
-            watch: !cli.no_watch,
-        };
-        if let Some(response) = daemon::request(&request).await? {
-            match response {
-                DaemonResponse::Ack { .. } => {}
-                DaemonResponse::Error { message } => bail!(message),
-                _ => {}
-            }
-        } else {
-            let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
-            let _summary = index_workspace(&workspace, &model)?;
-        }
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        let _summary = index_workspace(&workspace, &model)?;
     }
 
     let hits = if cli.regex {

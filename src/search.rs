@@ -193,6 +193,8 @@ pub fn workspace_has_results(workspace: &Workspace) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    use serial_test::serial;
+
     use crate::EMBEDDING_DIMENSIONS;
     use crate::embedding::HashEmbeddingModel;
     use crate::indexer::index_workspace;
@@ -201,6 +203,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[serial]
     fn hybrid_search_returns_hits() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();

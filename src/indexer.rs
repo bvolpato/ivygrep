@@ -502,6 +502,7 @@ pub fn diff_for_workspace(workspace: &Workspace) -> Result<MerkleDiff> {
 mod tests {
     use std::fs;
 
+    use serial_test::serial;
     use tempfile::tempdir;
 
     use crate::EMBEDDING_DIMENSIONS;
@@ -511,6 +512,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[serial]
     fn indexes_simple_repo() {
         let root = tempdir().unwrap();
         let home = tempdir().unwrap();
@@ -527,5 +529,43 @@ mod tests {
         let summary = index_workspace(&workspace, &model).unwrap();
         assert_eq!(summary.deleted_files, 0);
         assert!(summary.total_chunks >= 1);
+    }
+
+    #[test]
+    #[serial]
+    fn respects_gitignore_by_default() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+
+        fs::write(root.path().join(".gitignore"), "ignored.rs\n").unwrap();
+        fs::write(
+            root.path().join("kept.rs"),
+            "pub fn included_symbol() -> i32 { 42 }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("ignored.rs"),
+            "pub fn excluded_symbol() -> i32 { 0 }\n",
+        )
+        .unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        let _ = index_workspace(&workspace, &model).unwrap();
+
+        let conn = open_sqlite(&workspace.sqlite_path()).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT file_path FROM chunks ORDER BY file_path")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+
+        assert!(rows.iter().any(|path| path == "kept.rs"));
+        assert!(!rows.iter().any(|path| path == "ignored.rs"));
     }
 }

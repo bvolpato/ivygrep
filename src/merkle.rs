@@ -53,6 +53,7 @@ impl MerkleSnapshot {
         walker.git_exclude(true);
         walker.git_global(true);
         walker.ignore(true);
+        walker.require_git(false);
         walker.follow_links(false);
 
         for entry in walker.build() {

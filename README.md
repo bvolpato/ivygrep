@@ -54,11 +54,15 @@ install -m 0755 ./target/release/ivygrep ~/.local/bin/ivygrep
 ## Quick Start
 
 ```bash
-ivygrep index .
+ivygrep add .
 ivygrep "where is the tax calculated?"
 ```
 
-First query in a non-indexed workspace prompts:
+`add` registers the current workspace for indexing and daemon watch updates.
+
+If daemon mode is running, a plain query also auto-indexes the current workspace before searching.
+
+When no daemon is running, first query in a non-indexed workspace prompts:
 
 ```text
 This folder is not indexed. Index it now? [y/N]
@@ -85,6 +89,12 @@ Useful flags:
 - `--json`: machine-readable output
 - `--no-watch`: skip daemon watcher registration
 
+Command intent:
+
+- `ivygrep add <path>`: register/index/watch a workspace (preferred day-to-day workflow).
+- `ivygrep rm <path>`: remove workspace index and watcher registration.
+- `ivygrep index <path>`: explicit index/reindex command (manual override).
+
 ## When to use the daemon
 
 Use `ivygrep daemon` when you want the best steady-state latency in an active repo:
@@ -95,12 +105,21 @@ Use `ivygrep daemon` when you want the best steady-state latency in an active re
 
 Skip daemon mode if you run one-off queries occasionally. The CLI works directly in-process without it.
 
+Typical daemon workflow:
+
+```bash
+ivygrep daemon
+ivygrep add .
+ivygrep "where is split assignment handled?"
+```
+
 ## Architecture
 
 - `tantivy` for lexical index/search
 - `usearch` for vector index/search
 - `notify` for file watching
 - SQLite metadata store per workspace
+- `.gitignore` rules are respected by default during indexing and regex scans.
 - Workspace index root: `~/.local/share/ivygrep/indexes/<workspace-id>/`
 
 ## Development
