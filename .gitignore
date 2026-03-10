@@ -1,0 +1,21 @@
+# Rust build outputs
+/target/
+
+# Rustfmt backups
+**/*.rs.bk
+
+# OS artifacts
+.DS_Store
+
+# Editors and IDEs
+.vscode/
+.idea/
+
+# Vim swap files
+*.swp
+*.swo
+
+# Local env files
+.env
+.env.*
+.direnv/
