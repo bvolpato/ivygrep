@@ -513,13 +513,14 @@ mod tests {
     #[test]
     fn indexes_simple_repo() {
         let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
         fs::write(
             root.path().join("lib.rs"),
             "pub fn calculate_tax(amount: f64) -> f64 { amount * 0.2 }\n",
         )
         .unwrap();
 
-        unsafe { std::env::set_var("IVYGREP_HOME", tempdir().unwrap().path()) };
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
         let workspace = Workspace::resolve(root.path()).unwrap();
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
 

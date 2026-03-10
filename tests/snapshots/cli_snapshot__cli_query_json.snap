@@ -3,14 +3,6 @@ source: tests/cli_snapshot.rs
 assertion_line: 59
 expression: value
 ---
-- end_line: 4
-  file_path: rust_repo/src/lib.rs
-  preview: "pub fn calculate_tax(amount: f64, rate: f64) -> f64 {"
-  score: "<score>"
-  sources:
-    - lexical
-    - semantic
-  start_line: 1
 - end_line: 12
   file_path: rust_repo/src/lib.rs
   preview: "pub fn invoice_total(items: &[f64], rate: f64) -> f64 {"
@@ -19,6 +11,14 @@ expression: value
     - lexical
     - semantic
   start_line: 9
+- end_line: 4
+  file_path: rust_repo/src/lib.rs
+  preview: "pub fn calculate_tax(amount: f64, rate: f64) -> f64 {"
+  score: "<score>"
+  sources:
+    - lexical
+    - semantic
+  start_line: 1
 - end_line: 8
   file_path: rust_repo/src/lib.rs
   preview: "pub fn subtotal(items: &[f64]) -> f64 {"

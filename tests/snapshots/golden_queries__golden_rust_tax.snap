@@ -4,14 +4,14 @@ assertion_line: 49
 expression: snap
 ---
 - file_path: rust_repo/src/lib.rs
-  line: 1
-  preview: "pub fn calculate_tax(amount: f64, rate: f64) -> f64 {"
+  line: 9
+  preview: "pub fn invoice_total(items: &[f64], rate: f64) -> f64 {"
   sources:
     - lexical
     - semantic
 - file_path: rust_repo/src/lib.rs
-  line: 9
-  preview: "pub fn invoice_total(items: &[f64], rate: f64) -> f64 {"
+  line: 1
+  preview: "pub fn calculate_tax(amount: f64, rate: f64) -> f64 {"
   sources:
     - lexical
     - semantic

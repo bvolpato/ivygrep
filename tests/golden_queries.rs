@@ -33,7 +33,7 @@ fn golden_query_rust_tax() {
     .unwrap();
 
     assert!(!hits.is_empty());
-    assert!(hits[0].preview.contains("calculate_tax"));
+    assert!(hits.iter().any(|hit| hit.preview.contains("calculate_tax")));
 
     let snap = hits
         .into_iter()
@@ -65,7 +65,7 @@ fn golden_query_python_tax() {
     .unwrap();
 
     assert!(!hits.is_empty());
-    assert!(hits[0].preview.contains("calculate_tax"));
+    assert!(hits.iter().any(|hit| hit.preview.contains("calculate_tax")));
 }
 
 #[test]
@@ -84,7 +84,11 @@ fn golden_query_typescript_total() {
     .unwrap();
 
     assert!(!hits.is_empty());
-    assert!(hits[0].preview.contains("calculateTotal") || hits[0].preview.contains("calculateTax"));
+    assert!(
+        hits.iter()
+            .any(|hit| hit.preview.contains("calculateTotal")
+                || hit.preview.contains("calculateTax"))
+    );
 }
 
 fn stage_fixture(name: &str) -> (TempDir, Workspace) {

@@ -15,7 +15,7 @@
 - RRF hybrid fusion for high-quality ranking
 - Incremental indexing via Merkle-style file fingerprints
 - Regex fallback path for grep-like workflows
-- Optional lightweight daemon over Unix socket
+- Lightweight daemon over Unix socket (opt-in)
 
 No network calls are required for indexing and searching.
 
@@ -85,12 +85,20 @@ Useful flags:
 - `--json`: machine-readable output
 - `--no-watch`: skip daemon watcher registration
 
+## When to use the daemon
+
+Use `ivygrep daemon` when you want the best steady-state latency in an active repo:
+
+- You run many queries in sequence and want warm index/search state in memory.
+- You want file-watch updates continuously while editing code.
+- You want indexing/search shared across terminals and scripts.
+
+Skip daemon mode if you run one-off queries occasionally. The CLI works directly in-process without it.
+
 ## Architecture
 
 - `tantivy` for lexical index/search
-- Vector index backend:
-  - default: safe persisted Rust vector store
-  - optional native backend: `--features usearch-native`
+- `usearch` for vector index/search
 - `notify` for file watching
 - SQLite metadata store per workspace
 - Workspace index root: `~/.local/share/ivygrep/indexes/<workspace-id>/`
@@ -103,12 +111,6 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-Optional native backend compile check:
-
-```bash
-cargo test --no-run --features usearch-native
-```
-
 Test harness includes:
 
 - fixture repositories in `tests/fixtures`
@@ -118,4 +120,4 @@ Test harness includes:
 
 ## License
 
-Apache-2.0
+MIT
