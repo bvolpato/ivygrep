@@ -403,7 +403,8 @@ fn concurrent_cli_searches_via_binary() {
     }
 
     // Index first (single process, no contention)
-    let output = std::process::Command::new("./target/release/ivygrep")
+    let ivygrep_bin = assert_cmd::cargo::cargo_bin!("ivygrep");
+    let output = std::process::Command::new(ivygrep_bin)
         .arg("--add")
         .arg(root.path())
         .env("IVYGREP_HOME", home.path())
@@ -434,7 +435,8 @@ fn concurrent_cli_searches_via_binary() {
                     "f64",
                 ];
                 let query = queries[i % queries.len()];
-                let output = std::process::Command::new("./target/release/ivygrep")
+                let bin = assert_cmd::cargo::cargo_bin!("ivygrep");
+                let output = std::process::Command::new(bin)
                     .args(["-f", "--json", query])
                     .arg(&root_path)
                     .env("IVYGREP_HOME", &home_path)
