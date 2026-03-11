@@ -99,6 +99,30 @@ pub fn index_workspace(
 ) -> Result<IndexingSummary> {
     workspace.ensure_dirs()?;
 
+    // Acquire an exclusive file lock to prevent concurrent writes to the
+    // vector store (usearch) and other index files. The lock is advisory
+    // and automatically released when `_lock_file` is dropped.
+    let lock_path = workspace.lock_path();
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open lock file {}", lock_path.display()))?;
+    fs2::FileExt::lock_exclusive(&lock_file)
+        .with_context(|| format!("failed to acquire index lock {}", lock_path.display()))?;
+
+    let result = index_workspace_inner(workspace, embedding_model);
+
+    // Release the lock (also happens automatically on drop, but be explicit)
+    let _ = fs2::FileExt::unlock(&lock_file);
+    result
+}
+
+fn index_workspace_inner(
+    workspace: &Workspace,
+    embedding_model: &dyn EmbeddingModel,
+) -> Result<IndexingSummary> {
     let _ = open_storage(workspace, embedding_model.dimensions())?;
 
     let old_snapshot = MerkleSnapshot::load(&workspace.merkle_snapshot_path())?;

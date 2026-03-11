@@ -86,6 +86,10 @@ impl Workspace {
         self.index_dir.join("merkle_snapshot.json")
     }
 
+    pub fn lock_path(&self) -> PathBuf {
+        self.index_dir.join("index.lock")
+    }
+
     pub fn write_metadata(&self, metadata: &WorkspaceMetadata) -> Result<()> {
         let data = serde_json::to_vec_pretty(metadata)?;
         fs::write(self.metadata_path(), data)?;
