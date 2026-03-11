@@ -15,16 +15,21 @@ use std::thread;
 use serial_test::serial;
 use tempfile::tempdir;
 
+use ivygrep::EMBEDDING_DIMENSIONS;
 use ivygrep::embedding::HashEmbeddingModel;
 use ivygrep::indexer::{index_workspace, open_sqlite};
 use ivygrep::search::{SearchOptions, hybrid_search};
 use ivygrep::workspace::Workspace;
-use ivygrep::EMBEDDING_DIMENSIONS;
 
 /// Helper: create a workspace with source files and index it.
 fn make_indexed_workspace(
     file_count: usize,
-) -> (tempfile::TempDir, tempfile::TempDir, Workspace, HashEmbeddingModel) {
+) -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    Workspace,
+    HashEmbeddingModel,
+) {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
@@ -71,7 +76,10 @@ fn concurrent_searches_do_not_panic() {
                 let query = queries[i % queries.len()];
                 let opts = SearchOptions::default();
                 let result = hybrid_search(&ws, query, m.as_ref(), &opts);
-                assert!(result.is_ok(), "search '{query}' on thread {i} failed: {result:?}");
+                assert!(
+                    result.is_ok(),
+                    "search '{query}' on thread {i} failed: {result:?}"
+                );
                 result.unwrap()
             })
         })
@@ -107,7 +115,10 @@ fn search_during_reindex_does_not_crash() {
         for i in 0..5 {
             fs::write(
                 root_path.join(format!("module_{i}.rs")),
-                format!("pub fn compute_{i}_v2(x: f64) -> f64 {{ x * {}.0 }}\n", i * 10),
+                format!(
+                    "pub fn compute_{i}_v2(x: f64) -> f64 {{ x * {}.0 }}\n",
+                    i * 10
+                ),
             )
             .unwrap();
         }
@@ -176,7 +187,13 @@ fn sequential_crud_search_cycles() {
     .unwrap();
     index_workspace(&ws, &model).unwrap();
 
-    let hits = hybrid_search(&ws, "discount calculation", &model, &SearchOptions::default()).unwrap();
+    let hits = hybrid_search(
+        &ws,
+        "discount calculation",
+        &model,
+        &SearchOptions::default(),
+    )
+    .unwrap();
     assert!(!hits.is_empty(), "cycle 2: should find discount");
 
     // The old content should not be in any chunk
@@ -201,7 +218,10 @@ fn sequential_crud_search_cycles() {
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(count, 0, "cycle 3: all chunks should be gone after file delete");
+    assert_eq!(
+        count, 0,
+        "cycle 3: all chunks should be gone after file delete"
+    );
 
     // Cycle 4: re-create and search
     fs::write(
@@ -211,9 +231,11 @@ fn sequential_crud_search_cycles() {
     .unwrap();
     index_workspace(&ws, &model).unwrap();
 
-    let hits =
-        hybrid_search(&ws, "process payment", &model, &SearchOptions::default()).unwrap();
-    assert!(!hits.is_empty(), "cycle 4: should find newly created content");
+    let hits = hybrid_search(&ws, "process payment", &model, &SearchOptions::default()).unwrap();
+    assert!(
+        !hits.is_empty(),
+        "cycle 4: should find newly created content"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -387,7 +409,11 @@ fn concurrent_cli_searches_via_binary() {
         .env("IVYGREP_HOME", home.path())
         .output()
         .unwrap();
-    assert!(output.status.success(), "index failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "index failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     // Launch 6 concurrent searches.
     // Use -f to also test that re-indexing serializes properly via the lock.
@@ -399,7 +425,14 @@ fn concurrent_cli_searches_via_binary() {
             let barrier = Arc::clone(&barrier);
             thread::spawn(move || {
                 barrier.wait();
-                let queries = ["compute", "search target", "function", "value", "pub fn", "f64"];
+                let queries = [
+                    "compute",
+                    "search target",
+                    "function",
+                    "value",
+                    "pub fn",
+                    "f64",
+                ];
                 let query = queries[i % queries.len()];
                 let output = std::process::Command::new("./target/release/ivygrep")
                     .args(["-f", "--json", query])

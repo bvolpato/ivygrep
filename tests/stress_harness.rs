@@ -56,7 +56,12 @@ fn require_fixture(path: &Path) {
 /// Stage a fixture into a temp directory and return workspace + model.
 fn stage_fixture(
     fixture_path: &Path,
-) -> (tempfile::TempDir, tempfile::TempDir, Workspace, HashEmbeddingModel) {
+) -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    Workspace,
+    HashEmbeddingModel,
+) {
     let staging = tempfile::tempdir().unwrap();
     let staged_workspace_root = staging.path().join("workspace");
     fs::create_dir_all(&staged_workspace_root).unwrap();
@@ -362,11 +367,7 @@ fn stress_ripgrep_incremental_reindex() {
 
     // Phase 3: add a new file to test incremental indexing
     let sentinel_a = ws_root.join("ivygrep_stress_sentinel_a.rs");
-    fs::write(
-        &sentinel_a,
-        "pub fn sentinel_a() -> bool { true }\n",
-    )
-    .unwrap();
+    fs::write(&sentinel_a, "pub fn sentinel_a() -> bool { true }\n").unwrap();
 
     let s3 = index_workspace(&workspace, &model).unwrap();
     assert_eq!(
@@ -377,22 +378,14 @@ fn stress_ripgrep_incremental_reindex() {
 
     // Phase 4: add another brand new file
     let sentinel_b = ws_root.join("ivygrep_stress_sentinel_b.rs");
-    fs::write(
-        &sentinel_b,
-        "pub fn sentinel_b() -> bool { false }\n",
-    )
-    .unwrap();
+    fs::write(&sentinel_b, "pub fn sentinel_b() -> bool { false }\n").unwrap();
 
     let s4 = index_workspace(&workspace, &model).unwrap();
     assert_eq!(s4.indexed_files, 1, "only sentinel_b should be indexed");
     assert_eq!(s4.deleted_files, 0);
 
     // Phase 5: modify sentinel_a and delete sentinel_b
-    fs::write(
-        &sentinel_a,
-        "pub fn sentinel_a_v2() -> bool { false }\n",
-    )
-    .unwrap();
+    fs::write(&sentinel_a, "pub fn sentinel_a_v2() -> bool { false }\n").unwrap();
     fs::remove_file(&sentinel_b).unwrap();
 
     let s5 = index_workspace(&workspace, &model).unwrap();
@@ -509,9 +502,7 @@ fn stress_concurrent_query_storm_ripgrep() {
     let max = all_latencies[total - 1];
     let avg: Duration = all_latencies.iter().sum::<Duration>() / total as u32;
 
-    eprintln!(
-        "[query-storm] {total} queries across {thread_count} threads"
-    );
+    eprintln!("[query-storm] {total} queries across {thread_count} threads");
     eprintln!("[query-storm] avg={avg:?} p50={p50:?} p95={p95:?} p99={p99:?} max={max:?}");
 
     // Sanity: p95 should be under 5 seconds even on slow CI
@@ -540,7 +531,7 @@ fn stress_regex_search_ripgrep() {
         ("impl\\s+\\w+\\s+for", "trait implementations", 3),
         ("pub\\s+(fn|struct|enum)", "public items", 20),
         ("#\\[derive\\(", "derive macros", 5),
-        ("TODO|FIXME", "todo comments", 0),  // may or may not exist
+        ("TODO|FIXME", "todo comments", 0), // may or may not exist
     ];
 
     for (pattern, label, min_expected) in patterns {
@@ -550,7 +541,10 @@ fn stress_regex_search_ripgrep() {
 
         eprintln!(
             "[regex-stress] pattern='{}' ({}) hits={} elapsed={:?}",
-            pattern, label, hits.len(), elapsed
+            pattern,
+            label,
+            hits.len(),
+            elapsed
         );
 
         if min_expected > 0 {
@@ -732,10 +726,7 @@ fn stress_large_file_near_limit() {
         &SearchOptions::default(),
     )
     .unwrap();
-    assert!(
-        !hits.is_empty(),
-        "should find function_500 in large file"
-    );
+    assert!(!hits.is_empty(), "should find function_500 in large file");
     assert!(
         hits[0].preview.contains("function_500"),
         "top hit should contain function_500"
@@ -776,7 +767,10 @@ fn stress_rapid_large_scale_churn() {
     let workspace = Workspace::resolve(root.path()).unwrap();
     let s1 = index_workspace(&workspace, &model).unwrap();
     assert_eq!(s1.indexed_files, 100);
-    eprintln!("[churn] phase1: created 100 files, chunks={}", s1.total_chunks);
+    eprintln!(
+        "[churn] phase1: created 100 files, chunks={}",
+        s1.total_chunks
+    );
 
     // Phase 2: modify 30, delete 20, add 25 — all at once
     for i in 0..30 {
@@ -809,11 +803,9 @@ fn stress_rapid_large_scale_churn() {
     let ws = Workspace::resolve(root.path()).unwrap();
     let conn = open_sqlite(&ws.sqlite_path()).unwrap();
     let file_count: i64 = conn
-        .query_row(
-            "SELECT COUNT(DISTINCT file_path) FROM chunks",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT COUNT(DISTINCT file_path) FROM chunks", [], |row| {
+            row.get(0)
+        })
         .unwrap();
     assert_eq!(
         file_count, 105,
@@ -826,26 +818,14 @@ fn stress_rapid_large_scale_churn() {
     assert_eq!(s3.deleted_files, 0, "no changes → zero deleted");
 
     // Phase 5: search after massive churn should still work
-    let hits = hybrid_search(
-        &workspace,
-        "new_handler",
-        &model,
-        &SearchOptions::default(),
-    )
-    .unwrap();
+    let hits = hybrid_search(&workspace, "new_handler", &model, &SearchOptions::default()).unwrap();
     assert!(!hits.is_empty(), "should find newly added functions");
 
     // Verify deleted functions are gone
-    let hits = hybrid_search(
-        &workspace,
-        "handler_35",
-        &model,
-        &SearchOptions::default(),
-    )
-    .unwrap();
-    let has_deleted = hits.iter().any(|h| {
-        h.file_path.to_string_lossy().contains("mod_035")
-    });
+    let hits = hybrid_search(&workspace, "handler_35", &model, &SearchOptions::default()).unwrap();
+    let has_deleted = hits
+        .iter()
+        .any(|h| h.file_path.to_string_lossy().contains("mod_035"));
     assert!(
         !has_deleted,
         "deleted file mod_035.rs should not appear in results"
@@ -868,10 +848,28 @@ fn stress_query_throughput_benchmark() {
     // Generate a medium-sized codebase
     for i in 0..60 {
         let lang = match i % 4 {
-            0 => ("rs", format!("pub fn compute_{i}(x: f64) -> f64 {{ x * {}.0 }}\n", i + 1)),
-            1 => ("py", format!("def calculate_{i}(x, y):\n    return x + y * {}\n", i)),
-            2 => ("ts", format!("export function process_{i}(data: number[]): number {{ return data.length * {} }}\n", i)),
-            _ => ("java", format!("public class Handler{i} {{\n    public int handle(int x) {{ return x * {}; }}\n}}\n", i)),
+            0 => (
+                "rs",
+                format!("pub fn compute_{i}(x: f64) -> f64 {{ x * {}.0 }}\n", i + 1),
+            ),
+            1 => (
+                "py",
+                format!("def calculate_{i}(x, y):\n    return x + y * {}\n", i),
+            ),
+            2 => (
+                "ts",
+                format!(
+                    "export function process_{i}(data: number[]): number {{ return data.length * {} }}\n",
+                    i
+                ),
+            ),
+            _ => (
+                "java",
+                format!(
+                    "public class Handler{i} {{\n    public int handle(int x) {{ return x * {}; }}\n}}\n",
+                    i
+                ),
+            ),
         };
         fs::write(root.path().join(format!("module_{i}.{}", lang.0)), lang.1).unwrap();
     }
@@ -881,11 +879,26 @@ fn stress_query_throughput_benchmark() {
     index_workspace(&workspace, &model).unwrap();
 
     let queries = vec![
-        "compute function", "calculate value", "process data", "handle request",
-        "return result", "public method", "export function", "x plus y",
-        "multiply number", "array length", "integer return", "float computation",
-        "where is the handler", "data processing pipeline", "mathematical operation",
-        "module_30", "compute_15", "calculate_42", "Handler", "process_7",
+        "compute function",
+        "calculate value",
+        "process data",
+        "handle request",
+        "return result",
+        "public method",
+        "export function",
+        "x plus y",
+        "multiply number",
+        "array length",
+        "integer return",
+        "float computation",
+        "where is the handler",
+        "data processing pipeline",
+        "mathematical operation",
+        "module_30",
+        "compute_15",
+        "calculate_42",
+        "Handler",
+        "process_7",
     ];
 
     let mut latencies = Vec::new();
@@ -954,13 +967,7 @@ fn stress_sustained_query_and_reindex_cycles() {
 
     // 30 cycles of: query → mutate 1 file → reindex → query
     for cycle in 0..30 {
-        let hits = hybrid_search(
-            &workspace,
-            "service",
-            &model,
-            &SearchOptions::default(),
-        )
-        .unwrap();
+        let hits = hybrid_search(&workspace, "service", &model, &SearchOptions::default()).unwrap();
         assert!(!hits.is_empty(), "cycle {cycle}: search failed");
 
         // Mutate one file
@@ -974,7 +981,10 @@ fn stress_sustained_query_and_reindex_cycles() {
         .unwrap();
 
         let summary = index_workspace(&workspace, &model).unwrap();
-        assert_eq!(summary.indexed_files, 1, "cycle {cycle}: only 1 file changed");
+        assert_eq!(
+            summary.indexed_files, 1,
+            "cycle {cycle}: only 1 file changed"
+        );
 
         // Chunk count should remain stable (replace, not accumulate)
         let conn = open_sqlite(&workspace.sqlite_path()).unwrap();
@@ -1040,7 +1050,11 @@ fn stress_index_integrity_no_orphan_chunks() {
         if surv.exists() {
             fs::write(
                 &surv,
-                format!("fn item_{}_modified_r{round}() -> i32 {{ {} }}\n", 29 - round, round * 100),
+                format!(
+                    "fn item_{}_modified_r{round}() -> i32 {{ {} }}\n",
+                    29 - round,
+                    round * 100
+                ),
             )
             .unwrap();
         }
@@ -1129,7 +1143,11 @@ fn stress_concurrent_search_during_reindex_large() {
             fs::write(&sentinel, format!("stress iteration {i}\n")).unwrap();
 
             let result = index_workspace(&ws_w, m_w.as_ref());
-            assert!(result.is_ok(), "writer iteration {i} failed: {:?}", result.err());
+            assert!(
+                result.is_ok(),
+                "writer iteration {i} failed: {:?}",
+                result.err()
+            );
             thread::sleep(Duration::from_millis(50));
         }
     });
@@ -1165,9 +1183,7 @@ fn stress_concurrent_search_during_reindex_large() {
                             );
                         }
                         Err(e) => {
-                            eprintln!(
-                                "[concurrent-large] reader {tid} acceptable error: {e}"
-                            );
+                            eprintln!("[concurrent-large] reader {tid} acceptable error: {e}");
                         }
                     }
                     thread::sleep(Duration::from_millis(20));
@@ -1199,20 +1215,59 @@ fn stress_diverse_language_mix() {
 
     // Create files in every supported language
     let files: Vec<(&str, &str)> = vec![
-        ("app.rs", "pub fn rust_handler(req: &str) -> String { req.to_uppercase() }\n"),
-        ("app.py", "def python_handler(req):\n    return req.upper()\n"),
-        ("app.ts", "export function typescriptHandler(req: string): string { return req.toUpperCase(); }\n"),
-        ("app.js", "function javascriptHandler(req) { return req.toUpperCase(); }\n"),
-        ("App.java", "public class App {\n    public String javaHandler(String req) { return req.toUpperCase(); }\n}\n"),
-        ("app.go", "package main\n\nimport \"strings\"\n\nfunc goHandler(req string) string { return strings.ToUpper(req) }\n"),
+        (
+            "app.rs",
+            "pub fn rust_handler(req: &str) -> String { req.to_uppercase() }\n",
+        ),
+        (
+            "app.py",
+            "def python_handler(req):\n    return req.upper()\n",
+        ),
+        (
+            "app.ts",
+            "export function typescriptHandler(req: string): string { return req.toUpperCase(); }\n",
+        ),
+        (
+            "app.js",
+            "function javascriptHandler(req) { return req.toUpperCase(); }\n",
+        ),
+        (
+            "App.java",
+            "public class App {\n    public String javaHandler(String req) { return req.toUpperCase(); }\n}\n",
+        ),
+        (
+            "app.go",
+            "package main\n\nimport \"strings\"\n\nfunc goHandler(req string) string { return strings.ToUpper(req) }\n",
+        ),
         ("app.rb", "def ruby_handler(req)\n  req.upcase\nend\n"),
-        ("app.c", "#include <ctype.h>\nvoid c_handler(char* s) { while(*s) { *s = toupper(*s); s++; } }\n"),
-        ("app.cpp", "#include <algorithm>\nstd::string cpp_handler(std::string s) { std::transform(s.begin(), s.end(), s.begin(), ::toupper); return s; }\n"),
-        ("app.cs", "public class App { public string CSharpHandler(string req) => req.ToUpper(); }\n"),
-        ("app.swift", "func swiftHandler(_ req: String) -> String { return req.uppercased() }\n"),
-        ("app.kt", "fun kotlinHandler(req: String): String = req.uppercase()\n"),
-        ("app.scala", "def scalaHandler(req: String): String = req.toUpperCase\n"),
-        ("app.php", "<?php function phpHandler($req) { return strtoupper($req); }\n"),
+        (
+            "app.c",
+            "#include <ctype.h>\nvoid c_handler(char* s) { while(*s) { *s = toupper(*s); s++; } }\n",
+        ),
+        (
+            "app.cpp",
+            "#include <algorithm>\nstd::string cpp_handler(std::string s) { std::transform(s.begin(), s.end(), s.begin(), ::toupper); return s; }\n",
+        ),
+        (
+            "app.cs",
+            "public class App { public string CSharpHandler(string req) => req.ToUpper(); }\n",
+        ),
+        (
+            "app.swift",
+            "func swiftHandler(_ req: String) -> String { return req.uppercased() }\n",
+        ),
+        (
+            "app.kt",
+            "fun kotlinHandler(req: String): String = req.uppercase()\n",
+        ),
+        (
+            "app.scala",
+            "def scalaHandler(req: String): String = req.toUpperCase\n",
+        ),
+        (
+            "app.php",
+            "<?php function phpHandler($req) { return strtoupper($req); }\n",
+        ),
         ("app.r", "r_handler <- function(req) { toupper(req) }\n"),
     ];
 

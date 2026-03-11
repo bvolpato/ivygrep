@@ -14,14 +14,17 @@ use std::fs;
 use serial_test::serial;
 use tempfile::tempdir;
 
+use ivygrep::EMBEDDING_DIMENSIONS;
 use ivygrep::embedding::HashEmbeddingModel;
 use ivygrep::indexer::{index_workspace, open_sqlite};
 use ivygrep::merkle::MerkleSnapshot;
 use ivygrep::workspace::Workspace;
-use ivygrep::EMBEDDING_DIMENSIONS;
 
 /// Helper: set IVYGREP_HOME, resolve workspace, index, return summary.
-fn setup_and_index(root: &std::path::Path, home: &std::path::Path) -> ivygrep::indexer::IndexingSummary {
+fn setup_and_index(
+    root: &std::path::Path,
+    home: &std::path::Path,
+) -> ivygrep::indexer::IndexingSummary {
     unsafe { std::env::set_var("IVYGREP_HOME", home) };
     let workspace = Workspace::resolve(root).unwrap();
     let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
@@ -75,7 +78,10 @@ fn create_new_file_incremental() {
     // Phase 2: add a new file — only the new file should be indexed
     fs::write(root.path().join("beta.rs"), "fn beta() -> i32 { 2 }\n").unwrap();
     let s2 = setup_and_index(root.path(), home.path());
-    assert_eq!(s2.indexed_files, 1, "only the new file should be re-indexed");
+    assert_eq!(
+        s2.indexed_files, 1,
+        "only the new file should be re-indexed"
+    );
     assert_eq!(s2.deleted_files, 0);
 
     let files = indexed_files(&ws);
@@ -116,7 +122,11 @@ fn no_change_means_zero_work() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    fs::write(root.path().join("stable.rs"), "fn stable() -> bool { true }\n").unwrap();
+    fs::write(
+        root.path().join("stable.rs"),
+        "fn stable() -> bool { true }\n",
+    )
+    .unwrap();
     fs::write(root.path().join("fixed.py"), "def fixed(): return 42\n").unwrap();
 
     let s1 = setup_and_index(root.path(), home.path());
@@ -127,7 +137,10 @@ fn no_change_means_zero_work() {
     let s2 = setup_and_index(root.path(), home.path());
     assert_eq!(s2.indexed_files, 0, "no files should be re-indexed");
     assert_eq!(s2.deleted_files, 0, "no files should be deleted");
-    assert_eq!(s2.total_chunks, chunks_after_initial, "chunk count unchanged");
+    assert_eq!(
+        s2.total_chunks, chunks_after_initial,
+        "chunk count unchanged"
+    );
 }
 
 #[test]
@@ -157,7 +170,11 @@ fn update_file_only_reindexes_changed() {
     let home = tempdir().unwrap();
 
     fs::write(root.path().join("mutable.rs"), "fn v1() -> i32 { 1 }\n").unwrap();
-    fs::write(root.path().join("constant.rs"), "fn unchanged() -> i32 { 0 }\n").unwrap();
+    fs::write(
+        root.path().join("constant.rs"),
+        "fn unchanged() -> i32 { 0 }\n",
+    )
+    .unwrap();
     let s1 = setup_and_index(root.path(), home.path());
     assert_eq!(s1.indexed_files, 2);
 
@@ -177,7 +194,10 @@ fn update_file_only_reindexes_changed() {
             |row| row.get(0),
         )
         .unwrap();
-    assert!(text.contains("v2"), "chunk should contain updated content, got: {text}");
+    assert!(
+        text.contains("v2"),
+        "chunk should contain updated content, got: {text}"
+    );
 }
 
 #[test]
@@ -199,7 +219,11 @@ fn update_preserves_unmodified_chunks() {
 
     // Total chunks should be the same (replaced, not accumulated)
     let ws = workspace_for(root.path());
-    assert_eq!(chunk_count(&ws), initial_chunks, "chunk count should not grow");
+    assert_eq!(
+        chunk_count(&ws),
+        initial_chunks,
+        "chunk count should not grow"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -225,7 +249,10 @@ fn delete_file_removes_chunks() {
     let ws = workspace_for(root.path());
     let files = indexed_files(&ws);
     assert!(files.contains("alive.rs"));
-    assert!(!files.contains("doomed.rs"), "doomed.rs chunks should be gone");
+    assert!(
+        !files.contains("doomed.rs"),
+        "doomed.rs chunks should be gone"
+    );
 }
 
 #[test]
@@ -306,7 +333,10 @@ fn merkle_snapshot_matches_filesystem_after_crud() {
     let saved = MerkleSnapshot::load(&ws.merkle_snapshot_path()).unwrap();
     let fresh = MerkleSnapshot::build(root.path()).unwrap();
 
-    assert_eq!(saved.root_hash, fresh.root_hash, "persisted snapshot = fresh scan");
+    assert_eq!(
+        saved.root_hash, fresh.root_hash,
+        "persisted snapshot = fresh scan"
+    );
     assert_eq!(saved.files, fresh.files, "file hashes should match");
 
     // Another re-index should be a no-op
@@ -327,12 +357,20 @@ fn subdirectory_crud_is_incremental() {
 
     fs::create_dir_all(root.path().join("src/models")).unwrap();
     fs::write(root.path().join("src/main.rs"), "fn main() {}\n").unwrap();
-    fs::write(root.path().join("src/models/user.rs"), "struct User { name: String }\n").unwrap();
+    fs::write(
+        root.path().join("src/models/user.rs"),
+        "struct User { name: String }\n",
+    )
+    .unwrap();
     let s1 = setup_and_index(root.path(), home.path());
     assert_eq!(s1.indexed_files, 2);
 
     // Add new file in subdirectory only
-    fs::write(root.path().join("src/models/post.rs"), "struct Post { title: String }\n").unwrap();
+    fs::write(
+        root.path().join("src/models/post.rs"),
+        "struct Post { title: String }\n",
+    )
+    .unwrap();
     let s2 = setup_and_index(root.path(), home.path());
     assert_eq!(s2.indexed_files, 1, "only the new subdirectory file");
     assert_eq!(s2.deleted_files, 0);
@@ -379,7 +417,10 @@ fn large_workspace_tiny_change_is_cheap() {
     .unwrap();
 
     let s2 = setup_and_index(root.path(), home.path());
-    assert_eq!(s2.indexed_files, 1, "only 1 of 50 files should be re-indexed");
+    assert_eq!(
+        s2.indexed_files, 1,
+        "only 1 of 50 files should be re-indexed"
+    );
     assert_eq!(s2.deleted_files, 0);
 }
 
