@@ -12,6 +12,7 @@ use crate::embedding::EmbeddingModel;
 use crate::indexer::{
     IndexedChunk, fetch_chunk_by_id, fetch_chunk_by_vector_key, open_sqlite, open_tantivy_index,
 };
+use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
 use crate::vector_store::VectorStore;
 use crate::workspace::{Workspace, WorkspaceScope};
@@ -21,6 +22,8 @@ pub struct SearchOptions {
     pub limit: Option<usize>,
     pub context: usize,
     pub type_filter: Option<String>,
+    pub include_globs: Vec<String>,
+    pub exclude_globs: Vec<String>,
     pub scope_filter: Option<WorkspaceScope>,
 }
 
@@ -30,6 +33,8 @@ impl Default for SearchOptions {
             limit: None,
             context: 2,
             type_filter: None,
+            include_globs: vec![],
+            exclude_globs: vec![],
             scope_filter: None,
         }
     }
@@ -42,6 +47,7 @@ pub fn hybrid_search(
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
     let candidate_limit = options.limit.unwrap_or(500).max(100);
+    let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
 
     let (index, fields) = open_tantivy_index(&workspace.tantivy_dir())?;
     let reader = index.reader()?;
@@ -65,6 +71,7 @@ pub fn hybrid_search(
             if let Some(chunk) = fetch_chunk_by_id(doc, &fields)
                 .filter(|chunk| type_matches(chunk, options.type_filter.as_deref()))
                 .filter(|chunk| scope_matches(chunk, options.scope_filter.as_ref()))
+                .filter(|chunk| path_matches(chunk, &path_matcher))
             {
                 lexical_by_id
                     .entry(chunk.chunk_id.clone())
@@ -86,6 +93,7 @@ pub fn hybrid_search(
             if let Some(chunk) = fetch_chunk_by_vector_key(&sqlite, vector_match.key)?
                 .filter(|chunk| type_matches(chunk, options.type_filter.as_deref()))
                 .filter(|chunk| scope_matches(chunk, options.scope_filter.as_ref()))
+                .filter(|chunk| path_matches(chunk, &path_matcher))
             {
                 semantic_chunks.push((chunk, vector_match.score));
             }
@@ -376,6 +384,10 @@ fn scope_matches(chunk: &IndexedChunk, scope_filter: Option<&WorkspaceScope>) ->
         Some(scope) => scope.matches(&chunk.file_path),
         None => true,
     }
+}
+
+fn path_matches(chunk: &IndexedChunk, path_matcher: &PathGlobMatcher) -> bool {
+    path_matcher.matches(&chunk.file_path)
 }
 
 fn fuse_rrf(
@@ -704,6 +716,8 @@ mod tests {
                 limit: None,
                 context: 2,
                 type_filter: None,
+                include_globs: vec![],
+                exclude_globs: vec![],
                 scope_filter: Some(WorkspaceScope {
                     rel_path: std::path::PathBuf::from("scoped"),
                     is_file: false,

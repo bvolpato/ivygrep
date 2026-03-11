@@ -59,6 +59,12 @@ pub struct Cli {
     #[arg(long = "type", global = true)]
     pub type_filter: Option<String>,
 
+    #[arg(long, value_name = "GLOBS", value_delimiter = ',', global = true)]
+    pub include: Vec<String>,
+
+    #[arg(long, value_name = "GLOBS", value_delimiter = ',', global = true)]
+    pub exclude: Vec<String>,
+
     #[arg(short = 'n', long, global = true)]
     pub limit: Option<usize>,
 
@@ -250,6 +256,8 @@ async fn run_query(cli: Cli) -> Result<()> {
                 path: workspace.root.clone(),
                 pattern: query.to_string(),
                 limit: cli.limit,
+                include_globs: cli.include.clone(),
+                exclude_globs: cli.exclude.clone(),
                 scope_path: scope_path.clone(),
                 scope_is_file,
             };
@@ -266,6 +274,8 @@ async fn run_query(cli: Cli) -> Result<()> {
                 limit: cli.limit,
                 context: cli.context,
                 type_filter: cli.type_filter.clone(),
+                include_globs: cli.include.clone(),
+                exclude_globs: cli.exclude.clone(),
                 scope_path: scope_path.clone(),
                 scope_is_file,
             };
@@ -305,6 +315,8 @@ async fn run_query(cli: Cli) -> Result<()> {
             path: workspace.root.clone(),
             pattern: query.to_string(),
             limit: cli.limit,
+            include_globs: cli.include.clone(),
+            exclude_globs: cli.exclude.clone(),
             scope_path: scope_path.clone(),
             scope_is_file,
         };
@@ -312,7 +324,14 @@ async fn run_query(cli: Cli) -> Result<()> {
         match daemon::request(&request).await? {
             Some(DaemonResponse::SearchResults { hits }) => hits,
             Some(DaemonResponse::Error { message }) => bail!(message),
-            _ => regex_search(&workspace, query, cli.limit, scope_filter.as_ref())?,
+            _ => regex_search(
+                &workspace,
+                query,
+                cli.limit,
+                scope_filter.as_ref(),
+                &cli.include,
+                &cli.exclude,
+            )?,
         }
     } else {
         let request = DaemonRequest::Search {
@@ -321,6 +340,8 @@ async fn run_query(cli: Cli) -> Result<()> {
             limit: cli.limit,
             context: cli.context,
             type_filter: cli.type_filter.clone(),
+            include_globs: cli.include.clone(),
+            exclude_globs: cli.exclude.clone(),
             scope_path: scope_path.clone(),
             scope_is_file,
         };
@@ -338,6 +359,8 @@ async fn run_query(cli: Cli) -> Result<()> {
                         limit: cli.limit,
                         context: cli.context,
                         type_filter: cli.type_filter.clone(),
+                        include_globs: cli.include.clone(),
+                        exclude_globs: cli.exclude.clone(),
                         scope_filter: scope_filter.clone(),
                     },
                 )?

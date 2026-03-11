@@ -30,6 +30,10 @@ pub enum DaemonRequest {
         limit: Option<usize>,
         context: usize,
         type_filter: Option<String>,
+        #[serde(default)]
+        include_globs: Vec<String>,
+        #[serde(default)]
+        exclude_globs: Vec<String>,
         scope_path: Option<PathBuf>,
         #[serde(default)]
         scope_is_file: bool,
@@ -38,6 +42,10 @@ pub enum DaemonRequest {
         path: PathBuf,
         pattern: String,
         limit: Option<usize>,
+        #[serde(default)]
+        include_globs: Vec<String>,
+        #[serde(default)]
+        exclude_globs: Vec<String>,
         scope_path: Option<PathBuf>,
         #[serde(default)]
         scope_is_file: bool,

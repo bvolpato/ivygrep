@@ -4,6 +4,7 @@ use grep_searcher::sinks::UTF8;
 use grep_searcher::{Searcher, SearcherBuilder};
 use ignore::WalkBuilder;
 
+use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
 use crate::workspace::{Workspace, WorkspaceScope};
 
@@ -12,10 +13,13 @@ pub fn regex_search(
     pattern: &str,
     limit: Option<usize>,
     scope_filter: Option<&WorkspaceScope>,
+    include_globs: &[String],
+    exclude_globs: &[String],
 ) -> Result<Vec<SearchHit>> {
     let matcher = RegexMatcher::new(pattern)?;
     let mut searcher: Searcher = SearcherBuilder::new().line_number(true).build();
     let max_hits = limit.unwrap_or(usize::MAX);
+    let path_matcher = PathGlobMatcher::new(include_globs, exclude_globs)?;
 
     let mut hits = Vec::new();
 
@@ -40,6 +44,9 @@ pub fn regex_search(
             Err(_) => full_path.clone(),
         };
         if scope_filter.is_some_and(|scope| !scope.matches(&rel_path)) {
+            continue;
+        }
+        if !path_matcher.matches(&rel_path) {
             continue;
         }
 
@@ -104,11 +111,47 @@ mod tests {
             is_file: false,
         };
 
-        let hits = regex_search(&workspace, "applyFilter", None, Some(&scope)).unwrap();
+        let hits = regex_search(&workspace, "applyFilter", None, Some(&scope), &[], &[]).unwrap();
         assert!(!hits.is_empty());
         assert!(
             hits.iter()
                 .all(|hit| hit.file_path.starts_with(std::path::Path::new("scoped")))
         );
+    }
+
+    #[test]
+    #[serial]
+    fn regex_search_respects_include_exclude_globs() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("match.rs"),
+            "pub fn applyFilter() -> bool { true }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("match.md"),
+            "pub fn applyFilter() -> bool { true }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let include = vec!["*.md".to_string()];
+        let exclude = vec!["match.md".to_string()];
+
+        let include_only =
+            regex_search(&workspace, "applyFilter", None, None, &include, &[]).unwrap();
+        assert_eq!(
+            include_only
+                .iter()
+                .map(|hit| hit.file_path.clone())
+                .collect::<std::collections::HashSet<_>>(),
+            [PathBuf::from("match.md")]
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>()
+        );
+
+        let include_and_exclude =
+            regex_search(&workspace, "applyFilter", None, None, &include, &exclude).unwrap();
+        assert!(include_and_exclude.is_empty());
     }
 }

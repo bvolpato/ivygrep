@@ -114,6 +114,8 @@ fn run_index_and_query(
             limit: Some(50),
             context: 2,
             type_filter: None,
+            include_globs: vec![],
+            exclude_globs: vec![],
             scope_filter: None,
         },
     )
@@ -210,6 +212,8 @@ fn stress_ripgrep_deep_relevance() {
                 limit: Some(10),
                 context: 2,
                 type_filter: None,
+                include_globs: vec![],
+                exclude_globs: vec![],
                 scope_filter: None,
             },
         )
@@ -289,6 +293,8 @@ fn stress_tantivy_deep_relevance() {
                 limit: Some(10),
                 context: 2,
                 type_filter: None,
+                include_globs: vec![],
+                exclude_globs: vec![],
                 scope_filter: None,
             },
         )
@@ -468,6 +474,8 @@ fn stress_concurrent_query_storm_ripgrep() {
                             limit: Some(20),
                             context: 2,
                             type_filter: None,
+                            include_globs: vec![],
+                            exclude_globs: vec![],
                             scope_filter: None,
                         },
                     );
@@ -536,7 +544,7 @@ fn stress_regex_search_ripgrep() {
 
     for (pattern, label, min_expected) in patterns {
         let start = Instant::now();
-        let hits = regex_search(&workspace, pattern, Some(200), None).unwrap();
+        let hits = regex_search(&workspace, pattern, Some(200), None, &[], &[]).unwrap();
         let elapsed = start.elapsed();
 
         eprintln!(
@@ -1171,6 +1179,8 @@ fn stress_concurrent_search_during_reindex_large() {
                             limit: Some(10),
                             context: 2,
                             type_filter: None,
+                            include_globs: vec![],
+                            exclude_globs: vec![],
                             scope_filter: None,
                         },
                     );

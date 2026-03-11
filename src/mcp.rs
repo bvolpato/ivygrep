@@ -11,6 +11,7 @@ use crate::EMBEDDING_DIMENSIONS;
 use crate::config;
 use crate::embedding::HashEmbeddingModel;
 use crate::indexer::{index_workspace, workspace_is_indexed};
+use crate::path_glob::parse_glob_csv;
 use crate::protocol::SearchHit;
 use crate::regex_search::regex_search;
 use crate::search::{SearchOptions, hybrid_search};
@@ -61,6 +62,8 @@ struct IvygrepSearchArgs {
     #[serde(rename = "type")]
     type_filter: Option<String>,
     regex: Option<bool>,
+    include: Option<String>,
+    exclude: Option<String>,
     first_line_only: Option<bool>,
     file_name_only: Option<bool>,
     verbose: Option<bool>,
@@ -174,9 +177,11 @@ fn search_tool_schema() -> Value {
                 "context": {"type": "integer", "minimum": 0, "description": "Context lines around focused line."},
                 "type": {"type": "string", "description": "Language filter (rust, python, typescript, ...)."},
                 "regex": {"type": "boolean", "description": "Use regex mode instead of hybrid semantic search."},
-                "first_line_only": {"type": "boolean", "description": "Show only first non-empty line of each hit preview."},
-                "file_name_only": {"type": "boolean", "description": "Return only file paths."},
-                "verbose": {"type": "boolean", "description": "Include reason pointers in output."}
+                "include": {"type": "string", "description": "Comma-separated include globs, e.g. \"*.md,src/**/*.rs\"."},
+                "exclude": {"type": "string", "description": "Comma-separated exclude globs, e.g. \"target/**,*.lock\"."},
+                "first_line_only": {"type": "boolean", "description": "Return only the first non-empty preview line for each hit."},
+                "file_name_only": {"type": "boolean", "description": "Return only file paths (no hit details)."},
+                "verbose": {"type": "boolean", "description": "Include reason pointers in JSON output."}
             },
             "required": ["query"]
         }
@@ -211,8 +216,18 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
         let _summary = index_workspace(&workspace, &model)?;
     }
 
+    let include_globs = parse_glob_csv(args.include.as_deref());
+    let exclude_globs = parse_glob_csv(args.exclude.as_deref());
+
     let hits = if args.regex.unwrap_or(false) {
-        regex_search(&workspace, query, args.limit, scope_filter.as_ref())?
+        regex_search(
+            &workspace,
+            query,
+            args.limit,
+            scope_filter.as_ref(),
+            &include_globs,
+            &exclude_globs,
+        )?
     } else {
         hybrid_search(
             &workspace,
@@ -222,13 +237,19 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
                 limit: args.limit,
                 context: args.context.unwrap_or(2),
                 type_filter: args.type_filter.clone(),
+                include_globs: include_globs.clone(),
+                exclude_globs: exclude_globs.clone(),
                 scope_filter: scope_filter.clone(),
             },
         )?
     };
 
     let mut grouped = group_hits_by_file(&hits, args.limit);
-    if !args.verbose.unwrap_or(false) {
+    let verbose = args.verbose.unwrap_or(false);
+    let first_line_only = args.first_line_only.unwrap_or(false);
+    let file_name_only = args.file_name_only.unwrap_or(false);
+
+    if !verbose {
         for file in &mut grouped {
             for hit in &mut file.hits {
                 hit.reason.clear();
@@ -236,21 +257,47 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
         }
     }
 
-    let structured = json!({
-        "workspace_root": workspace.root,
-        "scope_path": scope_filter.as_ref().map(|scope| scope.rel_path.clone()),
-        "scope_is_file": scope_filter.as_ref().is_some_and(|scope| scope.is_file),
-        "query": query,
-        "mode": if args.regex.unwrap_or(false) { "regex" } else { "hybrid" },
-        "results": grouped,
-    });
+    if first_line_only {
+        for file in &mut grouped {
+            for hit in &mut file.hits {
+                hit.preview = hit
+                    .preview
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+            }
+        }
+    }
 
-    let text = render_tool_text(
-        &grouped,
-        args.first_line_only.unwrap_or(false),
-        args.file_name_only.unwrap_or(false),
-        args.verbose.unwrap_or(false),
-    );
+    let payload = if file_name_only {
+        json!({
+            "workspace_root": workspace.root,
+            "scope_path": scope_filter.as_ref().map(|scope| scope.rel_path.clone()),
+            "scope_is_file": scope_filter.as_ref().is_some_and(|scope| scope.is_file),
+            "query": query,
+            "mode": if args.regex.unwrap_or(false) { "regex" } else { "hybrid" },
+            "result_count": grouped.len(),
+            "include": include_globs,
+            "exclude": exclude_globs,
+            "file_paths": grouped.iter().map(|file| file.file_path.clone()).collect::<Vec<_>>(),
+        })
+    } else {
+        json!({
+            "workspace_root": workspace.root,
+            "scope_path": scope_filter.as_ref().map(|scope| scope.rel_path.clone()),
+            "scope_is_file": scope_filter.as_ref().is_some_and(|scope| scope.is_file),
+            "query": query,
+            "mode": if args.regex.unwrap_or(false) { "regex" } else { "hybrid" },
+            "result_count": grouped.len(),
+            "include": include_globs,
+            "exclude": exclude_globs,
+            "results": grouped,
+        })
+    };
+
+    let text = serde_json::to_string(&payload)?;
 
     Ok(json!({
         "content": [
@@ -259,7 +306,6 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
                 "text": text
             }
         ],
-        "structuredContent": structured,
         "isError": false
     }))
 }
@@ -301,71 +347,6 @@ fn group_hits_by_file(hits: &[SearchHit], limit: Option<usize>) -> Vec<FileSearc
     }
 
     files
-}
-
-fn render_tool_text(
-    grouped: &[FileSearchResult],
-    first_line_only: bool,
-    file_name_only: bool,
-    verbose: bool,
-) -> String {
-    if grouped.is_empty() {
-        return "No results.".to_string();
-    }
-
-    if file_name_only {
-        return grouped
-            .iter()
-            .map(|file| file.file_path.to_string_lossy().to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
-    }
-
-    let mut out = Vec::new();
-    for file in grouped {
-        out.push(format!(
-            "{}  score={:.4}  matches={}",
-            file.file_path.to_string_lossy(),
-            file.total_score,
-            file.hit_count
-        ));
-
-        for hit in &file.hits {
-            let source = if hit.sources.is_empty() {
-                String::new()
-            } else {
-                format!(" [{}]", hit.sources.join("+"))
-            };
-
-            out.push(format!(
-                "  {}-{}{} score={:.4}",
-                hit.start_line, hit.end_line, source, hit.score
-            ));
-
-            if verbose && !hit.reason.is_empty() {
-                out.push(format!("    reason: {}", hit.reason.trim()));
-            }
-
-            let rendered_preview = if first_line_only {
-                hit.preview
-                    .lines()
-                    .find(|line| !line.trim().is_empty())
-                    .unwrap_or("")
-                    .trim()
-                    .to_string()
-            } else {
-                hit.preview.trim().to_string()
-            };
-
-            for line in rendered_preview.lines() {
-                out.push(format!("    {line}"));
-            }
-        }
-
-        out.push(String::new());
-    }
-
-    out.join("\n")
 }
 
 /// Detected framing mode for the stdio transport.
@@ -500,13 +481,15 @@ mod tests {
             context: Some(2),
             type_filter: None,
             regex: Some(false),
+            include: None,
+            exclude: None,
             first_line_only: Some(false),
             file_name_only: Some(false),
             verbose: Some(false),
         })
         .unwrap();
 
-        let result = response.get("structuredContent").unwrap();
+        let result = tool_json_payload(&response);
         let files = result
             .get("results")
             .and_then(|v| v.as_array())
@@ -517,5 +500,133 @@ mod tests {
 
         assert!(!files.is_empty());
         assert!(files.iter().all(|path| path.starts_with("scoped/")));
+    }
+
+    #[test]
+    #[serial]
+    fn mcp_search_omits_reason_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(
+            root.join("match.rs"),
+            "pub fn applyFilter(values: &[i32]) -> Vec<i32> { values.to_vec() }\n",
+        )
+        .unwrap();
+
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let response = execute_ivygrep_search(IvygrepSearchArgs {
+            query: Some("applyFilter".to_string()),
+            path: Some(root.to_string_lossy().to_string()),
+            limit: Some(5),
+            context: Some(2),
+            type_filter: None,
+            regex: Some(false),
+            include: None,
+            exclude: None,
+            first_line_only: Some(false),
+            file_name_only: Some(false),
+            verbose: Some(false),
+        })
+        .unwrap();
+
+        let result = tool_json_payload(&response);
+        let hits = result
+            .get("results")
+            .and_then(|v| v.as_array())
+            .and_then(|files| files.first())
+            .and_then(|file| file.get("hits"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        assert!(!hits.is_empty());
+        assert!(hits.iter().all(|hit| hit.get("reason").is_none()));
+    }
+
+    #[test]
+    #[serial]
+    fn mcp_search_respects_include_exclude_globs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(
+            root.join("match.rs"),
+            "pub fn applyFilter(values: &[i32]) -> Vec<i32> { values.to_vec() }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("match.md"),
+            "pub fn applyFilter(values: &[i32]) -> Vec<i32> { values.to_vec() }\n",
+        )
+        .unwrap();
+
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let include_only = execute_ivygrep_search(IvygrepSearchArgs {
+            query: Some("applyFilter".to_string()),
+            path: Some(root.to_string_lossy().to_string()),
+            limit: Some(5),
+            context: Some(2),
+            type_filter: None,
+            regex: Some(false),
+            include: Some("*.md".to_string()),
+            exclude: None,
+            first_line_only: Some(false),
+            file_name_only: Some(true),
+            verbose: Some(false),
+        })
+        .unwrap();
+
+        let include_payload = tool_json_payload(&include_only);
+        let file_paths = include_payload
+            .get("file_paths")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(
+            file_paths,
+            vec![Value::String("match.md".to_string())],
+            "include glob should keep only markdown results"
+        );
+
+        let include_and_exclude = execute_ivygrep_search(IvygrepSearchArgs {
+            query: Some("applyFilter".to_string()),
+            path: Some(root.to_string_lossy().to_string()),
+            limit: Some(5),
+            context: Some(2),
+            type_filter: None,
+            regex: Some(false),
+            include: Some("*.md".to_string()),
+            exclude: Some("match.md".to_string()),
+            first_line_only: Some(false),
+            file_name_only: Some(true),
+            verbose: Some(false),
+        })
+        .unwrap();
+
+        let excluded_payload = tool_json_payload(&include_and_exclude);
+        assert_eq!(
+            excluded_payload
+                .get("file_paths")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.len())
+                .unwrap_or_default(),
+            0
+        );
+    }
+
+    fn tool_json_payload(response: &Value) -> Value {
+        let content = response
+            .get("content")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|item| item.get("text"))
+            .and_then(|v| v.as_str())
+            .expect("tool response content text");
+        serde_json::from_str(content).expect("valid JSON payload")
     }
 }

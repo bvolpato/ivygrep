@@ -153,6 +153,8 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             limit,
             context,
             type_filter,
+            include_globs,
+            exclude_globs,
             scope_path,
             scope_is_file,
         } => {
@@ -170,6 +172,8 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 limit,
                 context,
                 type_filter,
+                include_globs,
+                exclude_globs,
                 scope_filter: scope_from_request(scope_path, scope_is_file),
             };
 
@@ -190,6 +194,8 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             path,
             pattern,
             limit,
+            include_globs,
+            exclude_globs,
             scope_path,
             scope_is_file,
         } => {
@@ -204,7 +210,14 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
 
             let scope_filter = scope_from_request(scope_path, scope_is_file);
             let result = tokio::task::spawn_blocking(move || {
-                regex_search(&workspace, &pattern, limit, scope_filter.as_ref())
+                regex_search(
+                    &workspace,
+                    &pattern,
+                    limit,
+                    scope_filter.as_ref(),
+                    &include_globs,
+                    &exclude_globs,
+                )
             })
             .await
             .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));

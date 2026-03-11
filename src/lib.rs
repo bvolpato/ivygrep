@@ -6,6 +6,7 @@ pub mod embedding;
 pub mod indexer;
 pub mod mcp;
 pub mod merkle;
+pub mod path_glob;
 pub mod protocol;
 pub mod regex_search;
 pub mod search;

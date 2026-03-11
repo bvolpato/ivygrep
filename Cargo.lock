@@ -944,6 +944,7 @@ dependencies = [
  "dirs",
  "fs2",
  "fs_extra",
+ "globset",
  "grep-matcher",
  "grep-regex",
  "grep-searcher",

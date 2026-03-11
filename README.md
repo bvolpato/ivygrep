@@ -65,7 +65,8 @@ install -m 0755 ./target/release/ivygrep ~/.local/bin/ivygrep
 
 ```bash
 ivygrep --add .
-ivygrep "where is the tax calculated?"
+ivygrep "authentication for MCPs"
+ivygrep "authentication for MCPs" ~/githubworkspace/opencode
 ```
 
 `--add` registers the current workspace for indexing and daemon watch updates.
@@ -97,7 +98,7 @@ ivygrep --mcp
 
 ### Exposed tool
 
-- `ivygrep_search(query, path?, limit?, context?, type?, regex?, first_line_only?, file_name_only?, verbose?)`
+- `ivygrep_search(query, path?, limit?, context?, type?, regex?, include?, exclude?, first_line_only?, file_name_only?, verbose?)`
 
 Behavior:
 
@@ -105,21 +106,26 @@ Behavior:
 - If `path` points to a subdirectory or a file, results are restricted to that scope only.
 - `.gitignore` is respected during indexing and regex scans.
 - Unknown extensions are indexed when content looks like text; binary content is skipped.
+- MCP tool output is compact JSON in `content[0].text` (no duplicated text rendering).
+- `reason` fields are omitted by default; pass `verbose=true` only when needed.
+- `include` / `exclude` accept comma-separated globs (for example `*.md,src/**/*.rs`).
 
 ### Claude Code
 
 ```bash
-claude mcp add ivygrep --transport stdio --command ivygrep --args "--mcp"
+claude mcp add -s user ivygrep -- ivygrep --mcp
 ```
 
-Equivalent manual config (`~/.claude/mcp.json`):
+Equivalent user-scope config (`~/.claude.json`):
 
 ```json
 {
   "mcpServers": {
     "ivygrep": {
+      "type": "stdio",
       "command": "ivygrep",
-      "args": ["--mcp"]
+      "args": ["--mcp"],
+      "env": {}
     }
   }
 }
@@ -147,36 +153,34 @@ Then refresh MCP servers in Cursor settings.
 If your Codex build supports CLI registration:
 
 ```bash
-codex mcp add ivygrep --command ivygrep --args "--mcp"
+codex mcp add ivygrep -- ivygrep --mcp
 ```
 
-Use your MCP server config file (commonly `~/.codex/mcp.json`) and add:
+Equivalent config (`~/.codex/config.toml`):
 
-```json
-{
-  "mcpServers": {
-    "ivygrep": {
-      "command": "ivygrep",
-      "args": ["--mcp"]
-    }
-  }
-}
+```toml
+[mcp_servers.ivygrep]
+command = "ivygrep"
+args = ["--mcp"]
 ```
 
 ### OpenCode
 
 ```bash
-opencode mcp add ivygrep --command ivygrep --args "--mcp"
+opencode mcp add
 ```
 
-Equivalent config (`~/.opencode/mcp.json`):
+Then choose `Local` and set command to `ivygrep --mcp`.
+
+Equivalent config (`opencode.json` in project root, or `~/.config/opencode/opencode.json` globally):
 
 ```json
 {
-  "mcpServers": {
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
     "ivygrep": {
-      "command": "ivygrep",
-      "args": ["--mcp"]
+      "type": "local",
+      "command": ["ivygrep", "--mcp"]
     }
   }
 }
@@ -197,13 +201,12 @@ Equivalent config (`~/.opencode/mcp.json`):
 ## CLI
 
 ```bash
-ivygrep "where is the tax calculated?"
+ivygrep "authentication for MCPs"
 ivygrep --add .
 ivygrep --rm .
 ivygrep --status
 ivygrep --daemon
-ivygrep --mcp
-ivygrep applyFilter ~/githubworkspace/trino
+ivygrep "authentication for MCPs" ~/githubworkspace/opencode
 ```
 
 Useful flags:
@@ -211,6 +214,8 @@ Useful flags:
 - `-f, --force`: skip first-query prompt; with `--add`, rebuild from scratch
 - `--regex`: regex mode
 - `--type <lang>`: language filter (`rust`, `python`, `typescript`, ...)
+- `--include <globs>`: comma-separated include globs (for example `*.txt,*.md`)
+- `--exclude <globs>`: comma-separated exclude globs (for example `target/**,*.lock`)
 - `-C, --context <n>`: context lines around the focused pointer line (default: `2`, i.e. up to 5 lines total)
 - `-n, --limit <n>`: max number of files in output (no default limit)
 - `--add [path]`: register/index/watch workspace (defaults to `.`)
