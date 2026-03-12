@@ -6,7 +6,7 @@
 
 ## Superpower Your LLM
 
-Your coding agent is only as strong as its retrieval toolchain. `ivygrep` is designed to be that retrieval layer.
+Your coding agent is only as strong as its retrieval toolchain. `ig` is designed to be that retrieval layer.
 
 - Natural-language code search: `where is tax calculated?` can still find `calculateTaxes(...)`.
 - Hybrid ranking: lexical BM25 + semantic vectors + RRF fusion.
@@ -18,7 +18,7 @@ In practice: the agent stops guessing and starts grounding edits in real, scoped
 
 ## Why ivygrep
 
-`ivygrep` is a local-first hybrid code search tool:
+`ig` (ivygrep) is a local-first hybrid code search tool:
 
 - Lexical search with Tantivy (BM25)
 - Semantic search with local embeddings
@@ -44,7 +44,7 @@ brew install bvolpato/tap/ivygrep
 git clone https://github.com/bvolpato/ivygrep.git
 cd ivygrep
 cargo build --release
-./target/release/ivygrep --help
+./target/release/ig --help
 ```
 
 ### Standalone binary path
@@ -52,21 +52,21 @@ cargo build --release
 If you build from source, the standalone executable is generated at:
 
 ```text
-./target/release/ivygrep
+./target/release/ig
 ```
 
 You can move it into your PATH:
 
 ```bash
-install -m 0755 ./target/release/ivygrep ~/.local/bin/ivygrep
+install -m 0755 ./target/release/ig ~/.local/bin/ig
 ```
 
 ## Quick Start
 
 ```bash
-ivygrep --add .
-ivygrep "authentication for MCPs"
-ivygrep "authentication for MCPs" ~/githubworkspace/opencode
+ig --add .
+ig "authentication for MCPs"
+ig "authentication for MCPs" ~/githubworkspace/opencode
 ```
 
 `--add` registers the current workspace for indexing and daemon watch updates.
@@ -82,27 +82,27 @@ This folder is not indexed. Index it now? [y/N]
 
 ### Usage Demo
 
-`ivygrep` searching the `opencode` repo for `"authentication for MCPs"` in a real terminal session:
+`ig` searching the `opencode` repo for `"authentication for MCPs"` in a real terminal session:
 
 <p>
-  <img src="assets/ivygrep-opencode.gif" alt="ivygrep demo on opencode" />
+  <img src="assets/ivygrep-opencode.gif" alt="ig demo on opencode" />
 </p>
 
 ## MCP Server (Agent Integration)
 
-`ivygrep` ships with an MCP server over stdio:
+`ig` ships with an MCP server over stdio:
 
 ```bash
-ivygrep --mcp
+ig --mcp
 ```
 
 ### Exposed tool
 
-- `ivygrep_search(query, path?, limit?, context?, type?, regex?, include?, exclude?, first_line_only?, file_name_only?, verbose?)`
+- `ig_search(query, path?, limit?, context?, type?, regex?, include?, exclude?, first_line_only?, file_name_only?, verbose?)`
 
 Behavior:
 
-- If the workspace is not indexed, `ivygrep_search` auto-indexes it on first call.
+- If the workspace is not indexed, `ig_search` auto-indexes it on first call.
 - If `path` points to a subdirectory or a file, results are restricted to that scope only.
 - `.gitignore` is respected during indexing and regex scans.
 - Unknown extensions are indexed when content looks like text; binary content is skipped.
@@ -113,7 +113,7 @@ Behavior:
 ### Claude Code
 
 ```bash
-claude mcp add -s user ivygrep -- ivygrep --mcp
+claude mcp add -s user ig -- ig --mcp
 ```
 
 Equivalent user-scope config (`~/.claude.json`):
@@ -121,9 +121,9 @@ Equivalent user-scope config (`~/.claude.json`):
 ```json
 {
   "mcpServers": {
-    "ivygrep": {
+    "ig": {
       "type": "stdio",
-      "command": "ivygrep",
+      "command": "ig",
       "args": ["--mcp"],
       "env": {}
     }
@@ -138,8 +138,8 @@ Project or global config (`.cursor/mcp.json` or `~/.cursor/mcp.json`):
 ```json
 {
   "mcpServers": {
-    "ivygrep": {
-      "command": "ivygrep",
+    "ig": {
+      "command": "ig",
       "args": ["--mcp"]
     }
   }
@@ -153,14 +153,14 @@ Then refresh MCP servers in Cursor settings.
 If your Codex build supports CLI registration:
 
 ```bash
-codex mcp add ivygrep -- ivygrep --mcp
+codex mcp add ig -- ig --mcp
 ```
 
 Equivalent config (`~/.codex/config.toml`):
 
 ```toml
-[mcp_servers.ivygrep]
-command = "ivygrep"
+[mcp_servers.ig]
+command = "ig"
 args = ["--mcp"]
 ```
 
@@ -170,7 +170,7 @@ args = ["--mcp"]
 opencode mcp add
 ```
 
-Then choose `Local` and set command to `ivygrep --mcp`.
+Then choose `Local` and set command to `ig --mcp`.
 
 Equivalent config (`opencode.json` in project root, or `~/.config/opencode/opencode.json` globally):
 
@@ -178,9 +178,9 @@ Equivalent config (`opencode.json` in project root, or `~/.config/opencode/openc
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "ivygrep": {
+    "ig": {
       "type": "local",
-      "command": ["ivygrep", "--mcp"]
+      "command": ["ig", "--mcp"]
     }
   }
 }
@@ -188,12 +188,12 @@ Equivalent config (`opencode.json` in project root, or `~/.config/opencode/openc
 
 ### Example agent prompt
 
-`Refactor payment flow. First call ivygrep_search with path=src/payments and find where tax is computed.`
+`Refactor payment flow. First call ig_search with path=src/payments and find where tax is computed.`
 
 ### MCP vs Daemon
 
-- `ivygrep --mcp` starts an MCP server on stdio (for Claude/Cursor/Codex/OpenCode tool calls).
-- `ivygrep --daemon` starts the background workspace watcher/indexer over Unix socket for CLI workflows.
+- `ig --mcp` starts an MCP server on stdio (for Claude/Cursor/Codex/OpenCode tool calls).
+- `ig --daemon` starts the background workspace watcher/indexer over Unix socket for CLI workflows.
 - They are independent: MCP does not require daemon, and daemon does not require MCP.
 - If you want continuous file-watch reindexing across terminals, run daemon.
 - If you only need agent tool calls, run `--mcp` only.
@@ -201,12 +201,12 @@ Equivalent config (`opencode.json` in project root, or `~/.config/opencode/openc
 ## CLI
 
 ```bash
-ivygrep "authentication for MCPs"
-ivygrep --add .
-ivygrep --rm .
-ivygrep --status
-ivygrep --daemon
-ivygrep "authentication for MCPs" ~/githubworkspace/opencode
+ig "authentication for MCPs"
+ig --add .
+ig --rm .
+ig --status
+ig --daemon
+ig "authentication for MCPs" ~/githubworkspace/opencode
 ```
 
 Useful flags:
@@ -232,11 +232,11 @@ Useful flags:
 Action/query split:
 
 - Workspace actions are explicit flags (`--add`, `--rm`, `--status`, `--daemon`), so query text like `add` is never ambiguous.
-- `ivygrep <query> <path>` runs semantic search against another workspace without `cd`.
+- `ig <query> <path>` runs semantic search against another workspace without `cd`.
 
 ## When to use the daemon
 
-Use `ivygrep --daemon` when you want the best steady-state latency in an active repo:
+Use `ig --daemon` when you want the best steady-state latency in an active repo:
 
 - You run many queries in sequence and want warm index/search state in memory.
 - You want file-watch updates continuously while editing code.
@@ -249,9 +249,9 @@ If you started it and saw no logs before, run it in a terminal and you should no
 Typical daemon workflow:
 
 ```bash
-ivygrep --daemon
-ivygrep --add .
-ivygrep "where is split assignment handled?"
+ig --daemon
+ig --add .
+ig "where is split assignment handled?"
 ```
 
 ## Result Ranking & Output

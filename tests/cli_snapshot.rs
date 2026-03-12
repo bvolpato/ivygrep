@@ -22,7 +22,7 @@ fn stage_fixture_repo(name: &str) -> (tempfile::TempDir, std::path::PathBuf, std
 #[test]
 #[serial]
 fn cli_help_snapshot() {
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ivygrep"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
     let output = cmd
         .arg("--help")
         .assert()
@@ -40,7 +40,7 @@ fn cli_help_snapshot() {
 fn cli_query_json_snapshot() {
     let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
 
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ivygrep"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
     let output = cmd
         .current_dir(&target_root)
         .env("IVYGREP_HOME", &home)
@@ -77,7 +77,7 @@ fn cli_query_json_snapshot() {
 fn cli_file_name_only_json_snapshot() {
     let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
 
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ivygrep"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
     let output = cmd
         .current_dir(&target_root)
         .env("IVYGREP_HOME", &home)
@@ -102,7 +102,7 @@ fn cli_file_name_only_json_snapshot() {
 fn cli_first_line_only_text_output() {
     let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
 
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ivygrep"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
     let output = cmd
         .current_dir(&target_root)
         .env("IVYGREP_HOME", &home)
@@ -124,7 +124,7 @@ fn cli_query_with_explicit_path_json() {
     let (tmp, target_root, home) = stage_fixture_repo("rust_repo");
     let target_root_str = target_root.to_string_lossy().into_owned();
 
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ivygrep"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
     let output = cmd
         .current_dir(tmp.path())
         .env("IVYGREP_HOME", &home)
@@ -161,7 +161,7 @@ fn cli_query_with_explicit_path_json() {
 fn cli_query_word_add_is_treated_as_query() {
     let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
 
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ivygrep"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
     let output = cmd
         .current_dir(&target_root)
         .env("IVYGREP_HOME", &home)
@@ -180,7 +180,7 @@ fn cli_query_word_add_is_treated_as_query() {
 fn cli_add_flag_indexes_workspace() {
     let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
 
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ivygrep"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
     let output = cmd
         .current_dir(&target_root)
         .env("IVYGREP_HOME", &home)
@@ -200,7 +200,7 @@ fn cli_add_flag_indexes_workspace() {
 fn cli_verbose_json_includes_reason() {
     let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
 
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ivygrep"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
     let output = cmd
         .current_dir(&target_root)
         .env("IVYGREP_HOME", &home)
@@ -256,7 +256,7 @@ fn cli_query_from_subdirectory_is_scope_restricted() {
 
     let home = tmp.path().join("ivygrep_home");
 
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ivygrep"));
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
     let output = cmd
         .current_dir(&scoped)
         .env("IVYGREP_HOME", &home)

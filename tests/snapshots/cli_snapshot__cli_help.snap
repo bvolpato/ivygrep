@@ -5,7 +5,7 @@ expression: text
 ---
 Semantic grep that stays local
 
-Usage: ivygrep [OPTIONS] [QUERY] [PATH]
+Usage: ig [OPTIONS] [QUERY] [PATH]
 
 Arguments:
   [QUERY]  

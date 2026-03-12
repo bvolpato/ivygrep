@@ -65,7 +65,7 @@ jobs:
 
       - name: Smoke test (native only)
         if: ${{ !matrix.cross }}
-        run: ./target/${{ matrix.target }}/release/ivygrep --help
+        run: ./target/${{ matrix.target }}/release/ig --help
 
       - name: Package archive
         shell: bash
@@ -73,7 +73,7 @@ jobs:
           TAG="${GITHUB_REF#refs/tags/}"
           ARCHIVE_NAME="ivygrep-${TAG}-${{ matrix.target }}"
           mkdir -p "dist/${ARCHIVE_NAME}"
-          cp "target/${{ matrix.target }}/release/ivygrep" "dist/${ARCHIVE_NAME}/"
+          cp "target/${{ matrix.target }}/release/ig" "dist/${ARCHIVE_NAME}/"
           cp README.md LICENSE* 2>/dev/null "dist/${ARCHIVE_NAME}/" || true
           cd dist
           tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
@@ -208,12 +208,12 @@ jobs:
             end
 
             def install
-              bin.install "ivygrep"
+              bin.install "ig"
             end
 
             test do
               (testpath/"hello.rs").write('fn hello() -> &str { "world" }')
-              system "#{bin}/ivygrep", "--help"
+              system "#{bin}/ig", "--help"
             end
           end
           FORMULA_EOF

@@ -230,7 +230,7 @@ async fn run_query(cli: Cli) -> Result<()> {
     let query = cli
         .query
         .as_deref()
-        .context("missing query. Example: ivygrep \"where is tax calculated\"")?;
+        .context("missing query. Example: ig \"where is tax calculated\"")?;
 
     let query_path = match &cli.query_path {
         Some(path) => path.clone(),
@@ -576,7 +576,7 @@ fn maybe_run_legacy_mcp_stdio() -> Result<bool> {
     }
 
     if args.first().is_some_and(|arg| arg == "mcp") {
-        bail!("usage: ivygrep --mcp");
+        bail!("usage: ig --mcp");
     }
 
     Ok(false)

@@ -18,7 +18,7 @@ use crate::search::{SearchOptions, hybrid_search};
 use crate::workspace::resolve_workspace_and_scope;
 
 const JSONRPC_VERSION: &str = "2.0";
-const TOOL_IVYGREP_SEARCH: &str = "ivygrep_search";
+const TOOL_IG_SEARCH: &str = "ig_search";
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
@@ -150,10 +150,10 @@ fn dispatch(method: &str, params: Value) -> Result<Value> {
                 }
             },
             "serverInfo": {
-                "name": "ivygrep",
+                "name": "ig",
                 "version": env!("CARGO_PKG_VERSION")
             },
-            "instructions": "Use ivygrep_search(query, path) to run local semantic code search. If path is a subdirectory or file, results are restricted to that scope."
+            "instructions": "Use ig_search(query, path) to run local semantic code search. If path is a subdirectory or file, results are restricted to that scope."
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools": [search_tool_schema()]})),
@@ -166,7 +166,7 @@ fn dispatch(method: &str, params: Value) -> Result<Value> {
 
 fn search_tool_schema() -> Value {
     json!({
-        "name": TOOL_IVYGREP_SEARCH,
+        "name": TOOL_IG_SEARCH,
         "description": "Hybrid semantic+lexical code search. Auto-indexes on first query. Respects .gitignore and restricts results to the provided path scope.",
         "inputSchema": {
             "type": "object",
@@ -190,7 +190,7 @@ fn search_tool_schema() -> Value {
 
 fn run_tool_call(params: Value) -> Result<Value> {
     let call: ToolCallParams = serde_json::from_value(params)?;
-    if call.name != TOOL_IVYGREP_SEARCH {
+    if call.name != TOOL_IG_SEARCH {
         bail!("unknown tool: {}", call.name);
     }
 

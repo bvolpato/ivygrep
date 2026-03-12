@@ -91,4 +91,4 @@ jobs:
         run: cargo build --release
 
       - name: Smoke test
-        run: ./target/release/ivygrep --help
+        run: ./target/release/ig --help
