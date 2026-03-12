@@ -82,7 +82,7 @@ This folder is not indexed. Index it now? [y/N]
 
 ### Usage Demo
 
-`ig` searching the `ivygrep` repo for `"how does merkle incremental indexing work"`:
+`ig` searching the `opencode` repo for `"authentication for MCPs"`:
 
 <p>
   <img src="assets/ig-demo.gif" alt="ig demo" />
