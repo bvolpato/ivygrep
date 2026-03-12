@@ -82,10 +82,10 @@ This folder is not indexed. Index it now? [y/N]
 
 ### Usage Demo
 
-`ig` searching the `opencode` repo for `"authentication for MCPs"` in a real terminal session:
+`ig` searching the `ivygrep` repo for `"how does merkle incremental indexing work"`:
 
 <p>
-  <img src="assets/ivygrep-opencode.gif" alt="ig demo on opencode" />
+  <img src="assets/ig-demo.gif" alt="ig demo" />
 </p>
 
 ## MCP Server (Agent Integration)
