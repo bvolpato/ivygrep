@@ -224,5 +224,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Formula/ivygrep.rb
-          git commit -m "ivygrep ${{ steps.sha.outputs.tag }}: update formula"
-          git push
+          if git diff --cached --quiet; then
+            echo "Formula already up to date, nothing to commit"
+          else
+            git commit -m "ivygrep ${{ steps.sha.outputs.tag }}: update formula"
+            git push
+          fi
