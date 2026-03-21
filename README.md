@@ -76,8 +76,8 @@ If daemon mode is running, a plain query also auto-indexes the current workspace
 When no daemon is running, first query in a non-indexed workspace prompts:
 
 ```text
-This folder is not indexed. Index it now? [y/N]
-(-f to force, --no-watch to skip daemon)
+  (-f to force, --no-watch to skip daemon)
+This folder is not indexed. Index it now? [y/N]: _
 ```
 
 ### Usage Demo

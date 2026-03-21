@@ -518,9 +518,17 @@ fn group_hits_by_file(hits: &[SearchHit], limit: Option<usize>) -> Vec<FileSearc
 
 fn prompt_index_first_time() -> Result<bool> {
     let mut stdout = io::stdout();
-    writeln!(stdout, "This folder is not indexed. Index it now? [y/N]")?;
-    writeln!(stdout, "(-f to force, --no-watch to skip daemon)")?;
-    write!(stdout, "> ")?;
+    writeln!(
+        stdout,
+        "{}",
+        "  (-f to force, --no-watch to skip daemon)".dimmed()
+    )?;
+    write!(
+        stdout,
+        "{} {} ",
+        "This folder is not indexed. Index it now?".bold(),
+        "[y/N]:".yellow()
+    )?;
     stdout.flush()?;
 
     let mut input = String::new();
