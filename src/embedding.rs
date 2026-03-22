@@ -1,12 +1,63 @@
+//! Embedding models for semantic vector search.
+//!
+//! Two implementations are available:
+//!
+//! | Model | Feature | Dimensions | Quality | Binary size |
+//! |-------|---------|------------|---------|-------------|
+//! | [`HashEmbeddingModel`] | *(always)* | 256 | Moderate — token overlap heuristic | Tiny |
+//! | [`OnnxEmbeddingModel`] | `neural` | 384 | High — true semantic similarity | ~23 MB model download |
+//!
+//! Use [`create_model`] to build the right model based on the `neural` flag.
+
 use std::collections::HashMap;
 
 use pluralizer::pluralize;
 use sha2::{Digest, Sha256};
 
+/// Shared interface implemented by all embedding backends.
 pub trait EmbeddingModel: Send + Sync {
     fn dimensions(&self) -> usize;
     fn embed(&self, text: &str) -> Vec<f32>;
 }
+
+/// Returns the embedding dimension for the selected mode.
+pub fn model_dimensions(neural: bool) -> usize {
+    if neural {
+        #[cfg(feature = "neural")]
+        {
+            384 // all-MiniLM-L6-v2
+        }
+        #[cfg(not(feature = "neural"))]
+        {
+            let _ = neural;
+            256
+        }
+    } else {
+        256
+    }
+}
+
+/// Create the appropriate embedding model.
+///
+/// When `neural` is `true` **and** the `neural` feature is compiled in,
+/// returns an [`OnnxEmbeddingModel`] backed by `all-MiniLM-L6-v2`.
+/// Otherwise falls back to the zero-dependency [`HashEmbeddingModel`].
+pub fn create_model(neural: bool) -> Box<dyn EmbeddingModel> {
+    #[cfg(feature = "neural")]
+    if neural {
+        match OnnxEmbeddingModel::new() {
+            Ok(model) => return Box::new(model),
+            Err(e) => {
+                tracing::warn!("Failed to load neural model, falling back to hash: {e}");
+            }
+        }
+    }
+
+    let _ = neural;
+    Box::new(HashEmbeddingModel::new(256))
+}
+
+// ── Hash-based embedding (always available) ────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct HashEmbeddingModel {
@@ -87,6 +138,48 @@ impl EmbeddingModel for HashEmbeddingModel {
         vector
     }
 }
+
+// ── ONNX neural embedding (behind `neural` feature) ───────────────────────
+
+#[cfg(feature = "neural")]
+pub struct OnnxEmbeddingModel {
+    model: parking_lot::Mutex<fastembed::TextEmbedding>,
+}
+
+#[cfg(feature = "neural")]
+impl OnnxEmbeddingModel {
+    /// Initialize the neural model.  On first run this downloads
+    /// `all-MiniLM-L6-v2` (~23 MB) to a local cache.
+    pub fn new() -> anyhow::Result<Self> {
+        use fastembed::{EmbeddingModel as FastModel, InitOptions};
+
+        let model = fastembed::TextEmbedding::try_new(
+            InitOptions::new(FastModel::AllMiniLML6V2).with_show_download_progress(true),
+        )?;
+
+        Ok(Self {
+            model: parking_lot::Mutex::new(model),
+        })
+    }
+}
+
+#[cfg(feature = "neural")]
+impl EmbeddingModel for OnnxEmbeddingModel {
+    fn dimensions(&self) -> usize {
+        384
+    }
+
+    fn embed(&self, text: &str) -> Vec<f32> {
+        self.model
+            .lock()
+            .embed(vec![text], None)
+            .ok()
+            .and_then(|mut vecs| vecs.pop())
+            .unwrap_or_else(|| vec![0.0; 384])
+    }
+}
+
+// ── Token helpers ──────────────────────────────────────────────────────────
 
 fn semantic_token_variants(raw_token: &str) -> Vec<String> {
     let compact = raw_token.to_ascii_lowercase();
@@ -200,5 +293,16 @@ mod tests {
             .map(|(a, b)| a * b)
             .sum::<f32>();
         assert!(cosine > 0.15);
+    }
+
+    #[test]
+    fn create_model_returns_hash_without_neural() {
+        let model = create_model(false);
+        assert_eq!(model.dimensions(), 256);
+    }
+
+    #[test]
+    fn model_dimensions_hash() {
+        assert_eq!(model_dimensions(false), 256);
     }
 }

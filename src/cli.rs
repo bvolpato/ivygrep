@@ -9,10 +9,9 @@ use colored::Colorize;
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 
-use crate::EMBEDDING_DIMENSIONS;
 use crate::config;
 use crate::daemon;
-use crate::embedding::HashEmbeddingModel;
+use crate::embedding::create_model;
 use crate::indexer::{index_workspace, remove_workspace_index, workspace_is_indexed};
 use crate::mcp;
 use crate::protocol::{DaemonRequest, DaemonResponse, SearchHit};
@@ -79,6 +78,11 @@ pub struct Cli {
 
     #[arg(long, global = true)]
     pub verbose: bool,
+
+    /// Use ONNX neural embeddings (all-MiniLM-L6-v2) instead of hash-based.
+    /// Requires the `neural` feature. Downloads ~23 MB model on first use.
+    #[arg(long, global = true)]
+    pub neural: bool,
 }
 
 pub async fn run() -> Result<()> {
@@ -191,8 +195,8 @@ async fn run_add(path: &Path, watch: bool, force: bool, json: bool) -> Result<()
         return print_daemon_response(response, json);
     }
 
-    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
-    let summary = index_workspace(&workspace, &model)?;
+    let model = create_model(false);
+    let summary = index_workspace(&workspace, model.as_ref())?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -306,8 +310,8 @@ async fn run_query(cli: Cli) -> Result<()> {
     }
 
     {
-        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
-        let _summary = index_workspace(&workspace, &model)?;
+        let model = create_model(cli.neural);
+        let _summary = index_workspace(&workspace, model.as_ref())?;
     }
 
     let hits = if cli.regex {
@@ -350,11 +354,11 @@ async fn run_query(cli: Cli) -> Result<()> {
             Some(DaemonResponse::SearchResults { hits }) => hits,
             Some(DaemonResponse::Error { message }) => bail!(message),
             _ => {
-                let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+                let model = create_model(cli.neural);
                 hybrid_search(
                     &workspace,
                     query,
-                    &model,
+                    model.as_ref(),
                     &SearchOptions {
                         limit: cli.limit,
                         context: cli.context,

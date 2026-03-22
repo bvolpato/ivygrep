@@ -9,6 +9,10 @@ license = "MIT"
 name = "ig"
 path = "src/main.rs"
 
+[features]
+default = []
+neural = ["dep:fastembed"]
+
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
@@ -36,6 +40,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 usearch = "2.24"
 uuid = { version = "1.11", features = ["v4", "serde"] }
+fastembed = { version = "5", optional = true }
 
 [dev-dependencies]
 assert_cmd = "2.0"

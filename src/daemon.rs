@@ -10,9 +10,8 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
-use crate::EMBEDDING_DIMENSIONS;
 use crate::config;
-use crate::embedding::HashEmbeddingModel;
+use crate::embedding::{EmbeddingModel, create_model};
 use crate::indexer::{index_workspace, remove_workspace_index};
 use crate::protocol::{DaemonRequest, DaemonResponse};
 use crate::regex_search::regex_search;
@@ -21,7 +20,7 @@ use crate::workspace::{Workspace, WorkspaceScope, list_workspaces};
 
 #[derive(Clone)]
 struct DaemonState {
-    model: HashEmbeddingModel,
+    model: Arc<dyn EmbeddingModel>,
     watchers: Arc<Mutex<HashMap<String, RecommendedWatcher>>>,
     trigger_tx: mpsc::UnboundedSender<PathBuf>,
 }
@@ -41,7 +40,7 @@ pub async fn run_daemon() -> Result<()> {
     let (trigger_tx, mut trigger_rx) = mpsc::unbounded_channel::<PathBuf>();
 
     let state = DaemonState {
-        model: HashEmbeddingModel::new(EMBEDDING_DIMENSIONS),
+        model: Arc::from(create_model(false)),
         watchers: Arc::new(Mutex::new(HashMap::new())),
         trigger_tx,
     };
@@ -53,7 +52,7 @@ pub async fn run_daemon() -> Result<()> {
             let model = indexing_state.model.clone();
             if let Err(err) = tokio::task::spawn_blocking(move || {
                 let workspace = Workspace::resolve(&index_path)?;
-                let _ = index_workspace(&workspace, &model)?;
+                let _ = index_workspace(&workspace, model.as_ref())?;
                 Result::<(), anyhow::Error>::Ok(())
             })
             .await
@@ -123,7 +122,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             };
 
             let index_result =
-                tokio::task::spawn_blocking(move || index_workspace(&workspace, &model))
+                tokio::task::spawn_blocking(move || index_workspace(&workspace, model.as_ref()))
                     .await
                     .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
 
@@ -178,7 +177,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             };
 
             let result = tokio::task::spawn_blocking(move || {
-                hybrid_search(&workspace, &query, &model, &options)
+                hybrid_search(&workspace, &query, model.as_ref(), &options)
             })
             .await
             .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));

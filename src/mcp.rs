@@ -7,9 +7,8 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::EMBEDDING_DIMENSIONS;
 use crate::config;
-use crate::embedding::HashEmbeddingModel;
+use crate::embedding::create_model;
 use crate::indexer::{index_workspace, workspace_is_indexed};
 use crate::path_glob::parse_glob_csv;
 use crate::protocol::SearchHit;
@@ -210,10 +209,10 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
     };
 
     let (workspace, scope_filter) = resolve_workspace_and_scope(Path::new(&input_path))?;
-    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+    let model = create_model(false);
 
     if !workspace_is_indexed(&workspace) {
-        let _summary = index_workspace(&workspace, &model)?;
+        let _summary = index_workspace(&workspace, model.as_ref())?;
     }
 
     let include_globs = parse_glob_csv(args.include.as_deref());
@@ -232,7 +231,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
         hybrid_search(
             &workspace,
             query,
-            &model,
+            model.as_ref(),
             &SearchOptions {
                 limit: args.limit,
                 context: args.context.unwrap_or(2),

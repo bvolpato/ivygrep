@@ -47,6 +47,25 @@ cargo build --release
 ./target/release/ig --help
 ```
 
+### With neural embeddings (optional)
+
+Build with the `neural` feature to enable ONNX-based embeddings
+(`all-MiniLM-L6-v2`, 384-dim) for significantly richer semantic search:
+
+```bash
+cargo build --release --features neural
+```
+
+Then pass `--neural` at query time:
+
+```bash
+ig --neural "authentication flow"
+```
+
+> The model (~23 MB) is downloaded automatically on first use.
+> Without `--neural`, ivygrep uses a lightweight hash-based embedding that
+> requires no downloads.
+
 ### Standalone binary path
 
 If you build from source, the standalone executable is generated at:
