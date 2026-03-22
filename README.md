@@ -23,6 +23,7 @@ In practice: the agent stops guessing and starts grounding edits in real, scoped
 - Lexical search with Tantivy (BM25)
 - Semantic search with local embeddings
 - RRF hybrid fusion for high-quality ranking
+- 100% accurate AST function/class chunking via `tree-sitter` (fallback to regex)
 - Incremental indexing via Merkle-style file fingerprints
 - Regex fallback path for grep-like workflows
 - Lightweight daemon over Unix socket (opt-in)

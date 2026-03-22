@@ -393,6 +393,14 @@ pub fn chunk_source(rel_path: &Path, text: &str) -> Vec<Chunk> {
         return vec![];
     }
 
+    // Attempt 100% accurate AST chunking via Tree-sitter for supported languages
+    if let Some(chunks) = try_tree_sitter_chunk_source(rel_path, text, &language, &lines) {
+        if !chunks.is_empty() {
+            return chunks;
+        }
+    }
+
+    // Fall back to regex-based heuristic chunking
     let signatures = match lang_def {
         Some(def) => collect_signatures(def.detect_signature, &lines),
         None => vec![],
@@ -428,6 +436,116 @@ pub fn chunk_source(rel_path: &Path, text: &str) -> Vec<Chunk> {
     }
 
     chunks
+}
+
+/// Uses Tree-sitter to reliably extract accurately bounded functions and classes
+/// for supported main languages (Rust, Python, Go, JS, TS).
+fn try_tree_sitter_chunk_source(
+    rel_path: &Path,
+    text: &str,
+    language: &str,
+    lines: &[&str],
+) -> Option<Vec<Chunk>> {
+    use streaming_iterator::StreamingIterator;
+    use tree_sitter::{Parser, Query, QueryCursor};
+
+    let mut parser = Parser::new();
+    let query_str = match language {
+        "rust" => {
+            parser
+                .set_language(&tree_sitter_rust::LANGUAGE.into())
+                .ok()?;
+            "(function_item) @fn (impl_item) @class (trait_item) @class"
+        }
+        "python" => {
+            parser
+                .set_language(&tree_sitter_python::LANGUAGE.into())
+                .ok()?;
+            "(function_definition) @fn (class_definition) @class"
+        }
+        "go" => {
+            parser.set_language(&tree_sitter_go::LANGUAGE.into()).ok()?;
+            "(function_declaration) @fn (method_declaration) @fn (type_declaration) @class"
+        }
+        "javascript" => {
+            parser
+                .set_language(&tree_sitter_javascript::LANGUAGE.into())
+                .ok()?;
+            "(function_declaration) @fn (method_definition) @fn (class_declaration) @class"
+        }
+        "typescript" => {
+            parser
+                .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+                .ok()?;
+            "(function_declaration) @fn (method_definition) @fn (class_declaration) @class (interface_declaration) @class"
+        }
+        _ => return None,
+    };
+
+    let tree = parser.parse(text, None)?;
+    let query = Query::new(&parser.language().unwrap(), query_str).ok()?;
+    let mut cursor = QueryCursor::new();
+
+    let mut ranges = Vec::new();
+    let mut matches = cursor.matches(&query, tree.root_node(), text.as_bytes());
+
+    while let Some(m) = matches.next() {
+        for capture in m.captures {
+            let start_line = capture.node.start_position().row;
+            let end_line = capture.node.end_position().row;
+
+            let kind = match capture.node.kind() {
+                "class_definition"
+                | "impl_item"
+                | "trait_item"
+                | "class_declaration"
+                | "interface_declaration"
+                | "type_declaration" => ChunkKind::Class,
+                _ => ChunkKind::Function,
+            };
+
+            // Convert to 1-indexed bounds, end_line is inclusive in tree-sitter rows
+            ranges.push((start_line + 1, end_line + 1, kind));
+        }
+    }
+
+    if ranges.is_empty() {
+        return None;
+    }
+
+    // Sort ranges by start line. We allow overlaps (e.g. an impl chunk containing multiple fn chunks).
+    // Vector search actually benefits greatly from BOTH the large structural chunks AND the specific function chunks.
+    ranges.sort_by_key(|r| r.0);
+
+    let mut chunks = Vec::new();
+
+    for (start, end, kind) in ranges {
+        if start == 0 || start > lines.len() {
+            continue;
+        }
+        let safe_end = end.min(lines.len());
+        if safe_end < start {
+            continue;
+        }
+
+        let block_lines = &lines[(start - 1)..safe_end];
+        let block_text = format!(
+            "// {}\n\n{}",
+            rel_path.to_string_lossy(),
+            block_lines.join("\n")
+        );
+
+        chunks.push(make_chunk(
+            rel_path,
+            start,
+            safe_end,
+            block_text,
+            language.to_string(),
+            kind,
+        ));
+    }
+
+    Some(chunks)
 }
 
 // ── Signature Detection ────────────────────────────────────────────────────
