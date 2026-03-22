@@ -44,7 +44,7 @@ fn cli_query_json_snapshot() {
     let output = cmd
         .current_dir(&target_root)
         .env("IVYGREP_HOME", &home)
-        .args(["--json", "-f", "where is the tax calculated?"])
+        .args(["--json", "--hash", "-f", "where is the tax calculated?"])
         .assert()
         .success()
         .get_output()
@@ -83,6 +83,7 @@ fn cli_file_name_only_json_snapshot() {
         .env("IVYGREP_HOME", &home)
         .args([
             "--json",
+            "--hash",
             "--file-name-only",
             "-f",
             "where is the tax calculated?",
@@ -106,7 +107,12 @@ fn cli_first_line_only_text_output() {
     let output = cmd
         .current_dir(&target_root)
         .env("IVYGREP_HOME", &home)
-        .args(["--first-line-only", "-f", "where is the tax calculated?"])
+        .args([
+            "--first-line-only",
+            "--hash",
+            "-f",
+            "where is the tax calculated?",
+        ])
         .assert()
         .success()
         .get_output()
@@ -130,6 +136,7 @@ fn cli_query_with_explicit_path_json() {
         .env("IVYGREP_HOME", &home)
         .args([
             "--json",
+            "--hash",
             "-f",
             "where is the tax calculated?",
             &target_root_str,
@@ -165,7 +172,7 @@ fn cli_query_word_add_is_treated_as_query() {
     let output = cmd
         .current_dir(&target_root)
         .env("IVYGREP_HOME", &home)
-        .args(["--json", "-f", "add"])
+        .args(["--json", "--hash", "-f", "add"])
         .assert()
         .success()
         .get_output()
@@ -184,7 +191,7 @@ fn cli_add_flag_indexes_workspace() {
     let output = cmd
         .current_dir(&target_root)
         .env("IVYGREP_HOME", &home)
-        .args(["--add", "."])
+        .args(["--add", "--hash", "."])
         .assert()
         .success()
         .get_output()
@@ -204,7 +211,13 @@ fn cli_verbose_json_includes_reason() {
     let output = cmd
         .current_dir(&target_root)
         .env("IVYGREP_HOME", &home)
-        .args(["--json", "--verbose", "-f", "where is the tax calculated?"])
+        .args([
+            "--json",
+            "--hash",
+            "--verbose",
+            "-f",
+            "where is the tax calculated?",
+        ])
         .assert()
         .success()
         .get_output()
@@ -260,7 +273,7 @@ fn cli_query_from_subdirectory_is_scope_restricted() {
     let output = cmd
         .current_dir(&scoped)
         .env("IVYGREP_HOME", &home)
-        .args(["--json", "-f", "applyFilter"])
+        .args(["--json", "--hash", "-f", "applyFilter"])
         .assert()
         .success()
         .get_output()

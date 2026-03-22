@@ -22,3 +22,6 @@
 
 # Local stress harness fixtures (downloaded corpora and sample repos)
 /tests/stress-data/
+
+# ONNX model cache (fastembed)
+.fastembed_cache/

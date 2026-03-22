@@ -79,10 +79,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub verbose: bool,
 
-    /// Use ONNX neural embeddings (all-MiniLM-L6-v2) instead of hash-based.
-    /// Requires the `neural` feature. Downloads ~23 MB model on first use.
+    /// Use lightweight hash-based embeddings instead of the default ONNX
+    /// neural model. Faster startup, no model download, lower quality.
     #[arg(long, global = true)]
-    pub neural: bool,
+    pub hash: bool,
 }
 
 pub async fn run() -> Result<()> {
@@ -310,7 +310,7 @@ async fn run_query(cli: Cli) -> Result<()> {
     }
 
     {
-        let model = create_model(cli.neural);
+        let model = create_model(cli.hash);
         let _summary = index_workspace(&workspace, model.as_ref())?;
     }
 
@@ -354,7 +354,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             Some(DaemonResponse::SearchResults { hits }) => hits,
             Some(DaemonResponse::Error { message }) => bail!(message),
             _ => {
-                let model = create_model(cli.neural);
+                let model = create_model(cli.hash);
                 hybrid_search(
                     &workspace,
                     query,

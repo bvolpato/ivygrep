@@ -21,39 +21,41 @@ pub trait EmbeddingModel: Send + Sync {
 }
 
 /// Returns the embedding dimension for the selected mode.
-pub fn model_dimensions(neural: bool) -> usize {
-    if neural {
+pub fn model_dimensions(hash: bool) -> usize {
+    if hash {
+        256
+    } else {
         #[cfg(feature = "neural")]
         {
             384 // all-MiniLM-L6-v2
         }
         #[cfg(not(feature = "neural"))]
         {
-            let _ = neural;
             256
         }
-    } else {
-        256
     }
 }
 
 /// Create the appropriate embedding model.
 ///
-/// When `neural` is `true` **and** the `neural` feature is compiled in,
-/// returns an [`OnnxEmbeddingModel`] backed by `all-MiniLM-L6-v2`.
-/// Otherwise falls back to the zero-dependency [`HashEmbeddingModel`].
-pub fn create_model(neural: bool) -> Box<dyn EmbeddingModel> {
-    #[cfg(feature = "neural")]
-    if neural {
-        match OnnxEmbeddingModel::new() {
-            Ok(model) => return Box::new(model),
-            Err(e) => {
-                tracing::warn!("Failed to load neural model, falling back to hash: {e}");
+/// By default (when `hash` is `false`), returns an [`OnnxEmbeddingModel`]
+/// backed by `all-MiniLM-L6-v2` for high-quality semantic search.
+/// Pass `hash = true` to use the lightweight [`HashEmbeddingModel`] instead.
+///
+/// If the `neural` feature is not compiled in, always falls back to hash.
+pub fn create_model(hash: bool) -> Box<dyn EmbeddingModel> {
+    if !hash {
+        #[cfg(feature = "neural")]
+        {
+            match OnnxEmbeddingModel::new() {
+                Ok(model) => return Box::new(model),
+                Err(e) => {
+                    tracing::warn!("Failed to load neural model, falling back to hash: {e}");
+                }
             }
         }
     }
 
-    let _ = neural;
     Box::new(HashEmbeddingModel::new(256))
 }
 
@@ -296,13 +298,13 @@ mod tests {
     }
 
     #[test]
-    fn create_model_returns_hash_without_neural() {
-        let model = create_model(false);
+    fn create_model_returns_hash_when_requested() {
+        let model = create_model(true);
         assert_eq!(model.dimensions(), 256);
     }
 
     #[test]
     fn model_dimensions_hash() {
-        assert_eq!(model_dimensions(false), 256);
+        assert_eq!(model_dimensions(true), 256);
     }
 }

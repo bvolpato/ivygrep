@@ -29,6 +29,6 @@ Options:
       --first-line-only     
       --file-name-only      
       --verbose             
-      --neural              Use ONNX neural embeddings (all-MiniLM-L6-v2) instead of hash-based. Requires the `neural` feature. Downloads ~23 MB model on first use
+      --hash                Use lightweight hash-based embeddings instead of the default ONNX neural model. Faster startup, no model download, lower quality
   -h, --help                Print help
   -V, --version             Print version

@@ -10,7 +10,7 @@ name = "ig"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["neural"]
 neural = ["dep:fastembed"]
 
 [dependencies]
