@@ -44,6 +44,7 @@ fn cli_query_json_snapshot() {
     let output = cmd
         .current_dir(&target_root)
         .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
         .args(["--json", "--hash", "-f", "where is the tax calculated?"])
         .assert()
         .success()
@@ -81,6 +82,7 @@ fn cli_file_name_only_json_snapshot() {
     let output = cmd
         .current_dir(&target_root)
         .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
         .args([
             "--json",
             "--hash",
@@ -107,6 +109,7 @@ fn cli_first_line_only_text_output() {
     let output = cmd
         .current_dir(&target_root)
         .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
         .args([
             "--first-line-only",
             "--hash",
@@ -134,6 +137,7 @@ fn cli_query_with_explicit_path_json() {
     let output = cmd
         .current_dir(tmp.path())
         .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
         .args([
             "--json",
             "--hash",
@@ -172,6 +176,7 @@ fn cli_query_word_add_is_treated_as_query() {
     let output = cmd
         .current_dir(&target_root)
         .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
         .args(["--json", "--hash", "-f", "add"])
         .assert()
         .success()
@@ -191,6 +196,7 @@ fn cli_add_flag_indexes_workspace() {
     let output = cmd
         .current_dir(&target_root)
         .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
         .args(["--add", "--hash", "."])
         .assert()
         .success()
@@ -211,6 +217,7 @@ fn cli_verbose_json_includes_reason() {
     let output = cmd
         .current_dir(&target_root)
         .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
         .args([
             "--json",
             "--hash",
@@ -273,6 +280,7 @@ fn cli_query_from_subdirectory_is_scope_restricted() {
     let output = cmd
         .current_dir(&scoped)
         .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
         .args(["--json", "--hash", "-f", "applyFilter"])
         .assert()
         .success()

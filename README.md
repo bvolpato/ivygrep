@@ -26,7 +26,8 @@ In practice: the agent stops guessing and starts grounding edits in real, scoped
 - 100% accurate AST function/class chunking via `tree-sitter` (fallback to regex)
 - Incremental indexing via Merkle-style file fingerprints
 - Regex fallback path for grep-like workflows
-- Lightweight daemon over Unix socket (opt-in)
+- Transparent daemon over Unix socket (auto-spawns on first search)
+- Cross-workspace search with `--all`
 
 No network calls are required for indexing and searching.
 
@@ -89,7 +90,8 @@ ig "authentication for MCPs" ~/githubworkspace/opencode
 
 `--add` registers the current workspace for indexing and daemon watch updates.
 
-If daemon mode is running, a plain query also auto-indexes the current workspace before searching.
+When no daemon is running, `ig` transparently spawns one in the background on your first
+search — no manual `ig --daemon` step needed. Use `--no-watch` to suppress auto-start.
 
 When no daemon is running, first query in a non-indexed workspace prompts:
 
@@ -254,6 +256,8 @@ Useful flags:
 - `--verbose`: include detailed `reason` pointers for each hit
 - `--json`: machine-readable grouped output
 - `--no-watch`: skip daemon watcher registration
+- `--all`: search across every indexed workspace at once
+- `--hash`: use lightweight hash-based embeddings (faster, no model download)
 
 Action/query split:
 
@@ -267,6 +271,9 @@ Use `ig --daemon` when you want the best steady-state latency in an active repo:
 - You run many queries in sequence and want warm index/search state in memory.
 - You want file-watch updates continuously while editing code.
 - You want indexing/search shared across terminals and scripts.
+
+Note: the daemon is auto-spawned on first search, so manual startup is optional.
+Set `IVYGREP_NO_AUTOSPAWN=1` to disable this behaviour (useful in CI).
 
 Skip daemon mode if you run one-off queries occasionally. The CLI works directly in-process without it.
 The daemon is the process that watches registered workspaces and performs background incremental updates.

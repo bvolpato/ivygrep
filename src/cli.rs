@@ -58,6 +58,9 @@ pub struct Cli {
     #[arg(long = "type", global = true)]
     pub type_filter: Option<String>,
 
+    #[arg(long, global = true)]
+    pub all: bool,
+
     #[arg(long, value_name = "GLOBS", value_delimiter = ',', global = true)]
     pub include: Vec<String>,
 
@@ -135,7 +138,7 @@ pub async fn run() -> Result<()> {
 }
 
 async fn run_status(json: bool) -> Result<()> {
-    let response = daemon::request(&DaemonRequest::Status).await?;
+    let response = daemon::request(&DaemonRequest::Status, false).await?;
     let workspaces = match response {
         Some(DaemonResponse::Status { workspaces }) => workspaces,
         Some(DaemonResponse::Error { message }) => bail!(message),
@@ -172,7 +175,7 @@ async fn run_add(path: &Path, watch: bool, force: bool, json: bool) -> Result<()
             path: workspace.root.clone(),
         };
 
-        if let Some(response) = daemon::request(&remove_request).await? {
+        if let Some(response) = daemon::request(&remove_request, false).await? {
             if let DaemonResponse::Error { message } = response {
                 bail!(message);
             }
@@ -191,7 +194,7 @@ async fn run_add(path: &Path, watch: bool, force: bool, json: bool) -> Result<()
         watch,
     };
 
-    if let Some(response) = daemon::request(&request).await? {
+    if let Some(response) = daemon::request(&request, false).await? {
         return print_daemon_response(response, json);
     }
 
@@ -215,7 +218,7 @@ async fn run_remove(path: &Path, json: bool) -> Result<()> {
     let request = DaemonRequest::Remove {
         path: workspace.root.clone(),
     };
-    if let Some(response) = daemon::request(&request).await? {
+    if let Some(response) = daemon::request(&request, false).await? {
         return print_daemon_response(response, json);
     }
 
@@ -244,79 +247,42 @@ async fn run_query(cli: Cli) -> Result<()> {
     let scope_path = scope_filter.as_ref().map(|scope| scope.rel_path.clone());
     let scope_is_file = scope_filter.as_ref().is_some_and(|scope| scope.is_file);
 
-    let daemon_index_request = DaemonRequest::Index {
-        path: workspace.root.clone(),
-        watch: !cli.no_watch,
-    };
-    if let Some(response) = daemon::request(&daemon_index_request).await? {
-        match response {
-            DaemonResponse::Ack { .. } => {}
-            DaemonResponse::Error { message } => bail!(message),
-            _ => {}
-        }
+    let query_path_opt = if cli.all { None } else { Some(workspace.root.clone()) };
+    let mut search_via_daemon = false;
 
-        let hits = if cli.regex {
-            let request = DaemonRequest::RegexSearch {
-                path: workspace.root.clone(),
-                pattern: query.to_string(),
-                limit: cli.limit,
-                include_globs: cli.include.clone(),
-                exclude_globs: cli.exclude.clone(),
-                scope_path: scope_path.clone(),
-                scope_is_file,
-            };
-
-            match daemon::request(&request).await? {
-                Some(DaemonResponse::SearchResults { hits }) => hits,
-                Some(DaemonResponse::Error { message }) => bail!(message),
-                _ => vec![],
-            }
-        } else {
-            let request = DaemonRequest::Search {
-                path: workspace.root.clone(),
-                query: query.to_string(),
-                limit: cli.limit,
-                context: cli.context,
-                type_filter: cli.type_filter.clone(),
-                include_globs: cli.include.clone(),
-                exclude_globs: cli.exclude.clone(),
-                scope_path: scope_path.clone(),
-                scope_is_file,
-            };
-
-            match daemon::request(&request).await? {
-                Some(DaemonResponse::SearchResults { hits }) => hits,
-                Some(DaemonResponse::Error { message }) => bail!(message),
-                _ => vec![],
-            }
+    // Wake up the daemon and ensure the current directory is indexed (if not using --all)
+    if !cli.all {
+        let daemon_index_request = DaemonRequest::Index {
+            path: workspace.root.clone(),
+            watch: !cli.no_watch,
         };
-
-        render_hits(
-            &hits,
-            cli.json,
-            cli.limit,
-            cli.first_line_only,
-            cli.file_name_only,
-            cli.verbose,
-        )?;
-        return Ok(());
-    }
-
-    if !workspace_is_indexed(&workspace) && !cli.force {
-        let should_index = prompt_index_first_time()?;
-        if !should_index {
-            bail!("workspace is not indexed; aborting search")
+        if let Some(response) = daemon::request(&daemon_index_request, !cli.no_watch).await? {
+            if let DaemonResponse::Error { message } = response {
+                bail!(message);
+            }
+            search_via_daemon = true;
+        }
+    } else {
+        // Just ping to wake up the daemon if we only want global search
+        if daemon::request(&DaemonRequest::Status, !cli.no_watch).await?.is_some() {
+            search_via_daemon = true;
         }
     }
 
-    {
+    if !search_via_daemon && !cli.all {
+        if !workspace_is_indexed(&workspace) && !cli.force {
+            let should_index = prompt_index_first_time()?;
+            if !should_index {
+                bail!("workspace is not indexed; aborting search")
+            }
+        }
         let model = create_model(cli.hash);
         let _summary = index_workspace(&workspace, model.as_ref())?;
     }
 
     let hits = if cli.regex {
         let request = DaemonRequest::RegexSearch {
-            path: workspace.root.clone(),
+            path: query_path_opt.clone(),
             pattern: query.to_string(),
             limit: cli.limit,
             include_globs: cli.include.clone(),
@@ -325,21 +291,39 @@ async fn run_query(cli: Cli) -> Result<()> {
             scope_is_file,
         };
 
-        match daemon::request(&request).await? {
-            Some(DaemonResponse::SearchResults { hits }) => hits,
-            Some(DaemonResponse::Error { message }) => bail!(message),
-            _ => regex_search(
-                &workspace,
-                query,
-                cli.limit,
-                scope_filter.as_ref(),
-                &cli.include,
-                &cli.exclude,
-            )?,
+        if search_via_daemon {
+            match daemon::request(&request, false).await? {
+                Some(DaemonResponse::SearchResults { hits }) => hits,
+                Some(DaemonResponse::Error { message }) => bail!(message),
+                _ => vec![],
+            }
+        } else {
+            let mut all_hits = Vec::new();
+            let workspaces = if cli.all {
+                list_workspaces()?.into_iter().filter(|w| w.last_indexed_at_unix.is_some()).filter_map(|w| Workspace::resolve(&w.root).ok()).collect()
+            } else {
+                vec![workspace.clone()]
+            };
+            for ws in workspaces {
+                if let Ok(mut hits) = regex_search(
+                    &ws,
+                    query,
+                    cli.limit,
+                    scope_filter.as_ref(),
+                    &cli.include,
+                    &cli.exclude,
+                ) {
+                    all_hits.append(&mut hits);
+                }
+            }
+            if let Some(l) = cli.limit {
+                all_hits.truncate(l);
+            }
+            all_hits
         }
     } else {
         let request = DaemonRequest::Search {
-            path: workspace.root.clone(),
+            path: query_path_opt.clone(),
             query: query.to_string(),
             limit: cli.limit,
             context: cli.context,
@@ -350,13 +334,23 @@ async fn run_query(cli: Cli) -> Result<()> {
             scope_is_file,
         };
 
-        match daemon::request(&request).await? {
-            Some(DaemonResponse::SearchResults { hits }) => hits,
-            Some(DaemonResponse::Error { message }) => bail!(message),
-            _ => {
-                let model = create_model(cli.hash);
-                hybrid_search(
-                    &workspace,
+        if search_via_daemon {
+            match daemon::request(&request, false).await? {
+                Some(DaemonResponse::SearchResults { hits }) => hits,
+                Some(DaemonResponse::Error { message }) => bail!(message),
+                _ => vec![],
+            }
+        } else {
+            let mut all_hits = Vec::new();
+            let workspaces = if cli.all {
+                list_workspaces()?.into_iter().filter(|w| w.last_indexed_at_unix.is_some()).filter_map(|w| Workspace::resolve(&w.root).ok()).collect()
+            } else {
+                vec![workspace.clone()]
+            };
+            let model = create_model(cli.hash);
+            for ws in workspaces {
+                if let Ok(mut hits) = hybrid_search(
+                    &ws,
                     query,
                     model.as_ref(),
                     &SearchOptions {
@@ -367,8 +361,15 @@ async fn run_query(cli: Cli) -> Result<()> {
                         exclude_globs: cli.exclude.clone(),
                         scope_filter: scope_filter.clone(),
                     },
-                )?
+                ) {
+                    all_hits.append(&mut hits);
+                }
             }
+            all_hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+            if let Some(l) = cli.limit {
+                all_hits.truncate(l);
+            }
+            all_hits
         }
     };
 

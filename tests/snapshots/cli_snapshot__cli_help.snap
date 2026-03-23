@@ -22,6 +22,7 @@ Options:
       --json                
   -C, --context <CONTEXT>   [default: 2]
       --type <TYPE_FILTER>  
+      --all                 
       --include <GLOBS>     
       --exclude <GLOBS>     
   -n, --limit <LIMIT>       

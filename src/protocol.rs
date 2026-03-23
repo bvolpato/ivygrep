@@ -25,7 +25,7 @@ pub enum DaemonRequest {
         watch: bool,
     },
     Search {
-        path: PathBuf,
+        path: Option<PathBuf>,
         query: String,
         limit: Option<usize>,
         context: usize,
@@ -39,7 +39,7 @@ pub enum DaemonRequest {
         scope_is_file: bool,
     },
     RegexSearch {
-        path: PathBuf,
+        path: Option<PathBuf>,
         pattern: String,
         limit: Option<usize>,
         #[serde(default)]

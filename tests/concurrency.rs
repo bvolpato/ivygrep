@@ -408,6 +408,7 @@ fn concurrent_cli_searches_via_binary() {
         .arg("--add")
         .arg(root.path())
         .env("IVYGREP_HOME", home.path())
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
         .output()
         .unwrap();
     assert!(
@@ -440,6 +441,7 @@ fn concurrent_cli_searches_via_binary() {
                     .args(["-f", "--json", query])
                     .arg(&root_path)
                     .env("IVYGREP_HOME", &home_path)
+                    .env("IVYGREP_NO_AUTOSPAWN", "1")
                     .output()
                     .unwrap();
                 assert!(
