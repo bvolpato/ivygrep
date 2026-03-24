@@ -158,7 +158,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             scope_is_file,
         } => {
             let model = state.model.clone();
-            
+
             let workspaces = if let Some(p) = path {
                 match Workspace::resolve(&p) {
                     Ok(workspace) => vec![workspace],
@@ -170,8 +170,16 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 }
             } else {
                 match list_workspaces() {
-                    Ok(ws) => ws.into_iter().filter(|w| w.last_indexed_at_unix.is_some()).filter_map(|w| Workspace::resolve(&w.root).ok()).collect(),
-                    Err(err) => return DaemonResponse::Error { message: err.to_string() },
+                    Ok(ws) => ws
+                        .into_iter()
+                        .filter(|w| w.last_indexed_at_unix.is_some())
+                        .filter_map(|w| Workspace::resolve(&w.root).ok())
+                        .collect(),
+                    Err(err) => {
+                        return DaemonResponse::Error {
+                            message: err.to_string(),
+                        };
+                    }
                 }
             };
 
@@ -187,12 +195,18 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             let result = tokio::task::spawn_blocking(move || {
                 let mut all_hits = Vec::new();
                 for workspace in workspaces {
-                    if let Ok(mut hits) = hybrid_search(&workspace, &query, model.as_ref(), &options) {
+                    if let Ok(mut hits) =
+                        hybrid_search(&workspace, &query, model.as_ref(), &options)
+                    {
                         all_hits.append(&mut hits);
                     }
                 }
                 // Sort combined hits by score (descending)
-                all_hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                all_hits.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
                 if let Some(l) = options.limit {
                     all_hits.truncate(l);
                 }
@@ -226,8 +240,16 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 }
             } else {
                 match list_workspaces() {
-                    Ok(ws) => ws.into_iter().filter(|w| w.last_indexed_at_unix.is_some()).filter_map(|w| Workspace::resolve(&w.root).ok()).collect(),
-                    Err(err) => return DaemonResponse::Error { message: err.to_string() },
+                    Ok(ws) => ws
+                        .into_iter()
+                        .filter(|w| w.last_indexed_at_unix.is_some())
+                        .filter_map(|w| Workspace::resolve(&w.root).ok())
+                        .collect(),
+                    Err(err) => {
+                        return DaemonResponse::Error {
+                            message: err.to_string(),
+                        };
+                    }
                 }
             };
 
@@ -246,14 +268,14 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                         all_hits.append(&mut hits);
                     }
                 }
-                
+
                 // Regex search score logic in Rust: wait, `regex_search` doesn't strictly score, but it has `score: 1.0` or file index order.
                 // It's already sorted by file inside. Doing nothing keeps file order, which is fine.
                 // Just cut off the limit:
                 if let Some(l) = limit {
                     all_hits.truncate(l);
                 }
-                
+
                 all_hits
             })
             .await
@@ -314,31 +336,33 @@ fn scope_from_request(scope_path: Option<PathBuf>, scope_is_file: bool) -> Optio
 
 pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<DaemonResponse>> {
     let socket_path = config::socket_path()?;
-    
+
     // Auto-spawn the daemon if it isn't running, to provide a transparent frictionless background indexer.
     // Skip when IVYGREP_NO_AUTOSPAWN is set (useful in tests and CI).
-    if autospawn && !socket_path.exists() && std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none() {
-        if let Ok(exe) = std::env::current_exe() {
-            let is_ig = exe
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n == "ig");
-            if is_ig {
-                let mut cmd = std::process::Command::new(exe);
-                cmd.arg("--daemon");
+    if autospawn
+        && !socket_path.exists()
+        && std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
+        && let Ok(exe) = std::env::current_exe()
+    {
+        let is_ig = exe
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n == "ig");
+        if is_ig {
+            let mut cmd = std::process::Command::new(exe);
+            cmd.arg("--daemon");
 
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::CommandExt;
-                    // Put daemon in its own process group so it survives Ctrl+C on the parent CLI
-                    cmd.process_group(0);
-                }
-
-                // Spawn detached daemon process
-                let _ = cmd.spawn();
-                // Give it a brief moment to bind the socket
-                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                // Put daemon in its own process group so it survives Ctrl+C on the parent CLI
+                cmd.process_group(0);
             }
+
+            // Spawn detached daemon process
+            let _ = cmd.spawn();
+            // Give it a brief moment to bind the socket
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         }
     }
 

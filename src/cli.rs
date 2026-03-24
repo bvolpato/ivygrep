@@ -247,7 +247,11 @@ async fn run_query(cli: Cli) -> Result<()> {
     let scope_path = scope_filter.as_ref().map(|scope| scope.rel_path.clone());
     let scope_is_file = scope_filter.as_ref().is_some_and(|scope| scope.is_file);
 
-    let query_path_opt = if cli.all { None } else { Some(workspace.root.clone()) };
+    let query_path_opt = if cli.all {
+        None
+    } else {
+        Some(workspace.root.clone())
+    };
     let mut search_via_daemon = false;
 
     // Wake up the daemon and ensure the current directory is indexed (if not using --all)
@@ -264,7 +268,10 @@ async fn run_query(cli: Cli) -> Result<()> {
         }
     } else {
         // Just ping to wake up the daemon if we only want global search
-        if daemon::request(&DaemonRequest::Status, !cli.no_watch).await?.is_some() {
+        if daemon::request(&DaemonRequest::Status, !cli.no_watch)
+            .await?
+            .is_some()
+        {
             search_via_daemon = true;
         }
     }
@@ -300,7 +307,11 @@ async fn run_query(cli: Cli) -> Result<()> {
         } else {
             let mut all_hits = Vec::new();
             let workspaces = if cli.all {
-                list_workspaces()?.into_iter().filter(|w| w.last_indexed_at_unix.is_some()).filter_map(|w| Workspace::resolve(&w.root).ok()).collect()
+                list_workspaces()?
+                    .into_iter()
+                    .filter(|w| w.last_indexed_at_unix.is_some())
+                    .filter_map(|w| Workspace::resolve(&w.root).ok())
+                    .collect()
             } else {
                 vec![workspace.clone()]
             };
@@ -343,7 +354,11 @@ async fn run_query(cli: Cli) -> Result<()> {
         } else {
             let mut all_hits = Vec::new();
             let workspaces = if cli.all {
-                list_workspaces()?.into_iter().filter(|w| w.last_indexed_at_unix.is_some()).filter_map(|w| Workspace::resolve(&w.root).ok()).collect()
+                list_workspaces()?
+                    .into_iter()
+                    .filter(|w| w.last_indexed_at_unix.is_some())
+                    .filter_map(|w| Workspace::resolve(&w.root).ok())
+                    .collect()
             } else {
                 vec![workspace.clone()]
             };
@@ -365,7 +380,11 @@ async fn run_query(cli: Cli) -> Result<()> {
                     all_hits.append(&mut hits);
                 }
             }
-            all_hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+            all_hits.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             if let Some(l) = cli.limit {
                 all_hits.truncate(l);
             }

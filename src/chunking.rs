@@ -394,10 +394,10 @@ pub fn chunk_source(rel_path: &Path, text: &str) -> Vec<Chunk> {
     }
 
     // Attempt 100% accurate AST chunking via Tree-sitter for supported languages
-    if let Some(chunks) = try_tree_sitter_chunk_source(rel_path, text, &language, &lines) {
-        if !chunks.is_empty() {
-            return chunks;
-        }
+    if let Some(chunks) = try_tree_sitter_chunk_source(rel_path, text, &language, &lines)
+        && !chunks.is_empty()
+    {
+        return chunks;
     }
 
     // Fall back to regex-based heuristic chunking
