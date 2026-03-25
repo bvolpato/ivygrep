@@ -26,9 +26,11 @@ jobs:
             runner: ubuntu-latest
             archive: tar.gz
             cross: true
+            cargo_flags: "--no-default-features"
           - target: x86_64-apple-darwin
             runner: macos-latest
             archive: tar.gz
+            cargo_flags: "--no-default-features"
           - target: aarch64-apple-darwin
             runner: macos-latest
             archive: tar.gz
@@ -61,7 +63,7 @@ jobs:
           echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
 
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.cargo_flags }}
 
       - name: Smoke test (native only)
         if: ${{ !matrix.cross }}
