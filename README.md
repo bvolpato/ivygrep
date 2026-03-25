@@ -2,8 +2,6 @@
   <img src="assets/logo.png" alt="ivygrep logo" width="180" />
 </p>
 
-<h1 align="center">ivygrep</h1>
-
 <p align="center">
   <strong>Semantic code search that never phones home.</strong><br/>
   Ask questions in English. Get answers in code. 100% local.
