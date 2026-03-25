@@ -20,9 +20,20 @@ use crate::workspace::{Workspace, WorkspaceScope, list_workspaces};
 
 #[derive(Clone)]
 struct DaemonState {
-    model: Arc<dyn EmbeddingModel>,
+    lazy_model: Arc<std::sync::OnceLock<Arc<dyn EmbeddingModel>>>,
     watchers: Arc<Mutex<HashMap<String, RecommendedWatcher>>>,
     trigger_tx: mpsc::UnboundedSender<PathBuf>,
+}
+
+impl DaemonState {
+    fn get_model(&self) -> Arc<dyn EmbeddingModel> {
+        self.lazy_model
+            .get_or_init(|| {
+                eprintln!("initializing embedding model (first use)...");
+                Arc::from(create_model(false))
+            })
+            .clone()
+    }
 }
 
 pub async fn run_daemon() -> Result<()> {
@@ -39,8 +50,13 @@ pub async fn run_daemon() -> Result<()> {
 
     let (trigger_tx, mut trigger_rx) = mpsc::unbounded_channel::<PathBuf>();
 
+    // Defer model creation so the socket accept loop starts immediately.
+    // The model (and potential ONNX download) happens on first use.
+    let lazy_model: Arc<std::sync::OnceLock<Arc<dyn EmbeddingModel>>> =
+        Arc::new(std::sync::OnceLock::new());
+
     let state = DaemonState {
-        model: Arc::from(create_model(false)),
+        lazy_model: lazy_model.clone(),
         watchers: Arc::new(Mutex::new(HashMap::new())),
         trigger_tx,
     };
@@ -49,7 +65,7 @@ pub async fn run_daemon() -> Result<()> {
     tokio::spawn(async move {
         while let Some(path) = trigger_rx.recv().await {
             let index_path = path.clone();
-            let model = indexing_state.model.clone();
+            let model = indexing_state.get_model();
             if let Err(err) = tokio::task::spawn_blocking(move || {
                 let workspace = Workspace::resolve(&index_path)?;
                 let _ = index_workspace(&workspace, model.as_ref())?;
@@ -111,7 +127,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             },
         },
         DaemonRequest::Index { path, watch } => {
-            let model = state.model.clone();
+            let model = state.get_model();
             let workspace = match Workspace::resolve(&path) {
                 Ok(workspace) => workspace,
                 Err(err) => {
@@ -157,7 +173,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             scope_path,
             scope_is_file,
         } => {
-            let model = state.model.clone();
+            let model = state.get_model();
 
             let workspaces = if let Some(p) = path {
                 match Workspace::resolve(&p) {
@@ -352,6 +368,24 @@ pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<
             let mut cmd = std::process::Command::new(exe);
             cmd.arg("--daemon");
 
+            // Redirect daemon output to a log file so it doesn't pollute the CLI terminal
+            if let Ok(log_file) = config::app_home()
+                .map(|h| h.join("daemon.log"))
+                .and_then(|log_path| {
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(log_path)
+                        .map_err(|e| anyhow::anyhow!(e))
+                })
+            {
+                let log_stderr = log_file
+                    .try_clone()
+                    .unwrap_or_else(|_| std::fs::File::open("/dev/null").unwrap());
+                cmd.stdout(std::process::Stdio::from(log_file));
+                cmd.stderr(std::process::Stdio::from(log_stderr));
+            }
+
             #[cfg(unix)]
             {
                 use std::os::unix::process::CommandExt;
@@ -361,8 +395,13 @@ pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<
 
             // Spawn detached daemon process
             let _ = cmd.spawn();
-            // Give it a brief moment to bind the socket
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            // Poll for socket readiness (up to 2 seconds)
+            for _ in 0..20 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if socket_path.exists() {
+                    break;
+                }
+            }
         }
     }
 
@@ -381,7 +420,18 @@ pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<
 
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
-    reader.read_line(&mut line).await?;
+
+    // Timeout so we never hang forever waiting for a busy daemon
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        reader.read_line(&mut line),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(_)) | Err(_) => return Ok(None),
+    }
+
     if line.trim().is_empty() {
         return Ok(None);
     }

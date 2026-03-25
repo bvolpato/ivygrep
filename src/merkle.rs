@@ -57,6 +57,11 @@ impl MerkleSnapshot {
         walker.ignore(true);
         walker.require_git(false);
         walker.follow_links(false);
+        walker.filter_entry(|entry| {
+            // Skip .git directory but allow other hidden files (.env, .eslintrc, etc.)
+            !(entry.file_type().is_some_and(|ft| ft.is_dir())
+                && entry.file_name() == ".git")
+        });
 
         for entry in walker.build() {
             let entry = entry?;
@@ -222,5 +227,45 @@ mod tests {
         let snapshot = MerkleSnapshot::build(root).unwrap();
         assert!(snapshot.files.contains_key("notes.custom"));
         assert!(!snapshot.files.contains_key("blob.custom"));
+    }
+
+    #[test]
+    fn dot_git_directory_is_excluded_but_other_hidden_files_are_included() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+
+        // Simulate a .git directory with objects
+        fs::create_dir_all(root.join(".git/objects")).unwrap();
+        fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        fs::write(
+            root.join(".git/objects/pack.idx"),
+            "fake pack index content\n",
+        )
+        .unwrap();
+
+        // Regular hidden files that SHOULD be indexed
+        fs::write(root.join(".env"), "DATABASE_URL=postgres://localhost\n").unwrap();
+        fs::write(root.join(".eslintrc.json"), "{}\n").unwrap();
+
+        // Normal source file
+        fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
+
+        let snapshot = MerkleSnapshot::build(root).unwrap();
+
+        // .git contents must be excluded
+        assert!(!snapshot.files.contains_key(".git/HEAD"));
+        assert!(!snapshot.files.contains_key(".git/objects/pack.idx"));
+        assert!(
+            snapshot
+                .files
+                .keys()
+                .all(|k| !k.starts_with(".git/")),
+            "no file under .git/ should be indexed"
+        );
+
+        // Other hidden files and normal files must be included
+        assert!(snapshot.files.contains_key(".env"));
+        assert!(snapshot.files.contains_key(".eslintrc.json"));
+        assert!(snapshot.files.contains_key("main.rs"));
     }
 }

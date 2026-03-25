@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::env;
-use std::io::{self, Write};
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -277,11 +277,13 @@ async fn run_query(cli: Cli) -> Result<()> {
     }
 
     if !search_via_daemon && !cli.all {
-        if !workspace_is_indexed(&workspace) && !cli.force {
-            let should_index = prompt_index_first_time()?;
-            if !should_index {
-                bail!("workspace is not indexed; aborting search")
-            }
+        if !workspace_is_indexed(&workspace) {
+            eprintln!(
+                "{} {} {}",
+                "⟐".bold(),
+                "First run — indexing".bold(),
+                workspace.root.display().to_string().dimmed()
+            );
         }
         let model = create_model(cli.hash);
         let _summary = index_workspace(&workspace, model.as_ref())?;
@@ -540,27 +542,7 @@ fn group_hits_by_file(hits: &[SearchHit], limit: Option<usize>) -> Vec<FileSearc
     files
 }
 
-fn prompt_index_first_time() -> Result<bool> {
-    let mut stdout = io::stdout();
-    writeln!(
-        stdout,
-        "{}",
-        "  (-f to force, --no-watch to skip daemon)".dimmed()
-    )?;
-    write!(
-        stdout,
-        "{} {} ",
-        "This folder is not indexed. Index it now?".bold(),
-        "[y/N]:".yellow()
-    )?;
-    stdout.flush()?;
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
-
-    let normalized = input.trim().to_ascii_lowercase();
-    Ok(normalized == "y" || normalized == "yes")
-}
 
 fn print_daemon_response(response: DaemonResponse, json: bool) -> Result<()> {
     match response {

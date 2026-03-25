@@ -31,6 +31,10 @@ pub fn regex_search(
         .ignore(true)
         .require_git(false)
         .follow_links(false);
+    walk.filter_entry(|entry| {
+        !(entry.file_type().is_some_and(|ft| ft.is_dir())
+            && entry.file_name() == ".git")
+    });
 
     'walk: for entry in walk.build() {
         let entry = entry?;

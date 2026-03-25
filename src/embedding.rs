@@ -10,9 +10,12 @@
 //! Use [`create_model`] to build the right model based on the `neural` flag.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use pluralizer::pluralize;
 use sha2::{Digest, Sha256};
+
+use crate::config;
 
 /// Shared interface implemented by all embedding backends.
 pub trait EmbeddingModel: Send + Sync {
@@ -151,18 +154,41 @@ pub struct OnnxEmbeddingModel {
 #[cfg(feature = "neural")]
 impl OnnxEmbeddingModel {
     /// Initialize the neural model.  On first run this downloads
-    /// `all-MiniLM-L6-v2` (~23 MB) to a local cache.
+    /// `all-MiniLM-L6-v2` (~23 MB) to `~/.local/share/ivygrep/models/`.
     pub fn new() -> anyhow::Result<Self> {
         use fastembed::{EmbeddingModel as FastModel, InitOptions};
 
+        let cache_dir = model_cache_dir();
+        std::fs::create_dir_all(&cache_dir)?;
+
+        let needs_download = !cache_dir.join("fast-all-MiniLM-L6-v2").exists();
+        if needs_download {
+            eprintln!("⟐ Downloading embedding model (~23 MB, one-time)...");
+        }
+
         let model = fastembed::TextEmbedding::try_new(
-            InitOptions::new(FastModel::AllMiniLML6V2).with_show_download_progress(true),
+            InitOptions::new(FastModel::AllMiniLML6V2)
+                .with_cache_dir(cache_dir)
+                .with_show_download_progress(true),
         )?;
+
+        if needs_download {
+            eprintln!("✓ Model ready.");
+        }
 
         Ok(Self {
             model: parking_lot::Mutex::new(model),
         })
     }
+}
+
+/// Returns the centralized model cache directory inside the ivygrep app home.
+/// Falls back to a temp directory if the app home cannot be resolved.
+#[cfg(feature = "neural")]
+fn model_cache_dir() -> PathBuf {
+    config::app_home()
+        .map(|home| home.join("models"))
+        .unwrap_or_else(|_| std::env::temp_dir().join("ivygrep-models"))
 }
 
 #[cfg(feature = "neural")]
