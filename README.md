@@ -1,364 +1,346 @@
 <p align="center">
-  <img src="assets/logo.png" alt="ivygrep logo" width="220" />
+  <img src="assets/logo.png" alt="ivygrep logo" width="180" />
 </p>
 
-<p align="center"><strong>Semantic grep that never phones home.</strong><br/>Feels like <code>rg</code>, understands English.</p>
+<h1 align="center">ivygrep</h1>
 
-## Superpower Your LLM
+<p align="center">
+  <strong>Semantic code search that never phones home.</strong><br/>
+  Ask questions in English. Get answers in code. 100% local.
+</p>
 
-Your coding agent is only as strong as its retrieval toolchain. `ig` is designed to be that retrieval layer.
+<p align="center">
+  <a href="https://github.com/bvolpato/ivygrep/actions"><img src="https://github.com/bvolpato/ivygrep/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/bvolpato/ivygrep/releases/latest"><img src="https://img.shields.io/github/v/release/bvolpato/ivygrep?color=%2334d058&label=release" alt="Latest Release" /></a>
+  <a href="https://github.com/bvolpato/ivygrep/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
+  <a href="https://github.com/bvolpato/ivygrep/releases"><img src="https://img.shields.io/github/downloads/bvolpato/ivygrep/total?color=%23ff6f00" alt="Downloads" /></a>
+</p>
 
-- Natural-language code search: `where is tax calculated?` can still find `calculateTaxes(...)`.
-- Hybrid ranking: lexical BM25 + semantic vectors + RRF fusion.
-- Token-efficient context: your agent pulls only relevant chunks instead of stuffing full files into prompts.
-- Local-only privacy: no cloud indexing, no code upload.
-- Incremental freshness: Merkle-based updates keep search results aligned with current code.
+<p align="center">
+  <img src="assets/hero-banner.png" alt="ivygrep semantic code search" width="600" />
+</p>
 
-In practice: the agent stops guessing and starts grounding edits in real, scoped code references.
+---
 
-## Why ivygrep
+## ⚡ What is ivygrep?
 
-`ig` (ivygrep) is a local-first hybrid code search tool:
+**ivygrep (`ig`)** is a local-first code search tool that understands natural language. It combines lexical search (like `grep`/`rg`) with semantic vector search — so you can search your code the way you *think* about it.
 
-- Lexical search with Tantivy (BM25)
-- Semantic search with local embeddings
-- RRF hybrid fusion for high-quality ranking
-- 100% accurate AST function/class chunking via `tree-sitter` (fallback to regex)
-- Incremental indexing via Merkle-style file fingerprints
-- Regex fallback path for grep-like workflows
-- Transparent daemon over Unix socket (auto-spawns on first search)
-- Cross-workspace search with `--all`
+```bash
+# Ask in English, find the code
+ig "where is tax calculated?"
+# → finds calculateTaxes(), applyVAT(), computeWithholding()
 
-No network calls are required for indexing and searching.
+ig "database connection retry logic"
+# → finds reconnect(), exponentialBackoff(), handleDbTimeout()
+```
 
-## Install
+> **No API keys. No cloud. No telemetry. Your code never leaves your machine.**
 
-### Homebrew tap (standalone, no cargo)
+---
 
+## 🤔 Why ivygrep?
+
+Traditional code search tools require you to know _exactly_ what you're looking for. ivygrep lets you search with intent.
+
+| Feature | `grep` / `rg` | GitHub Search | **ivygrep** |
+|---------|:---:|:---:|:---:|
+| Works offline | ✅ | ❌ | ✅ |
+| Natural language queries | ❌ | ⚠️ | ✅ |
+| Semantic understanding | ❌ | ❌ | ✅ |
+| Sub-100ms latency | ✅ | ❌ | ✅ |
+| Privacy-first (no upload) | ✅ | ❌ | ✅ |
+| AST-aware chunking | ❌ | ❌ | ✅ |
+| Incremental indexing | ❌ | ❌ | ✅ |
+| MCP server for AI agents | ❌ | ❌ | ✅ |
+
+---
+
+## 🚀 Quick Start
+
+### Install
+
+**Homebrew** (recommended):
 ```bash
 brew tap bvolpato/tap
 brew install bvolpato/tap/ivygrep
 ```
 
-### From source (developer workflow)
-
+**From source**:
 ```bash
-git clone https://github.com/bvolpato/ivygrep.git
-cd ivygrep
+git clone https://github.com/bvolpato/ivygrep.git && cd ivygrep
 cargo build --release
-./target/release/ig --help
-```
-
-### Neural embeddings (default)
-
-The default build includes ONNX-based neural embeddings
-(`all-MiniLM-L6-v2`, 384-dim) for high-quality semantic search.
-The model (~23 MB) is downloaded automatically on first use.
-
-```bash
-ig "authentication flow"       # uses neural embeddings by default
-ig --hash "authentication flow"  # opt into lightweight hash-based embeddings
-```
-
-For a minimal binary with no ONNX dependency:
-
-```bash
-cargo build --release --no-default-features
-```
-
-### Standalone binary path
-
-If you build from source, the standalone executable is generated at:
-
-```text
-./target/release/ig
-```
-
-You can move it into your PATH:
-
-```bash
 install -m 0755 ./target/release/ig ~/.local/bin/ig
 ```
 
-## Quick Start
+**Binary downloads**: grab the latest from [Releases](https://github.com/bvolpato/ivygrep/releases/latest) — available for Linux (x86/ARM) and macOS (Intel/Apple Silicon).
+
+### First search in 10 seconds
 
 ```bash
-ig --add .
-ig "authentication for MCPs"
-ig "authentication for MCPs" ~/githubworkspace/opencode
+ig "authentication flow"            # auto-indexes on first run, then searches
+ig "error handling" src/api/         # scope to a directory
+ig --all "database migrations"      # search across all indexed projects
 ```
 
-`--add` registers the current workspace for indexing and daemon watch updates.
+That's it. No config files, no setup wizards, no prompts, no API keys. On first run, `ig` auto-indexes the workspace and spawns a background daemon for incremental updates.
 
-When no daemon is running, `ig` transparently spawns one in the background on your first
-search — no manual `ig --daemon` step needed. Use `--no-watch` to suppress auto-start.
-
-When no daemon is running, first query in a non-indexed workspace prompts:
-
-```text
-  (-f to force, --no-watch to skip daemon)
-This folder is not indexed. Index it now? [y/N]: _
-```
-
-### Usage Demo
-
-`ig` searching the `opencode` repo for `"authentication for MCPs"`:
+> **Tip**: Use `ig --add .` to explicitly register a workspace for watch-based reindexing, or `ig --hash` for fast startup without the neural model download.
 
 <p>
-  <img src="assets/ig-demo.gif" alt="ig demo" />
+  <img src="assets/ig-demo.gif" alt="ivygrep demo — searching the opencode repo" width="700" />
 </p>
 
-## Performance
+---
 
-`ig` is designed to be highly reliable under aggressive AI agent workloads. In our benchmark suite simulating a concurrent code-search storm over the `ripgrep` repository (using the semantic hybrid index):
+## 🧠 How It Works
 
-- **Average latency**: ~26ms
-- **p95 latency**: ~62ms
-- **Max latency**: ~98ms (even under sustained 8-thread concurrent saturation)
+ivygrep uses a **hybrid search architecture** — combining the precision of keyword matching with the intelligence of semantic understanding:
 
-## MCP Server (Agent Integration)
-
-`ig` ships with an MCP server over stdio:
-
-```bash
-ig --mcp
+```
+┌─────────────────────────────────────────────┐
+│              Your Query                     │
+│         "retry logic for payments"          │
+└────────────┬───────────────┬────────────────┘
+             │               │
+    ┌────────▼──────┐ ┌──────▼────────┐
+    │  Lexical BM25  │ │   Semantic    │
+    │   (Tantivy)    │ │  (Embeddings) │
+    └────────┬──────┘ └──────┬────────┘
+             │               │
+    ┌────────▼───────────────▼────────┐
+    │      RRF Hybrid Fusion          │
+    │   (Reciprocal Rank Fusion)      │
+    └────────────────┬────────────────┘
+                     │
+    ┌────────────────▼────────────────┐
+    │     Ranked Results by File      │
+    │   with AST-aware context        │
+    └─────────────────────────────────┘
 ```
 
-### Exposed tool
+- **Lexical path** — BM25 scoring via [Tantivy](https://github.com/quickwit-oss/tantivy) catches exact keyword matches
+- **Semantic path** — vector embeddings (neural ONNX or lightweight hash) capture meaning
+- **AST chunking** — [tree-sitter](https://tree-sitter.github.io) splits code into precise function/class boundaries (35+ languages)
+- **Incremental indexing** — Merkle-style fingerprints mean re-index only touches changed files
 
-- `ig_search(query, path?, limit?, context?, type?, regex?, include?, exclude?, first_line_only?, file_name_only?, verbose?)`
+---
 
-Behavior:
+## ⚡ Performance
 
-- If the workspace is not indexed, `ig_search` auto-indexes it on first call.
-- If `path` points to a subdirectory or a file, results are restricted to that scope only.
-- `.gitignore` is respected during indexing and regex scans.
-- Unknown extensions are indexed when content looks like text; binary content is skipped.
-- MCP tool output is compact JSON in `content[0].text` (no duplicated text rendering).
-- `reason` fields are omitted by default; pass `verbose=true` only when needed.
-- `include` / `exclude` accept comma-separated globs (for example `*.md,src/**/*.rs`).
+Benchmarked under concurrent AI agent workloads (8 threads, sustained saturation):
 
-### Claude Code
+| Metric | Value |
+|--------|-------|
+| **Average latency** | ~26 ms |
+| **p95 latency** | ~62 ms |
+| **Max latency** | ~98 ms |
+
+> Faster than a network roundtrip. Your agent never waits.
+
+---
+
+## 🤖 MCP Server — Supercharge Your AI Agent
+
+ivygrep is the **retrieval layer your coding agent is missing**. Instead of stuffing entire files into context, your agent pulls only the relevant code chunks.
+
+```bash
+ig --mcp    # starts MCP server on stdio
+```
+
+### One-line setup for every major agent:
+
+<details>
+<summary><b>Claude Code</b></summary>
 
 ```bash
 claude mcp add -s user ig -- ig --mcp
 ```
 
-Equivalent user-scope config (`~/.claude.json`):
-
+Or add to `~/.claude.json`:
 ```json
 {
   "mcpServers": {
-    "ig": {
-      "type": "stdio",
-      "command": "ig",
-      "args": ["--mcp"],
-      "env": {}
-    }
+    "ig": { "type": "stdio", "command": "ig", "args": ["--mcp"] }
   }
 }
 ```
+</details>
 
-### Cursor
+<details>
+<summary><b>Cursor</b></summary>
 
-Project or global config (`.cursor/mcp.json` or `~/.cursor/mcp.json`):
-
+Add to `.cursor/mcp.json` or `~/.cursor/mcp.json`:
 ```json
 {
   "mcpServers": {
-    "ig": {
-      "command": "ig",
-      "args": ["--mcp"]
-    }
+    "ig": { "command": "ig", "args": ["--mcp"] }
   }
 }
 ```
-
 Then refresh MCP servers in Cursor settings.
+</details>
 
-### Codex
-
-If your Codex build supports CLI registration:
+<details>
+<summary><b>Codex</b></summary>
 
 ```bash
 codex mcp add ig -- ig --mcp
 ```
 
-Equivalent config (`~/.codex/config.toml`):
-
+Or add to `~/.codex/config.toml`:
 ```toml
 [mcp_servers.ig]
 command = "ig"
 args = ["--mcp"]
 ```
+</details>
 
-### OpenCode
+<details>
+<summary><b>OpenCode</b></summary>
 
 ```bash
 opencode mcp add
 ```
 
-Then choose `Local` and set command to `ig --mcp`.
+Choose `Local` and set command to `ig --mcp`.
 
-Equivalent config (`opencode.json` in project root, or `~/.config/opencode/opencode.json` globally):
-
+Or add to `opencode.json`:
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "ig": {
-      "type": "local",
-      "command": ["ig", "--mcp"]
-    }
+    "ig": { "type": "local", "command": ["ig", "--mcp"] }
   }
 }
 ```
+</details>
 
 ### Example agent prompt
 
-`Refactor payment flow. First call ig_search with path=src/payments and find where tax is computed.`
+> *"Refactor the payment flow. First call ig_search with path=src/payments to find where tax is computed."*
 
-### MCP vs Daemon
+The agent searches, finds the exact function, and edits grounded in real code — not hallucinations.
 
-- `ig --mcp` starts an MCP server on stdio (for Claude/Cursor/Codex/OpenCode tool calls).
-- `ig --daemon` starts the background workspace watcher/indexer over Unix socket for CLI workflows.
-- They are independent: MCP does not require daemon, and daemon does not require MCP.
-- If you want continuous file-watch reindexing across terminals, run daemon.
-- If you only need agent tool calls, run `--mcp` only.
+### MCP tool
 
-## CLI
+`ig_search(query, path?, limit?, context?, type?, regex?, include?, exclude?, first_line_only?, file_name_only?, verbose?)`
 
-```bash
-ig "authentication for MCPs"
-ig --add .
-ig --rm .
-ig --status
-ig --daemon
-ig "authentication for MCPs" ~/githubworkspace/opencode
-```
+- Auto-indexes on first call
+- Scopes to subdirectory or file
+- Respects `.gitignore`
+- Compact JSON output (token-efficient for LLMs)
 
-Useful flags:
+---
 
-- `-f, --force`: skip first-query prompt; with `--add`, rebuild from scratch
-- `--regex`: regex mode
-- `--type <lang>`: language filter (`rust`, `python`, `typescript`, ...)
-- `--include <globs>`: comma-separated include globs (for example `*.txt,*.md`)
-- `--exclude <globs>`: comma-separated exclude globs (for example `target/**,*.lock`)
-- `-C, --context <n>`: context lines around the focused pointer line (default: `2`, i.e. up to 5 lines total)
-- `-n, --limit <n>`: max number of files in output (no default limit)
-- `--add [path]`: register/index/watch workspace (defaults to `.`)
-- `--rm [path]`: remove workspace index/watch registration (defaults to `.`)
-- `--status`: show indexed workspaces
-- `--daemon`: run daemon process
-- `--mcp`: run MCP server on stdio
-- `--first-line-only`: print only the first non-empty line of each hit snippet
-- `--file-name-only`: print only matching file paths
-- `--verbose`: include detailed `reason` pointers for each hit
-- `--json`: machine-readable grouped output
-- `--no-watch`: skip daemon watcher registration
-- `--all`: search across every indexed workspace at once
-- `--hash`: use lightweight hash-based embeddings (faster, no model download)
+## 🌍 35+ Languages Supported
 
-Action/query split:
+ivygrep provides AST-aware chunking for functions, classes, and modules:
 
-- Workspace actions are explicit flags (`--add`, `--rm`, `--status`, `--daemon`), so query text like `add` is never ambiguous.
-- `ig <query> <path>` runs semantic search against another workspace without `cd`.
+| Category | Languages |
+|----------|-----------|
+| **Systems** | Rust, C, C++, Zig |
+| **Web** | JavaScript, TypeScript, HTML, CSS, GraphQL |
+| **Backend** | Python, Go, Java, Kotlin, Scala, C#, Ruby, PHP, Perl |
+| **Functional** | Haskell, OCaml, Elixir, Erlang, Clojure |
+| **Mobile** | Swift, Dart, Objective-C |
+| **Scientific** | R, Julia |
+| **Shell** | Bash/Zsh, PowerShell, Lua |
+| **Data/Infra** | SQL, Protobuf, Terraform, TOML, YAML, JSON |
+| **Other** | Markdown, Dockerfile, Makefile, and more |
 
-## When to use the daemon
+> Unknown extensions are auto-detected — if it looks like text, it gets indexed.
 
-Use `ig --daemon` when you want the best steady-state latency in an active repo:
+---
 
-- You run many queries in sequence and want warm index/search state in memory.
-- You want file-watch updates continuously while editing code.
-- You want indexing/search shared across terminals and scripts.
-
-Note: the daemon is auto-spawned on first search, so manual startup is optional.
-Set `IVYGREP_NO_AUTOSPAWN=1` to disable this behaviour (useful in CI).
-
-Skip daemon mode if you run one-off queries occasionally. The CLI works directly in-process without it.
-The daemon is the process that watches registered workspaces and performs background incremental updates.
-If you started it and saw no logs before, run it in a terminal and you should now see startup/watch/update lines on stderr.
-
-Typical daemon workflow:
+## 🔧 CLI Reference
 
 ```bash
-ig --daemon
-ig --add .
-ig "where is split assignment handled?"
+# Core workflow
+ig "your query"                    # search current workspace
+ig "query" ~/other/project         # search a different workspace
+ig --add .                         # register & index a workspace
+ig --rm .                          # unregister a workspace
+ig --status                        # show indexed workspaces
+ig --all "query"                   # search all indexed workspaces
+
+# Search modes
+ig --regex "fn\s+\w+_tax"          # regex mode (like rg)
+ig --hash "query"                  # use fast hash embeddings (no model download)
+
+# Output control
+ig -n 5 "query"                    # limit to 5 files
+ig -C 4 "query"                    # 4 lines of context
+ig --type rust "query"             # filter by language
+ig --include "*.rs,*.go" "query"   # include globs
+ig --exclude "vendor/**" "query"   # exclude globs
+ig --json "query"                  # machine-readable JSON
+ig --first-line-only "query"       # compact grep-style output
+ig --file-name-only "query"        # file paths only
+ig --verbose "query"               # include match reasons
+
+# Daemon & server
+ig --daemon                        # start background watcher
+ig --mcp                           # start MCP server (stdio)
 ```
 
-## Result Ranking & Output
+> **Tip**: The daemon auto-spawns on your first search — no manual startup needed. Set `IVYGREP_NO_AUTOSPAWN=1` to disable (useful in CI).
 
-- Results are grouped by file by default (not line-first).
-- File score is the sum of chunk scores in that file.
-- Files are sorted by descending file score.
-- By default, each hit prints a concise focused snippet (about 5 lines).
-- Use `--verbose` to include `reason` pointer lines.
-- Exact lexical/literal matches are weighted higher than fuzzy semantic-only matches.
-- A relevance threshold is applied automatically so low-signal chunks are dropped.
-- Use `--first-line-only` if you want compact grep-style previews.
-- Use `--file-name-only` to list only files and feed them into other tools.
-- If you want hard truncation, use `-n`.
+---
 
-## Architecture
+## 🏗️ Architecture
 
-- `tantivy` for lexical index/search
-- `usearch` for vector index/search
-- `notify` for file watching
-- SQLite metadata store per workspace
-- `.gitignore` rules are respected by default during indexing and regex scans.
-- Unknown extensions are indexed when content is detected as text; binary files are skipped.
-- Workspace index root: `${IVYGREP_HOME:-${XDG_DATA_HOME:-~/.local/share}/ivygrep}/indexes/<workspace-id>/`
-- Path precedence:
-  1. `IVYGREP_HOME` (if non-empty)
-  2. `XDG_DATA_HOME/ivygrep` (if non-empty)
-  3. `~/.local/share/ivygrep`
+```
+ivygrep
+├── tantivy        — lexical BM25 index
+├── usearch        — vector similarity index
+├── tree-sitter    — AST-based code chunking (Rust, Python, Go, JS, TS)
+├── fastembed      — ONNX neural embeddings (all-MiniLM-L6-v2, 384-dim)
+├── notify         — filesystem watcher for live re-indexing
+├── SQLite         — metadata store per workspace
+└── Unix socket    — daemon IPC (auto-spawned)
+```
 
-## Development
+**Index location**: `${IVYGREP_HOME:-${XDG_DATA_HOME:-~/.local/share}/ivygrep}/indexes/<workspace-id>/`
+
+**Neural embeddings**: The default build bundles ONNX Runtime for high-quality semantic search. The model (~23 MB) downloads automatically on first use. For a minimal binary without ONNX: `cargo build --release --no-default-features`.
+
+---
+
+## 🧪 Development
 
 ```bash
-cargo fmt
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-Test harness includes:
+The test suite includes **72+ tests** across 6 categories:
 
-- fixture repositories in `tests/fixtures`
-- golden semantic query tests
-- CLI snapshot tests
-- property-based Merkle diff tests
+| Suite | Tests | Description |
+|-------|------:|-------------|
+| Unit | 40 | Core logic, chunking, embedding, search |
+| CLI snapshots | 9 | End-to-end CLI behavior |
+| Concurrency | 6 | Thread safety, parallel search/index |
+| Golden queries | 3 | Semantic accuracy validation |
+| Incremental CRUD | 13 | Add/update/delete indexing correctness |
+| Property-based | 1 | Merkle diff invariants |
 
-### Larger stress harnesses
-
-Use medium-size canonical corpora to stress indexing and hybrid retrieval without checking large assets into git.
-
-Included bootstrap targets:
-
-- Project Gutenberg Shakespeare corpus (`pg100`, complete works)
-- Project Gutenberg Alice in Wonderland (`pg11`)
-- `BurntSushi/ripgrep` (depth-1 clone)
-- `quickwit-oss/tantivy` (depth-1 clone)
-
-Bootstrap fixtures locally:
+### Stress testing
 
 ```bash
 ./scripts/bootstrap_stress_fixtures.sh
-```
-
-Run ignored stress tests:
-
-```bash
 cargo test --test stress_harness -- --ignored --nocapture
 ```
 
-Optional custom fixture root:
+Fixtures include the Linux kernel (ripgrep), Shakespeare corpus, and Tantivy source.
 
-```bash
-IVYGREP_STRESS_ROOT=/tmp/ivygrep-stress ./scripts/bootstrap_stress_fixtures.sh /tmp/ivygrep-stress
-IVYGREP_STRESS_ROOT=/tmp/ivygrep-stress cargo test --test stress_harness -- --ignored --nocapture
-```
+---
 
-## License
+## 📄 License
 
-MIT
+MIT — use it however you want.
+
+---
+
+<p align="center">
+  <b>⭐ Star this repo if ivygrep saved you a context-window!</b>
+</p>
