@@ -513,8 +513,7 @@ fn try_tree_sitter_chunk_source(
         return None;
     }
 
-    // Sort ranges by start line. We allow overlaps (e.g. an impl chunk containing multiple fn chunks).
-    // Vector search actually benefits greatly from BOTH the large structural chunks AND the specific function chunks.
+    // Sort by start line; keep overlapping structural chunks (impl+fn).
     ranges.sort_by_key(|r| r.0);
 
     let mut chunks = Vec::new();

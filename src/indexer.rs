@@ -114,7 +114,6 @@ pub fn index_workspace(
 
     let result = index_workspace_inner(workspace, embedding_model);
 
-    // Release the lock (also happens automatically on drop, but be explicit)
     let _ = fs2::FileExt::unlock(&lock_file);
     result
 }

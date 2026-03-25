@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::env;
-
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -254,7 +253,6 @@ async fn run_query(cli: Cli) -> Result<()> {
     };
     let mut search_via_daemon = false;
 
-    // Wake up the daemon and ensure the current directory is indexed (if not using --all)
     if !cli.all {
         let daemon_index_request = DaemonRequest::Index {
             path: workspace.root.clone(),
@@ -267,7 +265,6 @@ async fn run_query(cli: Cli) -> Result<()> {
             search_via_daemon = true;
         }
     } else {
-        // Just ping to wake up the daemon if we only want global search
         if daemon::request(&DaemonRequest::Status, !cli.no_watch)
             .await?
             .is_some()

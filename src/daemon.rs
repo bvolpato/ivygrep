@@ -29,7 +29,7 @@ impl DaemonState {
     fn get_model(&self) -> Arc<dyn EmbeddingModel> {
         self.lazy_model
             .get_or_init(|| {
-                eprintln!("initializing embedding model (first use)...");
+                eprintln!("loading embedding model...");
                 Arc::from(create_model(false))
             })
             .clone()
@@ -50,8 +50,7 @@ pub async fn run_daemon() -> Result<()> {
 
     let (trigger_tx, mut trigger_rx) = mpsc::unbounded_channel::<PathBuf>();
 
-    // Defer model creation so the socket accept loop starts immediately.
-    // The model (and potential ONNX download) happens on first use.
+    // Defer model creation — the ONNX download happens on first use.
     let lazy_model: Arc<std::sync::OnceLock<Arc<dyn EmbeddingModel>>> =
         Arc::new(std::sync::OnceLock::new());
 
@@ -217,7 +216,6 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                         all_hits.append(&mut hits);
                     }
                 }
-                // Sort combined hits by score (descending)
                 all_hits.sort_by(|a, b| {
                     b.score
                         .partial_cmp(&a.score)
@@ -229,10 +227,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 all_hits
             })
             .await
-            .unwrap_or_else(|_join_err| {
-                // If thread panicked, return empty hits or string
-                Vec::new()
-            });
+            .unwrap_or_else(|_join_err| Vec::new());
 
             DaemonResponse::SearchResults { hits: result }
         }
@@ -285,9 +280,6 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     }
                 }
 
-                // Regex search score logic in Rust: wait, `regex_search` doesn't strictly score, but it has `score: 1.0` or file index order.
-                // It's already sorted by file inside. Doing nothing keeps file order, which is fine.
-                // Just cut off the limit:
                 if let Some(l) = limit {
                     all_hits.truncate(l);
                 }
@@ -295,9 +287,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 all_hits
             })
             .await
-            .unwrap_or_else(|_join_err| {
-                Vec::new() // return empty on panic
-            });
+            .unwrap_or_else(|_join_err| Vec::new());
 
             DaemonResponse::SearchResults { hits: result }
         }
@@ -353,8 +343,8 @@ fn scope_from_request(scope_path: Option<PathBuf>, scope_is_file: bool) -> Optio
 pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<DaemonResponse>> {
     let socket_path = config::socket_path()?;
 
-    // Auto-spawn the daemon if it isn't running, to provide a transparent frictionless background indexer.
-    // Skip when IVYGREP_NO_AUTOSPAWN is set (useful in tests and CI).
+    // Auto-spawn the daemon if it isn't running.
+    // Skip when IVYGREP_NO_AUTOSPAWN is set (for tests and CI).
     if autospawn
         && !socket_path.exists()
         && std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
@@ -368,7 +358,7 @@ pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<
             let mut cmd = std::process::Command::new(exe);
             cmd.arg("--daemon");
 
-            // Redirect daemon output to a log file so it doesn't pollute the CLI terminal
+            // Redirect daemon I/O to a log file to keep the CLI terminal clean.
             if let Ok(log_file) =
                 config::app_home()
                     .map(|h| h.join("daemon.log"))
@@ -390,13 +380,11 @@ pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<
             #[cfg(unix)]
             {
                 use std::os::unix::process::CommandExt;
-                // Put daemon in its own process group so it survives Ctrl+C on the parent CLI
                 cmd.process_group(0);
             }
 
-            // Spawn detached daemon process
             let _ = cmd.spawn();
-            // Poll for socket readiness (up to 2 seconds)
+            // Poll for socket readiness (up to 2s)
             for _ in 0..20 {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 if socket_path.exists() {
@@ -422,7 +410,7 @@ pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
 
-    // Timeout so we never hang forever waiting for a busy daemon
+    // Bound the wait so a busy daemon can't block the CLI forever.
     match tokio::time::timeout(
         std::time::Duration::from_secs(120),
         reader.read_line(&mut line),
