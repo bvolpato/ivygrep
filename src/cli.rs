@@ -542,8 +542,6 @@ fn group_hits_by_file(hits: &[SearchHit], limit: Option<usize>) -> Vec<FileSearc
     files
 }
 
-
-
 fn print_daemon_response(response: DaemonResponse, json: bool) -> Result<()> {
     match response {
         DaemonResponse::Ack { message } => {

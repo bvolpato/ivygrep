@@ -59,8 +59,7 @@ impl MerkleSnapshot {
         walker.follow_links(false);
         walker.filter_entry(|entry| {
             // Skip .git directory but allow other hidden files (.env, .eslintrc, etc.)
-            !(entry.file_type().is_some_and(|ft| ft.is_dir())
-                && entry.file_name() == ".git")
+            !(entry.file_type().is_some_and(|ft| ft.is_dir()) && entry.file_name() == ".git")
         });
 
         for entry in walker.build() {
@@ -256,10 +255,7 @@ mod tests {
         assert!(!snapshot.files.contains_key(".git/HEAD"));
         assert!(!snapshot.files.contains_key(".git/objects/pack.idx"));
         assert!(
-            snapshot
-                .files
-                .keys()
-                .all(|k| !k.starts_with(".git/")),
+            snapshot.files.keys().all(|k| !k.starts_with(".git/")),
             "no file under .git/ should be indexed"
         );
 

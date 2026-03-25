@@ -369,15 +369,16 @@ pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<
             cmd.arg("--daemon");
 
             // Redirect daemon output to a log file so it doesn't pollute the CLI terminal
-            if let Ok(log_file) = config::app_home()
-                .map(|h| h.join("daemon.log"))
-                .and_then(|log_path| {
-                    std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(log_path)
-                        .map_err(|e| anyhow::anyhow!(e))
-                })
+            if let Ok(log_file) =
+                config::app_home()
+                    .map(|h| h.join("daemon.log"))
+                    .and_then(|log_path| {
+                        std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(log_path)
+                            .map_err(|e| anyhow::anyhow!(e))
+                    })
             {
                 let log_stderr = log_file
                     .try_clone()
