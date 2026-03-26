@@ -95,26 +95,14 @@ That's it. No config files, no setup wizards, no prompts, no API keys. On first 
 
 ivygrep uses a **hybrid search architecture** — combining the precision of keyword matching with the intelligence of semantic understanding:
 
-```
-┌─────────────────────────────────────────────┐
-│              Your Query                     │
-│         "retry logic for payments"          │
-└────────────┬───────────────┬────────────────┘
-             │               │
-    ┌────────▼──────┐ ┌──────▼────────┐
-    │  Lexical BM25  │ │   Semantic    │
-    │   (Tantivy)    │ │  (Embeddings) │
-    └────────┬──────┘ └──────┬────────┘
-             │               │
-    ┌────────▼───────────────▼────────┐
-    │      RRF Hybrid Fusion          │
-    │   (Reciprocal Rank Fusion)      │
-    └────────────────┬────────────────┘
-                     │
-    ┌────────────────▼────────────────┐
-    │     Ranked Results by File      │
-    │   with AST-aware context        │
-    └─────────────────────────────────┘
+```mermaid
+flowchart TD
+    Q["Your Query\n'retry logic for payments'"]
+    Q --> L["Lexical BM25\n(Tantivy)"]
+    Q --> S["Semantic\n(Embeddings)"]
+    L --> F["RRF Hybrid Fusion"]
+    S --> F
+    F --> R["Ranked Results\nwith AST-aware context"]
 ```
 
 - **Lexical path** — BM25 scoring via [Tantivy](https://github.com/quickwit-oss/tantivy) catches exact keyword matches
@@ -340,5 +328,5 @@ MIT — use it however you want.
 ---
 
 <p align="center">
-  <b>⭐ Star this repo if ivygrep saved you a context-window!</b>
+  Built by <a href="https://github.com/bvolpato">@bvolpato</a> · Contributions welcome
 </p>
