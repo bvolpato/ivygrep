@@ -618,6 +618,77 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mcp_initialize_returns_protocol_version_and_capabilities() {
+        let result = dispatch("initialize", json!({})).unwrap();
+        assert_eq!(result["protocolVersion"], "2024-11-05");
+        assert!(result["capabilities"]["tools"].is_object());
+        assert_eq!(result["serverInfo"]["name"], "ig");
+        let version = result["serverInfo"]["version"].as_str().unwrap();
+        assert!(!version.is_empty());
+    }
+
+    #[test]
+    fn mcp_tools_list_returns_ig_search() {
+        let result = dispatch("tools/list", json!({})).unwrap();
+        let tools = result["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "ig_search");
+        let schema = &tools[0]["inputSchema"];
+        assert!(schema["properties"]["query"].is_object());
+        assert!(schema["properties"]["regex"].is_object());
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.contains(&json!("query")));
+    }
+
+    #[test]
+    fn mcp_unknown_method_returns_error() {
+        let result = dispatch("tools/nonexistent", json!({}));
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported method")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn mcp_search_regex_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(
+            root.join("match.rs"),
+            "pub fn calculate_tax(amount: f64) -> f64 { amount * 0.2 }\n",
+        )
+        .unwrap();
+
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let response = execute_ivygrep_search(IvygrepSearchArgs {
+            query: Some(r"calculate_\w+".to_string()),
+            path: Some(root.to_string_lossy().to_string()),
+            limit: Some(5),
+            context: Some(2),
+            type_filter: None,
+            regex: Some(true),
+            include: None,
+            exclude: None,
+            first_line_only: Some(false),
+            file_name_only: Some(false),
+            verbose: Some(false),
+        })
+        .unwrap();
+
+        let result = tool_json_payload(&response);
+        assert_eq!(result["mode"], "regex");
+        let count = result["result_count"].as_u64().unwrap();
+        assert!(count > 0, "regex search should find results");
+    }
+
     fn tool_json_payload(response: &Value) -> Value {
         let content = response
             .get("content")

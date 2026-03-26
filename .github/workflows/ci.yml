@@ -9,6 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  IVYGREP_NO_AUTOSPAWN: "1"
 
 jobs:
   check:
@@ -91,4 +92,6 @@ jobs:
         run: cargo build --release
 
       - name: Smoke test
-        run: ./target/release/ig --help
+        run: |
+          ./target/release/ig --help
+          ./target/release/ig --version
