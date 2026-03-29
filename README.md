@@ -299,11 +299,11 @@ ivygrep
 cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-The test suite includes **83+ tests** across 6 categories:
+The test suite includes **90+ tests** across 6 categories:
 
 | Suite | Tests | Description |
 |-------|------:|-------------|
-| Unit | 45 | Core logic, chunking, embedding, search, MCP |
+| Unit | 52 | Core logic, chunking, embedding, search, MCP, text |
 | CLI snapshots | 9 | End-to-end CLI behavior |
 | Concurrency | 6 | Thread safety, parallel search/index |
 | Golden queries | 3 | Semantic accuracy validation |

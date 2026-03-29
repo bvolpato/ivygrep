@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 
 use anyhow::Result;
-use pluralizer::pluralize;
 use rusqlite::Connection;
 use tantivy::TantivyDocument;
 use tantivy::collector::TopDocs;
@@ -14,6 +13,7 @@ use crate::indexer::{
 };
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
+use crate::text::{singularize_token, split_identifier_segments};
 use crate::vector_store::VectorStore;
 use crate::workspace::{Workspace, WorkspaceScope};
 
@@ -305,61 +305,6 @@ fn tokenize_query(query: &str) -> Vec<String> {
     tokens.sort();
     tokens.dedup();
     tokens
-}
-
-fn split_identifier_segments(token: &str) -> Vec<String> {
-    let mut segments = Vec::new();
-    let mut current = String::new();
-    let mut prev_is_lower = false;
-    let mut prev_is_alpha = false;
-
-    for ch in token.chars() {
-        if !ch.is_ascii_alphanumeric() {
-            if !current.is_empty() {
-                segments.push(current.to_ascii_lowercase());
-                current.clear();
-            }
-            prev_is_lower = false;
-            prev_is_alpha = false;
-            continue;
-        }
-
-        let is_upper = ch.is_ascii_uppercase();
-        let is_alpha = ch.is_ascii_alphabetic();
-
-        if !current.is_empty() && is_upper && prev_is_lower {
-            segments.push(current.to_ascii_lowercase());
-            current.clear();
-        }
-
-        if !current.is_empty() && is_alpha != prev_is_alpha {
-            segments.push(current.to_ascii_lowercase());
-            current.clear();
-        }
-
-        current.push(ch);
-        prev_is_lower = ch.is_ascii_lowercase();
-        prev_is_alpha = is_alpha;
-    }
-
-    if !current.is_empty() {
-        segments.push(current.to_ascii_lowercase());
-    }
-
-    segments
-}
-
-fn singularize_token(token: &str) -> String {
-    if token.len() <= 3 || !token.chars().all(|ch| ch.is_ascii_alphabetic()) {
-        return token.to_string();
-    }
-
-    let singular = pluralize(token, 1isize, false).to_ascii_lowercase();
-    if singular.is_empty() {
-        token.to_string()
-    } else {
-        singular
-    }
 }
 
 fn truncate_for_reason(line: &str) -> String {

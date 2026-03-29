@@ -10,6 +10,7 @@ pub mod path_glob;
 pub mod protocol;
 pub mod regex_search;
 pub mod search;
+pub mod text;
 pub mod vector_store;
 pub mod workspace;
 
