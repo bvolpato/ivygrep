@@ -184,10 +184,6 @@ fn index_workspace_inner(
             let indexed = build_indexed_chunk(chunk);
             let embedding = embedding_model.embed(&indexed.text);
 
-            if vector_index.contains(indexed.vector_key) {
-                vector_index.remove(indexed.vector_key);
-            }
-
             vector_index.upsert(indexed.vector_key, embedding);
             insert_chunk(&sqlite, &indexed)?;
             add_chunk_doc(&mut writer, &fields, &indexed)?;

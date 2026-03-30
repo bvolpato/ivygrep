@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::env;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -11,7 +10,7 @@ use crate::config;
 use crate::embedding::create_model;
 use crate::indexer::{index_workspace, workspace_is_indexed};
 use crate::path_glob::parse_glob_csv;
-use crate::protocol::SearchHit;
+use crate::protocol::group_hits_by_file;
 use crate::regex_search::regex_search;
 use crate::search::{SearchOptions, hybrid_search};
 use crate::workspace::resolve_workspace_and_scope;
@@ -66,14 +65,6 @@ struct IvygrepSearchArgs {
     first_line_only: Option<bool>,
     file_name_only: Option<bool>,
     verbose: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct FileSearchResult {
-    file_path: PathBuf,
-    total_score: f32,
-    hit_count: usize,
-    hits: Vec<SearchHit>,
 }
 
 pub fn serve_stdio() -> Result<()> {
@@ -307,45 +298,6 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
         ],
         "isError": false
     }))
-}
-
-fn group_hits_by_file(hits: &[SearchHit], limit: Option<usize>) -> Vec<FileSearchResult> {
-    let mut grouped = HashMap::<PathBuf, FileSearchResult>::new();
-
-    for hit in hits {
-        let entry = grouped
-            .entry(hit.file_path.clone())
-            .or_insert_with(|| FileSearchResult {
-                file_path: hit.file_path.clone(),
-                total_score: 0.0,
-                hit_count: 0,
-                hits: vec![],
-            });
-        entry.total_score += hit.score;
-        entry.hit_count += 1;
-        entry.hits.push(hit.clone());
-    }
-
-    let mut files = grouped.into_values().collect::<Vec<_>>();
-    for file in &mut files {
-        file.hits.sort_by(|a, b| {
-            b.score
-                .total_cmp(&a.score)
-                .then_with(|| a.start_line.cmp(&b.start_line))
-        });
-    }
-
-    files.sort_by(|a, b| {
-        b.total_score
-            .total_cmp(&a.total_score)
-            .then_with(|| a.file_path.cmp(&b.file_path))
-    });
-
-    if let Some(limit) = limit {
-        files.truncate(limit);
-    }
-
-    files
 }
 
 /// Detected framing mode for the stdio transport.

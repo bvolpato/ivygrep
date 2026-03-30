@@ -2,7 +2,6 @@ use anyhow::Result;
 use grep_regex::RegexMatcher;
 use grep_searcher::sinks::UTF8;
 use grep_searcher::{Searcher, SearcherBuilder};
-use ignore::WalkBuilder;
 
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
@@ -23,17 +22,7 @@ pub fn regex_search(
 
     let mut hits = Vec::new();
 
-    let mut walk = WalkBuilder::new(&workspace.root);
-    walk.hidden(false)
-        .git_ignore(true)
-        .git_exclude(true)
-        .git_global(true)
-        .ignore(true)
-        .require_git(false)
-        .follow_links(false);
-    walk.filter_entry(|entry| {
-        !(entry.file_type().is_some_and(|ft| ft.is_dir()) && entry.file_name() == ".git")
-    });
+    let walk = crate::walker::source_walker(&workspace.root);
 
     'walk: for entry in walk.build() {
         let entry = entry?;

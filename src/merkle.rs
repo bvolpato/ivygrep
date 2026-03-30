@@ -3,7 +3,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use ignore::WalkBuilder;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -49,18 +48,7 @@ impl MerkleSnapshot {
     pub fn build(root: &Path) -> Result<Self> {
         let mut files = BTreeMap::new();
 
-        let mut walker = WalkBuilder::new(root);
-        walker.hidden(false);
-        walker.git_ignore(true);
-        walker.git_exclude(true);
-        walker.git_global(true);
-        walker.ignore(true);
-        walker.require_git(false);
-        walker.follow_links(false);
-        walker.filter_entry(|entry| {
-            // Skip .git directory but allow other hidden files (.env, .eslintrc, etc.)
-            !(entry.file_type().is_some_and(|ft| ft.is_dir()) && entry.file_name() == ".git")
-        });
+        let walker = crate::walker::source_walker(root);
 
         for entry in walker.build() {
             let entry = entry?;

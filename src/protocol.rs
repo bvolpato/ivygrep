@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -62,4 +63,51 @@ pub enum DaemonResponse {
     Status { workspaces: Vec<WorkspaceStatus> },
     SearchResults { hits: Vec<SearchHit> },
     Error { message: String },
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FileSearchResult {
+    pub file_path: PathBuf,
+    pub total_score: f32,
+    pub hit_count: usize,
+    pub hits: Vec<SearchHit>,
+}
+
+pub fn group_hits_by_file(hits: &[SearchHit], limit: Option<usize>) -> Vec<FileSearchResult> {
+    let mut grouped = HashMap::<PathBuf, FileSearchResult>::new();
+
+    for hit in hits {
+        let entry = grouped
+            .entry(hit.file_path.clone())
+            .or_insert_with(|| FileSearchResult {
+                file_path: hit.file_path.clone(),
+                total_score: 0.0,
+                hit_count: 0,
+                hits: vec![],
+            });
+        entry.total_score += hit.score;
+        entry.hit_count += 1;
+        entry.hits.push(hit.clone());
+    }
+
+    let mut files = grouped.into_values().collect::<Vec<_>>();
+    for file in &mut files {
+        file.hits.sort_by(|a, b| {
+            b.score
+                .total_cmp(&a.score)
+                .then_with(|| a.start_line.cmp(&b.start_line))
+        });
+    }
+
+    files.sort_by(|a, b| {
+        b.total_score
+            .total_cmp(&a.total_score)
+            .then_with(|| a.file_path.cmp(&b.file_path))
+    });
+
+    if let Some(limit) = limit {
+        files.truncate(limit);
+    }
+
+    files
 }

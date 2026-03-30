@@ -1,11 +1,10 @@
-use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use colored::Colorize;
-use serde::Serialize;
+
 use tracing_subscriber::EnvFilter;
 
 use crate::config;
@@ -13,7 +12,7 @@ use crate::daemon;
 use crate::embedding::create_model;
 use crate::indexer::{index_workspace, remove_workspace_index, workspace_is_indexed};
 use crate::mcp;
-use crate::protocol::{DaemonRequest, DaemonResponse, SearchHit};
+use crate::protocol::{DaemonRequest, DaemonResponse, SearchHit, group_hits_by_file};
 use crate::regex_search::regex_search;
 use crate::search::{SearchOptions, hybrid_search};
 use crate::workspace::{Workspace, list_workspaces, resolve_workspace_and_scope};
@@ -402,14 +401,6 @@ async fn run_query(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Serialize)]
-struct FileSearchResult {
-    file_path: PathBuf,
-    total_score: f32,
-    hit_count: usize,
-    hits: Vec<SearchHit>,
-}
-
 fn render_hits(
     hits: &[SearchHit],
     json: bool,
@@ -498,45 +489,6 @@ fn render_hits(
     }
 
     Ok(())
-}
-
-fn group_hits_by_file(hits: &[SearchHit], limit: Option<usize>) -> Vec<FileSearchResult> {
-    let mut grouped = HashMap::<PathBuf, FileSearchResult>::new();
-
-    for hit in hits {
-        let entry = grouped
-            .entry(hit.file_path.clone())
-            .or_insert_with(|| FileSearchResult {
-                file_path: hit.file_path.clone(),
-                total_score: 0.0,
-                hit_count: 0,
-                hits: vec![],
-            });
-        entry.total_score += hit.score;
-        entry.hit_count += 1;
-        entry.hits.push(hit.clone());
-    }
-
-    let mut files = grouped.into_values().collect::<Vec<_>>();
-    for file in &mut files {
-        file.hits.sort_by(|a, b| {
-            b.score
-                .total_cmp(&a.score)
-                .then_with(|| a.start_line.cmp(&b.start_line))
-        });
-    }
-
-    files.sort_by(|a, b| {
-        b.total_score
-            .total_cmp(&a.total_score)
-            .then_with(|| a.file_path.cmp(&b.file_path))
-    });
-
-    if let Some(limit) = limit {
-        files.truncate(limit);
-    }
-
-    files
 }
 
 fn print_daemon_response(response: DaemonResponse, json: bool) -> Result<()> {
