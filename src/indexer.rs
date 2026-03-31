@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -158,7 +159,20 @@ fn index_workspace_inner(
     )?;
 
     let mut touched_files = HashSet::new();
-    for rel_path in &diff.added_or_modified {
+    let total = diff.added_or_modified.len();
+    let show_progress = total > 0 && std::io::stderr().is_terminal();
+
+    for (idx, rel_path) in diff.added_or_modified.iter().enumerate() {
+        if show_progress {
+            let display = rel_path.to_string_lossy();
+            let label = if display.len() > 60 {
+                format!("…{}", &display[display.len() - 59..])
+            } else {
+                display.to_string()
+            };
+            eprint!("\r\x1b[K  [{}/{}] {}", idx + 1, total, label);
+        }
+
         touched_files.insert(rel_path.to_string_lossy().to_string());
 
         let abs_path = workspace.root.join(rel_path);
@@ -188,6 +202,10 @@ fn index_workspace_inner(
             insert_chunk(&sqlite, &indexed)?;
             add_chunk_doc(&mut writer, &fields, &indexed)?;
         }
+    }
+
+    if show_progress {
+        eprint!("\r\x1b[K");
     }
 
     writer.commit()?;
