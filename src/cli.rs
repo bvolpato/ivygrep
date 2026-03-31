@@ -272,6 +272,14 @@ async fn run_query(cli: Cli) -> Result<()> {
         }
     }
 
+    // Create the embedding model once for the entire local (non-daemon) flow.
+    // Used by both indexing and semantic search; skipped for daemon and regex paths.
+    let local_model = if !search_via_daemon && (!cli.all || !cli.regex) {
+        Some(create_model(cli.hash))
+    } else {
+        None
+    };
+
     if !search_via_daemon && !cli.all {
         if !workspace_is_indexed(&workspace) {
             eprintln!(
@@ -281,7 +289,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                 workspace.root.display().to_string().dimmed()
             );
         }
-        let model = create_model(cli.hash);
+        let model = local_model.as_ref().expect("model created for local path");
         let _summary = index_workspace(&workspace, model.as_ref())?;
     }
 
@@ -350,6 +358,9 @@ async fn run_query(cli: Cli) -> Result<()> {
                 _ => vec![],
             }
         } else {
+            let model = local_model
+                .as_ref()
+                .expect("model created for local search");
             let mut all_hits = Vec::new();
             let workspaces = if cli.all {
                 list_workspaces()?
@@ -360,7 +371,6 @@ async fn run_query(cli: Cli) -> Result<()> {
             } else {
                 vec![workspace.clone()]
             };
-            let model = create_model(cli.hash);
             for ws in workspaces {
                 if let Ok(mut hits) = hybrid_search(
                     &ws,

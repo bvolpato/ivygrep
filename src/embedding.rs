@@ -161,7 +161,11 @@ impl OnnxEmbeddingModel {
         let cache_dir = model_cache_dir();
         std::fs::create_dir_all(&cache_dir)?;
 
-        let needs_download = !cache_dir.join("fast-all-MiniLM-L6-v2").exists();
+        let needs_download = cache_dir
+            .read_dir()
+            .ok()
+            .and_then(|mut entries| entries.next())
+            .is_none();
         if needs_download {
             eprintln!("⟐ Downloading embedding model (~23 MB, one-time)...");
         }
