@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use rayon::prelude::*;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -155,49 +156,69 @@ fn index_workspace_inner(
 
     apply_deletions(&tx, &mut writer, &fields, &mut vector_index, &diff.deleted)?;
 
-    let mut touched_files = HashSet::new();
     let total = diff.added_or_modified.len();
     let show_progress = total > 0 && std::io::stderr().is_terminal();
+    let progress_counter = std::sync::atomic::AtomicUsize::new(0);
 
-    for (idx, rel_path) in diff.added_or_modified.iter().enumerate() {
-        if show_progress {
-            let display = rel_path.to_string_lossy();
-            let label = if display.len() > 60 {
-                format!("…{}", &display[display.len() - 59..])
-            } else {
-                display.to_string()
+    // Phase 1: Parallel read + chunk + embed (CPU-bound, uses all cores).
+    let processed: Vec<_> = diff
+        .added_or_modified
+        .par_iter()
+        .filter_map(|rel_path| {
+            let abs_path = workspace.root.join(rel_path);
+            if !abs_path.exists() {
+                if show_progress {
+                    let n = progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    eprint!("\r\x1b[K  [{}/{}] scanning...", n, total);
+                }
+                return None;
+            }
+
+            let content_bytes = fs::read(&abs_path).ok()?;
+            if !is_indexable_file(rel_path, &content_bytes) {
+                if show_progress {
+                    let n = progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    eprint!("\r\x1b[K  [{}/{}] scanning...", n, total);
+                }
+                return None;
+            }
+
+            let content = match String::from_utf8(content_bytes) {
+                Ok(text) => text,
+                Err(err) => String::from_utf8_lossy(&err.into_bytes()).into_owned(),
             };
-            eprint!("\r\x1b[K  [{}/{}] {}", idx + 1, total, label);
-        }
 
+            let chunks = chunk_source(rel_path, &content);
+            let indexed_chunks: Vec<_> = chunks.into_iter().map(build_indexed_chunk).collect();
+
+            let texts: Vec<&str> = indexed_chunks.iter().map(|c| c.text.as_str()).collect();
+            let embeddings = embedding_model.embed_batch(&texts);
+
+            if show_progress {
+                let n = progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                let display = rel_path.to_string_lossy();
+                let label = if display.len() > 60 {
+                    format!("…{}", &display[display.len() - 59..])
+                } else {
+                    display.to_string()
+                };
+                eprint!("\r\x1b[K  [{}/{}] {}", n, total, label);
+            }
+
+            let pairs: Vec<_> = indexed_chunks.into_iter().zip(embeddings).collect();
+            Some((rel_path.clone(), pairs))
+        })
+        .collect();
+
+    // Phase 2: Sequential write to stores (fast — just DB inserts).
+    let mut touched_files = HashSet::new();
+    for (rel_path, chunk_pairs) in &processed {
         touched_files.insert(rel_path.to_string_lossy().to_string());
-
-        let abs_path = workspace.root.join(rel_path);
-        if !abs_path.exists() {
-            continue;
-        }
 
         remove_file_chunks(&tx, &mut writer, &fields, &mut vector_index, rel_path)?;
 
-        let content_bytes = fs::read(&abs_path)
-            .with_context(|| format!("failed reading {}", abs_path.display()))?;
-        if !is_indexable_file(rel_path, &content_bytes) {
-            continue;
-        }
-
-        let content = match String::from_utf8(content_bytes) {
-            Ok(text) => text,
-            Err(err) => String::from_utf8_lossy(&err.into_bytes()).into_owned(),
-        };
-
-        let chunks = chunk_source(rel_path, &content);
-        let indexed_chunks: Vec<_> = chunks.into_iter().map(build_indexed_chunk).collect();
-
-        let texts: Vec<&str> = indexed_chunks.iter().map(|c| c.text.as_str()).collect();
-        let embeddings = embedding_model.embed_batch(&texts);
-
-        for (indexed, embedding) in indexed_chunks.iter().zip(embeddings) {
-            vector_index.upsert(indexed.vector_key, embedding);
+        for (indexed, embedding) in chunk_pairs {
+            vector_index.upsert(indexed.vector_key, embedding.clone());
             insert_chunk(&tx, indexed)?;
             add_chunk_doc(&mut writer, &fields, indexed)?;
         }
