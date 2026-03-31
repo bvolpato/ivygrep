@@ -19,10 +19,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
             runner: ubuntu-latest
             archive: tar.gz
-          - target: aarch64-unknown-linux-gnu
+            cargo_flags: "--no-default-features"
+          - target: aarch64-unknown-linux-musl
             runner: ubuntu-latest
             archive: tar.gz
             cross: true
@@ -53,14 +54,19 @@ jobs:
           key: release-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: release-${{ matrix.target }}-
 
-      - name: Install cross-compilation tools (aarch64-linux)
+      - name: Install musl tools (x86_64-linux)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install cross-compilation tools (aarch64-linux-musl)
         if: matrix.cross
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu musl-tools
+          # Use the GNU cross-linker for musl target (works for static builds)
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CC_aarch64_unknown_linux_musl=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CXX_aarch64_unknown_linux_musl=aarch64-linux-gnu-g++" >> $GITHUB_ENV
 
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.cargo_flags }}
@@ -161,8 +167,8 @@ jobs:
 
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
-          echo "sha_linux_amd64=$(get_sha "ivygrep-${TAG}-x86_64-unknown-linux-gnu.tar.gz.sha256")" >> $GITHUB_OUTPUT
-          echo "sha_linux_arm64=$(get_sha "ivygrep-${TAG}-aarch64-unknown-linux-gnu.tar.gz.sha256")" >> $GITHUB_OUTPUT
+          echo "sha_linux_amd64=$(get_sha "ivygrep-${TAG}-x86_64-unknown-linux-musl.tar.gz.sha256")" >> $GITHUB_OUTPUT
+          echo "sha_linux_arm64=$(get_sha "ivygrep-${TAG}-aarch64-unknown-linux-musl.tar.gz.sha256")" >> $GITHUB_OUTPUT
           echo "sha_macos_amd64=$(get_sha "ivygrep-${TAG}-x86_64-apple-darwin.tar.gz.sha256")" >> $GITHUB_OUTPUT
           echo "sha_macos_arm64=$(get_sha "ivygrep-${TAG}-aarch64-apple-darwin.tar.gz.sha256")" >> $GITHUB_OUTPUT
 
@@ -200,11 +206,11 @@ jobs:
 
             on_linux do
               if Hardware::CPU.intel?
-                url "https://github.com/bvolpato/ivygrep/releases/download/${{ steps.sha.outputs.tag }}/ivygrep-${{ steps.sha.outputs.tag }}-x86_64-unknown-linux-gnu.tar.gz"
+                url "https://github.com/bvolpato/ivygrep/releases/download/${{ steps.sha.outputs.tag }}/ivygrep-${{ steps.sha.outputs.tag }}-x86_64-unknown-linux-musl.tar.gz"
                 sha256 "${{ steps.sha.outputs.sha_linux_amd64 }}"
               end
               if Hardware::CPU.arm?
-                url "https://github.com/bvolpato/ivygrep/releases/download/${{ steps.sha.outputs.tag }}/ivygrep-${{ steps.sha.outputs.tag }}-aarch64-unknown-linux-gnu.tar.gz"
+                url "https://github.com/bvolpato/ivygrep/releases/download/${{ steps.sha.outputs.tag }}/ivygrep-${{ steps.sha.outputs.tag }}-aarch64-unknown-linux-musl.tar.gz"
                 sha256 "${{ steps.sha.outputs.sha_linux_arm64 }}"
               end
             end
