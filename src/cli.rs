@@ -272,9 +272,12 @@ async fn run_query(cli: Cli) -> Result<()> {
         }
     }
 
-    // Create the embedding model once for the entire local (non-daemon) flow.
-    // Used by both indexing and semantic search; skipped for daemon and regex paths.
-    let local_model = if !search_via_daemon && (!cli.all || !cli.regex) {
+    // Only create the embedding model when actually needed:
+    // - For indexing: only if the workspace isn't indexed yet
+    // - For search: only for semantic (non-regex) search
+    let needs_model_for_index = !search_via_daemon && !cli.all && !workspace_is_indexed(&workspace);
+    let needs_model_for_search = !search_via_daemon && !cli.regex;
+    let local_model = if needs_model_for_index || needs_model_for_search {
         Some(create_model(cli.hash))
     } else {
         None
@@ -289,8 +292,9 @@ async fn run_query(cli: Cli) -> Result<()> {
                 workspace.root.display().to_string().dimmed()
             );
         }
-        let model = local_model.as_ref().expect("model created for local path");
-        let _summary = index_workspace(&workspace, model.as_ref())?;
+        if let Some(ref model) = local_model {
+            let _summary = index_workspace(&workspace, model.as_ref())?;
+        }
     }
 
     let hits = if cli.regex {
