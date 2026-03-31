@@ -191,13 +191,15 @@ fn index_workspace_inner(
         };
 
         let chunks = chunk_source(rel_path, &content);
-        for chunk in chunks {
-            let indexed = build_indexed_chunk(chunk);
-            let embedding = embedding_model.embed(&indexed.text);
+        let indexed_chunks: Vec<_> = chunks.into_iter().map(build_indexed_chunk).collect();
 
+        let texts: Vec<&str> = indexed_chunks.iter().map(|c| c.text.as_str()).collect();
+        let embeddings = embedding_model.embed_batch(&texts);
+
+        for (indexed, embedding) in indexed_chunks.iter().zip(embeddings) {
             vector_index.upsert(indexed.vector_key, embedding);
-            insert_chunk(&tx, &indexed)?;
-            add_chunk_doc(&mut writer, &fields, &indexed)?;
+            insert_chunk(&tx, indexed)?;
+            add_chunk_doc(&mut writer, &fields, indexed)?;
         }
     }
 
@@ -319,7 +321,7 @@ fn add_chunk_doc(
 }
 
 fn insert_chunk(conn: &Connection, chunk: &IndexedChunk) -> Result<()> {
-    conn.execute(
+    let mut stmt = conn.prepare_cached(
         "INSERT OR REPLACE INTO chunks (
             chunk_id,
             file_path,
@@ -332,22 +334,22 @@ fn insert_chunk(conn: &Connection, chunk: &IndexedChunk) -> Result<()> {
             vector_key,
             modified_unix
         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        params![
-            chunk.chunk_id,
-            chunk.file_path.to_string_lossy().to_string(),
-            chunk.start_line as i64,
-            chunk.end_line as i64,
-            chunk.language,
-            chunk.kind,
-            chunk.text,
-            chunk.content_hash,
-            chunk.vector_key as i64,
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64,
-        ],
     )?;
+    stmt.execute(params![
+        chunk.chunk_id,
+        chunk.file_path.to_string_lossy().to_string(),
+        chunk.start_line as i64,
+        chunk.end_line as i64,
+        chunk.language,
+        chunk.kind,
+        chunk.text,
+        chunk.content_hash,
+        chunk.vector_key as i64,
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64,
+    ])?;
     Ok(())
 }
 

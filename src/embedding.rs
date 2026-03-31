@@ -21,6 +21,12 @@ use crate::text::{singularize_token, split_identifier_segments};
 pub trait EmbeddingModel: Send + Sync {
     fn dimensions(&self) -> usize;
     fn embed(&self, text: &str) -> Vec<f32>;
+
+    /// Embed multiple texts in a single call. Backends that support batch
+    /// inference (e.g. ONNX) override this for significant speedup.
+    fn embed_batch(&self, texts: &[&str]) -> Vec<Vec<f32>> {
+        texts.iter().map(|t| self.embed(t)).collect()
+    }
 }
 
 /// Returns the embedding dimension for the selected mode.
@@ -208,6 +214,16 @@ impl EmbeddingModel for OnnxEmbeddingModel {
             .ok()
             .and_then(|mut vecs| vecs.pop())
             .unwrap_or_else(|| vec![0.0; 384])
+    }
+
+    fn embed_batch(&self, texts: &[&str]) -> Vec<Vec<f32>> {
+        if texts.is_empty() {
+            return vec![];
+        }
+        self.model
+            .lock()
+            .embed(texts, None)
+            .unwrap_or_else(|_| texts.iter().map(|_| vec![0.0; 384]).collect())
     }
 }
 
