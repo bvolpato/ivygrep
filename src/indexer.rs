@@ -150,13 +150,10 @@ fn index_workspace_inner(
     let mut vector_index =
         VectorStore::open(&workspace.vector_path(), embedding_model.dimensions())?;
 
-    apply_deletions(
-        &mut sqlite,
-        &mut writer,
-        &fields,
-        &mut vector_index,
-        &diff.deleted,
-    )?;
+    // Batch all SQLite writes in a single transaction for ~10-50x speedup.
+    let tx = sqlite.transaction()?;
+
+    apply_deletions(&tx, &mut writer, &fields, &mut vector_index, &diff.deleted)?;
 
     let mut touched_files = HashSet::new();
     let total = diff.added_or_modified.len();
@@ -180,7 +177,7 @@ fn index_workspace_inner(
             continue;
         }
 
-        remove_file_chunks(&sqlite, &mut writer, &fields, &mut vector_index, rel_path)?;
+        remove_file_chunks(&tx, &mut writer, &fields, &mut vector_index, rel_path)?;
 
         let content_bytes = fs::read(&abs_path)
             .with_context(|| format!("failed reading {}", abs_path.display()))?;
@@ -199,7 +196,7 @@ fn index_workspace_inner(
             let embedding = embedding_model.embed(&indexed.text);
 
             vector_index.upsert(indexed.vector_key, embedding);
-            insert_chunk(&sqlite, &indexed)?;
+            insert_chunk(&tx, &indexed)?;
             add_chunk_doc(&mut writer, &fields, &indexed)?;
         }
     }
@@ -207,6 +204,8 @@ fn index_workspace_inner(
     if show_progress {
         eprint!("\r\x1b[K");
     }
+
+    tx.commit()?;
 
     writer.commit()?;
     writer.wait_merging_threads()?;
@@ -269,7 +268,7 @@ fn vector_key_from_content_hash(content_hash: &str) -> u64 {
 }
 
 fn apply_deletions(
-    sqlite: &mut Connection,
+    sqlite: &Connection,
     writer: &mut tantivy::IndexWriter,
     fields: &TantivyFields,
     vector_index: &mut VectorStore,
@@ -379,6 +378,9 @@ pub fn open_sqlite(sqlite_path: &Path) -> Result<Connection> {
 fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+
         CREATE TABLE IF NOT EXISTS chunks (
             chunk_id TEXT PRIMARY KEY,
             file_path TEXT NOT NULL,
