@@ -165,96 +165,87 @@ fn index_workspace_inner(
     let progress_counter = std::sync::atomic::AtomicUsize::new(0);
 
     let t0 = std::time::Instant::now();
-
-    // Phase 1: Parallel read + chunk (truly parallel — no locks).
-    if show_progress {
-        eprint!("\r\x1b[K  reading & chunking...");
-    }
-    let file_chunks: Vec<_> = diff
-        .added_or_modified
-        .par_iter()
-        .filter_map(|rel_path| {
-            let abs_path = workspace.root.join(rel_path);
-            if !abs_path.exists() {
-                progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return None;
-            }
-
-            let content_bytes = fs::read(&abs_path).ok()?;
-            if !is_indexable_file(rel_path, &content_bytes) {
-                progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return None;
-            }
-
-            let content = match String::from_utf8(content_bytes) {
-                Ok(text) => text,
-                Err(err) => String::from_utf8_lossy(&err.into_bytes()).into_owned(),
-            };
-
-            let chunks = chunk_source(rel_path, &content);
-            let indexed: Vec<_> = chunks.into_iter().map(build_indexed_chunk).collect();
-
-            if show_progress {
-                let n = progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                eprint!("\r\x1b[K  [{}/{}] chunking...", n, total);
-            }
-
-            if indexed.is_empty() {
-                return None;
-            }
-            Some((rel_path.clone(), indexed))
-        })
-        .collect();
-
-    let t1 = std::time::Instant::now();
-
-    // Phase 2: Batch embed ALL chunks in one call (no per-file mutex contention).
-    let total_chunks: usize = file_chunks.iter().map(|(_, c)| c.len()).sum();
-    if show_progress {
-        eprint!(
-            "\r\x1b[K  embedding {} chunks ({} files)...",
-            total_chunks,
-            file_chunks.len()
-        );
-    }
-
-    let all_texts: Vec<&str> = file_chunks
-        .iter()
-        .flat_map(|(_, chunks)| chunks.iter().map(|c| c.text.as_str()))
-        .collect();
-    let all_embeddings = embedding_model.embed_batch(&all_texts);
-
-    let t2 = std::time::Instant::now();
-
-    // Phase 3: Sequential write to stores (fast — just DB inserts).
-    if show_progress {
-        eprint!("\r\x1b[K  writing index...");
-    }
+    let mut total_chunks_processed = 0;
     let mut touched_files = HashSet::new();
-    let mut embed_idx = 0;
-    for (rel_path, indexed_chunks) in &file_chunks {
-        touched_files.insert(rel_path.to_string_lossy().to_string());
 
-        remove_file_chunks(&tx, &mut writer, &fields, &mut vector_index, rel_path)?;
+    // Stream through batches to rigidly bound memory footprints.
+    // 4096 files is highly parallelizable while capping memory overhead effectively.
+    for batch_paths in diff.added_or_modified.chunks(4096) {
+        if show_progress {
+            let current = progress_counter.load(std::sync::atomic::Ordering::Relaxed);
+            eprint!("\r\x1b[K  [{current}/{total}] streaming files to sqlite/tantivy...");
+        }
 
-        for indexed in indexed_chunks {
-            let embedding = all_embeddings[embed_idx].clone();
-            embed_idx += 1;
-            vector_index.upsert(indexed.vector_key, embedding);
-            insert_chunk(&tx, indexed)?;
-            add_chunk_doc(&mut writer, &fields, indexed)?;
+        // Phase 1: Parallel read + chunk exactly ONE batch.
+        let file_chunks: Vec<_> = batch_paths
+            .par_iter()
+            .filter_map(|rel_path| {
+                let abs_path = workspace.root.join(rel_path);
+                if !abs_path.exists() {
+                    progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return None;
+                }
+
+                let content_bytes = fs::read(&abs_path).ok()?;
+                if !is_indexable_file(rel_path, &content_bytes) {
+                    progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return None;
+                }
+
+                let content = match String::from_utf8(content_bytes) {
+                    Ok(text) => text,
+                    Err(err) => String::from_utf8_lossy(&err.into_bytes()).into_owned(),
+                };
+
+                let chunks = chunk_source(rel_path, &content);
+                let indexed: Vec<_> = chunks.into_iter().map(build_indexed_chunk).collect();
+                
+                progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                if indexed.is_empty() {
+                    return None;
+                }
+                Some((rel_path.clone(), indexed))
+            })
+            .collect();
+
+        if file_chunks.is_empty() {
+            continue;
+        }
+
+        // Phase 2: Batch embed (very fast hashing model).
+        let all_texts: Vec<&str> = file_chunks
+            .iter()
+            .flat_map(|(_, chunks)| chunks.iter().map(|c| c.text.as_str()))
+            .collect();
+        
+        let all_embeddings = embedding_model.embed_batch(&all_texts);
+
+        // Phase 3: Sequential sync to persistence layers.
+        let mut embed_idx = 0;
+        for (rel_path, indexed_chunks) in &file_chunks {
+            touched_files.insert(rel_path.to_string_lossy().to_string());
+            total_chunks_processed += indexed_chunks.len();
+
+            remove_file_chunks(&tx, &mut writer, &fields, &mut vector_index, rel_path)?;
+
+            for indexed in indexed_chunks {
+                let embedding = all_embeddings[embed_idx].clone();
+                embed_idx += 1;
+                vector_index.upsert(indexed.vector_key, embedding);
+                insert_chunk(&tx, indexed)?;
+                add_chunk_doc(&mut writer, &fields, indexed)?;
+            }
         }
     }
 
-    let t3 = std::time::Instant::now();
+    let t1 = std::time::Instant::now();
     if total > 0 {
         eprint!(
-            "\r\x1b[K  ✓ {} files, {} chunks — read {:.1}s, embed {:.1}s, write {:.1}s\n",
-            file_chunks.len(),
-            total_chunks,
-            t1.duration_since(t0).as_secs_f64(),
-            t2.duration_since(t1).as_secs_f64(),
-            t3.duration_since(t2).as_secs_f64(),
+            "\r\x1b[K  ✓ {} files, {} chunks — indexed completely in {:.1}s\n",
+            touched_files.len(),
+            total_chunks_processed,
+            t1.duration_since(t0).as_secs_f64()
         );
     }
 
