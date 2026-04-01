@@ -1849,6 +1849,7 @@ dependencies = [
  "hex",
  "ignore",
  "insta",
+ "libc",
  "notify",
  "num_cpus",
  "ort",

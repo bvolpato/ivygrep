@@ -137,9 +137,22 @@ pub async fn run() -> Result<()> {
 
     if let Some(path) = &cli.enhance_internal {
         let workspace = Workspace::resolve(path)?;
-        if let Ok(model) = crate::embedding::create_neural_model_background() {
-            let _ = crate::indexer::enhance_workspace_neural(&workspace, model.as_ref());
-        }
+        workspace.ensure_dirs()?;
+
+        // Write PID file so --status can show "enhancing..."
+        let pid_path = workspace.enhancing_pid_path();
+        let _ = std::fs::write(&pid_path, std::process::id().to_string());
+
+        let result = if let Ok(model) = crate::embedding::create_neural_model_background() {
+            crate::indexer::enhance_workspace_neural(&workspace, model.as_ref())
+        } else {
+            Ok(0)
+        };
+
+        // Clean up PID file
+        let _ = std::fs::remove_file(&pid_path);
+
+        result?;
         return Ok(());
     }
 
@@ -194,7 +207,7 @@ async fn run_status(json: bool) -> Result<()> {
             let size = format_bytes(ws.index_size_bytes);
             println!("  Size:   {}", size);
 
-            // Embedding status — the key new info
+            // Embedding status
             if ws.has_neural_vectors {
                 let pct = if ws.chunk_count > 0 {
                     let ratio = (ws.neural_vector_count as f64 / ws.chunk_count as f64) * 100.0;
@@ -205,6 +218,10 @@ async fn run_status(json: bool) -> Result<()> {
                 println!(
                     "  Search: \x1b[1;32m★ neural\x1b[0m ({} enhanced, {})",
                     ws.neural_vector_count, pct
+                );
+            } else if ws.enhancing_in_progress {
+                println!(
+                    "  Search: \x1b[1;33m⟳ enhancing\x1b[0m (neural embeddings computing in background...)"
                 );
             } else if ws.chunk_count > 0 {
                 println!(

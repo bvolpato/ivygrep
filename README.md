@@ -71,10 +71,7 @@ cargo build --release
 install -m 0755 ./target/release/ig ~/.local/bin/ig
 ```
 
-**With Apple GPU acceleration** (macOS, recommended on Apple Silicon):
-```bash
-cargo build --release --features coreml
-```
+> **Note on macOS**: Building on macOS automatically enables the Apple CoreML Execution Provider, offloading embedding generation to the Neural Engine / GPU with zero configuration.
 
 **Binary downloads**: grab the latest from [Releases](https://github.com/bvolpato/ivygrep/releases/latest) — available for Linux (x86/ARM) and macOS (Intel/Apple Silicon).
 

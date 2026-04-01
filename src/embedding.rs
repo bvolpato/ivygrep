@@ -198,23 +198,20 @@ fn ort_thread_budget() -> usize {
     (cpus / 2).max(2)
 }
 
-/// Register CoreML execution provider (Apple Neural Engine / GPU) if compiled in.
-/// This is a no-op if `coreml` feature is not enabled.
+/// Register CoreML execution provider (Apple Neural Engine / GPU).
+/// Automatically compiled in on macOS builds.
 #[cfg(feature = "neural")]
 fn register_coreml() {
-    #[cfg(feature = "coreml")]
+    #[cfg(target_os = "macos")]
     {
         // ort::init() is idempotent; first call wins.
-        if let Err(e) = ort::init()
-            .with_execution_providers([ort::execution_providers::CoreMLExecutionProvider::default(
-            )
-            .build()])
-            .commit()
-        {
-            tracing::debug!("CoreML EP registration skipped: {e}");
-        } else {
-            tracing::info!("CoreML execution provider registered");
-        }
+        // In ort rc.11, commit() returns bool (true if this call did the init).
+        let _ = ort::init()
+            .with_execution_providers([
+                ort::execution_providers::CoreMLExecutionProvider::default().build(),
+            ])
+            .commit();
+        tracing::info!("CoreML execution provider registered");
     }
 }
 

@@ -35,6 +35,8 @@ pub struct WorkspaceStatus {
     pub index_size_bytes: u64,
     pub has_neural_vectors: bool,
     pub neural_vector_count: u64,
+    #[serde(default)]
+    pub enhancing_in_progress: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -89,6 +91,12 @@ impl Workspace {
 
     pub fn vector_neural_path(&self) -> PathBuf {
         self.index_dir.join("vectors_neural.usearch")
+    }
+
+    /// PID file written by the background `--enhance-internal` process.
+    /// Contains the PID so `--status` can detect whether enhancement is in progress.
+    pub fn enhancing_pid_path(&self) -> PathBuf {
+        self.index_dir.join(".enhancing.pid")
     }
 
     pub fn merkle_snapshot_path(&self) -> PathBuf {
@@ -218,6 +226,10 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
             0
         };
 
+        // Check if enhancement is actively running
+        let pid_path = index_dir.join(".enhancing.pid");
+        let enhancing_in_progress = is_enhancing_alive(&pid_path);
+
         by_id.insert(
             metadata.id.clone(),
             WorkspaceStatus {
@@ -230,6 +242,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
                 index_size_bytes,
                 has_neural_vectors,
                 neural_vector_count,
+                enhancing_in_progress,
             },
         );
     }
@@ -278,6 +291,37 @@ fn dir_size_bytes(dir: &Path) -> u64 {
         total
     }
     walk(dir)
+}
+
+/// Check if a background enhancement process is alive by reading the PID file.
+/// Returns false (and cleans up the file) if the PID is stale.
+fn is_enhancing_alive(pid_path: &Path) -> bool {
+    let content = match fs::read_to_string(pid_path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let pid: i32 = match content.trim().parse() {
+        Ok(p) => p,
+        Err(_) => {
+            let _ = fs::remove_file(pid_path);
+            return false;
+        }
+    };
+
+    // kill(pid, 0) checks if process exists without sending a signal
+    #[cfg(unix)]
+    {
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        if !alive {
+            let _ = fs::remove_file(pid_path);
+        }
+        alive
+    }
+    #[cfg(not(unix))]
+    {
+        // On non-unix, just check if the file exists (best effort)
+        true
+    }
 }
 
 #[cfg(test)]
