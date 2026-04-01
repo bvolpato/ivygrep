@@ -211,7 +211,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 let mut all_hits = Vec::new();
                 let ws_neural_missing: Vec<PathBuf> = workspaces
                     .iter()
-                    .filter(|w| !w.vector_neural_path().exists())
+                    .filter(|w| !w.vector_neural_path().exists() && !w.is_enhancing_active())
                     .map(|w| w.root.clone())
                     .collect();
 

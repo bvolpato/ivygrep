@@ -99,6 +99,11 @@ impl Workspace {
         self.index_dir.join(".enhancing.pid")
     }
 
+    /// Checks if an enhancement process is currently running for this workspace.
+    pub fn is_enhancing_active(&self) -> bool {
+        is_enhancing_alive(&self.enhancing_pid_path())
+    }
+
     pub fn merkle_snapshot_path(&self) -> PathBuf {
         self.index_dir.join("merkle_snapshot.json")
     }
