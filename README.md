@@ -111,21 +111,25 @@ flowchart TD
 ```
 
 **On first search:**
-1. **Index instantly** with hash embeddings (~0.0s for typical repos)
-2. **Return results** immediately via lexical + hash-semantic fusion 
-3. **Enhance silently** — a background process computes neural (ONNX) embeddings using throttled CPU (half your cores) so your machine stays responsive
-4. **Subsequent queries** automatically use the higher-quality neural vectors
-5. **GPU acceleration** — on macOS with CoreML enabled, embeddings run on the Apple Neural Engine / GPU
+1. **Index instantly** with structural hashes (~0.0s for typical repos, via 128-bit SIMD `xxh3`)
+2. **Stream into DB** through an asynchronous MPSC chunking pipeline, maintaining absolute minimal memory footprints (handling even the 85,000+ files of the Linux kernel smoothly).
+3. **Return results** immediately via lexical + hash-semantic fusion.
+4. **Enhance silently** — a background daemon independently processes neural (ONNX) embeddings utilizing throttled CPUs to maintain responsiveness.
+5. **GPU Acceleration** — on macOS, ONNX natively links to Apple CoreML Execution Providers, offloading matrix multiplications entirely to the ANE (Apple Neural Engine) autonomously.
+6. **Subsequent queries** seamlessly adopt the high-precision neural vectors!
 
-Use `ig --status` to see where each workspace stands:
+Use `ig --status` to transparently examine how each workspace is dynamically tracking inside the background daemon:
 
 ```
 ⟐ /Users/you/project
   Index:  ✓ indexed (2m ago)
   Files:  41 files, 440 chunks
   Size:   1.7 MB
-  Search: ★ neural (440 enhanced, 100%)
+  Search: ⟳ enhancing (computing AllMiniLML6V2Q via CoreML in background...)
+          (200 / 440 chunks, ~45%)
 ```
+
+> If you wish to forcibly blockade `ig` queries from evaluating strictly UNTIL neural indexing hits 100% (to prevent partial BM25 hybridization), pass the `--wait-for-enhancement` flag.
 
 - **Lexical path** — BM25 scoring via [Tantivy](https://github.com/quickwit-oss/tantivy) catches exact keyword matches
 - **Semantic path** — starts with hash embeddings (instant), upgrades to quantized ONNX neural embeddings in background
@@ -313,10 +317,10 @@ ivygrep
 ├── tantivy         — lexical BM25 index
 ├── usearch         — vector similarity index (hash + neural stores)
 ├── tree-sitter     — AST-based code chunking (35+ languages)
-├── fastembed       — quantized ONNX embeddings (AllMiniLML6V2Q, 384-dim)
-├── hash embeddings — instant zero-dependency embeddings for indexing
+├── fastembed       — quantized ONNX embeddings (AllMiniLML6V2Q, 384-dim, CoreML accelerated)
+├── xxh3 (xxhash)   — hyper-fast 128-bit SIMD structural block hashes
 ├── notify          — filesystem watcher for live re-indexing
-├── SQLite          — metadata store per workspace
+├── SQLite          — metadata store natively synced via Async MPSC streaming channels
 └── Unix socket     — daemon IPC (auto-spawned)
 ```
 
