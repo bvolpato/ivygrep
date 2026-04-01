@@ -312,9 +312,13 @@ pub fn enhance_workspace_neural(
     // Use a small batch size to bound ONNX/CoreML intermediate Tensor allocations
     // (e.g. attention matrices). A size of 128 spikes up to 1GB+ RAM.
     let mut batch = Vec::with_capacity(8);
-    let mut total_processed = 0;
+    let mut newly_processed = 0;
+    
+    // To support resumption, we'll discover how many are already in the index
+    // so we can correctly broadcast our starting percentage.
+    let mut progress_count = 0;
 
-    let mut process_batch = |batch: &mut Vec<(u64, String)>, count: &mut usize| {
+    let process_batch = |batch: &mut Vec<(u64, String)>, count: &mut usize, v_index: &mut VectorStore| {
         if batch.is_empty() {
             return;
         }
@@ -322,25 +326,47 @@ pub fn enhance_workspace_neural(
         let embeddings = neural_model.embed_batch(&texts);
 
         for ((key, _), embedding) in batch.iter().zip(embeddings) {
-            vector_index.upsert(*key, embedding);
+            v_index.upsert(*key, embedding);
         }
         *count += batch.len();
         batch.clear();
     };
 
+    let progress_path = workspace.index_dir.join(".enhancing.progress");
+
     for row in rows.flatten() {
+        if vector_index.contains(row.0) {
+            progress_count += 1;
+            continue;
+        }
+
         batch.push(row);
         if batch.len() >= 8 {
-            process_batch(&mut batch, &mut total_processed);
+            process_batch(&mut batch, &mut newly_processed, &mut vector_index);
+            progress_count += 8;
+
+            if progress_count % 256 == 0 {
+                // Periodically update the human-readable progress file
+                let _ = std::fs::write(&progress_path, progress_count.to_string());
+            }
+
+            if newly_processed % 8192 == 0 {
+                // Periodically save to disk to support partial resumption 
+                // and immediate hybrid-search upgrades.
+                let _ = vector_index.save();
+            }
         }
     }
 
     // Process any remaining tail
-    process_batch(&mut batch, &mut total_processed);
-
+    let tail_len = batch.len();
+    process_batch(&mut batch, &mut newly_processed, &mut vector_index);
+    progress_count += tail_len;
+    
+    let _ = std::fs::write(&progress_path, progress_count.to_string());
     vector_index.save()?;
 
-    Ok(total_processed)
+    Ok(newly_processed)
 }
 
 fn build_indexed_chunk(chunk: Chunk) -> IndexedChunk {

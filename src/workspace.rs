@@ -38,6 +38,8 @@ pub struct WorkspaceStatus {
     #[serde(default)]
     pub enhancing_in_progress: bool,
     #[serde(default)]
+    pub enhancing_progress_count: Option<u64>,
+    #[serde(default)]
     pub indexing_in_progress: bool,
 }
 
@@ -99,6 +101,10 @@ impl Workspace {
     /// Contains the PID so `--status` can detect whether enhancement is in progress.
     pub fn enhancing_pid_path(&self) -> PathBuf {
         self.index_dir.join(".enhancing.pid")
+    }
+
+    pub fn enhancing_progress_path(&self) -> PathBuf {
+        self.index_dir.join(".enhancing.progress")
     }
 
     pub fn indexing_pid_path(&self) -> PathBuf {
@@ -281,6 +287,15 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
         // Check if indexing is actively running
         let indexing_pid_path = index_dir.join(".indexing.pid");
         let indexing_in_progress = is_active_pid_alive(&indexing_pid_path);
+        
+        let enhancing_progress_count = if enhancing_in_progress {
+            let progress_path = index_dir.join(".enhancing.progress");
+            std::fs::read_to_string(&progress_path)
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+        } else {
+            None
+        };
 
         by_id.insert(
             metadata.id.clone(),
@@ -295,6 +310,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
                 has_neural_vectors,
                 neural_vector_count,
                 enhancing_in_progress,
+                enhancing_progress_count,
                 indexing_in_progress,
             },
         );

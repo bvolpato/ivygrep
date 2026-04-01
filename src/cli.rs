@@ -216,7 +216,25 @@ async fn run_status(json: bool) -> Result<()> {
             println!("  Size:   {}", size);
 
             // Embedding status
-            if ws.has_neural_vectors {
+            if ws.enhancing_in_progress {
+                let accel = crate::embedding::hardware_acceleration_info();
+                
+                let progress_str = if let Some(count) = ws.enhancing_progress_count {
+                    let pct = if ws.chunk_count > 0 {
+                        (count as f64 / ws.chunk_count as f64 * 100.0).min(100.0) as u64
+                    } else {
+                        100
+                    };
+                    format!("({} / {} chunks, ~{}%), ", count, ws.chunk_count, pct)
+                } else {
+                    String::new()
+                };
+
+                println!(
+                    "  Search: \x1b[1;33m⟳ enhancing\x1b[0m {progress_str}(computing {} in background...)",
+                    accel
+                );
+            } else if ws.has_neural_vectors {
                 let pct = if ws.chunk_count > 0 {
                     let ratio = (ws.neural_vector_count as f64 / ws.chunk_count as f64) * 100.0;
                     format!("{:.0}%", ratio.min(100.0))
@@ -227,12 +245,6 @@ async fn run_status(json: bool) -> Result<()> {
                 println!(
                     "  Search: \x1b[1;32m★ neural\x1b[0m ({} enhanced, {}, {})",
                     ws.neural_vector_count, pct, accel
-                );
-            } else if ws.enhancing_in_progress {
-                let accel = crate::embedding::hardware_acceleration_info();
-                println!(
-                    "  Search: \x1b[1;33m⟳ enhancing\x1b[0m (computing {} in background...)",
-                    accel
                 );
             } else if ws.indexing_in_progress {
                 println!(
