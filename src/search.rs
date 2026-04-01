@@ -697,4 +697,117 @@ mod tests {
                 .all(|hit| hit.file_path.starts_with(std::path::Path::new("scoped")))
         );
     }
+
+    #[test]
+    #[serial]
+    fn search_works_with_hash_only_no_neural() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(
+            tmp.path().join("payments.rs"),
+            "pub fn process_payment(amount: f64, method: &str) -> bool { amount > 0.0 }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        // No neural store — should fall back to hash vectors
+        assert!(!workspace.vector_neural_path().exists());
+
+        let hits = hybrid_search(
+            &workspace,
+            "process payment",
+            &model,
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert!(!hits.is_empty());
+        assert!(hits[0].preview.contains("process_payment"));
+    }
+
+    #[test]
+    #[serial]
+    fn search_uses_neural_vectors_when_available() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(
+            tmp.path().join("auth.rs"),
+            "pub fn authenticate_user(token: &str) -> bool { !token.is_empty() }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        // Search before neural enhancement
+        let hits_before = hybrid_search(
+            &workspace,
+            "authenticate user",
+            &model,
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert!(!hits_before.is_empty());
+
+        // Run neural enhancement (using hash model as stand-in)
+        crate::indexer::enhance_workspace_neural(&workspace, &model).unwrap();
+        assert!(workspace.vector_neural_path().exists());
+
+        // Search after neural enhancement — should still work
+        let hits_after = hybrid_search(
+            &workspace,
+            "authenticate user",
+            &model,
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert!(!hits_after.is_empty());
+        assert!(hits_after[0].preview.contains("authenticate_user"));
+    }
+
+    #[test]
+    #[serial]
+    fn search_after_reindex_and_enhance_returns_new_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(
+            tmp.path().join("v1.rs"),
+            "pub fn original_func() -> i32 { 42 }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        crate::indexer::enhance_workspace_neural(&workspace, &model).unwrap();
+
+        // Add new file, re-index, re-enhance
+        std::fs::write(
+            tmp.path().join("v2.rs"),
+            "pub fn payment_gateway(amount: f64) -> bool { amount > 0.0 }\n",
+        )
+        .unwrap();
+        index_workspace(&workspace, &model).unwrap();
+        crate::indexer::enhance_workspace_neural(&workspace, &model).unwrap();
+
+        // Should find the new content
+        let hits = hybrid_search(
+            &workspace,
+            "payment gateway",
+            &model,
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert!(!hits.is_empty());
+        assert!(hits[0].preview.contains("payment_gateway"));
+    }
 }

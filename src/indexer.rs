@@ -700,4 +700,122 @@ mod tests {
         assert!(rows.iter().any(|path| path == "kept.rs"));
         assert!(!rows.iter().any(|path| path == "ignored.rs"));
     }
+
+    #[test]
+    #[serial]
+    fn enhance_workspace_neural_creates_vector_store() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        fs::write(
+            root.path().join("lib.rs"),
+            "pub fn calculate_tax(amount: f64) -> f64 { amount * 0.2 }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("util.rs"),
+            "pub fn format_currency(val: f64) -> String { format!(\"${:.2}\", val) }\n",
+        )
+        .unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let hash_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+
+        // Phase 1: index with hash
+        let summary = index_workspace(&workspace, &hash_model).unwrap();
+        assert!(summary.total_chunks >= 2);
+        assert!(!workspace.vector_neural_path().exists());
+
+        // Phase 2: enhance with neural (using hash as stand-in for ONNX in tests)
+        let neural_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        let enhanced = enhance_workspace_neural(&workspace, &neural_model).unwrap();
+        assert_eq!(enhanced, summary.total_chunks);
+
+        // Verify neural vector store was created
+        assert!(workspace.vector_neural_path().exists());
+
+        // Verify the neural store has correct number of vectors
+        let store = crate::vector_store::VectorStore::open(
+            &workspace.vector_neural_path(),
+            EMBEDDING_DIMENSIONS,
+        )
+        .unwrap();
+        assert_eq!(store.size(), enhanced);
+    }
+
+    #[test]
+    #[serial]
+    fn enhance_workspace_neural_is_idempotent() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        fs::write(
+            root.path().join("app.rs"),
+            "pub fn process(data: &str) -> String { data.to_uppercase() }\n",
+        )
+        .unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let hash_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &hash_model).unwrap();
+
+        let neural_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+
+        let n1 = enhance_workspace_neural(&workspace, &neural_model).unwrap();
+        let n2 = enhance_workspace_neural(&workspace, &neural_model).unwrap();
+        assert_eq!(n1, n2, "enhance should be idempotent");
+    }
+
+    #[test]
+    #[serial]
+    fn enhance_neural_reflects_index_changes() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        fs::write(
+            root.path().join("mod.rs"),
+            "pub fn original() -> i32 { 1 }\n",
+        )
+        .unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let hash_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &hash_model).unwrap();
+
+        let neural_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        let n1 = enhance_workspace_neural(&workspace, &neural_model).unwrap();
+
+        // Add more files and re-index
+        for i in 0..5 {
+            fs::write(
+                root.path().join(format!("extra_{i}.rs")),
+                format!("pub fn extra_{i}() -> i32 {{ {i} }}\n"),
+            )
+            .unwrap();
+        }
+        index_workspace(&workspace, &hash_model).unwrap();
+
+        // Re-enhance — should now cover more chunks
+        let n2 = enhance_workspace_neural(&workspace, &neural_model).unwrap();
+        assert!(
+            n2 > n1,
+            "neural enhancement should cover new chunks: before={n1} after={n2}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn enhance_neural_returns_zero_for_empty_index() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let hash_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &hash_model).unwrap();
+
+        let neural_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        let n = enhance_workspace_neural(&workspace, &neural_model).unwrap();
+        assert_eq!(n, 0, "empty index should produce zero enhanced chunks");
+    }
 }

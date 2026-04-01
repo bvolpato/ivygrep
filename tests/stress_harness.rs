@@ -1361,3 +1361,314 @@ fn stress_double_index_idempotent() {
         s1.total_chunks
     );
 }
+
+// ============================================================================
+// 16. Hash indexing speed benchmark (synthetic codebase)
+// ============================================================================
+
+#[test]
+#[serial]
+fn stress_hash_index_speed_benchmark() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+    // Generate a 200-file mixed-language codebase
+    for i in 0..200 {
+        let (ext, content) = match i % 5 {
+            0 => (
+                "rs",
+                format!(
+                    "pub fn compute_{i}(x: f64, y: f64) -> f64 {{\n    let result = x * {}.0 + y;\n    result.abs()\n}}\n",
+                    i + 1
+                ),
+            ),
+            1 => (
+                "py",
+                format!(
+                    "def process_{i}(data):\n    \"\"\"Process item {i}\"\"\"\n    return [x * {} for x in data]\n",
+                    i
+                ),
+            ),
+            2 => (
+                "ts",
+                format!(
+                    "export function handler_{i}(req: Request): Response {{\n    const val = req.body.value * {};\n    return {{ status: 200, data: val }};\n}}\n",
+                    i
+                ),
+            ),
+            3 => (
+                "java",
+                format!(
+                    "public class Service{i} {{\n    public int execute(int x) {{\n        return x * {};\n    }}\n}}\n",
+                    i + 1
+                ),
+            ),
+            _ => (
+                "go",
+                format!(
+                    "func Handle{i}(w http.ResponseWriter, r *http.Request) {{\n    val := {} * 2\n    fmt.Fprintf(w, \"%d\", val)\n}}\n",
+                    i
+                ),
+            ),
+        };
+        fs::write(root.path().join(format!("module_{i:03}.{ext}")), content).unwrap();
+    }
+
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+
+    let start = Instant::now();
+    let summary = index_workspace(&workspace, &model).unwrap();
+    let elapsed = start.elapsed();
+
+    eprintln!(
+        "[hash-benchmark] 200 files, {} chunks indexed in {:.3}s",
+        summary.total_chunks,
+        elapsed.as_secs_f64(),
+    );
+
+    // Hash indexing 200 files should complete in under 5 seconds
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "hash indexing too slow: {:?}",
+        elapsed
+    );
+    assert!(summary.indexed_files >= 190, "should index most files");
+    assert!(summary.total_chunks >= 200, "should produce many chunks");
+
+    // Verify re-index is near-instant
+    let re_start = Instant::now();
+    let re_summary = index_workspace(&workspace, &model).unwrap();
+    let re_elapsed = re_start.elapsed();
+
+    assert_eq!(re_summary.indexed_files, 0);
+    assert!(
+        re_elapsed < Duration::from_secs(2),
+        "re-index too slow: {:?}",
+        re_elapsed
+    );
+
+    eprintln!(
+        "[hash-benchmark] re-index (no changes) in {:.3}s",
+        re_elapsed.as_secs_f64(),
+    );
+}
+
+// ============================================================================
+// 17. Neural enhancement speed benchmark
+// ============================================================================
+
+#[test]
+#[serial]
+fn stress_neural_enhance_benchmark() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+    // Generate 100 files
+    for i in 0..100 {
+        fs::write(
+            root.path().join(format!("svc_{i:03}.rs")),
+            format!(
+                "/// Service {i} handles request routing\npub fn handle_{i}(req: &str) -> String {{\n    format!(\"response_{i}: {{}}\", req)\n}}\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+
+    // Phase 1: Hash index
+    let t0 = Instant::now();
+    let summary = index_workspace(&workspace, &model).unwrap();
+    let hash_elapsed = t0.elapsed();
+
+    // Phase 2: Neural enhancement (using hash model as stand-in)
+    let t1 = Instant::now();
+    let enhanced = ivygrep::indexer::enhance_workspace_neural(&workspace, &model).unwrap();
+    let enhance_elapsed = t1.elapsed();
+
+    eprintln!(
+        "[neural-benchmark] {} files, {} chunks:\n  hash index: {:.3}s\n  neural enhance: {:.3}s\n  total: {:.3}s",
+        summary.indexed_files,
+        summary.total_chunks,
+        hash_elapsed.as_secs_f64(),
+        enhance_elapsed.as_secs_f64(),
+        (hash_elapsed + enhance_elapsed).as_secs_f64(),
+    );
+
+    assert_eq!(enhanced, summary.total_chunks);
+    assert!(workspace.vector_neural_path().exists());
+
+    // Both phases with HashEmbeddingModel should be very fast
+    assert!(
+        hash_elapsed < Duration::from_secs(3),
+        "hash index too slow: {:?}",
+        hash_elapsed
+    );
+    assert!(
+        enhance_elapsed < Duration::from_secs(3),
+        "neural enhance too slow: {:?}",
+        enhance_elapsed
+    );
+}
+
+// ============================================================================
+// 18. Full two-tier upgrade pipeline (index → search → enhance → search)
+// ============================================================================
+
+#[test]
+#[serial]
+fn stress_two_tier_upgrade_pipeline() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+    // Create a realistic codebase
+    let files = vec![
+        (
+            "auth.rs",
+            "pub fn authenticate_user(token: &str) -> bool { !token.is_empty() }\npub fn validate_session(id: u64) -> bool { id > 0 }\n",
+        ),
+        (
+            "payments.rs",
+            "pub fn process_payment(amount: f64, currency: &str) -> Result<(), String> { Ok(()) }\npub fn refund_payment(tx_id: &str) -> bool { true }\n",
+        ),
+        (
+            "users.rs",
+            "pub struct User { pub name: String, pub email: String }\npub fn create_user(name: &str, email: &str) -> User { User { name: name.to_string(), email: email.to_string() } }\n",
+        ),
+        (
+            "database.rs",
+            "pub fn connect_db(url: &str) -> bool { !url.is_empty() }\npub fn run_query(sql: &str) -> Vec<String> { vec![sql.to_string()] }\n",
+        ),
+        (
+            "api.rs",
+            "pub fn handle_request(method: &str, path: &str) -> u16 { 200 }\npub fn send_response(status: u16, body: &str) -> String { format!(\"{status}: {body}\") }\n",
+        ),
+    ];
+    for (name, content) in &files {
+        fs::write(root.path().join(name), content).unwrap();
+    }
+
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+
+    // Step 1: Hash index (instant)
+    let t0 = Instant::now();
+    index_workspace(&workspace, &model).unwrap();
+    let index_time = t0.elapsed();
+
+    // Step 2: Search with hash-only vectors
+    let t1 = Instant::now();
+    let hash_hits = hybrid_search(
+        &workspace,
+        "authenticate user token",
+        &model,
+        &SearchOptions::default(),
+    )
+    .unwrap();
+    let search1_time = t1.elapsed();
+    assert!(!hash_hits.is_empty(), "hash search should find results");
+
+    // Step 3: Enhance with neural embeddings
+    let t2 = Instant::now();
+    let enhanced = ivygrep::indexer::enhance_workspace_neural(&workspace, &model).unwrap();
+    let enhance_time = t2.elapsed();
+    assert!(enhanced > 0, "should enhance chunks");
+
+    // Step 4: Search with neural vectors available
+    let t3 = Instant::now();
+    let neural_hits = hybrid_search(
+        &workspace,
+        "authenticate user token",
+        &model,
+        &SearchOptions::default(),
+    )
+    .unwrap();
+    let search2_time = t3.elapsed();
+    assert!(!neural_hits.is_empty(), "neural search should find results");
+
+    // Both searches should find auth results
+    assert!(hash_hits[0].preview.contains("authenticate"));
+    assert!(neural_hits[0].preview.contains("authenticate"));
+
+    eprintln!("[two-tier] Pipeline timings:");
+    eprintln!("  1. hash index:    {:.3}s", index_time.as_secs_f64());
+    eprintln!("  2. hash search:   {:.3}s", search1_time.as_secs_f64());
+    eprintln!(
+        "  3. neural enhance:{:.3}s ({enhanced} chunks)",
+        enhance_time.as_secs_f64()
+    );
+    eprintln!("  4. neural search: {:.3}s", search2_time.as_secs_f64());
+    eprintln!("[two-tier] PASS: upgrade pipeline works end-to-end");
+}
+
+// ============================================================================
+// 19. Neural enhancement survives file deletion and re-index
+// ============================================================================
+
+#[test]
+#[serial]
+fn stress_neural_survives_churn() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+
+    // Create 20 files
+    for i in 0..20 {
+        fs::write(
+            root.path().join(format!("handler_{i}.rs")),
+            format!("pub fn handle_{i}(x: i32) -> i32 {{ x + {i} }}\n"),
+        )
+        .unwrap();
+    }
+
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    index_workspace(&workspace, &model).unwrap();
+
+    // Enhance
+    let n1 = ivygrep::indexer::enhance_workspace_neural(&workspace, &model).unwrap();
+    assert!(n1 > 0);
+
+    // Delete half the files, add 10 new ones
+    for i in 0..10 {
+        fs::remove_file(root.path().join(format!("handler_{i}.rs"))).unwrap();
+    }
+    for i in 20..30 {
+        fs::write(
+            root.path().join(format!("handler_{i}.rs")),
+            format!("pub fn handle_{i}(x: i32) -> i32 {{ x * {i} }}\n"),
+        )
+        .unwrap();
+    }
+
+    // Re-index with hash
+    let summary = index_workspace(&workspace, &model).unwrap();
+    assert_eq!(summary.deleted_files, 10);
+    assert_eq!(summary.indexed_files, 10);
+
+    // Re-enhance — should reflect new state
+    let n2 = ivygrep::indexer::enhance_workspace_neural(&workspace, &model).unwrap();
+    assert_eq!(n2, summary.total_chunks);
+
+    // Search should find new content, not deleted content
+    let hits = hybrid_search(&workspace, "handle_25", &model, &SearchOptions::default()).unwrap();
+    assert!(!hits.is_empty(), "should find new handler_25");
+
+    let hits = hybrid_search(&workspace, "handle_5", &model, &SearchOptions::default()).unwrap();
+    // handle_5 was deleted, but handle_15/25 still exist — verify deleted file is gone
+    let has_deleted = hits
+        .iter()
+        .any(|h| h.file_path.to_string_lossy().contains("handler_5.rs"));
+    assert!(
+        !has_deleted,
+        "deleted handler_5.rs should not appear in results"
+    );
+
+    eprintln!("[neural-churn] PASS: neural enhancement survives file churn");
+}
