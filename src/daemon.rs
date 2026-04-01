@@ -60,14 +60,13 @@ pub async fn run_daemon() -> Result<()> {
         trigger_tx,
     };
 
-    let indexing_state = state.clone();
     tokio::spawn(async move {
         while let Some(path) = trigger_rx.recv().await {
             let index_path = path.clone();
-            let model = indexing_state.get_model();
             if let Err(err) = tokio::task::spawn_blocking(move || {
                 let workspace = Workspace::resolve(&index_path)?;
-                let _ = index_workspace(&workspace, model.as_ref())?;
+                let hash_model = create_model(true);
+                let _ = index_workspace(&workspace, hash_model.as_ref())?;
                 Result::<(), anyhow::Error>::Ok(())
             })
             .await
@@ -126,7 +125,6 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             },
         },
         DaemonRequest::Index { path, watch } => {
-            let model = state.get_model();
             let workspace = match Workspace::resolve(&path) {
                 Ok(workspace) => workspace,
                 Err(err) => {
@@ -136,10 +134,12 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 }
             };
 
-            let index_result =
-                tokio::task::spawn_blocking(move || index_workspace(&workspace, model.as_ref()))
-                    .await
-                    .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
+            let index_result = tokio::task::spawn_blocking(move || {
+                let hash_model = create_model(true);
+                index_workspace(&workspace, hash_model.as_ref())
+            })
+            .await
+            .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
 
             match index_result {
                 Ok(summary) => {
@@ -342,6 +342,10 @@ fn scope_from_request(scope_path: Option<PathBuf>, scope_is_file: bool) -> Optio
 
 pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<DaemonResponse>> {
     let socket_path = config::socket_path()?;
+
+    if socket_path.exists() && UnixStream::connect(&socket_path).await.is_err() {
+        let _ = std::fs::remove_file(&socket_path);
+    }
 
     // Auto-spawn the daemon if it isn't running.
     // Skip when IVYGREP_NO_AUTOSPAWN is set (for tests and CI).

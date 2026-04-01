@@ -84,6 +84,9 @@ pub struct Cli {
     /// neural model. Faster startup, no model download, lower quality.
     #[arg(long, global = true)]
     pub hash: bool,
+
+    #[arg(long, hide = true, value_name = "PATH")]
+    pub enhance_internal: Option<PathBuf>,
 }
 
 pub async fn run() -> Result<()> {
@@ -130,6 +133,14 @@ pub async fn run() -> Result<()> {
 
     if let Some(path) = &cli.rm_path {
         return run_remove(path, cli.json).await;
+    }
+
+    if let Some(path) = &cli.enhance_internal {
+        let workspace = Workspace::resolve(path)?;
+        if let Ok(model) = crate::embedding::create_neural_model() {
+            let _ = crate::indexer::enhance_workspace_neural(&workspace, model.as_ref());
+        }
+        return Ok(());
     }
 
     run_query(cli).await
@@ -506,22 +517,24 @@ async fn run_query(cli: Cli) -> Result<()> {
 
     // Kick off background neural enhancement if not already done.
     // This runs after results are returned so the user is never blocked.
+    // We launch it as a separate hidden CLI process to prevent segmentation faults
+    // that occur perfectly cleanly tearing down `onnxruntime` when the main process exits.
     // Skipped in CI/test environments (IVYGREP_NO_AUTOSPAWN=1).
     let no_autospawn = env::var("IVYGREP_NO_AUTOSPAWN").is_ok();
-    if !search_via_daemon && !cli.all && !cli.hash && !cli.regex && !no_autospawn {
+    if !cli.all && !cli.hash && !cli.regex && !no_autospawn {
         let neural_path = workspace.vector_neural_path();
-        if !neural_path.exists() {
-            let ws = workspace.clone();
-            std::thread::spawn(move || {
-                if let Ok(model) = crate::embedding::create_neural_model() {
-                    match crate::indexer::enhance_workspace_neural(&ws, model.as_ref()) {
-                        Ok(n) => {
-                            tracing::info!("background: enhanced {n} chunks with neural embeddings")
-                        }
-                        Err(e) => tracing::warn!("background neural enhancement failed: {e}"),
-                    }
-                }
-            });
+        if !neural_path.exists()
+            && let Ok(exe) = env::current_exe()
+        {
+            let mut cmd = std::process::Command::new(exe);
+            cmd.arg("--enhance-internal").arg(&workspace.root);
+
+            // Disconnect standard I/O so it truly detaches in the background
+            cmd.stdin(std::process::Stdio::null());
+            cmd.stdout(std::process::Stdio::null());
+            cmd.stderr(std::process::Stdio::null());
+
+            let _ = cmd.spawn();
         }
     }
 
