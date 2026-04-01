@@ -298,30 +298,43 @@ pub fn enhance_workspace_neural(
     let sqlite = open_sqlite(&workspace.sqlite_path())?;
 
     let mut stmt = sqlite.prepare("SELECT vector_key, text FROM chunks ORDER BY vector_key")?;
-    let rows: Vec<(u64, String)> = stmt
-        .query_map([], |row| {
-            Ok((row.get::<_, i64>(0)? as u64, row.get::<_, String>(1)?))
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
-
-    if rows.is_empty() {
-        return Ok(0);
-    }
-
-    let texts: Vec<&str> = rows.iter().map(|(_, t)| t.as_str()).collect();
-    let embeddings = neural_model.embed_batch(&texts);
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)? as u64, row.get::<_, String>(1)?))
+    })?;
 
     let mut vector_index =
         VectorStore::open(&workspace.vector_neural_path(), neural_model.dimensions())?;
 
-    for ((key, _), embedding) in rows.iter().zip(embeddings) {
-        vector_index.upsert(*key, embedding);
+    let mut batch = Vec::with_capacity(128);
+    let mut total_processed = 0;
+
+    let mut process_batch = |batch: &mut Vec<(u64, String)>, count: &mut usize| {
+        if batch.is_empty() {
+            return;
+        }
+        let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
+        let embeddings = neural_model.embed_batch(&texts);
+
+        for ((key, _), embedding) in batch.iter().zip(embeddings) {
+            vector_index.upsert(*key, embedding);
+        }
+        *count += batch.len();
+        batch.clear();
+    };
+
+    for row in rows.flatten() {
+        batch.push(row);
+        if batch.len() >= 128 {
+            process_batch(&mut batch, &mut total_processed);
+        }
     }
+    
+    // Process any remaining tail
+    process_batch(&mut batch, &mut total_processed);
 
     vector_index.save()?;
 
-    Ok(rows.len())
+    Ok(total_processed)
 }
 
 fn build_indexed_chunk(chunk: Chunk) -> IndexedChunk {
