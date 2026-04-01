@@ -539,19 +539,8 @@ async fn run_query(cli: Cli) -> Result<()> {
     // Skipped in CI/test environments (IVYGREP_NO_AUTOSPAWN=1).
     let no_autospawn = env::var("IVYGREP_NO_AUTOSPAWN").is_ok();
     if !cli.all && !cli.hash && !cli.regex && !no_autospawn {
-        let neural_path = workspace.vector_neural_path();
-        if !neural_path.exists()
-            && let Ok(exe) = env::current_exe()
-        {
-            let mut cmd = std::process::Command::new(exe);
-            cmd.arg("--enhance-internal").arg(&workspace.root);
-
-            // Disconnect standard I/O so it truly detaches in the background
-            cmd.stdin(std::process::Stdio::null());
-            cmd.stdout(std::process::Stdio::null());
-            cmd.stderr(std::process::Stdio::null());
-
-            let _ = cmd.spawn();
+        if !workspace.vector_neural_path().exists() {
+            let _ = workspace.trigger_background_enhancement();
         }
     }
 

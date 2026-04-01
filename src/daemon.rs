@@ -231,31 +231,10 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     all_hits.truncate(l);
                 }
                 // Spawn background neural enhancement for workspaces that need it
-                if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
-                    && let Ok(exe) = std::env::current_exe()
-                {
+                if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none() {
                     for root in ws_neural_missing {
                         if let Ok(ws) = Workspace::resolve(&root) {
-                            // Atomic file creation to prevent concurrent threads from racing
-                            // when spawning duplicate enhancement processes
-                            let pid_path = ws.enhancing_pid_path();
-                            let lock = std::fs::OpenOptions::new()
-                                .write(true)
-                                .create_new(true)
-                                .open(&pid_path);
-
-                            if lock.is_ok() {
-                                let mut cmd = std::process::Command::new(&exe);
-                                cmd.arg("--enhance-internal").arg(&root);
-                                cmd.stdin(std::process::Stdio::null());
-                                cmd.stdout(std::process::Stdio::null());
-                                cmd.stderr(std::process::Stdio::null());
-                                if let Ok(child) = cmd.spawn() {
-                                    let _ = std::fs::write(&pid_path, child.id().to_string());
-                                } else {
-                                    let _ = std::fs::remove_file(&pid_path);
-                                }
-                            }
+                            let _ = ws.trigger_background_enhancement();
                         }
                     }
                 }

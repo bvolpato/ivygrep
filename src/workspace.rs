@@ -104,6 +104,35 @@ impl Workspace {
         is_enhancing_alive(&self.enhancing_pid_path())
     }
 
+    /// Triggers an atomic background spawn of the neural enhancement process.
+    /// Uses O_EXCL file lock mechanics to mathematically prevent race conditions
+    /// even if multiple threads or processes try to spawn this simultaneously.
+    pub fn trigger_background_enhancement(&self) -> Result<()> {
+        let exe = std::env::current_exe()?;
+        let pid_path = self.enhancing_pid_path();
+
+        let lock = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&pid_path);
+
+        if lock.is_ok() {
+            let mut cmd = std::process::Command::new(&exe);
+            cmd.arg("--enhance-internal").arg(&self.root);
+            cmd.stdin(std::process::Stdio::null());
+            cmd.stdout(std::process::Stdio::null());
+            cmd.stderr(std::process::Stdio::null());
+            
+            if let Ok(child) = cmd.spawn() {
+                let _ = std::fs::write(&pid_path, child.id().to_string());
+            } else {
+                let _ = std::fs::remove_file(&pid_path);
+            }
+        }
+        
+        Ok(())
+    }
+
     pub fn merkle_snapshot_path(&self) -> PathBuf {
         self.index_dir.join("merkle_snapshot.json")
     }
@@ -305,7 +334,14 @@ fn is_enhancing_alive(pid_path: &Path) -> bool {
         Ok(c) => c,
         Err(_) => return false,
     };
-    let pid: i32 = match content.trim().parse() {
+
+    let content = content.trim();
+    if content.is_empty() || content == "PENDING" {
+        // Temporarily locked by a concurrent spawning thread, treat as alive
+        return true;
+    }
+
+    let pid: i32 = match content.parse() {
         Ok(p) => p,
         Err(_) => {
             let _ = fs::remove_file(pid_path);
