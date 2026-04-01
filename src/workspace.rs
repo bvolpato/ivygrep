@@ -30,6 +30,11 @@ pub struct WorkspaceStatus {
     pub root: PathBuf,
     pub last_indexed_at_unix: Option<u64>,
     pub watch_enabled: bool,
+    pub chunk_count: u64,
+    pub file_count: u64,
+    pub index_size_bytes: u64,
+    pub has_neural_vectors: bool,
+    pub neural_vector_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -202,6 +207,17 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
         })?;
         let metadata: WorkspaceMetadata = serde_json::from_slice(&raw)?;
 
+        let index_dir = entry.path();
+        let (chunk_count, file_count) = read_sqlite_counts(&index_dir);
+        let index_size_bytes = dir_size_bytes(&index_dir);
+        let neural_path = index_dir.join("vectors_neural.usearch");
+        let has_neural_vectors = neural_path.exists();
+        let neural_vector_count = if has_neural_vectors {
+            neural_path.metadata().map(|m| m.len()).unwrap_or(0) / 4 // rough estimate
+        } else {
+            0
+        };
+
         by_id.insert(
             metadata.id.clone(),
             WorkspaceStatus {
@@ -209,11 +225,59 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
                 root: metadata.root,
                 last_indexed_at_unix: metadata.last_indexed_at_unix,
                 watch_enabled: metadata.watch_enabled,
+                chunk_count,
+                file_count,
+                index_size_bytes,
+                has_neural_vectors,
+                neural_vector_count,
             },
         );
     }
 
     Ok(by_id.into_values().collect())
+}
+
+fn read_sqlite_counts(index_dir: &Path) -> (u64, u64) {
+    let sqlite_path = index_dir.join("metadata.sqlite3");
+    if !sqlite_path.exists() {
+        return (0, 0);
+    }
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        &sqlite_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return (0, 0);
+    };
+    let chunks: i64 = conn
+        .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
+        .unwrap_or(0);
+    let files: i64 = conn
+        .query_row("SELECT COUNT(DISTINCT file_path) FROM chunks", [], |row| {
+            row.get(0)
+        })
+        .unwrap_or(0);
+    (chunks as u64, files as u64)
+}
+
+fn dir_size_bytes(dir: &Path) -> u64 {
+    fn walk(path: &Path) -> u64 {
+        let mut total = 0u64;
+        if let Ok(entries) = fs::read_dir(path) {
+            for entry in entries.flatten() {
+                let ft = match entry.file_type() {
+                    Ok(ft) => ft,
+                    Err(_) => continue,
+                };
+                if ft.is_file() {
+                    total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+                } else if ft.is_dir() {
+                    total += walk(&entry.path());
+                }
+            }
+        }
+        total
+    }
+    walk(dir)
 }
 
 #[cfg(test)]

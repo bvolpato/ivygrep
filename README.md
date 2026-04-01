@@ -81,9 +81,9 @@ ig "error handling" src/api/         # scope to a directory
 ig --all "database migrations"      # search across all indexed projects
 ```
 
-That's it. No config files, no setup wizards, no prompts, no API keys. On first run, `ig` auto-indexes the workspace and spawns a background daemon for incremental updates.
+That's it. No config files, no setup wizards, no prompts, no API keys. On first run, `ig` auto-indexes the workspace instantly and spawns a background daemon for incremental updates.
 
-> **Tip**: Use `ig --add .` to explicitly register a workspace for watch-based reindexing, or `ig --hash` for fast startup without the neural model download.
+> **Tip**: Indexing is instant — `ig` uses hash embeddings for sub-second startup, then silently upgrades to neural embeddings in the background.
 
 <p>
   <img src="assets/ig-demo.gif" alt="ivygrep demo — searching the opencode repo" width="700" />
@@ -93,20 +93,39 @@ That's it. No config files, no setup wizards, no prompts, no API keys. On first 
 
 ## 🧠 How It Works
 
-ivygrep uses a **hybrid search architecture** — combining the precision of keyword matching with the intelligence of semantic understanding:
+ivygrep uses a **two-tier hybrid search architecture** — instant indexing with progressive quality upgrades:
 
 ```mermaid
 flowchart TD
-    Q["Your Query\n'retry logic for payments'"]
-    Q --> L["Lexical BM25\n(Tantivy)"]
-    Q --> S["Semantic\n(Embeddings)"]
+    Q["ig 'retry logic for payments'"]
+    Q --> I["①  Hash Index\n(instant, 0.0s)"]
+    I --> L["Lexical BM25\n(Tantivy)"]
+    I --> S["Semantic Search\n(Hash → Neural)"]
     L --> F["RRF Hybrid Fusion"]
     S --> F
-    F --> R["Ranked Results\nwith AST-aware context"]
+    F --> R["Ranked Results"]
+    I -.-> BG["② Background\nNeural Enhancement"]
+    BG -.-> NV["Neural vectors\n(quantized ONNX)"]
+```
+
+**On first search:**
+1. **Index instantly** with hash embeddings (~0.0s for typical repos)
+2. **Return results** immediately via lexical + hash-semantic fusion 
+3. **Enhance silently** — a background thread computes neural (ONNX) embeddings
+4. **Subsequent queries** automatically use the higher-quality neural vectors
+
+Use `ig --status` to see where each workspace stands:
+
+```
+⟐ /Users/you/project
+  Index:  ✓ indexed (2m ago)
+  Files:  41 files, 440 chunks
+  Size:   1.7 MB
+  Search: ★ neural (440 enhanced, 100%)
 ```
 
 - **Lexical path** — BM25 scoring via [Tantivy](https://github.com/quickwit-oss/tantivy) catches exact keyword matches
-- **Semantic path** — vector embeddings (neural ONNX or lightweight hash) capture meaning
+- **Semantic path** — starts with hash embeddings (instant), upgrades to quantized ONNX neural embeddings in background
 - **AST chunking** — [tree-sitter](https://tree-sitter.github.io) splits code into precise function/class boundaries (35+ languages)
 - **Incremental indexing** — Merkle-style fingerprints mean re-index only touches changed files
 
@@ -114,7 +133,16 @@ flowchart TD
 
 ## ⚡ Performance
 
-Benchmarked under concurrent AI agent workloads (8 threads, sustained saturation):
+### Indexing
+
+| Operation | Time | Notes |
+|-----------|------|-------|
+| **First index** (40 files) | **0.0s** | Hash embeddings — instant |
+| **First index** (200 files) | **0.3s** | Parallel hash pipeline |
+| **Re-index** (no changes) | 0.01s | Merkle diff only |
+| **Neural enhancement** | ~24s | Background, non-blocking |
+
+### Search (concurrent AI agent load, 8 threads)
 
 | Metric | Value |
 |--------|-------|
@@ -122,7 +150,7 @@ Benchmarked under concurrent AI agent workloads (8 threads, sustained saturation
 | **p95 latency** | ~62 ms |
 | **Max latency** | ~98 ms |
 
-> Faster than a network roundtrip. Your agent never waits.
+> Indexing is instant. Search is instant. Neural quality upgrades happen silently.
 
 ---
 
@@ -247,12 +275,13 @@ ig "your query"                    # search current workspace
 ig "query" ~/other/project         # search a different workspace
 ig --add .                         # register & index a workspace
 ig --rm .                          # unregister a workspace
-ig --status                        # show indexed workspaces
+ig --status                        # show workspace health & embedding status
+ig --status --json                 # machine-readable workspace status
 ig --all "query"                   # search all indexed workspaces
 
 # Search modes
 ig --regex "fn\s+\w+_tax"          # regex mode (like rg)
-ig --hash "query"                  # use fast hash embeddings (no model download)
+ig --hash "query"                  # force hash embeddings (skip neural)
 
 # Output control
 ig -n 5 "query"                    # limit to 5 files
@@ -278,18 +307,23 @@ ig --mcp                           # start MCP server (stdio)
 
 ```
 ivygrep
-├── tantivy        — lexical BM25 index
-├── usearch        — vector similarity index
-├── tree-sitter    — AST-based code chunking (Rust, Python, Go, JS, TS)
-├── fastembed      — ONNX neural embeddings (all-MiniLM-L6-v2, 384-dim)
-├── notify         — filesystem watcher for live re-indexing
-├── SQLite         — metadata store per workspace
-└── Unix socket    — daemon IPC (auto-spawned)
+├── tantivy         — lexical BM25 index
+├── usearch         — vector similarity index (hash + neural stores)
+├── tree-sitter     — AST-based code chunking (35+ languages)
+├── fastembed       — quantized ONNX embeddings (AllMiniLML6V2Q, 384-dim)
+├── hash embeddings — instant zero-dependency embeddings for indexing
+├── notify          — filesystem watcher for live re-indexing
+├── SQLite          — metadata store per workspace
+└── Unix socket     — daemon IPC (auto-spawned)
 ```
 
 **Index location**: `${IVYGREP_HOME:-${XDG_DATA_HOME:-~/.local/share}/ivygrep}/indexes/<workspace-id>/`
 
-**Neural embeddings**: The default build bundles ONNX Runtime for high-quality semantic search. The model (~23 MB) downloads automatically on first use. For a minimal binary without ONNX: `cargo build --release --no-default-features`.
+Each workspace stores two vector indexes:
+- `vectors.usearch` — hash-based (always present, instant to compute)
+- `vectors_neural.usearch` — ONNX-based (created in background after first search)
+
+**Neural embeddings**: The default build bundles ONNX Runtime for high-quality semantic search. The quantized model (~23 MB) downloads automatically on first use. Indexing never blocks on this — it happens in the background. For a minimal binary without ONNX: `cargo build --release --no-default-features`.
 
 ---
 
@@ -299,16 +333,17 @@ ivygrep
 cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-The test suite includes **90+ tests** across 6 categories:
+The test suite includes **101 tests** across 7 categories:
 
 | Suite | Tests | Description |
 |-------|------:|-------------|
-| Unit | 52 | Core logic, chunking, embedding, search, MCP, text |
+| Unit | 59 | Core logic, chunking, embedding, search, neural enhancement, MCP |
 | CLI snapshots | 9 | End-to-end CLI behavior |
 | Concurrency | 6 | Thread safety, parallel search/index |
 | Golden queries | 3 | Semantic accuracy validation |
 | Incremental CRUD | 13 | Add/update/delete indexing correctness |
 | Property-based | 1 | Merkle diff invariants |
+| Stress / benchmarks | 10 | Hash speed, neural pipeline, churn survival, query throughput |
 
 ### Stress testing
 
@@ -317,7 +352,7 @@ The test suite includes **90+ tests** across 6 categories:
 cargo test --test stress_harness -- --ignored --nocapture
 ```
 
-Fixtures include the Linux kernel (ripgrep), Shakespeare corpus, and Tantivy source.
+Fixtures include ripgrep, Shakespeare corpus, and Tantivy source.
 
 ---
 

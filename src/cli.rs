@@ -147,22 +147,111 @@ async fn run_status(json: bool) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&workspaces)?);
     } else if workspaces.is_empty() {
         println!("No indexed workspaces.");
+        println!(
+            "\n  Run \x1b[1mig \"query\"\x1b[0m in a project to auto-index, or \x1b[1mig --add .\x1b[0m to register one."
+        );
     } else {
-        for ws in workspaces {
-            let marker = if ws.watch_enabled {
-                "watching"
+        for ws in &workspaces {
+            println!("\x1b[1;36m⟐ {}\x1b[0m", ws.root.display());
+            println!("  ID:     {}", ws.id);
+
+            // Index timestamp
+            match ws.last_indexed_at_unix {
+                Some(ts) => {
+                    let ago = format_timestamp_ago(ts);
+                    println!("  Index:  \x1b[32m✓ indexed\x1b[0m ({})", ago);
+                }
+                None => {
+                    println!("  Index:  \x1b[33m⚠ never indexed\x1b[0m");
+                }
+            }
+
+            // Daemon/watcher
+            if ws.watch_enabled {
+                println!("  Watch:  \x1b[32m● watching\x1b[0m");
             } else {
-                "static"
-            };
-            let indexed = ws
-                .last_indexed_at_unix
-                .map(|ts| ts.to_string())
-                .unwrap_or_else(|| "never".to_string());
-            println!("{}\t{}\t{}\t{}", ws.id, marker, indexed, ws.root.display());
+                println!("  Watch:  \x1b[90m○ static\x1b[0m");
+            }
+
+            // Chunk stats
+            println!(
+                "  Files:  {} files, {} chunks",
+                ws.file_count, ws.chunk_count
+            );
+
+            // Index size
+            let size = format_bytes(ws.index_size_bytes);
+            println!("  Size:   {}", size);
+
+            // Embedding status — the key new info
+            if ws.has_neural_vectors {
+                let pct = if ws.chunk_count > 0 {
+                    let ratio = (ws.neural_vector_count as f64 / ws.chunk_count as f64) * 100.0;
+                    format!("{:.0}%", ratio.min(100.0))
+                } else {
+                    "100%".to_string()
+                };
+                println!(
+                    "  Search: \x1b[1;32m★ neural\x1b[0m ({} enhanced, {})",
+                    ws.neural_vector_count, pct
+                );
+            } else if ws.chunk_count > 0 {
+                println!(
+                    "  Search: \x1b[33m◆ hash\x1b[0m (fast, run a query to trigger neural upgrade)"
+                );
+            } else {
+                println!("  Search: \x1b[90m○ empty\x1b[0m");
+            }
+
+            println!();
         }
+
+        // Summary
+        let total_files: u64 = workspaces.iter().map(|w| w.file_count).sum();
+        let total_chunks: u64 = workspaces.iter().map(|w| w.chunk_count).sum();
+        let total_size: u64 = workspaces.iter().map(|w| w.index_size_bytes).sum();
+        let neural_count = workspaces.iter().filter(|w| w.has_neural_vectors).count();
+        println!(
+            "\x1b[90m{} workspace(s), {} files, {} chunks, {} on disk, {}/{} neural\x1b[0m",
+            workspaces.len(),
+            total_files,
+            total_chunks,
+            format_bytes(total_size),
+            neural_count,
+            workspaces.len(),
+        );
     }
 
     Ok(())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else {
+        format!("{:.2} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+fn format_timestamp_ago(unix_ts: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let ago = now.saturating_sub(unix_ts);
+    if ago < 60 {
+        format!("{ago}s ago")
+    } else if ago < 3600 {
+        format!("{}m ago", ago / 60)
+    } else if ago < 86400 {
+        format!("{}h ago", ago / 3600)
+    } else {
+        format!("{}d ago", ago / 86400)
+    }
 }
 
 async fn run_add(path: &Path, watch: bool, force: bool, json: bool) -> Result<()> {
@@ -547,7 +636,7 @@ fn print_daemon_response(response: DaemonResponse, json: bool) -> Result<()> {
             if json {
                 println!("{}", serde_json::to_string_pretty(&workspaces)?);
             } else {
-                for ws in workspaces {
+                for ws in &workspaces {
                     println!("{}\t{}", ws.id, ws.root.display());
                 }
             }
