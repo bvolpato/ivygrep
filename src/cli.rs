@@ -272,19 +272,14 @@ async fn run_query(cli: Cli) -> Result<()> {
         }
     }
 
-    // Only create the embedding model when actually needed:
-    // - For indexing: only if the workspace isn't indexed yet
-    // - For search: only for semantic (non-regex) search
-    let needs_model_for_index = !search_via_daemon && !cli.all && !workspace_is_indexed(&workspace);
-    let needs_model_for_search = !search_via_daemon && !cli.regex;
-    let local_model = if needs_model_for_index || needs_model_for_search {
-        Some(create_model(cli.hash))
-    } else {
-        None
-    };
+    // Indexing always uses hash embeddings (instant, ~0.1s).
+    // Search uses ONNX model for query embedding (single text, still fast).
+    // Background thread enhances the vector store with neural embeddings
+    // after results are returned, silently upgrading quality.
 
     if !search_via_daemon && !cli.all {
-        if !workspace_is_indexed(&workspace) {
+        let first_run = !workspace_is_indexed(&workspace);
+        if first_run {
             eprintln!(
                 "{} {} {}",
                 "⟐".bold(),
@@ -292,10 +287,17 @@ async fn run_query(cli: Cli) -> Result<()> {
                 workspace.root.display().to_string().dimmed()
             );
         }
-        if let Some(ref model) = local_model {
-            let _summary = index_workspace(&workspace, model.as_ref())?;
-        }
+        let hash_model = crate::embedding::create_hash_model();
+        let _summary = index_workspace(&workspace, hash_model.as_ref())?;
     }
+
+    // For semantic search, load the ONNX model (needed to embed the query).
+    let search_model: Option<Box<dyn crate::embedding::EmbeddingModel>> =
+        if !search_via_daemon && !cli.regex {
+            Some(create_model(cli.hash))
+        } else {
+            None
+        };
 
     let hits = if cli.regex {
         let request = DaemonRequest::RegexSearch {
@@ -362,7 +364,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                 _ => vec![],
             }
         } else {
-            let model = local_model
+            let model = search_model
                 .as_ref()
                 .expect("model created for local search");
             let mut all_hits = Vec::new();
@@ -412,6 +414,28 @@ async fn run_query(cli: Cli) -> Result<()> {
         cli.file_name_only,
         cli.verbose,
     )?;
+
+    // Kick off background neural enhancement if not already done.
+    // This runs after results are returned so the user is never blocked.
+    // Skipped in CI/test environments (IVYGREP_NO_AUTOSPAWN=1).
+    let no_autospawn = env::var("IVYGREP_NO_AUTOSPAWN").is_ok();
+    if !search_via_daemon && !cli.all && !cli.hash && !cli.regex && !no_autospawn {
+        let neural_path = workspace.vector_neural_path();
+        if !neural_path.exists() {
+            let ws = workspace.clone();
+            std::thread::spawn(move || {
+                if let Ok(model) = crate::embedding::create_neural_model() {
+                    match crate::indexer::enhance_workspace_neural(&ws, model.as_ref()) {
+                        Ok(n) => {
+                            tracing::info!("background: enhanced {n} chunks with neural embeddings")
+                        }
+                        Err(e) => tracing::warn!("background neural enhancement failed: {e}"),
+                    }
+                }
+            });
+        }
+    }
+
     Ok(())
 }
 

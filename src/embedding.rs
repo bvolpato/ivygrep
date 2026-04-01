@@ -48,7 +48,7 @@ pub fn model_dimensions(hash: bool) -> usize {
 /// Create the appropriate embedding model.
 ///
 /// By default (when `hash` is `false`), returns an [`OnnxEmbeddingModel`]
-/// backed by `all-MiniLM-L6-v2` for high-quality semantic search.
+/// backed by `all-MiniLM-L6-v2` (quantized) for high-quality semantic search.
 /// Pass `hash = true` to use the lightweight [`HashEmbeddingModel`] instead.
 ///
 /// If the `neural` feature is not compiled in, always falls back to hash.
@@ -66,6 +66,25 @@ pub fn create_model(hash: bool) -> Box<dyn EmbeddingModel> {
     }
 
     Box::new(HashEmbeddingModel::new(256))
+}
+
+/// Create a hash-only embedding model (instant, no ONNX).
+pub fn create_hash_model() -> Box<dyn EmbeddingModel> {
+    Box::new(HashEmbeddingModel::new(256))
+}
+
+/// Create a neural (ONNX) embedding model. Returns Err if the neural
+/// feature is not compiled in or the model fails to load.
+pub fn create_neural_model() -> anyhow::Result<Box<dyn EmbeddingModel>> {
+    #[cfg(feature = "neural")]
+    {
+        let model = OnnxEmbeddingModel::new()?;
+        Ok(Box::new(model))
+    }
+    #[cfg(not(feature = "neural"))]
+    {
+        anyhow::bail!("neural feature not compiled in")
+    }
 }
 
 // ── Hash-based embedding (always available) ────────────────────────────────
@@ -177,7 +196,7 @@ impl OnnxEmbeddingModel {
         }
 
         let model = fastembed::TextEmbedding::try_new(
-            InitOptions::new(FastModel::AllMiniLML6V2)
+            InitOptions::new(FastModel::AllMiniLML6V2Q)
                 .with_cache_dir(cache_dir)
                 .with_show_download_progress(true),
         )?;

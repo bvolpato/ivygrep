@@ -83,8 +83,29 @@ pub fn hybrid_search(
     let mut lexical_chunks = lexical_by_id.into_values().collect::<Vec<_>>();
     lexical_chunks.sort_by(|a, b| b.1.total_cmp(&a.1));
 
-    let vector_index = VectorStore::open(&workspace.vector_path(), embedding_model.dimensions())?;
-    let query_vector = embedding_model.embed(query_text);
+    // Prefer neural vector store if available, otherwise fall back to hash.
+    let neural_path = workspace.vector_neural_path();
+    let (vector_index, query_vector) = if neural_path.exists() {
+        // Neural store exists — use neural model for query embedding.
+        // The neural model may be the same as embedding_model if ONNX was
+        // passed, or we need to create one. Since we can't easily create a
+        // separate model here, we use the provided one and check dims match.
+        let neural_dims = 384; // AllMiniLML6V2Q output
+        if embedding_model.dimensions() == neural_dims {
+            let vi = VectorStore::open(&neural_path, neural_dims)?;
+            let qv = embedding_model.embed(query_text);
+            (vi, qv)
+        } else {
+            // Fall back to hash vectors — model dimension mismatch
+            let vi = VectorStore::open(&workspace.vector_path(), embedding_model.dimensions())?;
+            let qv = embedding_model.embed(query_text);
+            (vi, qv)
+        }
+    } else {
+        let vi = VectorStore::open(&workspace.vector_path(), embedding_model.dimensions())?;
+        let qv = embedding_model.embed(query_text);
+        (vi, qv)
+    };
 
     let mut semantic_chunks = Vec::new();
     if vector_index.size() > 0 {

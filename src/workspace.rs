@@ -82,6 +82,10 @@ impl Workspace {
         self.index_dir.join("vectors.usearch")
     }
 
+    pub fn vector_neural_path(&self) -> PathBuf {
+        self.index_dir.join("vectors_neural.usearch")
+    }
+
     pub fn merkle_snapshot_path(&self) -> PathBuf {
         self.index_dir.join("merkle_snapshot.json")
     }

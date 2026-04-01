@@ -288,6 +288,42 @@ fn index_workspace_inner(
     })
 }
 
+/// Compute neural (ONNX) embeddings for all chunks and save as a separate
+/// vector store. This is designed to run in a background thread after the
+/// fast hash-based index returns results to the user.
+pub fn enhance_workspace_neural(
+    workspace: &Workspace,
+    neural_model: &dyn EmbeddingModel,
+) -> Result<usize> {
+    let sqlite = open_sqlite(&workspace.sqlite_path())?;
+
+    let mut stmt = sqlite.prepare("SELECT vector_key, text FROM chunks ORDER BY vector_key")?;
+    let rows: Vec<(u64, String)> = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)? as u64, row.get::<_, String>(1)?))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if rows.is_empty() {
+        return Ok(0);
+    }
+
+    let texts: Vec<&str> = rows.iter().map(|(_, t)| t.as_str()).collect();
+    let embeddings = neural_model.embed_batch(&texts);
+
+    let mut vector_index =
+        VectorStore::open(&workspace.vector_neural_path(), neural_model.dimensions())?;
+
+    for ((key, _), embedding) in rows.iter().zip(embeddings) {
+        vector_index.upsert(*key, embedding);
+    }
+
+    vector_index.save()?;
+
+    Ok(rows.len())
+}
+
 fn build_indexed_chunk(chunk: Chunk) -> IndexedChunk {
     let vector_key = vector_key_from_content_hash(&chunk.content_hash);
     let kind = format!("{:?}", chunk.kind);
