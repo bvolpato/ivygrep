@@ -1,6 +1,6 @@
 [package]
 name = "ivygrep"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 description = "Semantic grep that stays local"
 license = "MIT"
@@ -33,7 +33,7 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
-tantivy = "0.25"
+tantivy = "0.26"
 tokio = { version = "1.50", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
