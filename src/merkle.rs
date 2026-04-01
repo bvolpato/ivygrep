@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+
 use std::io::IsTerminal;
 
 const MAX_INDEXABLE_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -84,17 +84,17 @@ impl MerkleSnapshot {
             // Pseudo-hash based on filesystem metadata (size + mtime) instead of reading
             // the entire file contents. This makes the diffing traversal extremely fast,
             // bypassing massive multi-gigabyte I/O overheads on monoliths like dd-source.
-            let mut hasher = Sha256::new();
-            hasher.update(rel.to_string_lossy().as_bytes());
-            hasher.update(metadata.len().to_le_bytes());
+            let mut data = Vec::with_capacity(128);
+            data.extend_from_slice(rel.to_string_lossy().as_bytes());
+            data.extend_from_slice(&metadata.len().to_le_bytes());
 
             if let Ok(mtime) = metadata.modified() {
                 if let Ok(duration) = mtime.duration_since(std::time::UNIX_EPOCH) {
-                    hasher.update(duration.as_nanos().to_le_bytes());
+                    data.extend_from_slice(&duration.as_nanos().to_le_bytes());
                 }
             }
 
-            let file_hash = hex::encode(hasher.finalize());
+            let file_hash = hex::encode(xxhash_rust::xxh3::xxh3_128(&data).to_le_bytes());
 
             files.insert(rel.to_string_lossy().to_string(), file_hash);
         }
@@ -145,12 +145,12 @@ impl MerkleSnapshot {
 }
 
 fn root_hash(files: &BTreeMap<String, String>) -> String {
-    let mut hasher = Sha256::new();
+    let mut data = Vec::with_capacity(files.len() * 128);
     for (path, hash) in files {
-        hasher.update(path.as_bytes());
-        hasher.update(hash.as_bytes());
+        data.extend_from_slice(path.as_bytes());
+        data.extend_from_slice(hash.as_bytes());
     }
-    hex::encode(hasher.finalize())
+    hex::encode(xxhash_rust::xxh3::xxh3_128(&data).to_le_bytes())
 }
 
 #[cfg(test)]

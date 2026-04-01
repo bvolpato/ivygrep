@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+
 
 use crate::config;
 
@@ -237,10 +237,7 @@ pub fn resolve_workspace_and_scope(path: &Path) -> Result<(Workspace, Option<Wor
 }
 
 pub fn workspace_id(root: &Path) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(root.to_string_lossy().as_bytes());
-    let digest = hasher.finalize();
-    hex::encode(&digest[..16])
+    hex::encode(xxhash_rust::xxh3::xxh3_128(root.to_string_lossy().as_bytes()).to_le_bytes())
 }
 
 pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {

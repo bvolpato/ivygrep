@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use rayon::prelude::*;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+
 use tantivy::schema::{Field, STORED, STRING, Schema, TEXT, Value};
 use tantivy::{Index as TantivyIndex, TantivyDocument, Term, doc};
 
@@ -387,9 +387,7 @@ fn build_indexed_chunk(chunk: Chunk) -> IndexedChunk {
 }
 
 fn vector_key_from_content_hash(content_hash: &str) -> u64 {
-    let mut hasher = Sha256::new();
-    hasher.update(content_hash.as_bytes());
-    let digest = hasher.finalize();
+    let digest = xxhash_rust::xxh3::xxh3_128(content_hash.as_bytes()).to_le_bytes();
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&digest[..8]);
     let mut value = u64::from_le_bytes(bytes);

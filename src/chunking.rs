@@ -11,7 +11,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+
 use uuid::Uuid;
 
 const TEXT_SNIFF_BYTES: usize = 8 * 1024;
@@ -1230,12 +1230,12 @@ fn make_chunk(
     language: String,
     kind: ChunkKind,
 ) -> Chunk {
-    let mut hasher = Sha256::new();
-    hasher.update(rel_path.to_string_lossy().as_bytes());
-    hasher.update(start_line.to_le_bytes());
-    hasher.update(end_line.to_le_bytes());
-    hasher.update(text.as_bytes());
-    let content_hash = hex::encode(hasher.finalize());
+    let mut content_hash_data = Vec::with_capacity(text.len() + 32);
+    content_hash_data.extend_from_slice(rel_path.to_string_lossy().as_bytes());
+    content_hash_data.extend_from_slice(&start_line.to_le_bytes());
+    content_hash_data.extend_from_slice(&end_line.to_le_bytes());
+    content_hash_data.extend_from_slice(text.as_bytes());
+    let content_hash = hex::encode(xxhash_rust::xxh3::xxh3_128(&content_hash_data).to_le_bytes());
 
     Chunk {
         id: Uuid::new_v4(),
