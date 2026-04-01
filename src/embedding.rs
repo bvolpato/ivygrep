@@ -215,6 +215,25 @@ fn register_coreml() {
     }
 }
 
+pub fn hardware_acceleration_info() -> &'static str {
+    #[cfg(feature = "neural")]
+    {
+        #[cfg(target_os = "macos")]
+        {
+            use ort::ep::ExecutionProvider;
+            if ort::execution_providers::CoreMLExecutionProvider::default().is_available().unwrap_or(false) {
+                return "AllMiniLML6V2Q via CoreML";
+            }
+        }
+        
+        "AllMiniLML6V2Q via CPU"
+    }
+    #[cfg(not(feature = "neural"))]
+    {
+        "Disabled"
+    }
+}
+
 #[cfg(feature = "neural")]
 impl OnnxEmbeddingModel {
     /// Initialize the neural model.  On first run this downloads

@@ -215,13 +215,15 @@ async fn run_status(json: bool) -> Result<()> {
                 } else {
                     "100%".to_string()
                 };
+                let accel = crate::embedding::hardware_acceleration_info();
                 println!(
-                    "  Search: \x1b[1;32m★ neural\x1b[0m ({} enhanced, {})",
-                    ws.neural_vector_count, pct
+                    "  Search: \x1b[1;32m★ neural\x1b[0m ({} enhanced, {}, {})",
+                    ws.neural_vector_count, pct, accel
                 );
             } else if ws.enhancing_in_progress {
+                let accel = crate::embedding::hardware_acceleration_info();
                 println!(
-                    "  Search: \x1b[1;33m⟳ enhancing\x1b[0m (neural embeddings computing in background...)"
+                    "  Search: \x1b[1;33m⟳ enhancing\x1b[0m (computing {} in background...)", accel
                 );
             } else if ws.chunk_count > 0 {
                 println!(

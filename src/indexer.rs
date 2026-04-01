@@ -305,7 +305,9 @@ pub fn enhance_workspace_neural(
     let mut vector_index =
         VectorStore::open(&workspace.vector_neural_path(), neural_model.dimensions())?;
 
-    let mut batch = Vec::with_capacity(128);
+    // Use a small batch size to bound ONNX/CoreML intermediate Tensor allocations
+    // (e.g. attention matrices). A size of 128 spikes up to 1GB+ RAM. 
+    let mut batch = Vec::with_capacity(8);
     let mut total_processed = 0;
 
     let mut process_batch = |batch: &mut Vec<(u64, String)>, count: &mut usize| {
@@ -324,7 +326,7 @@ pub fn enhance_workspace_neural(
 
     for row in rows.flatten() {
         batch.push(row);
-        if batch.len() >= 128 {
+        if batch.len() >= 8 {
             process_batch(&mut batch, &mut total_processed);
         }
     }
