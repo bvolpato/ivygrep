@@ -2,6 +2,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use std::io::IsTerminal;
 use clap::Parser;
 use colored::Colorize;
 
@@ -40,6 +41,9 @@ pub struct Cli {
 
     #[arg(long, default_value_t = false)]
     pub mcp: bool,
+
+    #[arg(long, default_value_t = false)]
+    pub wait_for_enhancement: bool,
 
     #[arg(short, long, global = true)]
     pub force: bool,
@@ -439,6 +443,37 @@ async fn run_query(cli: Cli) -> Result<()> {
         }
         let hash_model = crate::embedding::create_hash_model();
         let _summary = index_workspace(&workspace, hash_model.as_ref())?;
+    }
+
+    if cli.wait_for_enhancement && !cli.all {
+        loop {
+            let ws_map = crate::workspace::list_workspaces().unwrap_or_default();
+            if let Some(status) = ws_map.iter().find(|ws| ws.id == workspace.id) {
+                if !status.enhancing_in_progress {
+                    break;
+                }
+
+                if std::io::stderr().is_terminal() {
+                    let progress_str = if let Some(count) = status.enhancing_progress_count {
+                        let pct = if status.chunk_count > 0 {
+                            (count as f64 / status.chunk_count as f64 * 100.0).min(100.0) as u64
+                        } else {
+                            100
+                        };
+                        format!(" ({} / {} chunks, ~{}%)", count, status.chunk_count, pct)
+                    } else {
+                        String::new()
+                    };
+                    eprint!("\r\x1b[K  waiting for background neural enhancement{}...", progress_str);
+                }
+            } else {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+        }
+        if std::io::stderr().is_terminal() {
+            eprintln!("\r\x1b[K  ✓ neural enhancement complete");
+        }
     }
 
     // For semantic search, load the ONNX model (needed to embed the query).

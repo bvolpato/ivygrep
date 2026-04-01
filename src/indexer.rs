@@ -200,7 +200,10 @@ fn index_workspace_inner(
                 let chunks = chunk_source(rel_path, &content);
                 let indexed: Vec<_> = chunks.into_iter().map(build_indexed_chunk).collect();
                 
-                progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let n = progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                if show_progress && n % 100 == 0 {
+                    eprint!("\r\x1b[K  [{n}/{total}] chunking...");
+                }
 
                 if indexed.is_empty() {
                     return None;

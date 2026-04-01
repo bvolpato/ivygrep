@@ -12,7 +12,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use sha2::{Digest, Sha256};
 
 use crate::config;
 use crate::text::{singularize_token, split_identifier_segments};
@@ -156,14 +155,13 @@ impl EmbeddingModel for HashEmbeddingModel {
                 let normalized = self.normalize_token(&singular);
                 token_count += 1;
 
-                let mut hasher = Sha256::new();
-                hasher.update(normalized.as_bytes());
-                let hash = hasher.finalize();
+                use std::hash::{Hash, Hasher, DefaultHasher};
+                let mut hasher = DefaultHasher::new();
+                normalized.hash(&mut hasher);
+                let hash_val = hasher.finish();
 
-                let bucket = u64::from_le_bytes(hash[..8].try_into().expect("slice length"))
-                    as usize
-                    % self.dimensions;
-                let sign = if hash[8] & 1 == 0 { 1.0 } else { -1.0 };
+                let bucket = (hash_val as usize) % self.dimensions;
+                let sign = if (hash_val >> 16) & 1 == 0 { 1.0 } else { -1.0 };
                 vector[bucket] += sign;
             }
         }
@@ -180,6 +178,11 @@ impl EmbeddingModel for HashEmbeddingModel {
         }
 
         vector
+    }
+
+    fn embed_batch(&self, texts: &[&str]) -> Vec<Vec<f32>> {
+        use rayon::prelude::*;
+        texts.par_iter().map(|t| self.embed(t)).collect()
     }
 }
 

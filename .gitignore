@@ -25,3 +25,4 @@
 
 # ONNX model cache (fastembed)
 .fastembed_cache/
+profile.json.gz
