@@ -385,15 +385,21 @@ async fn run_query(cli: Cli) -> Result<()> {
     let mut search_via_daemon = false;
 
     if !cli.all {
-        let daemon_index_request = DaemonRequest::Index {
-            path: workspace.root.clone(),
-            watch: !cli.no_watch,
-        };
-        if let Some(response) = daemon::request(&daemon_index_request, !cli.no_watch).await? {
-            if let DaemonResponse::Error { message } = response {
-                bail!(message);
+        let first_run = !crate::indexer::workspace_is_indexed(&workspace);
+        if first_run {
+            let daemon_index_request = DaemonRequest::Index {
+                path: workspace.root.clone(),
+                watch: !cli.no_watch,
+            };
+            if let Some(response) = daemon::request(&daemon_index_request, !cli.no_watch).await? {
+                if let DaemonResponse::Error { message } = response {
+                    bail!(message);
+                }
+                search_via_daemon = true;
             }
-            search_via_daemon = true;
+        } else {
+            // Already indexed. Just check if the daemon is online to route the search request.
+            search_via_daemon = daemon::request(&DaemonRequest::Status, false).await?.is_some();
         }
     } else {
         if daemon::request(&DaemonRequest::Status, !cli.no_watch)
