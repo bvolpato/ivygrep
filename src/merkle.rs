@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::io::IsTerminal;
 
 use crate::chunking::is_indexable_file;
 
@@ -47,14 +48,23 @@ impl MerkleSnapshot {
 
     pub fn build(root: &Path) -> Result<Self> {
         let mut files = BTreeMap::new();
-
         let walker = crate::walker::source_walker(root);
+
+        let show_progress = std::io::stderr().is_terminal();
+        let mut scanned = 0;
 
         for entry in walker.build() {
             let entry = entry?;
             let path = entry.path();
             if !entry.file_type().is_some_and(|ft| ft.is_file()) {
                 continue;
+            }
+
+            scanned += 1;
+            if show_progress && scanned % 500 == 0 {
+                use std::io::Write;
+                eprint!("\r\x1b[K  scanning items... {}", scanned);
+                let _ = std::io::stderr().flush();
             }
 
             let rel = path
@@ -84,6 +94,10 @@ impl MerkleSnapshot {
             let file_hash = hex::encode(hasher.finalize());
 
             files.insert(rel.to_string_lossy().to_string(), file_hash);
+        }
+
+        if show_progress {
+            eprint!("\r\x1b[K"); // clean up progress line
         }
 
         let root_hash = root_hash(&files);

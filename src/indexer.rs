@@ -114,8 +114,12 @@ pub fn index_workspace(
     fs2::FileExt::lock_exclusive(&lock_file)
         .with_context(|| format!("failed to acquire index lock {}", lock_path.display()))?;
 
+    let pid_path = workspace.indexing_pid_path();
+    let _ = fs::write(&pid_path, std::process::id().to_string());
+
     let result = index_workspace_inner(workspace, embedding_model);
 
+    let _ = fs::remove_file(&pid_path);
     let _ = fs2::FileExt::unlock(&lock_file);
     result
 }

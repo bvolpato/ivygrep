@@ -37,6 +37,8 @@ pub struct WorkspaceStatus {
     pub neural_vector_count: u64,
     #[serde(default)]
     pub enhancing_in_progress: bool,
+    #[serde(default)]
+    pub indexing_in_progress: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -99,9 +101,13 @@ impl Workspace {
         self.index_dir.join(".enhancing.pid")
     }
 
+    pub fn indexing_pid_path(&self) -> PathBuf {
+        self.index_dir.join(".indexing.pid")
+    }
+
     /// Checks if an enhancement process is currently running for this workspace.
     pub fn is_enhancing_active(&self) -> bool {
-        is_enhancing_alive(&self.enhancing_pid_path())
+        is_active_pid_alive(&self.enhancing_pid_path())
     }
 
     /// Triggers an atomic background spawn of the neural enhancement process.
@@ -270,7 +276,11 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
 
         // Check if enhancement is actively running
         let pid_path = index_dir.join(".enhancing.pid");
-        let enhancing_in_progress = is_enhancing_alive(&pid_path);
+        let enhancing_in_progress = is_active_pid_alive(&pid_path);
+
+        // Check if indexing is actively running
+        let indexing_pid_path = index_dir.join(".indexing.pid");
+        let indexing_in_progress = is_active_pid_alive(&indexing_pid_path);
 
         by_id.insert(
             metadata.id.clone(),
@@ -285,6 +295,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
                 has_neural_vectors,
                 neural_vector_count,
                 enhancing_in_progress,
+                indexing_in_progress,
             },
         );
     }
@@ -335,9 +346,9 @@ fn dir_size_bytes(dir: &Path) -> u64 {
     walk(dir)
 }
 
-/// Check if a background enhancement process is alive by reading the PID file.
+/// Check if a background process is alive by reading the PID file.
 /// Returns false (and cleans up the file) if the PID is stale.
-fn is_enhancing_alive(pid_path: &Path) -> bool {
+fn is_active_pid_alive(pid_path: &Path) -> bool {
     let content = match fs::read_to_string(pid_path) {
         Ok(c) => c,
         Err(_) => return false,

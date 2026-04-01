@@ -234,6 +234,10 @@ async fn run_status(json: bool) -> Result<()> {
                     "  Search: \x1b[1;33m⟳ enhancing\x1b[0m (computing {} in background...)",
                     accel
                 );
+            } else if ws.indexing_in_progress {
+                println!(
+                    "  Search: \x1b[1;33m⟳ indexing\x1b[0m (scanning, parsing, and chunking documents locally...)"
+                );
             } else if ws.chunk_count > 0 {
                 println!(
                     "  Search: \x1b[33m◆ hash\x1b[0m (fast, run a query to trigger neural upgrade)"
