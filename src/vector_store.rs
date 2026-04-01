@@ -45,11 +45,20 @@ impl VectorStore {
             .context("vector store path has no parent")?;
         fs::create_dir_all(parent)?;
 
-        let path_str = self
-            .path
+        let tmp_path = self.path.with_extension("usearch.tmp");
+        let path_str = tmp_path
             .to_str()
             .context("vector path contains invalid UTF-8")?;
-        self.index.save(path_str)?;
+
+        // Write to temporary file first
+        if let Err(e) = self.index.save(path_str) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(e.into());
+        }
+
+        // Atomically rename to avoid corrupted reads by concurrent search processes
+        fs::rename(&tmp_path, &self.path)?;
+
         Ok(())
     }
 
