@@ -162,7 +162,7 @@ fn index_workspace_inner(
 
     let total = diff.added_or_modified.len();
     let show_progress = total > 0 && std::io::stderr().is_terminal();
-    let progress_counter = std::sync::atomic::AtomicUsize::new(0);
+    let progress_counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     let t0 = std::time::Instant::now();
     let mut total_chunks_processed = 0;
@@ -170,52 +170,58 @@ fn index_workspace_inner(
 
     // Stream through batches to rigidly bound memory footprints.
     // 4096 files is highly parallelizable while capping memory overhead effectively.
-    for batch_paths in diff.added_or_modified.chunks(4096) {
-        if show_progress {
-            let current = progress_counter.load(std::sync::atomic::Ordering::Relaxed);
-            eprint!("\r\x1b[K  [{current}/{total}] streaming files to sqlite/tantivy...");
+    let (tx_batch, rx_batch) = std::sync::mpsc::sync_channel::<Vec<(std::path::PathBuf, Vec<IndexedChunk>)>>(2);
+
+    let progress_counter_clone = progress_counter.clone();
+    let root_clone = workspace.root.clone();
+    let diff_paths: Vec<_> = diff.added_or_modified.clone();
+
+    std::thread::spawn(move || {
+        for batch_paths in diff_paths.chunks(4096) {
+            let file_chunks: Vec<_> = batch_paths
+                .par_iter()
+                .filter_map(|rel_path| {
+                    let abs_path = root_clone.join(rel_path);
+                    if !abs_path.exists() {
+                        progress_counter_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        return None;
+                    }
+
+                    let content_bytes = fs::read(&abs_path).ok()?;
+                    if !is_indexable_file(rel_path, &content_bytes) {
+                        progress_counter_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        return None;
+                    }
+
+                    let content = match String::from_utf8(content_bytes) {
+                        Ok(text) => text,
+                        Err(err) => String::from_utf8_lossy(&err.into_bytes()).into_owned(),
+                    };
+
+                    let chunks = chunk_source(rel_path, &content);
+                    let indexed: Vec<_> = chunks.into_iter().map(build_indexed_chunk).collect();
+                    
+                    let n = progress_counter_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if show_progress && n % 100 == 0 {
+                        eprint!("\r\x1b[K  [{n}/{total}] chunking...");
+                    }
+
+                    if indexed.is_empty() {
+                        return None;
+                    }
+                    Some((rel_path.clone(), indexed))
+                })
+                .collect();
+
+            if !file_chunks.is_empty() {
+                if tx_batch.send(file_chunks).is_err() {
+                    break;
+                }
+            }
         }
+    });
 
-        // Phase 1: Parallel read + chunk exactly ONE batch.
-        let file_chunks: Vec<_> = batch_paths
-            .par_iter()
-            .filter_map(|rel_path| {
-                let abs_path = workspace.root.join(rel_path);
-                if !abs_path.exists() {
-                    progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    return None;
-                }
-
-                let content_bytes = fs::read(&abs_path).ok()?;
-                if !is_indexable_file(rel_path, &content_bytes) {
-                    progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    return None;
-                }
-
-                let content = match String::from_utf8(content_bytes) {
-                    Ok(text) => text,
-                    Err(err) => String::from_utf8_lossy(&err.into_bytes()).into_owned(),
-                };
-
-                let chunks = chunk_source(rel_path, &content);
-                let indexed: Vec<_> = chunks.into_iter().map(build_indexed_chunk).collect();
-                
-                let n = progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                if show_progress && n % 100 == 0 {
-                    eprint!("\r\x1b[K  [{n}/{total}] chunking...");
-                }
-
-                if indexed.is_empty() {
-                    return None;
-                }
-                Some((rel_path.clone(), indexed))
-            })
-            .collect();
-
-        if file_chunks.is_empty() {
-            continue;
-        }
-
+    while let Ok(file_chunks) = rx_batch.recv() {
         // Phase 2: Batch embed (very fast hashing model).
         let all_texts: Vec<&str> = file_chunks
             .iter()
