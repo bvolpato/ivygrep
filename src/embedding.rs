@@ -207,9 +207,9 @@ fn register_coreml() {
         // ort::init() is idempotent; first call wins.
         // In ort rc.11, commit() returns bool (true if this call did the init).
         let _ = ort::init()
-            .with_execution_providers([
-                ort::execution_providers::CoreMLExecutionProvider::default().build(),
-            ])
+            .with_execution_providers([ort::execution_providers::CoreMLExecutionProvider::default(
+            )
+            .build()])
             .commit();
         tracing::info!("CoreML execution provider registered");
     }
@@ -221,11 +221,14 @@ pub fn hardware_acceleration_info() -> &'static str {
         #[cfg(target_os = "macos")]
         {
             use ort::ep::ExecutionProvider;
-            if ort::execution_providers::CoreMLExecutionProvider::default().is_available().unwrap_or(false) {
+            if ort::execution_providers::CoreMLExecutionProvider::default()
+                .is_available()
+                .unwrap_or(false)
+            {
                 return "AllMiniLML6V2Q via CoreML";
             }
         }
-        
+
         "AllMiniLML6V2Q via CPU"
     }
     #[cfg(not(feature = "neural"))]

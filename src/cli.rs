@@ -231,7 +231,8 @@ async fn run_status(json: bool) -> Result<()> {
             } else if ws.enhancing_in_progress {
                 let accel = crate::embedding::hardware_acceleration_info();
                 println!(
-                    "  Search: \x1b[1;33m⟳ enhancing\x1b[0m (computing {} in background...)", accel
+                    "  Search: \x1b[1;33m⟳ enhancing\x1b[0m (computing {} in background...)",
+                    accel
                 );
             } else if ws.chunk_count > 0 {
                 println!(
@@ -548,10 +549,8 @@ async fn run_query(cli: Cli) -> Result<()> {
     // that occur perfectly cleanly tearing down `onnxruntime` when the main process exits.
     // Skipped in CI/test environments (IVYGREP_NO_AUTOSPAWN=1).
     let no_autospawn = env::var("IVYGREP_NO_AUTOSPAWN").is_ok();
-    if !cli.all && !cli.hash && !cli.regex && !no_autospawn {
-        if !workspace.vector_neural_path().exists() {
-            let _ = workspace.trigger_background_enhancement();
-        }
+    if !cli.all && !cli.hash && !cli.regex && !no_autospawn && !workspace.vector_neural_path().exists() {
+        let _ = workspace.trigger_background_enhancement();
     }
 
     Ok(())

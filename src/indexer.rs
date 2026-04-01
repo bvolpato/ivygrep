@@ -306,7 +306,7 @@ pub fn enhance_workspace_neural(
         VectorStore::open(&workspace.vector_neural_path(), neural_model.dimensions())?;
 
     // Use a small batch size to bound ONNX/CoreML intermediate Tensor allocations
-    // (e.g. attention matrices). A size of 128 spikes up to 1GB+ RAM. 
+    // (e.g. attention matrices). A size of 128 spikes up to 1GB+ RAM.
     let mut batch = Vec::with_capacity(8);
     let mut total_processed = 0;
 
@@ -330,7 +330,7 @@ pub fn enhance_workspace_neural(
             process_batch(&mut batch, &mut total_processed);
         }
     }
-    
+
     // Process any remaining tail
     process_batch(&mut batch, &mut total_processed);
 

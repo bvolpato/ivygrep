@@ -64,7 +64,10 @@ pub fn hybrid_search(
             Ok(query) => query,
             Err(_) => continue,
         };
-        let lexical_docs = searcher.search(&parsed_query, &TopDocs::with_limit(candidate_limit).order_by_score())?;
+        let lexical_docs = searcher.search(
+            &parsed_query,
+            &TopDocs::with_limit(candidate_limit).order_by_score(),
+        )?;
 
         for (score, addr) in lexical_docs {
             let doc: TantivyDocument = searcher.doc(addr)?;

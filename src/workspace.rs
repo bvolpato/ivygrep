@@ -122,13 +122,13 @@ impl Workspace {
             cmd.stdin(std::process::Stdio::null());
             cmd.stdout(std::process::Stdio::null());
             cmd.stderr(std::process::Stdio::null());
-            
+
             if let Ok(mut child) = cmd.spawn() {
                 let _ = std::fs::write(&pid_path, child.id().to_string());
-                
+
                 // Spawn a detached thread solely to waitpid() the child.
-                // Without this, the background process becomes a <defunct> zombie 
-                // in the daemon's process table forever when it exits, causing 
+                // Without this, the background process becomes a <defunct> zombie
+                // in the daemon's process table forever when it exits, causing
                 // `kill(pid, 0)` liveness checks to falsely return positive infinitely!
                 std::thread::spawn(move || {
                     let _ = child.wait();
@@ -137,7 +137,7 @@ impl Workspace {
                 let _ = std::fs::remove_file(&pid_path);
             }
         }
-        
+
         Ok(())
     }
 
