@@ -143,17 +143,25 @@ pub async fn run() -> Result<()> {
         let pid_path = workspace.enhancing_pid_path();
         let _ = std::fs::write(&pid_path, std::process::id().to_string());
 
-        let result = if let Ok(model) = crate::embedding::create_neural_model_background() {
-            crate::indexer::enhance_workspace_neural(&workspace, model.as_ref())
-        } else {
-            Ok(0)
+        let result = {
+            let model_res = crate::embedding::create_neural_model_background();
+            if let Ok(model) = model_res {
+                crate::indexer::enhance_workspace_neural(&workspace, model.as_ref())
+            } else {
+                Ok(0)
+            }
         };
 
         // Clean up PID file
         let _ = std::fs::remove_file(&pid_path);
 
-        result?;
-        return Ok(());
+        // ONNX clean teardown can sometimes segfault in multithreaded handlers.
+        // We'll intentionally skip proper Rust panic runtime teardown and forcefully exit.
+        if let Err(e) = result {
+            eprintln!("Background enhancement failed: {:?}", e);
+            std::process::exit(1);
+        }
+        std::process::exit(0);
     }
 
     run_query(cli).await
