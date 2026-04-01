@@ -137,7 +137,7 @@ pub async fn run() -> Result<()> {
 
     if let Some(path) = &cli.enhance_internal {
         let workspace = Workspace::resolve(path)?;
-        if let Ok(model) = crate::embedding::create_neural_model() {
+        if let Ok(model) = crate::embedding::create_neural_model_background() {
             let _ = crate::indexer::enhance_workspace_neural(&workspace, model.as_ref());
         }
         return Ok(());

@@ -87,6 +87,20 @@ pub fn create_neural_model() -> anyhow::Result<Box<dyn EmbeddingModel>> {
     }
 }
 
+/// Create a neural model with reduced thread budget for background work.
+/// Uses half the CPU cores so the system stays responsive.
+pub fn create_neural_model_background() -> anyhow::Result<Box<dyn EmbeddingModel>> {
+    #[cfg(feature = "neural")]
+    {
+        let model = OnnxEmbeddingModel::new_background()?;
+        Ok(Box::new(model))
+    }
+    #[cfg(not(feature = "neural"))]
+    {
+        anyhow::bail!("neural feature not compiled in")
+    }
+}
+
 // ── Hash-based embedding (always available) ────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -176,12 +190,42 @@ pub struct OnnxEmbeddingModel {
     model: parking_lot::Mutex<fastembed::TextEmbedding>,
 }
 
+/// Maximum ONNX inter/intra-op thread count for background enhancement.
+/// Uses half the logical CPUs (min 2) so the system stays responsive.
+#[cfg(feature = "neural")]
+fn ort_thread_budget() -> usize {
+    let cpus = num_cpus::get();
+    (cpus / 2).max(2)
+}
+
+/// Register CoreML execution provider (Apple Neural Engine / GPU) if compiled in.
+/// This is a no-op if `coreml` feature is not enabled.
+#[cfg(feature = "neural")]
+fn register_coreml() {
+    #[cfg(feature = "coreml")]
+    {
+        // ort::init() is idempotent; first call wins.
+        if let Err(e) = ort::init()
+            .with_execution_providers([ort::execution_providers::CoreMLExecutionProvider::default(
+            )
+            .build()])
+            .commit()
+        {
+            tracing::debug!("CoreML EP registration skipped: {e}");
+        } else {
+            tracing::info!("CoreML execution provider registered");
+        }
+    }
+}
+
 #[cfg(feature = "neural")]
 impl OnnxEmbeddingModel {
     /// Initialize the neural model.  On first run this downloads
     /// `all-MiniLM-L6-v2` (~23 MB) to `~/.local/share/ivygrep/models/`.
     pub fn new() -> anyhow::Result<Self> {
         use fastembed::{EmbeddingModel as FastModel, InitOptions};
+
+        register_coreml();
 
         let cache_dir = model_cache_dir();
         std::fs::create_dir_all(&cache_dir)?;
@@ -208,6 +252,16 @@ impl OnnxEmbeddingModel {
         Ok(Self {
             model: parking_lot::Mutex::new(model),
         })
+    }
+
+    /// Initialize with limited thread count for background processing.
+    pub fn new_background() -> anyhow::Result<Self> {
+        // Set the ORT thread budget before model init
+        let budget = ort_thread_budget();
+        // SAFETY: This is called in the background `--enhance-internal` subprocess
+        // which is single-threaded at this point (before model init).
+        unsafe { std::env::set_var("ORT_NUM_THREADS", budget.to_string()) };
+        Self::new()
     }
 }
 

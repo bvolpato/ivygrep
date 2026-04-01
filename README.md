@@ -71,6 +71,11 @@ cargo build --release
 install -m 0755 ./target/release/ig ~/.local/bin/ig
 ```
 
+**With Apple GPU acceleration** (macOS, recommended on Apple Silicon):
+```bash
+cargo build --release --features coreml
+```
+
 **Binary downloads**: grab the latest from [Releases](https://github.com/bvolpato/ivygrep/releases/latest) — available for Linux (x86/ARM) and macOS (Intel/Apple Silicon).
 
 ### First search in 10 seconds
@@ -111,8 +116,9 @@ flowchart TD
 **On first search:**
 1. **Index instantly** with hash embeddings (~0.0s for typical repos)
 2. **Return results** immediately via lexical + hash-semantic fusion 
-3. **Enhance silently** — a background thread computes neural (ONNX) embeddings
+3. **Enhance silently** — a background process computes neural (ONNX) embeddings using throttled CPU (half your cores) so your machine stays responsive
 4. **Subsequent queries** automatically use the higher-quality neural vectors
+5. **GPU acceleration** — on macOS with CoreML enabled, embeddings run on the Apple Neural Engine / GPU
 
 Use `ig --status` to see where each workspace stands:
 

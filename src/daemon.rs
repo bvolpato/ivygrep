@@ -209,6 +209,12 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
 
             let result = tokio::task::spawn_blocking(move || {
                 let mut all_hits = Vec::new();
+                let ws_neural_missing: Vec<PathBuf> = workspaces
+                    .iter()
+                    .filter(|w| !w.vector_neural_path().exists())
+                    .map(|w| w.root.clone())
+                    .collect();
+
                 for workspace in workspaces {
                     if let Ok(mut hits) =
                         hybrid_search(&workspace, &query, model.as_ref(), &options)
@@ -223,6 +229,19 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 });
                 if let Some(l) = options.limit {
                     all_hits.truncate(l);
+                }
+                // Spawn background neural enhancement for workspaces that need it
+                if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
+                    && let Ok(exe) = std::env::current_exe()
+                {
+                    for root in ws_neural_missing {
+                        let mut cmd = std::process::Command::new(&exe);
+                        cmd.arg("--enhance-internal").arg(&root);
+                        cmd.stdin(std::process::Stdio::null());
+                        cmd.stdout(std::process::Stdio::null());
+                        cmd.stderr(std::process::Stdio::null());
+                        let _ = cmd.spawn();
+                    }
                 }
                 all_hits
             })
