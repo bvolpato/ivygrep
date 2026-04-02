@@ -403,15 +403,71 @@ async fn run_query(cli: Cli) -> Result<()> {
     if !cli.all {
         let first_run = !crate::indexer::workspace_is_indexed(&workspace);
         if first_run {
+            // Always show progress for first-run, even when the daemon handles it.
+            eprintln!(
+                "{} {} {}",
+                "⟐".bold(),
+                "First run — indexing".bold(),
+                workspace.root.display().to_string().dimmed()
+            );
+
             let daemon_index_request = DaemonRequest::Index {
                 path: workspace.root.clone(),
                 watch: !cli.no_watch,
             };
-            if let Some(response) = daemon::request(&daemon_index_request, !cli.no_watch).await? {
-                if let DaemonResponse::Error { message } = response {
-                    bail!(message);
+
+            // Send the index request to the daemon, but show a progress spinner
+            // while we wait so the user knows work is happening.
+            let ws_id = workspace.id.clone();
+            let show_progress = std::io::stderr().is_terminal();
+
+            let response_future = daemon::request(&daemon_index_request, !cli.no_watch);
+
+            if show_progress {
+                // Poll for progress while waiting for the daemon to finish indexing
+                let progress_handle = tokio::spawn({
+                    let ws_id = ws_id.clone();
+                    async move {
+                        let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                        let mut tick = 0usize;
+                        loop {
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            let frame = spinner[tick % spinner.len()];
+                            tick += 1;
+
+                            // Check workspace status for progress
+                            if let Ok(ws_list) = crate::workspace::list_workspaces() {
+                                if let Some(status) = ws_list.iter().find(|w| w.id == ws_id) {
+                                    eprint!(
+                                        "\r\x1b[K  {} {} files, {} chunks indexed...",
+                                        frame, status.file_count, status.chunk_count
+                                    );
+                                    continue;
+                                }
+                            }
+                            eprint!("\r\x1b[K  {} indexing...", frame);
+                        }
+                    }
+                });
+
+                let result = response_future.await;
+                progress_handle.abort();
+                eprint!("\r\x1b[K"); // clear spinner line
+
+                if let Ok(Some(response)) = result {
+                    if let DaemonResponse::Error { message } = response {
+                        bail!(message);
+                    }
+                    search_via_daemon = true;
                 }
-                search_via_daemon = true;
+            } else {
+                // Non-interactive: just wait silently
+                if let Some(response) = response_future.await? {
+                    if let DaemonResponse::Error { message } = response {
+                        bail!(message);
+                    }
+                    search_via_daemon = true;
+                }
             }
         } else {
             // Already indexed. Just check if the daemon is online to route the search request.
