@@ -434,9 +434,18 @@ pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
 
-    // Bound the wait so a busy daemon can't block the CLI forever.
+    // Timeout varies by request type: Index can take 30+ min on massive repos
+    // (dd-source: 270K files), while Status should complete in seconds.
+    let timeout_secs = match request {
+        DaemonRequest::Index { .. } => 1800,       // 30 min for large repos
+        DaemonRequest::Status => 5,                 // quick health check
+        DaemonRequest::Search { .. }
+        | DaemonRequest::RegexSearch { .. } => 120, // 2 min for search
+        DaemonRequest::Remove { .. } => 30,         // cleanup
+    };
+
     match tokio::time::timeout(
-        std::time::Duration::from_secs(120),
+        std::time::Duration::from_secs(timeout_secs),
         reader.read_line(&mut line),
     )
     .await
