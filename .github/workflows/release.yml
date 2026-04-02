@@ -21,19 +21,23 @@ jobs:
         include:
           - target: x86_64-unknown-linux-musl
             runner: ubuntu-latest
+            archive_name: linux-x86_64
             archive: tar.gz
             cargo_flags: "--no-default-features"
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-latest
+            archive_name: linux-aarch64
             archive: tar.gz
             cross: true
             cargo_flags: "--no-default-features"
           - target: x86_64-apple-darwin
             runner: macos-latest
+            archive_name: macos-x86_64
             archive: tar.gz
             cargo_flags: "--no-default-features"
           - target: aarch64-apple-darwin
             runner: macos-latest
+            archive_name: macos-aarch64
             archive: tar.gz
 
     steps:
@@ -58,18 +62,17 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-musl'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
-      - name: Install cross-compilation tools (aarch64-linux-musl)
+      - name: Install cross (aarch64-linux-musl)
         if: matrix.cross
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu musl-tools
-          # Use the GNU cross-linker for musl target (works for static builds)
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-          echo "CC_aarch64_unknown_linux_musl=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-          echo "CXX_aarch64_unknown_linux_musl=aarch64-linux-gnu-g++" >> $GITHUB_ENV
+        run: cargo install cross --git https://github.com/cross-rs/cross
 
-      - name: Build release binary
+      - name: Build release binary (native)
+        if: ${{ !matrix.cross }}
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.cargo_flags }}
+
+      - name: Build release binary (cross)
+        if: matrix.cross
+        run: cross build --release --target ${{ matrix.target }} ${{ matrix.cargo_flags }}
 
       - name: Smoke test (native only)
         if: ${{ !matrix.cross }}
@@ -79,7 +82,7 @@ jobs:
         shell: bash
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          ARCHIVE_NAME="ivygrep-${TAG}-${{ matrix.target }}"
+          ARCHIVE_NAME="ivygrep-${TAG}-${{ matrix.archive_name }}"
           mkdir -p "dist/${ARCHIVE_NAME}"
           cp "target/${{ matrix.target }}/release/ig" "dist/${ARCHIVE_NAME}/"
           cp README.md LICENSE* 2>/dev/null "dist/${ARCHIVE_NAME}/" || true
@@ -167,10 +170,10 @@ jobs:
 
           echo "version=${VERSION}" >> $GITHUB_OUTPUT
           echo "tag=${TAG}" >> $GITHUB_OUTPUT
-          echo "sha_linux_amd64=$(get_sha "ivygrep-${TAG}-x86_64-unknown-linux-musl.tar.gz.sha256")" >> $GITHUB_OUTPUT
-          echo "sha_linux_arm64=$(get_sha "ivygrep-${TAG}-aarch64-unknown-linux-musl.tar.gz.sha256")" >> $GITHUB_OUTPUT
-          echo "sha_macos_amd64=$(get_sha "ivygrep-${TAG}-x86_64-apple-darwin.tar.gz.sha256")" >> $GITHUB_OUTPUT
-          echo "sha_macos_arm64=$(get_sha "ivygrep-${TAG}-aarch64-apple-darwin.tar.gz.sha256")" >> $GITHUB_OUTPUT
+          echo "sha_linux_amd64=$(get_sha "ivygrep-${TAG}-linux-x86_64.tar.gz.sha256")" >> $GITHUB_OUTPUT
+          echo "sha_linux_arm64=$(get_sha "ivygrep-${TAG}-linux-aarch64.tar.gz.sha256")" >> $GITHUB_OUTPUT
+          echo "sha_macos_amd64=$(get_sha "ivygrep-${TAG}-macos-x86_64.tar.gz.sha256")" >> $GITHUB_OUTPUT
+          echo "sha_macos_arm64=$(get_sha "ivygrep-${TAG}-macos-aarch64.tar.gz.sha256")" >> $GITHUB_OUTPUT
 
       - name: Checkout homebrew-tap
         uses: actions/checkout@v5
@@ -195,22 +198,22 @@ jobs:
 
             on_macos do
               if Hardware::CPU.intel?
-                url "https://github.com/bvolpato/ivygrep/releases/download/${{ steps.sha.outputs.tag }}/ivygrep-${{ steps.sha.outputs.tag }}-x86_64-apple-darwin.tar.gz"
+                url "https://github.com/bvolpato/ivygrep/releases/download/${{ steps.sha.outputs.tag }}/ivygrep-${{ steps.sha.outputs.tag }}-macos-x86_64.tar.gz"
                 sha256 "${{ steps.sha.outputs.sha_macos_amd64 }}"
               end
               if Hardware::CPU.arm?
-                url "https://github.com/bvolpato/ivygrep/releases/download/${{ steps.sha.outputs.tag }}/ivygrep-${{ steps.sha.outputs.tag }}-aarch64-apple-darwin.tar.gz"
+                url "https://github.com/bvolpato/ivygrep/releases/download/${{ steps.sha.outputs.tag }}/ivygrep-${{ steps.sha.outputs.tag }}-macos-aarch64.tar.gz"
                 sha256 "${{ steps.sha.outputs.sha_macos_arm64 }}"
               end
             end
 
             on_linux do
               if Hardware::CPU.intel?
-                url "https://github.com/bvolpato/ivygrep/releases/download/${{ steps.sha.outputs.tag }}/ivygrep-${{ steps.sha.outputs.tag }}-x86_64-unknown-linux-musl.tar.gz"
+                url "https://github.com/bvolpato/ivygrep/releases/download/${{ steps.sha.outputs.tag }}/ivygrep-${{ steps.sha.outputs.tag }}-linux-x86_64.tar.gz"
                 sha256 "${{ steps.sha.outputs.sha_linux_amd64 }}"
               end
               if Hardware::CPU.arm?
-                url "https://github.com/bvolpato/ivygrep/releases/download/${{ steps.sha.outputs.tag }}/ivygrep-${{ steps.sha.outputs.tag }}-aarch64-unknown-linux-musl.tar.gz"
+                url "https://github.com/bvolpato/ivygrep/releases/download/${{ steps.sha.outputs.tag }}/ivygrep-${{ steps.sha.outputs.tag }}-linux-aarch64.tar.gz"
                 sha256 "${{ steps.sha.outputs.sha_linux_arm64 }}"
               end
             end
