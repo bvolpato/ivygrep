@@ -130,6 +130,18 @@ fn index_workspace_inner(
 ) -> Result<IndexingSummary> {
     let _ = open_storage(workspace, embedding_model.dimensions())?;
 
+    // Trust-but-verify: if a live watcher daemon is confirmed, skip the
+    // expensive Merkle rebuild entirely. The watcher already triggered
+    // re-indexing for any changed files through filesystem events.
+    if workspace.is_watcher_alive() && workspace_is_indexed(workspace) {
+        return Ok(IndexingSummary {
+            workspace_id: workspace.id.clone(),
+            indexed_files: 0,
+            deleted_files: 0,
+            total_chunks: count_chunks(&workspace.sqlite_path())?,
+        });
+    }
+
     let old_snapshot = MerkleSnapshot::load(&workspace.merkle_snapshot_path())?;
     let new_snapshot = MerkleSnapshot::build(&workspace.root)?;
     let diff = old_snapshot.diff(&new_snapshot);
@@ -805,8 +817,9 @@ mod tests {
         let neural_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
 
         let n1 = enhance_workspace_neural(&workspace, &neural_model).unwrap();
+        assert!(n1 > 0, "first enhance should process chunks");
         let n2 = enhance_workspace_neural(&workspace, &neural_model).unwrap();
-        assert_eq!(n1, n2, "enhance should be idempotent");
+        assert_eq!(n2, 0, "second enhance should skip already-processed chunks");
     }
 
     #[test]

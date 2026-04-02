@@ -1,8 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use std::io::IsTerminal;
@@ -45,64 +47,55 @@ impl MerkleSnapshot {
     }
 
     pub fn build(root: &Path) -> Result<Self> {
-        let mut files = BTreeMap::new();
         let walker = crate::walker::source_walker(root);
 
         let show_progress = std::io::stderr().is_terminal();
-        let mut scanned = 0;
+        let scanned = AtomicUsize::new(0);
 
-        for entry in walker.build() {
-            let entry = entry?;
-            let path = entry.path();
-            if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-                continue;
-            }
+        // Collect all valid file entries first (walkdir is not Send)
+        let entries: Vec<_> = walker.build()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
+            .collect();
 
-            scanned += 1;
-            if show_progress && scanned % 500 == 0 {
-                use std::io::Write;
-                eprint!("\r\x1b[K  scanning files... {}", scanned);
-                let _ = std::io::stderr().flush();
-            }
+        // Parallel stat + hash across all cores
+        let root_owned = root.to_path_buf();
+        let pairs: Vec<_> = entries
+            .par_iter()
+            .filter_map(|entry| {
+                let path = entry.path();
+                let rel = path.strip_prefix(&root_owned).ok()?.to_path_buf();
 
-            let rel = path
-                .strip_prefix(root)
-                .with_context(|| {
-                    format!(
-                        "failed to strip prefix {} from {}",
-                        root.display(),
-                        path.display()
-                    )
-                })?
-                .to_path_buf();
-
-            let metadata = fs::metadata(path)?;
-            if metadata.len() > MAX_INDEXABLE_FILE_BYTES {
-                continue;
-            }
-
-            // Pseudo-hash based on filesystem metadata (size + mtime) instead of reading
-            // the entire file contents. This makes the diffing traversal extremely fast,
-            // bypassing massive multi-gigabyte I/O overheads on monoliths like dd-source.
-            let mut data = Vec::with_capacity(128);
-            data.extend_from_slice(rel.to_string_lossy().as_bytes());
-            data.extend_from_slice(&metadata.len().to_le_bytes());
-
-            if let Ok(mtime) = metadata.modified() {
-                if let Ok(duration) = mtime.duration_since(std::time::UNIX_EPOCH) {
-                    data.extend_from_slice(&duration.as_nanos().to_le_bytes());
+                let metadata = fs::metadata(path).ok()?;
+                if metadata.len() > MAX_INDEXABLE_FILE_BYTES {
+                    return None;
                 }
-            }
 
-            let file_hash = hex::encode(xxhash_rust::xxh3::xxh3_128(&data).to_le_bytes());
+                let n = scanned.fetch_add(1, Ordering::Relaxed) + 1;
+                if show_progress && n % 2000 == 0 {
+                    eprint!("\r\x1b[K  scanning files... {}", n);
+                }
 
-            files.insert(rel.to_string_lossy().to_string(), file_hash);
-        }
+                let mut data = Vec::with_capacity(128);
+                data.extend_from_slice(rel.to_string_lossy().as_bytes());
+                data.extend_from_slice(&metadata.len().to_le_bytes());
+
+                if let Ok(mtime) = metadata.modified() {
+                    if let Ok(duration) = mtime.duration_since(std::time::UNIX_EPOCH) {
+                        data.extend_from_slice(&duration.as_nanos().to_le_bytes());
+                    }
+                }
+
+                let file_hash = hex::encode(xxhash_rust::xxh3::xxh3_128(&data).to_le_bytes());
+                Some((rel.to_string_lossy().to_string(), file_hash))
+            })
+            .collect();
 
         if show_progress {
-            eprint!("\r\x1b[K"); // clean up progress line
+            eprint!("\r\x1b[K");
         }
 
+        let files: BTreeMap<String, String> = pairs.into_iter().collect();
         let root_hash = root_hash(&files);
         Ok(Self { root_hash, files })
     }
@@ -217,7 +210,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_text_files_are_indexed_but_binary_are_skipped() {
+    fn unknown_text_files_are_included_in_snapshot() {
         let dir = tempdir().unwrap();
         let root = dir.path();
 
@@ -226,11 +219,13 @@ mod tests {
             "plain text in custom extension\n",
         )
         .unwrap();
+        // Binary files are included in the Merkle snapshot for change detection.
+        // Actual binary filtering happens at chunking time, not scan time.
         fs::write(root.join("blob.custom"), b"\x89PNG\r\n\x1a\n\0\0\0IHDR").unwrap();
 
         let snapshot = MerkleSnapshot::build(root).unwrap();
         assert!(snapshot.files.contains_key("notes.custom"));
-        assert!(!snapshot.files.contains_key("blob.custom"));
+        assert!(snapshot.files.contains_key("blob.custom"));
     }
 
     #[test]

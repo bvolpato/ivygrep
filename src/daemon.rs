@@ -308,6 +308,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
         DaemonRequest::Remove { path } => match Workspace::resolve(&path) {
             Ok(workspace) => {
                 state.watchers.lock().remove(&workspace.id);
+                let _ = std::fs::remove_file(workspace.watcher_pid_path());
                 match remove_workspace_index(&workspace) {
                     Ok(_) => DaemonResponse::Ack {
                         message: format!("removed workspace index {}", workspace.id),
@@ -341,7 +342,12 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
     })?;
 
     watcher.watch(&workspace.root, RecursiveMode::Recursive)?;
-    state.watchers.lock().insert(workspace.id, watcher);
+    state.watchers.lock().insert(workspace.id.clone(), watcher);
+
+    // Write the daemon PID so the CLI can verify the watcher is alive
+    // and skip expensive Merkle scans ("trust but verify").
+    let _ = std::fs::write(workspace.watcher_pid_path(), std::process::id().to_string());
+
     eprintln!("watching {}", workspace.root.display());
 
     Ok(())

@@ -111,6 +111,18 @@ impl Workspace {
         self.index_dir.join(".indexing.pid")
     }
 
+    /// PID file written by the daemon when it starts watching this workspace.
+    /// Allows the CLI to skip expensive Merkle scans when a live watcher is confirmed.
+    pub fn watcher_pid_path(&self) -> PathBuf {
+        self.index_dir.join(".watcher.pid")
+    }
+
+    /// Trust-but-verify: check if a filesystem watcher daemon is alive for this workspace.
+    /// Returns true only if the PID file exists AND the process is still running.
+    pub fn is_watcher_alive(&self) -> bool {
+        is_active_pid_alive(&self.watcher_pid_path())
+    }
+
     /// Checks if an enhancement process is currently running for this workspace.
     pub fn is_enhancing_active(&self) -> bool {
         is_active_pid_alive(&self.enhancing_pid_path())
