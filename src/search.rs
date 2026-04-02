@@ -9,7 +9,7 @@ use tantivy::query::QueryParser;
 
 use crate::embedding::EmbeddingModel;
 use crate::indexer::{
-    IndexedChunk, fetch_chunk_by_id, fetch_chunk_by_vector_key, open_sqlite, open_tantivy_index,
+    IndexedChunk, fetch_chunk_by_id, fetch_chunk_by_vector_key, open_sqlite_readonly, open_tantivy_index,
 };
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
@@ -56,7 +56,7 @@ pub fn hybrid_search(
     let mut parser = QueryParser::for_index(&index, vec![fields.text, fields.file_path]);
     parser.set_field_boost(fields.file_path, 2.0);
 
-    let sqlite = open_sqlite(&workspace.sqlite_path())?;
+    let sqlite = open_sqlite_readonly(&workspace.sqlite_path())?;
 
     let mut lexical_by_id = HashMap::<String, (IndexedChunk, f32)>::new();
     for lexical_query in build_lexical_queries(query_text) {
@@ -503,8 +503,22 @@ fn compact_identifier(input: &str) -> String {
 }
 
 pub fn workspace_has_results(workspace: &Workspace) -> Result<bool> {
-    let conn: Connection = open_sqlite(&workspace.sqlite_path())?;
-    let count: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
+    let conn: Connection = open_sqlite_readonly(&workspace.sqlite_path())?;
+    // Check cached stats first (O(1)), fall back to EXISTS which stops at first row
+    let count: i64 = conn
+        .query_row(
+            "SELECT value FROM _stats WHERE key = 'chunk_count'",
+            [],
+            |row| row.get(0),
+        )
+        .or_else(|_| {
+            conn.query_row(
+                "SELECT 1 FROM chunks LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+        })
+        .unwrap_or(0);
     Ok(count > 0)
 }
 

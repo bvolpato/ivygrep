@@ -333,6 +333,63 @@ fn read_sqlite_counts(index_dir: &Path) -> (u64, u64) {
     if !sqlite_path.exists() {
         return (0, 0);
     }
+
+    // Try read-only first for speed (no CREATE TABLE / PRAGMA overhead).
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        &sqlite_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return (0, 0);
+    };
+
+    // Fast path: read from cached _stats table (O(1) lookup).
+    let cached_chunks = conn.query_row(
+        "SELECT value FROM _stats WHERE key = 'chunk_count'",
+        [],
+        |row| row.get::<_, i64>(0),
+    );
+    let cached_files = conn.query_row(
+        "SELECT value FROM _stats WHERE key = 'file_count'",
+        [],
+        |row| row.get::<_, i64>(0),
+    );
+
+    if let (Ok(c), Ok(f)) = (cached_chunks, cached_files) {
+        return (c as u64, f as u64);
+    }
+
+    // Slow path: _stats table doesn't exist yet (pre-migration DB).
+    // Try to open read-write and cache counts. If the DB is locked
+    // (e.g., by the enhancer), fall back to a live read-only COUNT.
+    drop(conn);
+
+    // Try non-blocking write migration first
+    if let Ok(conn) = rusqlite::Connection::open(&sqlite_path) {
+        conn.busy_timeout(std::time::Duration::from_millis(100)).ok();
+        if conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS _stats (key TEXT PRIMARY KEY, value INTEGER NOT NULL)",
+        ).is_ok() {
+            let chunks: i64 = conn
+                .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
+                .unwrap_or(0);
+            let files: i64 = conn
+                .query_row("SELECT COUNT(DISTINCT file_path) FROM chunks", [], |row| {
+                    row.get(0)
+                })
+                .unwrap_or(0);
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO _stats (key, value) VALUES ('chunk_count', ?1)",
+                rusqlite::params![chunks],
+            );
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO _stats (key, value) VALUES ('file_count', ?1)",
+                rusqlite::params![files],
+            );
+            return (chunks as u64, files as u64);
+        }
+    }
+
+    // DB is locked — do a read-only live COUNT (won't cache, but won't block)
     let Ok(conn) = rusqlite::Connection::open_with_flags(
         &sqlite_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -350,25 +407,39 @@ fn read_sqlite_counts(index_dir: &Path) -> (u64, u64) {
     (chunks as u64, files as u64)
 }
 
+/// Fast index size estimate by stat-ing known index files instead of
+/// recursively walking potentially 17+ GB of index directories.
 fn dir_size_bytes(dir: &Path) -> u64 {
-    fn walk(path: &Path) -> u64 {
-        let mut total = 0u64;
-        if let Ok(entries) = fs::read_dir(path) {
-            for entry in entries.flatten() {
-                let ft = match entry.file_type() {
-                    Ok(ft) => ft,
-                    Err(_) => continue,
-                };
-                if ft.is_file() {
-                    total += entry.metadata().map(|m| m.len()).unwrap_or(0);
-                } else if ft.is_dir() {
-                    total += walk(&entry.path());
+    let known_files = [
+        "metadata.sqlite3",
+        "metadata.sqlite3-wal",
+        "metadata.sqlite3-shm",
+        "vectors.usearch",
+        "vectors_neural.usearch",
+        "merkle_snapshot.json",
+        "workspace.json",
+    ];
+
+    let mut total = 0u64;
+    for name in &known_files {
+        if let Ok(meta) = fs::metadata(dir.join(name)) {
+            total += meta.len();
+        }
+    }
+
+    // Add Tantivy directory (can have many segment files)
+    let tantivy_dir = dir.join("tantivy");
+    if let Ok(entries) = fs::read_dir(&tantivy_dir) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if meta.is_file() {
+                    total += meta.len();
                 }
             }
         }
-        total
     }
-    walk(dir)
+
+    total
 }
 
 /// Check if a background process is alive by reading the PID file.

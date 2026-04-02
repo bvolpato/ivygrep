@@ -172,12 +172,10 @@ pub async fn run() -> Result<()> {
 }
 
 async fn run_status(json: bool) -> Result<()> {
-    let response = daemon::request(&DaemonRequest::Status, false).await?;
-    let workspaces = match response {
-        Some(DaemonResponse::Status { workspaces }) => workspaces,
-        Some(DaemonResponse::Error { message }) => bail!(message),
-        _ => list_workspaces()?,
-    };
+    // Read status directly from the filesystem — no need to route through
+    // the daemon socket. Status data (SQLite stats, PID files, metadata)
+    // is all local. This avoids blocking when the daemon is busy.
+    let workspaces = list_workspaces()?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&workspaces)?);

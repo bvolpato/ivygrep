@@ -270,6 +270,22 @@ fn index_workspace_inner(
         );
     }
 
+    // Update cached stats before committing so status reads are O(1).
+    let chunk_count: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM chunks", [], |row| row.get(0)
+    ).unwrap_or(0);
+    let file_count: i64 = tx.query_row(
+        "SELECT COUNT(DISTINCT file_path) FROM chunks", [], |row| row.get(0)
+    ).unwrap_or(0);
+    tx.execute(
+        "INSERT OR REPLACE INTO _stats (key, value) VALUES ('chunk_count', ?1)",
+        params![chunk_count],
+    )?;
+    tx.execute(
+        "INSERT OR REPLACE INTO _stats (key, value) VALUES ('file_count', ?1)",
+        params![file_count],
+    )?;
+
     tx.commit()?;
 
     writer.commit()?;
@@ -515,6 +531,16 @@ pub fn open_sqlite(sqlite_path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+/// Open SQLite in read-only mode for search and status queries.
+/// Skips CREATE TABLE / PRAGMA writes for maximum speed.
+pub fn open_sqlite_readonly(sqlite_path: &Path) -> Result<Connection> {
+    let conn = Connection::open_with_flags(
+        sqlite_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    Ok(conn)
+}
+
 fn create_tables(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
@@ -532,6 +558,11 @@ fn create_tables(conn: &Connection) -> Result<()> {
             content_hash TEXT NOT NULL,
             vector_key INTEGER NOT NULL,
             modified_unix INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS _stats (
+            key TEXT PRIMARY KEY,
+            value INTEGER NOT NULL
         );
 
         CREATE INDEX IF NOT EXISTS idx_chunks_file_path ON chunks(file_path);
