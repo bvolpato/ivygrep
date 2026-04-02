@@ -98,6 +98,32 @@ impl VectorStore {
         }
     }
 
+    /// Score a single vector by key against a query vector.
+    /// Returns None if the key doesn't exist in the index.
+    pub fn score(&self, key: u64, query: &[f32]) -> Option<f32> {
+        if !self.index.contains(key) {
+            return None;
+        }
+        // Use search with the query and check if this key appears
+        // For efficiency, retrieve the vector and compute cosine similarity directly
+        let dims = query.len();
+        let mut stored = vec![0.0f32; dims];
+        match self.index.get(key, &mut stored) {
+            Ok(_count) => {
+                // Cosine similarity: dot(a,b) / (|a| * |b|)
+                let dot: f32 = stored.iter().zip(query.iter()).map(|(a, b)| a * b).sum();
+                let norm_a: f32 = stored.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let norm_b: f32 = query.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if norm_a > 0.0 && norm_b > 0.0 {
+                    Some(dot / (norm_a * norm_b))
+                } else {
+                    Some(0.0)
+                }
+            }
+            Err(_) => None,
+        }
+    }
+
     fn ensure_capacity_for_insert(&mut self) {
         let size = self.index.size();
         let capacity = self.index.capacity();

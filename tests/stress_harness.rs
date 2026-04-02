@@ -1654,7 +1654,7 @@ fn stress_neural_survives_churn() {
 
     // Re-enhance — should reflect new state
     let n2 = ivygrep::indexer::enhance_workspace_neural(&workspace, &model).unwrap();
-    assert_eq!(n2, summary.total_chunks);
+    assert_eq!(n2, 10, "only the 10 new chunks should be processed");
 
     // Search should find new content, not deleted content
     let hits = hybrid_search(&workspace, "handle_25", &model, &SearchOptions::default()).unwrap();

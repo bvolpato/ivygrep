@@ -537,7 +537,6 @@ async fn run_query(cli: Cli) -> Result<()> {
         }
     }
 
-    // For semantic search, load the ONNX model (needed to embed the query).
     let search_model: Option<Box<dyn crate::embedding::EmbeddingModel>> =
         if !search_via_daemon && !cli.regex {
             Some(create_model(cli.hash))
@@ -604,10 +603,36 @@ async fn run_query(cli: Cli) -> Result<()> {
         };
 
         if search_via_daemon {
-            match daemon::request(&request, false).await? {
-                Some(DaemonResponse::SearchResults { hits }) => hits,
-                Some(DaemonResponse::Error { message }) => bail!(message),
-                _ => vec![],
+            let show_spinner = std::io::stderr().is_terminal();
+            let search_future = daemon::request(&request, false);
+
+            if show_spinner {
+                let spinner_handle = tokio::spawn(async move {
+                    let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                    let mut tick = 0usize;
+                    // Wait a short beat before showing spinner (fast queries won't flash it)
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    loop {
+                        let frame = spinner[tick % spinner.len()];
+                        tick += 1;
+                        eprint!("\r\x1b[K  {} searching...", frame);
+                        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+                    }
+                });
+                let result = search_future.await;
+                spinner_handle.abort();
+                eprint!("\r\x1b[K");
+                match result? {
+                    Some(DaemonResponse::SearchResults { hits }) => hits,
+                    Some(DaemonResponse::Error { message }) => bail!(message),
+                    _ => vec![],
+                }
+            } else {
+                match daemon::request(&request, false).await? {
+                    Some(DaemonResponse::SearchResults { hits }) => hits,
+                    Some(DaemonResponse::Error { message }) => bail!(message),
+                    _ => vec![],
+                }
             }
         } else {
             let model = search_model
@@ -671,7 +696,7 @@ async fn run_query(cli: Cli) -> Result<()> {
         let _ = workspace.trigger_background_enhancement();
     }
 
-    Ok(())
+    std::process::exit(0);
 }
 
 fn render_hits(

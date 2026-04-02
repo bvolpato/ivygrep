@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::path::PathBuf;
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -58,12 +59,53 @@ pub fn hybrid_search(
 
     let sqlite = open_sqlite_readonly(&workspace.sqlite_path())?;
 
+    let mut allowed_languages = Vec::new();
+    let mut can_pushdown_languages = options.include_globs.is_empty();
+    if let Some(tf) = &options.type_filter {
+        allowed_languages.push(tf.to_string());
+        can_pushdown_languages = true;
+    } else if !options.include_globs.is_empty() {
+        can_pushdown_languages = true;
+        for glob in &options.include_globs {
+            let trimmed = glob.trim();
+            if trimmed.starts_with("*.") && !trimmed.contains('/') && !trimmed.contains('?') {
+                let ext = &trimmed[1..];
+                if let Some(lang) = crate::chunking::language_for_path(&PathBuf::from(format!("dummy{}", ext))) {
+                    allowed_languages.push(lang.to_string());
+                } else {
+                    can_pushdown_languages = false;
+                    break;
+                }
+            } else {
+                can_pushdown_languages = false;
+                break;
+            }
+        }
+    }
+
     let mut lexical_by_id = HashMap::<String, (IndexedChunk, f32)>::new();
     for lexical_query in build_lexical_queries(query_text) {
-        let parsed_query = match parser.parse_query(&lexical_query) {
+        let mut parsed_query = match parser.parse_query(&lexical_query) {
             Ok(query) => query,
             Err(_) => continue,
         };
+
+        if can_pushdown_languages && !allowed_languages.is_empty() {
+            let mut lang_queries: Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
+            for lang in &allowed_languages {
+                let term = tantivy::Term::from_field_text(fields.language, lang);
+                let q = Box::new(tantivy::query::TermQuery::new(term, tantivy::schema::IndexRecordOption::Basic));
+                lang_queries.push((tantivy::query::Occur::Should, q));
+            }
+            let lang_boolean = Box::new(tantivy::query::BooleanQuery::new(lang_queries));
+
+            let combined_queries = vec![
+                (tantivy::query::Occur::Must, parsed_query),
+                (tantivy::query::Occur::Must, lang_boolean as Box<dyn tantivy::query::Query>),
+            ];
+            parsed_query = Box::new(tantivy::query::BooleanQuery::new(combined_queries));
+        }
+
         let lexical_docs = searcher.search(
             &parsed_query,
             &TopDocs::with_limit(candidate_limit).order_by_score(),
@@ -109,17 +151,43 @@ pub fn hybrid_search(
         let qv = embedding_model.embed(query_text);
         (vi, qv)
     };
+    // When glob filters or scope filters are active, pre-collect the set of
+    // vector_keys that match, so we can skip the expensive full-corpus vector
+    // search and only fetch relevant candidates from SQLite.
+    let has_filters = !options.include_globs.is_empty()
+        || !options.exclude_globs.is_empty()
+        || options.scope_filter.is_some()
+        || options.type_filter.is_some();
 
     let mut semantic_chunks = Vec::new();
     if vector_index.size() > 0 {
-        let matches = vector_index.search(&query_vector, candidate_limit);
-        for vector_match in matches {
-            if let Some(chunk) = fetch_chunk_by_vector_key(&sqlite, vector_match.key)?
-                .filter(|chunk| type_matches(chunk, options.type_filter.as_deref()))
-                .filter(|chunk| scope_matches(chunk, options.scope_filter.as_ref()))
-                .filter(|chunk| path_matches(chunk, &path_matcher))
-            {
-                semantic_chunks.push((chunk, vector_match.score));
+        if has_filters {
+            // Pre-filtered path: query SQLite for matching chunks first,
+            // then only look up their embeddings. This turns a 2.3M scan
+            // into a few thousand lookups for targeted queries like --include '*.yaml'.
+            let filtered_chunks = collect_filtered_chunks(
+                &sqlite,
+                &path_matcher,
+                options.scope_filter.as_ref(),
+                options.type_filter.as_deref(),
+                &options.include_globs,
+            );
+            // Score each filtered chunk against the query vector
+            for chunk in filtered_chunks {
+                if let Some(score) = vector_index.score(chunk.vector_key, &query_vector) {
+                    semantic_chunks.push((chunk, score));
+                }
+            }
+            // Sort by score descending, keep top candidates
+            semantic_chunks.sort_by(|a, b| b.1.total_cmp(&a.1));
+            semantic_chunks.truncate(candidate_limit);
+        } else {
+            // Unfiltered path: standard ANN search over entire corpus
+            let matches = vector_index.search(&query_vector, candidate_limit);
+            for vector_match in matches {
+                if let Some(chunk) = fetch_chunk_by_vector_key(&sqlite, vector_match.key)? {
+                    semantic_chunks.push((chunk, vector_match.score));
+                }
             }
         }
     }
@@ -357,6 +425,87 @@ fn scope_matches(chunk: &IndexedChunk, scope_filter: Option<&WorkspaceScope>) ->
 
 fn path_matches(chunk: &IndexedChunk, path_matcher: &PathGlobMatcher) -> bool {
     path_matcher.matches(&chunk.file_path)
+}
+
+/// Pre-collect chunks from SQLite that match glob/scope/type filters.
+/// Used to avoid full-corpus vector scan when targeted filters are set.
+fn collect_filtered_chunks(
+    conn: &Connection,
+    path_matcher: &PathGlobMatcher,
+    scope_filter: Option<&WorkspaceScope>,
+    type_filter: Option<&str>,
+    include_globs: &[String],
+) -> Vec<IndexedChunk> {
+    // Build a SQL query that pushes as much filtering as possible into SQLite.
+    let mut sql = String::from(
+        "SELECT chunk_id, file_path, start_line, end_line, language, kind, text, content_hash, vector_key FROM chunks WHERE 1=1",
+    );
+    let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    if let Some(tf) = type_filter {
+        sql.push_str(" AND language = ?");
+        params_vec.push(Box::new(tf.to_string()));
+    }
+
+    if let Some(scope) = scope_filter {
+        let prefix = scope.rel_path.to_string_lossy().to_string();
+        if scope.is_file {
+            sql.push_str(" AND file_path = ?");
+            params_vec.push(Box::new(prefix));
+        } else {
+            sql.push_str(" AND file_path LIKE ?");
+            params_vec.push(Box::new(format!("{}%", prefix)));
+        }
+    }
+
+    // Push simple extension globs into SQL for massive performance gains.
+    // e.g., "*.yaml" -> language IN ('yaml') (Hits the SQLite index instantly!)
+    // Instead of doing `file_path LIKE '%.yaml'` which triggers a full table scan.
+    let mut sql_ext_filters: Vec<String> = Vec::new();
+    for glob in include_globs {
+        let trimmed = glob.trim();
+        if trimmed.starts_with("*.") && !trimmed.contains('/') && !trimmed.contains('?') {
+            // Simple extension glob: *.yaml, *.rs, *.py, etc.
+            let ext = &trimmed[1..]; // ".yaml"
+            if let Some(lang) = crate::chunking::language_for_path(&PathBuf::from(format!("dummy{}", ext))) {
+                sql_ext_filters.push("language = ?".to_string());
+                params_vec.push(Box::new(lang.to_string()));
+            } else {
+                // If we don't have a known language for this extension, we must fall back to LIKE
+                sql_ext_filters.push("file_path LIKE ?".to_string());
+                params_vec.push(Box::new(format!("%{}", ext)));
+            }
+        }
+    }
+    if !sql_ext_filters.is_empty() {
+        sql.push_str(&format!(" AND ({})", sql_ext_filters.join(" OR ")));
+    }
+
+    let Ok(mut stmt) = conn.prepare(&sql) else {
+        return Vec::new();
+    };
+
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+    let Ok(rows) = stmt.query_map(params_refs.as_slice(), |row| {
+        Ok(IndexedChunk {
+            chunk_id: row.get(0)?,
+            file_path: PathBuf::from(row.get::<_, String>(1)?),
+            start_line: row.get::<_, i64>(2)? as usize,
+            end_line: row.get::<_, i64>(3)? as usize,
+            language: row.get(4)?,
+            kind: row.get(5)?,
+            text: row.get(6)?,
+            content_hash: row.get(7)?,
+            vector_key: row.get::<_, i64>(8)? as u64,
+        })
+    }) else {
+        return Vec::new();
+    };
+
+    // Apply full glob filtering in Rust for complex patterns
+    rows.flatten()
+        .filter(|chunk| path_matcher.matches(&chunk.file_path))
+        .collect()
 }
 
 fn fuse_rrf(
