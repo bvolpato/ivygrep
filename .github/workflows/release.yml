@@ -72,6 +72,10 @@ jobs:
 
       - name: Build release binary (cross)
         if: matrix.cross
+        env:
+          # Disable ARM SVE intrinsics — arm_sve.h is not available in cross containers
+          CFLAGS: "-DSIMSIMD_TARGET_SVE=0 -DSIMSIMD_TARGET_SVE_I8=0 -DSIMSIMD_TARGET_SVE_F16=0 -DSIMSIMD_TARGET_SVE_BF16=0"
+          CXXFLAGS: "-DSIMSIMD_TARGET_SVE=0 -DSIMSIMD_TARGET_SVE_I8=0 -DSIMSIMD_TARGET_SVE_F16=0 -DSIMSIMD_TARGET_SVE_BF16=0"
         run: cross build --release --target ${{ matrix.target }} ${{ matrix.cargo_flags }}
 
       - name: Smoke test (native only)
