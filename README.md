@@ -152,16 +152,18 @@ Use `ig --status` to transparently examine how each workspace is dynamically tra
 
 ### Search — ivygrep vs grep vs ripgrep
 
-| Tool | Query | Time | Finds semantic matches? |
-|------|-------|------|:-----------------------:|
-| `grep -rn` | `"embed"` | ~14 ms | ❌ exact string only |
-| `rg` | `"embed"` | ~18 ms | ❌ exact string only |
-| **`ig --regex`** | `"embed"` | ~66 ms | ❌ (regex mode) |
-| **`ig`** | `"embedding model loading"` | ~770 ms | ✅ finds related code |
+Benchmarked on the **Linux kernel** (92K files, 1.5M chunks) — query: `"kfree"`:
 
-> `grep` and `rg` are faster for exact string matching. ivygrep shines when you
-> don't know the exact identifier — ask in natural language and get semantically
-> ranked results.
+| Tool | Mode | Time | Speedup |
+|------|------|-----:|--------:|
+| `grep -rn` | exact string | ~9 s | 1× |
+| `rg` | exact string | ~2.7 s | 3× |
+| **`ig --regex`** | exact string (indexed) | **~25 ms** | **360×** |
+| **`ig`** | semantic: `"kernel memory free"` | **~155 ms** | **58×** |
+
+> `grep` and `rg` scan every file on each query. ivygrep queries a pre-built
+> index, so searches are **orders of magnitude faster** on warm repos — and
+> semantic mode finds related code even when you don't know the exact identifier.
 
 ### Concurrent search (AI agent load, 8 threads)
 
