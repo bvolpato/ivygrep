@@ -139,28 +139,20 @@ pub fn hybrid_search(
     lexical_chunks.sort_by(|a, b| b.1.total_cmp(&a.1));
 
     // Prefer neural vector store if available, otherwise fall back to hash.
+    // Lazy-embed: only compute the query vector when the vector index has entries,
+    // avoiding the ~1.5s ONNX model load for empty or regex-only queries.
     let neural_path = workspace.vector_neural_path();
-    let (vector_index, query_vector) = if neural_path.exists() {
-        // Neural store exists — use neural model for query embedding.
-        // The neural model may be the same as embedding_model if ONNX was
-        // passed, or we need to create one. Since we can't easily create a
-        // separate model here, we use the provided one and check dims match.
+    let vector_index = if neural_path.exists() {
         let neural_dims = 384; // AllMiniLML6V2Q output
         if embedding_model.dimensions() == neural_dims {
-            let vi = VectorStore::open(&neural_path, neural_dims)?;
-            let qv = embedding_model.embed(query_text);
-            (vi, qv)
+            VectorStore::open(&neural_path, neural_dims)?
         } else {
-            // Fall back to hash vectors — model dimension mismatch
-            let vi = VectorStore::open(&workspace.vector_path(), embedding_model.dimensions())?;
-            let qv = embedding_model.embed(query_text);
-            (vi, qv)
+            VectorStore::open(&workspace.vector_path(), embedding_model.dimensions())?
         }
     } else {
-        let vi = VectorStore::open(&workspace.vector_path(), embedding_model.dimensions())?;
-        let qv = embedding_model.embed(query_text);
-        (vi, qv)
+        VectorStore::open(&workspace.vector_path(), embedding_model.dimensions())?
     };
+
     // When glob filters or scope filters are active, pre-collect the set of
     // vector_keys that match, so we can skip the expensive full-corpus vector
     // search and only fetch relevant candidates from SQLite.
@@ -171,6 +163,9 @@ pub fn hybrid_search(
 
     let mut semantic_chunks = Vec::new();
     if vector_index.size() > 0 {
+        // Only now do we pay the cost of embedding the query
+        let query_vector = embedding_model.embed(query_text);
+
         if has_filters {
             // Pre-filtered path: query SQLite for matching chunks first,
             // then only look up their embeddings. This turns a 2.3M scan
@@ -203,62 +198,81 @@ pub fn hybrid_search(
     }
 
     let merged = fuse_rrf(&lexical_chunks, &semantic_chunks, query_text, options.limit);
-    let hits = merged
-        .into_iter()
-        .map(|(chunk, score, sources)| {
-            to_hit(
+
+    // Group hits by file path so we read each file only once
+    let mut hits_by_file: HashMap<PathBuf, Vec<(IndexedChunk, f32, Vec<String>)>> = HashMap::new();
+    for (chunk, score, sources) in &merged {
+        hits_by_file
+            .entry(workspace.root.join(&chunk.file_path))
+            .or_default()
+            .push((chunk.clone(), *score, sources.clone()));
+    }
+
+    let mut hits = Vec::with_capacity(merged.len());
+    for (file_path, file_hits) in &hits_by_file {
+        let file_content = fs::read_to_string(file_path).ok();
+        for (chunk, score, sources) in file_hits {
+            hits.push(to_hit(
                 workspace,
                 chunk,
                 query_text,
-                score,
+                *score,
                 sources,
                 options.context,
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
+                file_content.as_deref(),
+            )?);
+        }
+    }
+    // Re-sort since grouping by file changed the order
+    hits.sort_by(|a, b| b.score.total_cmp(&a.score));
 
     Ok(hits)
 }
 
 fn to_hit(
     workspace: &Workspace,
-    chunk: IndexedChunk,
+    chunk: &IndexedChunk,
     query_text: &str,
     score: f32,
-    sources: Vec<String>,
+    sources: &[String],
     context_lines: usize,
+    pre_read_content: Option<&str>,
 ) -> Result<SearchHit> {
-    let file_path = workspace.root.join(&chunk.file_path);
-    let content = match fs::read_to_string(&file_path) {
-        Ok(c) => c,
-        Err(_) => {
-            // File was deleted since indexing — fall back to stored chunk text
-            return Ok(SearchHit {
-                file_path: chunk.file_path,
-                start_line: chunk.start_line,
-                end_line: chunk.end_line,
-                preview: chunk.text,
-                reason: "file no longer on disk".to_string(),
-                score,
-                sources,
-            });
+    let content = match pre_read_content {
+        Some(c) => c.to_string(),
+        None => {
+            let file_path = workspace.root.join(&chunk.file_path);
+            match fs::read_to_string(&file_path) {
+                Ok(c) => c,
+                Err(_) => {
+                    return Ok(SearchHit {
+                        file_path: chunk.file_path.clone(),
+                        start_line: chunk.start_line,
+                        end_line: chunk.end_line,
+                        preview: chunk.text.clone(),
+                        reason: "file no longer on disk".to_string(),
+                        score,
+                        sources: sources.to_vec(),
+                    });
+                }
+            }
         }
     };
 
     let lines = content.lines().collect::<Vec<_>>();
     if lines.is_empty() {
         return Ok(SearchHit {
-            file_path: chunk.file_path,
+            file_path: chunk.file_path.clone(),
             start_line: chunk.start_line,
             end_line: chunk.start_line,
             preview: String::new(),
             reason: "empty file".to_string(),
             score,
-            sources,
+            sources: sources.to_vec(),
         });
     }
 
-    let focus_line = find_focus_line(&chunk, query_text, &lines);
+    let focus_line = find_focus_line(chunk, query_text, &lines);
     let (snippet_start, snippet_end) = snippet_bounds(focus_line, context_lines, lines.len());
     let preview = lines[snippet_start.saturating_sub(1)..snippet_end].join("\n");
     let reason = summarize_reason(
@@ -270,13 +284,13 @@ fn to_hit(
     );
 
     Ok(SearchHit {
-        file_path: chunk.file_path,
+        file_path: chunk.file_path.clone(),
         start_line: snippet_start,
         end_line: snippet_end,
         preview,
         reason,
         score,
-        sources,
+        sources: sources.to_vec(),
     })
 }
 
@@ -531,7 +545,12 @@ fn fuse_rrf(
     const LEXICAL_WEIGHT: f32 = 3.2;
     const SEMANTIC_WEIGHT: f32 = 1.0;
     const LEXICAL_SCORE_WEIGHT: f32 = 0.05;
+    const SEMANTIC_SCORE_WEIGHT: f32 = 0.08;
     const SEMANTIC_ONLY_PENALTY: f32 = 0.82;
+    const TERM_COVERAGE_WEIGHT: f32 = 0.12;
+    const PATH_SEGMENT_WEIGHT: f32 = 0.08;
+
+    let query_tokens = tokenize_query(query_text);
 
     let mut scores = HashMap::<String, f32>::new();
     let mut chunks = HashMap::<String, IndexedChunk>::new();
@@ -550,9 +569,11 @@ fn fuse_rrf(
             .insert("lexical".to_string());
     }
 
-    for (rank, (chunk, _semantic_score)) in semantic.iter().enumerate() {
+    for (rank, (chunk, semantic_score)) in semantic.iter().enumerate() {
         let entry = scores.entry(chunk.chunk_id.clone()).or_insert(0.0);
         *entry += SEMANTIC_WEIGHT / (K + rank as f32 + 1.0);
+        // Use the actual cosine similarity score, not just rank position
+        *entry += normalize_semantic_score(*semantic_score) * SEMANTIC_SCORE_WEIGHT;
         chunks
             .entry(chunk.chunk_id.clone())
             .or_insert_with(|| chunk.clone());
@@ -571,6 +592,17 @@ fn fuse_rrf(
             source_list.sort();
 
             let mut score = base_score + literal_match_boost(query_text, &chunk);
+
+            // Term-coverage bonus: reward chunks that match more query tokens
+            if !query_tokens.is_empty() {
+                score += term_coverage_boost(&query_tokens, &chunk) * TERM_COVERAGE_WEIGHT;
+            }
+
+            // File-path segment matching: boost files whose path contains query tokens
+            if !query_tokens.is_empty() {
+                score += path_segment_boost(&query_tokens, &chunk) * PATH_SEGMENT_WEIGHT;
+            }
+
             if !source_set.contains("lexical") {
                 score *= SEMANTIC_ONLY_PENALTY;
             }
@@ -592,16 +624,23 @@ fn fuse_rrf(
 fn filter_meaningful_scores(
     ranked: &[(IndexedChunk, f32, Vec<String>)],
 ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
-    if ranked.is_empty() {
-        return vec![];
+    if ranked.len() <= 1 {
+        return ranked.to_vec();
     }
 
     let best_score = ranked[0].1;
-    let threshold = (best_score * 0.60).max(0.015);
+
+    // Adaptive threshold: use mean - 1 standard deviation of the score
+    // distribution, but clamp to reasonable bounds.
+    let scores: Vec<f32> = ranked.iter().map(|(_, s, _)| *s).collect();
+    let mean = scores.iter().sum::<f32>() / scores.len() as f32;
+    let variance = scores.iter().map(|s| (s - mean).powi(2)).sum::<f32>() / scores.len() as f32;
+    let stddev = variance.sqrt();
+    let adaptive_threshold = (mean - stddev).max(best_score * 0.35).max(0.010);
 
     let mut filtered = ranked
         .iter()
-        .filter(|(_, score, _)| *score >= threshold)
+        .filter(|(_, score, _)| *score >= adaptive_threshold)
         .cloned()
         .collect::<Vec<_>>();
 
@@ -618,6 +657,44 @@ fn normalize_lexical_score(raw_score: f32) -> f32 {
     } else {
         0.0
     }
+}
+
+fn normalize_semantic_score(raw_score: f32) -> f32 {
+    // Cosine similarity is already in [-1, 1]; clamp to [0, 1] and apply
+    // a gentle log curve to spread out the high-similarity range.
+    let clamped = raw_score.clamp(0.0, 1.0);
+    if clamped > 0.0 {
+        (clamped * 2.0 + 1.0).ln() // maps 0→0, 0.5→0.69, 1.0→1.10
+    } else {
+        0.0
+    }
+}
+
+/// Fraction of query tokens that appear (case-insensitive) in the chunk text.
+fn term_coverage_boost(query_tokens: &[String], chunk: &IndexedChunk) -> f32 {
+    if query_tokens.is_empty() {
+        return 0.0;
+    }
+    let text_lower = chunk.text.to_ascii_lowercase();
+    let matched = query_tokens
+        .iter()
+        .filter(|t| text_lower.contains(t.as_str()))
+        .count();
+    matched as f32 / query_tokens.len() as f32
+}
+
+/// Boost when query tokens match file-path segments (directory/filename).
+fn path_segment_boost(query_tokens: &[String], chunk: &IndexedChunk) -> f32 {
+    if query_tokens.is_empty() {
+        return 0.0;
+    }
+    let path_lower = chunk.file_path.to_string_lossy().to_ascii_lowercase();
+    let segments: Vec<&str> = path_lower.split('/').collect();
+    let matched = query_tokens
+        .iter()
+        .filter(|t| segments.iter().any(|seg| seg.contains(t.as_str())))
+        .count();
+    matched as f32 / query_tokens.len() as f32
 }
 
 fn literal_match_boost(query_text: &str, chunk: &IndexedChunk) -> f32 {
