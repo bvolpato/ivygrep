@@ -150,7 +150,20 @@ Use `ig --status` to transparently examine how each workspace is dynamically tra
 | **Re-index** (no changes) | 0.01s | Merkle diff only |
 | **Neural enhancement** | ~24s | Background, non-blocking |
 
-### Search (concurrent AI agent load, 8 threads)
+### Search — ivygrep vs grep vs ripgrep
+
+| Tool | Query | Time | Finds semantic matches? |
+|------|-------|------|:-----------------------:|
+| `grep -rn` | `"embed"` | ~14 ms | ❌ exact string only |
+| `rg` | `"embed"` | ~18 ms | ❌ exact string only |
+| **`ig --regex`** | `"embed"` | ~66 ms | ❌ (regex mode) |
+| **`ig`** | `"embedding model loading"` | ~770 ms | ✅ finds related code |
+
+> `grep` and `rg` are faster for exact string matching. ivygrep shines when you
+> don't know the exact identifier — ask in natural language and get semantically
+> ranked results.
+
+### Concurrent search (AI agent load, 8 threads)
 
 | Metric | Value |
 |--------|-------|
@@ -255,21 +268,21 @@ The agent searches, finds the exact function, and edits grounded in real code �
 
 ---
 
-## 🌍 35+ Languages Supported
+## 🌍 44 Languages Supported
 
 ivygrep provides AST-aware chunking for functions, classes, and modules:
 
 | Category | Languages |
 |----------|-----------|
-| **Systems** | Rust, C, C++, Zig |
+| **Systems** | Rust, C, C++, Zig, Nim |
 | **Web** | JavaScript, TypeScript, HTML, CSS, GraphQL |
-| **Backend** | Python, Go, Java, Kotlin, Scala, C#, Ruby, PHP, Perl |
+| **Backend** | Python, Go, Java, Kotlin, Scala, C#, Ruby, PHP, Perl, Groovy |
 | **Functional** | Haskell, OCaml, Elixir, Erlang, Clojure |
 | **Mobile** | Swift, Dart, Objective-C |
 | **Scientific** | R, Julia |
 | **Shell** | Bash/Zsh, PowerShell, Lua |
-| **Data/Infra** | SQL, Protobuf, Terraform, TOML, YAML, JSON |
-| **Other** | Markdown, Dockerfile, Makefile, and more |
+| **Data/Infra** | SQL, Protobuf, Thrift, Terraform, TOML, YAML, JSON, XML |
+| **Other** | Markdown, Dockerfile, Makefile, and plain text |
 
 > Unknown extensions are auto-detected — if it looks like text, it gets indexed.
 
@@ -341,17 +354,8 @@ Each workspace stores two vector indexes:
 cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-The test suite includes **101 tests** across 7 categories:
-
-| Suite | Tests | Description |
-|-------|------:|-------------|
-| Unit | 59 | Core logic, chunking, embedding, search, neural enhancement, MCP |
-| CLI snapshots | 9 | End-to-end CLI behavior |
-| Concurrency | 6 | Thread safety, parallel search/index |
-| Golden queries | 3 | Semantic accuracy validation |
-| Incremental CRUD | 13 | Add/update/delete indexing correctness |
-| Property-based | 1 | Merkle diff invariants |
-| Stress / benchmarks | 10 | Hash speed, neural pipeline, churn survival, query throughput |
+The test suite covers unit tests, CLI snapshots, concurrency, golden queries,
+incremental CRUD, property-based Merkle invariants, and stress/benchmarks.
 
 ### Stress testing
 
