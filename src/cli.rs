@@ -430,22 +430,29 @@ async fn run_query(cli: Cli) -> Result<()> {
                     async move {
                         let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
                         let mut tick = 0usize;
+                        let mut cached_msg = String::new();
                         loop {
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
                             let frame = spinner[tick % spinner.len()];
                             tick += 1;
 
-                            // Check workspace status for progress
-                            if let Ok(ws_list) = crate::workspace::list_workspaces() {
-                                if let Some(status) = ws_list.iter().find(|w| w.id == ws_id) {
-                                    eprint!(
-                                        "\r\x1b[K  {} {} files, {} chunks indexed...",
-                                        frame, status.file_count, status.chunk_count
-                                    );
-                                    continue;
+                            // Poll workspace status every ~640ms (every 8th frame)
+                            if tick % 8 == 1 {
+                                if let Ok(ws_list) = crate::workspace::list_workspaces() {
+                                    if let Some(status) = ws_list.iter().find(|w| w.id == ws_id) {
+                                        cached_msg = format!(
+                                            "{} files, {} chunks indexed...",
+                                            status.file_count, status.chunk_count
+                                        );
+                                    }
                                 }
                             }
-                            eprint!("\r\x1b[K  {} indexing...", frame);
+
+                            if cached_msg.is_empty() {
+                                eprint!("\r\x1b[K  {} indexing...", frame);
+                            } else {
+                                eprint!("\r\x1b[K  {} {}", frame, cached_msg);
+                            }
                         }
                     }
                 });
