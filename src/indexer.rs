@@ -182,7 +182,8 @@ fn index_workspace_inner(
 
     // Stream through batches to rigidly bound memory footprints.
     // 4096 files is highly parallelizable while capping memory overhead effectively.
-    let (tx_batch, rx_batch) = std::sync::mpsc::sync_channel::<Vec<(std::path::PathBuf, Vec<IndexedChunk>)>>(2);
+    let (tx_batch, rx_batch) =
+        std::sync::mpsc::sync_channel::<Vec<(std::path::PathBuf, Vec<IndexedChunk>)>>(2);
 
     let progress_counter_clone = progress_counter.clone();
     let root_clone = workspace.root.clone();
@@ -212,9 +213,11 @@ fn index_workspace_inner(
 
                     let chunks = chunk_source(rel_path, &content);
                     let indexed: Vec<_> = chunks.into_iter().map(build_indexed_chunk).collect();
-                    
-                    let n = progress_counter_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                    if show_progress && n % 100 == 0 {
+
+                    let n = progress_counter_clone
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        + 1;
+                    if show_progress && n.is_multiple_of(100) {
                         eprint!("\r\x1b[K  [{n}/{total}] chunking...");
                     }
 
@@ -225,10 +228,8 @@ fn index_workspace_inner(
                 })
                 .collect();
 
-            if !file_chunks.is_empty() {
-                if tx_batch.send(file_chunks).is_err() {
-                    break;
-                }
+            if !file_chunks.is_empty() && tx_batch.send(file_chunks).is_err() {
+                break;
             }
         }
     });
@@ -239,7 +240,7 @@ fn index_workspace_inner(
             .iter()
             .flat_map(|(_, chunks)| chunks.iter().map(|c| c.text.as_str()))
             .collect();
-        
+
         let all_embeddings = embedding_model.embed_batch(&all_texts);
 
         // Phase 3: Sequential sync to persistence layers.
@@ -271,12 +272,14 @@ fn index_workspace_inner(
     }
 
     // Update cached stats before committing so status reads are O(1).
-    let chunk_count: i64 = tx.query_row(
-        "SELECT COUNT(*) FROM chunks", [], |row| row.get(0)
-    ).unwrap_or(0);
-    let file_count: i64 = tx.query_row(
-        "SELECT COUNT(DISTINCT file_path) FROM chunks", [], |row| row.get(0)
-    ).unwrap_or(0);
+    let chunk_count: i64 = tx
+        .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
+        .unwrap_or(0);
+    let file_count: i64 = tx
+        .query_row("SELECT COUNT(DISTINCT file_path) FROM chunks", [], |row| {
+            row.get(0)
+        })
+        .unwrap_or(0);
     tx.execute(
         "INSERT OR REPLACE INTO _stats (key, value) VALUES ('chunk_count', ?1)",
         params![chunk_count],
@@ -341,24 +344,25 @@ pub fn enhance_workspace_neural(
     // (e.g. attention matrices). A size of 128 spikes up to 1GB+ RAM.
     let mut batch = Vec::with_capacity(8);
     let mut newly_processed = 0;
-    
+
     // To support resumption, we'll discover how many are already in the index
     // so we can correctly broadcast our starting percentage.
     let mut progress_count = 0;
 
-    let process_batch = |batch: &mut Vec<(u64, String)>, count: &mut usize, v_index: &mut VectorStore| {
-        if batch.is_empty() {
-            return;
-        }
-        let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
-        let embeddings = neural_model.embed_batch(&texts);
+    let process_batch =
+        |batch: &mut Vec<(u64, String)>, count: &mut usize, v_index: &mut VectorStore| {
+            if batch.is_empty() {
+                return;
+            }
+            let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
+            let embeddings = neural_model.embed_batch(&texts);
 
-        for ((key, _), embedding) in batch.iter().zip(embeddings) {
-            v_index.upsert(*key, embedding);
-        }
-        *count += batch.len();
-        batch.clear();
-    };
+            for ((key, _), embedding) in batch.iter().zip(embeddings) {
+                v_index.upsert(*key, embedding);
+            }
+            *count += batch.len();
+            batch.clear();
+        };
 
     let progress_path = workspace.index_dir.join(".enhancing.progress");
 
@@ -379,7 +383,7 @@ pub fn enhance_workspace_neural(
             }
 
             if newly_processed % 8192 == 0 {
-                // Periodically save to disk to support partial resumption 
+                // Periodically save to disk to support partial resumption
                 // and immediate hybrid-search upgrades.
                 let _ = vector_index.save();
             }
@@ -390,7 +394,7 @@ pub fn enhance_workspace_neural(
     let tail_len = batch.len();
     process_batch(&mut batch, &mut newly_processed, &mut vector_index);
     progress_count += tail_len;
-    
+
     let _ = std::fs::write(&progress_path, progress_count.to_string());
     vector_index.save()?;
 

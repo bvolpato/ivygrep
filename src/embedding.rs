@@ -12,7 +12,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-
 use crate::config;
 use crate::text::{singularize_token, split_identifier_segments};
 
@@ -155,7 +154,7 @@ impl EmbeddingModel for HashEmbeddingModel {
                 let normalized = self.normalize_token(&singular);
                 token_count += 1;
 
-                use std::hash::{Hash, Hasher, DefaultHasher};
+                use std::hash::{DefaultHasher, Hash, Hasher};
                 let mut hasher = DefaultHasher::new();
                 normalized.hash(&mut hasher);
                 let hash_val = hasher.finish();

@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-
 use crate::config;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -296,7 +295,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
         // Check if indexing is actively running
         let indexing_pid_path = index_dir.join(".indexing.pid");
         let indexing_in_progress = is_active_pid_alive(&indexing_pid_path);
-        
+
         let enhancing_progress_count = if enhancing_in_progress {
             let progress_path = index_dir.join(".enhancing.progress");
             std::fs::read_to_string(&progress_path)
@@ -365,10 +364,14 @@ fn read_sqlite_counts(index_dir: &Path) -> (u64, u64) {
 
     // Try non-blocking write migration first
     if let Ok(conn) = rusqlite::Connection::open(&sqlite_path) {
-        conn.busy_timeout(std::time::Duration::from_millis(100)).ok();
-        if conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS _stats (key TEXT PRIMARY KEY, value INTEGER NOT NULL)",
-        ).is_ok() {
+        conn.busy_timeout(std::time::Duration::from_millis(100))
+            .ok();
+        if conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS _stats (key TEXT PRIMARY KEY, value INTEGER NOT NULL)",
+            )
+            .is_ok()
+        {
             let chunks: i64 = conn
                 .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
                 .unwrap_or(0);
@@ -431,10 +434,10 @@ fn dir_size_bytes(dir: &Path) -> u64 {
     let tantivy_dir = dir.join("tantivy");
     if let Ok(entries) = fs::read_dir(&tantivy_dir) {
         for entry in entries.flatten() {
-            if let Ok(meta) = entry.metadata() {
-                if meta.is_file() {
-                    total += meta.len();
-                }
+            if let Ok(meta) = entry.metadata()
+                && meta.is_file()
+            {
+                total += meta.len();
             }
         }
     }

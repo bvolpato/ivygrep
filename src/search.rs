@@ -10,7 +10,8 @@ use tantivy::query::QueryParser;
 
 use crate::embedding::EmbeddingModel;
 use crate::indexer::{
-    IndexedChunk, fetch_chunk_by_id, fetch_chunk_by_vector_key, open_sqlite_readonly, open_tantivy_index,
+    IndexedChunk, fetch_chunk_by_id, fetch_chunk_by_vector_key, open_sqlite_readonly,
+    open_tantivy_index,
 };
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
@@ -70,7 +71,9 @@ pub fn hybrid_search(
             let trimmed = glob.trim();
             if trimmed.starts_with("*.") && !trimmed.contains('/') && !trimmed.contains('?') {
                 let ext = &trimmed[1..];
-                if let Some(lang) = crate::chunking::language_for_path(&PathBuf::from(format!("dummy{}", ext))) {
+                if let Some(lang) =
+                    crate::chunking::language_for_path(&PathBuf::from(format!("dummy{}", ext)))
+                {
                     allowed_languages.push(lang.to_string());
                 } else {
                     can_pushdown_languages = false;
@@ -91,17 +94,24 @@ pub fn hybrid_search(
         };
 
         if can_pushdown_languages && !allowed_languages.is_empty() {
-            let mut lang_queries: Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
+            let mut lang_queries: Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)> =
+                Vec::new();
             for lang in &allowed_languages {
                 let term = tantivy::Term::from_field_text(fields.language, lang);
-                let q = Box::new(tantivy::query::TermQuery::new(term, tantivy::schema::IndexRecordOption::Basic));
+                let q = Box::new(tantivy::query::TermQuery::new(
+                    term,
+                    tantivy::schema::IndexRecordOption::Basic,
+                ));
                 lang_queries.push((tantivy::query::Occur::Should, q));
             }
             let lang_boolean = Box::new(tantivy::query::BooleanQuery::new(lang_queries));
 
             let combined_queries = vec![
                 (tantivy::query::Occur::Must, parsed_query),
-                (tantivy::query::Occur::Must, lang_boolean as Box<dyn tantivy::query::Query>),
+                (
+                    tantivy::query::Occur::Must,
+                    lang_boolean as Box<dyn tantivy::query::Query>,
+                ),
             ];
             parsed_query = Box::new(tantivy::query::BooleanQuery::new(combined_queries));
         }
@@ -467,7 +477,9 @@ fn collect_filtered_chunks(
         if trimmed.starts_with("*.") && !trimmed.contains('/') && !trimmed.contains('?') {
             // Simple extension glob: *.yaml, *.rs, *.py, etc.
             let ext = &trimmed[1..]; // ".yaml"
-            if let Some(lang) = crate::chunking::language_for_path(&PathBuf::from(format!("dummy{}", ext))) {
+            if let Some(lang) =
+                crate::chunking::language_for_path(&PathBuf::from(format!("dummy{}", ext)))
+            {
                 sql_ext_filters.push("language = ?".to_string());
                 params_vec.push(Box::new(lang.to_string()));
             } else {
@@ -485,7 +497,8 @@ fn collect_filtered_chunks(
         return Vec::new();
     };
 
-    let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        params_vec.iter().map(|p| p.as_ref()).collect();
     let Ok(rows) = stmt.query_map(params_refs.as_slice(), |row| {
         Ok(IndexedChunk {
             chunk_id: row.get(0)?,
@@ -660,13 +673,7 @@ pub fn workspace_has_results(workspace: &Workspace) -> Result<bool> {
             [],
             |row| row.get(0),
         )
-        .or_else(|_| {
-            conn.query_row(
-                "SELECT 1 FROM chunks LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-        })
+        .or_else(|_| conn.query_row("SELECT 1 FROM chunks LIMIT 1", [], |row| row.get(0)))
         .unwrap_or(0);
     Ok(count > 0)
 }

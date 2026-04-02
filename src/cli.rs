@@ -2,9 +2,9 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use std::io::IsTerminal;
 use clap::Parser;
 use colored::Colorize;
+use std::io::IsTerminal;
 
 use tracing_subscriber::EnvFilter;
 
@@ -220,7 +220,7 @@ async fn run_status(json: bool) -> Result<()> {
             // Embedding status
             if ws.enhancing_in_progress {
                 let accel = crate::embedding::hardware_acceleration_info();
-                
+
                 let progress_str = if let Some(count) = ws.enhancing_progress_count {
                     let pct = if ws.chunk_count > 0 {
                         (count as f64 / ws.chunk_count as f64 * 100.0).min(100.0) as u64
@@ -435,15 +435,14 @@ async fn run_query(cli: Cli) -> Result<()> {
                             tick += 1;
 
                             // Poll workspace status every ~640ms (every 8th frame)
-                            if tick % 8 == 1 {
-                                if let Ok(ws_list) = crate::workspace::list_workspaces() {
-                                    if let Some(status) = ws_list.iter().find(|w| w.id == ws_id) {
-                                        cached_msg = format!(
-                                            "{} files, {} chunks indexed...",
-                                            status.file_count, status.chunk_count
-                                        );
-                                    }
-                                }
+                            if tick % 8 == 1
+                                && let Ok(ws_list) = crate::workspace::list_workspaces()
+                                && let Some(status) = ws_list.iter().find(|w| w.id == ws_id)
+                            {
+                                cached_msg = format!(
+                                    "{} files, {} chunks indexed...",
+                                    status.file_count, status.chunk_count
+                                );
                             }
 
                             if cached_msg.is_empty() {
@@ -476,7 +475,9 @@ async fn run_query(cli: Cli) -> Result<()> {
             }
         } else {
             // Already indexed. Just check if the daemon is online to route the search request.
-            search_via_daemon = daemon::request(&DaemonRequest::Status, false).await?.is_some();
+            search_via_daemon = daemon::request(&DaemonRequest::Status, false)
+                .await?
+                .is_some();
         }
     } else {
         if daemon::request(&DaemonRequest::Status, !cli.no_watch)
@@ -525,7 +526,10 @@ async fn run_query(cli: Cli) -> Result<()> {
                     } else {
                         String::new()
                     };
-                    eprint!("\r\x1b[K  waiting for background neural enhancement{}...", progress_str);
+                    eprint!(
+                        "\r\x1b[K  waiting for background neural enhancement{}...",
+                        progress_str
+                    );
                 }
             } else {
                 break;
@@ -692,7 +696,12 @@ async fn run_query(cli: Cli) -> Result<()> {
     // that occur perfectly cleanly tearing down `onnxruntime` when the main process exits.
     // Skipped in CI/test environments (IVYGREP_NO_AUTOSPAWN=1).
     let no_autospawn = env::var("IVYGREP_NO_AUTOSPAWN").is_ok();
-    if !cli.all && !cli.hash && !cli.regex && !no_autospawn && !workspace.vector_neural_path().exists() {
+    if !cli.all
+        && !cli.hash
+        && !cli.regex
+        && !no_autospawn
+        && !workspace.vector_neural_path().exists()
+    {
         let _ = workspace.trigger_background_enhancement();
     }
 

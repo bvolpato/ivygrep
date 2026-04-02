@@ -53,7 +53,8 @@ impl MerkleSnapshot {
         let scanned = AtomicUsize::new(0);
 
         // Collect all valid file entries first (walkdir is not Send)
-        let entries: Vec<_> = walker.build()
+        let entries: Vec<_> = walker
+            .build()
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
             .collect();
@@ -72,7 +73,7 @@ impl MerkleSnapshot {
                 }
 
                 let n = scanned.fetch_add(1, Ordering::Relaxed) + 1;
-                if show_progress && n % 2000 == 0 {
+                if show_progress && n.is_multiple_of(2000) {
                     eprint!("\r\x1b[K  scanning files... {}", n);
                 }
 
@@ -80,10 +81,10 @@ impl MerkleSnapshot {
                 data.extend_from_slice(rel.to_string_lossy().as_bytes());
                 data.extend_from_slice(&metadata.len().to_le_bytes());
 
-                if let Ok(mtime) = metadata.modified() {
-                    if let Ok(duration) = mtime.duration_since(std::time::UNIX_EPOCH) {
-                        data.extend_from_slice(&duration.as_nanos().to_le_bytes());
-                    }
+                if let Ok(mtime) = metadata.modified()
+                    && let Ok(duration) = mtime.duration_since(std::time::UNIX_EPOCH)
+                {
+                    data.extend_from_slice(&duration.as_nanos().to_le_bytes());
                 }
 
                 let file_hash = hex::encode(xxhash_rust::xxh3::xxh3_128(&data).to_le_bytes());
