@@ -133,6 +133,7 @@ Use `ig --status` to transparently examine how each workspace is dynamically tra
 
 - **Lexical path** — BM25 scoring via [Tantivy](https://github.com/quickwit-oss/tantivy) catches exact keyword matches
 - **Semantic path** — starts with hash embeddings (instant), upgrades to quantized ONNX neural embeddings in background
+- **Intelligent pre-filtering** — File globs (`--include`, `--exclude`) and language filters natively push down into Tantivy `BooleanQuery` and SQLite `LIKE` queries to avoid full-corpus vector scaling on massive (2M+ chunks) monolithic repos.
 - **AST chunking** — [tree-sitter](https://tree-sitter.github.io) splits code into precise function/class boundaries (35+ languages)
 - **Incremental indexing** — Merkle-style fingerprints mean re-index only touches changed files
 
