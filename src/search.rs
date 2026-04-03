@@ -55,7 +55,7 @@ pub fn hybrid_search(
     let (index, fields) = open_tantivy_index(&workspace.tantivy_dir())?;
     let reader = index.reader()?;
     let searcher = reader.searcher();
-    eprintln!("  [trace] open_tantivy={:?}", t0.elapsed());
+    tracing::trace!("open_tantivy={:?}", t0.elapsed());
 
     let mut parser = QueryParser::for_index(&index, vec![fields.text, fields.file_path]);
     parser.set_field_boost(fields.file_path, 2.0);
@@ -139,7 +139,7 @@ pub fn hybrid_search(
     }
     let mut lexical_chunks = lexical_by_id.into_values().collect::<Vec<_>>();
     lexical_chunks.sort_by(|a, b| b.1.total_cmp(&a.1));
-    eprintln!("  [trace] lexical={:?} found={}", t0.elapsed(), lexical_chunks.len());
+    tracing::trace!("lexical={:?} found={}", t0.elapsed(), lexical_chunks.len());
 
     let mut vector_index_opt = None;
     if let Some(model) = embedding_model {
@@ -154,7 +154,7 @@ pub fn hybrid_search(
         } else {
             VectorStore::open_readonly(&workspace.vector_path(), model.dimensions())?
         });
-        eprintln!("  [trace] open_vector={:?} size={}", t0.elapsed(), vector_index_opt.as_ref().unwrap().size());
+        tracing::trace!("open_vector={:?} size={}", t0.elapsed(), vector_index_opt.as_ref().unwrap().size());
     }
 
     // When glob filters or scope filters are active, pre-collect the set of
@@ -202,10 +202,10 @@ pub fn hybrid_search(
             }
         }
     }
-    eprintln!("  [trace] semantic={:?} found={}", t0.elapsed(), semantic_chunks.len());
+    tracing::trace!("semantic={:?} found={}", t0.elapsed(), semantic_chunks.len());
 
     let merged = fuse_rrf(&lexical_chunks, &semantic_chunks, query_text, options.limit);
-    eprintln!("  [trace] fuse_rrf={:?} merged={}", t0.elapsed(), merged.len());
+    tracing::trace!("fuse_rrf={:?} merged={}", t0.elapsed(), merged.len());
 
     // Group hits by file path so we read each file only once
     let mut hits_by_file: HashMap<PathBuf, Vec<(IndexedChunk, f32, Vec<String>)>> = HashMap::new();
@@ -233,7 +233,7 @@ pub fn hybrid_search(
     }
     // Re-sort since grouping by file changed the order
     hits.sort_by(|a, b| b.score.total_cmp(&a.score));
-    eprintln!("  [trace] to_hit={:?} hits={} files_read={}", t0.elapsed(), hits.len(), hits_by_file.len());
+    tracing::trace!("to_hit={:?} hits={} files_read={}", t0.elapsed(), hits.len(), hits_by_file.len());
 
     Ok(hits)
 }
