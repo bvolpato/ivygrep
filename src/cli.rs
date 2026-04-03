@@ -898,13 +898,6 @@ fn render_hits(
 
     if grouped.is_empty() {
         println!("No results.");
-        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-            eprintln!(
-                "{}",
-                "hint: try `ig --add . --force` to rebuild index, or check ~/.local/share/ivygrep/daemon.log"
-                    .dimmed()
-            );
-        }
         return Ok(());
     }
 
