@@ -176,7 +176,13 @@ fn sequential_crud_search_cycles() {
     let ws = Workspace::resolve(root.path()).unwrap();
     index_workspace(&ws, &model).unwrap();
 
-    let hits = hybrid_search(&ws, "tax calculation", Some(&model), &SearchOptions::default()).unwrap();
+    let hits = hybrid_search(
+        &ws,
+        "tax calculation",
+        Some(&model),
+        &SearchOptions::default(),
+    )
+    .unwrap();
     assert!(!hits.is_empty(), "cycle 1: should find tax");
 
     // Cycle 2: modify and search
@@ -231,7 +237,13 @@ fn sequential_crud_search_cycles() {
     .unwrap();
     index_workspace(&ws, &model).unwrap();
 
-    let hits = hybrid_search(&ws, "process payment", Some(&model), &SearchOptions::default()).unwrap();
+    let hits = hybrid_search(
+        &ws,
+        "process payment",
+        Some(&model),
+        &SearchOptions::default(),
+    )
+    .unwrap();
     assert!(
         !hits.is_empty(),
         "cycle 4: should find newly created content"

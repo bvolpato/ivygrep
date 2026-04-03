@@ -826,11 +826,23 @@ fn stress_rapid_large_scale_churn() {
     assert_eq!(s3.deleted_files, 0, "no changes → zero deleted");
 
     // Phase 5: search after massive churn should still work
-    let hits = hybrid_search(&workspace, "new_handler", Some(&model), &SearchOptions::default()).unwrap();
+    let hits = hybrid_search(
+        &workspace,
+        "new_handler",
+        Some(&model),
+        &SearchOptions::default(),
+    )
+    .unwrap();
     assert!(!hits.is_empty(), "should find newly added functions");
 
     // Verify deleted functions are gone
-    let hits = hybrid_search(&workspace, "handler_35", Some(&model), &SearchOptions::default()).unwrap();
+    let hits = hybrid_search(
+        &workspace,
+        "handler_35",
+        Some(&model),
+        &SearchOptions::default(),
+    )
+    .unwrap();
     let has_deleted = hits
         .iter()
         .any(|h| h.file_path.to_string_lossy().contains("mod_035"));
@@ -914,7 +926,8 @@ fn stress_query_throughput_benchmark() {
 
     for query in &queries {
         let start = Instant::now();
-        let hits = hybrid_search(&workspace, query, Some(&model), &SearchOptions::default()).unwrap();
+        let hits =
+            hybrid_search(&workspace, query, Some(&model), &SearchOptions::default()).unwrap();
         latencies.push(start.elapsed());
         assert!(!hits.is_empty(), "query '{query}' had no results");
     }
@@ -975,7 +988,13 @@ fn stress_sustained_query_and_reindex_cycles() {
 
     // 30 cycles of: query → mutate 1 file → reindex → query
     for cycle in 0..30 {
-        let hits = hybrid_search(&workspace, "service", Some(&model), &SearchOptions::default()).unwrap();
+        let hits = hybrid_search(
+            &workspace,
+            "service",
+            Some(&model),
+            &SearchOptions::default(),
+        )
+        .unwrap();
         assert!(!hits.is_empty(), "cycle {cycle}: search failed");
 
         // Mutate one file
@@ -1657,10 +1676,22 @@ fn stress_neural_survives_churn() {
     assert_eq!(n2, 10, "only the 10 new chunks should be processed");
 
     // Search should find new content, not deleted content
-    let hits = hybrid_search(&workspace, "handle_25", Some(&model), &SearchOptions::default()).unwrap();
+    let hits = hybrid_search(
+        &workspace,
+        "handle_25",
+        Some(&model),
+        &SearchOptions::default(),
+    )
+    .unwrap();
     assert!(!hits.is_empty(), "should find new handler_25");
 
-    let hits = hybrid_search(&workspace, "handle_5", Some(&model), &SearchOptions::default()).unwrap();
+    let hits = hybrid_search(
+        &workspace,
+        "handle_5",
+        Some(&model),
+        &SearchOptions::default(),
+    )
+    .unwrap();
     // handle_5 was deleted, but handle_15/25 still exist — verify deleted file is gone
     let has_deleted = hits
         .iter()

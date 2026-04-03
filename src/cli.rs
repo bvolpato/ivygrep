@@ -573,8 +573,10 @@ async fn run_query(cli: Cli) -> Result<()> {
         }
     }
 
-    let is_identifier = !query.contains(' ') 
-        && query.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-');
+    let is_identifier = !query.contains(' ')
+        && query
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-');
 
     let search_model: Option<Box<dyn crate::embedding::EmbeddingModel>> =
         if !search_via_daemon && !cli.regex && !is_identifier {

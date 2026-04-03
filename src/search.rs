@@ -154,7 +154,11 @@ pub fn hybrid_search(
         } else {
             VectorStore::open_readonly(&workspace.vector_path(), model.dimensions())?
         });
-        tracing::trace!("open_vector={:?} size={}", t0.elapsed(), vector_index_opt.as_ref().unwrap().size());
+        tracing::trace!(
+            "open_vector={:?} size={}",
+            t0.elapsed(),
+            vector_index_opt.as_ref().unwrap().size()
+        );
     }
 
     // When glob filters or scope filters are active, pre-collect the set of
@@ -202,7 +206,11 @@ pub fn hybrid_search(
             }
         }
     }
-    tracing::trace!("semantic={:?} found={}", t0.elapsed(), semantic_chunks.len());
+    tracing::trace!(
+        "semantic={:?} found={}",
+        t0.elapsed(),
+        semantic_chunks.len()
+    );
 
     let merged = fuse_rrf(&lexical_chunks, &semantic_chunks, query_text, options.limit);
     tracing::trace!("fuse_rrf={:?} merged={}", t0.elapsed(), merged.len());
@@ -233,7 +241,12 @@ pub fn hybrid_search(
     }
     // Re-sort since grouping by file changed the order
     hits.sort_by(|a, b| b.score.total_cmp(&a.score));
-    tracing::trace!("to_hit={:?} hits={} files_read={}", t0.elapsed(), hits.len(), hits_by_file.len());
+    tracing::trace!(
+        "to_hit={:?} hits={} files_read={}",
+        t0.elapsed(),
+        hits.len(),
+        hits_by_file.len()
+    );
 
     Ok(hits)
 }
@@ -828,8 +841,13 @@ mod tests {
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         index_workspace(&workspace, &model).unwrap();
 
-        let hits =
-            hybrid_search(&workspace, "applyFilter", Some(&model), &SearchOptions::default()).unwrap();
+        let hits = hybrid_search(
+            &workspace,
+            "applyFilter",
+            Some(&model),
+            &SearchOptions::default(),
+        )
+        .unwrap();
 
         assert!(!hits.is_empty());
         assert!(hits[0].preview.contains("applyFilter"));
@@ -861,8 +879,13 @@ mod tests {
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         index_workspace(&workspace, &model).unwrap();
 
-        let hits =
-            hybrid_search(&workspace, "applyFilter", Some(&model), &SearchOptions::default()).unwrap();
+        let hits = hybrid_search(
+            &workspace,
+            "applyFilter",
+            Some(&model),
+            &SearchOptions::default(),
+        )
+        .unwrap();
         assert!(!hits.is_empty());
 
         let top = &hits[0];
