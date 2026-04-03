@@ -13,7 +13,7 @@ use tracing::{error, info, warn};
 use crate::config;
 use crate::embedding::{EmbeddingModel, create_model};
 use crate::indexer::{index_workspace, remove_workspace_index};
-use crate::protocol::{DaemonRequest, DaemonResponse};
+use crate::protocol::{BUILD_VERSION, DaemonRequest, DaemonResponse};
 use crate::regex_search::regex_search;
 use crate::search::{SearchOptions, hybrid_search};
 use crate::workspace::{Workspace, WorkspaceScope, list_workspaces};
@@ -26,13 +26,13 @@ struct DaemonState {
 }
 
 impl DaemonState {
-    fn get_model(&self) -> Arc<dyn EmbeddingModel> {
-        self.lazy_model
-            .get_or_init(|| {
-                eprintln!("loading embedding model...");
-                Arc::from(create_model(false))
-            })
-            .clone()
+    /// Try to get the ONNX model without blocking. If it's not loaded yet,
+    /// return a fast hash-based model so searches don't stall during startup.
+    fn get_model_or_fallback(&self) -> Arc<dyn EmbeddingModel> {
+        match self.lazy_model.get() {
+            Some(model) => model.clone(),
+            None => Arc::from(create_model(true)),
+        }
     }
 }
 
@@ -59,6 +59,19 @@ pub async fn run_daemon() -> Result<()> {
         watchers: Arc::new(Mutex::new(HashMap::new())),
         trigger_tx,
     };
+
+    // Eagerly start loading the ONNX model in the background so it's ready
+    // when the first search arrives. Searches that arrive before loading
+    // completes will use a fast hash-based fallback.
+    {
+        let lazy = lazy_model.clone();
+        std::thread::spawn(move || {
+            lazy.get_or_init(|| {
+                eprintln!("loading embedding model...");
+                Arc::from(create_model(false))
+            });
+        });
+    }
 
     tokio::spawn(async move {
         while let Some(path) = trigger_rx.recv().await {
@@ -119,7 +132,10 @@ async fn handle_connection(stream: UnixStream, state: DaemonState) -> Result<()>
 async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonResponse {
     match request {
         DaemonRequest::Status => match list_workspaces() {
-            Ok(workspaces) => DaemonResponse::Status { workspaces },
+            Ok(workspaces) => DaemonResponse::Status {
+                workspaces,
+                version: Some(BUILD_VERSION.to_string()),
+            },
             Err(err) => DaemonResponse::Error {
                 message: err.to_string(),
             },
@@ -172,7 +188,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             scope_path,
             scope_is_file,
         } => {
-            let model = state.get_model();
+            let state_clone = state.clone();
 
             let workspaces = if let Some(p) = path {
                 match Workspace::resolve(&p) {
@@ -208,18 +224,28 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             };
 
             let result = tokio::task::spawn_blocking(move || {
+                let model = state_clone.get_model_or_fallback();
                 let mut all_hits = Vec::new();
+                let mut all_errors: Vec<String> = Vec::new();
                 let ws_neural_missing: Vec<PathBuf> = workspaces
                     .iter()
                     .filter(|w| !w.vector_neural_path().exists() && !w.is_enhancing_active())
                     .map(|w| w.root.clone())
                     .collect();
 
-                for workspace in workspaces {
-                    if let Ok(mut hits) =
-                        hybrid_search(&workspace, &query, Some(model.as_ref()), &options)
-                    {
-                        all_hits.append(&mut hits);
+                for workspace in &workspaces {
+                    match hybrid_search(workspace, &query, Some(model.as_ref()), &options) {
+                        Ok(mut hits) => all_hits.append(&mut hits),
+                        Err(err) => {
+                            warn!(
+                                "hybrid_search failed for {}: {err:#}",
+                                workspace.root.display()
+                            );
+                            all_errors.push(format!(
+                                "{}: {err:#}",
+                                workspace.root.display()
+                            ));
+                        }
                     }
                 }
                 all_hits.sort_by(|a, b| {
@@ -238,12 +264,23 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                         }
                     }
                 }
-                all_hits
+                (all_hits, all_errors)
             })
             .await
-            .unwrap_or_else(|_join_err| Vec::new());
+            .unwrap_or_else(|join_err| {
+                warn!("search task panicked: {join_err:#}");
+                (Vec::new(), vec![format!("search task panicked: {join_err:#}")])
+            });
 
-            DaemonResponse::SearchResults { hits: result }
+            // If ALL workspaces failed (no hits and at least one error),
+            // propagate as Error so the CLI can fall back to local search.
+            if result.0.is_empty() && !result.1.is_empty() {
+                DaemonResponse::Error {
+                    message: format!("search failed: {}", result.1.join("; ")),
+                }
+            } else {
+                DaemonResponse::SearchResults { hits: result.0 }
+            }
         }
         DaemonRequest::RegexSearch {
             path,
@@ -281,16 +318,22 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             let scope_filter = scope_from_request(scope_path, scope_is_file);
             let result = tokio::task::spawn_blocking(move || {
                 let mut all_hits = Vec::new();
-                for workspace in workspaces {
-                    if let Ok(mut hits) = regex_search(
-                        &workspace,
+                for workspace in &workspaces {
+                    match regex_search(
+                        workspace,
                         &pattern,
                         limit,
                         scope_filter.as_ref(),
                         &include_globs,
                         &exclude_globs,
                     ) {
-                        all_hits.append(&mut hits);
+                        Ok(mut hits) => all_hits.append(&mut hits),
+                        Err(err) => {
+                            warn!(
+                                "regex_search failed for {}: {err:#}",
+                                workspace.root.display()
+                            );
+                        }
                     }
                 }
 
@@ -301,7 +344,10 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 all_hits
             })
             .await
-            .unwrap_or_else(|_join_err| Vec::new());
+            .unwrap_or_else(|join_err| {
+                warn!("regex search task panicked: {join_err:#}");
+                Vec::new()
+            });
 
             DaemonResponse::SearchResults { hits: result }
         }
@@ -322,6 +368,21 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 message: err.to_string(),
             },
         },
+        DaemonRequest::Restart => {
+            info!("restart requested, shutting down");
+            // Clean up socket so the new daemon can bind immediately
+            if let Ok(sp) = config::socket_path() {
+                let _ = std::fs::remove_file(sp);
+            }
+            // Schedule exit after the response is sent
+            tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                std::process::exit(0);
+            });
+            DaemonResponse::Ack {
+                message: "restarting".to_string(),
+            }
+        }
     }
 }
 
@@ -422,14 +483,40 @@ pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<
         return Ok(None);
     }
 
-    let mut stream = match UnixStream::connect(&socket_path).await {
-        Ok(stream) => stream,
-        Err(_) => return Ok(None),
+    // Timeout on connect — if the daemon is a zombie stuck in kernel sleep,
+    // the connect() will hang. Don't let the CLI join the zombie pile.
+    let mut stream = match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        UnixStream::connect(&socket_path),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        _ => {
+            // Connect timed out or failed — daemon is dead or zombie.
+            // Remove the stale socket so we don't try again.
+            let _ = std::fs::remove_file(&socket_path);
+            return Ok(None);
+        }
     };
 
     let payload = serde_json::to_vec(request)?;
-    stream.write_all(&payload).await?;
-    stream.write_all(b"\n").await?;
+    // Timeout writes too — a zombie daemon may accept the connection
+    // but never read from it, causing writes to eventually block.
+    if tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        async {
+            stream.write_all(&payload).await?;
+            stream.write_all(b"\n").await?;
+            Ok::<_, anyhow::Error>(())
+        },
+    )
+    .await
+    .is_err()
+    {
+        let _ = std::fs::remove_file(&socket_path);
+        return Ok(None);
+    }
 
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
@@ -438,7 +525,7 @@ pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<
     // (dd-source: 270K files), while Status should complete in seconds.
     let timeout_secs = match request {
         DaemonRequest::Index { .. } => 1800, // 30 min for large repos
-        DaemonRequest::Status => 5,          // quick health check
+        DaemonRequest::Status | DaemonRequest::Restart => 5, // quick
         DaemonRequest::Search { .. } | DaemonRequest::RegexSearch { .. } => 120, // 2 min for search
         DaemonRequest::Remove { .. } => 30,  // cleanup
     };

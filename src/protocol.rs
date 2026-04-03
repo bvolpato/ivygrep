@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::workspace::WorkspaceStatus;
 
+/// Compile-time version tag so the CLI can detect stale daemon processes.
+pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchHit {
     pub file_path: PathBuf,
@@ -54,13 +57,18 @@ pub enum DaemonRequest {
     Remove {
         path: PathBuf,
     },
+    Restart,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonResponse {
     Ack { message: String },
-    Status { workspaces: Vec<WorkspaceStatus> },
+    Status {
+        workspaces: Vec<WorkspaceStatus>,
+        #[serde(default)]
+        version: Option<String>,
+    },
     SearchResults { hits: Vec<SearchHit> },
     Error { message: String },
 }

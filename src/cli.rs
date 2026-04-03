@@ -13,7 +13,9 @@ use crate::daemon;
 use crate::embedding::create_model;
 use crate::indexer::{index_workspace, remove_workspace_index, workspace_is_indexed};
 use crate::mcp;
-use crate::protocol::{DaemonRequest, DaemonResponse, SearchHit, group_hits_by_file};
+use crate::protocol::{
+    BUILD_VERSION, DaemonRequest, DaemonResponse, SearchHit, group_hits_by_file,
+};
 use crate::regex_search::regex_search;
 use crate::search::{SearchOptions, hybrid_search};
 use crate::workspace::{Workspace, list_workspaces, resolve_workspace_and_scope};
@@ -475,10 +477,35 @@ async fn run_query(cli: Cli) -> Result<()> {
             }
         } else {
             // Already indexed. Just check if the daemon is online to route the search request.
+            // Also verify the daemon version matches — stale daemons silently break search.
             let _t = std::time::Instant::now();
-            search_via_daemon = daemon::request(&DaemonRequest::Status, false)
-                .await?
-                .is_some();
+            match daemon::request(&DaemonRequest::Status, false).await? {
+                Some(DaemonResponse::Status { version, .. }) => {
+                    if version.as_deref() == Some(BUILD_VERSION) {
+                        search_via_daemon = true;
+                    } else {
+                        tracing::warn!(
+                            "daemon version mismatch: daemon={:?} cli={}, restarting",
+                            version,
+                            BUILD_VERSION
+                        );
+                        restart_daemon().await;
+                        // Re-check if the new daemon is up
+                        search_via_daemon = daemon::request(&DaemonRequest::Status, false)
+                            .await?
+                            .is_some();
+                    }
+                }
+                Some(_) => {
+                    // Old daemon without version field — restart it
+                    tracing::warn!("daemon has no version field, restarting");
+                    restart_daemon().await;
+                    search_via_daemon = daemon::request(&DaemonRequest::Status, false)
+                        .await?
+                        .is_some();
+                }
+                None => {}
+            }
         }
     } else {
         if daemon::request(&DaemonRequest::Status, !cli.no_watch)
@@ -571,7 +598,10 @@ async fn run_query(cli: Cli) -> Result<()> {
             match daemon::request(&request, false).await? {
                 Some(DaemonResponse::SearchResults { hits }) => hits,
                 Some(DaemonResponse::Error { message }) => bail!(message),
-                _ => vec![],
+                other => {
+                    tracing::warn!("daemon regex search returned unexpected response: {other:?}");
+                    vec![]
+                }
             }
         } else {
             let mut all_hits = Vec::new();
@@ -585,7 +615,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                 vec![workspace.clone()]
             };
             for ws in workspaces {
-                if let Ok(mut hits) = regex_search(
+                match regex_search(
                     &ws,
                     query,
                     cli.limit,
@@ -593,7 +623,13 @@ async fn run_query(cli: Cli) -> Result<()> {
                     &cli.include,
                     &cli.exclude,
                 ) {
-                    all_hits.append(&mut hits);
+                    Ok(mut hits) => all_hits.append(&mut hits),
+                    Err(err) => {
+                        tracing::warn!(
+                            "regex_search failed for {}: {err:#}",
+                            ws.root.display()
+                        );
+                    }
                 }
             }
             if let Some(l) = cli.limit {
@@ -619,7 +655,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             let _t_search = std::time::Instant::now();
             let search_future = daemon::request(&request, false);
 
-            if show_spinner {
+            let daemon_result = if show_spinner {
                 let spinner_handle = tokio::spawn(async move {
                     let spinner = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
                     let mut tick = 0usize;
@@ -635,16 +671,38 @@ async fn run_query(cli: Cli) -> Result<()> {
                 let result = search_future.await;
                 spinner_handle.abort();
                 eprint!("\r\x1b[K");
-                match result? {
-                    Some(DaemonResponse::SearchResults { hits }) => hits,
-                    Some(DaemonResponse::Error { message }) => bail!(message),
-                    _ => vec![],
-                }
+                result?
             } else {
-                match daemon::request(&request, false).await? {
-                    Some(DaemonResponse::SearchResults { hits }) => hits,
-                    Some(DaemonResponse::Error { message }) => bail!(message),
-                    _ => vec![],
+                daemon::request(&request, false).await?
+            };
+
+            match daemon_result {
+                Some(DaemonResponse::SearchResults { hits }) => hits,
+                Some(DaemonResponse::Error { message }) => {
+                    // Daemon search failed — fall back to local search instead
+                    // of showing "No results." to the user.
+                    tracing::warn!("daemon search failed ({message}), falling back to local");
+                    let options = SearchOptions {
+                        limit: cli.limit,
+                        context: cli.context,
+                        type_filter: cli.type_filter.clone(),
+                        include_globs: cli.include.clone(),
+                        exclude_globs: cli.exclude.clone(),
+                        scope_filter: scope_filter.clone(),
+                    };
+                    local_fallback_search(&workspace, query, &options, cli.hash)
+                }
+                other => {
+                    tracing::warn!("daemon search unavailable ({other:?}), falling back to local");
+                    let options = SearchOptions {
+                        limit: cli.limit,
+                        context: cli.context,
+                        type_filter: cli.type_filter.clone(),
+                        include_globs: cli.include.clone(),
+                        exclude_globs: cli.exclude.clone(),
+                        scope_filter: scope_filter.clone(),
+                    };
+                    local_fallback_search(&workspace, query, &options, cli.hash)
                 }
             }
         } else {
@@ -660,7 +718,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             };
             for ws in workspaces {
                 let _t_search = std::time::Instant::now();
-                if let Ok(mut hits) = hybrid_search(
+                match hybrid_search(
                     &ws,
                     query,
                     search_model.as_deref(),
@@ -673,7 +731,13 @@ async fn run_query(cli: Cli) -> Result<()> {
                         scope_filter: scope_filter.clone(),
                     },
                 ) {
-                    all_hits.append(&mut hits);
+                    Ok(mut hits) => all_hits.append(&mut hits),
+                    Err(err) => {
+                        tracing::warn!(
+                            "hybrid_search failed for {}: {err:#}",
+                            ws.root.display()
+                        );
+                    }
                 }
             }
             all_hits.sort_by(|a, b| {
@@ -757,6 +821,13 @@ fn render_hits(
 
     if grouped.is_empty() {
         println!("No results.");
+        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+            eprintln!(
+                "{}",
+                "hint: try `ig --add . --force` to rebuild index, or check ~/.local/share/ivygrep/daemon.log"
+                    .dimmed()
+            );
+        }
         return Ok(());
     }
 
@@ -820,7 +891,7 @@ fn print_daemon_response(response: DaemonResponse, json: bool) -> Result<()> {
         DaemonResponse::SearchResults { hits } => {
             render_hits(&hits, json, None, false, false, false)
         }
-        DaemonResponse::Status { workspaces } => {
+        DaemonResponse::Status { workspaces, .. } => {
             if json {
                 println!("{}", serde_json::to_string_pretty(&workspaces)?);
             } else {
@@ -856,4 +927,57 @@ fn maybe_run_legacy_mcp_stdio() -> Result<bool> {
     }
 
     Ok(false)
+}
+
+/// Ask the running daemon to shut down, then spawn a fresh one from the current binary.
+async fn restart_daemon() {
+    // Send a graceful restart request over the socket.
+    // The daemon cleans up its own socket and exits after replying.
+    let _ = daemon::request(&DaemonRequest::Restart, false).await;
+
+    // Give the old daemon a moment to exit
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // If the socket still exists, the old daemon didn't understand
+    // Restart (pre-upgrade binary). Remove the socket so the old daemon
+    // can't accept new connections, then auto-spawn a new one.
+    if let Ok(sp) = config::socket_path() {
+        if sp.exists() {
+            let _ = std::fs::remove_file(&sp);
+        }
+    }
+
+    // Auto-spawn the new daemon via the standard request path
+    let _ = daemon::request(&DaemonRequest::Status, true).await;
+}
+
+/// Run a local hybrid search as a fallback when the daemon is unavailable or broken.
+fn local_fallback_search(
+    workspace: &Workspace,
+    query: &str,
+    options: &SearchOptions,
+    use_hash: bool,
+) -> Vec<SearchHit> {
+    let model: Option<Box<dyn crate::embedding::EmbeddingModel>> = {
+        let is_identifier = !query.contains(' ')
+            && query
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '-');
+        if is_identifier {
+            None
+        } else {
+            Some(create_model(use_hash))
+        }
+    };
+
+    match hybrid_search(workspace, query, model.as_deref(), options) {
+        Ok(hits) => hits,
+        Err(err) => {
+            tracing::warn!(
+                "local fallback search also failed for {}: {err:#}",
+                workspace.root.display()
+            );
+            vec![]
+        }
+    }
 }
