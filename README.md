@@ -156,10 +156,11 @@ Benchmarked on the **Linux kernel** (92K files, 1.5M chunks) — query: `"kfree"
 
 | Tool | Mode | Time | Speedup |
 |------|------|-----:|--------:|
-| `grep -rn` | exact string | ~9 s | 1× |
+| `grep -rn` | exact string | ~9.0 s | 1× |
 | `rg` | exact string | ~2.7 s | 3× |
-| **`ig --regex`** | exact string (indexed) | **~25 ms** | **360×** |
-| **`ig`** | semantic: `"kernel memory free"` | **~155 ms** | **58×** |
+| **`ig`** | **single identifier** (fast path) | **~17 ms** | **529×** |
+| **`ig --regex`** | exact string regex | **~25 ms** | **360×** |
+| **`ig`** | semantic: `"kernel memory allocation"` | **~72 ms** | **125×** |
 
 > `grep` and `rg` scan every file on each query. ivygrep queries a pre-built
 > index, so searches are **orders of magnitude faster** on warm repos — and

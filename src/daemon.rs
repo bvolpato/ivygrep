@@ -217,7 +217,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
 
                 for workspace in workspaces {
                     if let Ok(mut hits) =
-                        hybrid_search(&workspace, &query, model.as_ref(), &options)
+                        hybrid_search(&workspace, &query, Some(model.as_ref()), &options)
                     {
                         all_hits.append(&mut hits);
                     }

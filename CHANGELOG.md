@@ -2,6 +2,16 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.4.6] — 2026-04-03
+
+A state-of-the-art query latency release that makes ivygrep as fast as traditional string matchers like `grep` and `ripgrep` while maintaining intelligent retrieval. Un-cached searches of 90,000+ files take around ~15-40ms.
+
+### Performance
+- **Identifier Fast-Path:** Queries consisting of single word identifiers (like "kfree" or "malloc") bypass the ONNX memory-mapped vector semantic step entirely, searching strictly via BM25 SQL. Speed increased by over 10x (`~40ms` query latency on Linux).
+- **No-Rescan Penalty:** Local `ig` searches heavily bypass duplicate workspace Merkle re-indexes. If the workspace is already indexed, the CLI relies heavily on the background daemon and triggers instant search mode to save ~2 seconds of latency.
+- **Daemon Speedups:** Fixed IPC RPC errors caused by old daemon sockets surviving binary restarts and enhanced search options.
+- **Lazy Models:** Reduced memory usage by making Embedding models dynamically lazy.
+
 ## [0.4.1] — 2026-04-02
 
 A performance-focused release that makes ivygrep viable on massive monorepos

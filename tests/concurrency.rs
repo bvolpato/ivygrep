@@ -75,7 +75,7 @@ fn concurrent_searches_do_not_panic() {
                 let queries = ["compute", "module documentation", "function", "f64"];
                 let query = queries[i % queries.len()];
                 let opts = SearchOptions::default();
-                let result = hybrid_search(&ws, query, m.as_ref(), &opts);
+                let result = hybrid_search(&ws, query, Some(m.as_ref()), &opts);
                 assert!(
                     result.is_ok(),
                     "search '{query}' on thread {i} failed: {result:?}"
@@ -136,7 +136,7 @@ fn search_during_reindex_does_not_crash() {
         // Run multiple searches while indexer is running
         for _ in 0..5 {
             let opts = SearchOptions::default();
-            let result = hybrid_search(&ws_b, "compute function", m_b.as_ref(), &opts);
+            let result = hybrid_search(&ws_b, "compute function", Some(m_b.as_ref()), &opts);
             // The search might see old or new data, but must NOT crash
             match result {
                 Ok(_hits) => {} // success: might be old or new data
@@ -176,7 +176,7 @@ fn sequential_crud_search_cycles() {
     let ws = Workspace::resolve(root.path()).unwrap();
     index_workspace(&ws, &model).unwrap();
 
-    let hits = hybrid_search(&ws, "tax calculation", &model, &SearchOptions::default()).unwrap();
+    let hits = hybrid_search(&ws, "tax calculation", Some(&model), &SearchOptions::default()).unwrap();
     assert!(!hits.is_empty(), "cycle 1: should find tax");
 
     // Cycle 2: modify and search
@@ -190,7 +190,7 @@ fn sequential_crud_search_cycles() {
     let hits = hybrid_search(
         &ws,
         "discount calculation",
-        &model,
+        Some(&model),
         &SearchOptions::default(),
     )
     .unwrap();
@@ -231,7 +231,7 @@ fn sequential_crud_search_cycles() {
     .unwrap();
     index_workspace(&ws, &model).unwrap();
 
-    let hits = hybrid_search(&ws, "process payment", &model, &SearchOptions::default()).unwrap();
+    let hits = hybrid_search(&ws, "process payment", Some(&model), &SearchOptions::default()).unwrap();
     assert!(
         !hits.is_empty(),
         "cycle 4: should find newly created content"
@@ -310,7 +310,7 @@ fn rapid_interleaved_crud_and_search() {
         );
 
         // Search
-        let result = hybrid_search(&ws, "function", &model, &SearchOptions::default());
+        let result = hybrid_search(&ws, "function", Some(&model), &SearchOptions::default());
         assert!(
             result.is_ok(),
             "cycle {cycle}: search failed: {:?}",

@@ -222,7 +222,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
         hybrid_search(
             &workspace,
             query,
-            model.as_ref(),
+            Some(model.as_ref()),
             &SearchOptions {
                 limit: args.limit,
                 context: args.context.unwrap_or(2),

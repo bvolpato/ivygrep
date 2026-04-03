@@ -475,6 +475,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             }
         } else {
             // Already indexed. Just check if the daemon is online to route the search request.
+            let _t = std::time::Instant::now();
             search_via_daemon = daemon::request(&DaemonRequest::Status, false)
                 .await?
                 .is_some();
@@ -502,9 +503,13 @@ async fn run_query(cli: Cli) -> Result<()> {
                 "First run — indexing".bold(),
                 workspace.root.display().to_string().dimmed()
             );
+            let hash_model = crate::embedding::create_hash_model();
+            let _summary = index_workspace(&workspace, hash_model.as_ref())?;
         }
-        let hash_model = crate::embedding::create_hash_model();
-        let _summary = index_workspace(&workspace, hash_model.as_ref())?;
+        // Skip re-indexing for already-indexed workspaces.
+        // The daemon watcher handles incremental updates. Re-scanning
+        // 92K files (Merkle diff) takes ~2s on the Linux kernel — too
+        // slow for every query. Users can `ig --add .` to force re-index.
     }
 
     if cli.wait_for_enhancement && !cli.all {
@@ -541,8 +546,11 @@ async fn run_query(cli: Cli) -> Result<()> {
         }
     }
 
+    let is_identifier = !query.contains(' ') 
+        && query.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-');
+
     let search_model: Option<Box<dyn crate::embedding::EmbeddingModel>> =
-        if !search_via_daemon && !cli.regex {
+        if !search_via_daemon && !cli.regex && !is_identifier {
             Some(create_model(cli.hash))
         } else {
             None
@@ -606,8 +614,9 @@ async fn run_query(cli: Cli) -> Result<()> {
             scope_is_file,
         };
 
-        if search_via_daemon {
+        let all_hits = if search_via_daemon {
             let show_spinner = std::io::stderr().is_terminal();
+            let _t_search = std::time::Instant::now();
             let search_future = daemon::request(&request, false);
 
             if show_spinner {
@@ -639,9 +648,6 @@ async fn run_query(cli: Cli) -> Result<()> {
                 }
             }
         } else {
-            let model = search_model
-                .as_ref()
-                .expect("model created for local search");
             let mut all_hits = Vec::new();
             let workspaces = if cli.all {
                 list_workspaces()?
@@ -653,10 +659,11 @@ async fn run_query(cli: Cli) -> Result<()> {
                 vec![workspace.clone()]
             };
             for ws in workspaces {
+                let _t_search = std::time::Instant::now();
                 if let Ok(mut hits) = hybrid_search(
                     &ws,
                     query,
-                    model.as_ref(),
+                    search_model.as_deref(),
                     &SearchOptions {
                         limit: cli.limit,
                         context: cli.context,
@@ -678,7 +685,8 @@ async fn run_query(cli: Cli) -> Result<()> {
                 all_hits.truncate(l);
             }
             all_hits
-        }
+        };
+        all_hits
     };
 
     render_hits(

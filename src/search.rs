@@ -45,15 +45,17 @@ impl Default for SearchOptions {
 pub fn hybrid_search(
     workspace: &Workspace,
     query_text: &str,
-    embedding_model: &dyn EmbeddingModel,
+    embedding_model: Option<&dyn EmbeddingModel>,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
+    let t0 = std::time::Instant::now();
     let candidate_limit = options.limit.unwrap_or(500).max(100);
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
 
     let (index, fields) = open_tantivy_index(&workspace.tantivy_dir())?;
     let reader = index.reader()?;
     let searcher = reader.searcher();
+    eprintln!("  [trace] open_tantivy={:?}", t0.elapsed());
 
     let mut parser = QueryParser::for_index(&index, vec![fields.text, fields.file_path]);
     parser.set_field_boost(fields.file_path, 2.0);
@@ -137,21 +139,23 @@ pub fn hybrid_search(
     }
     let mut lexical_chunks = lexical_by_id.into_values().collect::<Vec<_>>();
     lexical_chunks.sort_by(|a, b| b.1.total_cmp(&a.1));
+    eprintln!("  [trace] lexical={:?} found={}", t0.elapsed(), lexical_chunks.len());
 
-    // Prefer neural vector store if available, otherwise fall back to hash.
-    // Lazy-embed: only compute the query vector when the vector index has entries,
-    // avoiding the ~1.5s ONNX model load for empty or regex-only queries.
-    let neural_path = workspace.vector_neural_path();
-    let vector_index = if neural_path.exists() {
-        let neural_dims = 384; // AllMiniLML6V2Q output
-        if embedding_model.dimensions() == neural_dims {
-            VectorStore::open(&neural_path, neural_dims)?
+    let mut vector_index_opt = None;
+    if let Some(model) = embedding_model {
+        let neural_path = workspace.vector_neural_path();
+        vector_index_opt = Some(if neural_path.exists() {
+            let neural_dims = 384; // AllMiniLML6V2Q output
+            if model.dimensions() == neural_dims {
+                VectorStore::open_readonly(&neural_path, neural_dims)?
+            } else {
+                VectorStore::open_readonly(&workspace.vector_path(), model.dimensions())?
+            }
         } else {
-            VectorStore::open(&workspace.vector_path(), embedding_model.dimensions())?
-        }
-    } else {
-        VectorStore::open(&workspace.vector_path(), embedding_model.dimensions())?
-    };
+            VectorStore::open_readonly(&workspace.vector_path(), model.dimensions())?
+        });
+        eprintln!("  [trace] open_vector={:?} size={}", t0.elapsed(), vector_index_opt.as_ref().unwrap().size());
+    }
 
     // When glob filters or scope filters are active, pre-collect the set of
     // vector_keys that match, so we can skip the expensive full-corpus vector
@@ -162,42 +166,46 @@ pub fn hybrid_search(
         || options.type_filter.is_some();
 
     let mut semantic_chunks = Vec::new();
-    if vector_index.size() > 0 {
-        // Only now do we pay the cost of embedding the query
-        let query_vector = embedding_model.embed(query_text);
+    if let (Some(model), Some(vector_index)) = (embedding_model, vector_index_opt) {
+        if vector_index.size() > 0 {
+            // Only now do we pay the cost of embedding the query
+            let query_vector = model.embed(query_text);
 
-        if has_filters {
-            // Pre-filtered path: query SQLite for matching chunks first,
-            // then only look up their embeddings. This turns a 2.3M scan
-            // into a few thousand lookups for targeted queries like --include '*.yaml'.
-            let filtered_chunks = collect_filtered_chunks(
-                &sqlite,
-                &path_matcher,
-                options.scope_filter.as_ref(),
-                options.type_filter.as_deref(),
-                &options.include_globs,
-            );
-            // Score each filtered chunk against the query vector
-            for chunk in filtered_chunks {
-                if let Some(score) = vector_index.score(chunk.vector_key, &query_vector) {
-                    semantic_chunks.push((chunk, score));
+            if has_filters {
+                // Pre-filtered path: query SQLite for matching chunks first,
+                // then only look up their embeddings. This turns a 2.3M scan
+                // into a few thousand lookups for targeted queries like --include '*.yaml'.
+                let filtered_chunks = collect_filtered_chunks(
+                    &sqlite,
+                    &path_matcher,
+                    options.scope_filter.as_ref(),
+                    options.type_filter.as_deref(),
+                    &options.include_globs,
+                );
+                // Score each filtered chunk against the query vector
+                for chunk in filtered_chunks {
+                    if let Some(score) = vector_index.score(chunk.vector_key, &query_vector) {
+                        semantic_chunks.push((chunk, score));
+                    }
                 }
-            }
-            // Sort by score descending, keep top candidates
-            semantic_chunks.sort_by(|a, b| b.1.total_cmp(&a.1));
-            semantic_chunks.truncate(candidate_limit);
-        } else {
-            // Unfiltered path: standard ANN search over entire corpus
-            let matches = vector_index.search(&query_vector, candidate_limit);
-            for vector_match in matches {
-                if let Some(chunk) = fetch_chunk_by_vector_key(&sqlite, vector_match.key)? {
-                    semantic_chunks.push((chunk, vector_match.score));
+                // Sort by score descending, keep top candidates
+                semantic_chunks.sort_by(|a, b| b.1.total_cmp(&a.1));
+                semantic_chunks.truncate(candidate_limit);
+            } else {
+                // Unfiltered path: standard ANN search over entire corpus
+                let matches = vector_index.search(&query_vector, candidate_limit);
+                for vector_match in matches {
+                    if let Some(chunk) = fetch_chunk_by_vector_key(&sqlite, vector_match.key)? {
+                        semantic_chunks.push((chunk, vector_match.score));
+                    }
                 }
             }
         }
     }
+    eprintln!("  [trace] semantic={:?} found={}", t0.elapsed(), semantic_chunks.len());
 
     let merged = fuse_rrf(&lexical_chunks, &semantic_chunks, query_text, options.limit);
+    eprintln!("  [trace] fuse_rrf={:?} merged={}", t0.elapsed(), merged.len());
 
     // Group hits by file path so we read each file only once
     let mut hits_by_file: HashMap<PathBuf, Vec<(IndexedChunk, f32, Vec<String>)>> = HashMap::new();
@@ -225,6 +233,7 @@ pub fn hybrid_search(
     }
     // Re-sort since grouping by file changed the order
     hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+    eprintln!("  [trace] to_hit={:?} hits={} files_read={}", t0.elapsed(), hits.len(), hits_by_file.len());
 
     Ok(hits)
 }
@@ -787,7 +796,7 @@ mod tests {
         let hits = hybrid_search(
             &workspace,
             "where is tax calculated",
-            &model,
+            Some(&model),
             &SearchOptions::default(),
         )
         .unwrap();
@@ -820,7 +829,7 @@ mod tests {
         index_workspace(&workspace, &model).unwrap();
 
         let hits =
-            hybrid_search(&workspace, "applyFilter", &model, &SearchOptions::default()).unwrap();
+            hybrid_search(&workspace, "applyFilter", Some(&model), &SearchOptions::default()).unwrap();
 
         assert!(!hits.is_empty());
         assert!(hits[0].preview.contains("applyFilter"));
@@ -853,7 +862,7 @@ mod tests {
         index_workspace(&workspace, &model).unwrap();
 
         let hits =
-            hybrid_search(&workspace, "applyFilter", &model, &SearchOptions::default()).unwrap();
+            hybrid_search(&workspace, "applyFilter", Some(&model), &SearchOptions::default()).unwrap();
         assert!(!hits.is_empty());
 
         let top = &hits[0];
@@ -890,7 +899,7 @@ mod tests {
         let hits = hybrid_search(
             &workspace,
             "apply limits",
-            &model,
+            Some(&model),
             &SearchOptions::default(),
         )
         .unwrap();
@@ -927,7 +936,7 @@ mod tests {
         let hits = hybrid_search(
             &workspace,
             "applyFilter",
-            &model,
+            Some(&model),
             &SearchOptions {
                 limit: None,
                 context: 2,
@@ -971,7 +980,7 @@ mod tests {
         let hits = hybrid_search(
             &workspace,
             "process payment",
-            &model,
+            Some(&model),
             &SearchOptions::default(),
         )
         .unwrap();
@@ -1000,7 +1009,7 @@ mod tests {
         let hits_before = hybrid_search(
             &workspace,
             "authenticate user",
-            &model,
+            Some(&model),
             &SearchOptions::default(),
         )
         .unwrap();
@@ -1014,7 +1023,7 @@ mod tests {
         let hits_after = hybrid_search(
             &workspace,
             "authenticate user",
-            &model,
+            Some(&model),
             &SearchOptions::default(),
         )
         .unwrap();
@@ -1053,7 +1062,7 @@ mod tests {
         let hits = hybrid_search(
             &workspace,
             "payment gateway",
-            &model,
+            Some(&model),
             &SearchOptions::default(),
         )
         .unwrap();

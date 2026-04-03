@@ -109,7 +109,7 @@ fn run_index_and_query(
     let hits = hybrid_search(
         &workspace,
         query,
-        &model,
+        Some(&model),
         &SearchOptions {
             limit: Some(50),
             context: 2,
@@ -207,7 +207,7 @@ fn stress_ripgrep_deep_relevance() {
         let hits = hybrid_search(
             &workspace,
             query,
-            &model,
+            Some(&model),
             &SearchOptions {
                 limit: Some(10),
                 context: 2,
@@ -288,7 +288,7 @@ fn stress_tantivy_deep_relevance() {
         let hits = hybrid_search(
             &workspace,
             query,
-            &model,
+            Some(&model),
             &SearchOptions {
                 limit: Some(10),
                 context: 2,
@@ -469,7 +469,7 @@ fn stress_concurrent_query_storm_ripgrep() {
                     let result = hybrid_search(
                         &ws,
                         query,
-                        m.as_ref(),
+                        Some(m.as_ref()),
                         &SearchOptions {
                             limit: Some(20),
                             context: 2,
@@ -662,7 +662,7 @@ fn stress_multi_workspace_concurrent_index() {
         let hits = hybrid_search(
             &ws_r,
             "regex matcher",
-            m_r.as_ref(),
+            Some(m_r.as_ref()),
             &SearchOptions::default(),
         )
         .unwrap();
@@ -676,7 +676,7 @@ fn stress_multi_workspace_concurrent_index() {
         let hits = hybrid_search(
             &ws_a,
             "down the rabbit hole",
-            m_a.as_ref(),
+            Some(m_a.as_ref()),
             &SearchOptions::default(),
         )
         .unwrap();
@@ -730,7 +730,7 @@ fn stress_large_file_near_limit() {
     let hits = hybrid_search(
         &workspace,
         "function_500",
-        &model,
+        Some(&model),
         &SearchOptions::default(),
     )
     .unwrap();
@@ -744,7 +744,7 @@ fn stress_large_file_near_limit() {
     let hits = hybrid_search(
         &workspace,
         "compute result",
-        &model,
+        Some(&model),
         &SearchOptions::default(),
     )
     .unwrap();
@@ -826,11 +826,11 @@ fn stress_rapid_large_scale_churn() {
     assert_eq!(s3.deleted_files, 0, "no changes → zero deleted");
 
     // Phase 5: search after massive churn should still work
-    let hits = hybrid_search(&workspace, "new_handler", &model, &SearchOptions::default()).unwrap();
+    let hits = hybrid_search(&workspace, "new_handler", Some(&model), &SearchOptions::default()).unwrap();
     assert!(!hits.is_empty(), "should find newly added functions");
 
     // Verify deleted functions are gone
-    let hits = hybrid_search(&workspace, "handler_35", &model, &SearchOptions::default()).unwrap();
+    let hits = hybrid_search(&workspace, "handler_35", Some(&model), &SearchOptions::default()).unwrap();
     let has_deleted = hits
         .iter()
         .any(|h| h.file_path.to_string_lossy().contains("mod_035"));
@@ -914,7 +914,7 @@ fn stress_query_throughput_benchmark() {
 
     for query in &queries {
         let start = Instant::now();
-        let hits = hybrid_search(&workspace, query, &model, &SearchOptions::default()).unwrap();
+        let hits = hybrid_search(&workspace, query, Some(&model), &SearchOptions::default()).unwrap();
         latencies.push(start.elapsed());
         assert!(!hits.is_empty(), "query '{query}' had no results");
     }
@@ -975,7 +975,7 @@ fn stress_sustained_query_and_reindex_cycles() {
 
     // 30 cycles of: query → mutate 1 file → reindex → query
     for cycle in 0..30 {
-        let hits = hybrid_search(&workspace, "service", &model, &SearchOptions::default()).unwrap();
+        let hits = hybrid_search(&workspace, "service", Some(&model), &SearchOptions::default()).unwrap();
         assert!(!hits.is_empty(), "cycle {cycle}: search failed");
 
         // Mutate one file
@@ -1174,7 +1174,7 @@ fn stress_concurrent_search_during_reindex_large() {
                     let result = hybrid_search(
                         &ws,
                         query,
-                        m.as_ref(),
+                        Some(m.as_ref()),
                         &SearchOptions {
                             limit: Some(10),
                             context: 2,
@@ -1301,7 +1301,7 @@ fn stress_diverse_language_mix() {
     let hits = hybrid_search(
         &workspace,
         "handler that converts to uppercase",
-        &model,
+        Some(&model),
         &SearchOptions::default(),
     )
     .unwrap();
@@ -1566,7 +1566,7 @@ fn stress_two_tier_upgrade_pipeline() {
     let hash_hits = hybrid_search(
         &workspace,
         "authenticate user token",
-        &model,
+        Some(&model),
         &SearchOptions::default(),
     )
     .unwrap();
@@ -1584,7 +1584,7 @@ fn stress_two_tier_upgrade_pipeline() {
     let neural_hits = hybrid_search(
         &workspace,
         "authenticate user token",
-        &model,
+        Some(&model),
         &SearchOptions::default(),
     )
     .unwrap();
@@ -1657,10 +1657,10 @@ fn stress_neural_survives_churn() {
     assert_eq!(n2, 10, "only the 10 new chunks should be processed");
 
     // Search should find new content, not deleted content
-    let hits = hybrid_search(&workspace, "handle_25", &model, &SearchOptions::default()).unwrap();
+    let hits = hybrid_search(&workspace, "handle_25", Some(&model), &SearchOptions::default()).unwrap();
     assert!(!hits.is_empty(), "should find new handler_25");
 
-    let hits = hybrid_search(&workspace, "handle_5", &model, &SearchOptions::default()).unwrap();
+    let hits = hybrid_search(&workspace, "handle_5", Some(&model), &SearchOptions::default()).unwrap();
     // handle_5 was deleted, but handle_15/25 still exist — verify deleted file is gone
     let has_deleted = hits
         .iter()

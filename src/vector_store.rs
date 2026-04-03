@@ -38,6 +38,34 @@ impl VectorStore {
         })
     }
 
+    /// Open for read-only search using memory-mapping (`view()`).
+    /// Much faster than `open()` for large indices because it avoids
+    /// loading the entire vector data into memory upfront (~450ms → <1ms
+    /// on the Linux kernel's 1.5M-vector index).
+    ///
+    /// The returned store must NOT be used for writes (upsert/remove/save).
+    pub fn open_readonly(path: &Path, dimensions: usize) -> Result<Self> {
+        let options = IndexOptions {
+            dimensions,
+            metric: MetricKind::Cos,
+            quantization: ScalarKind::F32,
+            ..IndexOptions::default()
+        };
+
+        let index = Index::new(&options)?;
+        if path.exists() {
+            let path_str = path
+                .to_str()
+                .context("vector path contains invalid UTF-8")?;
+            index.view(path_str)?;
+        }
+
+        Ok(Self {
+            path: path.to_path_buf(),
+            index,
+        })
+    }
+
     pub fn save(&self) -> Result<()> {
         let parent = self
             .path

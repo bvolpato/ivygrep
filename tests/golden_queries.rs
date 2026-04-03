@@ -27,7 +27,7 @@ fn golden_query_rust_tax() {
     let hits = hybrid_search(
         &workspace,
         "where is the tax calculated?",
-        &model,
+        Some(&model),
         &SearchOptions::default(),
     )
     .unwrap();
@@ -59,7 +59,7 @@ fn golden_query_python_tax() {
     let hits = hybrid_search(
         &workspace,
         "tax function",
-        &model,
+        Some(&model),
         &SearchOptions::default(),
     )
     .unwrap();
@@ -78,7 +78,7 @@ fn golden_query_typescript_total() {
     let hits = hybrid_search(
         &workspace,
         "calculate total with tax",
-        &model,
+        Some(&model),
         &SearchOptions::default(),
     )
     .unwrap();
