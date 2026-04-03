@@ -1,8 +1,0 @@
-[target.aarch64-unknown-linux-musl]
-# Disable ARM SVE intrinsics — arm_sve.h is not available in cross containers.
-# These env vars are passed into the Docker container by cross.
-[target.aarch64-unknown-linux-musl.env]
-passthrough = [
-    "CFLAGS",
-    "CXXFLAGS",
-]

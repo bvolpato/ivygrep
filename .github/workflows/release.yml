@@ -13,18 +13,18 @@ env:
 
 jobs:
   build:
-    name: Build ${{ matrix.target }}
+    name: Build ${{ matrix.archive_name }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-musl
+          - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             archive_name: linux-x86_64
             archive: tar.gz
             cargo_flags: "--no-default-features"
-          - target: aarch64-unknown-linux-musl
+          - target: aarch64-unknown-linux-gnu
             runner: ubuntu-latest
             archive_name: linux-aarch64
             archive: tar.gz
@@ -58,11 +58,7 @@ jobs:
           key: release-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: release-${{ matrix.target }}-
 
-      - name: Install musl tools (x86_64-linux)
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      - name: Install cross (aarch64-linux-musl)
+      - name: Install cross
         if: matrix.cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
@@ -72,10 +68,6 @@ jobs:
 
       - name: Build release binary (cross)
         if: matrix.cross
-        env:
-          # Disable ARM SVE intrinsics — arm_sve.h is not available in cross containers
-          CFLAGS: "-DSIMSIMD_TARGET_SVE=0 -DSIMSIMD_TARGET_SVE_I8=0 -DSIMSIMD_TARGET_SVE_F16=0 -DSIMSIMD_TARGET_SVE_BF16=0"
-          CXXFLAGS: "-DSIMSIMD_TARGET_SVE=0 -DSIMSIMD_TARGET_SVE_I8=0 -DSIMSIMD_TARGET_SVE_F16=0 -DSIMSIMD_TARGET_SVE_BF16=0"
         run: cross build --release --target ${{ matrix.target }} ${{ matrix.cargo_flags }}
 
       - name: Smoke test (native only)
