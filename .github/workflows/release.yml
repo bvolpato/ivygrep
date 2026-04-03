@@ -25,10 +25,9 @@ jobs:
             archive: tar.gz
             cargo_flags: "--no-default-features"
           - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-latest
+            runner: ubuntu-24.04-arm
             archive_name: linux-aarch64
             archive: tar.gz
-            cross: true
             cargo_flags: "--no-default-features"
           - target: x86_64-apple-darwin
             runner: macos-latest
@@ -58,20 +57,10 @@ jobs:
           key: release-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: release-${{ matrix.target }}-
 
-      - name: Install cross
-        if: matrix.cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
-      - name: Build release binary (native)
-        if: ${{ !matrix.cross }}
+      - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.cargo_flags }}
 
-      - name: Build release binary (cross)
-        if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }} ${{ matrix.cargo_flags }}
-
-      - name: Smoke test (native only)
-        if: ${{ !matrix.cross }}
+      - name: Smoke test
         run: ./target/${{ matrix.target }}/release/ig --help
 
       - name: Package archive
