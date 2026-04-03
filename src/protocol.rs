@@ -54,6 +54,20 @@ pub enum DaemonRequest {
         #[serde(default)]
         scope_is_file: bool,
     },
+    LiteralSearch {
+        path: Option<PathBuf>,
+        query: String,
+        limit: Option<usize>,
+        context: usize,
+        type_filter: Option<String>,
+        #[serde(default)]
+        include_globs: Vec<String>,
+        #[serde(default)]
+        exclude_globs: Vec<String>,
+        scope_path: Option<PathBuf>,
+        #[serde(default)]
+        scope_is_file: bool,
+    },
     Remove {
         path: PathBuf,
     },
@@ -63,14 +77,20 @@ pub enum DaemonRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonResponse {
-    Ack { message: String },
+    Ack {
+        message: String,
+    },
     Status {
         workspaces: Vec<WorkspaceStatus>,
         #[serde(default)]
         version: Option<String>,
     },
-    SearchResults { hits: Vec<SearchHit> },
-    Error { message: String },
+    SearchResults {
+        hits: Vec<SearchHit>,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]

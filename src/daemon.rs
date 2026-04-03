@@ -15,7 +15,7 @@ use crate::embedding::{EmbeddingModel, create_model};
 use crate::indexer::{index_workspace, remove_workspace_index};
 use crate::protocol::{BUILD_VERSION, DaemonRequest, DaemonResponse};
 use crate::regex_search::regex_search;
-use crate::search::{SearchOptions, hybrid_search};
+use crate::search::{SearchOptions, hybrid_search, literal_search};
 use crate::workspace::{Workspace, WorkspaceScope, list_workspaces};
 
 #[derive(Clone)]
@@ -241,10 +241,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                                 "hybrid_search failed for {}: {err:#}",
                                 workspace.root.display()
                             );
-                            all_errors.push(format!(
-                                "{}: {err:#}",
-                                workspace.root.display()
-                            ));
+                            all_errors.push(format!("{}: {err:#}", workspace.root.display()));
                         }
                     }
                 }
@@ -269,7 +266,10 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             .await
             .unwrap_or_else(|join_err| {
                 warn!("search task panicked: {join_err:#}");
-                (Vec::new(), vec![format!("search task panicked: {join_err:#}")])
+                (
+                    Vec::new(),
+                    vec![format!("search task panicked: {join_err:#}")],
+                )
             });
 
             // If ALL workspaces failed (no hits and at least one error),
@@ -350,6 +350,87 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             });
 
             DaemonResponse::SearchResults { hits: result }
+        }
+        DaemonRequest::LiteralSearch {
+            path,
+            query,
+            limit,
+            context,
+            type_filter,
+            include_globs,
+            exclude_globs,
+            scope_path,
+            scope_is_file,
+        } => {
+            let workspaces = if let Some(p) = path {
+                match Workspace::resolve(&p) {
+                    Ok(workspace) => vec![workspace],
+                    Err(err) => {
+                        return DaemonResponse::Error {
+                            message: err.to_string(),
+                        };
+                    }
+                }
+            } else {
+                match list_workspaces() {
+                    Ok(ws) => ws
+                        .into_iter()
+                        .filter(|w| w.last_indexed_at_unix.is_some())
+                        .filter_map(|w| Workspace::resolve(&w.root).ok())
+                        .collect(),
+                    Err(err) => {
+                        return DaemonResponse::Error {
+                            message: err.to_string(),
+                        };
+                    }
+                }
+            };
+
+            let scope_filter = scope_from_request(scope_path, scope_is_file);
+            let options = SearchOptions {
+                limit,
+                context,
+                type_filter,
+                include_globs,
+                exclude_globs,
+                scope_filter,
+            };
+
+            let result = tokio::task::spawn_blocking(move || {
+                let mut all_hits = Vec::new();
+                let mut all_errors: Vec<String> = Vec::new();
+                for workspace in &workspaces {
+                    match literal_search(workspace, &query, &options) {
+                        Ok(mut hits) => all_hits.append(&mut hits),
+                        Err(err) => {
+                            warn!(
+                                "literal_search failed for {}: {err:#}",
+                                workspace.root.display()
+                            );
+                            all_errors.push(format!("{}: {err:#}", workspace.root.display()));
+                        }
+                    }
+                }
+
+                if all_hits.is_empty() && !all_errors.is_empty() {
+                    return Err(all_errors.join("; "));
+                }
+
+                if let Some(l) = options.limit {
+                    all_hits.truncate(l);
+                }
+                Ok(all_hits)
+            })
+            .await
+            .unwrap_or_else(|join_err| {
+                warn!("literal search task panicked: {join_err:#}");
+                Err(join_err.to_string())
+            });
+
+            match result {
+                Ok(hits) => DaemonResponse::SearchResults { hits },
+                Err(message) => DaemonResponse::Error { message },
+            }
         }
         DaemonRequest::Remove { path } => match Workspace::resolve(&path) {
             Ok(workspace) => {
@@ -503,14 +584,11 @@ pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<
     let payload = serde_json::to_vec(request)?;
     // Timeout writes too — a zombie daemon may accept the connection
     // but never read from it, causing writes to eventually block.
-    if tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        async {
-            stream.write_all(&payload).await?;
-            stream.write_all(b"\n").await?;
-            Ok::<_, anyhow::Error>(())
-        },
-    )
+    if tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        stream.write_all(&payload).await?;
+        stream.write_all(b"\n").await?;
+        Ok::<_, anyhow::Error>(())
+    })
     .await
     .is_err()
     {
@@ -526,7 +604,9 @@ pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<
     let timeout_secs = match request {
         DaemonRequest::Index { .. } => 1800, // 30 min for large repos
         DaemonRequest::Status | DaemonRequest::Restart => 5, // quick
-        DaemonRequest::Search { .. } | DaemonRequest::RegexSearch { .. } => 120, // 2 min for search
+        DaemonRequest::Search { .. }
+        | DaemonRequest::RegexSearch { .. }
+        | DaemonRequest::LiteralSearch { .. } => 120, // 2 min for search
         DaemonRequest::Remove { .. } => 30,  // cleanup
     };
 

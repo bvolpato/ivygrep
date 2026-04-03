@@ -12,7 +12,7 @@ use crate::indexer::{index_workspace, workspace_is_indexed};
 use crate::path_glob::parse_glob_csv;
 use crate::protocol::group_hits_by_file;
 use crate::regex_search::regex_search;
-use crate::search::{SearchOptions, hybrid_search};
+use crate::search::{SearchOptions, hybrid_search, literal_search};
 use crate::workspace::resolve_workspace_and_scope;
 
 const JSONRPC_VERSION: &str = "2.0";
@@ -60,6 +60,7 @@ struct IvygrepSearchArgs {
     #[serde(rename = "type")]
     type_filter: Option<String>,
     regex: Option<bool>,
+    literal: Option<bool>,
     include: Option<String>,
     exclude: Option<String>,
     first_line_only: Option<bool>,
@@ -166,7 +167,8 @@ fn search_tool_schema() -> Value {
                 "limit": {"type": "integer", "minimum": 1, "description": "Max number of returned files."},
                 "context": {"type": "integer", "minimum": 0, "description": "Context lines around focused line."},
                 "type": {"type": "string", "description": "Language filter (rust, python, typescript, ...)."},
-                "regex": {"type": "boolean", "description": "Use regex mode instead of hybrid semantic search."},
+                "regex": {"type": "boolean", "description": "Use regex mode (walks raw files, no index — slow on large repos). Prefer 'literal' for exact matches."},
+                "literal": {"type": "boolean", "description": "Fast exact-match search backed by the index. Deterministic, orders of magnitude faster than regex."},
                 "include": {"type": "string", "description": "Comma-separated include globs, e.g. \"*.md,src/**/*.rs\"."},
                 "exclude": {"type": "string", "description": "Comma-separated exclude globs, e.g. \"target/**,*.lock\"."},
                 "first_line_only": {"type": "boolean", "description": "Return only the first non-empty preview line for each hit."},
@@ -209,7 +211,20 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
     let include_globs = parse_glob_csv(args.include.as_deref());
     let exclude_globs = parse_glob_csv(args.exclude.as_deref());
 
-    let hits = if args.regex.unwrap_or(false) {
+    let hits = if args.literal.unwrap_or(false) {
+        literal_search(
+            &workspace,
+            query,
+            &SearchOptions {
+                limit: args.limit,
+                context: args.context.unwrap_or(2),
+                type_filter: args.type_filter.clone(),
+                include_globs: include_globs.clone(),
+                exclude_globs: exclude_globs.clone(),
+                scope_filter: scope_filter.clone(),
+            },
+        )?
+    } else if args.regex.unwrap_or(false) {
         regex_search(
             &workspace,
             query,
@@ -267,7 +282,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
             "scope_path": scope_filter.as_ref().map(|scope| scope.rel_path.clone()),
             "scope_is_file": scope_filter.as_ref().is_some_and(|scope| scope.is_file),
             "query": query,
-            "mode": if args.regex.unwrap_or(false) { "regex" } else { "hybrid" },
+            "mode": if args.literal.unwrap_or(false) { "literal" } else if args.regex.unwrap_or(false) { "regex" } else { "hybrid" },
             "result_count": grouped.len(),
             "include": include_globs,
             "exclude": exclude_globs,
@@ -279,7 +294,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
             "scope_path": scope_filter.as_ref().map(|scope| scope.rel_path.clone()),
             "scope_is_file": scope_filter.as_ref().is_some_and(|scope| scope.is_file),
             "query": query,
-            "mode": if args.regex.unwrap_or(false) { "regex" } else { "hybrid" },
+            "mode": if args.literal.unwrap_or(false) { "literal" } else if args.regex.unwrap_or(false) { "regex" } else { "hybrid" },
             "result_count": grouped.len(),
             "include": include_globs,
             "exclude": exclude_globs,
@@ -432,6 +447,7 @@ mod tests {
             context: Some(2),
             type_filter: None,
             regex: Some(false),
+            literal: None,
             include: None,
             exclude: None,
             first_line_only: Some(false),
@@ -475,6 +491,7 @@ mod tests {
             context: Some(2),
             type_filter: None,
             regex: Some(false),
+            literal: None,
             include: None,
             exclude: None,
             first_line_only: Some(false),
@@ -524,6 +541,7 @@ mod tests {
             context: Some(2),
             type_filter: None,
             regex: Some(false),
+            literal: None,
             include: Some("*.md".to_string()),
             exclude: None,
             first_line_only: Some(false),
@@ -551,6 +569,7 @@ mod tests {
             context: Some(2),
             type_filter: None,
             regex: Some(false),
+            literal: None,
             include: Some("*.md".to_string()),
             exclude: Some("match.md".to_string()),
             first_line_only: Some(false),
@@ -627,6 +646,7 @@ mod tests {
             context: Some(2),
             type_filter: None,
             regex: Some(true),
+            literal: None,
             include: None,
             exclude: None,
             first_line_only: Some(false),
@@ -639,6 +659,43 @@ mod tests {
         assert_eq!(result["mode"], "regex");
         let count = result["result_count"].as_u64().unwrap();
         assert!(count > 0, "regex search should find results");
+    }
+
+    #[test]
+    #[serial]
+    fn mcp_search_literal_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(
+            root.join("match.rs"),
+            "pub fn calculate_tax(amount: f64) -> f64 { amount * 0.2 }\n",
+        )
+        .unwrap();
+
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let response = execute_ivygrep_search(IvygrepSearchArgs {
+            query: Some("calculate_tax".to_string()),
+            path: Some(root.to_string_lossy().to_string()),
+            limit: Some(5),
+            context: Some(2),
+            type_filter: None,
+            regex: None,
+            literal: Some(true),
+            include: None,
+            exclude: None,
+            first_line_only: Some(false),
+            file_name_only: Some(false),
+            verbose: Some(false),
+        })
+        .unwrap();
+
+        let result = tool_json_payload(&response);
+        assert_eq!(result["mode"], "literal");
+        let count = result["result_count"].as_u64().unwrap();
+        assert!(count > 0, "literal search should find results");
     }
 
     fn tool_json_payload(response: &Value) -> Value {

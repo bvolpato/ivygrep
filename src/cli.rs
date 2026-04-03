@@ -17,7 +17,7 @@ use crate::protocol::{
     BUILD_VERSION, DaemonRequest, DaemonResponse, SearchHit, group_hits_by_file,
 };
 use crate::regex_search::regex_search;
-use crate::search::{SearchOptions, hybrid_search};
+use crate::search::{SearchOptions, hybrid_search, literal_search};
 use crate::workspace::{Workspace, list_workspaces, resolve_workspace_and_scope};
 
 #[derive(Debug, Parser)]
@@ -50,7 +50,13 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub force: bool,
 
-    #[arg(long, global = true)]
+    /// Fast exact-match search backed by the index. Deterministic results,
+    /// orders of magnitude faster than grep/rg for indexed repos.
+    #[arg(long, short = 'l', global = true)]
+    pub literal: bool,
+
+    /// Legacy regex mode (walks all files, no index). Use `rg` directly instead.
+    #[arg(long, global = true, hide = true)]
     pub regex: bool,
 
     #[arg(long, global = true)]
@@ -579,13 +585,88 @@ async fn run_query(cli: Cli) -> Result<()> {
             .all(|c| c.is_alphanumeric() || c == '_' || c == '-');
 
     let search_model: Option<Box<dyn crate::embedding::EmbeddingModel>> =
-        if !search_via_daemon && !cli.regex && !is_identifier {
+        if !search_via_daemon && !cli.regex && !cli.literal && !is_identifier {
             Some(create_model(cli.hash))
         } else {
             None
         };
 
-    let hits = if cli.regex {
+    let hits = if cli.literal {
+        let request = DaemonRequest::LiteralSearch {
+            path: query_path_opt.clone(),
+            query: query.to_string(),
+            limit: cli.limit,
+            context: cli.context,
+            type_filter: cli.type_filter.clone(),
+            include_globs: cli.include.clone(),
+            exclude_globs: cli.exclude.clone(),
+            scope_path: scope_path.clone(),
+            scope_is_file,
+        };
+
+        if search_via_daemon {
+            match daemon::request(&request, false).await? {
+                Some(DaemonResponse::SearchResults { hits }) => hits,
+                Some(DaemonResponse::Error { message }) => {
+                    tracing::warn!(
+                        "daemon literal search failed ({message}), falling back to local"
+                    );
+                    let options = SearchOptions {
+                        limit: cli.limit,
+                        context: cli.context,
+                        type_filter: cli.type_filter.clone(),
+                        include_globs: cli.include.clone(),
+                        exclude_globs: cli.exclude.clone(),
+                        scope_filter: scope_filter.clone(),
+                    };
+                    let mut all_hits = Vec::new();
+                    let workspaces = vec![workspace.clone()];
+                    for ws in workspaces {
+                        match literal_search(&ws, query, &options) {
+                            Ok(mut hits) => all_hits.append(&mut hits),
+                            Err(err) => tracing::warn!(
+                                "literal_search failed for {}: {err:#}",
+                                ws.root.display()
+                            ),
+                        }
+                    }
+                    all_hits
+                }
+                _ => vec![],
+            }
+        } else {
+            let mut all_hits = Vec::new();
+            let workspaces = if cli.all {
+                list_workspaces()?
+                    .into_iter()
+                    .filter(|w| w.last_indexed_at_unix.is_some())
+                    .filter_map(|w| Workspace::resolve(&w.root).ok())
+                    .collect()
+            } else {
+                vec![workspace.clone()]
+            };
+            let options = SearchOptions {
+                limit: cli.limit,
+                context: cli.context,
+                type_filter: cli.type_filter.clone(),
+                include_globs: cli.include.clone(),
+                exclude_globs: cli.exclude.clone(),
+                scope_filter: scope_filter.clone(),
+            };
+            for ws in workspaces {
+                match literal_search(&ws, query, &options) {
+                    Ok(mut hits) => all_hits.append(&mut hits),
+                    Err(err) => {
+                        tracing::warn!("literal_search failed for {}: {err:#}", ws.root.display())
+                    }
+                }
+            }
+            if let Some(l) = cli.limit {
+                all_hits.truncate(l);
+            }
+            all_hits
+        }
+    } else if cli.regex {
         let request = DaemonRequest::RegexSearch {
             path: query_path_opt.clone(),
             pattern: query.to_string(),
@@ -627,10 +708,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                 ) {
                     Ok(mut hits) => all_hits.append(&mut hits),
                     Err(err) => {
-                        tracing::warn!(
-                            "regex_search failed for {}: {err:#}",
-                            ws.root.display()
-                        );
+                        tracing::warn!("regex_search failed for {}: {err:#}", ws.root.display());
                     }
                 }
             }
@@ -735,10 +813,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                 ) {
                     Ok(mut hits) => all_hits.append(&mut hits),
                     Err(err) => {
-                        tracing::warn!(
-                            "hybrid_search failed for {}: {err:#}",
-                            ws.root.display()
-                        );
+                        tracing::warn!("hybrid_search failed for {}: {err:#}", ws.root.display());
                     }
                 }
             }

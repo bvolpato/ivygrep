@@ -42,6 +42,123 @@ impl Default for SearchOptions {
     }
 }
 
+/// Fast index-backed literal text search.
+///
+/// Uses Tantivy to find chunks containing the literal terms, then scans
+/// only those chunks' source lines for exact case-insensitive substring
+/// matches. This is O(matched_chunks) instead of O(all_files), making it
+/// orders of magnitude faster than `--regex` for exact string searches.
+pub fn literal_search(
+    workspace: &Workspace,
+    query_text: &str,
+    options: &SearchOptions,
+) -> Result<Vec<SearchHit>> {
+    let t0 = std::time::Instant::now();
+    let query = query_text.trim();
+    if query.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let query_lower = query.to_ascii_lowercase();
+    let max_hits = options.limit.unwrap_or(500);
+    let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
+
+    let (index, fields) = open_tantivy_index(&workspace.tantivy_dir())?;
+    let reader = index.reader()?;
+    let searcher = reader.searcher();
+
+    // Use Tantivy QueryParser to find chunks whose text contains the query terms.
+    // This narrows the search space from all files to only matching chunks.
+    let mut parser = QueryParser::for_index(&index, vec![fields.text, fields.file_path]);
+    parser.set_field_boost(fields.file_path, 2.0);
+
+    // Build lexical queries from the literal text
+    let lexical_queries = build_lexical_queries(query);
+    let mut candidate_chunks = Vec::new();
+    let mut seen_ids = HashSet::new();
+    let candidate_limit = max_hits.max(100) * 5; // fetch more candidates than needed
+
+    for lexical_query in &lexical_queries {
+        let parsed = match parser.parse_query(lexical_query) {
+            Ok(q) => q,
+            Err(_) => continue,
+        };
+
+        let top_docs = searcher.search(
+            &parsed,
+            &TopDocs::with_limit(candidate_limit).order_by_score(),
+        )?;
+
+        for (_score, addr) in top_docs {
+            let doc: TantivyDocument = searcher.doc(addr)?;
+            if let Some(chunk) = fetch_chunk_by_id(doc, &fields)
+                .filter(|c| type_matches(c, options.type_filter.as_deref()))
+                .filter(|c| scope_matches(c, options.scope_filter.as_ref()))
+                .filter(|c| path_matches(c, &path_matcher))
+                .filter(|c| seen_ids.insert(c.chunk_id.clone()))
+            {
+                candidate_chunks.push(chunk);
+            }
+        }
+    }
+    tracing::trace!(
+        "literal_tantivy={:?} candidates={}",
+        t0.elapsed(),
+        candidate_chunks.len()
+    );
+
+    // Now scan only the candidate chunks' source lines for exact literal matches.
+    // Group by file to read each file only once.
+    let mut chunks_by_file: HashMap<PathBuf, Vec<IndexedChunk>> = HashMap::new();
+    for chunk in candidate_chunks {
+        chunks_by_file
+            .entry(workspace.root.join(&chunk.file_path))
+            .or_default()
+            .push(chunk);
+    }
+
+    let mut hits = Vec::new();
+    'outer: for (file_path, chunks) in &chunks_by_file {
+        let content = match fs::read_to_string(file_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let lines: Vec<&str> = content.lines().collect();
+
+        for chunk in chunks {
+            // Scan lines within this chunk's range for the literal text
+            let start = chunk.start_line.saturating_sub(1);
+            let end = chunk.end_line.min(lines.len());
+
+            for (i, line) in lines[start..end].iter().enumerate() {
+                let line_num = start + i + 1;
+                if line.to_ascii_lowercase().contains(&query_lower) {
+                    let (snippet_start, snippet_end) =
+                        snippet_bounds(line_num, options.context, lines.len());
+                    let preview = lines[snippet_start.saturating_sub(1)..snippet_end].join("\n");
+
+                    hits.push(SearchHit {
+                        file_path: chunk.file_path.clone(),
+                        start_line: snippet_start,
+                        end_line: snippet_end,
+                        preview,
+                        reason: format!("literal match: {}", truncate_for_reason(line.trim())),
+                        score: 1.0,
+                        sources: vec!["literal".to_string()],
+                    });
+
+                    if hits.len() >= max_hits {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+    }
+
+    tracing::trace!("literal_total={:?} hits={}", t0.elapsed(), hits.len());
+    Ok(hits)
+}
+
 pub fn hybrid_search(
     workspace: &Workspace,
     query_text: &str,
