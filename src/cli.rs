@@ -579,13 +579,8 @@ async fn run_query(cli: Cli) -> Result<()> {
         }
     }
 
-    let is_identifier = !query.contains(' ')
-        && query
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-');
-
     let search_model: Option<Box<dyn crate::embedding::EmbeddingModel>> =
-        if !search_via_daemon && !cli.regex && !cli.literal && !is_identifier {
+        if !search_via_daemon && !cli.regex && !cli.literal {
             Some(create_model(cli.hash))
         } else {
             None
@@ -1028,16 +1023,15 @@ fn local_fallback_search(
     options: &SearchOptions,
     use_hash: bool,
 ) -> Vec<SearchHit> {
-    let model: Option<Box<dyn crate::embedding::EmbeddingModel>> = {
-        let is_identifier = !query.contains(' ')
-            && query
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '_' || c == '-');
-        if is_identifier {
-            None
-        } else {
-            Some(create_model(use_hash))
-        }
+    let is_single_word = !query.contains(' ')
+        && query
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-');
+    let model: Option<Box<dyn crate::embedding::EmbeddingModel>> = if is_single_word {
+        // Fallback path: skip heavy ONNX model for single-word queries to stay fast.
+        None
+    } else {
+        Some(create_model(use_hash))
     };
 
     match hybrid_search(workspace, query, model.as_deref(), options) {

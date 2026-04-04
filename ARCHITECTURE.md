@@ -1,89 +1,235 @@
 # Architecture
 
-> A deep dive into how ivygrep turns natural-language queries into
-> instant, relevant code results — entirely offline.
+> How ivygrep turns natural-language queries into instant, relevant code
+> results — entirely offline, entirely local.
 
 ---
 
-## High-Level Overview
+## What It Is
 
-ivygrep is a **local-first semantic code search engine** built in Rust. It
-combines full-text lexical search with vector similarity search, backed by an
-always-on background daemon that keeps indexes fresh.
+ivygrep is a **local-first semantic code search engine** built in Rust. You ask
+a question in plain English — *"where is tax calculated"* — and it returns the
+exact lines of code across your entire codebase. No cloud, no API keys, no
+telemetry.
 
-```mermaid
-graph TB
-    subgraph "User Interfaces"
-        CLI["ig CLI"]
-        MCP["MCP Server<br/>(AI agents)"]
-    end
+Under the hood it fuses two fundamentally different search strategies into a
+single ranked result set:
 
-    subgraph "Daemon (Unix Socket IPC)"
-        D["ig --daemon"]
-    end
+- **Lexical search** (BM25) — finds exact and near-exact term matches
+- **Semantic search** (vector similarity) — finds conceptually related code
 
-    subgraph "Search Engine"
-        HS["Hybrid Search<br/>(RRF Fusion)"]
-        LEX["Lexical BM25<br/>(Tantivy)"]
-        SEM["Semantic ANN<br/>(USearch)"]
-    end
-
-    subgraph "Index Pipeline"
-        IDX["Indexer"]
-        CHK["AST Chunker<br/>(Tree-sitter)"]
-        EMB["Embedding Model"]
-        MRK["Merkle Diff"]
-    end
-
-    subgraph "Storage Layer"
-        SQL[(SQLite)]
-        TAN[(Tantivy Index)]
-        VH[(vectors.usearch<br/>hash)]
-        VN[(vectors_neural.usearch<br/>ONNX)]
-    end
-
-    CLI --> D
-    MCP --> D
-    D --> HS
-    HS --> LEX
-    HS --> SEM
-    LEX --> TAN
-    SEM --> VH
-    SEM --> VN
-    D --> IDX
-    IDX --> MRK
-    IDX --> CHK
-    CHK --> EMB
-    IDX --> SQL
-    IDX --> TAN
-    IDX --> VH
-```
+Results from both are merged via Reciprocal Rank Fusion, scored, and filtered
+in a single pass. The whole thing runs behind a background daemon that keeps
+indexes warm and watches for file changes.
 
 ---
 
-## Module Map
+## Technology Stack
 
-The codebase is a single Rust crate with 16 modules. Each has a clear
-responsibility:
+Every dependency exists for a specific reason. There are no framework
+batteries — only purpose-selected engines.
 
-| Module | File | Lines | Purpose |
-|--------|------|------:|---------|
-| **cli** | `cli.rs` | ~1000 | CLI argument parsing, search orchestration, output formatting |
-| **daemon** | `daemon.rs` | ~530 | Background daemon: IPC server, file watcher, multi-workspace search routing |
-| **protocol** | `protocol.rs` | ~120 | Shared IPC types (`DaemonRequest`, `DaemonResponse`), version constant |
-| **search** | `search.rs` | ~1100 | Hybrid search engine: BM25 + vector fusion, scoring, context extraction |
-| **indexer** | `indexer.rs` | ~900 | Index pipeline: Merkle diff → chunk → embed → write to SQLite/Tantivy/USearch |
-| **chunking** | `chunking.rs` | ~1400 | AST-aware code splitting (Tree-sitter + regex fallback), 44 language registry |
-| **embedding** | `embedding.rs` | ~400 | Embedding trait + two backends: hash (instant) and ONNX neural (high quality) |
-| **vector_store** | `vector_store.rs` | ~190 | USearch wrapper: cosine similarity index with mmap'd read-only search |
-| **merkle** | `merkle.rs` | ~270 | Merkle-style fingerprinting for incremental indexing (xxh3 128-bit) |
-| **workspace** | `workspace.rs` | ~520 | Workspace discovery, metadata, scope resolution, status reporting |
-| **regex_search** | `regex_search.rs` | ~140 | Regex mode (`--regex`) using `grep-searcher` + `grep-regex` |
-| **mcp** | `mcp.rs` | ~650 | MCP (Model Context Protocol) server for AI coding agents |
-| **config** | `config.rs` | ~50 | Paths: `IVYGREP_HOME`, socket, indexes, models |
-| **walker** | `walker.rs` | ~25 | `.gitignore`-aware directory walker (via `ignore` crate) |
-| **text** | `text.rs` | ~90 | Token utilities: identifier splitting, singularization |
-| **path_glob** | `path_glob.rs` | ~50 | Include/exclude glob matching for search filtering |
+### Tantivy — Full-Text Search Index
+
+[Tantivy](https://github.com/quickwit-oss/tantivy) is the lexical search
+backbone. It is a Rust-native full-text search engine (think Lucene, but
+embeddable in a single process with no JVM).
+
+**What we use it for:**
+
+- **BM25 ranked search** — every code chunk is tokenized and indexed. Query
+  terms are parsed via `QueryParser` against the `text` and `file_path` fields
+  (with `file_path` boosted 2×) to produce relevance-ranked results.
+- **Literal search** — the `--literal` fast path uses Tantivy to narrow the
+  search space from all files to only chunks containing the query terms, then
+  scans just those chunks for exact substring matches. This is O(matched_chunks)
+  instead of O(all_files).
+- **Language pushdown** — `--type rust` is compiled into a Tantivy
+  `BooleanQuery` that combines the parsed text query with a `TermQuery` on the
+  `language` field. This happens at the index level, not post-filter.
+- **Schema** — each chunk is a Tantivy document with fields: `chunk_id`,
+  `file_path` (STRING + STORED), `start_line`, `end_line`, `language`, `kind`,
+  `text` (TEXT + STORED), and `content_hash`.
+
+**Why Tantivy and not ripgrep/grep:** grep scans every file on every query.
+Tantivy builds an inverted index once and answers term queries in milliseconds.
+On a 92K-file repo, a Tantivy lookup returns in ~17ms vs seconds for a full
+grep.
+
+### USearch — Vector Similarity Index
+
+[USearch](https://github.com/unum-cloud/usearch) is a compact, embeddable
+approximate nearest-neighbor (ANN) search library. It implements HNSW
+(Hierarchical Navigable Small World) graphs for fast cosine similarity search.
+
+**What we use it for:**
+
+- **Semantic search** — query text is embedded into a vector, then USearch finds
+  the closest code chunk vectors by cosine distance. This is how
+  *"retry logic for payments"* finds `fn handle_payment_retry()` even though
+  the terms don't overlap.
+- **Two-tier vector stores:**
+  - `vectors.usearch` — 256-dimensional hash embeddings, built instantly during
+    indexing. Always present.
+  - `vectors_neural.usearch` — 384-dimensional ONNX neural embeddings
+    (AllMiniLM-L6-v2), built asynchronously by a background subprocess. Higher
+    quality, used when available.
+- **Memory-mapped reads** — search opens the vector index with `view()` (mmap)
+  instead of `load()`. On large indices (e.g. 1.5M vectors for the Linux
+  kernel), this reduces open time from ~450ms to <1ms.
+- **Atomic writes** — vector saves write to a `.tmp` file then `rename()` to
+  prevent corrupted reads by concurrent search processes.
+
+**Why USearch and not FAISS/Qdrant:** USearch is a single embeddable C++ library
+with Rust bindings. No server process, no Python, no external dependencies.
+The entire index is a single file.
+
+### SQLite — Chunk Metadata Store
+
+[SQLite](https://www.sqlite.org/) via `rusqlite` (bundled, no system dependency).
+
+**What we use it for:**
+
+- **Source of truth for chunk data** — every indexed code chunk is stored as a
+  row: `chunk_id`, `file_path`, line range, `language`, `kind`, `text`,
+  `content_hash`, and `vector_key`. All search results are resolved back to
+  SQLite to get the full chunk metadata.
+- **Vector key → chunk resolution** — after USearch returns the top vector
+  matches (as numeric keys), SQLite translates them back to file paths, line
+  numbers, and source text. This is the bridge between the vector index and
+  human-readable results.
+- **Filtered chunk collection** — when `--include '*.yaml'` or `--type rust` is
+  used, the search engine queries SQLite directly
+  (`SELECT ... WHERE language = ?`) to collect matching chunk vector keys, then
+  scores only those against the query vector. This turns a full-corpus vector
+  scan into a targeted lookup.
+- **Stats cache** — `chunk_count` and `file_count` are cached in a `_stats`
+  table, updated at commit time, so `--status` queries are O(1).
+- **WAL mode** — `PRAGMA journal_mode = WAL` allows concurrent reads during
+  writes. Indexing batches all inserts in a single transaction for 10-50×
+  speedup.
+
+**Why SQLite and not Postgres/RocksDB:** single-file, zero-config, bundled in
+the binary. A code search tool should not require a database server.
+
+### fastembed + ort — Neural Embedding Model
+
+[fastembed](https://github.com/Anush008/fastembed-rs) provides high-level model
+loading. [ort](https://github.com/pykeio/ort) is the Rust binding for ONNX
+Runtime.
+
+**What we use them for:**
+
+- **AllMiniLM-L6-v2 (quantized INT8)** — the neural embedding model. Converts
+  code chunks and search queries into 384-dimensional dense vectors that capture
+  semantic meaning. Downloaded once (~23 MB) on first use, cached in
+  `~/.local/share/ivygrep/models/`.
+- **Batch embedding** — `embed_batch()` sends multiple chunks through the model
+  in a single ONNX inference call, dramatically faster than one-at-a-time during
+  the background enhancement pass.
+- **CoreML acceleration** — on macOS, `ort` is compiled with the CoreML
+  execution provider, offloading inference to Apple's Neural Engine / GPU.
+  Registered automatically at startup via `ort::init().with_execution_providers()`.
+- **Background thread budget** — when running as a background enhancement
+  subprocess, `ORT_NUM_THREADS` is set to half the CPU count (min 2) so the
+  system stays responsive.
+- **Graceful fallback** — if the neural model fails to load (missing download,
+  corrupt cache, unsupported platform), the system silently falls back to hash
+  embeddings. No search ever fails because of a model problem.
+
+**Why fastembed and not sentence-transformers:** fastembed is pure Rust/ONNX with
+no Python dependency. The model runs in the same process as the search engine.
+
+### Tree-sitter — AST-Aware Code Chunking
+
+[Tree-sitter](https://tree-sitter.github.io/tree-sitter/) is an incremental
+parsing library that produces concrete syntax trees.
+
+**What we use it for:**
+
+- **Precise function/class boundaries** — for 5 core languages (Rust, Python,
+  Go, JavaScript, TypeScript), Tree-sitter parses the full AST and extracts
+  structural node ranges using S-expression queries like:
+  ```
+  (function_item) @fn (impl_item) @class (trait_item) @class
+  ```
+  Each matched node becomes a chunk with exact start/end line numbers.
+- **Quality over heuristics** — Tree-sitter gives perfect boundaries for nested
+  functions, multi-line signatures, and trait impls. The regex-based fallback
+  (used for 35+ other languages) sometimes splits mid-function.
+
+**Why Tree-sitter and not regex-only:** regex can't reliably parse code. A line
+like `if (function_call()) {` looks like a function definition to a regex
+heuristic. Tree-sitter knows it's a control flow statement because it has the
+full parse tree. For languages without Tree-sitter grammars, we fall back to a
+data-driven regex heuristic (44 language definitions in `LANGUAGES`).
+
+### notify — Filesystem Watcher
+
+[notify](https://github.com/notify-rs/notify) is a cross-platform filesystem
+event library.
+
+**What we use it for:**
+
+- **Live index updates** — the daemon registers a `RecommendedWatcher` (FSEvents
+  on macOS, inotify on Linux) on each indexed workspace directory with
+  `RecursiveMode::Recursive`. Any file change event triggers an incremental
+  re-index.
+- **Eliminating Merkle scans** — when a watcher is alive (verified via PID
+  file), the indexer skips the expensive full-filesystem Merkle diff. On a
+  92K-file repo, this saves ~2 seconds per query.
+- **Debounced re-indexing** — file change events are sent through a
+  `tokio::sync::mpsc` channel to a dedicated indexing task, which batches and
+  processes them asynchronously.
+
+**Why notify and not polling:** FSEvents/inotify are kernel-level and instant.
+Polling would add latency and CPU overhead proportional to repo size.
+
+### rayon — Parallel Processing
+
+[rayon](https://github.com/rayon-rs/rayon) is a data-parallelism library for
+Rust.
+
+**What we use it for:**
+
+- **Parallel file processing** — during indexing, files are chunked across all
+  CPU cores using `par_iter()`. Each file is read, parsed (Tree-sitter or
+  regex), and split into chunks in parallel. The results are collected and then
+  sequentially written to storage.
+- **Parallel Merkle scanning** — the full-filesystem fingerprint scan
+  (`MerkleSnapshot::build`) uses `par_iter()` to stat and hash files across all
+  cores. On a 92K-file repo this takes ~2 seconds instead of ~8.
+- **Parallel hash embedding** — the `HashEmbeddingModel::embed_batch()`
+  implementation uses `par_iter()` to compute embeddings across all cores.
+
+**Why rayon and not manual threading:** rayon's work-stealing scheduler
+automatically balances load across cores. No thread pool sizing, no manual
+synchronization.
+
+### xxhash — SIMD-Accelerated Hashing
+
+[xxhash-rust](https://github.com/DoumanAski/xxhash-rust) provides the xxh3
+family of hash functions, specifically the 128-bit variant.
+
+**What we use it for:**
+
+- **Merkle fingerprints** — each file is fingerprinted as
+  `xxh3_128(path + file_size + mtime)`. The concatenation of all file
+  fingerprints produces the workspace root hash. Comparing root hashes is an
+  O(1) check for "has anything changed?"
+- **Content hashing** — each chunk's content is hashed with xxh3 to produce a
+  `content_hash` used for deduplication and change detection across re-indexes.
+- **Vector key derivation** — the `vector_key` (USearch's numeric ID for each
+  vector) is derived by hashing the `content_hash` with xxh3 and truncating to
+  63 bits. This gives deterministic, collision-resistant keys without
+  maintaining a separate sequence.
+- **Workspace ID** — each workspace is identified by
+  `hex(xxh3_128(canonical_root_path))`, ensuring stable IDs without path
+  separator or symlink issues.
+
+**Why xxh3 and not SHA-256:** we need speed, not cryptographic security. xxh3
+runs at memory bandwidth on modern CPUs (~30 GB/s with SIMD). SHA-256 would be
+10-50× slower for the same job.
 
 ---
 
@@ -94,167 +240,58 @@ responsibility:
 When a workspace is indexed (first search, `--add`, or file watcher trigger),
 the pipeline processes files through four stages:
 
-```mermaid
-flowchart LR
-    subgraph "① Scan"
-        W["Walker<br/>(ignore crate)"]
-        M["Merkle Diff<br/>(xxh3 128-bit)"]
-    end
-
-    subgraph "② Chunk"
-        TS["Tree-sitter<br/>(Rust, Python, Go, JS, TS)"]
-        RG["Regex Heuristic<br/>(35+ other langs)"]
-        FW["Fixed Window<br/>(text/config)"]
-    end
-
-    subgraph "③ Embed"
-        HE["Hash Embeddings<br/>(256-dim, instant)"]
-        NE["ONNX Neural<br/>(384-dim, background)"]
-    end
-
-    subgraph "④ Store"
-        S1[(SQLite<br/>chunk metadata)]
-        S2[(Tantivy<br/>BM25 index)]
-        S3[(USearch<br/>vector index)]
-    end
-
-    W --> M
-    M -->|changed files| TS
-    M -->|changed files| RG
-    M -->|changed files| FW
-    TS --> HE
-    RG --> HE
-    FW --> HE
-    HE --> S1
-    HE --> S2
-    HE --> S3
-    NE -.->|background| S3
+```
+① Scan  →  ② Chunk  →  ③ Embed  →  ④ Store
 ```
 
-**Key design decisions:**
+1. **Scan** — the `ignore`-crate walker traverses the workspace respecting
+   `.gitignore` rules. A Merkle snapshot (xxh3 fingerprint per file) is
+   compared against the previous snapshot to identify added, modified, and
+   deleted files.
 
-- **Merkle fingerprints** use file path + size + mtime hashed with xxh3 (128-bit
-  SIMD). Re-indexing an unchanged 92K-file repo takes ~10ms.
-- **Tree-sitter** provides exact AST boundaries for 5 core languages (Rust,
-  Python, Go, JavaScript, TypeScript). Other languages fall back to regex-based
-  signature detection.
-- **Two-tier embeddings**: hash embeddings are computed inline (instant), neural
-  ONNX embeddings are computed asynchronously by a background subprocess
-  (`--enhance-internal`), so indexing never blocks on model inference.
+2. **Chunk** — changed files are split into semantic code chunks:
+   - Tree-sitter AST parsing for Rust, Python, Go, JS, TS
+   - Regex-based signature detection for 35+ other languages
+   - Fixed-window fallback for text/config/markup
+
+3. **Embed** — each chunk's text is embedded:
+   - Hash embeddings (256-dim) are computed inline, instantly
+   - Neural embeddings (384-dim, AllMiniLM-L6-v2) are computed later by a
+     background subprocess (`--enhance-internal`)
+
+4. **Store** — chunks are written to three storage backends in a single
+   transaction: SQLite (metadata), Tantivy (full-text index), USearch (vectors).
 
 ### 2. Search Pipeline
 
-Every search query flows through a hybrid fusion pipeline:
+Every query runs through a hybrid fusion pipeline:
 
-```mermaid
-flowchart TD
-    Q["Query: 'retry logic for payments'"]
-
-    Q --> ID{Single identifier?}
-    ID -->|yes| FP["Fast Path<br/>(Tantivy term lookup)<br/>~17ms"]
-    ID -->|no| HP["Hybrid Path"]
-
-    HP --> BM["BM25 Lexical<br/>(Tantivy QueryParser)"]
-    HP --> VS["Vector Semantic<br/>(USearch ANN)"]
-
-    BM --> RRF["Reciprocal Rank Fusion<br/>(k=60)"]
-    VS --> RRF
-
-    RRF --> AF["Adaptive Score Filter<br/>(dynamic threshold)"]
-    AF --> CX["Context Extraction<br/>(±N lines from source)"]
-    CX --> OUT["Ranked Results"]
-
-    FP --> CX
-```
-
-**Key design decisions:**
-
-- **Identifier fast path**: Single tokens like `kfree` or `handleTimeout`
-  bypass vector search entirely and go straight to Tantivy term lookup (~17ms
-  on the Linux kernel).
-- **RRF fusion** (Reciprocal Rank Fusion, k=60) merges lexical and semantic
-  rankings without requiring score calibration — each result's combined score
-  is `1/(k + rank_lexical) + 1/(k + rank_semantic)`.
-- **Adaptive filtering** dynamically computes a score threshold based on result
-  distribution, preventing noise from drowning real matches on large corpora.
-- **Pre-filtering**: `--type`, `--include`, `--exclude` are pushed down into
-  Tantivy `BooleanQuery` and SQLite `LIKE` before vector search runs, avoiding
-  full-corpus scanning on million-chunk repos.
+1. **Lexical** — Tantivy BM25 search with tokenized, singularized,
+   and compacted query variants
+2. **Semantic** — USearch ANN search using the query's embedding vector
+3. **Fusion** — Reciprocal Rank Fusion (k=60) merges both ranked lists
+4. **Boosting** — literal match bonus, term coverage, path segment matching,
+   normalized identifier matching
+5. **Filtering** — adaptive score threshold based on result distribution
+6. **Context** — focus line detection + ±N context lines from source
 
 ### 3. Daemon Architecture
 
-The daemon provides persistent search routing, file watching, and shared model
-loading across all CLI invocations:
+The daemon (`ig --daemon`) is a Tokio-based async server on a Unix domain
+socket. It provides:
 
-```mermaid
-flowchart TD
-    subgraph "CLI Process"
-        C1["ig 'query'"]
-        C2["ig --status"]
-        C3["ig --mcp"]
-    end
-
-    subgraph "Daemon Process (ig --daemon)"
-        SOCK["Unix Socket<br/>Listener"]
-        VER["Version Gate<br/>(BUILD_VERSION)"]
-        LOOP["Tokio Event Loop"]
-
-        subgraph "Model Loading"
-            LAZY["OnceLock&lt;ONNX Model&gt;"]
-            BG["Background Thread<br/>(eager load)"]
-            HASH["Hash Model<br/>(fallback)"]
-        end
-
-        subgraph "File Watchers"
-            FW1["notify::Watcher<br/>/project-a"]
-            FW2["notify::Watcher<br/>/project-b"]
-        end
-
-        subgraph "Request Handlers"
-            SRQ["Search"]
-            IRQ["Index"]
-            STRQ["Status"]
-            RSTRQ["Restart"]
-        end
-    end
-
-    C1 --> SOCK
-    C2 --> SOCK
-    C3 --> SOCK
-    SOCK --> VER
-    VER -->|version match| LOOP
-    VER -->|mismatch| RSTRQ
-    LOOP --> SRQ
-    LOOP --> IRQ
-    LOOP --> STRQ
-    BG --> LAZY
-    SRQ --> LAZY
-    SRQ -->|not ready| HASH
-    FW1 -->|file changed| IRQ
-    FW2 -->|file changed| IRQ
-```
-
-**Key design decisions:**
-
-- **Auto-spawn**: The first `ig` invocation auto-spawns the daemon in
-  the background. No manual startup needed.
-- **Version-gated restart**: Each daemon response includes `BUILD_VERSION`.
-  On mismatch (e.g., after `brew upgrade`), the CLI sends a `Restart`
-  request over the socket — the daemon exits cleanly, and the CLI
-  auto-spawns the new version.
-- **Non-blocking model load**: The ONNX model loads eagerly in a background
-  `std::thread`. Searches that arrive before loading completes use hash
-  embeddings as an instant fallback.
-- **Connection timeouts**: Socket connect and write operations have a 2-second
-  timeout to prevent the CLI from hanging on a zombie daemon.
-- **Local fallback**: If the daemon returns an error or is unreachable, the CLI
-  transparently retries the search locally.
+- **Shared model loading** — the ONNX model loads once in a background thread
+  (`OnceLock`). All CLI invocations share it.
+- **File watching** — `notify` watchers per workspace, triggering incremental
+  re-index on file changes.
+- **Version-gated restart** — each response includes `BUILD_VERSION`. On
+  mismatch, the CLI sends `Restart` and auto-spawns the new binary.
+- **Connection resilience** — 2-second timeouts on connect/write, stale socket
+  cleanup, automatic local fallback.
 
 ---
 
 ## Storage Layout
-
-Each indexed workspace gets its own directory under the ivygrep home:
 
 ```
 ~/.local/share/ivygrep/
@@ -266,170 +303,13 @@ Each indexed workspace gets its own directory under the ivygrep home:
     └── <workspace-id>/                 # hex(xxh3(canonical_path))
         ├── workspace.json              # Workspace metadata
         ├── merkle.json                 # File fingerprint snapshot
-        ├── chunks.db                   # SQLite — chunk text + metadata
+        ├── metadata.sqlite3            # SQLite — chunk text + metadata
         ├── tantivy/                    # Tantivy BM25 index segments
-        │   ├── meta.json
-        │   └── *.fast / *.pos / ...
-        ├── vectors.usearch             # Hash-based vector index (always present)
-        ├── vectors_neural.usearch      # Neural ONNX vector index (background)
-        ├── .enhancing.pid              # PID of active neural enhancement subprocess
-        └── .watcher.pid                # PID of daemon watcher for this workspace
+        ├── vectors.usearch             # Hash embeddings (256-dim)
+        ├── vectors_neural.usearch      # Neural ONNX embeddings (384-dim)
+        ├── .enhancing.pid              # PID of neural enhancement subprocess
+        └── .watcher.pid                # PID of daemon watcher
 ```
-
-| Store | Engine | Role |
-|-------|--------|------|
-| `chunks.db` | SQLite 3 (rusqlite, bundled) | Chunk text, metadata, file paths, content hashes. Source of truth for all chunk data. |
-| `tantivy/` | Tantivy 0.26 | Full-text BM25 index with per-field boosting (file_path: 2×). Supports term queries and boolean combinations. |
-| `vectors.usearch` | USearch 2.24 | Cosine similarity index for hash-based embeddings (256-dim). Always present, instant to build. |
-| `vectors_neural.usearch` | USearch 2.24 | Cosine similarity index for ONNX neural embeddings (384-dim, AllMiniLM-L6-v2 quantized). Built asynchronously in background. |
-| `merkle.json` | Custom (serde_json) | BTreeMap of `relative_path → xxh3(path+size+mtime)`. Used for O(n) incremental diff. |
-
----
-
-## Embedding Models
-
-ivygrep supports two embedding backends, selected at runtime:
-
-```mermaid
-graph LR
-    subgraph "Hash Model (always available)"
-        HM["HashEmbeddingModel"]
-        HM -->|"256-dim"| HASH_VEC["Sparse hash vector<br/>Token → bucket + sign<br/>via DefaultHasher"]
-    end
-
-    subgraph "Neural Model (feature=neural)"
-        NM["OnnxEmbeddingModel"]
-        NM -->|"384-dim"| ONNX_VEC["Dense semantic vector<br/>AllMiniLM-L6-v2<br/>quantized INT8"]
-    end
-
-    subgraph "Runtime Selection"
-        CM["create_model(hash)"]
-        CM -->|"hash=true"| HM
-        CM -->|"hash=false"| NM
-        NM -.->|"fallback on error"| HM
-    end
-```
-
-| Property | Hash Model | Neural Model |
-|----------|-----------|--------------|
-| Dimensions | 256 | 384 |
-| Quality | Moderate (token overlap) | High (true semantic similarity) |
-| Latency | Instant | ~23MB model download on first use |
-| Hardware | CPU only | CoreML (Apple Neural Engine) on macOS, CPU elsewhere |
-| Batch support | Parallel via rayon | Native ONNX batching |
-| Feature gate | Always | `neural` (default) |
-
-The hash model works by:
-1. Splitting text into tokens
-2. Expanding each token into semantic variants (e.g., `calculateTax` → `["calculate", "tax", "calculatetax"]`)
-3. Applying singularization (`taxes` → `tax`) and normalization aliases (`calc` → `calculate`)
-4. Hashing each token to a bucket in a fixed-size vector with sign randomization
-5. L2-normalizing the result
-
----
-
-## IPC Protocol
-
-The CLI and daemon communicate over a Unix domain socket using newline-delimited
-JSON. The protocol is defined in `protocol.rs`:
-
-```mermaid
-sequenceDiagram
-    participant CLI as ig CLI
-    participant D as Daemon
-
-    CLI->>D: DaemonRequest::Status
-    D-->>CLI: DaemonResponse::Status { workspaces, version }
-
-    Note over CLI: Version matches? Continue.<br/>Mismatch? Send Restart.
-
-    CLI->>D: DaemonRequest::Search { query, path, ... }
-    D-->>CLI: DaemonResponse::SearchResults { hits }
-
-    Note over CLI,D: On error: DaemonResponse::Error { message }<br/>CLI falls back to local search.
-
-    CLI->>D: DaemonRequest::Restart
-    D-->>CLI: DaemonResponse::Ack { "restarting" }
-    Note over D: Daemon removes socket,<br/>exits after 100ms
-    Note over CLI: Auto-spawns new daemon
-```
-
-### Request Types
-
-| Request | Fields | Description |
-|---------|--------|-------------|
-| `Status` | — | Health check, returns workspace list + daemon version |
-| `Search` | query, path?, limit?, context?, type_filter?, include/exclude globs, scope | Hybrid semantic+lexical search |
-| `RegexSearch` | pattern, path?, limit?, include/exclude globs, scope | Regex-only search (like ripgrep) |
-| `Index` | path, watch | Index a workspace and optionally start watching |
-| `Remove` | path | Remove workspace index |
-| `Restart` | — | Graceful shutdown (daemon cleans up and exits) |
-
-### Response Types
-
-| Response | Fields | Description |
-|----------|--------|-------------|
-| `Status` | workspaces: Vec\<WorkspaceStatus\>, version: Option\<String\> | Workspace health + daemon build version |
-| `SearchResults` | hits: Vec\<SearchHit\> | Ranked search results with file, lines, score, context |
-| `Ack` | message: String | Success confirmation |
-| `Error` | message: String | Error with description |
-
----
-
-## Resilience Model
-
-The system is designed to **never silently fail**. If something breaks,
-the user still gets results:
-
-```mermaid
-flowchart TD
-    Q["ig 'query'"]
-    Q --> CS["Connect to daemon<br/>(2s timeout)"]
-
-    CS -->|timeout| LF["Local Fallback Search"]
-    CS -->|connected| VS["Version Check"]
-
-    VS -->|mismatch| RS["Send Restart → respawn"]
-    VS -->|match| SR["Send Search Request"]
-
-    RS --> SR
-
-    SR -->|SearchResults| OK["Display Results ✓"]
-    SR -->|Error| LF
-    SR -->|timeout/disconnect| LF
-
-    LF --> OK
-```
-
-| Failure Mode | Behavior |
-|-------------|----------|
-| Daemon not running | Auto-spawn on first request |
-| Daemon version mismatch | Protocol-based restart (`DaemonRequest::Restart`) |
-| Daemon search error | CLI falls back to local `hybrid_search` |
-| Daemon zombie/unreachable | 2s connect timeout → remove stale socket → local fallback |
-| ONNX model not loaded yet | Hash model used as instant fallback |
-| ONNX model fails to load | Automatic fallback to hash model |
-| All searches return empty | User hint: check `daemon.log` or `--add . --force` |
-
----
-
-## Dependencies
-
-| Crate | Version | Role |
-|-------|---------|------|
-| `tantivy` | 0.26 | Full-text BM25 search index |
-| `usearch` | 2.24 | Approximate nearest-neighbor vector index |
-| `rusqlite` | 0.39 (bundled) | Chunk metadata store |
-| `fastembed` | 5 | ONNX embedding model loading (AllMiniLM-L6-v2) |
-| `ort` | 2.0.0-rc.11 | ONNX Runtime (CoreML on macOS) |
-| `tree-sitter` | 0.26 | AST parsing for precise code chunking |
-| `notify` | 8.2 | Cross-platform filesystem watcher |
-| `tokio` | 1.50 | Async runtime for daemon event loop |
-| `rayon` | 1.10 | Parallel indexing and batch embedding |
-| `clap` | 4.6 | CLI argument parsing |
-| `xxhash-rust` | 0.8 | 128-bit SIMD hashing for Merkle fingerprints |
-| `ignore` | 0.4 | `.gitignore`-aware directory walking |
-| `serde` / `serde_json` | 1.0 | Serialization for IPC protocol and storage |
 
 ---
 
@@ -438,7 +318,7 @@ flowchart TD
 | Feature | Default | Effect |
 |---------|---------|--------|
 | `neural` | ✅ | Enables ONNX neural embeddings (fastembed + ort). Adds ~23MB model download. |
-| *(none)* | — | Hash-only mode. Smaller binary, no ONNX download, lower search quality. |
+| *(none)* | — | Hash-only mode. Smaller binary, no ONNX, lower search quality. |
 
 ```bash
 # Full build (default — includes ONNX neural embeddings)
