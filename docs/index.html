@@ -229,23 +229,50 @@
             <h2 class="section-title text-center">Supercharge Your AI Agents</h2>
             <p class="text-center subtitle-small mb-4">ivygrep exposes an MCP (Model Context Protocol) server. Instead of stuffing entire files into your LLM context, your agent can query your codebase natively.</p>
             
-            <div class="grid grid-3">
+            <div class="grid agent-grid">
                 <div class="agent-card glass-card fade-in-scroll">
-                    <h4>Claude Code</h4>
-                    <div class="code-font text-xs opacity-80 bg-dark p-2 rounded mt-1">
+                    <h4 style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
+                        <img src="https://cdn.simpleicons.org/anthropic/white" width="18" height="18" alt="Anthropic logo" />
+                        Claude Code
+                    </h4>
+                    <div class="code-font text-xs opacity-80 bg-dark p-2 rounded mt-1" style="word-break: break-all;">
                         claude mcp add -s user ig -- ig --mcp
                     </div>
                 </div>
                 <div class="agent-card glass-card fade-in-scroll">
-                    <h4>Cursor IDE</h4>
-                    <div class="code-font text-xs opacity-80 bg-dark p-2 rounded mt-1">
-                        "ig": { "command": "ig", "args": ["--mcp"] }
+                    <h4 style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
+                        <img src="https://cdn.simpleicons.org/openai/white" width="18" height="18" alt="OpenAI logo" />
+                        Codex
+                    </h4>
+                    <div class="code-font text-xs opacity-80 bg-dark p-2 rounded mt-1" style="word-break: break-all;">
+                        codex mcp add ig -- ig --mcp
                     </div>
                 </div>
                 <div class="agent-card glass-card fade-in-scroll">
-                    <h4>OpenCode</h4>
-                    <div class="code-font text-xs opacity-80 bg-dark p-2 rounded mt-1">
-                        opencode mcp add<br/># set command to `ig --mcp`
+                    <h4 style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
+                        <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
+                        OpenCode
+                    </h4>
+                    <div class="code-font text-xs opacity-80 bg-dark p-2 rounded mt-1" style="word-break: break-all;">
+                        opencode mcp add<br/># set cmd to: ig --mcp
+                    </div>
+                </div>
+                <div class="agent-card glass-card fade-in-scroll">
+                    <h4 style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
+                        <img src="https://cdn.simpleicons.org/googlegemini/white" width="18" height="18" alt="Gemini logo" />
+                        Gemini
+                    </h4>
+                    <div class="code-font text-xs opacity-80 bg-dark p-2 rounded mt-1" style="word-break: break-all;">
+                        gemini mcp add --transport stdio ig ig --mcp
+                    </div>
+                </div>
+                <div class="agent-card glass-card fade-in-scroll">
+                    <h4 style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
+                        <img src="https://cdn.simpleicons.org/cursor/white" width="18" height="18" alt="Cursor logo" />
+                        Cursor
+                    </h4>
+                    <div class="code-font text-xs opacity-80 bg-dark p-2 rounded mt-1" style="word-break: break-all;">
+                        "ig": { "command": "ig", "args": ["--mcp"] }
                     </div>
                 </div>
             </div>
