@@ -11,6 +11,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Outfit:wght@300;400;600;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
+    <link rel="icon" type="image/svg+xml" href="assets/icon.svg">
 </head>
 <body>
     <div class="bg-fx"></div>
@@ -45,7 +46,8 @@
             <p class="subtitle slide-up delay-2">Ask questions in English. Get answers in code. 100% local, lightning fast, and seamlessly integrated with AI agents.</p>
             
             <div class="cta-group slide-up delay-3">
-                <div class="terminal-install code-block">
+                <div class="terminal-install code-block relative">
+                    <button class="copy-btn" onclick="navigator.clipboard.writeText('brew tap bvolpato/tap\nbrew install bvolpato/tap/ivygrep'); this.innerText='Copied!'; setTimeout(() => this.innerText='Copy', 2000)">Copy</button>
                     <span class="prompt">$</span> brew tap bvolpato/tap<br>
                     <span class="prompt">$</span> brew install bvolpato/tap/ivygrep
                 </div>
