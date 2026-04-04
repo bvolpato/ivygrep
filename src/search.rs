@@ -755,12 +755,10 @@ fn fuse_rrf(
 
             let mut score = base_score + literal_match_boost(query_text, &chunk);
 
-            // Term-coverage bonus: reward chunks that match more query tokens
             if !query_tokens.is_empty() {
                 score += term_coverage_boost(&query_tokens, &chunk) * TERM_COVERAGE_WEIGHT;
             }
 
-            // File-path segment matching: boost files whose path contains query tokens
             if !query_tokens.is_empty() {
                 score += path_segment_boost(&query_tokens, &chunk) * PATH_SEGMENT_WEIGHT;
             }
@@ -769,11 +767,28 @@ fn fuse_rrf(
                 score *= SEMANTIC_ONLY_PENALTY;
             }
 
+            score *= chunk_kind_boost(&chunk);
+            score *= file_authority_score(&chunk);
+
             Some((chunk, score, source_list))
         })
         .collect::<Vec<_>>();
 
     ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+
+    // Per-file hit diversity cap: prevent one noisy file from dominating.
+    let mut file_hit_counts: HashMap<PathBuf, usize> = HashMap::new();
+    for item in &mut ranked {
+        let count = file_hit_counts.entry(item.0.file_path.clone()).or_insert(0);
+        *count += 1;
+        match *count {
+            1..=3 => {}
+            4..=6 => item.1 *= 0.5,
+            _ => item.1 *= 0.2,
+        }
+    }
+    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+
     let mut filtered = filter_meaningful_scores(&ranked);
 
     if let Some(limit) = limit {
@@ -901,6 +916,25 @@ fn compact_identifier(input: &str) -> String {
         .filter(|ch| ch.is_ascii_alphanumeric())
         .map(|ch| ch.to_ascii_lowercase())
         .collect::<String>()
+}
+
+fn chunk_kind_boost(chunk: &IndexedChunk) -> f32 {
+    match chunk.kind.as_str() {
+        "function" | "class" | "struct" | "trait" | "impl" | "interface" => 1.2,
+        "comment" | "import" => 0.8,
+        _ => 1.0,
+    }
+}
+
+fn file_authority_score(chunk: &IndexedChunk) -> f32 {
+    let path = chunk.file_path.to_string_lossy().to_ascii_lowercase();
+    if path.contains("test") || path.contains("spec") || path.contains("mock") {
+        0.7
+    } else if path.ends_with(".json") || path.ends_with(".csv") || path.ends_with(".yaml") || path.ends_with(".md") {
+        0.5
+    } else {
+        1.0
+    }
 }
 
 pub fn workspace_has_results(workspace: &Workspace) -> Result<bool> {

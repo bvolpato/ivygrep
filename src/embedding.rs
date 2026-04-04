@@ -200,17 +200,58 @@ fn ort_thread_budget() -> usize {
     (cpus / 2).max(2)
 }
 
+/// Adaptive check for CoreML in background daemon phase.
+#[cfg(feature = "neural")]
+fn device_context_allows_coreml(is_background: bool) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::Command;
+
+        // In the background daemon phase, we adaptively disable CoreML (which uses ANE/GPU
+        // and can freeze the UI on heavy workloads) if the system is contextually constrained.
+        if is_background {
+            // 1. Check if we're on battery power
+            if let Ok(output) = Command::new("pmset").arg("-g").arg("batt").output() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if stdout.contains("Battery Power") {
+                    tracing::info!("Battery power detected, disabling CoreML in background");
+                    return false;
+                }
+            }
+
+            // 2. Check if the system is already under heavy load
+            let mut loadavg = [0.0f64; 3];
+            let has_load = unsafe { libc::getloadavg(loadavg.as_mut_ptr(), 3) };
+            if has_load > 0 {
+                let load1 = loadavg[0];
+                let cpus = num_cpus::get() as f64;
+                // If 1-minute load average > 70% of logical cores, system is quite busy
+                if load1 > cpus * 0.7 {
+                    tracing::info!("System load is high ({:.2}), disabling CoreML in background", load1);
+                    return false;
+                }
+            }
+        }
+    }
+    
+    true
+}
+
 /// Register CoreML execution provider (Apple Neural Engine / GPU).
 /// Automatically compiled in on macOS builds.
 #[cfg(feature = "neural")]
-fn register_coreml() {
+fn register_coreml(is_background: bool) {
     #[cfg(target_os = "macos")]
     {
+        if !device_context_allows_coreml(is_background) {
+            tracing::info!("CoreML skipped due to adaptive device context rules");
+            return;
+        }
+
         // ort::init() is idempotent; first call wins.
         // In ort rc.11, commit() returns bool (true if this call did the init).
         let _ = ort::init()
-            .with_execution_providers([ort::execution_providers::CoreMLExecutionProvider::default(
-            )
+            .with_execution_providers([ort::execution_providers::CoreMLExecutionProvider::default()
             .build()])
             .commit();
         tracing::info!("CoreML execution provider registered");
@@ -244,9 +285,23 @@ impl OnnxEmbeddingModel {
     /// Initialize the neural model.  On first run this downloads
     /// `all-MiniLM-L6-v2` (~23 MB) to `~/.local/share/ivygrep/models/`.
     pub fn new() -> anyhow::Result<Self> {
+        Self::new_internal(false)
+    }
+
+    /// Initialize with limited thread count for background processing.
+    pub fn new_background() -> anyhow::Result<Self> {
+        // Set the ORT thread budget before model init
+        let budget = ort_thread_budget();
+        // SAFETY: This is called in the background `--enhance-internal` subprocess
+        // which is single-threaded at this point (before model init).
+        unsafe { std::env::set_var("ORT_NUM_THREADS", budget.to_string()) };
+        Self::new_internal(true)
+    }
+
+    fn new_internal(is_background: bool) -> anyhow::Result<Self> {
         use fastembed::{EmbeddingModel as FastModel, InitOptions};
 
-        register_coreml();
+        register_coreml(is_background);
 
         let cache_dir = model_cache_dir();
         std::fs::create_dir_all(&cache_dir)?;
@@ -273,16 +328,6 @@ impl OnnxEmbeddingModel {
         Ok(Self {
             model: parking_lot::Mutex::new(model),
         })
-    }
-
-    /// Initialize with limited thread count for background processing.
-    pub fn new_background() -> anyhow::Result<Self> {
-        // Set the ORT thread budget before model init
-        let budget = ort_thread_budget();
-        // SAFETY: This is called in the background `--enhance-internal` subprocess
-        // which is single-threaded at this point (before model init).
-        unsafe { std::env::set_var("ORT_NUM_THREADS", budget.to_string()) };
-        Self::new()
     }
 }
 

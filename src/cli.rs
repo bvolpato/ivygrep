@@ -243,10 +243,17 @@ async fn run_status(json: bool) -> Result<()> {
                     String::new()
                 };
 
-                println!(
-                    "  Search: \x1b[1;33m⟳ enhancing\x1b[0m {progress_str}(computing {} in background...)",
-                    accel
-                );
+                if let Some(reason) = &ws.enhancing_paused_reason {
+                    println!(
+                        "  Search: \x1b[1;33m⟳ enhancing [PAUSED]\x1b[0m {progress_str}(Paused: {})",
+                        reason
+                    );
+                } else {
+                    println!(
+                        "  Search: \x1b[1;33m⟳ enhancing\x1b[0m {progress_str}(computing {} in background...)",
+                        accel
+                    );
+                }
             } else if ws.has_neural_vectors {
                 let pct = if ws.chunk_count > 0 {
                     let ratio = (ws.neural_vector_count as f64 / ws.chunk_count as f64) * 100.0;

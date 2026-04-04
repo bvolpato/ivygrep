@@ -39,6 +39,8 @@ pub struct WorkspaceStatus {
     #[serde(default)]
     pub enhancing_progress_count: Option<u64>,
     #[serde(default)]
+    pub enhancing_paused_reason: Option<String>,
+    #[serde(default)]
     pub indexing_in_progress: bool,
     #[serde(default)]
     pub indexing_progress: Option<String>,
@@ -106,6 +108,10 @@ impl Workspace {
 
     pub fn enhancing_progress_path(&self) -> PathBuf {
         self.index_dir.join(".enhancing.progress")
+    }
+
+    pub fn enhancing_paused_path(&self) -> PathBuf {
+        self.index_dir.join(".enhancing.paused")
     }
 
     pub fn indexing_pid_path(&self) -> PathBuf {
@@ -343,6 +349,15 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
             None
         };
 
+        let enhancing_paused_reason = if enhancing_in_progress {
+            let paused_path = index_dir.join(".enhancing.paused");
+            std::fs::read_to_string(&paused_path)
+                .ok()
+                .map(|s| s.trim().to_string())
+        } else {
+            None
+        };
+
         let indexing_progress = if indexing_in_progress {
             let progress_path = index_dir.join(".indexing.progress");
             std::fs::read_to_string(&progress_path)
@@ -366,6 +381,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
                 neural_vector_count,
                 enhancing_in_progress,
                 enhancing_progress_count,
+                enhancing_paused_reason,
                 indexing_in_progress,
                 indexing_progress,
             },

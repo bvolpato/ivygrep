@@ -372,6 +372,64 @@ fn index_workspace_inner(
     })
 }
 
+#[cfg(target_os = "macos")]
+fn parse_pmset_batt(stdout: &str) -> Option<String> {
+    if stdout.contains("Battery Power") {
+        Some("Battery Power".to_string())
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn parse_pmset_therm(stdout: &str) -> Option<String> {
+    if stdout.contains("warning level") 
+        && !stdout.contains("No thermal warning level")
+        && !stdout.contains("No performance warning level") {
+        Some("Thermal Throttling".to_string())
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn check_system_constraints() -> Option<String> {
+    use std::process::Command;
+
+    // 1. Check battery power
+    if let Ok(output) = Command::new("pmset").arg("-g").arg("batt").output() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(reason) = parse_pmset_batt(&stdout) {
+            return Some(reason);
+        }
+    }
+
+    // 2. Check thermal limit
+    if let Ok(output) = Command::new("pmset").arg("-g").arg("therm").output() {
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(reason) = parse_pmset_therm(&stdout) {
+            return Some(reason);
+        }
+    }
+
+    // 3. High load
+    let mut loadavg = [0.0f64; 3];
+    let has_load = unsafe { libc::getloadavg(loadavg.as_mut_ptr(), 3) };
+    if has_load > 0 {
+        let load1 = loadavg[0];
+        let cpus = num_cpus::get() as f64;
+        if load1 > cpus * 0.8 {
+            return Some(format!("High System Load ({:.1})", load1));
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "macos"))]
+fn check_system_constraints() -> Option<String> {
+    None
+}
+
 /// Compute neural (ONNX) embeddings for all chunks and save as a separate
 /// vector store. This is designed to run in a background thread after the
 /// fast hash-based index returns results to the user.
@@ -436,7 +494,8 @@ pub fn enhance_workspace_neural(
             batch.clear();
         };
 
-    let progress_path = workspace.index_dir.join(".enhancing.progress");
+    let progress_path = workspace.enhancing_progress_path();
+    let paused_path = workspace.enhancing_paused_path();
 
     for row in rows.flatten() {
         if vector_index.contains(row.0) {
@@ -446,6 +505,12 @@ pub fn enhance_workspace_neural(
 
         batch.push(row);
         if batch.len() >= 16 {
+            while let Some(reason) = check_system_constraints() {
+                let _ = std::fs::write(&paused_path, &reason);
+                std::thread::sleep(std::time::Duration::from_secs(10));
+            }
+            let _ = std::fs::remove_file(&paused_path);
+
             process_batch(&mut batch, &mut newly_processed, &mut vector_index);
             progress_count += 16;
 
@@ -1098,5 +1163,25 @@ mod tests {
         assert_eq!(id1, id2, "same path should produce same id");
         assert_ne!(id1, id3, "different paths should produce different ids");
         assert!(!id1.is_empty());
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_parse_pmset_batt() {
+        let ac_output = "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22741091)\t96%; AC attached; not charging present: true";
+        let batt_output = "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=22741091)\t96%; discharging; (no estimate) present: true";
+        
+        assert_eq!(super::parse_pmset_batt(ac_output), None);
+        assert_eq!(super::parse_pmset_batt(batt_output), Some("Battery Power".to_string()));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_parse_pmset_therm() {
+        let normal = "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded";
+        let throttled = "Note: Thermal warning level CPU_Speed_Limit = 50";
+        
+        assert_eq!(super::parse_pmset_therm(normal), None);
+        assert_eq!(super::parse_pmset_therm(throttled), Some("Thermal Throttling".to_string()));
     }
 }
