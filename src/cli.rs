@@ -203,6 +203,9 @@ async fn run_status(json: bool) -> Result<()> {
                     let ago = format_timestamp_ago(ts);
                     println!("  Index:  \x1b[32m✓ indexed\x1b[0m ({})", ago);
                 }
+                None if ws.indexing_in_progress => {
+                    println!("  Index:  \x1b[1;33m⟳ initial indexing\x1b[0m");
+                }
                 None => {
                     println!("  Index:  \x1b[33m⚠ never indexed\x1b[0m");
                 }
@@ -257,9 +260,15 @@ async fn run_status(json: bool) -> Result<()> {
                     ws.neural_vector_count, pct, accel
                 );
             } else if ws.indexing_in_progress {
-                println!(
-                    "  Search: \x1b[1;33m⟳ indexing\x1b[0m (scanning, parsing, and chunking documents locally...)"
-                );
+                let progress_str = ws.indexing_progress.as_deref().unwrap_or("starting");
+                let detail = if progress_str == "scanning" {
+                    "scanning filesystem...".to_string()
+                } else if progress_str.contains('/') {
+                    format!("{progress_str} files")
+                } else {
+                    progress_str.to_string()
+                };
+                println!("  Search: \x1b[1;33m⟳ indexing\x1b[0m ({detail})");
             } else if ws.chunk_count > 0 {
                 println!(
                     "  Search: \x1b[33m◆ hash\x1b[0m (fast, run a query to trigger neural upgrade)"
@@ -447,10 +456,22 @@ async fn run_query(cli: Cli) -> Result<()> {
                                 && let Ok(ws_list) = crate::workspace::list_workspaces()
                                 && let Some(status) = ws_list.iter().find(|w| w.id == ws_id)
                             {
-                                cached_msg = format!(
-                                    "{} files, {} chunks indexed...",
-                                    status.file_count, status.chunk_count
-                                );
+                                if status.indexing_in_progress {
+                                    if let Some(ref progress) = status.indexing_progress {
+                                        if progress == "scanning" {
+                                            cached_msg = "scanning filesystem...".to_string();
+                                        } else {
+                                            cached_msg = format!("indexing {progress} files...");
+                                        }
+                                    } else {
+                                        cached_msg = "indexing...".to_string();
+                                    }
+                                } else {
+                                    cached_msg = format!(
+                                        "{} files, {} chunks indexed",
+                                        status.file_count, status.chunk_count
+                                    );
+                                }
                             }
 
                             if cached_msg.is_empty() {
@@ -840,11 +861,7 @@ async fn run_query(cli: Cli) -> Result<()> {
     // that occur perfectly cleanly tearing down `onnxruntime` when the main process exits.
     // Skipped in CI/test environments (IVYGREP_NO_AUTOSPAWN=1).
     let no_autospawn = env::var("IVYGREP_NO_AUTOSPAWN").is_ok();
-    if !cli.all
-        && !cli.hash
-        && !cli.regex
-        && !no_autospawn
-        && !workspace.vector_neural_path().exists()
+    if !cli.all && !cli.hash && !cli.regex && !no_autospawn && workspace.needs_neural_enhancement()
     {
         let _ = workspace.trigger_background_enhancement();
     }

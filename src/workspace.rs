@@ -40,6 +40,8 @@ pub struct WorkspaceStatus {
     pub enhancing_progress_count: Option<u64>,
     #[serde(default)]
     pub indexing_in_progress: bool,
+    #[serde(default)]
+    pub indexing_progress: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -110,6 +112,10 @@ impl Workspace {
         self.index_dir.join(".indexing.pid")
     }
 
+    pub fn indexing_progress_path(&self) -> PathBuf {
+        self.index_dir.join(".indexing.progress")
+    }
+
     /// PID file written by the daemon when it starts watching this workspace.
     /// Allows the CLI to skip expensive Merkle scans when a live watcher is confirmed.
     pub fn watcher_pid_path(&self) -> PathBuf {
@@ -125,6 +131,38 @@ impl Workspace {
     /// Checks if an enhancement process is currently running for this workspace.
     pub fn is_enhancing_active(&self) -> bool {
         is_active_pid_alive(&self.enhancing_pid_path())
+    }
+
+    /// Checks if we need to trigger neural enhancement (e.g. if we have un-enhanced chunks).
+    pub fn needs_neural_enhancement(&self) -> bool {
+        if self.is_enhancing_active() {
+            return false;
+        }
+
+        let (chunk_count, _) = read_sqlite_counts(&self.index_dir);
+        if chunk_count == 0 {
+            return false;
+        }
+
+        let neural_path = self.vector_neural_path();
+        if !neural_path.exists() {
+            return true;
+        }
+
+        // Fast metadata size estimate. Each quantized F32 vector / I8 element is 384 bytes
+        // plus Usearch headers and hash metadata. If it's very small it's probably 0 chunks.
+        // For exact size, we memory-map it (takes < 1ms).
+        if let Ok(store) = crate::vector_store::VectorStore::open_readonly(
+            &neural_path,
+            384,
+            crate::vector_store::ScalarKind::I8,
+        ) {
+            let enhanced = store.size();
+            return (enhanced as u64) < chunk_count;
+        }
+
+        // If we can't open it but it exists and we have chunks, assume we need a rebuild/upgrade
+        true
     }
 
     /// Triggers an atomic background spawn of the neural enhancement process.
@@ -305,6 +343,15 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
             None
         };
 
+        let indexing_progress = if indexing_in_progress {
+            let progress_path = index_dir.join(".indexing.progress");
+            std::fs::read_to_string(&progress_path)
+                .ok()
+                .map(|s| s.trim().to_string())
+        } else {
+            None
+        };
+
         by_id.insert(
             metadata.id.clone(),
             WorkspaceStatus {
@@ -320,6 +367,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
                 enhancing_in_progress,
                 enhancing_progress_count,
                 indexing_in_progress,
+                indexing_progress,
             },
         );
     }

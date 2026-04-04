@@ -482,7 +482,25 @@ fn try_tree_sitter_chunk_source(
         _ => return None,
     };
 
-    let tree = parser.parse(text, None)?;
+    // 100ms timeout to prevent infinite loops/hangs on massive minified JS files.
+    // We use ParseOptions to cancel long-running parses since timeout_micros was removed in 0.26
+    let start_time = std::time::Instant::now();
+    let mut cb = |_state: &tree_sitter::ParseState| {
+        if start_time.elapsed().as_millis() > 100 {
+            std::ops::ControlFlow::Break(())
+        } else {
+            std::ops::ControlFlow::Continue(())
+        }
+    };
+    let options = tree_sitter::ParseOptions::new().progress_callback(&mut cb);
+
+    let bytes = text.as_bytes();
+    let len = bytes.len();
+    let tree = parser.parse_with_options(
+        &mut |i, _| (i < len).then(|| &bytes[i..]).unwrap_or_default(),
+        None,
+        Some(options),
+    )?;
     let query = Query::new(&parser.language().unwrap(), query_str).ok()?;
     let mut cursor = QueryCursor::new();
 

@@ -229,7 +229,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 let mut all_errors: Vec<String> = Vec::new();
                 let ws_neural_missing: Vec<PathBuf> = workspaces
                     .iter()
-                    .filter(|w| !w.vector_neural_path().exists() && !w.is_enhancing_active())
+                    .filter(|w| w.needs_neural_enhancement())
                     .map(|w| w.root.clone())
                     .collect();
 

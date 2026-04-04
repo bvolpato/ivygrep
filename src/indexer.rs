@@ -31,7 +31,8 @@ pub fn decompress_text(raw: Vec<u8>) -> String {
             .and_then(|b| String::from_utf8(b).ok())
             .unwrap_or_else(|| String::from_utf8_lossy(&raw).into_owned())
     } else {
-        String::from_utf8(raw).unwrap_or_else(|e| String::from_utf8_lossy(&e.into_bytes()).into_owned())
+        String::from_utf8(raw)
+            .unwrap_or_else(|e| String::from_utf8_lossy(&e.into_bytes()).into_owned())
     }
 }
 
@@ -76,10 +77,13 @@ pub struct StorageHandles {
 }
 
 pub fn workspace_is_indexed(workspace: &Workspace) -> bool {
-    workspace.metadata_path().exists()
-        && workspace.sqlite_path().exists()
+    workspace.sqlite_path().exists()
         && workspace.tantivy_dir().exists()
         && workspace.vector_path().exists()
+        && match workspace.read_metadata() {
+            Ok(Some(m)) => m.last_indexed_at_unix.is_some(),
+            _ => false,
+        }
 }
 
 pub fn remove_workspace_index(workspace: &Workspace) -> Result<()> {
@@ -137,6 +141,7 @@ pub fn index_workspace(
     let result = index_workspace_inner(workspace, embedding_model);
 
     let _ = fs::remove_file(&pid_path);
+    let _ = fs::remove_file(&workspace.indexing_progress_path());
     let _ = fs2::FileExt::unlock(&lock_file);
     result
 }
@@ -146,6 +151,22 @@ fn index_workspace_inner(
     embedding_model: &dyn EmbeddingModel,
 ) -> Result<IndexingSummary> {
     let _ = open_storage(workspace, embedding_model.dimensions())?;
+
+    // Write metadata early so the workspace appears in `ig --status` during indexing.
+    // The final write after completion updates last_indexed_at_unix.
+    if workspace.read_metadata()?.is_none() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        workspace.write_metadata(&WorkspaceMetadata {
+            id: workspace.id.clone(),
+            root: workspace.root.clone(),
+            created_at_unix: now,
+            last_indexed_at_unix: None,
+            watch_enabled: true,
+        })?;
+    }
 
     // Trust-but-verify: if a live watcher daemon is confirmed, skip the
     // expensive Merkle rebuild entirely. The watcher already triggered
@@ -160,6 +181,8 @@ fn index_workspace_inner(
     }
 
     let old_snapshot = MerkleSnapshot::load(&workspace.merkle_snapshot_path())?;
+
+    let _ = fs::write(&workspace.indexing_progress_path(), "scanning");
     let new_snapshot = MerkleSnapshot::build(&workspace.root)?;
     let diff = old_snapshot.diff(&new_snapshot);
 
@@ -181,8 +204,11 @@ fn index_workspace_inner(
     let (tantivy, fields) = open_tantivy_index(&workspace.tantivy_dir())?;
     let mut writer = tantivy.writer(50_000_000)?;
 
-    let mut vector_index =
-        VectorStore::open(&workspace.vector_path(), embedding_model.dimensions(), ScalarKind::F16)?;
+    let mut vector_index = VectorStore::open(
+        &workspace.vector_path(),
+        embedding_model.dimensions(),
+        ScalarKind::F16,
+    )?;
 
     // Batch all SQLite writes in a single transaction for ~10-50x speedup.
     let tx = sqlite.transaction()?;
@@ -204,7 +230,10 @@ fn index_workspace_inner(
 
     let progress_counter_clone = progress_counter.clone();
     let root_clone = workspace.root.clone();
+    let progress_path_clone = workspace.indexing_progress_path();
     let diff_paths: Vec<_> = diff.added_or_modified.clone();
+
+    let _ = fs::write(&progress_path_clone, format!("0/{total}"));
 
     std::thread::spawn(move || {
         for batch_paths in diff_paths.chunks(4096) {
@@ -236,6 +265,9 @@ fn index_workspace_inner(
                         + 1;
                     if show_progress && n.is_multiple_of(100) {
                         eprint!("\r\x1b[K  [{n}/{total}] chunking...");
+                    }
+                    if n.is_multiple_of(500) {
+                        let _ = fs::write(&progress_path_clone, format!("{n}/{total}"));
                     }
 
                     if indexed.is_empty() {
@@ -356,8 +388,11 @@ pub fn enhance_workspace_neural(
         Ok((key, decompress_text(raw)))
     })?;
 
-    let mut vector_index =
-        VectorStore::open(&workspace.vector_neural_path(), neural_model.dimensions(), ScalarKind::F32)?;
+    let mut vector_index = VectorStore::open(
+        &workspace.vector_neural_path(),
+        neural_model.dimensions(),
+        ScalarKind::F32,
+    )?;
 
     // Use a small batch size to bound ONNX/CoreML intermediate Tensor allocations
     // (e.g. attention matrices). A size of 128 spikes up to 1GB+ RAM.

@@ -280,10 +280,18 @@ pub fn hybrid_search(
             if model.dimensions() == neural_dims {
                 VectorStore::open_readonly(&neural_path, neural_dims, ScalarKind::F32)?
             } else {
-                VectorStore::open_readonly(&workspace.vector_path(), model.dimensions(), ScalarKind::F16)?
+                VectorStore::open_readonly(
+                    &workspace.vector_path(),
+                    model.dimensions(),
+                    ScalarKind::F16,
+                )?
             }
         } else {
-            VectorStore::open_readonly(&workspace.vector_path(), model.dimensions(), ScalarKind::F16)?
+            VectorStore::open_readonly(
+                &workspace.vector_path(),
+                model.dimensions(),
+                ScalarKind::F16,
+            )?
         });
         tracing::trace!(
             "open_vector={:?} size={}",

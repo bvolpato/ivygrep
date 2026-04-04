@@ -38,7 +38,10 @@ impl VectorStore {
                 // Old index may use different quantization; retry with F32
                 let fallback = make_index(ScalarKind::F32)?;
                 fallback.load(path_str)?;
-                return Ok(Self { path: path.to_path_buf(), index: fallback });
+                return Ok(Self {
+                    path: path.to_path_buf(),
+                    index: fallback,
+                });
             }
         }
 
@@ -74,7 +77,10 @@ impl VectorStore {
                 // Old index may use different quantization; retry with F32
                 let fallback = make_index(ScalarKind::F32)?;
                 fallback.view(path_str)?;
-                return Ok(Self { path: path.to_path_buf(), index: fallback });
+                return Ok(Self {
+                    path: path.to_path_buf(),
+                    index: fallback,
+                });
             }
         }
 
