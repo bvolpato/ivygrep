@@ -20,7 +20,7 @@
         <div class="container nav-content">
             <div class="logo">
                 <!-- Fallback to text if logo image is missing -->
-                <img src="assets/logo.png" alt="ivygrep logo" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';"/>
+                <a href="#"><img src="assets/icon.svg" alt="ivygrep icon" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';"/></a>
                 <span style="display:none;" class="logo-text">ivy<span class="highlight">grep</span></span>
             </div>
             <div class="nav-links">
@@ -98,7 +98,7 @@
                 <thead>
                     <tr>
                         <th>Feature</th>
-                        <th><code>grep</code> / <code>rg</code></th>
+                        <th><a href="https://www.gnu.org/software/grep/" target="_blank" style="color: inherit;"><code>grep</code></a> / <a href="https://github.com/BurntSushi/ripgrep" target="_blank" style="color: inherit;"><code>rg</code></a></th>
                         <th>GitHub Search</th>
                         <th><span class="highlight">ivygrep</span></th>
                     </tr>
@@ -180,7 +180,7 @@
         <div class="grid grid-2 align-center">
             <div class="fade-in-scroll">
                 <h2 class="section-title">Speed That Scales</h2>
-                <p class="mb-2">Benchmarked on the <strong>Linux kernel</strong> (92K files, 1.5M chunks). `grep` and `rg` scan every file on each query. ivygrep queries a pre-built index natively optimized for hybrid operations.</p>
+                <p class="mb-2">Benchmarked on the <strong>Linux kernel</strong> (92K files, 1.5M chunks). <a href="https://www.gnu.org/software/grep/" target="_blank" style="color: var(--accent-green); text-decoration: none;"><code>grep</code></a> and <a href="https://github.com/BurntSushi/ripgrep" target="_blank" style="color: var(--accent-green); text-decoration: none;"><code>rg</code></a> scan every file on each query. ivygrep queries a pre-built index natively optimized for hybrid operations.</p>
                 <div class="stats-grid">
                     <div class="stat-box">
                         <div class="stat-value">529&times;</div>
