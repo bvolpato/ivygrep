@@ -2,6 +2,10 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.1] — 2026-04-03
+
+- **ONNX Throughput Boost:** Increased the background neural enhancement batch size by 8× (from 8 to 64). To strictly prevent out-of-memory CoreML/ONNX Tensor attention matrix expansion bloat, chunk text is now deterministically bounded and truncated at ~1024 bytes directly before tokenization.
+
 ## [0.5.0] — 2026-04-03
 
 A massive storage efficiency and stability release. The index-to-source ratio has been reduced from **~6.5× to ~2.3×**.
