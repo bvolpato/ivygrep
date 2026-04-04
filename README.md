@@ -83,9 +83,9 @@ ig "error handling" src/api/         # scope to a directory
 ig --all "database migrations"      # search across all indexed projects
 ```
 
-That's it. No config files, no setup wizards, no prompts, no API keys. On first run, `ig` auto-indexes the workspace instantly and spawns a background daemon for incremental updates.
+That's it. No config files, no setup wizards, no prompts, no API keys. On first run, `ig` auto-indexes the workspace and spawns a background daemon for incremental updates.
 
-> **Tip**: Indexing is instant — `ig` uses hash embeddings for sub-second startup, then silently upgrades to neural embeddings in the background.
+> **Tip**: Indexing is fast — `ig` uses hash embeddings for sub-second indexing on most projects, then silently upgrades to neural embeddings in the background.
 
 <p>
   <img src="assets/ig-demo.gif" alt="ivygrep demo — searching the opencode repo" width="700" />
@@ -95,12 +95,12 @@ That's it. No config files, no setup wizards, no prompts, no API keys. On first 
 
 ## 🧠 How It Works
 
-ivygrep uses a **two-tier hybrid search architecture** — instant indexing with progressive quality upgrades:
+ivygrep uses a **two-tier hybrid search architecture** — fast indexing with progressive quality upgrades:
 
 ```mermaid
 flowchart TD
     Q["ig 'retry logic for payments'"]
-    Q --> I["①  Hash Index\n(instant, 0.0s)"]
+    Q --> I["①  Hash Index\n(sub-second)"]
     I --> L["Lexical BM25\n(Tantivy)"]
     I --> S["Semantic Search\n(Hash → Neural)"]
     L --> F["RRF Hybrid Fusion"]
@@ -111,7 +111,7 @@ flowchart TD
 ```
 
 **On first search:**
-1. **Index instantly** with structural hashes (~0.0s for typical repos, via 128-bit SIMD `xxh3`)
+1. **Index fast** with structural hashes (sub-second for most projects via 128-bit SIMD `xxh3`)
 2. **Stream into DB** through an asynchronous MPSC chunking pipeline, maintaining absolute minimal memory footprints (handling even the 85,000+ files of the Linux kernel smoothly).
 3. **Return results** immediately via lexical + hash-semantic fusion.
 4. **Enhance silently** — a background daemon independently processes neural (ONNX) embeddings utilizing throttled CPUs to maintain responsiveness.
@@ -132,7 +132,7 @@ Use `ig --status` to transparently examine how each workspace is dynamically tra
 > If you wish to forcibly blockade `ig` queries from evaluating strictly UNTIL neural indexing hits 100% (to prevent partial BM25 hybridization), pass the `--wait-for-enhancement` flag.
 
 - **Lexical path** — BM25 scoring via [Tantivy](https://github.com/quickwit-oss/tantivy) catches exact keyword matches
-- **Semantic path** — starts with hash embeddings (instant), upgrades to quantized ONNX neural embeddings in background
+- **Semantic path** — starts with hash embeddings (computed in-memory, near-zero cost), upgrades to quantized ONNX neural embeddings in background
 - **Intelligent pre-filtering** — File globs (`--include`, `--exclude`) and language filters natively push down into Tantivy `BooleanQuery` and SQLite `LIKE` queries to avoid full-corpus vector scaling on massive (2M+ chunks) monolithic repos.
 - **AST chunking** — [tree-sitter](https://tree-sitter.github.io) splits code into precise function/class boundaries (35+ languages)
 - **Incremental indexing** — Merkle-style fingerprints mean re-index only touches changed files
@@ -168,13 +168,15 @@ Benchmarked on the **Linux kernel** (92K files, 1.5M chunks) — query: `"kfree"
 
 ### Concurrent search (AI agent load, 8 threads)
 
-| Metric | Value |
-|--------|-------|
-| **Average latency** | ~26 ms |
-| **p95 latency** | ~62 ms |
-| **Max latency** | ~98 ms |
+| Metric | Mac M4 Max | Linux Ryzen 9 3950X |
+|--------|------------|---------------------|
+| **Average latency** | ~26 ms | ~11 ms |
+| **p95 latency** | ~62 ms | ~15 ms |
+| **Max latency** | ~98 ms | ~20 ms |
 
-> Indexing is instant. Search is instant. Neural quality upgrades happen silently.
+> Tested on: Apple M4 Max (16-core, 128 GB) and AMD Ryzen 9 3950X (16-core/32-thread, 64 GB DDR4).
+
+> Indexing is sub-second for most projects. Search is sub-100ms. Neural quality upgrades happen silently.
 
 ---
 
