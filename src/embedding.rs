@@ -201,73 +201,64 @@ fn ort_thread_budget() -> usize {
 }
 
 /// Adaptive check for CoreML in background daemon phase.
-#[cfg(feature = "neural")]
-#[allow(dead_code)]
+#[cfg(all(feature = "neural", target_os = "macos"))]
 fn device_context_allows_coreml(is_background: bool) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-        use std::process::Command;
+    use std::process::Command;
 
-        // In the background daemon phase, we adaptively disable CoreML (which uses ANE/GPU
-        // and can freeze the UI on heavy workloads) if the system is contextually constrained.
-        if is_background {
-            // 1. Check if we're on battery power
-            if let Ok(output) = Command::new("pmset").arg("-g").arg("batt").output() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if stdout.contains("Battery Power") {
-                    tracing::info!("Battery power detected, disabling CoreML in background");
-                    return false;
-                }
+    // In the background daemon phase, we adaptively disable CoreML (which uses ANE/GPU
+    // and can freeze the UI on heavy workloads) if the system is contextually constrained.
+    if is_background {
+        // 1. Check if we're on battery power
+        if let Ok(output) = Command::new("pmset").arg("-g").arg("batt").output() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.contains("Battery Power") {
+                tracing::info!("Battery power detected, disabling CoreML in background");
+                return false;
             }
+        }
 
-            // 2. Check if the system is already under heavy load
-            let mut loadavg = [0.0f64; 3];
-            let has_load = unsafe { libc::getloadavg(loadavg.as_mut_ptr(), 3) };
-            if has_load > 0 {
-                let load1 = loadavg[0];
-                let cpus = num_cpus::get() as f64;
-                // If 1-minute load average > 70% of logical cores, system is quite busy
-                if load1 > cpus * 0.7 {
-                    tracing::info!(
-                        "System load is high ({:.2}), disabling CoreML in background",
-                        load1
-                    );
-                    return false;
-                }
+        // 2. Check if the system is already under heavy load
+        let mut loadavg = [0.0f64; 3];
+        let has_load = unsafe { libc::getloadavg(loadavg.as_mut_ptr(), 3) };
+        if has_load > 0 {
+            let load1 = loadavg[0];
+            let cpus = num_cpus::get() as f64;
+            // If 1-minute load average > 70% of logical cores, system is quite busy
+            if load1 > cpus * 0.7 {
+                tracing::info!(
+                    "System load is high ({:.2}), disabling CoreML in background",
+                    load1
+                );
+                return false;
             }
         }
     }
 
-    // Keep variable used even on non-macOS platforms
-    let _ = is_background;
     true
 }
 
 /// Register CoreML execution provider (Apple Neural Engine / GPU).
 /// Automatically compiled in on macOS builds.
-#[cfg(feature = "neural")]
+#[cfg(all(feature = "neural", target_os = "macos"))]
 fn register_coreml(is_background: bool) {
-    #[cfg(target_os = "macos")]
-    {
-        if !device_context_allows_coreml(is_background) {
-            tracing::info!("CoreML skipped due to adaptive device context rules");
-            return;
-        }
-
-        // ort::init() is idempotent; first call wins.
-        // In ort rc.11, commit() returns bool (true if this call did the init).
-        let _ = ort::init()
-            .with_execution_providers([ort::execution_providers::CoreMLExecutionProvider::default(
-            )
-            .build()])
-            .commit();
-        tracing::info!("CoreML execution provider registered");
+    if !device_context_allows_coreml(is_background) {
+        tracing::info!("CoreML skipped due to adaptive device context rules");
+        return;
     }
-    
-    // Silence unused variable warning on non-macOS platforms
-    #[cfg(not(target_os = "macos"))]
-    let _ = is_background;
+
+    // ort::init() is idempotent; first call wins.
+    // In ort rc.11, commit() returns bool (true if this call did the init).
+    let _ = ort::init()
+        .with_execution_providers([
+            ort::execution_providers::CoreMLExecutionProvider::default().build()
+        ])
+        .commit();
+    tracing::info!("CoreML execution provider registered");
 }
+
+/// No-op on non-macOS platforms (CoreML is Apple-only).
+#[cfg(all(feature = "neural", not(target_os = "macos")))]
+fn register_coreml(_is_background: bool) {}
 
 pub fn hardware_acceleration_info() -> &'static str {
     #[cfg(feature = "neural")]
