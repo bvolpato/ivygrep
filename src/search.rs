@@ -745,6 +745,17 @@ fn fuse_rrf(
             .insert("semantic".to_string());
     }
 
+    // Chunk-density normalization (IDF-like):
+    // Count how many candidate chunks each file contributes. Files with many
+    // chunks (large data files, verbose test suites) get a 1/sqrt(n) penalty
+    // so they can't dominate the results just by having more "lottery tickets".
+    let mut file_chunk_counts: HashMap<PathBuf, usize> = HashMap::new();
+    for chunk in chunks.values() {
+        *file_chunk_counts
+            .entry(chunk.file_path.clone())
+            .or_insert(0) += 1;
+    }
+
     let mut ranked = scores
         .into_iter()
         .filter_map(|(id, base_score)| {
@@ -770,21 +781,32 @@ fn fuse_rrf(
             score *= chunk_kind_boost(&chunk);
             score *= file_authority_score(&chunk);
 
+            // Apply chunk-density normalization: 1/sqrt(n) where n is the number
+            // of chunks this file has in the candidate set. Single-chunk files
+            // (focused modules) are unaffected; a file with 25 chunks gets 0.2x.
+            let n_file_chunks = file_chunk_counts
+                .get(&chunk.file_path)
+                .copied()
+                .unwrap_or(1) as f32;
+            score /= n_file_chunks.sqrt();
+
             Some((chunk, score, source_list))
         })
         .collect::<Vec<_>>();
 
     ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
 
-    // Per-file hit diversity cap: prevent one noisy file from dominating.
+    // Per-file hit diversity cap: keep at most 2 hits per file at full score,
+    // then aggressively decay. This prevents any single file from hogging the
+    // top results even after density normalization.
     let mut file_hit_counts: HashMap<PathBuf, usize> = HashMap::new();
     for item in &mut ranked {
         let count = file_hit_counts.entry(item.0.file_path.clone()).or_insert(0);
         *count += 1;
         match *count {
-            1..=3 => {}
-            4..=6 => item.1 *= 0.5,
-            _ => item.1 *= 0.2,
+            1..=2 => {}
+            3..=4 => item.1 *= 0.4,
+            _ => item.1 *= 0.1,
         }
     }
     ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -920,25 +942,98 @@ fn compact_identifier(input: &str) -> String {
 
 fn chunk_kind_boost(chunk: &IndexedChunk) -> f32 {
     match chunk.kind.as_str() {
-        "function" | "class" | "struct" | "trait" | "impl" | "interface" => 1.2,
-        "comment" | "import" => 0.8,
+        // Definition sites are the most valuable — this is PageRank-like thinking:
+        // the place where something is *defined* is almost always what the user wants.
+        "Function" | "function" => 1.35,
+        "Class" | "class" | "Struct" | "struct" | "Trait" | "trait" | "Interface" | "interface" => {
+            1.4
+        }
+        "Impl" | "impl" | "Enum" | "enum" => 1.25,
+
+        // Imports and comments are rarely the target of a search
+        "Comment" | "comment" => 0.6,
+        "Import" | "import" | "Use" | "use" => 0.65,
+
+        // Generic blocks (if/for/match arms, raw lines) are low-signal:
+        // they match many terms but rarely contain the definition the user wants
+        "Block" | "block" => 0.75,
+
         _ => 1.0,
     }
 }
 
+/// File authority scoring inspired by PageRank: files that are "core" source code
+/// are more authoritative than tests, fixtures, generated code, data files, and
+/// vendored dependencies. The scoring range is deliberately wide (0.3–1.3) to
+/// create meaningful separation in the final ranking.
 fn file_authority_score(chunk: &IndexedChunk) -> f32 {
     let path = chunk.file_path.to_string_lossy().to_ascii_lowercase();
-    if path.contains("test") || path.contains("spec") || path.contains("mock") {
-        0.7
-    } else if path.ends_with(".json")
+
+    // Vendored / dependency code — almost never what the user wants
+    if path.contains("vendor/")
+        || path.contains("node_modules/")
+        || path.contains("__pycache__/")
+        || path.contains(".git/")
+        || path.contains("target/")
+        || path.contains("dist/")
+        || path.contains("build/")
+    {
+        return 0.2;
+    }
+
+    // Lock files, minified bundles, source maps — machine-generated noise
+    if path.ends_with(".lock")
+        || path.ends_with(".min.js")
+        || path.ends_with(".min.css")
+        || path.ends_with(".map")
+        || path.ends_with(".sum")
+    {
+        return 0.2;
+    }
+
+    // Generated / snapshot files
+    if path.contains("generated/")
+        || path.contains("__snapshots__/")
+        || path.contains("fixtures/")
+        || path.contains("testdata/")
+        || path.contains("test_data/")
+    {
+        return 0.35;
+    }
+
+    // Data / config files — they match many terms but are rarely the answer
+    if path.ends_with(".json")
         || path.ends_with(".csv")
         || path.ends_with(".yaml")
-        || path.ends_with(".md")
+        || path.ends_with(".yml")
+        || path.ends_with(".xml")
+        || path.ends_with(".toml")
+        || path.ends_with(".ini")
+        || path.ends_with(".env")
+        || path.ends_with(".sql")
     {
-        0.5
-    } else {
-        1.0
+        return 0.4;
     }
+
+    // Test / spec / mock files — useful but secondary to the implementation
+    if path.contains("test")
+        || path.contains("spec")
+        || path.contains("mock")
+        || path.contains("_test.")
+        || path.contains(".test.")
+        || path.contains("_spec.")
+        || path.contains(".spec.")
+    {
+        return 0.6;
+    }
+
+    // Documentation — helpful but not code
+    if path.ends_with(".md") || path.ends_with(".txt") || path.ends_with(".rst") {
+        return 0.5;
+    }
+
+    // Core source code gets a small boost to positively separate it
+    1.0
 }
 
 pub fn workspace_has_results(workspace: &Workspace) -> Result<bool> {
