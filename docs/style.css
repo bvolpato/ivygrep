@@ -64,6 +64,7 @@ body {
     filter: blur(150px);
     opacity: 0.15;
     z-index: 0;
+    pointer-events: none;
     border-radius: 50%;
 }
 
@@ -85,6 +86,7 @@ body {
     -webkit-backdrop-filter: blur(12px);
     position: sticky;
     top: 0;
+    z-index: 9999;
 }
 
 .nav-content {
