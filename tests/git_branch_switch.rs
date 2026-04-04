@@ -353,3 +353,172 @@ fn git_branch_with_modified_content_same_filename() {
         "indexed chunk should NOT contain 'staging_environment' on main, got: {text}"
     );
 }
+
+/// Helper: count total chunks in SQLite.
+fn chunk_count(workspace: &Workspace) -> usize {
+    let conn = open_sqlite(&workspace.sqlite_path()).unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
+        .unwrap();
+    count as usize
+}
+
+// ---------------------------------------------------------------------------
+// EDGE CASE: File rename (git mv) across branches
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn git_branch_renames_file_old_path_gone_new_path_indexed() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    git(root.path(), &["init", "-b", "main"]);
+
+    fs::write(
+        root.path().join("old_name.rs"),
+        "pub fn important_logic() -> i32 { 42 }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "original file"]);
+
+    // Index on main with the original filename
+    setup_and_index(root.path(), home.path());
+    let ws = workspace_for(root.path());
+    assert!(
+        indexed_files(&ws).contains("old_name.rs"),
+        "old_name.rs indexed before rename"
+    );
+
+    // Create a branch that renames the file
+    git(root.path(), &["checkout", "-b", "refactor"]);
+    git(root.path(), &["mv", "old_name.rs", "new_name.rs"]);
+    git(root.path(), &["commit", "-m", "rename file"]);
+
+    // Re-index after rename
+    let s = setup_and_index(root.path(), home.path());
+    assert!(s.indexed_files >= 1, "new_name.rs should be indexed");
+    assert!(s.deleted_files >= 1, "old_name.rs should be deleted");
+
+    let files = indexed_files(&ws);
+    assert!(
+        files.contains("new_name.rs"),
+        "new_name.rs is indexed after rename"
+    );
+    assert!(
+        !files.contains("old_name.rs"),
+        "old_name.rs is GONE after rename"
+    );
+
+    // Search should find content via new path
+    let results = search_file_paths(&ws, "important_logic");
+    assert!(
+        results.iter().any(|p| p.contains("new_name.rs")),
+        "important_logic findable under new_name.rs"
+    );
+    assert!(
+        !results.iter().any(|p| p.contains("old_name.rs")),
+        "important_logic NOT under old_name.rs"
+    );
+
+    // Switch back to main — original name should be restored
+    git(root.path(), &["checkout", "main"]);
+    setup_and_index(root.path(), home.path());
+
+    let files_main = indexed_files(&ws);
+    assert!(
+        files_main.contains("old_name.rs"),
+        "old_name.rs restored on main"
+    );
+    assert!(
+        !files_main.contains("new_name.rs"),
+        "new_name.rs gone on main"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// EDGE CASE: Entire subdirectory appears/disappears on branch switch
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn git_branch_adds_entire_subdirectory() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    git(root.path(), &["init", "-b", "main"]);
+
+    fs::write(
+        root.path().join("main.rs"),
+        "fn main() { println!(\"hello\"); }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "just main.rs"]);
+
+    // Index on main — only 1 file
+    setup_and_index(root.path(), home.path());
+    let ws = workspace_for(root.path());
+    let initial_chunks = chunk_count(&ws);
+    assert_eq!(indexed_files(&ws).len(), 1, "only main.rs on main");
+
+    // Create branch with an entire new subdirectory (5 files)
+    git(root.path(), &["checkout", "-b", "feature/api"]);
+    fs::create_dir_all(root.path().join("api/handlers")).unwrap();
+    for i in 0..5 {
+        let content = format!(
+            "pub fn handle_request_{}(req: &str) -> String {{ format!(\"response_{}: {{}}\", req) }}\n",
+            i, i
+        );
+        fs::write(
+            root.path().join(format!("api/handlers/handler_{i}.rs")),
+            content,
+        )
+        .unwrap();
+    }
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "add api handlers"]);
+
+    // Re-index — 5 new files should appear
+    let s = setup_and_index(root.path(), home.path());
+    assert_eq!(s.indexed_files, 5, "5 new handler files indexed");
+    assert_eq!(s.deleted_files, 0, "main.rs not deleted");
+
+    let files = indexed_files(&ws);
+    assert_eq!(files.len(), 6, "main.rs + 5 handlers");
+    assert!(files.contains("api/handlers/handler_0.rs"));
+    assert!(files.contains("api/handlers/handler_4.rs"));
+    assert!(chunk_count(&ws) > initial_chunks, "more chunks after adding files");
+
+    // Search for handler content
+    let results = search_file_paths(&ws, "handle_request_3");
+    assert!(
+        results.iter().any(|p| p.contains("handler_3.rs")),
+        "handler_3.rs searchable on feature branch"
+    );
+
+    // Switch back to main — entire api/ directory disappears
+    git(root.path(), &["checkout", "main"]);
+    let s_back = setup_and_index(root.path(), home.path());
+    assert_eq!(s_back.deleted_files, 5, "5 handler files removed");
+
+    let files_main = indexed_files(&ws);
+    assert_eq!(files_main.len(), 1, "back to just main.rs");
+    assert!(files_main.contains("main.rs"));
+    assert!(!files_main.contains("api/handlers/handler_0.rs"));
+
+    // Chunks should be back to initial count
+    assert_eq!(
+        chunk_count(&ws),
+        initial_chunks,
+        "chunk count restored after switching back"
+    );
+
+    // Handler search should return nothing
+    let results_back = search_file_paths(&ws, "handle_request_3");
+    assert!(
+        !results_back.iter().any(|p| p.contains("handler_3.rs")),
+        "handler_3.rs NOT searchable after switching back to main"
+    );
+}
