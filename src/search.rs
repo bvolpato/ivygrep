@@ -262,9 +262,10 @@ pub fn hybrid_search(
         .collect();
     for (chunk_id, vector_key) in need_text {
         if let Ok(Some(full)) = fetch_chunk_by_vector_key(&sqlite, vector_key)
-            && let Some((chunk, _)) = lexical_by_id.get_mut(&chunk_id) {
-                chunk.text = full.text;
-            }
+            && let Some((chunk, _)) = lexical_by_id.get_mut(&chunk_id)
+        {
+            chunk.text = full.text;
+        }
     }
 
     let mut lexical_chunks = lexical_by_id.into_values().collect::<Vec<_>>();
@@ -309,40 +310,41 @@ pub fn hybrid_search(
 
     let mut semantic_chunks = Vec::new();
     if let (Some(model), Some(vector_index)) = (embedding_model, vector_index_opt)
-        && vector_index.size() > 0 {
-            // Only now do we pay the cost of embedding the query
-            let query_vector = model.embed(query_text);
+        && vector_index.size() > 0
+    {
+        // Only now do we pay the cost of embedding the query
+        let query_vector = model.embed(query_text);
 
-            if has_filters {
-                // Pre-filtered path: query SQLite for matching chunks first,
-                // then only look up their embeddings. This turns a 2.3M scan
-                // into a few thousand lookups for targeted queries like --include '*.yaml'.
-                let filtered_chunks = collect_filtered_chunks(
-                    &sqlite,
-                    &path_matcher,
-                    options.scope_filter.as_ref(),
-                    options.type_filter.as_deref(),
-                    &options.include_globs,
-                );
-                // Score each filtered chunk against the query vector
-                for chunk in filtered_chunks {
-                    if let Some(score) = vector_index.score(chunk.vector_key, &query_vector) {
-                        semantic_chunks.push((chunk, score));
-                    }
+        if has_filters {
+            // Pre-filtered path: query SQLite for matching chunks first,
+            // then only look up their embeddings. This turns a 2.3M scan
+            // into a few thousand lookups for targeted queries like --include '*.yaml'.
+            let filtered_chunks = collect_filtered_chunks(
+                &sqlite,
+                &path_matcher,
+                options.scope_filter.as_ref(),
+                options.type_filter.as_deref(),
+                &options.include_globs,
+            );
+            // Score each filtered chunk against the query vector
+            for chunk in filtered_chunks {
+                if let Some(score) = vector_index.score(chunk.vector_key, &query_vector) {
+                    semantic_chunks.push((chunk, score));
                 }
-                // Sort by score descending, keep top candidates
-                semantic_chunks.sort_by(|a, b| b.1.total_cmp(&a.1));
-                semantic_chunks.truncate(candidate_limit);
-            } else {
-                // Unfiltered path: standard ANN search over entire corpus
-                let matches = vector_index.search(&query_vector, candidate_limit);
-                for vector_match in matches {
-                    if let Some(chunk) = fetch_chunk_by_vector_key(&sqlite, vector_match.key)? {
-                        semantic_chunks.push((chunk, vector_match.score));
-                    }
+            }
+            // Sort by score descending, keep top candidates
+            semantic_chunks.sort_by(|a, b| b.1.total_cmp(&a.1));
+            semantic_chunks.truncate(candidate_limit);
+        } else {
+            // Unfiltered path: standard ANN search over entire corpus
+            let matches = vector_index.search(&query_vector, candidate_limit);
+            for vector_match in matches {
+                if let Some(chunk) = fetch_chunk_by_vector_key(&sqlite, vector_match.key)? {
+                    semantic_chunks.push((chunk, vector_match.score));
                 }
             }
         }
+    }
     tracing::trace!(
         "semantic={:?} found={}",
         t0.elapsed(),

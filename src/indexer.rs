@@ -409,21 +409,24 @@ pub fn enhance_workspace_neural(
             if batch.is_empty() {
                 return;
             }
-            
+
             // Strictly cap each string to ~1024 bytes (slightly more than the 256 token limit of the model)
             // to definitively bound ONNX memory allocation prior to tokenization.
-            let texts: Vec<&str> = batch.iter().map(|(_, t)| {
-                if t.len() > 1024 {
-                    let mut end = 1024;
-                    while !t.is_char_boundary(end) {
-                        end -= 1;
+            let texts: Vec<&str> = batch
+                .iter()
+                .map(|(_, t)| {
+                    if t.len() > 1024 {
+                        let mut end = 1024;
+                        while !t.is_char_boundary(end) {
+                            end -= 1;
+                        }
+                        &t[..end]
+                    } else {
+                        t.as_str()
                     }
-                    &t[..end]
-                } else {
-                    t.as_str()
-                }
-            }).collect();
-            
+                })
+                .collect();
+
             let embeddings = neural_model.embed_batch(&texts);
 
             for ((key, _), embedding) in batch.iter().zip(embeddings) {
