@@ -208,20 +208,6 @@ Or add to `~/.claude.json`:
 </details>
 
 <details>
-<summary><b>Cursor</b></summary>
-
-Add to `.cursor/mcp.json` or `~/.cursor/mcp.json`:
-```json
-{
-  "mcpServers": {
-    "ig": { "command": "ig", "args": ["--mcp"] }
-  }
-}
-```
-Then refresh MCP servers in Cursor settings.
-</details>
-
-<details>
 <summary><b>Codex</b></summary>
 
 ```bash
@@ -254,6 +240,40 @@ Or add to `opencode.json`:
   }
 }
 ```
+</details>
+
+<details>
+<summary><b>Gemini</b></summary>
+
+```bash
+gemini mcp add --transport stdio ig ig --mcp
+```
+
+Or add to `~/.gemini/settings.json`:
+```json
+{
+  "mcpServers": {
+    "ig": {
+      "command": "ig",
+      "args": ["--mcp"]
+    }
+  }
+}
+```
+</details>
+
+<details>
+<summary><b>Cursor</b></summary>
+
+Add to `.cursor/mcp.json` or `~/.cursor/mcp.json`:
+```json
+{
+  "mcpServers": {
+    "ig": { "command": "ig", "args": ["--mcp"] }
+  }
+}
+```
+Then refresh MCP servers in Cursor settings.
 </details>
 
 ### Example agent prompt
