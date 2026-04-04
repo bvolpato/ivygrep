@@ -2,6 +2,10 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.2] — 2026-04-03
+
+- **CoreML Thermal/Cache Tuning:** Reduced the ONNX background execution batch size from 64 down to 16. While 64 scaled optimally on pure high-VRAM GPU setups, it caused severe thermal throttling and L2 cache thrashing on Apple Silicon / CoreML execution providers, slowing down the background indexer. The new limit still benefits from 2× batch throughput over v0.5.0 but maintains crisp desktop responsiveness.
+
 ## [0.5.1] — 2026-04-03
 
 - **ONNX Throughput Boost:** Increased the background neural enhancement batch size by 8× (from 8 to 64). To strictly prevent out-of-memory CoreML/ONNX Tensor attention matrix expansion bloat, chunk text is now deterministically bounded and truncated at ~1024 bytes directly before tokenization.
