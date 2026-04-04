@@ -187,13 +187,14 @@ fn update_file_only_reindexes_changed() {
     // The chunk content should reflect the update
     let ws = workspace_for(root.path());
     let conn = open_sqlite(&ws.sqlite_path()).unwrap();
-    let text: String = conn
+    let raw: Vec<u8> = conn
         .query_row(
             "SELECT text FROM chunks WHERE file_path = 'mutable.rs' LIMIT 1",
             [],
             |row| row.get(0),
         )
         .unwrap();
+    let text = ivygrep::indexer::decompress_text(raw);
     assert!(
         text.contains("v2"),
         "chunk should contain updated content, got: {text}"

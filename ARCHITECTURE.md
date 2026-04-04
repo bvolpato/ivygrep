@@ -231,6 +231,98 @@ family of hash functions, specifically the 128-bit variant.
 runs at memory bandwidth on modern CPUs (~30 GB/s with SIMD). SHA-256 would be
 10-50× slower for the same job.
 
+### Merkle Tree — Incremental Change Detection
+
+The Merkle tree is how ivygrep avoids re-indexing unchanged files. Without it,
+every search on a cold daemon would require re-reading, re-chunking, and
+re-embedding every file in the workspace — minutes of work on a large repo. With
+it, re-indexing an unchanged 92K-file workspace takes ~10ms.
+
+**The data structure:**
+
+A `MerkleSnapshot` is a flat map of relative file paths to per-file fingerprints,
+plus a single root hash derived from all of them:
+
+```
+MerkleSnapshot {
+    root_hash: "a8b3...",         // xxh3_128 over all (path, hash) pairs
+    files: {
+        "src/main.rs":   "f1c2...",   // xxh3_128(path + file_size + mtime)
+        "src/lib.rs":    "d4e5...",
+        "Cargo.toml":    "7a8b...",
+        ...
+    }
+}
+```
+
+Each file fingerprint is computed from metadata only — **no file contents are
+read**. The inputs are:
+
+1. **Relative path** (byte representation)
+2. **File size** (8 bytes, little-endian)
+3. **Modification time** (16 bytes, nanoseconds since epoch)
+
+These three values are concatenated and hashed with `xxh3_128`. This means
+detecting whether 92K files have changed requires only 92K `stat()` calls and
+92K hashes — no disk reads. On a modern SSD, this completes in ~2 seconds
+(parallelized via rayon).
+
+The **root hash** is computed by concatenating all `(path, file_hash)` pairs in
+sorted order (BTreeMap ensures deterministic ordering) and hashing the result
+with `xxh3_128`. This single 128-bit value represents the entire workspace state.
+
+**How the diff works:**
+
+When the indexer runs, it builds a fresh snapshot and compares it against the
+previously saved one:
+
+```
+1. Compare root hashes
+   ├── Equal?     → Nothing changed, skip everything (O(1))
+   └── Different? → Walk both file maps:
+       ├── In new but not old         → added
+       ├── In both, hash differs      → modified
+       └── In old but not new         → deleted
+```
+
+The diff produces a `MerkleDiff { added_or_modified, deleted }`. Only the files
+in `added_or_modified` are re-read, re-chunked, and re-embedded. Chunks for
+`deleted` files are removed from all three stores (SQLite, Tantivy, USearch).
+
+**Three-tier skip hierarchy:**
+
+The indexer has three levels of shortcuts, each faster than the next:
+
+| Check | Cost | When it triggers |
+|-------|------|-----------------|
+| **Watcher alive** | O(1) — read PID file | Daemon is watching this workspace; filesystem events handle updates. Skip the entire Merkle scan. |
+| **Root hash match** | O(n) stat + hash | Merkle scan ran, but root hashes are identical. No files changed. |
+| **Per-file hash diff** | O(changed) | Root hashes differ, but only 3 of 92K files changed. Re-index just those 3. |
+
+The daemon's `notify` watcher makes the first tier the common case. When the
+daemon is alive, the Merkle scan is skipped entirely — `is_watcher_alive()`
+checks for a PID file and verifies the process exists. The watcher handles
+incremental re-indexing via filesystem events. The Merkle scan only runs on cold
+starts (first search after a reboot, or when the daemon was killed).
+
+**Why "Merkle" and not just timestamps:**
+
+Comparing file paths + sizes + mtimes via hash rather than storing raw triples
+has two advantages:
+
+1. **O(1) workspace-level check** — a single root hash comparison short-circuits
+   the entire diff when nothing changed, without walking the file list.
+2. **Deterministic serialization** — the snapshot is a JSON file
+   (`merkle_snapshot.json`) with sorted keys. It can be compared, diffed, and
+   debugged with standard tools.
+
+The tradeoff is that mtime-based fingerprinting can produce false positives
+(e.g., `touch` changes mtime without changing content). A false positive triggers
+an unnecessary re-chunk and re-embed for that file, but the chunk's
+`content_hash` is based on actual content, so the storage layer handles
+deduplication correctly — the old chunk is removed and an identical one is
+re-inserted at the same vector key.
+
 ---
 
 ## Core Data Flow

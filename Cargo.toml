@@ -49,6 +49,7 @@ tree-sitter-typescript = "0.23.2"
 tree-sitter-go = "0.25.0"
 streaming-iterator = "0.1.9"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
+zstd = "0.13"
 
 [dev-dependencies]
 assert_cmd = "2.2"

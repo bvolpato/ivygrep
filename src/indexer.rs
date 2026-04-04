@@ -18,6 +18,23 @@ use crate::merkle::{MerkleDiff, MerkleSnapshot};
 use crate::vector_store::{ScalarKind, VectorStore};
 use crate::workspace::{Workspace, WorkspaceMetadata};
 
+const ZSTD_MAGIC: &[u8] = &[0x28, 0xB5, 0x2F, 0xFD];
+
+fn compress_text(text: &str) -> Vec<u8> {
+    zstd::encode_all(text.as_bytes(), 3).unwrap_or_else(|_| text.as_bytes().to_vec())
+}
+
+pub fn decompress_text(raw: Vec<u8>) -> String {
+    if raw.starts_with(ZSTD_MAGIC) {
+        zstd::decode_all(&raw[..])
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+            .unwrap_or_else(|| String::from_utf8_lossy(&raw).into_owned())
+    } else {
+        String::from_utf8(raw).unwrap_or_else(|e| String::from_utf8_lossy(&e.into_bytes()).into_owned())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexingSummary {
     pub workspace_id: String,
@@ -334,7 +351,9 @@ pub fn enhance_workspace_neural(
 
     let mut stmt = sqlite.prepare("SELECT vector_key, text FROM chunks ORDER BY vector_key")?;
     let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, i64>(0)? as u64, row.get::<_, String>(1)?))
+        let key = row.get::<_, i64>(0)? as u64;
+        let raw: Vec<u8> = row.get(1)?;
+        Ok((key, decompress_text(raw)))
     })?;
 
     let mut vector_index =
@@ -500,7 +519,7 @@ fn insert_chunk(conn: &Connection, chunk: &IndexedChunk) -> Result<()> {
         chunk.end_line as i64,
         chunk.language,
         chunk.kind,
-        chunk.text,
+        compress_text(&chunk.text),
         chunk.content_hash,
         chunk.vector_key as i64,
         SystemTime::now()
@@ -629,6 +648,7 @@ pub fn fetch_chunk_by_vector_key(
 
     let mut rows = stmt.query(params![vector_key as i64])?;
     if let Some(row) = rows.next()? {
+        let raw_text: Vec<u8> = row.get(6)?;
         let chunk = IndexedChunk {
             chunk_id: row.get::<_, String>(0)?,
             file_path: PathBuf::from(row.get::<_, String>(1)?),
@@ -636,7 +656,7 @@ pub fn fetch_chunk_by_vector_key(
             end_line: row.get::<_, i64>(3)? as usize,
             language: row.get(4)?,
             kind: row.get(5)?,
-            text: row.get(6)?,
+            text: decompress_text(raw_text),
             content_hash: row.get(7)?,
             vector_key: row.get::<_, i64>(8)? as u64,
         };

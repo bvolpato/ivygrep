@@ -667,6 +667,7 @@ fn collect_filtered_chunks(
     let params_refs: Vec<&dyn rusqlite::types::ToSql> =
         params_vec.iter().map(|p| p.as_ref()).collect();
     let Ok(rows) = stmt.query_map(params_refs.as_slice(), |row| {
+        let raw_text: Vec<u8> = row.get(6)?;
         Ok(IndexedChunk {
             chunk_id: row.get(0)?,
             file_path: PathBuf::from(row.get::<_, String>(1)?),
@@ -674,7 +675,7 @@ fn collect_filtered_chunks(
             end_line: row.get::<_, i64>(3)? as usize,
             language: row.get(4)?,
             kind: row.get(5)?,
-            text: row.get(6)?,
+            text: crate::indexer::decompress_text(raw_text),
             content_hash: row.get(7)?,
             vector_key: row.get::<_, i64>(8)? as u64,
         })

@@ -19,19 +19,27 @@ pub struct VectorStore {
 
 impl VectorStore {
     pub fn open(path: &Path, dimensions: usize, quantization: ScalarKind) -> Result<Self> {
-        let options = IndexOptions {
-            dimensions,
-            metric: MetricKind::Cos,
-            quantization,
-            ..IndexOptions::default()
+        let make_index = |q: ScalarKind| -> Result<Index> {
+            let options = IndexOptions {
+                dimensions,
+                metric: MetricKind::Cos,
+                quantization: q,
+                ..IndexOptions::default()
+            };
+            Ok(Index::new(&options)?)
         };
 
-        let index = Index::new(&options)?;
+        let index = make_index(quantization)?;
         if path.exists() {
             let path_str = path
                 .to_str()
                 .context("vector path contains invalid UTF-8")?;
-            index.load(path_str)?;
+            if index.load(path_str).is_err() && !matches!(quantization, ScalarKind::F32) {
+                // Old index may use different quantization; retry with F32
+                let fallback = make_index(ScalarKind::F32)?;
+                fallback.load(path_str)?;
+                return Ok(Self { path: path.to_path_buf(), index: fallback });
+            }
         }
 
         Ok(Self {
@@ -47,19 +55,27 @@ impl VectorStore {
     ///
     /// The returned store must NOT be used for writes (upsert/remove/save).
     pub fn open_readonly(path: &Path, dimensions: usize, quantization: ScalarKind) -> Result<Self> {
-        let options = IndexOptions {
-            dimensions,
-            metric: MetricKind::Cos,
-            quantization,
-            ..IndexOptions::default()
+        let make_index = |q: ScalarKind| -> Result<Index> {
+            let options = IndexOptions {
+                dimensions,
+                metric: MetricKind::Cos,
+                quantization: q,
+                ..IndexOptions::default()
+            };
+            Ok(Index::new(&options)?)
         };
 
-        let index = Index::new(&options)?;
+        let index = make_index(quantization)?;
         if path.exists() {
             let path_str = path
                 .to_str()
                 .context("vector path contains invalid UTF-8")?;
-            index.view(path_str)?;
+            if index.view(path_str).is_err() && !matches!(quantization, ScalarKind::F32) {
+                // Old index may use different quantization; retry with F32
+                let fallback = make_index(ScalarKind::F32)?;
+                fallback.view(path_str)?;
+                return Ok(Self { path: path.to_path_buf(), index: fallback });
+            }
         }
 
         Ok(Self {
