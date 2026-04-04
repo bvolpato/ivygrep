@@ -76,7 +76,8 @@
         font-size="46" 
         font-weight="800" 
         text-anchor="middle" 
-        letter-spacing="-1.5">
-    <tspan fill="#059669">ivy</tspan><tspan fill="#1e293b">grep</tspan>
+        letter-spacing="-1.5"
+        filter="url(#shadow)">
+    <tspan fill="#10b981">ivy</tspan><tspan fill="#38bdf8">grep</tspan>
   </text>
 </svg>
