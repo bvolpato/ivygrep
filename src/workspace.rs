@@ -155,7 +155,7 @@ impl Workspace {
         if let Ok(store) = crate::vector_store::VectorStore::open_readonly(
             &neural_path,
             384,
-            crate::vector_store::ScalarKind::I8,
+            crate::vector_store::ScalarKind::F32,
         ) {
             let enhanced = store.size();
             return (enhanced as u64) < chunk_count;
@@ -566,5 +566,51 @@ mod tests {
                 is_file: true,
             })
         );
+    }
+
+    #[test]
+    fn test_needs_neural_enhancement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index_dir = tmp.path().join("index");
+        std::fs::create_dir_all(&index_dir).unwrap();
+        
+        let ws = Workspace {
+            id: "test".to_string(),
+            root: tmp.path().to_path_buf(),
+            index_dir: index_dir.clone(),
+        };
+
+        // If no chunks exist, we don't need enhancement.
+        assert!(!ws.needs_neural_enhancement());
+
+        // Create a fake chunk database
+        let conn = crate::indexer::open_sqlite(&index_dir.join("metadata.sqlite3")).unwrap();
+        conn.execute("INSERT INTO chunks (chunk_id, file_path, start_line, end_line, language, kind, text, content_hash, vector_key, modified_unix) VALUES ('1', '', 0, 0, '', '', x'', '0', 1, 0)", []).unwrap();
+        conn.execute("INSERT INTO chunks (chunk_id, file_path, start_line, end_line, language, kind, text, content_hash, vector_key, modified_unix) VALUES ('2', '', 0, 0, '', '', x'', '0', 2, 0)", []).unwrap();
+
+        // No neural vectors but we have chunks -> true
+        assert!(ws.needs_neural_enhancement());
+
+        // Create a fake neural store with 1 item
+        let _ = crate::vector_store::VectorStore::open(&ws.vector_neural_path(), 384, crate::vector_store::ScalarKind::F32).unwrap();
+        
+        {
+            let mut store = crate::vector_store::VectorStore::open(&ws.vector_neural_path(), 384, crate::vector_store::ScalarKind::F32).unwrap();
+            store.upsert(1, vec![0.0; 384]);
+            store.save().unwrap();
+        }
+        
+        // Has 1 item, chunks is 2 -> true
+        assert!(ws.needs_neural_enhancement());
+
+        // Fill up to 2 items
+        {
+            let mut store = crate::vector_store::VectorStore::open(&ws.vector_neural_path(), 384, crate::vector_store::ScalarKind::F32).unwrap();
+            store.upsert(2, vec![0.0; 384]);
+            store.save().unwrap();
+        }
+
+        // Exact match chunks = vectors -> false
+        assert!(!ws.needs_neural_enhancement());
     }
 }

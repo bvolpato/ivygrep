@@ -116,10 +116,17 @@ jobs:
           find artifacts -name '*.sha256' -exec cp {} release-assets/ \;
           ls -la release-assets/
 
+      - name: Extract Release Notes
+        id: extract_notes
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          awk -v ver="\\[${VERSION}\\]" '/^## / { if (p) { exit }; if (index($2, ver)) { p=1; next } } p' CHANGELOG.md > release_notes.md
+          echo "notes_file=release_notes.md" >> $GITHUB_OUTPUT
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          body_path: ${{ steps.extract_notes.outputs.notes_file }}
           files: release-assets/*
           fail_on_unmatched_files: true
 

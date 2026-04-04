@@ -831,6 +831,47 @@ mod tests {
 
     #[test]
     #[serial]
+    fn workspace_is_indexed_handles_interruption() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+
+        // Initially false
+        assert!(!workspace_is_indexed(&workspace));
+
+        // Create the indexer metadata file but simulate an interruption (no last_indexed_at_unix)
+        let md = crate::workspace::WorkspaceMetadata {
+            id: workspace.id.clone(),
+            root: workspace.root.clone(),
+            created_at_unix: 0,
+            last_indexed_at_unix: None, // Interrupted!
+            watch_enabled: false,
+        };
+        std::fs::create_dir_all(&workspace.index_dir).unwrap();
+        std::fs::write(workspace.sqlite_path(), "").unwrap();
+        std::fs::create_dir_all(workspace.tantivy_dir()).unwrap();
+        std::fs::write(workspace.vector_path(), "").unwrap();
+
+        std::fs::write(workspace.index_dir.join("workspace.json"), serde_json::to_string(&md).unwrap()).unwrap();
+
+        // Even though the metadata file exists, it should recognize it's interrupted and return false
+        assert!(!workspace_is_indexed(&workspace));
+
+        // Fix it
+        let md_fixed = crate::workspace::WorkspaceMetadata {
+            id: workspace.id.clone(),
+            root: workspace.root.clone(),
+            created_at_unix: 0,
+            last_indexed_at_unix: Some(123), // Success
+            watch_enabled: false,
+        };
+        std::fs::write(workspace.index_dir.join("workspace.json"), serde_json::to_string(&md_fixed).unwrap()).unwrap();
+        assert!(workspace_is_indexed(&workspace));
+    }
+
+    #[test]
+    #[serial]
     fn respects_gitignore_by_default() {
         let root = tempdir().unwrap();
         let home = tempdir().unwrap();
