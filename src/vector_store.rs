@@ -212,4 +212,91 @@ mod tests {
         assert!(!hits.is_empty());
         assert_eq!(hits[0].key, 1);
     }
+
+    #[test]
+    fn contains_and_remove() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        store.upsert(42, vec![1.0, 0.0, 0.0, 0.0]);
+        assert!(store.contains(42));
+        assert!(!store.contains(99));
+
+        store.remove(42);
+        assert!(!store.contains(42));
+    }
+
+    #[test]
+    fn size_tracks_insertions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        assert_eq!(store.size(), 0);
+        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(store.size(), 1);
+        store.upsert(2, vec![0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(store.size(), 2);
+    }
+
+    #[test]
+    fn upsert_replaces_existing_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]);
+        store.upsert(1, vec![0.0, 1.0, 0.0, 0.0]); // overwrite
+
+        assert_eq!(store.size(), 1); // still 1 entry
+        let hits = store.search(&[0.0, 1.0, 0.0, 0.0], 1);
+        assert_eq!(hits[0].key, 1); // matches the new vector
+    }
+
+    #[test]
+    fn score_returns_similarity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]);
+
+        // Identical vector → high positive score (cosine = 1.0)
+        let score = store.score(1, &[1.0, 0.0, 0.0, 0.0]);
+        assert!(score.is_some());
+        assert!(score.unwrap() > 0.9);
+
+        // Non-existent key → None
+        assert!(store.score(999, &[1.0, 0.0, 0.0, 0.0]).is_none());
+    }
+
+    #[test]
+    fn open_readonly_sees_saved_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]);
+        store.upsert(2, vec![0.0, 1.0, 0.0, 0.0]);
+        store.save().unwrap();
+
+        let ro = VectorStore::open_readonly(&path, 4, ScalarKind::F32).unwrap();
+        assert_eq!(ro.size(), 2);
+        assert!(ro.contains(1));
+        assert!(ro.contains(2));
+    }
+
+    #[test]
+    fn capacity_grows_beyond_initial() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        // Insert more than initial capacity (1024) to trigger growth
+        for i in 0..1100 {
+            store.upsert(i, vec![1.0, 0.0, 0.0, 0.0]);
+        }
+        assert_eq!(store.size(), 1100);
+    }
 }

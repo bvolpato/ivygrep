@@ -853,7 +853,11 @@ mod tests {
         std::fs::create_dir_all(workspace.tantivy_dir()).unwrap();
         std::fs::write(workspace.vector_path(), "").unwrap();
 
-        std::fs::write(workspace.index_dir.join("workspace.json"), serde_json::to_string(&md).unwrap()).unwrap();
+        std::fs::write(
+            workspace.index_dir.join("workspace.json"),
+            serde_json::to_string(&md).unwrap(),
+        )
+        .unwrap();
 
         // Even though the metadata file exists, it should recognize it's interrupted and return false
         assert!(!workspace_is_indexed(&workspace));
@@ -866,7 +870,11 @@ mod tests {
             last_indexed_at_unix: Some(123), // Success
             watch_enabled: false,
         };
-        std::fs::write(workspace.index_dir.join("workspace.json"), serde_json::to_string(&md_fixed).unwrap()).unwrap();
+        std::fs::write(
+            workspace.index_dir.join("workspace.json"),
+            serde_json::to_string(&md_fixed).unwrap(),
+        )
+        .unwrap();
         assert!(workspace_is_indexed(&workspace));
     }
 
@@ -1026,5 +1034,73 @@ mod tests {
         let neural_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         let n = enhance_workspace_neural(&workspace, &neural_model).unwrap();
         assert_eq!(n, 0, "empty index should produce zero enhanced chunks");
+    }
+
+    #[test]
+    fn decompress_text_roundtrips_zstd() {
+        let original = "pub fn hello() -> &str { \"world\" }\n";
+        let compressed = super::compress_text(original);
+        let decompressed = super::decompress_text(compressed);
+        assert_eq!(decompressed, original);
+    }
+
+    #[test]
+    fn decompress_text_handles_plain_utf8() {
+        let plain = b"plain text, not zstd";
+        let decompressed = super::decompress_text(plain.to_vec());
+        assert_eq!(decompressed, "plain text, not zstd");
+    }
+
+    #[test]
+    fn read_preview_line_skips_blanks_and_comments() {
+        let content = "\n\n  // This is a comment\n  pub fn main() {}\n";
+        assert_eq!(super::read_preview_line(content), "pub fn main() {}");
+    }
+
+    #[test]
+    fn read_preview_line_returns_empty_for_all_comments() {
+        let content = "// only comment\n// another\n";
+        assert_eq!(super::read_preview_line(content), "");
+    }
+
+    #[test]
+    fn read_preview_line_handles_empty_input() {
+        assert_eq!(super::read_preview_line(""), "");
+    }
+
+    #[test]
+    #[serial]
+    fn remove_workspace_index_cleans_up() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        fs::write(root.path().join("lib.rs"), "pub fn to_remove() {}\n").unwrap();
+
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        // Index dir should exist after indexing
+        assert!(workspace.index_dir.exists());
+
+        remove_workspace_index(&workspace).unwrap();
+
+        // Index dir should be completely removed
+        assert!(!workspace.index_dir.exists());
+    }
+
+    #[test]
+    fn workspace_id_is_deterministic() {
+        use crate::workspace::workspace_id;
+        use std::path::Path;
+
+        let id1 = workspace_id(Path::new("/some/project"));
+        let id2 = workspace_id(Path::new("/some/project"));
+        let id3 = workspace_id(Path::new("/different/project"));
+
+        assert_eq!(id1, id2, "same path should produce same id");
+        assert_ne!(id1, id3, "different paths should produce different ids");
+        assert!(!id1.is_empty());
     }
 }

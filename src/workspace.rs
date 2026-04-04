@@ -573,7 +573,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let index_dir = tmp.path().join("index");
         std::fs::create_dir_all(&index_dir).unwrap();
-        
+
         let ws = Workspace {
             id: "test".to_string(),
             root: tmp.path().to_path_buf(),
@@ -592,20 +592,35 @@ mod tests {
         assert!(ws.needs_neural_enhancement());
 
         // Create a fake neural store with 1 item
-        let _ = crate::vector_store::VectorStore::open(&ws.vector_neural_path(), 384, crate::vector_store::ScalarKind::F32).unwrap();
-        
+        let _ = crate::vector_store::VectorStore::open(
+            &ws.vector_neural_path(),
+            384,
+            crate::vector_store::ScalarKind::F32,
+        )
+        .unwrap();
+
         {
-            let mut store = crate::vector_store::VectorStore::open(&ws.vector_neural_path(), 384, crate::vector_store::ScalarKind::F32).unwrap();
+            let mut store = crate::vector_store::VectorStore::open(
+                &ws.vector_neural_path(),
+                384,
+                crate::vector_store::ScalarKind::F32,
+            )
+            .unwrap();
             store.upsert(1, vec![0.0; 384]);
             store.save().unwrap();
         }
-        
+
         // Has 1 item, chunks is 2 -> true
         assert!(ws.needs_neural_enhancement());
 
         // Fill up to 2 items
         {
-            let mut store = crate::vector_store::VectorStore::open(&ws.vector_neural_path(), 384, crate::vector_store::ScalarKind::F32).unwrap();
+            let mut store = crate::vector_store::VectorStore::open(
+                &ws.vector_neural_path(),
+                384,
+                crate::vector_store::ScalarKind::F32,
+            )
+            .unwrap();
             store.upsert(2, vec![0.0; 384]);
             store.save().unwrap();
         }

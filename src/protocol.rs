@@ -139,3 +139,71 @@ pub fn group_hits_by_file(hits: &[SearchHit], limit: Option<usize>) -> Vec<FileS
 
     files
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hit(file: &str, score: f32, line: usize) -> SearchHit {
+        SearchHit {
+            file_path: PathBuf::from(file),
+            start_line: line,
+            end_line: line + 5,
+            preview: format!("line {line}"),
+            reason: String::new(),
+            score,
+            sources: vec!["test".to_string()],
+        }
+    }
+
+    #[test]
+    fn groups_hits_by_file() {
+        let hits = vec![
+            hit("a.rs", 1.0, 10),
+            hit("b.rs", 2.0, 20),
+            hit("a.rs", 0.5, 30),
+        ];
+        let groups = group_hits_by_file(&hits, None);
+        assert_eq!(groups.len(), 2);
+        // b.rs has higher total score (2.0) than a.rs (1.5)
+        assert_eq!(groups[0].file_path, PathBuf::from("b.rs"));
+        assert_eq!(groups[0].hit_count, 1);
+        assert_eq!(groups[1].file_path, PathBuf::from("a.rs"));
+        assert_eq!(groups[1].hit_count, 2);
+    }
+
+    #[test]
+    fn sorts_hits_within_file_by_score_descending() {
+        let hits = vec![hit("a.rs", 0.5, 30), hit("a.rs", 1.0, 10)];
+        let groups = group_hits_by_file(&hits, None);
+        assert_eq!(groups[0].hits[0].start_line, 10); // score 1.0 first
+        assert_eq!(groups[0].hits[1].start_line, 30); // score 0.5 second
+    }
+
+    #[test]
+    fn truncates_to_limit() {
+        let hits = vec![
+            hit("a.rs", 1.0, 10),
+            hit("b.rs", 2.0, 20),
+            hit("c.rs", 3.0, 30),
+        ];
+        let groups = group_hits_by_file(&hits, Some(2));
+        assert_eq!(groups.len(), 2);
+        // c.rs (3.0) and b.rs (2.0) survive, a.rs (1.0) truncated
+        assert_eq!(groups[0].file_path, PathBuf::from("c.rs"));
+        assert_eq!(groups[1].file_path, PathBuf::from("b.rs"));
+    }
+
+    #[test]
+    fn empty_hits_returns_empty() {
+        let groups = group_hits_by_file(&[], None);
+        assert!(groups.is_empty());
+    }
+
+    #[test]
+    fn total_score_is_sum_of_hit_scores() {
+        let hits = vec![hit("a.rs", 1.5, 10), hit("a.rs", 2.5, 20)];
+        let groups = group_hits_by_file(&hits, None);
+        assert!((groups[0].total_score - 4.0).abs() < f32::EPSILON);
+    }
+}

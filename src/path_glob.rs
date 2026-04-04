@@ -53,3 +53,65 @@ fn build_glob_set(globs: &[String], label: &str) -> Result<Option<GlobSet>> {
         format!("failed building {label} glob matcher")
     })?))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_matcher_matches_everything() {
+        let m = PathGlobMatcher::new(&[], &[]).unwrap();
+        assert!(m.matches(Path::new("src/main.rs")));
+        assert!(m.matches(Path::new("README.md")));
+    }
+
+    #[test]
+    fn include_only_filters_to_pattern() {
+        let m = PathGlobMatcher::new(&["*.rs".to_string()], &[]).unwrap();
+        assert!(m.matches(Path::new("src/main.rs")));
+        assert!(!m.matches(Path::new("README.md")));
+    }
+
+    #[test]
+    fn exclude_only_rejects_pattern() {
+        let m = PathGlobMatcher::new(&[], &["*.md".to_string()]).unwrap();
+        assert!(m.matches(Path::new("src/main.rs")));
+        assert!(!m.matches(Path::new("README.md")));
+    }
+
+    #[test]
+    fn include_and_exclude_combined() {
+        let m = PathGlobMatcher::new(&["*.rs".to_string()], &["*test*".to_string()]).unwrap();
+        assert!(m.matches(Path::new("src/main.rs")));
+        assert!(!m.matches(Path::new("src/test_helper.rs")));
+        assert!(!m.matches(Path::new("README.md")));
+    }
+
+    #[test]
+    fn exclude_takes_precedence_over_include() {
+        let m = PathGlobMatcher::new(&["*.rs".to_string()], &["*.rs".to_string()]).unwrap();
+        // Excluded even though included
+        assert!(!m.matches(Path::new("lib.rs")));
+    }
+
+    #[test]
+    fn parse_glob_csv_splits_and_trims() {
+        assert_eq!(parse_glob_csv(Some("*.rs, *.py")), vec!["*.rs", "*.py"]);
+    }
+
+    #[test]
+    fn parse_glob_csv_handles_none() {
+        assert!(parse_glob_csv(None).is_empty());
+    }
+
+    #[test]
+    fn parse_glob_csv_skips_empty_segments() {
+        assert_eq!(parse_glob_csv(Some(",*.rs,,*.py,")), vec!["*.rs", "*.py"]);
+    }
+
+    #[test]
+    fn invalid_glob_returns_error() {
+        let result = PathGlobMatcher::new(&["[invalid".to_string()], &[]);
+        assert!(result.is_err());
+    }
+}

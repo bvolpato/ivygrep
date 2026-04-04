@@ -1232,4 +1232,95 @@ mod tests {
         assert!(!hits.is_empty());
         assert!(hits[0].preview.contains("payment_gateway"));
     }
+
+    #[test]
+    #[serial]
+    fn workspace_has_results_after_indexing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(
+            tmp.path().join("lib.rs"),
+            "pub fn has_results() -> bool { true }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        assert!(workspace_has_results(&workspace).unwrap());
+    }
+
+    #[test]
+    #[serial]
+    fn workspace_has_no_results_when_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        assert!(!workspace_has_results(&workspace).unwrap());
+    }
+
+    #[test]
+    #[serial]
+    fn literal_search_finds_exact_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(
+            tmp.path().join("tax.rs"),
+            "pub fn calculate_tax(amount: f64) -> f64 { amount * 0.2 }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = literal_search(&workspace, "calculate_tax", &SearchOptions::default()).unwrap();
+        assert!(!hits.is_empty());
+        assert!(hits[0].preview.contains("calculate_tax"));
+    }
+
+    #[test]
+    #[serial]
+    fn literal_search_returns_empty_for_blank_query() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(tmp.path().join("lib.rs"), "pub fn something() {}\n").unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = literal_search(&workspace, "   ", &SearchOptions::default()).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn hybrid_search_handles_blank_query_gracefully() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(tmp.path().join("lib.rs"), "pub fn something() {}\n").unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        // Empty query should not panic — Tantivy may return wildcard matches
+        let result = hybrid_search(&workspace, "", Some(&model), &SearchOptions::default());
+        assert!(result.is_ok());
+    }
 }
