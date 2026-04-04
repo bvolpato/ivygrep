@@ -141,7 +141,7 @@ pub fn index_workspace(
     let result = index_workspace_inner(workspace, embedding_model);
 
     let _ = fs::remove_file(&pid_path);
-    let _ = fs::remove_file(&workspace.indexing_progress_path());
+    let _ = fs::remove_file(workspace.indexing_progress_path());
     let _ = fs2::FileExt::unlock(&lock_file);
     result
 }
@@ -182,7 +182,7 @@ fn index_workspace_inner(
 
     let old_snapshot = MerkleSnapshot::load(&workspace.merkle_snapshot_path())?;
 
-    let _ = fs::write(&workspace.indexing_progress_path(), "scanning");
+    let _ = fs::write(workspace.indexing_progress_path(), "scanning");
     let new_snapshot = MerkleSnapshot::build(&workspace.root)?;
     let diff = old_snapshot.diff(&new_snapshot);
 

@@ -746,7 +746,8 @@ async fn run_query(cli: Cli) -> Result<()> {
             scope_is_file,
         };
 
-        let all_hits = if search_via_daemon {
+        
+        if search_via_daemon {
             let show_spinner = std::io::stderr().is_terminal();
             let _t_search = std::time::Instant::now();
             let search_future = daemon::request(&request, false);
@@ -842,8 +843,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                 all_hits.truncate(l);
             }
             all_hits
-        };
-        all_hits
+        }
     };
 
     render_hits(
@@ -1023,11 +1023,10 @@ async fn restart_daemon() {
     // If the socket still exists, the old daemon didn't understand
     // Restart (pre-upgrade binary). Remove the socket so the old daemon
     // can't accept new connections, then auto-spawn a new one.
-    if let Ok(sp) = config::socket_path() {
-        if sp.exists() {
+    if let Ok(sp) = config::socket_path()
+        && sp.exists() {
             let _ = std::fs::remove_file(&sp);
         }
-    }
 
     // Auto-spawn the new daemon via the standard request path
     let _ = daemon::request(&DaemonRequest::Status, true).await;

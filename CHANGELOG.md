@@ -2,6 +2,23 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.0] — 2026-04-03
+
+A massive storage efficiency and stability release. The index-to-source ratio has been reduced from **~6.5× to ~2.3×**.
+
+> [!WARNING]  
+> **Breaking Change:** Due to the migration of neural and hash vectors to FP16 quantization, and the addition of `zstd` compression for SQLite, existing indices are incompatible. Please wipe your local `~/.local/share/ivygrep/` directory or run `ig --add . --force` before performing new searches to avoid mismatched chunks.
+
+### Storage & Performance
+- **F16 Vector Quantization:** `USearch` indices are now quantized down to `ScalarKind::F16` for hash embeddings, strictly halving the footprint of `.usearch` stores.
+- **SQLite zstd Compression:** Reduced `chunks.text` storage massively by compressing raw text chunks using `zstd`. Legacy uncompressed rows are auto-detected and correctly decoded.
+- **Tantivy Store Truncation:** Extracted `STORED` flag from Tantivy's text index. Full lexical matches now rely seamlessly on SQLite, removing ~500MB+ per index.
+
+### Stability & Indexing Pipeline
+- **Tree-sitter Timeout Engine:** Refactored tree-sitter bindings to invoke modern `ParseOptions` with `progress_callback`, imposing a mandatory 100ms parser completion limit. This entirely eliminates deadlocking on obfuscated, heavily-minified JavaScript or deeply nested data.
+- **Robust Enhancement Trigger:** Fixed a bug where indexer interruption permanently halted neural enhancement background processing. Background tasks now correctly calculate differential completion metrics to resume reliably via `.needs_neural_enhancement()`.
+- **First-run Spinner Resolution:** Initial daemon chunking progress now writes and parses `.indexing.progress`. "Stuck at 0 chunks" spinners are now perfectly responsive.
+
 ## [0.4.7] — 2026-04-03
 
 Introducing the new fast literal search path. This completes the performance push by optimizing the final bottleneck: exact string match queries.

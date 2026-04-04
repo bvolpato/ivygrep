@@ -497,7 +497,7 @@ fn try_tree_sitter_chunk_source(
     let bytes = text.as_bytes();
     let len = bytes.len();
     let tree = parser.parse_with_options(
-        &mut |i, _| (i < len).then(|| &bytes[i..]).unwrap_or_default(),
+        &mut |i, _| if i < len { &bytes[i..] } else { Default::default() },
         None,
         Some(options),
     )?;

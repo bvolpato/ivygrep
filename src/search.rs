@@ -261,11 +261,10 @@ pub fn hybrid_search(
         .map(|(id, (chunk, _))| (id.clone(), chunk.vector_key))
         .collect();
     for (chunk_id, vector_key) in need_text {
-        if let Ok(Some(full)) = fetch_chunk_by_vector_key(&sqlite, vector_key) {
-            if let Some((chunk, _)) = lexical_by_id.get_mut(&chunk_id) {
+        if let Ok(Some(full)) = fetch_chunk_by_vector_key(&sqlite, vector_key)
+            && let Some((chunk, _)) = lexical_by_id.get_mut(&chunk_id) {
                 chunk.text = full.text;
             }
-        }
     }
 
     let mut lexical_chunks = lexical_by_id.into_values().collect::<Vec<_>>();
@@ -309,8 +308,8 @@ pub fn hybrid_search(
         || options.type_filter.is_some();
 
     let mut semantic_chunks = Vec::new();
-    if let (Some(model), Some(vector_index)) = (embedding_model, vector_index_opt) {
-        if vector_index.size() > 0 {
+    if let (Some(model), Some(vector_index)) = (embedding_model, vector_index_opt)
+        && vector_index.size() > 0 {
             // Only now do we pay the cost of embedding the query
             let query_vector = model.embed(query_text);
 
@@ -344,7 +343,6 @@ pub fn hybrid_search(
                 }
             }
         }
-    }
     tracing::trace!(
         "semantic={:?} found={}",
         t0.elapsed(),
