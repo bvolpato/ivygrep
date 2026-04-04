@@ -15,7 +15,7 @@ use tantivy::{Index as TantivyIndex, TantivyDocument, Term, doc};
 use crate::chunking::{Chunk, chunk_source, is_indexable_file};
 use crate::embedding::EmbeddingModel;
 use crate::merkle::{MerkleDiff, MerkleSnapshot};
-use crate::vector_store::VectorStore;
+use crate::vector_store::{ScalarKind, VectorStore};
 use crate::workspace::{Workspace, WorkspaceMetadata};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,7 +85,7 @@ pub fn open_storage(workspace: &Workspace, embedding_dimensions: usize) -> Resul
     let _ = open_tantivy_index(&tantivy_dir)?;
 
     let vector_path = workspace.vector_path();
-    let vectors = VectorStore::open(&vector_path, embedding_dimensions)?;
+    let vectors = VectorStore::open(&vector_path, embedding_dimensions, ScalarKind::F16)?;
     vectors.save()?;
 
     Ok(StorageHandles {
@@ -165,7 +165,7 @@ fn index_workspace_inner(
     let mut writer = tantivy.writer(50_000_000)?;
 
     let mut vector_index =
-        VectorStore::open(&workspace.vector_path(), embedding_model.dimensions())?;
+        VectorStore::open(&workspace.vector_path(), embedding_model.dimensions(), ScalarKind::F16)?;
 
     // Batch all SQLite writes in a single transaction for ~10-50x speedup.
     let tx = sqlite.transaction()?;
@@ -338,7 +338,7 @@ pub fn enhance_workspace_neural(
     })?;
 
     let mut vector_index =
-        VectorStore::open(&workspace.vector_neural_path(), neural_model.dimensions())?;
+        VectorStore::open(&workspace.vector_neural_path(), neural_model.dimensions(), ScalarKind::F32)?;
 
     // Use a small batch size to bound ONNX/CoreML intermediate Tensor allocations
     // (e.g. attention matrices). A size of 128 spikes up to 1GB+ RAM.
@@ -585,7 +585,8 @@ fn build_schema() -> Schema {
     schema.add_u64_field("end_line", STORED);
     schema.add_text_field("language", STRING | STORED);
     schema.add_text_field("kind", STRING | STORED);
-    schema.add_text_field("text", TEXT | STORED);
+    // Not STORED — full text lives in SQLite
+    schema.add_text_field("text", TEXT);
     schema.add_text_field("content_hash", STRING | STORED);
     schema.build()
 }
@@ -689,9 +690,11 @@ pub fn fetch_chunk_by_id(
         .and_then(|v| v.as_str())?
         .to_string();
 
+    // Text may be absent (STORED removed); callers populate from SQLite.
     let text = search_doc
         .get_first(fields.text)
-        .and_then(|v| v.as_str())?
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
         .to_string();
 
     let content_hash = search_doc
@@ -828,6 +831,7 @@ mod tests {
         let store = crate::vector_store::VectorStore::open(
             &workspace.vector_neural_path(),
             EMBEDDING_DIMENSIONS,
+            crate::vector_store::ScalarKind::F32,
         )
         .unwrap();
         assert_eq!(store.size(), enhanced);

@@ -2,7 +2,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
+use usearch::{Index, IndexOptions, MetricKind};
+
+pub use usearch::ScalarKind;
 
 #[derive(Debug, Clone)]
 pub struct VectorMatch {
@@ -16,11 +18,11 @@ pub struct VectorStore {
 }
 
 impl VectorStore {
-    pub fn open(path: &Path, dimensions: usize) -> Result<Self> {
+    pub fn open(path: &Path, dimensions: usize, quantization: ScalarKind) -> Result<Self> {
         let options = IndexOptions {
             dimensions,
             metric: MetricKind::Cos,
-            quantization: ScalarKind::F32,
+            quantization,
             ..IndexOptions::default()
         };
 
@@ -44,11 +46,11 @@ impl VectorStore {
     /// on the Linux kernel's 1.5M-vector index).
     ///
     /// The returned store must NOT be used for writes (upsert/remove/save).
-    pub fn open_readonly(path: &Path, dimensions: usize) -> Result<Self> {
+    pub fn open_readonly(path: &Path, dimensions: usize, quantization: ScalarKind) -> Result<Self> {
         let options = IndexOptions {
             dimensions,
             metric: MetricKind::Cos,
-            quantization: ScalarKind::F32,
+            quantization,
             ..IndexOptions::default()
         };
 
@@ -178,12 +180,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("vectors.bin");
 
-        let mut store = VectorStore::open(&path, 4).unwrap();
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
         store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]);
         store.upsert(2, vec![0.0, 1.0, 0.0, 0.0]);
         store.save().unwrap();
 
-        let store = VectorStore::open(&path, 4).unwrap();
+        let store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
         let hits = store.search(&[1.0, 0.0, 0.0, 0.0], 2);
         assert!(!hits.is_empty());
         assert_eq!(hits[0].key, 1);

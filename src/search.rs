@@ -16,7 +16,7 @@ use crate::indexer::{
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
 use crate::text::{singularize_token, split_identifier_segments};
-use crate::vector_store::VectorStore;
+use crate::vector_store::{ScalarKind, VectorStore};
 use crate::workspace::{Workspace, WorkspaceScope};
 
 #[derive(Debug, Clone)]
@@ -254,6 +254,20 @@ pub fn hybrid_search(
             }
         }
     }
+    // Populate text from SQLite for chunks where Tantivy doesn't store it.
+    let need_text: Vec<(String, u64)> = lexical_by_id
+        .iter()
+        .filter(|(_, (chunk, _))| chunk.text.is_empty())
+        .map(|(id, (chunk, _))| (id.clone(), chunk.vector_key))
+        .collect();
+    for (chunk_id, vector_key) in need_text {
+        if let Ok(Some(full)) = fetch_chunk_by_vector_key(&sqlite, vector_key) {
+            if let Some((chunk, _)) = lexical_by_id.get_mut(&chunk_id) {
+                chunk.text = full.text;
+            }
+        }
+    }
+
     let mut lexical_chunks = lexical_by_id.into_values().collect::<Vec<_>>();
     lexical_chunks.sort_by(|a, b| b.1.total_cmp(&a.1));
     tracing::trace!("lexical={:?} found={}", t0.elapsed(), lexical_chunks.len());
@@ -264,12 +278,12 @@ pub fn hybrid_search(
         vector_index_opt = Some(if neural_path.exists() {
             let neural_dims = 384; // AllMiniLML6V2Q output
             if model.dimensions() == neural_dims {
-                VectorStore::open_readonly(&neural_path, neural_dims)?
+                VectorStore::open_readonly(&neural_path, neural_dims, ScalarKind::F32)?
             } else {
-                VectorStore::open_readonly(&workspace.vector_path(), model.dimensions())?
+                VectorStore::open_readonly(&workspace.vector_path(), model.dimensions(), ScalarKind::F16)?
             }
         } else {
-            VectorStore::open_readonly(&workspace.vector_path(), model.dimensions())?
+            VectorStore::open_readonly(&workspace.vector_path(), model.dimensions(), ScalarKind::F16)?
         });
         tracing::trace!(
             "open_vector={:?} size={}",

@@ -1028,7 +1028,7 @@ fn local_fallback_search(
             .chars()
             .all(|c| c.is_alphanumeric() || c == '_' || c == '-');
     let model: Option<Box<dyn crate::embedding::EmbeddingModel>> = if is_single_word {
-        // Fallback path: skip heavy ONNX model for single-word queries to stay fast.
+        // Skip ONNX model in fallback path for speed.
         None
     } else {
         Some(create_model(use_hash))
