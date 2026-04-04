@@ -202,6 +202,7 @@ fn ort_thread_budget() -> usize {
 
 /// Adaptive check for CoreML in background daemon phase.
 #[cfg(feature = "neural")]
+#[allow(dead_code)]
 fn device_context_allows_coreml(is_background: bool) -> bool {
     #[cfg(target_os = "macos")]
     {
@@ -237,6 +238,8 @@ fn device_context_allows_coreml(is_background: bool) -> bool {
         }
     }
 
+    // Keep variable used even on non-macOS platforms
+    let _ = is_background;
     true
 }
 
@@ -260,6 +263,10 @@ fn register_coreml(is_background: bool) {
             .commit();
         tracing::info!("CoreML execution provider registered");
     }
+    
+    // Silence unused variable warning on non-macOS platforms
+    #[cfg(not(target_os = "macos"))]
+    let _ = is_background;
 }
 
 pub fn hardware_acceleration_info() -> &'static str {

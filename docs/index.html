@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ivygrep | Semantic code search that never phones home</title>
+    <meta name="description" content="Local-first semantic code search combining lexical tools with neural vector search. Sub-100ms latency, zero telemetry.">
+    <meta name="theme-color" content="#0a0a0f">
+    
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Outfit:wght@300;400;600;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="bg-fx"></div>
+    <div class="bg-fx-glow"></div>
+
+    <nav class="navbar relative z-10 fade-in">
+        <div class="container nav-content">
+            <div class="logo">
+                <!-- Fallback to text if logo image is missing -->
+                <img src="assets/logo.png" alt="ivygrep logo" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';"/>
+                <span style="display:none;" class="logo-text">ivy<span class="highlight">grep</span></span>
+            </div>
+            <div class="nav-links">
+                <a href="#features">Features</a>
+                <a href="#how-it-works">Architecture</a>
+                <a href="#performance">Performance</a>
+                <a href="#mcp">AI Agents (MCP)</a>
+                <a href="https://github.com/bvolpato/ivygrep" class="btn btn-outline" target="_blank">
+                    <svg height="20" viewBox="0 0 16 16" width="20" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+                    GitHub
+                </a>
+            </div>
+        </div>
+    </nav>
+
+    <header class="hero relative z-10">
+        <div class="container hero-content">
+            <h1 class="slide-up">Semantic code search that <br/><span class="highlight-gradient">never phones home.</span></h1>
+            <p class="subtitle slide-up delay-1">Ask questions in English. Get answers in code. 100% local, lightning fast, and seamlessly integrated with AI agents.</p>
+            
+            <div class="cta-group slide-up delay-2">
+                <div class="terminal-install code-block">
+                    <span class="prompt">$</span> brew tap bvolpato/tap<br>
+                    <span class="prompt">$</span> brew install bvolpato/tap/ivygrep
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <section class="demo-section relative z-10 slide-up delay-3">
+        <div class="container">
+            <div class="glass-panel mockup-window">
+                <div class="mockup-header">
+                    <span class="dot red"></span>
+                    <span class="dot yellow"></span>
+                    <span class="dot green"></span>
+                </div>
+                <div class="mockup-body code-font">
+                    <div class="line"><span class="comment"># Ask in English, find the code intuitively</span></div>
+                    <div class="line typing"><span class="prompt">$</span> ig "where is tax calculated?"</div>
+                    <div class="line output success">✓ Found 3 semantic matches in 45ms</div>
+                    <div class="line output"><span class="path">src/finance/billing.rs:182</span></div>
+                    <div class="line output match">    pub fn <span class="highlight-match">calculate_inclusive_taxes</span>(...) -> Decimal {</div>
+                    <div class="line output"><span class="path">src/finance/checkout.rs:44</span></div>
+                    <div class="line output match">    fn <span class="highlight-match">apply_vat_and_withholding</span>(...) {</div>
+                    <div class="line output"><span class="path">src/finance/invoice.rs:301</span></div>
+                    <div class="line output match">    let <span class="highlight-match">tax_total</span> = subtotal * self.region.tax_rate;</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section id="features" class="container relative z-10 section-spacing">
+        <h2 class="section-title text-center">Why ivygrep?</h2>
+        <div class="grid grid-3">
+            <div class="glass-card fade-in-scroll">
+                <div class="card-icon">⚡</div>
+                <h3>Blazing Fast</h3>
+                <p>Sub-100ms latency. Hash embeddings deliver instant indexing while neural quality upgrades happen silently in the background.</p>
+            </div>
+            <div class="glass-card fade-in-scroll">
+                <div class="card-icon">🔒</div>
+                <h3>100% Local Privacy</h3>
+                <p>No API keys. No cloud backend. No telemetry. Your proprietary codebase never leaves your machine.</p>
+            </div>
+            <div class="glass-card fade-in-scroll">
+                <div class="card-icon">🧠</div>
+                <h3>Natural Language</h3>
+                <p>Combines classic exact matching (like grep/rg) with 384-dimensional quantized ONNX embeddings to match code semantically.</p>
+            </div>
+        </div>
+
+        <div class="comparison-table glass-panel mt-4 fade-in-scroll">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Feature</th>
+                        <th><code>grep</code> / <code>rg</code></th>
+                        <th>GitHub Search</th>
+                        <th><span class="highlight">ivygrep</span></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td>Works offline</td>
+                        <td>✅</td>
+                        <td>❌</td>
+                        <td><span class="highlight">✅</span></td>
+                    </tr>
+                    <tr>
+                        <td>Natural language queries</td>
+                        <td>❌</td>
+                        <td>⚠️</td>
+                        <td><span class="highlight">✅</span></td>
+                    </tr>
+                    <tr>
+                        <td>Semantic understanding</td>
+                        <td>❌</td>
+                        <td>❌</td>
+                        <td><span class="highlight">✅</span></td>
+                    </tr>
+                    <tr>
+                        <td>Sub-100ms latency</td>
+                        <td>✅</td>
+                        <td>❌</td>
+                        <td><span class="highlight">✅</span></td>
+                    </tr>
+                    <tr>
+                        <td>Privacy-first (no upload)</td>
+                        <td>✅</td>
+                        <td>❌</td>
+                        <td><span class="highlight">✅</span></td>
+                    </tr>
+                    <tr>
+                        <td>AST-aware chunking</td>
+                        <td>❌</td>
+                        <td>❌</td>
+                        <td><span class="highlight">✅</span></td>
+                    </tr>
+                    <tr>
+                        <td>Incremental indexing</td>
+                        <td>❌</td>
+                        <td>❌</td>
+                        <td><span class="highlight">✅</span></td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section id="how-it-works" class="container relative z-10 section-spacing">
+        <h2 class="section-title text-center">Two-Tier Hybrid Architecture</h2>
+        <p class="text-center subtitle-small mb-4">ivygrep uses a dual-engine architecture: fast indexing with progressive quality upgrades.</p>
+        
+        <div class="flow-diagram glass-panel fade-in-scroll">
+            <div class="flow-step">
+                <div class="flow-icon">1</div>
+                <h4>Hash Index</h4>
+                <p>Sub-second indexing via 128-bit SIMD structural hashes. Instant search availability.</p>
+            </div>
+            <div class="flow-arrow">→</div>
+            <div class="flow-step">
+                <div class="flow-icon">2</div>
+                <h4>Hybrid Fusion</h4>
+                <p>Lexical BM25 (Tantivy) and Semantic paths fuse via RRF to return high-precision results.</p>
+            </div>
+            <div class="flow-arrow">→</div>
+            <div class="flow-step">
+                <div class="flow-icon">3</div>
+                <h4>Neural Enhancement</h4>
+                <p>Background daemon silently upgrades chunks to quantized ONNX (AllMiniLML6V2Q) with Apple CoreML acceleration on macOS.</p>
+            </div>
+        </div>
+    </section>
+
+    <section id="performance" class="container relative z-10 section-spacing">
+        <div class="grid grid-2 align-center">
+            <div class="fade-in-scroll">
+                <h2 class="section-title">Speed That Scales</h2>
+                <p class="mb-2">Benchmarked on the <strong>Linux kernel</strong> (92K files, 1.5M chunks). `grep` and `rg` scan every file on each query. ivygrep queries a pre-built index natively optimized for hybrid operations.</p>
+                <div class="stats-grid">
+                    <div class="stat-box">
+                        <div class="stat-value">529&times;</div>
+                        <div class="stat-label">Faster than grep</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-value">~17ms</div>
+                        <div class="stat-label">Single identifier search</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-value">0.3s</div>
+                        <div class="stat-label">Indexing 200 files</div>
+                    </div>
+                </div>
+            </div>
+            <div class="glass-panel fade-in-scroll">
+                <h3>Concurrent Search (AI Agent Load)</h3>
+                <p class="text-xs opacity-70 mb-2">Simulating 8 concurrent queries via MCP</p>
+                <div class="perf-bar-group">
+                    <div class="perf-label">Linux Ryzen 9 (Avg)</div>
+                    <div class="perf-bar-wrapper"><div class="perf-bar fill-green" style="width: 25%">11 ms</div></div>
+                </div>
+                <div class="perf-bar-group">
+                    <div class="perf-label">Mac M4 Max (Avg)</div>
+                    <div class="perf-bar-wrapper"><div class="perf-bar fill-blue" style="width: 45%">26 ms</div></div>
+                </div>
+                <div class="perf-bar-group">
+                    <div class="perf-label">Linux Ryzen 9 (p95)</div>
+                    <div class="perf-bar-wrapper"><div class="perf-bar fill-green opacity-80" style="width: 35%;">15 ms</div></div>
+                </div>
+                <div class="perf-bar-group">
+                    <div class="perf-label">Mac M4 Max (p95)</div>
+                    <div class="perf-bar-wrapper"><div class="perf-bar fill-blue opacity-80" style="width: 75%">62 ms</div></div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section id="mcp" class="mcp-section relative z-10 section-spacing">
+        <div class="container">
+            <h2 class="section-title text-center">Supercharge Your AI Agents</h2>
+            <p class="text-center subtitle-small mb-4">ivygrep exposes an MCP (Model Context Protocol) server. Instead of stuffing entire files into your LLM context, your agent can query your codebase natively.</p>
+            
+            <div class="grid grid-3">
+                <div class="agent-card glass-card fade-in-scroll">
+                    <h4>Claude Code</h4>
+                    <div class="code-font text-xs opacity-80 bg-dark p-2 rounded mt-1">
+                        claude mcp add -s user ig -- ig --mcp
+                    </div>
+                </div>
+                <div class="agent-card glass-card fade-in-scroll">
+                    <h4>Cursor IDE</h4>
+                    <div class="code-font text-xs opacity-80 bg-dark p-2 rounded mt-1">
+                        "ig": { "command": "ig", "args": ["--mcp"] }
+                    </div>
+                </div>
+                <div class="agent-card glass-card fade-in-scroll">
+                    <h4>OpenCode</h4>
+                    <div class="code-font text-xs opacity-80 bg-dark p-2 rounded mt-1">
+                        opencode mcp add<br/># set command to `ig --mcp`
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <footer class="footer relative z-10">
+        <div class="container text-center">
+            <div class="logo mb-2">
+                <img src="assets/logo.png" alt="ivygrep logo" style="width: 100px;" onerror="this.style.display='none';"/>
+            </div>
+            <p>Built by <a href="https://github.com/bvolpato">@bvolpato</a>. Released under the MIT License.</p>
+            <div class="mt-2">
+                <a href="https://github.com/bvolpato/ivygrep" class="footer-link">Repository</a> | 
+                <a href="https://github.com/bvolpato/ivygrep/releases" class="footer-link">Releases</a>
+            </div>
+        </div>
+    </footer>
+
+    <script>
+        // Intersection Observer for scroll animations
+        const observerOptions = {
+            root: null,
+            rootMargin: '0px',
+            threshold: 0.1
+        };
+
+        const observer = new IntersectionObserver((entries, observer) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.classList.add('visible');
+                    observer.unobserve(entry.target);
+                }
+            });
+        }, observerOptions);
+
+        document.querySelectorAll('.fade-in-scroll').forEach((el) => {
+            observer.observe(el);
+        });
+
+        // Typing effect logic
+        const typingEl = document.querySelector('.typing');
+        const originalText = typingEl.innerHTML;
+        const prompt = '<span class="prompt">$</span> ';
+        const textToType = 'ig "where is tax calculated?"';
+        
+        typingEl.innerHTML = prompt;
+        
+        // Hide outputs initially
+        const outputs = document.querySelectorAll('.output');
+        outputs.forEach(out => out.style.opacity = '0');
+
+        setTimeout(() => {
+            let i = 0;
+            const interval = setInterval(() => {
+                typingEl.innerHTML = prompt + textToType.substring(0, i+1);
+                i++;
+                if (i >= textToType.length) {
+                    clearInterval(interval);
+                    // Show outputs one by one quickly
+                    setTimeout(() => {
+                        outputs.forEach((out, index) => {
+                            setTimeout(() => {
+                                out.style.opacity = '1';
+                                out.style.transform = 'translateY(0)';
+                            }, index * 100); // 100ms between each output line
+                        });
+                    }, 300);
+                }
+            }, 50); // 50ms per keystroke
+        }, 1500); // Wait 1.5s before starting
+    </script>
+</body>
+</html>
