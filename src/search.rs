@@ -930,7 +930,11 @@ fn file_authority_score(chunk: &IndexedChunk) -> f32 {
     let path = chunk.file_path.to_string_lossy().to_ascii_lowercase();
     if path.contains("test") || path.contains("spec") || path.contains("mock") {
         0.7
-    } else if path.ends_with(".json") || path.ends_with(".csv") || path.ends_with(".yaml") || path.ends_with(".md") {
+    } else if path.ends_with(".json")
+        || path.ends_with(".csv")
+        || path.ends_with(".yaml")
+        || path.ends_with(".md")
+    {
         0.5
     } else {
         1.0

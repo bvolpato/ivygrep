@@ -227,13 +227,16 @@ fn device_context_allows_coreml(is_background: bool) -> bool {
                 let cpus = num_cpus::get() as f64;
                 // If 1-minute load average > 70% of logical cores, system is quite busy
                 if load1 > cpus * 0.7 {
-                    tracing::info!("System load is high ({:.2}), disabling CoreML in background", load1);
+                    tracing::info!(
+                        "System load is high ({:.2}), disabling CoreML in background",
+                        load1
+                    );
                     return false;
                 }
             }
         }
     }
-    
+
     true
 }
 
@@ -251,7 +254,8 @@ fn register_coreml(is_background: bool) {
         // ort::init() is idempotent; first call wins.
         // In ort rc.11, commit() returns bool (true if this call did the init).
         let _ = ort::init()
-            .with_execution_providers([ort::execution_providers::CoreMLExecutionProvider::default()
+            .with_execution_providers([ort::execution_providers::CoreMLExecutionProvider::default(
+            )
             .build()])
             .commit();
         tracing::info!("CoreML execution provider registered");

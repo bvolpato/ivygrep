@@ -383,10 +383,27 @@ fn parse_pmset_batt(stdout: &str) -> Option<String> {
 
 #[cfg(target_os = "macos")]
 fn parse_pmset_therm(stdout: &str) -> Option<String> {
-    if stdout.contains("warning level") 
+    if stdout.contains("warning level")
         && !stdout.contains("No thermal warning level")
-        && !stdout.contains("No performance warning level") {
+        && !stdout.contains("No performance warning level")
+    {
         Some("Thermal Throttling".to_string())
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn parse_system_load(load1: f64, cpus: f64) -> Option<String> {
+    // High system load is defined as the 1-minute load average exceeding
+    // 80% of the total available logical CPU cores.
+    // Example: On an 8-core machine, a 1-minute load average > 6.4 triggers pausing.
+    if load1 > cpus * 0.8 {
+        Some(format!(
+            "High System Load ({:.1} > {:.1} max)",
+            load1,
+            cpus * 0.8
+        ))
     } else {
         None
     }
@@ -418,8 +435,8 @@ fn check_system_constraints() -> Option<String> {
     if has_load > 0 {
         let load1 = loadavg[0];
         let cpus = num_cpus::get() as f64;
-        if load1 > cpus * 0.8 {
-            return Some(format!("High System Load ({:.1})", load1));
+        if let Some(reason) = parse_system_load(load1, cpus) {
+            return Some(reason);
         }
     }
     None
@@ -1170,9 +1187,12 @@ mod tests {
     fn test_parse_pmset_batt() {
         let ac_output = "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22741091)\t96%; AC attached; not charging present: true";
         let batt_output = "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=22741091)\t96%; discharging; (no estimate) present: true";
-        
+
         assert_eq!(super::parse_pmset_batt(ac_output), None);
-        assert_eq!(super::parse_pmset_batt(batt_output), Some("Battery Power".to_string()));
+        assert_eq!(
+            super::parse_pmset_batt(batt_output),
+            Some("Battery Power".to_string())
+        );
     }
 
     #[test]
@@ -1180,8 +1200,11 @@ mod tests {
     fn test_parse_pmset_therm() {
         let normal = "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded";
         let throttled = "Note: Thermal warning level CPU_Speed_Limit = 50";
-        
+
         assert_eq!(super::parse_pmset_therm(normal), None);
-        assert_eq!(super::parse_pmset_therm(throttled), Some("Thermal Throttling".to_string()));
+        assert_eq!(
+            super::parse_pmset_therm(throttled),
+            Some("Thermal Throttling".to_string())
+        );
     }
 }
