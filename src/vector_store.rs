@@ -247,11 +247,11 @@ mod tests {
 
         let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
         store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]);
-        store.upsert(1, vec![0.0, 1.0, 0.0, 0.0]); // overwrite
+        store.upsert(1, vec![0.0, 1.0, 0.0, 0.0]);
 
-        assert_eq!(store.size(), 1); // still 1 entry
+        assert_eq!(store.size(), 1);
         let hits = store.search(&[0.0, 1.0, 0.0, 0.0], 1);
-        assert_eq!(hits[0].key, 1); // matches the new vector
+        assert_eq!(hits[0].key, 1);
     }
 
     #[test]
@@ -262,12 +262,10 @@ mod tests {
         let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
         store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]);
 
-        // Identical vector → high positive score (cosine = 1.0)
         let score = store.score(1, &[1.0, 0.0, 0.0, 0.0]);
         assert!(score.is_some());
         assert!(score.unwrap() > 0.9);
 
-        // Non-existent key → None
         assert!(store.score(999, &[1.0, 0.0, 0.0, 0.0]).is_none());
     }
 
@@ -293,9 +291,8 @@ mod tests {
         let path = tmp.path().join("vectors.bin");
 
         let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
-        // Insert more than initial capacity (1024) to trigger growth
         for i in 0..1100 {
-            store.upsert(i, vec![1.0, 0.0, 0.0, 0.0]);
+            store.upsert(i, vec![i as f32, 0.0, 0.0, 0.0]);
         }
         assert_eq!(store.size(), 1100);
     }

@@ -176,8 +176,8 @@ mod tests {
     fn sorts_hits_within_file_by_score_descending() {
         let hits = vec![hit("a.rs", 0.5, 30), hit("a.rs", 1.0, 10)];
         let groups = group_hits_by_file(&hits, None);
-        assert_eq!(groups[0].hits[0].start_line, 10); // score 1.0 first
-        assert_eq!(groups[0].hits[1].start_line, 30); // score 0.5 second
+        assert_eq!(groups[0].hits[0].start_line, 10);
+        assert_eq!(groups[0].hits[1].start_line, 30);
     }
 
     #[test]
@@ -189,7 +189,6 @@ mod tests {
         ];
         let groups = group_hits_by_file(&hits, Some(2));
         assert_eq!(groups.len(), 2);
-        // c.rs (3.0) and b.rs (2.0) survive, a.rs (1.0) truncated
         assert_eq!(groups[0].file_path, PathBuf::from("c.rs"));
         assert_eq!(groups[1].file_path, PathBuf::from("b.rs"));
     }

@@ -840,12 +840,11 @@ mod tests {
         // Initially false
         assert!(!workspace_is_indexed(&workspace));
 
-        // Create the indexer metadata file but simulate an interruption (no last_indexed_at_unix)
         let md = crate::workspace::WorkspaceMetadata {
             id: workspace.id.clone(),
             root: workspace.root.clone(),
             created_at_unix: 0,
-            last_indexed_at_unix: None, // Interrupted!
+            last_indexed_at_unix: None,
             watch_enabled: false,
         };
         std::fs::create_dir_all(&workspace.index_dir).unwrap();
@@ -859,15 +858,14 @@ mod tests {
         )
         .unwrap();
 
-        // Even though the metadata file exists, it should recognize it's interrupted and return false
+        // last_indexed_at_unix is None → treat as not indexed
         assert!(!workspace_is_indexed(&workspace));
 
-        // Fix it
         let md_fixed = crate::workspace::WorkspaceMetadata {
             id: workspace.id.clone(),
             root: workspace.root.clone(),
             created_at_unix: 0,
-            last_indexed_at_unix: Some(123), // Success
+            last_indexed_at_unix: Some(123),
             watch_enabled: false,
         };
         std::fs::write(
@@ -1081,12 +1079,10 @@ mod tests {
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         index_workspace(&workspace, &model).unwrap();
 
-        // Index dir should exist after indexing
         assert!(workspace.index_dir.exists());
 
         remove_workspace_index(&workspace).unwrap();
 
-        // Index dir should be completely removed
         assert!(!workspace.index_dir.exists());
     }
 

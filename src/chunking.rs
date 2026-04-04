@@ -1430,21 +1430,14 @@ pub fn calculate_total(amount: f64) -> f64 {
 
     #[test]
     fn test_tree_sitter_timeout_fallback() {
-        // Create a massive pathological minified JSON string that would normally
-        // take a very long time to parse with tree-sitter.
-        // It creates `[[[[...]]]]` 200,000 deep.
+        // 200k-deep nested brackets: pathological input for tree-sitter's parser
         let pathological_json = "[".repeat(200_000) + &"]".repeat(200_000);
 
         let start = std::time::Instant::now();
-        // This should timeout at ~100ms and fallback to the regex chunker
         let chunks = chunk_source(Path::new("massive.json"), &pathological_json);
         let elapsed = start.elapsed().as_millis();
 
-        // It shouldn't take significantly longer than the 100ms timeout
-        // (plus some overhead for regex scanning, but regex fails fast on brackets).
         assert!(elapsed < 1000, "Chunking took too long: {}ms", elapsed);
-
-        // It should still give us at least one chunk back (fallback chunker)
         assert!(
             !chunks.is_empty(),
             "Fallback chunker should have returned chunks"

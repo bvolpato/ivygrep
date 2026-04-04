@@ -1302,8 +1302,11 @@ mod tests {
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         index_workspace(&workspace, &model).unwrap();
 
-        let hits = literal_search(&workspace, "   ", &SearchOptions::default()).unwrap();
-        assert!(hits.is_empty());
+        assert!(
+            literal_search(&workspace, "   ", &SearchOptions::default())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1319,7 +1322,6 @@ mod tests {
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         index_workspace(&workspace, &model).unwrap();
 
-        // Empty query should not panic — Tantivy may return wildcard matches
         let result = hybrid_search(&workspace, "", Some(&model), &SearchOptions::default());
         assert!(result.is_ok());
     }
