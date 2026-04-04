@@ -394,9 +394,10 @@ pub fn enhance_workspace_neural(
         ScalarKind::F32,
     )?;
 
-    // Use a small batch size to bound ONNX/CoreML intermediate Tensor allocations
-    // (e.g. attention matrices). A size of 128 spikes up to 1GB+ RAM.
-    let mut batch = Vec::with_capacity(8);
+    // Use a balanced batch size (64) to maximize ONNX intra-op execution throughput.
+    // By enforcing a strict character cap per chunk, we prevent massive memory spikes
+    // from O(n^2) attention matrix expansion on pathological/minified strings.
+    let mut batch = Vec::with_capacity(64);
     let mut newly_processed = 0;
 
     // To support resumption, we'll discover how many are already in the index
@@ -408,7 +409,21 @@ pub fn enhance_workspace_neural(
             if batch.is_empty() {
                 return;
             }
-            let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
+            
+            // Strictly cap each string to ~1024 bytes (slightly more than the 256 token limit of the model)
+            // to definitively bound ONNX memory allocation prior to tokenization.
+            let texts: Vec<&str> = batch.iter().map(|(_, t)| {
+                if t.len() > 1024 {
+                    let mut end = 1024;
+                    while !t.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    &t[..end]
+                } else {
+                    t.as_str()
+                }
+            }).collect();
+            
             let embeddings = neural_model.embed_batch(&texts);
 
             for ((key, _), embedding) in batch.iter().zip(embeddings) {
@@ -427,9 +442,9 @@ pub fn enhance_workspace_neural(
         }
 
         batch.push(row);
-        if batch.len() >= 8 {
+        if batch.len() >= 64 {
             process_batch(&mut batch, &mut newly_processed, &mut vector_index);
-            progress_count += 8;
+            progress_count += 64;
 
             if progress_count % 256 == 0 {
                 // Periodically update the human-readable progress file
