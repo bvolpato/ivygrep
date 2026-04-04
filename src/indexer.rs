@@ -411,6 +411,11 @@ fn parse_system_load(load1: f64, cpus: f64) -> Option<String> {
 
 #[cfg(target_os = "macos")]
 fn check_system_constraints() -> Option<String> {
+    // Never pause in test or CI environments to avoid breaking benchmarks randomly
+    if cfg!(test) || std::env::var("CI").is_ok() {
+        return None;
+    }
+
     use std::process::Command;
 
     // 1. Check battery power
