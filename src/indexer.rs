@@ -188,15 +188,13 @@ fn index_workspace_inner(
         let base_sqlite = base_dir.join("metadata.sqlite3");
         let base_merkle = base_dir.join("merkle_snapshot.json");
 
-        if base_sqlite.exists()
-            && base_merkle.exists()
-            && !workspace.has_overlay()
-        {
+        if base_sqlite.exists() && base_merkle.exists() && !workspace.has_overlay() {
             eprintln!("  ⚡ creating worktree overlay (no copy)...");
             let _ = fs::write(workspace.indexing_progress_path(), "building overlay");
 
             // Record base reference
-            let main_root = workspace.main_worktree_root()
+            let main_root = workspace
+                .main_worktree_root()
                 .context("cannot find main worktree root")?;
             let base_ref = serde_json::json!({
                 "base_index_dir": base_dir.to_string_lossy(),
@@ -206,10 +204,16 @@ fn index_workspace_inner(
                     .unwrap_or_default()
                     .as_secs(),
             });
-            fs::write(&workspace.base_ref_path(), serde_json::to_vec_pretty(&base_ref)?)?;
+            fs::write(
+                workspace.base_ref_path(),
+                serde_json::to_vec_pretty(&base_ref)?,
+            )?;
 
             // Content-based diff: base root vs worktree root
-            let _ = fs::write(workspace.indexing_progress_path(), "scanning (content-based)");
+            let _ = fs::write(
+                workspace.indexing_progress_path(),
+                "scanning (content-based)",
+            );
             let old = MerkleSnapshot::build_content_based(&main_root)?;
             let new = MerkleSnapshot::build_content_based(&workspace.root)?;
             let diff = old.diff(&new);
@@ -253,9 +257,7 @@ fn index_workspace_inner(
         let _ = fs::write(workspace.indexing_progress_path(), "scanning");
         let new = MerkleSnapshot::build(&workspace.root)?;
         let d = old.diff(&new);
-        if d.added_or_modified.is_empty()
-            && d.deleted.is_empty()
-            && workspace_is_indexed(workspace)
+        if d.added_or_modified.is_empty() && d.deleted.is_empty() && workspace_is_indexed(workspace)
         {
             return Ok(IndexingSummary {
                 workspace_id: workspace.id.clone(),
@@ -294,11 +296,8 @@ fn index_workspace_inner(
     let (tantivy, fields) = open_tantivy_index(&tantivy_path)?;
     let mut writer = tantivy.writer(50_000_000)?;
 
-    let mut vector_index = VectorStore::open(
-        &vector_path,
-        embedding_model.dimensions(),
-        ScalarKind::F16,
-    )?;
+    let mut vector_index =
+        VectorStore::open(&vector_path, embedding_model.dimensions(), ScalarKind::F16)?;
 
     // Batch all SQLite writes in a single transaction for ~10-50x speedup.
     let tx = sqlite.transaction()?;

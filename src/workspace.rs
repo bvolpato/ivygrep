@@ -119,8 +119,7 @@ impl Workspace {
 
     /// Returns the root path of the main worktree, if this is a worktree.
     pub fn main_worktree_root(&self) -> Option<PathBuf> {
-        git_main_worktree_root(&self.root)
-            .filter(|main| *main != self.root)
+        git_main_worktree_root(&self.root).filter(|main| *main != self.root)
     }
 
     pub fn ensure_dirs(&self) -> Result<()> {
@@ -511,8 +510,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
 
         let ws_is_worktree = metadata.root.join(".git").is_file();
         let base_repo_root = if ws_is_worktree {
-            git_main_worktree_root(&metadata.root)
-                .filter(|main| *main != metadata.root)
+            git_main_worktree_root(&metadata.root).filter(|main| *main != metadata.root)
         } else {
             None
         };

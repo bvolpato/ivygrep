@@ -68,17 +68,26 @@ impl SearchContext {
             let overlay_reader = overlay_idx.reader()?;
             let overlay_searcher = overlay_reader.searcher();
             let overlay_vec = if let Some(dim) = emb_dim {
-                VectorStore::open_readonly(&workspace.overlay_vector_path(), dim, ScalarKind::F16).ok()
-            } else { None };
+                VectorStore::open_readonly(&workspace.overlay_vector_path(), dim, ScalarKind::F16)
+                    .ok()
+            } else {
+                None
+            };
 
-            let base_dir = workspace.base_index_dir.clone().unwrap_or_else(|| workspace.index_dir.clone());
+            let base_dir = workspace
+                .base_index_dir
+                .clone()
+                .unwrap_or_else(|| workspace.index_dir.clone());
             let base_sqlite = open_sqlite_readonly(&base_dir.join("metadata.sqlite3"))?;
             let (base_idx, _) = open_tantivy_index(&base_dir.join("tantivy"))?;
             let base_reader = base_idx.reader()?;
             let base_searcher = base_reader.searcher();
             let base_vec = if let Some(dim) = emb_dim {
-                VectorStore::open_readonly(&base_dir.join("vectors.usearch"), dim, ScalarKind::F16).ok()
-            } else { None };
+                VectorStore::open_readonly(&base_dir.join("vectors.usearch"), dim, ScalarKind::F16)
+                    .ok()
+            } else {
+                None
+            };
 
             let mut tombstones = HashSet::new();
             let mut overlay_files = HashSet::new();
@@ -114,7 +123,9 @@ impl SearchContext {
             let searcher = reader.searcher();
             let vec = if let Some(dim) = emb_dim {
                 VectorStore::open_readonly(&workspace.vector_path(), dim, ScalarKind::F16).ok()
-            } else { None };
+            } else {
+                None
+            };
 
             Ok(Self {
                 sqlite,
@@ -129,22 +140,23 @@ impl SearchContext {
             })
         }
     }
-    
+
     pub fn is_shadowed_base_file(&self, searcher_idx: usize, file_path: &std::path::Path) -> bool {
         let file_lossy = file_path.to_string_lossy();
-        searcher_idx == 1 && (self.tombstones.contains(file_lossy.as_ref()) || self.overlay_files.contains(file_lossy.as_ref()))
+        searcher_idx == 1
+            && (self.tombstones.contains(file_lossy.as_ref())
+                || self.overlay_files.contains(file_lossy.as_ref()))
     }
 
     pub fn fetch_chunk_by_vector_key(&self, vector_key: u64) -> Result<Option<IndexedChunk>> {
         if let Ok(Some(chunk)) = fetch_chunk_by_vector_key(&self.sqlite, vector_key) {
             return Ok(Some(chunk));
         }
-        if let Some(base_sqlite) = &self.base_sqlite {
-            if let Ok(Some(chunk)) = fetch_chunk_by_vector_key(base_sqlite, vector_key) {
-                if !self.is_shadowed_base_file(1, &chunk.file_path) {
-                    return Ok(Some(chunk));
-                }
-            }
+        if let Some(base_sqlite) = &self.base_sqlite
+            && let Ok(Some(chunk)) = fetch_chunk_by_vector_key(base_sqlite, vector_key)
+            && !self.is_shadowed_base_file(1, &chunk.file_path)
+        {
+            return Ok(Some(chunk));
         }
         Ok(None)
     }
@@ -175,7 +187,8 @@ pub fn literal_search(
 
     // Use Tantivy QueryParser to find chunks whose text contains the query terms.
     // This narrows the search space from all files to only matching chunks.
-    let mut parser = QueryParser::for_index(&ctx.indexes[0], vec![ctx.fields.text, ctx.fields.file_path]);
+    let mut parser =
+        QueryParser::for_index(&ctx.indexes[0], vec![ctx.fields.text, ctx.fields.file_path]);
     parser.set_field_boost(ctx.fields.file_path, 2.0);
 
     // Build lexical queries from the literal text
@@ -281,7 +294,8 @@ pub fn hybrid_search(
     let ctx = SearchContext::load(workspace, embedding_model.map(|m| m.dimensions()))?;
     tracing::trace!("open_tantivy={:?}", t0.elapsed());
 
-    let mut parser = QueryParser::for_index(&ctx.indexes[0], vec![ctx.fields.text, ctx.fields.file_path]);
+    let mut parser =
+        QueryParser::for_index(&ctx.indexes[0], vec![ctx.fields.text, ctx.fields.file_path]);
     parser.set_field_boost(ctx.fields.file_path, 2.0);
 
     let mut allowed_languages = Vec::new();
@@ -380,10 +394,7 @@ pub fn hybrid_search(
     lexical_chunks.sort_by(|a, b| b.1.total_cmp(&a.1));
     tracing::trace!("lexical={:?} found={}", t0.elapsed(), lexical_chunks.len());
 
-    tracing::trace!(
-        "open_vector={:?}",
-        t0.elapsed()
-    );
+    tracing::trace!("open_vector={:?}", t0.elapsed());
 
     // When glob filters or scope filters are active, pre-collect the set of
     // vector_keys that match, so we can skip the expensive full-corpus vector
@@ -395,56 +406,56 @@ pub fn hybrid_search(
 
     let mut semantic_chunks = Vec::new();
     // We only do semantic search if at least one vector index has records
-    let has_vectors = ctx.vectors.as_ref().map_or(0, |v| v.size()) > 0 || 
-                      ctx.base_vectors.as_ref().map_or(0, |v| v.size()) > 0;
+    let has_vectors = ctx.vectors.as_ref().map_or(0, |v| v.size()) > 0
+        || ctx.base_vectors.as_ref().map_or(0, |v| v.size()) > 0;
 
-    if let Some(model) = embedding_model {
-        if has_vectors {
-            // Only now do we pay the cost of embedding the query
-            let query_vector = model.embed(query_text);
-    
-            if has_filters {
-                // Pre-filtered path: query SQLite for matching chunks across overlay + base
-                let filtered_chunks = collect_filtered_chunks(
-                    &ctx,
-                    &path_matcher,
-                    options.scope_filter.as_ref(),
-                    options.type_filter.as_deref(),
-                    &options.include_globs,
-                );
-                // Score each filtered chunk against the query vector
-                for chunk in filtered_chunks {
-                    let mut score = None;
-                    if let Some(v) = &ctx.vectors {
-                        score = v.score(chunk.vector_key, &query_vector);
-                    }
-                    if score.is_none() {
-                        if let Some(v) = &ctx.base_vectors {
-                            score = v.score(chunk.vector_key, &query_vector);
-                        }
-                    }
-                    if let Some(s) = score {
-                        semantic_chunks.push((chunk, s));
-                    }
-                }
-                semantic_chunks.sort_by(|a, b| b.1.total_cmp(&a.1));
-                semantic_chunks.truncate(candidate_limit);
-            } else {
-                // Unfiltered path: standard ANN search over entire corpus
-                let mut matches = Vec::new();
+    if let Some(model) = embedding_model
+        && has_vectors
+    {
+        // Only now do we pay the cost of embedding the query
+        let query_vector = model.embed(query_text);
+
+        if has_filters {
+            // Pre-filtered path: query SQLite for matching chunks across overlay + base
+            let filtered_chunks = collect_filtered_chunks(
+                &ctx,
+                &path_matcher,
+                options.scope_filter.as_ref(),
+                options.type_filter.as_deref(),
+                &options.include_globs,
+            );
+            // Score each filtered chunk against the query vector
+            for chunk in filtered_chunks {
+                let mut score = None;
                 if let Some(v) = &ctx.vectors {
-                    matches.extend(v.search(&query_vector, candidate_limit));
+                    score = v.score(chunk.vector_key, &query_vector);
                 }
-                if let Some(v) = &ctx.base_vectors {
-                    matches.extend(v.search(&query_vector, candidate_limit));
+                if score.is_none()
+                    && let Some(v) = &ctx.base_vectors
+                {
+                    score = v.score(chunk.vector_key, &query_vector);
                 }
-                matches.sort_by(|a, b| b.score.total_cmp(&a.score));
-                matches.truncate(candidate_limit);
-                
-                for vector_match in matches {
-                    if let Some(chunk) = ctx.fetch_chunk_by_vector_key(vector_match.key)? {
-                        semantic_chunks.push((chunk, vector_match.score));
-                    }
+                if let Some(s) = score {
+                    semantic_chunks.push((chunk, s));
+                }
+            }
+            semantic_chunks.sort_by(|a, b| b.1.total_cmp(&a.1));
+            semantic_chunks.truncate(candidate_limit);
+        } else {
+            // Unfiltered path: standard ANN search over entire corpus
+            let mut matches = Vec::new();
+            if let Some(v) = &ctx.vectors {
+                matches.extend(v.search(&query_vector, candidate_limit));
+            }
+            if let Some(v) = &ctx.base_vectors {
+                matches.extend(v.search(&query_vector, candidate_limit));
+            }
+            matches.sort_by(|a, b| b.score.total_cmp(&a.score));
+            matches.truncate(candidate_limit);
+
+            for vector_match in matches {
+                if let Some(chunk) = ctx.fetch_chunk_by_vector_key(vector_match.key)? {
+                    semantic_chunks.push((chunk, vector_match.score));
                 }
             }
         }
@@ -725,9 +736,21 @@ fn collect_filtered_chunks(
     type_filter: Option<&str>,
     include_globs: &[String],
 ) -> Vec<IndexedChunk> {
-    let mut chunks = query_filtered_chunks(&ctx.sqlite, path_matcher, scope_filter, type_filter, include_globs);
+    let mut chunks = query_filtered_chunks(
+        &ctx.sqlite,
+        path_matcher,
+        scope_filter,
+        type_filter,
+        include_globs,
+    );
     if let Some(base_sqlite) = &ctx.base_sqlite {
-        let mut base_chunks = query_filtered_chunks(base_sqlite, path_matcher, scope_filter, type_filter, include_globs);
+        let mut base_chunks = query_filtered_chunks(
+            base_sqlite,
+            path_matcher,
+            scope_filter,
+            type_filter,
+            include_globs,
+        );
         base_chunks.retain(|c| !ctx.is_shadowed_base_file(1, &c.file_path));
         chunks.extend(base_chunks);
     }

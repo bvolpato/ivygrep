@@ -182,7 +182,11 @@ fn git_branch_switch_updates_index_and_search_results() {
     git(root.path(), &["add", "."]);
     git(
         root.path(),
-        &["commit", "-m", "add payments, remove core on feature branch"],
+        &[
+            "commit",
+            "-m",
+            "add payments, remove core on feature branch",
+        ],
     );
 
     // Re-index after branch switch
@@ -533,7 +537,10 @@ fn git_branch_adds_entire_subdirectory() {
     assert_eq!(files.len(), 6, "main.rs + 5 handlers");
     assert!(files.contains("api/handlers/handler_0.rs"));
     assert!(files.contains("api/handlers/handler_4.rs"));
-    assert!(chunk_count(&ws) > initial_chunks, "more chunks after adding files");
+    assert!(
+        chunk_count(&ws) > initial_chunks,
+        "more chunks after adding files"
+    );
 
     // Search for handler content
     let results = search_file_paths(&ws, "handle_request_3");
@@ -685,9 +692,7 @@ fn git_worktree_seeds_from_base_and_applies_delta() {
     // Search should find the modified content
     let modified_results = search_file_paths(&wt_ws, "func_10_modified");
     assert!(
-        modified_results
-            .iter()
-            .any(|p| p.contains("module_010.rs")),
+        modified_results.iter().any(|p| p.contains("module_010.rs")),
         "modified func_10 should be searchable in worktree"
     );
 
@@ -714,7 +719,10 @@ fn git_worktree_seeds_from_base_and_applies_delta() {
     );
 
     // Clean up worktree
-    git(root.path(), &["worktree", "remove", wt_path.to_str().unwrap(), "--force"]);
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
 }
 
 #[test]
@@ -764,6 +772,8 @@ fn git_worktree_repo_id_matches_main() {
     assert!(!main_ws.is_worktree(), "main should NOT be a worktree");
 
     // Clean up
-    git(root.path(), &["worktree", "remove", wt_path.to_str().unwrap(), "--force"]);
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
 }
-
