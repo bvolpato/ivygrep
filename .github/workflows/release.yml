@@ -26,11 +26,11 @@ jobs:
             cargo_flags: "--no-default-features"
             use_cross: true
           - target: aarch64-unknown-linux-musl
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-latest
             archive_name: linux-aarch64
             archive: tar.gz
             cargo_flags: "--no-default-features"
-            musl: true
+            use_cross: true
           - target: x86_64-apple-darwin
             runner: macos-latest
             archive_name: macos-x86_64
@@ -54,10 +54,6 @@ jobs:
         if: matrix.use_cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
-      - name: Install musl toolchain
-        if: matrix.musl
-        run: sudo apt-get update && sudo apt-get install -y musl-tools musl-dev
-
       - name: Cache cargo registry & build
         uses: actions/cache@v5
         with:
@@ -69,10 +65,6 @@ jobs:
           restore-keys: release-${{ matrix.target }}-
 
       - name: Build release binary
-        env:
-          CC: ${{ matrix.musl && 'musl-gcc' || '' }}
-          CXX: ${{ matrix.musl && 'g++' || '' }}
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: ${{ matrix.musl && 'musl-gcc' || '' }}
         run: |
           if [ "${{ matrix.use_cross }}" = "true" ]; then
             cross build --release --target ${{ matrix.target }} ${{ matrix.cargo_flags }}
