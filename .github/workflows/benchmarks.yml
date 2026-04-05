@@ -51,7 +51,6 @@ jobs:
           with open("benchmark-data.json", "w") as f:
               json.dump(data, f)
           '
-          cat benchmark-data.json
 
 
       - name: Track Benchmarks
