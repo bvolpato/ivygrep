@@ -318,8 +318,32 @@ fn index_workspace_inner(
     }
 
     fs::create_dir_all(&tantivy_path)?;
+    // Clear stale Tantivy writer lock left by a crash — safe because we
+    // already hold the fs2 advisory lock guaranteeing exclusive access.
+    let tantivy_lock = tantivy_path.join(".tantivy-writer.lock");
+    let _ = fs::remove_file(&tantivy_lock);
     let (tantivy, fields) = open_tantivy_index(&tantivy_path)?;
-    let mut writer = tantivy.writer(50_000_000)?;
+    // Retry with backoff — NFS/overlayfs may delay flock release.
+    let mut writer = None;
+    for attempt in 0..5u32 {
+        match tantivy.writer(50_000_000) {
+            Ok(w) => {
+                writer = Some(w);
+                break;
+            }
+            Err(err) => {
+                if attempt < 4 {
+                    let _ = fs::remove_file(&tantivy_lock);
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        200 * (attempt as u64 + 1),
+                    ));
+                } else {
+                    return Err(err.into());
+                }
+            }
+        }
+    }
+    let mut writer = writer.expect("writer must be acquired after retries");
 
     let mut vector_index =
         VectorStore::open(&vector_path, embedding_model.dimensions(), ScalarKind::F16)?;

@@ -427,11 +427,35 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
         }
         DaemonRequest::Remove { path } => match Workspace::resolve(&path) {
             Ok(workspace) => {
+                // Stop watcher so no new indexing is triggered.
                 state.watchers.lock().remove(&workspace.id);
                 let _ = std::fs::remove_file(workspace.watcher_pid_path());
-                match remove_workspace_index(&workspace) {
+
+                // Acquire the same fs2 lock that index_workspace holds to
+                // wait for any in-progress indexing before deleting.
+                match tokio::task::spawn_blocking(move || {
+                    workspace.ensure_dirs().ok();
+                    let lock_path = workspace.lock_path();
+                    if let Ok(lock_file) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .write(true)
+                        .truncate(false)
+                        .open(&lock_path)
+                    {
+                        // Blocking: waits for any running indexer to release.
+                        let _ = fs2::FileExt::lock_exclusive(&lock_file);
+                        let result = remove_workspace_index(&workspace);
+                        let _ = fs2::FileExt::unlock(&lock_file);
+                        result
+                    } else {
+                        remove_workspace_index(&workspace)
+                    }
+                })
+                .await
+                .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())))
+                {
                     Ok(_) => DaemonResponse::Ack {
-                        message: format!("removed workspace index {}", workspace.id),
+                        message: format!("removed workspace index {}", path.display()),
                     },
                     Err(err) => DaemonResponse::Error {
                         message: err.to_string(),
