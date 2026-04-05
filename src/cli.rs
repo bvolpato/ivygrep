@@ -155,6 +155,21 @@ pub async fn run() -> Result<()> {
         let pid_path = workspace.enhancing_pid_path();
         let _ = std::fs::write(&pid_path, std::process::id().to_string());
 
+        struct EnhancingGuard {
+            pid_path: std::path::PathBuf,
+            progress_path: std::path::PathBuf,
+        }
+        impl Drop for EnhancingGuard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.pid_path);
+                let _ = std::fs::remove_file(&self.progress_path);
+            }
+        }
+        let _guard = EnhancingGuard {
+            pid_path: pid_path.clone(),
+            progress_path: workspace.enhancing_progress_path(),
+        };
+
         let result = {
             let model_res = crate::embedding::create_neural_model_background();
             if let Ok(model) = model_res {
@@ -163,9 +178,6 @@ pub async fn run() -> Result<()> {
                 Ok(0)
             }
         };
-
-        // Clean up PID file
-        let _ = std::fs::remove_file(&pid_path);
 
         // ONNX clean teardown can sometimes segfault in multithreaded handlers.
         // We'll intentionally skip proper Rust panic runtime teardown and forcefully exit.

@@ -138,10 +138,23 @@ pub fn index_workspace(
     let pid_path = workspace.indexing_pid_path();
     let _ = fs::write(&pid_path, std::process::id().to_string());
 
+    struct IndexingGuard {
+        pid_path: std::path::PathBuf,
+        progress_path: std::path::PathBuf,
+    }
+    impl Drop for IndexingGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.pid_path);
+            let _ = std::fs::remove_file(&self.progress_path);
+        }
+    }
+    let _guard = IndexingGuard {
+        pid_path: pid_path.clone(),
+        progress_path: workspace.indexing_progress_path(),
+    };
+
     let result = index_workspace_inner(workspace, embedding_model);
 
-    let _ = fs::remove_file(&pid_path);
-    let _ = fs::remove_file(workspace.indexing_progress_path());
     let _ = fs2::FileExt::unlock(&lock_file);
     result
 }
