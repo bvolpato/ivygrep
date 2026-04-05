@@ -316,6 +316,7 @@ h1 {
 }
 .grid-3 { grid-template-columns: repeat(3, 1fr); }
 .grid-2 { grid-template-columns: repeat(2, 1fr); }
+.agent-grid { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
 
 .align-center { align-items: center; }
 
@@ -500,7 +501,108 @@ th:first-child, td:first-child {
 }
 
 .fill-green { background: var(--accent-green); }
-.fill-blue { background: #60a5fa; } /* Lighter blue for dark mode contrast */
+.fill-blue { background: #60a5fa; }
+
+/* Benchmark Comparison Panel */
+.benchmark-panel {
+    padding: 2rem;
+}
+
+.benchmark-row {
+    display: grid;
+    grid-template-columns: 160px 1fr 70px;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 0.75rem;
+}
+
+.benchmark-row-highlight {
+    background: rgba(16, 185, 129, 0.06);
+    border-radius: 6px;
+    padding: 0.25rem 0.5rem;
+    margin-left: -0.5rem;
+    margin-right: -0.5rem;
+}
+
+.benchmark-tool {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+}
+
+.benchmark-tool code {
+    font-family: var(--font-code);
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #fff;
+}
+
+.benchmark-mode {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+}
+
+.benchmark-bar-wrapper {
+    background: rgba(0, 0, 0, 0.4);
+    height: 28px;
+    border-radius: 4px;
+    overflow: hidden;
+    position: relative;
+}
+
+.benchmark-bar {
+    height: 100%;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding-right: 0.5rem;
+    width: 0;
+    transition: width 1.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.benchmark-bar-grep { background: linear-gradient(90deg, #ef4444, #dc2626); }
+.benchmark-bar-rg { background: linear-gradient(90deg, #f59e0b, #d97706); }
+.benchmark-bar-ig { background: linear-gradient(90deg, #10b981, #34d399); min-width: 80px; }
+.benchmark-bar-ig-semantic { background: linear-gradient(90deg, #38bdf8, #60a5fa); min-width: 80px; }
+
+.benchmark-time {
+    font-family: var(--font-code);
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #000;
+    white-space: nowrap;
+}
+
+.benchmark-speed {
+    font-family: var(--font-code);
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    text-align: right;
+    white-space: nowrap;
+}
+
+.benchmark-speed-hero {
+    color: var(--accent-green);
+    font-weight: 700;
+    font-size: 1rem;
+}
+
+.benchmark-note {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-top: 1.25rem;
+    padding-top: 1rem;
+    border-top: 1px solid rgba(255,255,255,0.06);
+    line-height: 1.5;
+}
+
+@media (max-width: 768px) {
+    .benchmark-row {
+        grid-template-columns: 110px 1fr 55px;
+        gap: 0.5rem;
+    }
+}
 
 /* Footer */
 .footer {
