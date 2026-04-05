@@ -203,12 +203,23 @@ async fn run_status(json: bool) -> Result<()> {
             grouped.entry(key).or_default().push(ws);
         }
 
-        for (_, mut wss) in grouped {
+        for (base_root, mut wss) in grouped {
             wss.sort_by(|a, b| {
                 let a_is_base = a.base_repo_root.is_none();
                 let b_is_base = b.base_repo_root.is_none();
                 b_is_base.cmp(&a_is_base).then_with(|| a.root.cmp(&b.root))
             });
+
+            // Make sure the group itself has a visually distinct header
+            // if the base repo isn't explicitly listed as an active workspace.
+            if wss
+                .first()
+                .map(|w| w.base_repo_root.is_some())
+                .unwrap_or(false)
+            {
+                println!("\x1b[1;36m⟐ {}\x1b[0m", base_root.display());
+                println!("  \x1b[90m(Base repository not directly tracked by ivygrep)\x1b[0m\n");
+            }
 
             for ws in wss {
                 let is_overlay = ws.base_repo_root.is_some();
