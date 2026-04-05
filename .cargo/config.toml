@@ -1,0 +1,13 @@
+# Static linking configuration for fully portable Linux binaries.
+# The musl targets produce statically linked binaries with no glibc dependency,
+# eliminating issues like missing libmvec.so.1 on older systems.
+#
+# In CI, we use `cross` which provides musl-native toolchains with a
+# compatible libstdc++. Locally, you can also install a musl cross
+# toolchain (e.g. x86_64-linux-musl-cross from musl.cc).
+
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=+crt-static"]

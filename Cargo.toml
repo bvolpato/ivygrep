@@ -1,6 +1,6 @@
 [package]
 name = "ivygrep"
-version = "0.5.4"
+version = "0.5.5"
 edition = "2024"
 description = "Semantic grep that stays local"
 license = "MIT"
@@ -36,7 +36,7 @@ tantivy = "0.26"
 tokio = { version = "1.50", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-usearch = "2.24"
+usearch = { version = "2.24", default-features = false, features = ["fp16lib"] }
 uuid = { version = "1.22", features = ["v4", "serde"] }
 fastembed = { version = "5", optional = true }
 num_cpus = "1.16"

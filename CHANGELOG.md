@@ -2,6 +2,15 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.5] — 2026-04-05
+
+Fully **statically linked** Linux binaries — zero shared library dependencies.
+
+### Build: Portable Linux Binaries
+- **musl static linking:** Linux release binaries now target `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`, producing fully self-contained executables with no glibc dependency. This eliminates the `libmvec.so.1` / `libstdc++.so.6` errors on older or minimal Linux distributions.
+- **cross-compilation:** Release workflow uses [`cross`](https://github.com/cross-rs/cross) for Linux builds, providing a proper musl-native C++ toolchain for the `usearch` dependency.
+- **usearch simsimd disabled:** The `simsimd` feature is disabled to ensure compatibility with musl cross-toolchains. The `fp16lib` feature is retained for half-precision float support.
+
 ## [0.5.4] — 2026-04-04
 
 A milestone architecture release introducing **Worktree-Aware Zero-Copy Overlay Indexing**.
