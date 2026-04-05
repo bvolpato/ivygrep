@@ -2,6 +2,17 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.7] — 2026-04-05
+
+### Fixed
+- **RAII PID file cleanup:** `.indexing.pid` and `.enhancing.pid` lockfiles are now guaranteed to be removed via RAII guards, even when indexer or enhancer threads panic. Prevents stale PID files from blocking subsequent daemon runs.
+
+### Performance
+- **Batched SQLite transaction commits:** The indexer now dynamically batches SQLite transaction commits by chunk count instead of per-file, significantly improving indexing throughput on Linux.
+
+### CI
+- Added `github-action-benchmark` with Criterion tracking to monitor indexer performance across commits with automatic PR comments.
+
 ## [0.5.6] — 2026-04-05
 
 ### Fixed
