@@ -156,31 +156,6 @@
         </div>
     </section>
 
-    <section id="how-it-works" class="container relative z-10 section-spacing">
-        <h2 class="section-title text-center">Two-Tier Hybrid Architecture</h2>
-        <p class="text-center subtitle-small mb-4">ivygrep uses a dual-engine architecture: fast indexing with progressive quality upgrades.</p>
-        
-        <div class="flow-diagram glass-panel fade-in-scroll">
-            <div class="flow-step">
-                <div class="flow-icon">1</div>
-                <h4>Hash Index</h4>
-                <p>Sub-second indexing via 128-bit SIMD structural hashes. Instant search availability.</p>
-            </div>
-            <div class="flow-arrow">→</div>
-            <div class="flow-step">
-                <div class="flow-icon">2</div>
-                <h4>Hybrid Fusion</h4>
-                <p>Lexical BM25 (Tantivy) and Semantic paths fuse via RRF to return high-precision results.</p>
-            </div>
-            <div class="flow-arrow">→</div>
-            <div class="flow-step">
-                <div class="flow-icon">3</div>
-                <h4>Neural Enhancement</h4>
-                <p>Background daemon silently upgrades chunks to quantized ONNX (AllMiniLML6V2Q) with Apple CoreML acceleration on macOS.</p>
-            </div>
-        </div>
-    </section>
-
     <section id="performance" class="container relative z-10 section-spacing">
         <h2 class="section-title text-center">Speed That Scales</h2>
         <p class="text-center subtitle-small mb-4">Benchmarked on the <strong>Linux kernel</strong> (92K files, 1.5M chunks) — query: <code>"kfree"</code>. <a href="https://www.gnu.org/software/grep/" target="_blank" style="color: var(--accent-green); text-decoration: none;"><code>grep</code></a> and <a href="https://github.com/BurntSushi/ripgrep" target="_blank" style="color: var(--accent-green); text-decoration: none;"><code>rg</code></a> scan every file on each query. ivygrep queries a pre-built index.</p>
@@ -198,19 +173,14 @@
                 <div class="benchmark-speed">3×</div>
             </div>
             <div class="benchmark-row benchmark-row-highlight">
-                <div class="benchmark-tool"><code>ig</code><span class="benchmark-mode">single identifier</span></div>
-                <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig" data-width="1.9%"><span class="benchmark-time">~17 ms</span></div></div>
-                <div class="benchmark-speed benchmark-speed-hero">529×</div>
-            </div>
-            <div class="benchmark-row benchmark-row-highlight">
-                <div class="benchmark-tool"><code>ig --regex</code><span class="benchmark-mode">exact string regex</span></div>
-                <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig" data-width="2.8%"><span class="benchmark-time">~25 ms</span></div></div>
-                <div class="benchmark-speed benchmark-speed-hero">360×</div>
-            </div>
-            <div class="benchmark-row benchmark-row-highlight">
                 <div class="benchmark-tool"><code>ig</code><span class="benchmark-mode">semantic search</span></div>
-                <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig-semantic" data-width="4%"><span class="benchmark-time">~72 ms</span></div></div>
+                <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig-semantic" data-width="8%"><span class="benchmark-time">~72 ms</span></div></div>
                 <div class="benchmark-speed benchmark-speed-hero">125×</div>
+            </div>
+            <div class="benchmark-row benchmark-row-highlight">
+                <div class="benchmark-tool"><code>ig --literal</code><span class="benchmark-mode">single identifier</span></div>
+                <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig" data-width="2%"><span class="benchmark-time">~17 ms</span></div></div>
+                <div class="benchmark-speed benchmark-speed-hero">529×</div>
             </div>
             <p class="benchmark-note">grep and rg scan every file at query time. ivygrep queries a pre-built index — searches are <strong>orders of magnitude faster</strong> on warm repos, and semantic mode finds related code even when you don't know the exact identifier.</p>
         </div>
@@ -256,6 +226,31 @@
                     <div class="perf-label">Mac M4 Max (p95)</div>
                     <div class="perf-bar-wrapper"><div class="perf-bar fill-blue opacity-80" style="width: 75%">62 ms</div></div>
                 </div>
+            </div>
+        </div>
+    </section>
+
+    <section id="how-it-works" class="container relative z-10 section-spacing">
+        <h2 class="section-title text-center">Two-Tier Hybrid Architecture</h2>
+        <p class="text-center subtitle-small mb-4">ivygrep uses a dual-engine architecture: fast indexing with progressive quality upgrades.</p>
+        
+        <div class="flow-diagram glass-panel fade-in-scroll">
+            <div class="flow-step">
+                <div class="flow-icon">1</div>
+                <h4>Hash Index</h4>
+                <p>Sub-second indexing via 128-bit SIMD structural hashes. Instant search availability.</p>
+            </div>
+            <div class="flow-arrow">→</div>
+            <div class="flow-step">
+                <div class="flow-icon">2</div>
+                <h4>Hybrid Fusion</h4>
+                <p>Lexical BM25 (Tantivy) and Semantic paths fuse via RRF to return high-precision results.</p>
+            </div>
+            <div class="flow-arrow">→</div>
+            <div class="flow-step">
+                <div class="flow-icon">3</div>
+                <h4>Neural Enhancement</h4>
+                <p>Background daemon silently upgrades chunks to quantized ONNX (AllMiniLML6V2Q) with Apple CoreML acceleration on macOS.</p>
             </div>
         </div>
     </section>
