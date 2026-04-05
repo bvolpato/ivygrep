@@ -478,10 +478,15 @@ async fn run_query(cli: Cli) -> Result<()> {
         let first_run = !crate::indexer::workspace_is_indexed(&workspace);
         if first_run {
             // Always show progress for first-run, even when the daemon handles it.
+            let msg = if workspace.is_worktree() {
+                "First run — computing worktree overlay"
+            } else {
+                "First run — indexing"
+            };
             eprintln!(
                 "{} {} {}",
                 "⟐".bold(),
-                "First run — indexing".bold(),
+                msg.bold(),
                 workspace.root.display().to_string().dimmed()
             );
 
@@ -610,10 +615,15 @@ async fn run_query(cli: Cli) -> Result<()> {
     if !search_via_daemon && !cli.all {
         let first_run = !workspace_is_indexed(&workspace);
         if first_run {
+            let msg = if workspace.is_worktree() {
+                "First run — computing worktree overlay"
+            } else {
+                "First run — indexing"
+            };
             eprintln!(
                 "{} {} {}",
                 "⟐".bold(),
-                "First run — indexing".bold(),
+                msg.bold(),
                 workspace.root.display().to_string().dimmed()
             );
             let hash_model = crate::embedding::create_hash_model();
