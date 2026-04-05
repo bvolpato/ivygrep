@@ -414,6 +414,16 @@ fn index_workspace_inner(
 
             remove_file_chunks(&tx, &mut writer, &fields, &mut vector_index, rel_path)?;
 
+            // In overlay mode, tombstone the base version so search suppresses
+            // the stale base chunks for this file path.
+            if use_overlay {
+                let rel_str = rel_path.to_string_lossy().to_string();
+                tx.execute(
+                    "INSERT OR IGNORE INTO tombstones (file_path) VALUES (?1)",
+                    params![rel_str],
+                )?;
+            }
+
             for indexed in indexed_chunks {
                 let embedding = all_embeddings[embed_idx].clone();
                 embed_idx += 1;

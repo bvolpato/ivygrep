@@ -120,6 +120,20 @@ fn search_file_paths(workspace: &Workspace, query: &str) -> Vec<String> {
         .collect()
 }
 
+/// Helper: search and return hits for a specific file, including preview content.
+fn search_hits_for_file(
+    workspace: &Workspace,
+    query: &str,
+    file_name: &str,
+) -> Vec<(String, String)> {
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+    let hits = hybrid_search(workspace, query, Some(&model), &SearchOptions::default()).unwrap();
+    hits.iter()
+        .filter(|h| h.file_path.to_string_lossy().contains(file_name))
+        .map(|h| (h.file_path.to_string_lossy().to_string(), h.preview.clone()))
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // THE FINAL BOSS: Git branch switch → reindex → search correctness
 // ---------------------------------------------------------------------------
@@ -771,6 +785,635 @@ fn git_worktree_repo_id_matches_main() {
     assert!(!main_ws.is_worktree(), "main should NOT be a worktree");
 
     // Clean up
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+// ===========================================================================
+// WORKTREE OVERLAY: Tombstone accuracy — delete in worktree must be invisible
+// to search, but base must still have it.
+// ===========================================================================
+
+#[test]
+#[serial]
+fn worktree_tombstone_hides_deleted_file_from_search() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    git(root.path(), &["init", "-b", "main"]);
+
+    fs::write(
+        root.path().join("keep.rs"),
+        "pub fn keep_me() -> &'static str { \"always here\" }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("remove_me.rs"),
+        "pub fn secret_base_function() -> i32 { 999 }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "two files on main"]);
+
+    // Index the base
+    setup_and_index(root.path(), home.path());
+    let base_ws = workspace_for(root.path());
+
+    // Confirm both files searchable in base
+    let base_results = search_file_paths(&base_ws, "secret_base_function");
+    assert!(
+        base_results.iter().any(|p| p.contains("remove_me.rs")),
+        "base should find secret_base_function"
+    );
+
+    // Create branch that deletes remove_me.rs
+    git(root.path(), &["checkout", "-b", "wt-delete"]);
+    fs::remove_file(root.path().join("remove_me.rs")).unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "delete remove_me.rs"]);
+    git(root.path(), &["checkout", "main"]);
+
+    // Create worktree
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_delete");
+    git(
+        root.path(),
+        &["worktree", "add", wt_path.to_str().unwrap(), "wt-delete"],
+    );
+
+    // Index the worktree
+    setup_and_index(&wt_path, home.path());
+    let wt_ws = workspace_for(&wt_path);
+
+    // Worktree: remove_me.rs must be invisible
+    let wt_results = search_file_paths(&wt_ws, "secret_base_function");
+    assert!(
+        !wt_results.iter().any(|p| p.contains("remove_me.rs")),
+        "worktree must NOT find secret_base_function — tombstone should hide it"
+    );
+
+    // Worktree: keep.rs must still be found (inherited from base)
+    let wt_keep = search_file_paths(&wt_ws, "keep_me");
+    assert!(
+        wt_keep.iter().any(|p| p.contains("keep.rs")),
+        "worktree should still find keep_me via base inheritance"
+    );
+
+    // Worktree: indexed_files should not contain remove_me.rs
+    let wt_files = indexed_files(&wt_ws);
+    assert!(
+        !wt_files.contains("remove_me.rs"),
+        "worktree indexed_files must not contain tombstoned file"
+    );
+    assert!(
+        wt_files.contains("keep.rs"),
+        "worktree indexed_files must contain inherited file"
+    );
+
+    // Base: must still find remove_me.rs (unaffected by worktree)
+    let base_results_after = search_file_paths(&base_ws, "secret_base_function");
+    assert!(
+        base_results_after
+            .iter()
+            .any(|p| p.contains("remove_me.rs")),
+        "base must still find secret_base_function — worktree must not contaminate base"
+    );
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+// ===========================================================================
+// WORKTREE OVERLAY: Content isolation — worktree-only files must not leak
+// into base search.
+// ===========================================================================
+
+#[test]
+#[serial]
+fn worktree_new_file_invisible_to_base_search() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    git(root.path(), &["init", "-b", "main"]);
+    fs::write(
+        root.path().join("base.rs"),
+        "pub fn base_func() -> bool { true }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base file"]);
+
+    setup_and_index(root.path(), home.path());
+
+    // Branch with a new exclusive file
+    git(root.path(), &["checkout", "-b", "wt-add"]);
+    fs::write(
+        root.path().join("worktree_exclusive.rs"),
+        "pub fn only_in_worktree() -> &'static str { \"exclusive_content_xyz\" }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "add exclusive file"]);
+    git(root.path(), &["checkout", "main"]);
+
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_add");
+    git(
+        root.path(),
+        &["worktree", "add", wt_path.to_str().unwrap(), "wt-add"],
+    );
+
+    setup_and_index(&wt_path, home.path());
+    let wt_ws = workspace_for(&wt_path);
+
+    // Worktree: should find the exclusive content
+    let wt_results = search_file_paths(&wt_ws, "exclusive_content_xyz");
+    assert!(
+        wt_results
+            .iter()
+            .any(|p| p.contains("worktree_exclusive.rs")),
+        "worktree must find exclusive_content_xyz"
+    );
+
+    // Worktree: should also find inherited base content
+    let wt_base = search_file_paths(&wt_ws, "base_func");
+    assert!(
+        wt_base.iter().any(|p| p.contains("base.rs")),
+        "worktree must find inherited base_func"
+    );
+
+    // Base: must NOT find worktree-exclusive content
+    let base_ws = workspace_for(root.path());
+    let base_results = search_file_paths(&base_ws, "exclusive_content_xyz");
+    assert!(
+        !base_results
+            .iter()
+            .any(|p| p.contains("worktree_exclusive.rs")),
+        "base must NOT find worktree-exclusive content"
+    );
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+// ===========================================================================
+// WORKTREE OVERLAY: Modified content divergence — same file, different content
+// ===========================================================================
+
+#[test]
+#[serial]
+fn worktree_modified_file_shows_overlay_content_not_base() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    git(root.path(), &["init", "-b", "main"]);
+    fs::write(
+        root.path().join("divergent.rs"),
+        "pub fn production_cardinal_zebra() -> i32 { 42 }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base version"]);
+
+    setup_and_index(root.path(), home.path());
+
+    // Branch that modifies the same file
+    git(root.path(), &["checkout", "-b", "wt-mod"]);
+    fs::write(
+        root.path().join("divergent.rs"),
+        "pub fn staging_flamingo_penguin() -> i32 { 99 }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "worktree version"]);
+    git(root.path(), &["checkout", "main"]);
+
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_mod");
+    git(
+        root.path(),
+        &["worktree", "add", wt_path.to_str().unwrap(), "wt-mod"],
+    );
+
+    setup_and_index(&wt_path, home.path());
+    let wt_ws = workspace_for(&wt_path);
+
+    // Worktree: must find worktree-specific content
+    let wt_results = search_file_paths(&wt_ws, "staging_flamingo_penguin");
+    assert!(
+        wt_results.iter().any(|p| p.contains("divergent.rs")),
+        "worktree must find staging_flamingo_penguin in divergent.rs"
+    );
+
+    // Worktree: any result for divergent.rs must serve overlay content, never base content.
+    // (In a tiny index, hash embedding similarity can return low-relevance hits for the
+    //  same file. What matters is the content served is exclusively from the overlay.)
+    let wt_base_hits = search_hits_for_file(&wt_ws, "production_cardinal_zebra", "divergent.rs");
+    for (_path, preview) in &wt_base_hits {
+        assert!(
+            !preview.contains("production_cardinal_zebra"),
+            "worktree must NOT serve base content — got preview: {preview}"
+        );
+    }
+
+    // Base: must find base-specific content
+    let base_ws = workspace_for(root.path());
+    let base_results = search_file_paths(&base_ws, "production_cardinal_zebra");
+    assert!(
+        base_results.iter().any(|p| p.contains("divergent.rs")),
+        "base must still find production_cardinal_zebra"
+    );
+
+    // Base: must NOT find worktree-specific content
+    // Base: any result for divergent.rs must serve base content, not overlay content.
+    let base_leak_hits = search_hits_for_file(&base_ws, "staging_flamingo_penguin", "divergent.rs");
+    for (_path, preview) in &base_leak_hits {
+        assert!(
+            !preview.contains("staging_flamingo_penguin"),
+            "base must NOT serve worktree content — got preview: {preview}"
+        );
+    }
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+// ===========================================================================
+// WORKTREE OVERLAY: Auto-index base when indexing worktree first
+// ===========================================================================
+
+#[test]
+#[serial]
+fn worktree_auto_indexes_base_when_missing() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    git(root.path(), &["init", "-b", "main"]);
+
+    for i in 0..10 {
+        fs::write(
+            root.path().join(format!("src_{i}.rs")),
+            format!("pub fn base_func_{i}() -> usize {{ {i} }}\n"),
+        )
+        .unwrap();
+    }
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "initial 10 files"]);
+
+    git(root.path(), &["checkout", "-b", "wt-auto"]);
+    fs::write(
+        root.path().join("auto_only.rs"),
+        "pub fn auto_exclusive_marker() -> bool { true }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "worktree exclusive"]);
+    git(root.path(), &["checkout", "main"]);
+
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_auto");
+    git(
+        root.path(),
+        &["worktree", "add", wt_path.to_str().unwrap(), "wt-auto"],
+    );
+
+    // Index the worktree WITHOUT indexing the base first
+    let s = setup_and_index(&wt_path, home.path());
+    let wt_ws = workspace_for(&wt_path);
+
+    assert!(wt_ws.is_worktree(), "should detect as worktree");
+
+    // The worktree should have fewer indexed files than a full re-index
+    assert!(
+        s.indexed_files < 11,
+        "worktree delta should be small, not all 11 files. Got: {}",
+        s.indexed_files
+    );
+
+    // Worktree search should find both inherited and exclusive content
+    let inherited = search_file_paths(&wt_ws, "base_func_5");
+    assert!(
+        !inherited.is_empty(),
+        "worktree should find inherited base_func_5 after auto-indexing base"
+    );
+
+    let exclusive = search_file_paths(&wt_ws, "auto_exclusive_marker");
+    assert!(
+        exclusive.iter().any(|p| p.contains("auto_only.rs")),
+        "worktree should find auto_exclusive_marker"
+    );
+
+    // Verify the base was actually indexed (base metadata should exist)
+    let base_ws = workspace_for(root.path());
+    let base_files = indexed_files(&base_ws);
+    assert_eq!(
+        base_files.len(),
+        10,
+        "base should have all 10 files after auto-indexing cascade"
+    );
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+// ===========================================================================
+// WORKTREE OVERLAY: Incremental update — further changes to overlay
+// ===========================================================================
+
+#[test]
+#[serial]
+fn worktree_incremental_overlay_update() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    git(root.path(), &["init", "-b", "main"]);
+    fs::write(
+        root.path().join("stable.rs"),
+        "pub fn stable_func() -> bool { true }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "initial"]);
+
+    setup_and_index(root.path(), home.path());
+
+    git(root.path(), &["checkout", "-b", "wt-incr"]);
+    fs::write(
+        root.path().join("phase1.rs"),
+        "pub fn phase1_marker() -> &'static str { \"phase1_content\" }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "phase 1"]);
+    git(root.path(), &["checkout", "main"]);
+
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_incr");
+    git(
+        root.path(),
+        &["worktree", "add", wt_path.to_str().unwrap(), "wt-incr"],
+    );
+
+    // Phase 1: initial overlay
+    setup_and_index(&wt_path, home.path());
+    let wt_ws = workspace_for(&wt_path);
+    let phase1 = search_file_paths(&wt_ws, "phase1_marker");
+    assert!(
+        phase1.iter().any(|p| p.contains("phase1.rs")),
+        "phase 1: should find phase1_marker"
+    );
+
+    // Phase 2: make an uncommitted change directly in worktree
+    fs::write(
+        wt_path.join("phase2.rs"),
+        "pub fn phase2_new_marker() -> &'static str { \"phase2_content\" }\n",
+    )
+    .unwrap();
+
+    // Re-index the worktree incrementally
+    let s2 = setup_and_index(&wt_path, home.path());
+    assert!(
+        s2.indexed_files >= 1,
+        "phase 2: at least phase2.rs should be indexed"
+    );
+
+    // Both phase1 and phase2 content should be searchable
+    let phase1_still = search_file_paths(&wt_ws, "phase1_marker");
+    assert!(
+        phase1_still.iter().any(|p| p.contains("phase1.rs")),
+        "phase 2: phase1_marker should still be found"
+    );
+
+    let phase2 = search_file_paths(&wt_ws, "phase2_new_marker");
+    assert!(
+        phase2.iter().any(|p| p.contains("phase2.rs")),
+        "phase 2: phase2_new_marker should be found after incremental update"
+    );
+
+    // Stable base content should still be inherited
+    let stable = search_file_paths(&wt_ws, "stable_func");
+    assert!(
+        stable.iter().any(|p| p.contains("stable.rs")),
+        "inherited stable_func should still be searchable"
+    );
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+// ===========================================================================
+// WORKTREE OVERLAY: Multiple worktrees are independent
+// ===========================================================================
+
+#[test]
+#[serial]
+fn multiple_worktrees_are_independent() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    git(root.path(), &["init", "-b", "main"]);
+    fs::write(
+        root.path().join("shared.rs"),
+        "pub fn shared_func() -> bool { true }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "shared base"]);
+
+    setup_and_index(root.path(), home.path());
+
+    // Branch A: adds file_a.rs
+    git(root.path(), &["checkout", "-b", "wt-a"]);
+    fs::write(
+        root.path().join("file_a.rs"),
+        "pub fn only_in_branch_a() -> &'static str { \"branch_a_unique_marker\" }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "branch A file"]);
+    git(root.path(), &["checkout", "main"]);
+
+    // Branch B: adds file_b.rs, deletes shared.rs
+    git(root.path(), &["checkout", "-b", "wt-b"]);
+    fs::write(
+        root.path().join("file_b.rs"),
+        "pub fn only_in_branch_b() -> &'static str { \"branch_b_unique_marker\" }\n",
+    )
+    .unwrap();
+    fs::remove_file(root.path().join("shared.rs")).unwrap();
+    git(root.path(), &["add", "."]);
+    git(
+        root.path(),
+        &["commit", "-m", "branch B file, delete shared"],
+    );
+    git(root.path(), &["checkout", "main"]);
+
+    // Create both worktrees
+    let wt_a_dir = tempdir().unwrap();
+    let wt_a_path = wt_a_dir.path().join("wt_a");
+    git(
+        root.path(),
+        &["worktree", "add", wt_a_path.to_str().unwrap(), "wt-a"],
+    );
+
+    let wt_b_dir = tempdir().unwrap();
+    let wt_b_path = wt_b_dir.path().join("wt_b");
+    git(
+        root.path(),
+        &["worktree", "add", wt_b_path.to_str().unwrap(), "wt-b"],
+    );
+
+    // Index both worktrees
+    setup_and_index(&wt_a_path, home.path());
+    setup_and_index(&wt_b_path, home.path());
+
+    let ws_a = workspace_for(&wt_a_path);
+    let ws_b = workspace_for(&wt_b_path);
+
+    // Worktree A: should find branch_a_unique_marker and shared_func
+    let a_own = search_file_paths(&ws_a, "branch_a_unique_marker");
+    assert!(
+        a_own.iter().any(|p| p.contains("file_a.rs")),
+        "wt-a must find its own branch_a_unique_marker"
+    );
+    let a_shared = search_file_paths(&ws_a, "shared_func");
+    assert!(
+        a_shared.iter().any(|p| p.contains("shared.rs")),
+        "wt-a must find inherited shared_func"
+    );
+    let a_leak = search_file_paths(&ws_a, "branch_b_unique_marker");
+    assert!(
+        !a_leak.iter().any(|p| p.contains("file_b.rs")),
+        "wt-a must NOT find branch_b_unique_marker"
+    );
+
+    // Worktree B: should find branch_b_unique_marker but NOT shared_func
+    let b_own = search_file_paths(&ws_b, "branch_b_unique_marker");
+    assert!(
+        b_own.iter().any(|p| p.contains("file_b.rs")),
+        "wt-b must find its own branch_b_unique_marker"
+    );
+    let b_shared = search_file_paths(&ws_b, "shared_func");
+    assert!(
+        !b_shared.iter().any(|p| p.contains("shared.rs")),
+        "wt-b must NOT find shared_func — it was deleted in this branch"
+    );
+    let b_leak = search_file_paths(&ws_b, "branch_a_unique_marker");
+    assert!(
+        !b_leak.iter().any(|p| p.contains("file_a.rs")),
+        "wt-b must NOT find branch_a_unique_marker"
+    );
+
+    // Base: must be unaffected by both worktrees
+    let base_ws = workspace_for(root.path());
+    let base_shared = search_file_paths(&base_ws, "shared_func");
+    assert!(
+        base_shared.iter().any(|p| p.contains("shared.rs")),
+        "base must still find shared_func"
+    );
+    let base_a = search_file_paths(&base_ws, "branch_a_unique_marker");
+    assert!(
+        !base_a.iter().any(|p| p.contains("file_a.rs")),
+        "base must NOT find branch_a content"
+    );
+    let base_b = search_file_paths(&base_ws, "branch_b_unique_marker");
+    assert!(
+        !base_b.iter().any(|p| p.contains("file_b.rs")),
+        "base must NOT find branch_b content"
+    );
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_a_path.to_str().unwrap(), "--force"],
+    );
+    git(
+        root.path(),
+        &["worktree", "remove", wt_b_path.to_str().unwrap(), "--force"],
+    );
+}
+
+// ===========================================================================
+// WORKTREE OVERLAY: Delete then re-add file with different content
+// ===========================================================================
+
+#[test]
+#[serial]
+fn worktree_delete_then_readd_shows_new_content() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    git(root.path(), &["init", "-b", "main"]);
+    fs::write(
+        root.path().join("mutable.rs"),
+        "pub fn mercury_astronaut_launch() -> i32 { 7 }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "original"]);
+
+    setup_and_index(root.path(), home.path());
+
+    // Branch: delete the file, then recreate it with completely different content
+    git(root.path(), &["checkout", "-b", "wt-readd"]);
+    fs::remove_file(root.path().join("mutable.rs")).unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "delete mutable.rs"]);
+
+    fs::write(
+        root.path().join("mutable.rs"),
+        "pub fn neptune_submarine_ocean() -> i32 { 88 }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "recreate mutable.rs"]);
+    git(root.path(), &["checkout", "main"]);
+
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_readd");
+    git(
+        root.path(),
+        &["worktree", "add", wt_path.to_str().unwrap(), "wt-readd"],
+    );
+
+    setup_and_index(&wt_path, home.path());
+    let wt_ws = workspace_for(&wt_path);
+
+    // Worktree: must find the NEW content
+    let new_results = search_file_paths(&wt_ws, "neptune_submarine_ocean");
+    assert!(
+        new_results.iter().any(|p| p.contains("mutable.rs")),
+        "worktree must find neptune_submarine_ocean in re-added mutable.rs"
+    );
+
+    // Worktree: any result for mutable.rs must serve overlay content, never base content.
+    let old_hits = search_hits_for_file(&wt_ws, "mercury_astronaut_launch", "mutable.rs");
+    for (_path, preview) in &old_hits {
+        assert!(
+            !preview.contains("mercury_astronaut_launch"),
+            "worktree must NOT serve base content — got preview: {preview}"
+        );
+    }
+
+    // Base: must still have the original content
+    let base_ws = workspace_for(root.path());
+    let base_results = search_file_paths(&base_ws, "mercury_astronaut_launch");
+    assert!(
+        base_results.iter().any(|p| p.contains("mutable.rs")),
+        "base must still find mercury_astronaut_launch"
+    );
+
     git(
         root.path(),
         &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
