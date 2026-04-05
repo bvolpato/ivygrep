@@ -39,14 +39,33 @@ jobs:
         run: cargo install cargo-criterion
 
       - name: Run benchmarks
-        run: cargo criterion --message-format=json > criterion-output.json
+        run: cargo criterion --message-format=json > criterion-output.json || true
+
+      - name: Convert Criterion JSON to Custom Benchmark Format
+        run: |
+          python3 -c '
+          import json, sys
+          data = []
+          for line in open("criterion-output.json"):
+              try:
+                  obj = json.loads(line.strip())
+                  if obj.get("reason") == "benchmark-complete":
+                      name = obj.get("id")
+                      value = obj.get("mean", {}).get("estimate", 0)
+                      data.append({"name": name, "value": value, "unit": "ns"})
+              except: pass
+          with open("benchmark-data.json", "w") as f:
+              json.dump(data, f)
+          '
+
 
       - name: Track Benchmarks
         uses: benchmark-action/github-action-benchmark@v1
         with:
           name: Rust Benchmark
-          tool: 'cargo'
-          output-file-path: criterion-output.json
+          tool: 'customSmallerIsBetter'
+          output-file-path: benchmark-data.json
+
           github-token: ${{ secrets.GITHUB_TOKEN }}
           auto-push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           alert-threshold: '120%'
