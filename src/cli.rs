@@ -244,10 +244,17 @@ async fn run_status(json: bool) -> Result<()> {
                 }
 
                 // Chunk stats
-                println!(
-                    "{prefix}  Files:  {} files, {} chunks",
-                    ws.file_count, ws.chunk_count
-                );
+                if is_overlay {
+                    println!(
+                        "{prefix}  Files:  {} files, {} chunks (overlaid delta)",
+                        ws.file_count, ws.chunk_count
+                    );
+                } else {
+                    println!(
+                        "{prefix}  Files:  {} files, {} chunks",
+                        ws.file_count, ws.chunk_count
+                    );
+                }
 
                 // Index size
                 let size = format_bytes(ws.index_size_bytes);
@@ -299,6 +306,16 @@ async fn run_status(json: bool) -> Result<()> {
                         progress_str.to_string()
                     };
                     println!("{prefix}  Search: \x1b[1;33m⟳ indexing\x1b[0m ({detail})");
+                } else if is_overlay {
+                    if ws.chunk_count > 0 {
+                        println!(
+                            "{prefix}  Search: \x1b[33m◆ hash\x1b[0m (+ base neural/hash delegation)"
+                        );
+                    } else {
+                        println!(
+                            "{prefix}  Search: \x1b[35m⟐ overlay\x1b[0m (fully delegated to base)"
+                        );
+                    }
                 } else if ws.chunk_count > 0 {
                     println!(
                         "{prefix}  Search: \x1b[33m◆ hash\x1b[0m (fast, run a query to trigger neural upgrade)"

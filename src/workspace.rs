@@ -544,7 +544,13 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
 }
 
 fn read_sqlite_counts(index_dir: &Path) -> (u64, u64) {
-    let sqlite_path = index_dir.join("metadata.sqlite3");
+    let overlay_path = index_dir.join("overlay.sqlite3");
+    let sqlite_path = if overlay_path.exists() {
+        overlay_path
+    } else {
+        index_dir.join("metadata.sqlite3")
+    };
+
     if !sqlite_path.exists() {
         return (0, 0);
     }
@@ -635,6 +641,10 @@ fn dir_size_bytes(dir: &Path) -> u64 {
         "metadata.sqlite3-shm",
         "vectors.usearch",
         "vectors_neural.usearch",
+        "overlay.sqlite3",
+        "overlay.sqlite3-wal",
+        "overlay.sqlite3-shm",
+        "overlay_vectors.usearch",
         "merkle_snapshot.json",
         "workspace.json",
     ];
@@ -646,14 +656,16 @@ fn dir_size_bytes(dir: &Path) -> u64 {
         }
     }
 
-    // Add Tantivy directory (can have many segment files)
-    let tantivy_dir = dir.join("tantivy");
-    if let Ok(entries) = fs::read_dir(&tantivy_dir) {
-        for entry in entries.flatten() {
-            if let Ok(meta) = entry.metadata()
-                && meta.is_file()
-            {
-                total += meta.len();
+    // Add Tantivy directories
+    for t_dir in ["tantivy", "overlay_tantivy"] {
+        let path = dir.join(t_dir);
+        if let Ok(entries) = fs::read_dir(&path) {
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata()
+                    && meta.is_file()
+                {
+                    total += meta.len();
+                }
             }
         }
     }
