@@ -1,8 +1,8 @@
-use criterion::{criterion_group, criterion_main, Criterion, BatchSize};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use ivygrep::EMBEDDING_DIMENSIONS;
+use ivygrep::embedding::HashEmbeddingModel;
 use ivygrep::indexer::index_workspace;
 use ivygrep::workspace::Workspace;
-use ivygrep::embedding::HashEmbeddingModel;
-use ivygrep::EMBEDDING_DIMENSIONS;
 use std::fs;
 
 fn bench_indexer(c: &mut Criterion) {
@@ -16,17 +16,26 @@ fn bench_indexer(c: &mut Criterion) {
                 let staging = tempfile::tempdir().unwrap();
                 let ws_path = staging.path().join("workspace");
                 fs::create_dir_all(&ws_path).unwrap();
-                
+
                 // Create a few files
                 for i in 0..500 {
-                    fs::write(ws_path.join(format!("file_{}.rs", i)), format!("pub fn target_{}() {{}}", i)).unwrap();
+                    fs::write(
+                        ws_path.join(format!("file_{}.rs", i)),
+                        format!("pub fn target_{}() {{}}", i),
+                    )
+                    .unwrap();
                 }
 
                 // Set up isolated HOME
                 let home = tempfile::tempdir().unwrap();
                 unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
 
-                (staging, home, Workspace::resolve(&ws_path).unwrap(), HashEmbeddingModel::new(EMBEDDING_DIMENSIONS))
+                (
+                    staging,
+                    home,
+                    Workspace::resolve(&ws_path).unwrap(),
+                    HashEmbeddingModel::new(EMBEDDING_DIMENSIONS),
+                )
             },
             |(_staging, _home, workspace, model)| {
                 index_workspace(&workspace, &model).unwrap();
