@@ -261,9 +261,9 @@
         </div>
 
         <div class="glass-panel fade-in-scroll mt-4" style="border-left: 3px solid #10b981;">
-            <h3 style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem;">🌿 Git-Native Intelligence</h3>
-            <p class="subtitle-small" style="margin-bottom: 1rem;">ivygrep deeply understands git. This is a core design decision, not an afterthought.</p>
-            <div class="grid grid-2" style="gap: 1.2rem;">
+            <h3 style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">🌿 Git-Native Intelligence</h3>
+            <p style="opacity: 0.75; font-size: 0.95rem; margin-bottom: 1.2rem;">ivygrep deeply understands git. This is a core design decision, not an afterthought.</p>
+            <div class="grid grid-2" style="gap: 1.5rem;">
                 <div>
                     <h4 style="color: #10b981; margin-bottom: 0.3rem;">Worktree Overlays</h4>
                     <p class="text-xs opacity-80">When you <code>git worktree add</code>, ivygrep does <strong>not</strong> copy the index. It creates a thin overlay storing only divergent chunks &amp; tombstones — referencing the base index by path. A 92K-file repo with 50 changed files creates a ~200 KB overlay instead of duplicating ~50 MB.</p>
