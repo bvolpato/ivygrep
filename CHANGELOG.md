@@ -2,6 +2,22 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.4] — 2026-04-04
+
+A milestone architecture release introducing **Worktree-Aware Zero-Copy Overlay Indexing**.
+
+### Feature: Shared Base + Thin Overlays
+- **Worktree Indexing:** When indexing a `git worktree`, `ivygrep` no longer copies the enormous parent repository. Instead, it reads the `.cache/ivygrep/{base}` index and dynamically constructs a lightning-fast "overlay index" (`metadata.sqlite3`, `vectors...`) containing exclusively the chunks that were added, modified, or deleted in the worktree.
+- **Microsecond Tombstoning:** If a file is deleted or modified in your worktree, ivygrep registers robust SQLite tombstones in the overlay. The `SearchContext` seamlessly merges base and overlay indices mid-query, ensuring ultra-accurate search results.
+- **Base Auto-Indexing Cascade:** If you attempt to index a worktree before your `ivygrep` daemon has naturally indexed the base checkout, ivygrep gracefully intercepts the request, recursively locks and builds the full base index, and rapidly evaluates your overlay delta afterwards.
+- **Background Upgrade Cascading:** Background neural enhancement operations automatically cascade into parent base indices when triggered from a dependent worktree.
+- **UI Tracking Hierarchy:** `ig --status` has been revamped to visualize base repositories alongside a dedicated, indented visual tree representing its corresponding worktree overlays. Index file footprints precisely isolate the delta byte counts compared to the main checkout.
+
+## [0.5.3] — 2026-04-03
+
+Minor patch addressing Clippy CI constraints.
+- Resolved `clippy::collapsible_if` nested block rules originating from integration test additions.
+
 ## [0.5.2] — 2026-04-03
 
 - **CoreML Thermal/Cache Tuning:** Reduced the ONNX background execution batch size from 64 down to 16. While 64 scaled optimally on pure high-VRAM GPU setups, it caused severe thermal throttling and L2 cache thrashing on Apple Silicon / CoreML execution providers, slowing down the background indexer. The new limit still benefits from 2× batch throughput over v0.5.0 but maintains crisp desktop responsiveness.
