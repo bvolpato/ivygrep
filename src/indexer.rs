@@ -180,16 +180,77 @@ fn index_workspace_inner(
         });
     }
 
-    let old_snapshot = MerkleSnapshot::load(&workspace.merkle_snapshot_path())?;
+    // ── Worktree seed-from-base ──────────────────────────────────────────
+    // If this workspace is a git worktree and the main worktree has a
+    // fresh index we haven't seeded from yet, clone the base index and
+    // apply only the delta. This turns a full 270K-file index into a
+    // ~100-file delta operation.
+    let seeded_from_base = if let Some(ref base_dir) = workspace.base_index_dir {
+        let base_sqlite = base_dir.join("metadata.sqlite3");
+        let base_merkle = base_dir.join("merkle_snapshot.json");
+        let base_ref_path = workspace.index_dir.join("base_ref.json");
 
-    let _ = fs::write(workspace.indexing_progress_path(), "scanning");
-    let new_snapshot = MerkleSnapshot::build(&workspace.root)?;
+        // Only seed if: the base index exists AND we haven't done the first index yet
+        if base_sqlite.exists()
+            && base_merkle.exists()
+            && !workspace_is_indexed(workspace)
+        {
+            eprintln!("  ⚡ seeding worktree index from base...");
+            let _ = fs::write(workspace.indexing_progress_path(), "seeding from base");
+
+            // Copy base index files (SQLite, Tantivy, vectors) but NOT the Merkle snapshot
+            // We'll build content-based snapshots for both base and worktree to compute a correct diff
+            seed_index_files(base_dir, &workspace.index_dir)?;
+            // Remove the copied Merkle snapshot — we'll build content-based ones instead
+            let _ = fs::remove_file(workspace.merkle_snapshot_path());
+
+            // Record that we seeded from this base
+            let base_ref = serde_json::json!({
+                "base_index_dir": base_dir.to_string_lossy(),
+                "seeded_at_unix": SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            });
+            fs::write(&base_ref_path, serde_json::to_vec_pretty(&base_ref)?)?;
+
+            eprintln!("  ⚡ base index seeded, computing delta...");
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // Build the "old" and "new" Merkle snapshots.
+    // When we just seeded from base, use content-based hashing so that
+    // identical files across worktrees (same content, different mtime)
+    // produce identical hashes. The "old" snapshot comes from the main
+    // worktree root, and the "new" from this worktree's root.
+    let (old_snapshot, new_snapshot) = if seeded_from_base {
+        let _ = fs::write(workspace.indexing_progress_path(), "scanning (content-based)");
+        let main_root = workspace
+            .main_worktree_root()
+            .context("seeded from base but cannot find main worktree root")?;
+        let old = MerkleSnapshot::build_content_based(&main_root)?;
+        let new = MerkleSnapshot::build_content_based(&workspace.root)?;
+        (old, new)
+    } else {
+        let old = MerkleSnapshot::load(&workspace.merkle_snapshot_path())?;
+        let _ = fs::write(workspace.indexing_progress_path(), "scanning");
+        let new = MerkleSnapshot::build(&workspace.root)?;
+        (old, new)
+    };
+
     let diff = old_snapshot.diff(&new_snapshot);
 
     if diff.added_or_modified.is_empty()
         && diff.deleted.is_empty()
         && workspace_is_indexed(workspace)
     {
+        // Save the new snapshot so future incremental diffs work with mtime mode
+        new_snapshot.save(&workspace.merkle_snapshot_path())?;
         return Ok(IndexingSummary {
             workspace_id: workspace.id.clone(),
             indexed_files: 0,
@@ -584,6 +645,72 @@ fn vector_key_from_content_hash(content_hash: &str) -> u64 {
     let mut value = u64::from_le_bytes(bytes);
     value &= i64::MAX as u64;
     value
+}
+
+/// Copy base index files from the main worktree's index to a worktree's index.
+/// This enables the worktree to start from the base and only apply the delta.
+fn seed_index_files(base_dir: &Path, target_dir: &Path) -> Result<()> {
+    // Copy SQLite database
+    let base_sqlite = base_dir.join("metadata.sqlite3");
+    if base_sqlite.exists() {
+        fs::copy(&base_sqlite, target_dir.join("metadata.sqlite3"))?;
+        // Also copy WAL/SHM if present
+        let wal = base_dir.join("metadata.sqlite3-wal");
+        let shm = base_dir.join("metadata.sqlite3-shm");
+        if wal.exists() {
+            fs::copy(&wal, target_dir.join("metadata.sqlite3-wal"))?;
+        }
+        if shm.exists() {
+            fs::copy(&shm, target_dir.join("metadata.sqlite3-shm"))?;
+        }
+    }
+
+    // Copy Merkle snapshot
+    let base_merkle = base_dir.join("merkle_snapshot.json");
+    if base_merkle.exists() {
+        fs::copy(&base_merkle, target_dir.join("merkle_snapshot.json"))?;
+    }
+
+    // Copy vector index
+    let base_vectors = base_dir.join("vectors.usearch");
+    if base_vectors.exists() {
+        fs::copy(&base_vectors, target_dir.join("vectors.usearch"))?;
+    }
+
+    // Copy neural vector index
+    let base_neural = base_dir.join("vectors_neural.usearch");
+    if base_neural.exists() {
+        fs::copy(&base_neural, target_dir.join("vectors_neural.usearch"))?;
+    }
+
+    // Copy Tantivy index directory
+    let base_tantivy = base_dir.join("tantivy");
+    let target_tantivy = target_dir.join("tantivy");
+    if base_tantivy.exists() {
+        // Remove existing tantivy dir first (it may have been created by open_storage)
+        if target_tantivy.exists() {
+            fs::remove_dir_all(&target_tantivy)?;
+        }
+        copy_dir_recursive(&base_tantivy, &target_tantivy)?;
+    }
+
+    Ok(())
+}
+
+/// Recursively copy a directory and all its contents.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else {
+            fs::copy(&src_path, &dst_path)?;
+        }
+    }
+    Ok(())
 }
 
 fn apply_deletions(

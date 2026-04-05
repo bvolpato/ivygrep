@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,14 @@ pub struct Workspace {
     pub id: String,
     pub root: PathBuf,
     pub index_dir: PathBuf,
+    /// Stable repo-level identifier shared by all worktrees of the same repository.
+    /// `None` for non-git directories.
+    #[serde(default)]
+    pub repo_id: Option<String>,
+    /// Path to the base (main) worktree's index directory.
+    /// `Some(...)` only when this workspace is a git worktree (not the main checkout).
+    #[serde(default)]
+    pub base_index_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +53,12 @@ pub struct WorkspaceStatus {
     pub indexing_in_progress: bool,
     #[serde(default)]
     pub indexing_progress: Option<String>,
+    #[serde(default)]
+    pub is_worktree: bool,
+    #[serde(default)]
+    pub base_repo_root: Option<PathBuf>,
+    #[serde(default)]
+    pub seeded_from_base: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
@@ -68,11 +83,44 @@ impl Workspace {
         let id = workspace_id(&root);
         let index_dir = config::indexes_root()?.join(&id);
 
+        let (repo_id, base_index_dir) = match git_common_dir(&root) {
+            Some(common_dir) => {
+                let rid = repo_id_from_common_dir(&common_dir);
+                // If the common dir's parent is different from root, we are a worktree
+                let main_root = git_main_worktree_root(&root);
+                let base = if let Some(ref main) = main_root {
+                    if *main != root {
+                        let main_id = workspace_id(main);
+                        Some(config::indexes_root()?.join(&main_id))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                (Some(rid), base)
+            }
+            None => (None, None),
+        };
+
         Ok(Self {
             id,
             root,
             index_dir,
+            repo_id,
+            base_index_dir,
         })
+    }
+
+    /// Returns true if this workspace is a git worktree (not the main checkout).
+    pub fn is_worktree(&self) -> bool {
+        self.base_index_dir.is_some()
+    }
+
+    /// Returns the root path of the main worktree, if this is a worktree.
+    pub fn main_worktree_root(&self) -> Option<PathBuf> {
+        git_main_worktree_root(&self.root)
+            .filter(|main| *main != self.root)
     }
 
     pub fn ensure_dirs(&self) -> Result<()> {
@@ -295,6 +343,73 @@ pub fn workspace_id(root: &Path) -> String {
     hex::encode(xxhash_rust::xxh3::xxh3_128(root.to_string_lossy().as_bytes()).to_le_bytes())
 }
 
+/// Compute a stable repo-level ID from the git common directory path.
+/// All worktrees of the same repo will return the same ID.
+pub fn repo_id_from_common_dir(common_dir: &Path) -> String {
+    let mut prefix = b"repo:".to_vec();
+    prefix.extend_from_slice(common_dir.to_string_lossy().as_bytes());
+    hex::encode(xxhash_rust::xxh3::xxh3_128(&prefix).to_le_bytes())
+}
+
+/// Get the git common directory for a repository root.
+/// For regular repos this is `<root>/.git`, for worktrees this is the main repo's `.git`.
+/// Returns `None` if not a git repository.
+pub fn git_common_dir(root: &Path) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(&raw);
+    // git may return a relative path — resolve relative to root
+    let resolved = if path.is_absolute() {
+        path
+    } else {
+        root.join(&path)
+    };
+    // Canonicalize to resolve symlinks and ../ components
+    resolved.canonicalize().ok().or(Some(resolved))
+}
+
+/// Get the root directory of the main worktree for a repository.
+/// For a regular checkout, this returns the same root.
+/// For a worktree, this returns the main checkout's root.
+fn git_main_worktree_root(root: &Path) -> Option<PathBuf> {
+    let git_entry = root.join(".git");
+    if git_entry.is_file() {
+        // This is a worktree — .git is a file containing "gitdir: ..."
+        // The main worktree root is the parent of the common dir
+        let common = git_common_dir(root)?;
+        // common_dir is like /path/to/main/.git — its parent is the main root
+        // But we need to be careful: common_dir might end with /.git
+        let parent = common.parent()?;
+        let parent_name = parent.file_name()?.to_str()?;
+        if parent_name == ".git" {
+            // common_dir is /path/to/main/.git → main root is /path/to/main
+            // Wait, that means parent IS .git, so the main root is parent's parent
+            // Actually no — git_common_dir returns /path/to/main/.git directly
+            // So the main root is parent of the common_dir
+            return parent.parent().map(|p| p.to_path_buf());
+        }
+        // common_dir might be /path/to/main/.git itself
+        Some(parent.to_path_buf())
+    } else if git_entry.is_dir() {
+        // Regular checkout — this IS the main worktree
+        Some(root.to_path_buf())
+    } else {
+        None
+    }
+}
+
 pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
     let root = config::indexes_root()?;
     if !root.exists() {
@@ -367,6 +482,15 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
             None
         };
 
+        let ws_is_worktree = metadata.root.join(".git").is_file();
+        let base_repo_root = if ws_is_worktree {
+            git_main_worktree_root(&metadata.root)
+                .filter(|main| *main != metadata.root)
+        } else {
+            None
+        };
+        let seeded_from_base = index_dir.join("base_ref.json").exists();
+
         by_id.insert(
             metadata.id.clone(),
             WorkspaceStatus {
@@ -384,6 +508,9 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
                 enhancing_paused_reason,
                 indexing_in_progress,
                 indexing_progress,
+                is_worktree: ws_is_worktree,
+                base_repo_root,
+                seeded_from_base,
             },
         );
     }
@@ -594,6 +721,8 @@ mod tests {
             id: "test".to_string(),
             root: tmp.path().to_path_buf(),
             index_dir: index_dir.clone(),
+            repo_id: None,
+            base_index_dir: None,
         };
 
         // No DB file exists yet → chunk_count is 0 → false

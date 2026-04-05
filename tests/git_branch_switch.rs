@@ -522,3 +522,204 @@ fn git_branch_adds_entire_subdirectory() {
         "handler_3.rs NOT searchable after switching back to main"
     );
 }
+
+// ---------------------------------------------------------------------------
+// WORKTREE: Seed-from-base indexing
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn git_worktree_seeds_from_base_and_applies_delta() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    // Create a repo with 50 files to make the seed benefit obvious
+    git(root.path(), &["init", "-b", "main"]);
+
+    for i in 0..50 {
+        fs::write(
+            root.path().join(format!("module_{i:03}.rs")),
+            format!("pub fn func_{i}() -> usize {{ {i} }}\n"),
+        )
+        .unwrap();
+    }
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "initial 50 files"]);
+
+    // Index the main workspace
+    let s1 = setup_and_index(root.path(), home.path());
+    assert_eq!(s1.indexed_files, 50, "all 50 files indexed on main");
+
+    let ws = workspace_for(root.path());
+    let main_chunks = chunk_count(&ws);
+    assert!(main_chunks > 0, "main has chunks");
+
+    // Create a branch with 2 modified files
+    git(root.path(), &["checkout", "-b", "feature/tweak"]);
+    fs::write(
+        root.path().join("module_010.rs"),
+        "pub fn func_10_modified() -> usize { 1000 }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("module_020.rs"),
+        "pub fn func_20_modified() -> usize { 2000 }\n",
+    )
+    .unwrap();
+    // Add a new file only on feature branch
+    fs::write(
+        root.path().join("feature_only.rs"),
+        "pub fn feature_exclusive() -> &'static str { \"only_on_feature\" }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "modify 2 files, add 1"]);
+
+    // Go back to main
+    git(root.path(), &["checkout", "main"]);
+
+    // Create a worktree for the feature branch
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("worktree");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            wt_path.to_str().unwrap(),
+            "feature/tweak",
+        ],
+    );
+
+    // Verify the worktree has the .git file (not directory)
+    assert!(
+        wt_path.join(".git").is_file(),
+        "worktree should have .git file"
+    );
+
+    // Index the worktree — it should seed from the base
+    let s2 = setup_and_index(&wt_path, home.path());
+
+    let wt_ws = workspace_for(&wt_path);
+
+    // Verify worktree detection
+    assert!(
+        wt_ws.is_worktree(),
+        "worktree workspace should report is_worktree=true"
+    );
+    assert!(
+        wt_ws.base_index_dir.is_some(),
+        "worktree should have base_index_dir"
+    );
+
+    // The worktree should have seeded from base:
+    // - It should have processed far fewer files than a full re-index (not 50)
+    // - It should have the modified + added files indexed
+    assert!(
+        s2.indexed_files < 50,
+        "worktree should seed from base, not re-index all 50 files. Got: {}",
+        s2.indexed_files,
+    );
+
+    // Verify the worktree's index has the correct content
+    let wt_files = indexed_files(&wt_ws);
+
+    // All 50 original + 1 new file
+    assert!(
+        wt_files.contains("module_000.rs"),
+        "inherited file from base"
+    );
+    assert!(
+        wt_files.contains("module_049.rs"),
+        "inherited file from base"
+    );
+    assert!(
+        wt_files.contains("feature_only.rs"),
+        "new file on feature branch"
+    );
+
+    // Search should find the modified content
+    let modified_results = search_file_paths(&wt_ws, "func_10_modified");
+    assert!(
+        modified_results
+            .iter()
+            .any(|p| p.contains("module_010.rs")),
+        "modified func_10 should be searchable in worktree"
+    );
+
+    // Search should find the feature-only content
+    let feature_results = search_file_paths(&wt_ws, "feature_exclusive");
+    assert!(
+        feature_results
+            .iter()
+            .any(|p| p.contains("feature_only.rs")),
+        "feature_exclusive should be searchable in worktree"
+    );
+
+    // Search for inherited content should still work
+    let inherited_results = search_file_paths(&wt_ws, "func_0");
+    assert!(
+        !inherited_results.is_empty(),
+        "inherited content from base should be searchable"
+    );
+
+    // base_ref.json should exist
+    assert!(
+        wt_ws.index_dir.join("base_ref.json").exists(),
+        "base_ref.json should be written"
+    );
+
+    // Clean up worktree
+    git(root.path(), &["worktree", "remove", wt_path.to_str().unwrap(), "--force"]);
+}
+
+#[test]
+#[serial]
+fn git_worktree_repo_id_matches_main() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    git(root.path(), &["init", "-b", "main"]);
+    fs::write(root.path().join("main.rs"), "fn main() {}\n").unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "initial"]);
+
+    // Index main
+    setup_and_index(root.path(), home.path());
+    let main_ws = workspace_for(root.path());
+
+    // Create worktree
+    git(root.path(), &["checkout", "-b", "wt-branch"]);
+    git(root.path(), &["checkout", "main"]);
+
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt");
+    git(
+        root.path(),
+        &["worktree", "add", wt_path.to_str().unwrap(), "wt-branch"],
+    );
+
+    let wt_ws = workspace_for(&wt_path);
+
+    // repo_id should be the same for both
+    assert!(main_ws.repo_id.is_some(), "main should have repo_id");
+    assert!(wt_ws.repo_id.is_some(), "worktree should have repo_id");
+    assert_eq!(
+        main_ws.repo_id, wt_ws.repo_id,
+        "main and worktree should share the same repo_id"
+    );
+
+    // workspace IDs should be DIFFERENT (different paths)
+    assert_ne!(
+        main_ws.id, wt_ws.id,
+        "main and worktree should have different workspace IDs"
+    );
+
+    // worktree should detect base
+    assert!(wt_ws.is_worktree(), "wt should be a worktree");
+    assert!(!main_ws.is_worktree(), "main should NOT be a worktree");
+
+    // Clean up
+    git(root.path(), &["worktree", "remove", wt_path.to_str().unwrap(), "--force"]);
+}
+

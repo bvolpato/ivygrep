@@ -47,6 +47,17 @@ impl MerkleSnapshot {
     }
 
     pub fn build(root: &Path) -> Result<Self> {
+        Self::build_inner(root, false)
+    }
+
+    /// Build a snapshot using content-based hashing (reads file contents instead of mtime).
+    /// This is slower but produces identical hashes for identical files across worktrees,
+    /// enabling correct delta computation when seeding a worktree from a base index.
+    pub fn build_content_based(root: &Path) -> Result<Self> {
+        Self::build_inner(root, true)
+    }
+
+    fn build_inner(root: &Path, content_based: bool) -> Result<Self> {
         let walker = crate::walker::source_walker(root);
 
         let show_progress = std::io::stderr().is_terminal();
@@ -77,17 +88,27 @@ impl MerkleSnapshot {
                     eprint!("\r\x1b[K  scanning files... {}", n);
                 }
 
-                let mut data = Vec::with_capacity(128);
-                data.extend_from_slice(rel.to_string_lossy().as_bytes());
-                data.extend_from_slice(&metadata.len().to_le_bytes());
+                let file_hash = if content_based {
+                    // Content-based: hash rel_path + file contents
+                    // Identical files across worktrees produce identical hashes
+                    let content = fs::read(path).ok()?;
+                    let mut data = Vec::with_capacity(rel.to_string_lossy().len() + content.len());
+                    data.extend_from_slice(rel.to_string_lossy().as_bytes());
+                    data.extend_from_slice(&content);
+                    hex::encode(xxhash_rust::xxh3::xxh3_128(&data).to_le_bytes())
+                } else {
+                    // Mtime-based: fast stat-only hash (default for normal indexing)
+                    let mut data = Vec::with_capacity(128);
+                    data.extend_from_slice(rel.to_string_lossy().as_bytes());
+                    data.extend_from_slice(&metadata.len().to_le_bytes());
+                    if let Ok(mtime) = metadata.modified()
+                        && let Ok(duration) = mtime.duration_since(std::time::UNIX_EPOCH)
+                    {
+                        data.extend_from_slice(&duration.as_nanos().to_le_bytes());
+                    }
+                    hex::encode(xxhash_rust::xxh3::xxh3_128(&data).to_le_bytes())
+                };
 
-                if let Ok(mtime) = metadata.modified()
-                    && let Ok(duration) = mtime.duration_since(std::time::UNIX_EPOCH)
-                {
-                    data.extend_from_slice(&duration.as_nanos().to_le_bytes());
-                }
-
-                let file_hash = hex::encode(xxhash_rust::xxh3::xxh3_128(&data).to_le_bytes());
                 Some((rel.to_string_lossy().to_string(), file_hash))
             })
             .collect();
