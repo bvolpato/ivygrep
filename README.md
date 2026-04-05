@@ -54,6 +54,46 @@ Traditional code search tools require you to know _exactly_ what you're looking 
 
 ---
 
+## ⚡ Performance
+
+### Search — ivygrep vs grep vs ripgrep
+
+Benchmarked on the **Linux kernel** (92K files, 1.5M chunks) — query: `"kfree"`:
+
+| Tool | Mode | Time | Speedup |
+|------|------|-----:|--------:|
+| `grep -rn` | exact string | ~9.0 s | 1× |
+| `rg` | exact string | ~2.7 s | 3× |
+| **`ig`** | semantic: `"kernel memory allocation"` | **~72 ms** | **125×** |
+| **`ig --literal`** | **single identifier** (fast path) | **~17 ms** | **529×** |
+
+> `grep` and `rg` scan every file on each query. ivygrep queries a pre-built
+> index, so searches are **orders of magnitude faster** on warm repos — and
+> semantic mode finds related code even when you don't know the exact identifier.
+
+### Indexing
+
+| Operation | Time | Notes |
+|-----------|------|-------|
+| **First index** (40 files) | **0.0s** | Hash embeddings — instant |
+| **First index** (200 files) | **0.3s** | Parallel hash pipeline |
+| **Re-index** (no changes) | 0.01s | Merkle diff only |
+| **Neural enhancement** | ~24s | Background, non-blocking |
+
+### Concurrent search (AI agent load, 8 threads)
+
+| Metric | Mac M4 Max | Linux Ryzen 9 3950X |
+|--------|------------|---------------------|
+| **Average latency** | ~26 ms | ~11 ms |
+| **p95 latency** | ~62 ms | ~15 ms |
+| **Max latency** | ~98 ms | ~20 ms |
+
+> Tested on: Apple M4 Max (16-core, 128 GB) and AMD Ryzen 9 3950X (16-core/32-thread, 64 GB DDR4).
+
+> Indexing is sub-second for most projects. Search is sub-100ms. Neural quality upgrades happen silently.
+
+---
+
 ## 🚀 Quick Start
 
 ### Install
@@ -90,93 +130,6 @@ That's it. No config files, no setup wizards, no prompts, no API keys. On first 
 <p>
   <img src="assets/ig-demo.gif" alt="ivygrep demo — searching the opencode repo" width="700" />
 </p>
-
----
-
-## 🧠 How It Works
-
-ivygrep uses a **two-tier hybrid search architecture** — fast indexing with progressive quality upgrades:
-
-```mermaid
-flowchart TD
-    Q["ig 'retry logic for payments'"]
-    Q --> I["①  Hash Index\n(sub-second)"]
-    I --> L["Lexical BM25\n(Tantivy)"]
-    I --> S["Semantic Search\n(Hash → Neural)"]
-    L --> F["RRF Hybrid Fusion"]
-    S --> F
-    F --> R["Ranked Results"]
-    I -.-> BG["② Background\nNeural Enhancement"]
-    BG -.-> NV["Neural vectors\n(quantized ONNX)"]
-```
-
-**On first search:**
-1. **Index fast** with structural hashes (sub-second for most projects via 128-bit SIMD `xxh3`)
-2. **Stream into DB** through an asynchronous MPSC chunking pipeline, maintaining absolute minimal memory footprints (handling even the 85,000+ files of the Linux kernel smoothly).
-3. **Return results** immediately via lexical + hash-semantic fusion.
-4. **Enhance silently** — a background daemon independently processes neural (ONNX) embeddings utilizing throttled CPUs to maintain responsiveness.
-5. **GPU Acceleration** — on macOS, ONNX natively links to Apple CoreML Execution Providers, offloading matrix multiplications entirely to the ANE (Apple Neural Engine) autonomously.
-6. **Subsequent queries** seamlessly adopt the high-precision neural vectors!
-
-Use `ig --status` to transparently examine how each workspace is dynamically tracking inside the background daemon:
-
-```
-⟐ /Users/you/project
-  Index:  ✓ indexed (2m ago)
-  Files:  41 files, 440 chunks
-  Size:   1.7 MB
-  Search: ⟳ enhancing (computing AllMiniLML6V2Q via CoreML in background...)
-          (200 / 440 chunks, ~45%)
-```
-
-> If you wish to forcibly blockade `ig` queries from evaluating strictly UNTIL neural indexing hits 100% (to prevent partial BM25 hybridization), pass the `--wait-for-enhancement` flag.
-
-- **Lexical path** — BM25 scoring via [Tantivy](https://github.com/quickwit-oss/tantivy) catches exact keyword matches
-- **Semantic path** — starts with hash embeddings (computed in-memory, near-zero cost), upgrades to quantized ONNX neural embeddings in background
-- **Intelligent pre-filtering** — File globs (`--include`, `--exclude`) and language filters natively push down into Tantivy `BooleanQuery` and SQLite `LIKE` queries to avoid full-corpus vector scaling on massive (2M+ chunks) monolithic repos.
-- **AST chunking** — [tree-sitter](https://tree-sitter.github.io) splits code into precise function/class boundaries (35+ languages)
-- **Incremental indexing** — Merkle-style fingerprints mean re-index only touches changed files
-
----
-
-## ⚡ Performance
-
-### Indexing
-
-| Operation | Time | Notes |
-|-----------|------|-------|
-| **First index** (40 files) | **0.0s** | Hash embeddings — instant |
-| **First index** (200 files) | **0.3s** | Parallel hash pipeline |
-| **Re-index** (no changes) | 0.01s | Merkle diff only |
-| **Neural enhancement** | ~24s | Background, non-blocking |
-
-### Search — ivygrep vs grep vs ripgrep
-
-Benchmarked on the **Linux kernel** (92K files, 1.5M chunks) — query: `"kfree"`:
-
-| Tool | Mode | Time | Speedup |
-|------|------|-----:|--------:|
-| `grep -rn` | exact string | ~9.0 s | 1× |
-| `rg` | exact string | ~2.7 s | 3× |
-| **`ig`** | **single identifier** (fast path) | **~17 ms** | **529×** |
-| **`ig --regex`** | exact string regex | **~25 ms** | **360×** |
-| **`ig`** | semantic: `"kernel memory allocation"` | **~72 ms** | **125×** |
-
-> `grep` and `rg` scan every file on each query. ivygrep queries a pre-built
-> index, so searches are **orders of magnitude faster** on warm repos — and
-> semantic mode finds related code even when you don't know the exact identifier.
-
-### Concurrent search (AI agent load, 8 threads)
-
-| Metric | Mac M4 Max | Linux Ryzen 9 3950X |
-|--------|------------|---------------------|
-| **Average latency** | ~26 ms | ~11 ms |
-| **p95 latency** | ~62 ms | ~15 ms |
-| **Max latency** | ~98 ms | ~20 ms |
-
-> Tested on: Apple M4 Max (16-core, 128 GB) and AMD Ryzen 9 3950X (16-core/32-thread, 64 GB DDR4).
-
-> Indexing is sub-second for most projects. Search is sub-100ms. Neural quality upgrades happen silently.
 
 ---
 
