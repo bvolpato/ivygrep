@@ -188,17 +188,16 @@ fn index_workspace_inner(
         let base_sqlite = base_dir.join("metadata.sqlite3");
         let base_merkle = base_dir.join("merkle_snapshot.json");
 
-        if (!base_sqlite.exists() || !base_merkle.exists()) && !workspace.has_overlay() {
-            if let Some(main_root) = workspace.main_worktree_root() {
-                eprintln!(
-                    "  ⚡ base workspace is not indexed, running full base indexing first..."
-                );
-                let base_workspace = crate::workspace::Workspace::resolve(&main_root)?;
-                // We recursively call index_workspace on the base. It will acquire its
-                // own safe lock and index natively.
-                let _ = index_workspace(&base_workspace, embedding_model)?;
-                eprintln!("  ⚡ base indexing complete, proceeding with overlay...");
-            }
+        if (!base_sqlite.exists() || !base_merkle.exists())
+            && !workspace.has_overlay()
+            && let Some(main_root) = workspace.main_worktree_root()
+        {
+            eprintln!("  ⚡ base workspace is not indexed, running full base indexing first...");
+            let base_workspace = crate::workspace::Workspace::resolve(&main_root)?;
+            // We recursively call index_workspace on the base. It will acquire its
+            // own safe lock and index natively.
+            let _ = index_workspace(&base_workspace, embedding_model)?;
+            eprintln!("  ⚡ base indexing complete, proceeding with overlay...");
         }
 
         if base_sqlite.exists() && base_merkle.exists() && !workspace.has_overlay() {

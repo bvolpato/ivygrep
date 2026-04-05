@@ -282,12 +282,11 @@ impl Workspace {
         // If this is a worktree overlay, its hybrid search strongly relies on the
         // base repository's vectors. We explicitly cascade the neural enhancement
         // trigger so the base index receives upgrades in the background too.
-        if let Some(main_root) = self.main_worktree_root() {
-            if let Ok(base_ws) = Workspace::resolve(&main_root) {
-                if base_ws.needs_neural_enhancement() {
-                    let _ = base_ws.trigger_background_enhancement();
-                }
-            }
+        if let Some(main_root) = self.main_worktree_root()
+            && let Ok(base_ws) = Workspace::resolve(&main_root)
+            && base_ws.needs_neural_enhancement()
+        {
+            let _ = base_ws.trigger_background_enhancement();
         }
 
         Ok(())
