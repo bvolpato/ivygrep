@@ -311,8 +311,9 @@ fn index_workspace_inner(
     let mut vector_index =
         VectorStore::open(&vector_path, embedding_model.dimensions(), ScalarKind::F16)?;
 
-    // Batch all SQLite writes in a single transaction for ~10-50x speedup.
-    let tx = sqlite.transaction()?;
+    // Batch SQLite writes in a transaction for ~10-50x speedup.
+    // Mutable so we can periodically commit and avert massive WAL files.
+    let mut tx = sqlite.transaction()?;
 
     // In overlay mode, tombstone deleted files instead of removing from base
     if use_overlay {
@@ -336,6 +337,7 @@ fn index_workspace_inner(
     let t0 = std::time::Instant::now();
     let mut total_chunks_processed = 0;
     let mut touched_files = HashSet::new();
+    let mut chunks_since_commit = 0;
 
     // Stream through batches to rigidly bound memory footprints.
     // 4096 files is highly parallelizable while capping memory overhead effectively.
@@ -411,6 +413,7 @@ fn index_workspace_inner(
         for (rel_path, indexed_chunks) in &file_chunks {
             touched_files.insert(rel_path.to_string_lossy().to_string());
             total_chunks_processed += indexed_chunks.len();
+            chunks_since_commit += indexed_chunks.len();
 
             remove_file_chunks(&tx, &mut writer, &fields, &mut vector_index, rel_path)?;
 
@@ -431,6 +434,15 @@ fn index_workspace_inner(
                 insert_chunk(&tx, indexed)?;
                 add_chunk_doc(&mut writer, &fields, indexed)?;
             }
+        }
+
+        // Prevent memory/WAL ballooning on massive repositories
+        if chunks_since_commit >= 100_000 {
+            tx.commit()?;
+            writer.commit()?;
+            vector_index.save()?;
+            tx = sqlite.transaction()?;
+            chunks_since_commit = 0;
         }
     }
 
