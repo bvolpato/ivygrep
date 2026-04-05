@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775427758653,
+  "lastUpdate": 1775428256362,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -57,6 +57,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "indexer/index_small_workspace",
             "value": 710680738.8,
+            "unit": "ns"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "8ba4962207f786f425f9cc25d73d24f788295d0b",
+          "message": "chore: fix formatting in benchmarks (#5)",
+          "timestamp": "2026-04-05T18:29:35-04:00",
+          "tree_id": "7eb2100bb98b3ed2c6f50a117f3aafb325011011",
+          "url": "https://github.com/bvolpato/ivygrep/commit/8ba4962207f786f425f9cc25d73d24f788295d0b"
+        },
+        "date": 1775428255964,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 698828500.2,
             "unit": "ns"
           }
         ]
