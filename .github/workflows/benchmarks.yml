@@ -45,8 +45,9 @@ jobs:
                   obj = json.loads(line.strip())
                   if obj.get("reason") == "benchmark-complete":
                       name = obj.get("id")
-                      value = obj.get("mean", {}).get("estimate", 0)
-                      data.append({"name": name, "value": value, "unit": "ns"})
+                      ns = obj.get("mean", {}).get("estimate", 0)
+                      us = round(ns / 1000, 2)
+                      data.append({"name": name, "value": us, "unit": "µs"})
               except: pass
           with open("benchmark-data.json", "w") as f:
               json.dump(data, f)
