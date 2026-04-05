@@ -50,8 +50,8 @@ jobs:
             cargo_flags: ""
           - os: macos-latest
             cargo_flags: ""
-          - os: windows-latest
-            cargo_flags: "--no-default-features"
+          # Windows excluded: usearch (simsimd) uses AVX-512 FP16 intrinsics
+          # that MSVC doesn't support. IPC layer is cross-platform ready.
     steps:
       - uses: actions/checkout@v5
 
@@ -82,8 +82,7 @@ jobs:
             cargo_flags: ""
           - os: macos-latest
             cargo_flags: ""
-          - os: windows-latest
-            cargo_flags: "--no-default-features"
+          # Windows excluded: usearch (simsimd) doesn't compile on MSVC.
     steps:
       - uses: actions/checkout@v5
 
