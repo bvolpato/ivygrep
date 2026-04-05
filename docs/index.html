@@ -182,10 +182,42 @@
     </section>
 
     <section id="performance" class="container relative z-10 section-spacing">
-        <div class="grid grid-2 align-center">
+        <h2 class="section-title text-center">Speed That Scales</h2>
+        <p class="text-center subtitle-small mb-4">Benchmarked on the <strong>Linux kernel</strong> (92K files, 1.5M chunks) — query: <code>"kfree"</code>. <a href="https://www.gnu.org/software/grep/" target="_blank" style="color: var(--accent-green); text-decoration: none;"><code>grep</code></a> and <a href="https://github.com/BurntSushi/ripgrep" target="_blank" style="color: var(--accent-green); text-decoration: none;"><code>rg</code></a> scan every file on each query. ivygrep queries a pre-built index.</p>
+
+        <!-- Head-to-head benchmark comparison -->
+        <div class="glass-panel fade-in-scroll benchmark-panel">
+            <div class="benchmark-row">
+                <div class="benchmark-tool"><code>grep -rn</code><span class="benchmark-mode">exact string</span></div>
+                <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-grep" data-width="100%"><span class="benchmark-time">~9.0 s</span></div></div>
+                <div class="benchmark-speed">1×</div>
+            </div>
+            <div class="benchmark-row">
+                <div class="benchmark-tool"><code>rg</code><span class="benchmark-mode">exact string</span></div>
+                <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-rg" data-width="30%"><span class="benchmark-time">~2.7 s</span></div></div>
+                <div class="benchmark-speed">3×</div>
+            </div>
+            <div class="benchmark-row benchmark-row-highlight">
+                <div class="benchmark-tool"><code>ig</code><span class="benchmark-mode">single identifier</span></div>
+                <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig" data-width="1.9%"><span class="benchmark-time">~17 ms</span></div></div>
+                <div class="benchmark-speed benchmark-speed-hero">529×</div>
+            </div>
+            <div class="benchmark-row benchmark-row-highlight">
+                <div class="benchmark-tool"><code>ig --regex</code><span class="benchmark-mode">exact string regex</span></div>
+                <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig" data-width="2.8%"><span class="benchmark-time">~25 ms</span></div></div>
+                <div class="benchmark-speed benchmark-speed-hero">360×</div>
+            </div>
+            <div class="benchmark-row benchmark-row-highlight">
+                <div class="benchmark-tool"><code>ig</code><span class="benchmark-mode">semantic search</span></div>
+                <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig-semantic" data-width="4%"><span class="benchmark-time">~72 ms</span></div></div>
+                <div class="benchmark-speed benchmark-speed-hero">125×</div>
+            </div>
+            <p class="benchmark-note">grep and rg scan every file at query time. ivygrep queries a pre-built index — searches are <strong>orders of magnitude faster</strong> on warm repos, and semantic mode finds related code even when you don't know the exact identifier.</p>
+        </div>
+
+        <!-- Stat callouts + Concurrent search -->
+        <div class="grid grid-2 align-center mt-4">
             <div class="fade-in-scroll">
-                <h2 class="section-title">Speed That Scales</h2>
-                <p class="mb-2">Benchmarked on the <strong>Linux kernel</strong> (92K files, 1.5M chunks). <a href="https://www.gnu.org/software/grep/" target="_blank" style="color: var(--accent-green); text-decoration: none;"><code>grep</code></a> and <a href="https://github.com/BurntSushi/ripgrep" target="_blank" style="color: var(--accent-green); text-decoration: none;"><code>rg</code></a> scan every file on each query. ivygrep queries a pre-built index natively optimized for hybrid operations.</p>
                 <div class="stats-grid">
                     <div class="stat-box">
                         <div class="stat-value">529&times;</div>
@@ -193,17 +225,21 @@
                     </div>
                     <div class="stat-box">
                         <div class="stat-value">~17ms</div>
-                        <div class="stat-label">Single identifier search</div>
+                        <div class="stat-label">Single identifier lookup</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-value">~72ms</div>
+                        <div class="stat-label">Semantic: "kernel memory allocation"</div>
                     </div>
                     <div class="stat-box">
                         <div class="stat-value">0.3s</div>
-                        <div class="stat-label">Indexing 200 files</div>
+                        <div class="stat-label">Index 200 files from scratch</div>
                     </div>
                 </div>
             </div>
             <div class="glass-panel fade-in-scroll">
                 <h3>Concurrent Search (AI Agent Load)</h3>
-                <p class="text-xs opacity-70 mb-2">Simulating 8 concurrent queries via MCP</p>
+                <p class="text-xs opacity-70 mb-2">8 threads × Linux kernel — simulating MCP agent traffic</p>
                 <div class="perf-bar-group">
                     <div class="perf-label">Linux Ryzen 9 (Avg)</div>
                     <div class="perf-bar-wrapper"><div class="perf-bar fill-green" style="width: 25%">11 ms</div></div>
@@ -341,6 +377,24 @@
                 }
             }, 50); // 50ms per keystroke
         }, 1500); // Wait 1.5s before starting
+
+        // Animate benchmark bars on scroll
+        const benchmarkPanel = document.querySelector('.benchmark-panel');
+        if (benchmarkPanel) {
+            const benchmarkObserver = new IntersectionObserver((entries) => {
+                entries.forEach(entry => {
+                    if (entry.isIntersecting) {
+                        entry.target.querySelectorAll('.benchmark-bar').forEach((bar, i) => {
+                            setTimeout(() => {
+                                bar.style.width = bar.dataset.width;
+                            }, i * 200);
+                        });
+                        benchmarkObserver.unobserve(entry.target);
+                    }
+                });
+            }, { threshold: 0.3 });
+            benchmarkObserver.observe(benchmarkPanel);
+        }
     </script>
 </body>
 </html>
