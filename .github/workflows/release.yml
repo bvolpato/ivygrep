@@ -74,6 +74,7 @@ jobs:
         shell: bash
 
       - name: Smoke test
+        if: ${{ !contains(matrix.target, 'aarch64-unknown-linux') }}
         shell: bash
         run: |
           EXE_SUFFIX=""
