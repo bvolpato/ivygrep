@@ -2,6 +2,11 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.6] — 2026-04-05
+
+### Fixed
+- Re-enabled cross-architecture smoke testing for static aarch64 payloads using GitHub Actions Qemu setup.
+
 ## [0.5.5] — 2026-04-05
 
 Fully **statically linked** Linux binaries — zero shared library dependencies.
