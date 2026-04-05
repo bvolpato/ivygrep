@@ -180,93 +180,122 @@ fn index_workspace_inner(
         });
     }
 
-    // ── Worktree seed-from-base ──────────────────────────────────────────
-    // If this workspace is a git worktree and the main worktree has a
-    // fresh index we haven't seeded from yet, clone the base index and
-    // apply only the delta. This turns a full 270K-file index into a
-    // ~100-file delta operation.
-    let seeded_from_base = if let Some(ref base_dir) = workspace.base_index_dir {
+    // ── Worktree overlay ─────────────────────────────────────────────────
+    // If this is a git worktree and the base has a fresh index, create a
+    // thin overlay containing only divergent files instead of copying the
+    // entire base. The base index is referenced by path, not copied.
+    let overlay_mode = if let Some(ref base_dir) = workspace.base_index_dir {
         let base_sqlite = base_dir.join("metadata.sqlite3");
         let base_merkle = base_dir.join("merkle_snapshot.json");
-        let base_ref_path = workspace.index_dir.join("base_ref.json");
 
-        // Only seed if: the base index exists AND we haven't done the first index yet
         if base_sqlite.exists()
             && base_merkle.exists()
-            && !workspace_is_indexed(workspace)
+            && !workspace.has_overlay()
         {
-            eprintln!("  ⚡ seeding worktree index from base...");
-            let _ = fs::write(workspace.indexing_progress_path(), "seeding from base");
+            eprintln!("  ⚡ creating worktree overlay (no copy)...");
+            let _ = fs::write(workspace.indexing_progress_path(), "building overlay");
 
-            // Copy base index files (SQLite, Tantivy, vectors) but NOT the Merkle snapshot
-            // We'll build content-based snapshots for both base and worktree to compute a correct diff
-            seed_index_files(base_dir, &workspace.index_dir)?;
-            // Remove the copied Merkle snapshot — we'll build content-based ones instead
-            let _ = fs::remove_file(workspace.merkle_snapshot_path());
-
-            // Record that we seeded from this base
+            // Record base reference
+            let main_root = workspace.main_worktree_root()
+                .context("cannot find main worktree root")?;
             let base_ref = serde_json::json!({
                 "base_index_dir": base_dir.to_string_lossy(),
-                "seeded_at_unix": SystemTime::now()
+                "base_workspace_root": main_root.to_string_lossy(),
+                "created_at_unix": SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_secs(),
             });
-            fs::write(&base_ref_path, serde_json::to_vec_pretty(&base_ref)?)?;
+            fs::write(&workspace.base_ref_path(), serde_json::to_vec_pretty(&base_ref)?)?;
 
-            eprintln!("  ⚡ base index seeded, computing delta...");
-            true
+            // Content-based diff: base root vs worktree root
+            let _ = fs::write(workspace.indexing_progress_path(), "scanning (content-based)");
+            let old = MerkleSnapshot::build_content_based(&main_root)?;
+            let new = MerkleSnapshot::build_content_based(&workspace.root)?;
+            let diff = old.diff(&new);
+
+            eprintln!(
+                "  ⚡ overlay delta: {} added/modified, {} deleted",
+                diff.added_or_modified.len(),
+                diff.deleted.len()
+            );
+
+            // Save the content-based snapshot as the worktree's Merkle state
+            // Future incremental diffs will use mtime mode from this baseline
+            new.save(&workspace.merkle_snapshot_path())?;
+
+            Some(diff)
+        } else if workspace.has_overlay() {
+            // Overlay already exists — do normal incremental update on overlay stores
+            None
         } else {
-            false
+            // Base doesn't exist yet — fall through to full index
+            None
         }
     } else {
-        false
+        None
     };
 
-    // Build the "old" and "new" Merkle snapshots.
-    // When we just seeded from base, use content-based hashing so that
-    // identical files across worktrees (same content, different mtime)
-    // produce identical hashes. The "old" snapshot comes from the main
-    // worktree root, and the "new" from this worktree's root.
-    let (old_snapshot, new_snapshot) = if seeded_from_base {
-        let _ = fs::write(workspace.indexing_progress_path(), "scanning (content-based)");
-        let main_root = workspace
-            .main_worktree_root()
-            .context("seeded from base but cannot find main worktree root")?;
-        let old = MerkleSnapshot::build_content_based(&main_root)?;
-        let new = MerkleSnapshot::build_content_based(&workspace.root)?;
-        (old, new)
-    } else {
+    // When not in overlay creation mode, use the standard Merkle diff path
+    let diff = if let Some(overlay_diff) = overlay_mode {
+        overlay_diff
+    } else if workspace.has_overlay() {
+        // Incremental update to existing overlay
         let old = MerkleSnapshot::load(&workspace.merkle_snapshot_path())?;
         let _ = fs::write(workspace.indexing_progress_path(), "scanning");
         let new = MerkleSnapshot::build(&workspace.root)?;
-        (old, new)
+        let d = old.diff(&new);
+        new.save(&workspace.merkle_snapshot_path())?;
+        d
+    } else {
+        // Standard full-index path (non-worktree or base not available)
+        let old = MerkleSnapshot::load(&workspace.merkle_snapshot_path())?;
+        let _ = fs::write(workspace.indexing_progress_path(), "scanning");
+        let new = MerkleSnapshot::build(&workspace.root)?;
+        let d = old.diff(&new);
+        if d.added_or_modified.is_empty()
+            && d.deleted.is_empty()
+            && workspace_is_indexed(workspace)
+        {
+            return Ok(IndexingSummary {
+                workspace_id: workspace.id.clone(),
+                indexed_files: 0,
+                deleted_files: 0,
+                total_chunks: count_workspace_chunks(workspace).unwrap_or(0),
+            });
+        }
+        new.save(&workspace.merkle_snapshot_path())?;
+        d
     };
 
-    let diff = old_snapshot.diff(&new_snapshot);
+    // Determine which stores to write to: overlay or main
+    let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
+    let (sqlite_path, tantivy_path, vector_path) = if use_overlay {
+        (
+            workspace.overlay_sqlite_path(),
+            workspace.overlay_tantivy_dir(),
+            workspace.overlay_vector_path(),
+        )
+    } else {
+        (
+            workspace.sqlite_path(),
+            workspace.tantivy_dir(),
+            workspace.vector_path(),
+        )
+    };
 
-    if diff.added_or_modified.is_empty()
-        && diff.deleted.is_empty()
-        && workspace_is_indexed(workspace)
-    {
-        // Save the new snapshot so future incremental diffs work with mtime mode
-        new_snapshot.save(&workspace.merkle_snapshot_path())?;
-        return Ok(IndexingSummary {
-            workspace_id: workspace.id.clone(),
-            indexed_files: 0,
-            deleted_files: 0,
-            total_chunks: count_chunks(&workspace.sqlite_path())?,
-        });
+    let mut sqlite = Connection::open(&sqlite_path)?;
+    create_tables(&sqlite)?;
+    if use_overlay {
+        create_overlay_tables(&sqlite)?;
     }
 
-    let mut sqlite = Connection::open(workspace.sqlite_path())?;
-    create_tables(&sqlite)?;
-
-    let (tantivy, fields) = open_tantivy_index(&workspace.tantivy_dir())?;
+    fs::create_dir_all(&tantivy_path)?;
+    let (tantivy, fields) = open_tantivy_index(&tantivy_path)?;
     let mut writer = tantivy.writer(50_000_000)?;
 
     let mut vector_index = VectorStore::open(
-        &workspace.vector_path(),
+        &vector_path,
         embedding_model.dimensions(),
         ScalarKind::F16,
     )?;
@@ -274,7 +303,20 @@ fn index_workspace_inner(
     // Batch all SQLite writes in a single transaction for ~10-50x speedup.
     let tx = sqlite.transaction()?;
 
-    apply_deletions(&tx, &mut writer, &fields, &mut vector_index, &diff.deleted)?;
+    // In overlay mode, tombstone deleted files instead of removing from base
+    if use_overlay {
+        for rel_path in &diff.deleted {
+            let rel_str = rel_path.to_string_lossy().to_string();
+            tx.execute(
+                "INSERT OR IGNORE INTO tombstones (file_path) VALUES (?1)",
+                params![rel_str],
+            )?;
+            // Also remove from overlay if it was previously added there
+            tx.execute("DELETE FROM chunks WHERE file_path = ?1", params![rel_str])?;
+        }
+    } else {
+        apply_deletions(&tx, &mut writer, &fields, &mut vector_index, &diff.deleted)?;
+    }
 
     let total = diff.added_or_modified.len();
     let show_progress = total > 0 && std::io::stderr().is_terminal();
@@ -405,9 +447,6 @@ fn index_workspace_inner(
     writer.wait_merging_threads()?;
 
     vector_index.save()?;
-
-    new_snapshot.save(&workspace.merkle_snapshot_path())?;
-
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -429,7 +468,7 @@ fn index_workspace_inner(
         workspace_id: workspace.id.clone(),
         indexed_files: touched_files.len(),
         deleted_files: diff.deleted.len(),
-        total_chunks: count_chunks(&workspace.sqlite_path())?,
+        total_chunks: count_workspace_chunks(workspace).unwrap_or(0),
     })
 }
 
@@ -647,69 +686,20 @@ fn vector_key_from_content_hash(content_hash: &str) -> u64 {
     value
 }
 
-/// Copy base index files from the main worktree's index to a worktree's index.
-/// This enables the worktree to start from the base and only apply the delta.
-fn seed_index_files(base_dir: &Path, target_dir: &Path) -> Result<()> {
-    // Copy SQLite database
-    let base_sqlite = base_dir.join("metadata.sqlite3");
-    if base_sqlite.exists() {
-        fs::copy(&base_sqlite, target_dir.join("metadata.sqlite3"))?;
-        // Also copy WAL/SHM if present
-        let wal = base_dir.join("metadata.sqlite3-wal");
-        let shm = base_dir.join("metadata.sqlite3-shm");
-        if wal.exists() {
-            fs::copy(&wal, target_dir.join("metadata.sqlite3-wal"))?;
-        }
-        if shm.exists() {
-            fs::copy(&shm, target_dir.join("metadata.sqlite3-shm"))?;
-        }
-    }
+fn create_overlay_tables(conn: &Connection) -> Result<()> {
+    // The overlay chunks table has the exact same schema.
+    // It only stores chunks for files that are different from the base.
+    create_tables(conn)?;
 
-    // Copy Merkle snapshot
-    let base_merkle = base_dir.join("merkle_snapshot.json");
-    if base_merkle.exists() {
-        fs::copy(&base_merkle, target_dir.join("merkle_snapshot.json"))?;
-    }
+    // Tract deleted files that exist in the base index
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS tombstones (
+            file_path TEXT PRIMARY KEY
+        );
+        "#,
+    )?;
 
-    // Copy vector index
-    let base_vectors = base_dir.join("vectors.usearch");
-    if base_vectors.exists() {
-        fs::copy(&base_vectors, target_dir.join("vectors.usearch"))?;
-    }
-
-    // Copy neural vector index
-    let base_neural = base_dir.join("vectors_neural.usearch");
-    if base_neural.exists() {
-        fs::copy(&base_neural, target_dir.join("vectors_neural.usearch"))?;
-    }
-
-    // Copy Tantivy index directory
-    let base_tantivy = base_dir.join("tantivy");
-    let target_tantivy = target_dir.join("tantivy");
-    if base_tantivy.exists() {
-        // Remove existing tantivy dir first (it may have been created by open_storage)
-        if target_tantivy.exists() {
-            fs::remove_dir_all(&target_tantivy)?;
-        }
-        copy_dir_recursive(&base_tantivy, &target_tantivy)?;
-    }
-
-    Ok(())
-}
-
-/// Recursively copy a directory and all its contents.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let src_path = entry.path();
-        let dst_path = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir_recursive(&src_path, &dst_path)?;
-        } else {
-            fs::copy(&src_path, &dst_path)?;
-        }
-    }
     Ok(())
 }
 
@@ -810,9 +800,22 @@ fn chunk_vector_keys_for_file(conn: &Connection, rel_path: &str) -> Result<Vec<u
 }
 
 fn count_chunks(sqlite_path: &Path) -> Result<usize> {
+    if !sqlite_path.exists() {
+        return Ok(0);
+    }
     let conn = Connection::open(sqlite_path)?;
     let count: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
     Ok(count as usize)
+}
+
+fn count_workspace_chunks(workspace: &Workspace) -> Result<usize> {
+    let mut count = count_chunks(&workspace.sqlite_path()).unwrap_or(0);
+    if workspace.has_overlay() {
+        count += count_chunks(&workspace.overlay_sqlite_path()).unwrap_or(0);
+        // We don't subtract tombstones here because this is just an approximate
+        // indicator of index size for the CLI output / summary.
+    }
+    Ok(count)
 }
 
 pub fn open_sqlite(sqlite_path: &Path) -> Result<Connection> {

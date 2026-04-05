@@ -148,6 +148,33 @@ impl Workspace {
         self.index_dir.join("vectors_neural.usearch")
     }
 
+    // ── Overlay paths (worktree-only, thin per-worktree stores) ──────────
+
+    /// SQLite containing only divergent chunks + tombstones for this worktree.
+    pub fn overlay_sqlite_path(&self) -> PathBuf {
+        self.index_dir.join("overlay.sqlite3")
+    }
+
+    /// Tantivy index containing only divergent chunks for this worktree.
+    pub fn overlay_tantivy_dir(&self) -> PathBuf {
+        self.index_dir.join("overlay_tantivy")
+    }
+
+    /// Vector store containing only divergent vectors for this worktree.
+    pub fn overlay_vector_path(&self) -> PathBuf {
+        self.index_dir.join("overlay_vectors.usearch")
+    }
+
+    /// Returns true if this workspace has an active overlay (is_worktree + overlay exists).
+    pub fn has_overlay(&self) -> bool {
+        self.is_worktree() && self.overlay_sqlite_path().exists()
+    }
+
+    /// Path to the base reference JSON file recording which base we seeded from.
+    pub fn base_ref_path(&self) -> PathBuf {
+        self.index_dir.join("base_ref.json")
+    }
+
     /// PID file written by the background `--enhance-internal` process.
     /// Contains the PID so `--status` can detect whether enhancement is in progress.
     pub fn enhancing_pid_path(&self) -> PathBuf {

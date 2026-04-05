@@ -58,14 +58,58 @@ fn workspace_for(root: &std::path::Path) -> Workspace {
 
 /// Helper: get all indexed file paths from SQLite.
 fn indexed_files(workspace: &Workspace) -> HashSet<String> {
-    let conn = open_sqlite(&workspace.sqlite_path()).unwrap();
-    let mut stmt = conn
-        .prepare("SELECT DISTINCT file_path FROM chunks ORDER BY file_path")
-        .unwrap();
-    stmt.query_map([], |row| row.get::<_, String>(0))
-        .unwrap()
-        .map(|r| r.unwrap())
-        .collect()
+    let mut files = HashSet::new();
+    let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
+
+    if use_overlay {
+        let conn = open_sqlite(&workspace.overlay_sqlite_path()).unwrap();
+        let mut tombstones = HashSet::new();
+        if let Ok(mut stmt) = conn.prepare("SELECT file_path FROM tombstones") {
+            if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+                for r in rows {
+                    tombstones.insert(r.unwrap());
+                }
+            }
+        }
+
+        let mut overlay_files = HashSet::new();
+        if let Ok(mut stmt) = conn.prepare("SELECT DISTINCT file_path FROM chunks") {
+            if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+                for r in rows {
+                    let path = r.unwrap();
+                    overlay_files.insert(path.clone());
+                    files.insert(path);
+                }
+            }
+        }
+
+        let base_dir = workspace
+            .base_index_dir
+            .clone()
+            .unwrap_or_else(|| workspace.index_dir.clone());
+        let base_sqlite = base_dir.join("metadata.sqlite3");
+        if let Ok(base_conn) = open_sqlite(&base_sqlite) {
+            if let Ok(mut stmt) = base_conn.prepare("SELECT DISTINCT file_path FROM chunks") {
+                if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+                    for r in rows {
+                        let path = r.unwrap();
+                        if !tombstones.contains(&path) && !overlay_files.contains(&path) {
+                            files.insert(path);
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        let conn = open_sqlite(&workspace.sqlite_path()).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT file_path FROM chunks")
+            .unwrap();
+        for r in stmt.query_map([], |row| row.get::<_, String>(0)).unwrap() {
+            files.insert(r.unwrap());
+        }
+    }
+    files
 }
 
 /// Helper: search for a query and return file paths in the results.
