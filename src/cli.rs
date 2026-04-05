@@ -193,98 +193,122 @@ async fn run_status(json: bool) -> Result<()> {
             "\n  Run \x1b[1mig \"query\"\x1b[0m in a project to auto-index, or \x1b[1mig --add .\x1b[0m to register one."
         );
     } else {
+        let mut grouped: std::collections::BTreeMap<
+            std::path::PathBuf,
+            Vec<&crate::workspace::WorkspaceStatus>,
+        > = std::collections::BTreeMap::new();
+
         for ws in &workspaces {
-            println!("\x1b[1;36m⟐ {}\x1b[0m", ws.root.display());
-            println!("  ID:     {}", ws.id);
+            let key = ws.base_repo_root.clone().unwrap_or_else(|| ws.root.clone());
+            grouped.entry(key).or_default().push(ws);
+        }
 
-            // Index timestamp
-            match ws.last_indexed_at_unix {
-                Some(ts) => {
-                    let ago = format_timestamp_ago(ts);
-                    println!("  Index:  \x1b[32m✓ indexed\x1b[0m ({})", ago);
+        for (_, mut wss) in grouped {
+            wss.sort_by(|a, b| {
+                let a_is_base = a.base_repo_root.is_none();
+                let b_is_base = b.base_repo_root.is_none();
+                b_is_base.cmp(&a_is_base).then_with(|| a.root.cmp(&b.root))
+            });
+
+            for ws in wss {
+                let is_overlay = ws.base_repo_root.is_some();
+                let prefix = if is_overlay { "  " } else { "" };
+
+                if is_overlay {
+                    println!("  \x1b[1;35m↳ Overlay: {}\x1b[0m", ws.root.display());
+                } else {
+                    println!("\x1b[1;36m⟐ {}\x1b[0m", ws.root.display());
                 }
-                None if ws.indexing_in_progress => {
-                    println!("  Index:  \x1b[1;33m⟳ initial indexing\x1b[0m");
+
+                println!("{prefix}  ID:     {}", ws.id);
+
+                // Index timestamp
+                match ws.last_indexed_at_unix {
+                    Some(ts) => {
+                        let ago = format_timestamp_ago(ts);
+                        println!("{prefix}  Index:  \x1b[32m✓ indexed\x1b[0m ({ago})");
+                    }
+                    None if ws.indexing_in_progress => {
+                        println!("{prefix}  Index:  \x1b[1;33m⟳ initial indexing\x1b[0m");
+                    }
+                    None => {
+                        println!("{prefix}  Index:  \x1b[33m⚠ never indexed\x1b[0m");
+                    }
                 }
-                None => {
-                    println!("  Index:  \x1b[33m⚠ never indexed\x1b[0m");
+
+                // Daemon/watcher
+                if ws.watch_enabled {
+                    println!("{prefix}  Watch:  \x1b[32m● watching\x1b[0m");
+                } else {
+                    println!("{prefix}  Watch:  \x1b[90m○ static\x1b[0m");
                 }
-            }
 
-            // Daemon/watcher
-            if ws.watch_enabled {
-                println!("  Watch:  \x1b[32m● watching\x1b[0m");
-            } else {
-                println!("  Watch:  \x1b[90m○ static\x1b[0m");
-            }
+                // Chunk stats
+                println!(
+                    "{prefix}  Files:  {} files, {} chunks",
+                    ws.file_count, ws.chunk_count
+                );
 
-            // Chunk stats
-            println!(
-                "  Files:  {} files, {} chunks",
-                ws.file_count, ws.chunk_count
-            );
+                // Index size
+                let size = format_bytes(ws.index_size_bytes);
+                println!("{prefix}  Size:   {size}");
 
-            // Index size
-            let size = format_bytes(ws.index_size_bytes);
-            println!("  Size:   {}", size);
+                // Embedding status
+                if ws.enhancing_in_progress {
+                    let accel = crate::embedding::hardware_acceleration_info();
 
-            // Embedding status
-            if ws.enhancing_in_progress {
-                let accel = crate::embedding::hardware_acceleration_info();
-
-                let progress_str = if let Some(count) = ws.enhancing_progress_count {
-                    let pct = if ws.chunk_count > 0 {
-                        (count as f64 / ws.chunk_count as f64 * 100.0).min(100.0) as u64
+                    let progress_str = if let Some(count) = ws.enhancing_progress_count {
+                        let pct = if ws.chunk_count > 0 {
+                            (count as f64 / ws.chunk_count as f64 * 100.0).min(100.0) as u64
+                        } else {
+                            100
+                        };
+                        format!("({count} / {} chunks, ~{pct}%), ", ws.chunk_count)
                     } else {
-                        100
+                        String::new()
                     };
-                    format!("({} / {} chunks, ~{}%), ", count, ws.chunk_count, pct)
-                } else {
-                    String::new()
-                };
 
-                if let Some(reason) = &ws.enhancing_paused_reason {
+                    if let Some(reason) = &ws.enhancing_paused_reason {
+                        println!(
+                            "{prefix}  Search: \x1b[1;33m⟳ enhancing [PAUSED]\x1b[0m {progress_str}(Paused: {reason})"
+                        );
+                    } else {
+                        println!(
+                            "{prefix}  Search: \x1b[1;33m⟳ enhancing\x1b[0m {progress_str}(computing {accel} in background...)"
+                        );
+                    }
+                } else if ws.has_neural_vectors {
+                    let pct = if ws.chunk_count > 0 {
+                        let ratio = (ws.neural_vector_count as f64 / ws.chunk_count as f64) * 100.0;
+                        format!("{:.0}%", ratio.min(100.0))
+                    } else {
+                        "100%".to_string()
+                    };
+                    let accel = crate::embedding::hardware_acceleration_info();
                     println!(
-                        "  Search: \x1b[1;33m⟳ enhancing [PAUSED]\x1b[0m {progress_str}(Paused: {})",
-                        reason
+                        "{prefix}  Search: \x1b[1;32m★ neural\x1b[0m ({} enhanced, {pct}, {accel})",
+                        ws.neural_vector_count
+                    );
+                } else if ws.indexing_in_progress {
+                    let progress_str = ws.indexing_progress.as_deref().unwrap_or("starting");
+                    let detail = if progress_str == "scanning" {
+                        "scanning filesystem...".to_string()
+                    } else if progress_str.contains('/') {
+                        format!("{progress_str} files")
+                    } else {
+                        progress_str.to_string()
+                    };
+                    println!("{prefix}  Search: \x1b[1;33m⟳ indexing\x1b[0m ({detail})");
+                } else if ws.chunk_count > 0 {
+                    println!(
+                        "{prefix}  Search: \x1b[33m◆ hash\x1b[0m (fast, run a query to trigger neural upgrade)"
                     );
                 } else {
-                    println!(
-                        "  Search: \x1b[1;33m⟳ enhancing\x1b[0m {progress_str}(computing {} in background...)",
-                        accel
-                    );
+                    println!("{prefix}  Search: \x1b[90m○ empty\x1b[0m");
                 }
-            } else if ws.has_neural_vectors {
-                let pct = if ws.chunk_count > 0 {
-                    let ratio = (ws.neural_vector_count as f64 / ws.chunk_count as f64) * 100.0;
-                    format!("{:.0}%", ratio.min(100.0))
-                } else {
-                    "100%".to_string()
-                };
-                let accel = crate::embedding::hardware_acceleration_info();
-                println!(
-                    "  Search: \x1b[1;32m★ neural\x1b[0m ({} enhanced, {}, {})",
-                    ws.neural_vector_count, pct, accel
-                );
-            } else if ws.indexing_in_progress {
-                let progress_str = ws.indexing_progress.as_deref().unwrap_or("starting");
-                let detail = if progress_str == "scanning" {
-                    "scanning filesystem...".to_string()
-                } else if progress_str.contains('/') {
-                    format!("{progress_str} files")
-                } else {
-                    progress_str.to_string()
-                };
-                println!("  Search: \x1b[1;33m⟳ indexing\x1b[0m ({detail})");
-            } else if ws.chunk_count > 0 {
-                println!(
-                    "  Search: \x1b[33m◆ hash\x1b[0m (fast, run a query to trigger neural upgrade)"
-                );
-            } else {
-                println!("  Search: \x1b[90m○ empty\x1b[0m");
-            }
 
-            println!();
+                println!();
+            }
         }
 
         // Summary
