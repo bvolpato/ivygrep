@@ -48,6 +48,7 @@ Traditional code search tools require you to know _exactly_ what you're looking 
 | Semantic understanding | ❌ | ❌ | ✅ |
 | Sub-100ms latency | ✅ | ❌ | ✅ |
 | Privacy-first (no upload) | ✅ | ❌ | ✅ |
+| Git-native (worktrees, branches) | ❌ | ❌ | ✅ |
 | AST-aware chunking | ❌ | ❌ | ✅ |
 | Incremental indexing | ❌ | ❌ | ✅ |
 | MCP server for AI agents | ❌ | ❌ | ✅ |
@@ -311,6 +312,7 @@ ivygrep
 ├── tree-sitter     — AST-based code chunking (35+ languages)
 ├── fastembed       — quantized ONNX embeddings (AllMiniLML6V2Q, 384-dim, CoreML accelerated)
 ├── xxh3 (xxhash)   — hyper-fast 128-bit SIMD structural block hashes
+├── git2            — git-native: worktree detection, branch tracking, .gitignore
 ├── notify          — filesystem watcher for live re-indexing
 ├── SQLite          — metadata store natively synced via Async MPSC streaming channels
 └── Unix socket     — daemon IPC (auto-spawned)
@@ -323,6 +325,15 @@ Each workspace stores two vector indexes:
 - `vectors_neural.usearch` — ONNX-based (created in background after first search)
 
 **Neural embeddings**: The default build bundles ONNX Runtime for high-quality semantic search. The quantized model (~23 MB) downloads automatically on first use. Indexing never blocks on this — it happens in the background. For a minimal binary without ONNX: `cargo build --release --no-default-features`.
+
+### 🌿 Git-Native Intelligence
+
+ivygrep deeply understands git. This is a core design decision, not an afterthought.
+
+- **Worktree overlays** — When you `git worktree add`, ivygrep does **not** copy the index. Instead it creates a thin _overlay_ that only stores divergent chunks + tombstones, referencing the base worktree's index by path. A 92K-file repo checkout with 50 changed files creates a ~200 KB overlay instead of duplicating a ~50 MB index.
+- **Branch-switch delta recomputation** — When you switch branches (`git checkout`, `git switch`), the filesystem watcher detects the changed files and triggers a targeted Merkle-diff re-index of only the delta — no full re-scan.
+- **Content-based deduplication** — Overlay diffs use content-based (not mtime-based) Merkle hashes, so files that are byte-identical across worktrees share the same hash and are never re-indexed.
+- **`.gitignore` native** — Respects `.gitignore` rules at every level. No configuration needed.
 
 ---
 
