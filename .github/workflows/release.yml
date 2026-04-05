@@ -38,6 +38,11 @@ jobs:
             runner: macos-latest
             archive_name: macos-aarch64
             archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            archive_name: windows-x86_64
+            archive: zip
+            cargo_flags: "--no-default-features"
 
     steps:
       - uses: actions/checkout@v5
@@ -61,7 +66,13 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.cargo_flags }}
 
       - name: Smoke test
-        run: ./target/${{ matrix.target }}/release/ig --help
+        shell: bash
+        run: |
+          EXE_SUFFIX=""
+          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+            EXE_SUFFIX=".exe"
+          fi
+          ./target/${{ matrix.target }}/release/ig${EXE_SUFFIX} --help
 
       - name: Package archive
         shell: bash
@@ -69,12 +80,24 @@ jobs:
           TAG="${GITHUB_REF#refs/tags/}"
           ARCHIVE_NAME="ivygrep-${TAG}-${{ matrix.archive_name }}"
           mkdir -p "dist/${ARCHIVE_NAME}"
-          cp "target/${{ matrix.target }}/release/ig" "dist/${ARCHIVE_NAME}/"
+          
+          EXE_SUFFIX=""
+          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+            EXE_SUFFIX=".exe"
+          fi
+          
+          cp "target/${{ matrix.target }}/release/ig${EXE_SUFFIX}" "dist/${ARCHIVE_NAME}/"
           cp README.md LICENSE* 2>/dev/null "dist/${ARCHIVE_NAME}/" || true
           cd dist
-          tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
+          
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            zip -r "${ARCHIVE_NAME}.zip" "${ARCHIVE_NAME}"
+            echo "ARCHIVE_PATH=dist/${ARCHIVE_NAME}.zip" >> $GITHUB_ENV
+          else
+            tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
+            echo "ARCHIVE_PATH=dist/${ARCHIVE_NAME}.tar.gz" >> $GITHUB_ENV
+          fi
           echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> $GITHUB_ENV
-          echo "ARCHIVE_PATH=dist/${ARCHIVE_NAME}.tar.gz" >> $GITHUB_ENV
 
       - name: Compute SHA256
         shell: bash
@@ -85,7 +108,13 @@ jobs:
             SHA=$(sha256sum "${{ env.ARCHIVE_PATH }}" | awk '{print $1}')
           fi
           echo "SHA256=${SHA}" >> $GITHUB_ENV
-          echo "${SHA}  ${{ env.ARCHIVE_NAME }}.tar.gz" > "${{ env.ARCHIVE_PATH }}.sha256"
+          
+          # Use proper file extension depending on the generated archive format
+          ARCHIVE_EXT="tar.gz"
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            ARCHIVE_EXT="zip"
+          fi
+          echo "${SHA}  ${{ env.ARCHIVE_NAME }}.${ARCHIVE_EXT}" > "${{ env.ARCHIVE_PATH }}.sha256"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v5
@@ -113,6 +142,7 @@ jobs:
         run: |
           mkdir -p release-assets
           find artifacts -name '*.tar.gz' -exec cp {} release-assets/ \;
+          find artifacts -name '*.zip' -exec cp {} release-assets/ \;
           find artifacts -name '*.sha256' -exec cp {} release-assets/ \;
           ls -la release-assets/
 

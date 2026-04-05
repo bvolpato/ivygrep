@@ -2,11 +2,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
@@ -39,13 +38,7 @@ impl DaemonState {
 pub async fn run_daemon() -> Result<()> {
     config::ensure_app_dirs()?;
 
-    let socket_path = config::socket_path()?;
-    if socket_path.exists() {
-        std::fs::remove_file(&socket_path)?;
-    }
-
-    let listener = UnixListener::bind(&socket_path)
-        .with_context(|| format!("failed to bind socket {}", socket_path.display()))?;
+    let (listener, socket_path) = crate::ipc::bind().await?;
     eprintln!("ivygrep daemon listening on {}", socket_path.display());
 
     let (trigger_tx, mut trigger_rx) = mpsc::unbounded_channel::<PathBuf>();
@@ -110,7 +103,7 @@ pub async fn run_daemon() -> Result<()> {
     }
 }
 
-async fn handle_connection(stream: UnixStream, state: DaemonState) -> Result<()> {
+async fn handle_connection(stream: crate::ipc::IpcStream, state: DaemonState) -> Result<()> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     let bytes = reader.read_line(&mut line).await?;
@@ -452,9 +445,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
         DaemonRequest::Restart => {
             info!("restart requested, shutting down");
             // Clean up socket so the new daemon can bind immediately
-            if let Ok(sp) = config::socket_path() {
-                let _ = std::fs::remove_file(sp);
-            }
+            crate::ipc::cleanup_socket();
             // Schedule exit after the response is sent
             tokio::spawn(async {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -503,16 +494,14 @@ fn scope_from_request(scope_path: Option<PathBuf>, scope_is_file: bool) -> Optio
 }
 
 pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<DaemonResponse>> {
-    let socket_path = config::socket_path()?;
-
-    if socket_path.exists() && UnixStream::connect(&socket_path).await.is_err() {
-        let _ = std::fs::remove_file(&socket_path);
+    if crate::ipc::socket_exists() && crate::ipc::connect().await.is_err() {
+        crate::ipc::cleanup_socket();
     }
 
     // Auto-spawn the daemon if it isn't running.
     // Skip when IVYGREP_NO_AUTOSPAWN is set (for tests and CI).
     if autospawn
-        && !socket_path.exists()
+        && !crate::ipc::socket_exists()
         && std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
         && let Ok(exe) = std::env::current_exe()
     {
@@ -536,11 +525,13 @@ pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<
                             .map_err(|e| anyhow::anyhow!(e))
                     })
             {
-                let log_stderr = log_file
-                    .try_clone()
-                    .unwrap_or_else(|_| std::fs::File::open("/dev/null").unwrap());
+                let log_stderr = log_file.try_clone();
                 cmd.stdout(std::process::Stdio::from(log_file));
-                cmd.stderr(std::process::Stdio::from(log_stderr));
+                if let Ok(stderr_file) = log_stderr {
+                    cmd.stderr(std::process::Stdio::from(stderr_file));
+                } else {
+                    cmd.stderr(std::process::Stdio::null());
+                }
             }
 
             #[cfg(unix)]
@@ -549,18 +540,25 @@ pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<
                 cmd.process_group(0);
             }
 
+            #[cfg(not(unix))]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x08000000;
+                cmd.creation_flags(CREATE_NO_WINDOW);
+            }
+
             let _ = cmd.spawn();
             // Poll for socket readiness (up to 2s)
             for _ in 0..20 {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                if socket_path.exists() {
+                if crate::ipc::socket_exists() {
                     break;
                 }
             }
         }
     }
 
-    if !socket_path.exists() {
+    if !crate::ipc::socket_exists() {
         return Ok(None);
     }
 
@@ -568,7 +566,7 @@ pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<
     // the connect() will hang. Don't let the CLI join the zombie pile.
     let mut stream = match tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        UnixStream::connect(&socket_path),
+        crate::ipc::connect(),
     )
     .await
     {
@@ -576,7 +574,7 @@ pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<
         _ => {
             // Connect timed out or failed — daemon is dead or zombie.
             // Remove the stale socket so we don't try again.
-            let _ = std::fs::remove_file(&socket_path);
+            crate::ipc::cleanup_socket();
             return Ok(None);
         }
     };
@@ -592,7 +590,7 @@ pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<
     .await
     .is_err()
     {
-        let _ = std::fs::remove_file(&socket_path);
+        crate::ipc::cleanup_socket();
         return Ok(None);
     }
 

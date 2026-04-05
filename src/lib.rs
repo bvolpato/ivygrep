@@ -4,6 +4,7 @@ pub mod config;
 pub mod daemon;
 pub mod embedding;
 pub mod indexer;
+pub mod ipc;
 pub mod mcp;
 pub mod merkle;
 pub mod path_glob;

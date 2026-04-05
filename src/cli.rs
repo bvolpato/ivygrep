@@ -1091,10 +1091,8 @@ async fn restart_daemon() {
     // If the socket still exists, the old daemon didn't understand
     // Restart (pre-upgrade binary). Remove the socket so the old daemon
     // can't accept new connections, then auto-spawn a new one.
-    if let Ok(sp) = config::socket_path()
-        && sp.exists()
-    {
-        let _ = std::fs::remove_file(&sp);
+    if crate::ipc::socket_exists() {
+        crate::ipc::cleanup_socket();
     }
 
     // Auto-spawn the new daemon via the standard request path

@@ -20,10 +20,6 @@ pub fn indexes_root() -> Result<PathBuf> {
     Ok(app_home()?.join("indexes"))
 }
 
-pub fn socket_path() -> Result<PathBuf> {
-    Ok(app_home()?.join("daemon.sock"))
-}
-
 pub fn ensure_app_dirs() -> Result<()> {
     std::fs::create_dir_all(indexes_root()?)?;
     Ok(())
