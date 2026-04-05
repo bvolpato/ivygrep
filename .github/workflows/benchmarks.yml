@@ -53,3 +53,4 @@ jobs:
           comment-on-alert: true
           fail-on-alert: false
           alert-comment-cc-users: '@bvolpato'
+          comment-always: true
