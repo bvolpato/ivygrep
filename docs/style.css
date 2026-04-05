@@ -316,7 +316,9 @@ h1 {
 }
 .grid-3 { grid-template-columns: repeat(3, 1fr); }
 .grid-2 { grid-template-columns: repeat(2, 1fr); }
-.agent-grid { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+.agent-grid { grid-template-columns: repeat(3, 1fr); gap: 1.2rem; }
+@media (max-width: 768px) { .agent-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 480px) { .agent-grid { grid-template-columns: 1fr; } }
 
 .align-center { align-items: center; }
 
@@ -343,6 +345,54 @@ h1 {
 .p-2 { padding: 0.75rem; }
 .rounded { border-radius: 6px; }
 .bg-dark { background: rgba(0, 0, 0, 0.4); }
+
+.agent-cmd {
+    position: relative;
+    background: rgba(0, 0, 0, 0.4);
+    padding: 0.6rem 0.75rem;
+    padding-right: 3.5rem;
+    border-radius: 6px;
+    margin-top: 0.5rem;
+    font-family: var(--font-code);
+    font-size: 0.78rem;
+    color: rgba(255,255,255,0.8);
+    word-break: break-all;
+    line-height: 1.5;
+}
+
+.agent-cmd code {
+    font-family: inherit;
+    font-size: inherit;
+    color: inherit;
+    background: none;
+    padding: 0;
+}
+
+.agent-copy-btn {
+    position: absolute;
+    top: 0.45rem;
+    right: 0.45rem;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.15);
+    color: rgba(255,255,255,0.6);
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.68rem;
+    font-family: var(--font-body);
+    transition: all 0.2s;
+}
+
+.agent-copy-btn:hover {
+    background: rgba(255,255,255,0.15);
+    color: #fff;
+}
+
+.agent-copy-btn.copied {
+    background: rgba(16,185,129,0.2);
+    border-color: #10b981;
+    color: #10b981;
+}
 
 .subtitle-small {
     font-size: 1.1rem;
