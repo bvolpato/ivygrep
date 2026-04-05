@@ -366,3 +366,4 @@ MIT — use it however you want.
 <p align="center">
   Built by <a href="https://github.com/bvolpato">@bvolpato</a> · Contributions welcome
 </p>
+
