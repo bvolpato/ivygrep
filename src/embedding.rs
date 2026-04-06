@@ -279,7 +279,7 @@ pub fn hardware_acceleration_info() -> &'static str {
                 return "AllMiniLML6V2Q via CoreML";
             }
         }
-        
+
         #[cfg(target_os = "linux")]
         {
             use ort::ep::ExecutionProvider;

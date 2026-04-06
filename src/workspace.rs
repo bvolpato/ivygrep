@@ -511,11 +511,12 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
             None
         };
 
-        let enhancing_error = if !enhancing_in_progress && index_dir.join(".enhancing.error").exists() {
-            std::fs::read_to_string(index_dir.join(".enhancing.error")).ok()
-        } else {
-            None
-        };
+        let enhancing_error =
+            if !enhancing_in_progress && index_dir.join(".enhancing.error").exists() {
+                std::fs::read_to_string(index_dir.join(".enhancing.error")).ok()
+            } else {
+                None
+            };
 
         let indexing_progress = if indexing_in_progress {
             let progress_path = index_dir.join(".indexing.progress");
