@@ -199,6 +199,7 @@ async fn daemon_ipc_index_and_search_roundtrip() {
     let index_response = roundtrip(&DaemonRequest::Index {
         path: repo_path.clone(),
         watch: false,
+        skip_gitignore: false,
     })
     .await;
 
@@ -219,6 +220,7 @@ async fn daemon_ipc_index_and_search_roundtrip() {
         exclude_globs: vec![],
         scope_path: None,
         scope_is_file: false,
+        skip_gitignore: false,
     })
     .await;
 
@@ -331,6 +333,7 @@ async fn daemon_ipc_error_on_bad_path() {
     let response = roundtrip(&DaemonRequest::Index {
         path: std::path::PathBuf::from("/nonexistent/path/that/does/not/exist"),
         watch: false,
+        skip_gitignore: false,
     })
     .await;
 

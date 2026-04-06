@@ -117,6 +117,7 @@ fn run_index_and_query(
             include_globs: vec![],
             exclude_globs: vec![],
             scope_filter: None,
+            skip_gitignore: false,
         },
     )
     .unwrap();
@@ -215,6 +216,7 @@ fn stress_ripgrep_deep_relevance() {
                 include_globs: vec![],
                 exclude_globs: vec![],
                 scope_filter: None,
+                skip_gitignore: false,
             },
         )
         .unwrap();
@@ -296,6 +298,7 @@ fn stress_tantivy_deep_relevance() {
                 include_globs: vec![],
                 exclude_globs: vec![],
                 scope_filter: None,
+                skip_gitignore: false,
             },
         )
         .unwrap();
@@ -410,7 +413,7 @@ fn stress_ripgrep_incremental_reindex() {
 
     // Phase 8: verify Merkle snapshot is consistent
     let saved = MerkleSnapshot::load(&workspace.merkle_snapshot_path()).unwrap();
-    let fresh = MerkleSnapshot::build(&ws_root).unwrap();
+    let fresh = MerkleSnapshot::build(&ws_root, false).unwrap();
     assert_eq!(
         saved.root_hash, fresh.root_hash,
         "Merkle snapshot must match filesystem"
@@ -477,6 +480,7 @@ fn stress_concurrent_query_storm_ripgrep() {
                             include_globs: vec![],
                             exclude_globs: vec![],
                             scope_filter: None,
+                            skip_gitignore: false,
                         },
                     );
                     let elapsed = start.elapsed();
@@ -544,7 +548,7 @@ fn stress_regex_search_ripgrep() {
 
     for (pattern, label, min_expected) in patterns {
         let start = Instant::now();
-        let hits = regex_search(&workspace, pattern, Some(200), None, &[], &[]).unwrap();
+        let hits = regex_search(&workspace, pattern, Some(200), None, &[], &[], false).unwrap();
         let elapsed = start.elapsed();
 
         eprintln!(
@@ -1110,7 +1114,7 @@ fn stress_index_integrity_no_orphan_chunks() {
     }
 
     // And vice versa: every indexable file on disk should be in the DB
-    let snapshot = MerkleSnapshot::build(root.path()).unwrap();
+    let snapshot = MerkleSnapshot::build(root.path(), false).unwrap();
     for fs_file in snapshot.files.keys() {
         assert!(
             db_files.contains(fs_file),
@@ -1201,6 +1205,7 @@ fn stress_concurrent_search_during_reindex_large() {
                             include_globs: vec![],
                             exclude_globs: vec![],
                             scope_filter: None,
+                            skip_gitignore: false,
                         },
                     );
                     // May error during concurrent write, but must not panic

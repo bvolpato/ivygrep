@@ -27,6 +27,8 @@ pub enum DaemonRequest {
     Index {
         path: PathBuf,
         watch: bool,
+        #[serde(default)]
+        skip_gitignore: bool,
     },
     Search {
         path: Option<PathBuf>,
@@ -41,6 +43,8 @@ pub enum DaemonRequest {
         scope_path: Option<PathBuf>,
         #[serde(default)]
         scope_is_file: bool,
+        #[serde(default)]
+        skip_gitignore: bool,
     },
     RegexSearch {
         path: Option<PathBuf>,
@@ -53,6 +57,8 @@ pub enum DaemonRequest {
         scope_path: Option<PathBuf>,
         #[serde(default)]
         scope_is_file: bool,
+        #[serde(default)]
+        skip_gitignore: bool,
     },
     LiteralSearch {
         path: Option<PathBuf>,
@@ -67,6 +73,8 @@ pub enum DaemonRequest {
         scope_path: Option<PathBuf>,
         #[serde(default)]
         scope_is_file: bool,
+        #[serde(default)]
+        skip_gitignore: bool,
     },
     Remove {
         path: PathBuf,

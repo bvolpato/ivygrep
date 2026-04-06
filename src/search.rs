@@ -27,6 +27,7 @@ pub struct SearchOptions {
     pub include_globs: Vec<String>,
     pub exclude_globs: Vec<String>,
     pub scope_filter: Option<WorkspaceScope>,
+    pub skip_gitignore: bool,
 }
 
 impl Default for SearchOptions {
@@ -38,6 +39,7 @@ impl Default for SearchOptions {
             include_globs: vec![],
             exclude_globs: vec![],
             scope_filter: None,
+            skip_gitignore: false,
         }
     }
 }
@@ -216,6 +218,7 @@ pub fn literal_search(
                     .filter(|c| type_matches(c, options.type_filter.as_deref()))
                     .filter(|c| scope_matches(c, options.scope_filter.as_ref()))
                     .filter(|c| path_matches(c, &path_matcher))
+                    .filter(|c| options.skip_gitignore || !c.is_ignored)
                     .filter(|c| seen_ids.insert(c.chunk_id.clone()))
                 {
                     candidate_chunks.push(chunk);
@@ -367,6 +370,7 @@ pub fn hybrid_search(
                     .filter(|chunk| type_matches(chunk, options.type_filter.as_deref()))
                     .filter(|chunk| scope_matches(chunk, options.scope_filter.as_ref()))
                     .filter(|chunk| path_matches(chunk, &path_matcher))
+                    .filter(|chunk| options.skip_gitignore || !chunk.is_ignored)
                 {
                     lexical_by_id
                         .entry(chunk.chunk_id.clone())
@@ -423,6 +427,7 @@ pub fn hybrid_search(
                 options.scope_filter.as_ref(),
                 options.type_filter.as_deref(),
                 &options.include_globs,
+                options.skip_gitignore,
             );
             // Score each filtered chunk against the query vector
             for chunk in filtered_chunks {
@@ -455,7 +460,9 @@ pub fn hybrid_search(
 
             for vector_match in matches {
                 if let Some(chunk) = ctx.fetch_chunk_by_vector_key(vector_match.key)? {
-                    semantic_chunks.push((chunk, vector_match.score));
+                    if options.skip_gitignore || !chunk.is_ignored {
+                        semantic_chunks.push((chunk, vector_match.score));
+                    }
                 }
             }
         }
@@ -735,6 +742,7 @@ fn collect_filtered_chunks(
     scope_filter: Option<&WorkspaceScope>,
     type_filter: Option<&str>,
     include_globs: &[String],
+    skip_gitignore: bool,
 ) -> Vec<IndexedChunk> {
     let mut chunks = query_filtered_chunks(
         &ctx.sqlite,
@@ -742,6 +750,7 @@ fn collect_filtered_chunks(
         scope_filter,
         type_filter,
         include_globs,
+        skip_gitignore,
     );
     if let Some(base_sqlite) = &ctx.base_sqlite {
         let mut base_chunks = query_filtered_chunks(
@@ -750,6 +759,7 @@ fn collect_filtered_chunks(
             scope_filter,
             type_filter,
             include_globs,
+            skip_gitignore,
         );
         base_chunks.retain(|c| !ctx.is_shadowed_base_file(1, &c.file_path));
         chunks.extend(base_chunks);
@@ -763,12 +773,17 @@ fn query_filtered_chunks(
     scope_filter: Option<&WorkspaceScope>,
     type_filter: Option<&str>,
     include_globs: &[String],
+    skip_gitignore: bool,
 ) -> Vec<IndexedChunk> {
     // Build a SQL query that pushes as much filtering as possible into SQLite.
     let mut sql = String::from(
-        "SELECT chunk_id, file_path, start_line, end_line, language, kind, text, content_hash, vector_key FROM chunks WHERE 1=1",
+        "SELECT chunk_id, file_path, start_line, end_line, language, kind, text, content_hash, vector_key, is_ignored FROM chunks WHERE 1=1",
     );
     let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+
+    if !skip_gitignore {
+        sql.push_str(" AND is_ignored = 0");
+    }
 
     if let Some(tf) = type_filter {
         sql.push_str(" AND language = ?");
@@ -829,6 +844,7 @@ fn query_filtered_chunks(
             text: crate::indexer::decompress_text(raw_text),
             content_hash: row.get(7)?,
             vector_key: row.get::<_, i64>(8)? as u64,
+            is_ignored: row.get::<_, bool>(9)?,
         })
     }) else {
         return Vec::new();
@@ -1386,6 +1402,7 @@ mod tests {
                     rel_path: std::path::PathBuf::from("scoped"),
                     is_file: false,
                 }),
+                skip_gitignore: false,
             },
         )
         .unwrap();

@@ -66,6 +66,7 @@ struct IvygrepSearchArgs {
     first_line_only: Option<bool>,
     file_name_only: Option<bool>,
     verbose: Option<bool>,
+    skip_gitignore: Option<bool>,
 }
 
 pub fn serve_stdio() -> Result<()> {
@@ -173,7 +174,8 @@ fn search_tool_schema() -> Value {
                 "exclude": {"type": "string", "description": "Comma-separated exclude globs, e.g. \"target/**,*.lock\"."},
                 "first_line_only": {"type": "boolean", "description": "Return only the first non-empty preview line for each hit."},
                 "file_name_only": {"type": "boolean", "description": "Return only file paths (no hit details)."},
-                "verbose": {"type": "boolean", "description": "Include reason pointers in JSON output."}
+                "verbose": {"type": "boolean", "description": "Include reason pointers in JSON output."},
+                "skip_gitignore": {"type": "boolean", "description": "Include files ignored by .gitignore."}
             },
             "required": ["query"]
         }
@@ -222,6 +224,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
                 include_globs: include_globs.clone(),
                 exclude_globs: exclude_globs.clone(),
                 scope_filter: scope_filter.clone(),
+                skip_gitignore: args.skip_gitignore.unwrap_or(false),
             },
         )?
     } else if args.regex.unwrap_or(false) {
@@ -232,6 +235,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
             scope_filter.as_ref(),
             &include_globs,
             &exclude_globs,
+            args.skip_gitignore.unwrap_or(false),
         )?
     } else {
         hybrid_search(
@@ -245,6 +249,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
                 include_globs: include_globs.clone(),
                 exclude_globs: exclude_globs.clone(),
                 scope_filter: scope_filter.clone(),
+                skip_gitignore: args.skip_gitignore.unwrap_or(false),
             },
         )?
     };
@@ -453,6 +458,7 @@ mod tests {
             first_line_only: Some(false),
             file_name_only: Some(false),
             verbose: Some(false),
+            skip_gitignore: None,
         })
         .unwrap();
 
@@ -497,6 +503,7 @@ mod tests {
             first_line_only: Some(false),
             file_name_only: Some(false),
             verbose: Some(false),
+            skip_gitignore: None,
         })
         .unwrap();
 
@@ -547,6 +554,7 @@ mod tests {
             first_line_only: Some(false),
             file_name_only: Some(true),
             verbose: Some(false),
+            skip_gitignore: None,
         })
         .unwrap();
 
@@ -575,6 +583,7 @@ mod tests {
             first_line_only: Some(false),
             file_name_only: Some(true),
             verbose: Some(false),
+            skip_gitignore: None,
         })
         .unwrap();
 
@@ -652,6 +661,7 @@ mod tests {
             first_line_only: Some(false),
             file_name_only: Some(false),
             verbose: Some(false),
+            skip_gitignore: None,
         })
         .unwrap();
 
@@ -689,6 +699,7 @@ mod tests {
             first_line_only: Some(false),
             file_name_only: Some(false),
             verbose: Some(false),
+            skip_gitignore: None,
         })
         .unwrap();
 

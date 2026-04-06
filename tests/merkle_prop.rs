@@ -30,7 +30,7 @@ proptest! {
         for (path, new_hash) in &new_files {
             match old_files.get(path) {
                 Some(old_hash) if old_hash == new_hash => {}
-                _ => expected_add_or_modified.push(PathBuf::from(path)),
+                _ => expected_add_or_modified.push((PathBuf::from(path), new_hash.ends_with("-1"))),
             }
         }
 

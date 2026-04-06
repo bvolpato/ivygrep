@@ -1,6 +1,5 @@
 ---
 source: tests/cli_snapshot.rs
-assertion_line: 35
 expression: text
 ---
 Semantic grep that stays local
@@ -31,6 +30,7 @@ Options:
       --first-line-only       
       --file-name-only        
       --verbose               
+      --skip-gitignore        
       --hash                  Use lightweight hash-based embeddings instead of the default ONNX neural model. Faster startup, no model download, lower quality
   -h, --help                  Print help
   -V, --version               Print version

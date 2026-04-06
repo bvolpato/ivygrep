@@ -332,7 +332,7 @@ fn merkle_snapshot_matches_filesystem_after_crud() {
 
     let ws = workspace_for(root.path());
     let saved = MerkleSnapshot::load(&ws.merkle_snapshot_path()).unwrap();
-    let fresh = MerkleSnapshot::build(root.path()).unwrap();
+    let fresh = MerkleSnapshot::build(root.path(), false).unwrap();
 
     assert_eq!(
         saved.root_hash, fresh.root_hash,

@@ -92,6 +92,9 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub verbose: bool,
 
+    #[arg(long, global = true)]
+    pub skip_gitignore: bool,
+
     /// Use lightweight hash-based embeddings instead of the default ONNX
     /// neural model. Faster startup, no model download, lower quality.
     #[arg(long, global = true)]
@@ -140,7 +143,7 @@ pub async fn run() -> Result<()> {
     }
 
     if let Some(path) = &cli.add_path {
-        return run_add(path, !cli.no_watch, cli.force, cli.json).await;
+        return run_add(path, !cli.no_watch, cli.force, cli.skip_gitignore, cli.json).await;
     }
 
     if let Some(path) = &cli.rm_path {
@@ -424,8 +427,21 @@ fn format_timestamp_ago(unix_ts: u64) -> String {
     }
 }
 
-async fn run_add(path: &Path, watch: bool, force: bool, json: bool) -> Result<()> {
-    let workspace = Workspace::resolve(path)?;
+async fn run_add(path: &Path, watch: bool, force: bool, skip_gitignore: bool, json: bool) -> Result<()> {
+    let mut workspace = Workspace::resolve(path)?;
+    if skip_gitignore {
+        let mut meta = workspace.read_metadata()?.unwrap_or_else(|| crate::workspace::WorkspaceMetadata {
+            id: workspace.id.clone(),
+            root: workspace.root.clone(),
+            created_at_unix: 0,
+            last_indexed_at_unix: None,
+            watch_enabled: watch,
+            skip_gitignore: true,
+        });
+        meta.skip_gitignore = true;
+        workspace.ensure_dirs()?;
+        workspace.write_metadata(&meta)?;
+    }
 
     if force {
         let remove_request = DaemonRequest::Remove {
@@ -449,6 +465,7 @@ async fn run_add(path: &Path, watch: bool, force: bool, json: bool) -> Result<()
     let request = DaemonRequest::Index {
         path: workspace.root.clone(),
         watch,
+        skip_gitignore,
     };
 
     if let Some(response) = daemon::request(&request, false).await? {
@@ -530,6 +547,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             let daemon_index_request = DaemonRequest::Index {
                 path: workspace.root.clone(),
                 watch: !cli.no_watch,
+                skip_gitignore: cli.skip_gitignore,
             };
 
             // Send the index request to the daemon, but show a progress spinner
@@ -722,6 +740,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             exclude_globs: cli.exclude.clone(),
             scope_path: scope_path.clone(),
             scope_is_file,
+            skip_gitignore: cli.skip_gitignore,
         };
 
         if search_via_daemon {
@@ -738,6 +757,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                         include_globs: cli.include.clone(),
                         exclude_globs: cli.exclude.clone(),
                         scope_filter: scope_filter.clone(),
+                        skip_gitignore: cli.skip_gitignore,
                     };
                     let mut all_hits = Vec::new();
                     let workspaces = vec![workspace.clone()];
@@ -772,6 +792,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                 include_globs: cli.include.clone(),
                 exclude_globs: cli.exclude.clone(),
                 scope_filter: scope_filter.clone(),
+                skip_gitignore: cli.skip_gitignore,
             };
             for ws in workspaces {
                 match literal_search(&ws, query, &options) {
@@ -795,6 +816,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             exclude_globs: cli.exclude.clone(),
             scope_path: scope_path.clone(),
             scope_is_file,
+            skip_gitignore: cli.skip_gitignore,
         };
 
         if search_via_daemon {
@@ -825,6 +847,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                     scope_filter.as_ref(),
                     &cli.include,
                     &cli.exclude,
+                    cli.skip_gitignore,
                 ) {
                     Ok(mut hits) => all_hits.append(&mut hits),
                     Err(err) => {
@@ -848,6 +871,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             exclude_globs: cli.exclude.clone(),
             scope_path: scope_path.clone(),
             scope_is_file,
+            skip_gitignore: cli.skip_gitignore,
         };
 
         if search_via_daemon {
@@ -889,6 +913,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                         include_globs: cli.include.clone(),
                         exclude_globs: cli.exclude.clone(),
                         scope_filter: scope_filter.clone(),
+                        skip_gitignore: cli.skip_gitignore,
                     };
                     local_fallback_search(&workspace, query, &options, cli.hash)
                 }
@@ -901,6 +926,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                         include_globs: cli.include.clone(),
                         exclude_globs: cli.exclude.clone(),
                         scope_filter: scope_filter.clone(),
+                        skip_gitignore: cli.skip_gitignore,
                     };
                     local_fallback_search(&workspace, query, &options, cli.hash)
                 }
@@ -929,6 +955,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                         include_globs: cli.include.clone(),
                         exclude_globs: cli.exclude.clone(),
                         scope_filter: scope_filter.clone(),
+                        skip_gitignore: cli.skip_gitignore,
                     },
                 ) {
                     Ok(mut hits) => all_hits.append(&mut hits),

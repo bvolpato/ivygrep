@@ -18,7 +18,7 @@ pub struct MerkleSnapshot {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MerkleDiff {
-    pub added_or_modified: Vec<PathBuf>,
+    pub added_or_modified: Vec<(PathBuf, bool)>,
     pub deleted: Vec<PathBuf>,
 }
 
@@ -45,19 +45,43 @@ impl MerkleSnapshot {
         Ok(())
     }
 
-    pub fn build(root: &Path) -> Result<Self> {
-        Self::build_inner(root, false)
+    pub fn build(root: &Path, skip_gitignore: bool) -> Result<Self> {
+        Self::build_inner(root, false, skip_gitignore)
     }
 
     /// Build a snapshot using content-based hashing (reads file contents instead of mtime).
     /// This is slower but produces identical hashes for identical files across worktrees,
     /// enabling correct delta computation when seeding a worktree from a base index.
-    pub fn build_content_based(root: &Path) -> Result<Self> {
-        Self::build_inner(root, true)
+    pub fn build_content_based(root: &Path, skip_gitignore: bool) -> Result<Self> {
+        Self::build_inner(root, true, skip_gitignore)
     }
 
-    fn build_inner(root: &Path, content_based: bool) -> Result<Self> {
-        let walker = crate::walker::source_walker(root);
+    fn build_inner(root: &Path, content_based: bool, skip_gitignore: bool) -> Result<Self> {
+        // If skip_gitignore is true, do a fast standard walk first to record which files WOULD have been included properly.
+        let unignored_paths: std::collections::HashSet<String> = if skip_gitignore {
+            let standard_walker = crate::walker::source_walker(root, false);
+            let paths = std::sync::Mutex::new(std::collections::HashSet::new());
+            let root_owned = root.to_path_buf();
+            standard_walker.build_parallel().run(|| {
+                let paths_ref = &paths;
+                let root_ref = &root_owned;
+                Box::new(move |entry| {
+                    if let Ok(e) = entry {
+                        if e.file_type().is_some_and(|ft| ft.is_file()) {
+                            if let Ok(rel) = e.path().strip_prefix(root_ref) {
+                                paths_ref.lock().unwrap().insert(rel.to_string_lossy().to_string());
+                            }
+                        }
+                    }
+                    ignore::WalkState::Continue
+                })
+            });
+            paths.into_inner().unwrap()
+        } else {
+            std::collections::HashSet::new()
+        };
+
+        let walker = crate::walker::source_walker(root, skip_gitignore);
 
         let show_progress = std::io::stderr().is_terminal();
         let scanned = AtomicUsize::new(0);
@@ -70,6 +94,7 @@ impl MerkleSnapshot {
             let root_ref = &root_owned;
             let scanned_ref = &scanned;
             let pairs_ref = &pairs;
+            let unignored_paths_clone = unignored_paths.clone();
             Box::new(move |entry| {
                 let entry = match entry {
                     Ok(e) => e,
@@ -119,10 +144,18 @@ impl MerkleSnapshot {
                     hex::encode(xxhash_rust::xxh3::xxh3_128(&data).to_le_bytes())
                 };
 
+                let rel_str = rel.to_string_lossy().to_string();
+                let is_ignored = skip_gitignore && !unignored_paths_clone.contains(&rel_str);
+                let final_hash = if is_ignored {
+                    format!("{file_hash}-1")
+                } else {
+                    format!("{file_hash}-0")
+                };
+
                 pairs_ref
                     .lock()
                     .unwrap()
-                    .push((rel.to_string_lossy().to_string(), file_hash));
+                    .push((rel_str, final_hash));
                 ignore::WalkState::Continue
             })
         });
@@ -148,17 +181,18 @@ impl MerkleSnapshot {
         let mut deleted = Vec::new();
 
         for path in new_paths.iter() {
+            let new_hash = newer
+                .files
+                .get(path)
+                .expect("path exists in new set and map");
+            let is_ignored = new_hash.ends_with("-1");
             match self.files.get(path) {
                 Some(old_hash) => {
-                    let new_hash = newer
-                        .files
-                        .get(path)
-                        .expect("path exists in new set and map");
                     if old_hash != new_hash {
-                        added_or_modified.push(PathBuf::from(path));
+                        added_or_modified.push((PathBuf::from(path), is_ignored));
                     }
                 }
-                None => added_or_modified.push(PathBuf::from(path)),
+                None => added_or_modified.push((PathBuf::from(path), is_ignored)),
             }
         }
 
@@ -198,18 +232,18 @@ mod tests {
         fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
         fs::write(root.join("b.py"), "def b():\n    pass\n").unwrap();
 
-        let first = MerkleSnapshot::build(root).unwrap();
+        let first = MerkleSnapshot::build(root, false).unwrap();
 
         fs::remove_file(root.join("a.rs")).unwrap();
         fs::write(root.join("b.py"), "def b():\n    return 1\n").unwrap();
         fs::write(root.join("c.ts"), "export function c() {}\n").unwrap();
 
-        let second = MerkleSnapshot::build(root).unwrap();
+        let second = MerkleSnapshot::build(root, false).unwrap();
         let diff = first.diff(&second);
 
         assert!(diff.deleted.contains(&PathBuf::from("a.rs")));
-        assert!(diff.added_or_modified.contains(&PathBuf::from("b.py")));
-        assert!(diff.added_or_modified.contains(&PathBuf::from("c.ts")));
+        assert!(diff.added_or_modified.contains(&(PathBuf::from("b.py"), false)));
+        assert!(diff.added_or_modified.contains(&(PathBuf::from("c.ts"), false)));
     }
 
     #[test]
@@ -241,7 +275,7 @@ mod tests {
 
         fs::write(root.join("shakespeare.txt"), content).unwrap();
 
-        let snapshot = MerkleSnapshot::build(root).unwrap();
+        let snapshot = MerkleSnapshot::build(root, false).unwrap();
         assert!(snapshot.files.contains_key("shakespeare.txt"));
     }
 
@@ -259,7 +293,7 @@ mod tests {
         // Actual binary filtering happens at chunking time, not scan time.
         fs::write(root.join("blob.custom"), b"\x89PNG\r\n\x1a\n\0\0\0IHDR").unwrap();
 
-        let snapshot = MerkleSnapshot::build(root).unwrap();
+        let snapshot = MerkleSnapshot::build(root, false).unwrap();
         assert!(snapshot.files.contains_key("notes.custom"));
         assert!(snapshot.files.contains_key("blob.custom"));
     }
@@ -285,7 +319,7 @@ mod tests {
         // Normal source file
         fs::write(root.join("main.rs"), "fn main() {}\n").unwrap();
 
-        let snapshot = MerkleSnapshot::build(root).unwrap();
+        let snapshot = MerkleSnapshot::build(root, false).unwrap();
 
         // .git contents must be excluded
         assert!(!snapshot.files.contains_key(".git/HEAD"));

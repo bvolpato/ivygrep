@@ -133,7 +133,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 message: err.to_string(),
             },
         },
-        DaemonRequest::Index { path, watch } => {
+        DaemonRequest::Index { path, watch, skip_gitignore: _ } => {
             let workspace = match Workspace::resolve(&path) {
                 Ok(workspace) => workspace,
                 Err(err) => {
@@ -180,6 +180,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             exclude_globs,
             scope_path,
             scope_is_file,
+            skip_gitignore,
         } => {
             let state_clone = state.clone();
 
@@ -214,6 +215,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 include_globs,
                 exclude_globs,
                 scope_filter: scope_from_request(scope_path, scope_is_file),
+                skip_gitignore,
             };
 
             let result = tokio::task::spawn_blocking(move || {
@@ -283,6 +285,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             exclude_globs,
             scope_path,
             scope_is_file,
+            skip_gitignore,
         } => {
             let workspaces = if let Some(p) = path {
                 match Workspace::resolve(&p) {
@@ -319,6 +322,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                         scope_filter.as_ref(),
                         &include_globs,
                         &exclude_globs,
+                        skip_gitignore,
                     ) {
                         Ok(mut hits) => all_hits.append(&mut hits),
                         Err(err) => {
@@ -354,6 +358,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             exclude_globs,
             scope_path,
             scope_is_file,
+            skip_gitignore,
         } => {
             let workspaces = if let Some(p) = path {
                 match Workspace::resolve(&p) {
@@ -387,6 +392,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 include_globs,
                 exclude_globs,
                 scope_filter,
+                skip_gitignore,
             };
 
             let result = tokio::task::spawn_blocking(move || {

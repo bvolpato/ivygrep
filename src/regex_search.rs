@@ -14,6 +14,7 @@ pub fn regex_search(
     scope_filter: Option<&WorkspaceScope>,
     include_globs: &[String],
     exclude_globs: &[String],
+    skip_gitignore: bool,
 ) -> Result<Vec<SearchHit>> {
     let matcher = RegexMatcher::new(pattern)?;
     let mut searcher: Searcher = SearcherBuilder::new().line_number(true).build();
@@ -22,7 +23,7 @@ pub fn regex_search(
 
     let mut hits = Vec::new();
 
-    let walk = crate::walker::source_walker(&workspace.root);
+    let walk = crate::walker::source_walker(&workspace.root, skip_gitignore);
 
     'walk: for entry in walk.build() {
         let entry = entry?;
@@ -103,7 +104,7 @@ mod tests {
             is_file: false,
         };
 
-        let hits = regex_search(&workspace, "applyFilter", None, Some(&scope), &[], &[]).unwrap();
+        let hits = regex_search(&workspace, "applyFilter", None, Some(&scope), &[], &[], false).unwrap();
         assert!(!hits.is_empty());
         assert!(
             hits.iter()
@@ -131,7 +132,7 @@ mod tests {
         let exclude = vec!["match.md".to_string()];
 
         let include_only =
-            regex_search(&workspace, "applyFilter", None, None, &include, &[]).unwrap();
+            regex_search(&workspace, "applyFilter", None, None, &include, &[], false).unwrap();
         assert_eq!(
             include_only
                 .iter()
@@ -143,7 +144,7 @@ mod tests {
         );
 
         let include_and_exclude =
-            regex_search(&workspace, "applyFilter", None, None, &include, &exclude).unwrap();
+            regex_search(&workspace, "applyFilter", None, None, &include, &exclude, false).unwrap();
         assert!(include_and_exclude.is_empty());
     }
 }

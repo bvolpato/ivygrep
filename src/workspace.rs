@@ -30,6 +30,8 @@ pub struct WorkspaceMetadata {
     pub created_at_unix: u64,
     pub last_indexed_at_unix: Option<u64>,
     pub watch_enabled: bool,
+    #[serde(default)]
+    pub skip_gitignore: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

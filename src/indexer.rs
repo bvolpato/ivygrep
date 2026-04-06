@@ -55,6 +55,7 @@ pub struct IndexedChunk {
     pub text: String,
     pub content_hash: String,
     pub vector_key: u64,
+    pub is_ignored: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +68,7 @@ pub struct TantivyFields {
     pub kind: Field,
     pub text: Field,
     pub content_hash: Field,
+    pub is_ignored: Field,
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +180,7 @@ fn index_workspace_inner(
             created_at_unix: now,
             last_indexed_at_unix: None,
             watch_enabled: true,
+            skip_gitignore: false,
         })?;
     }
 
@@ -234,13 +237,13 @@ fn index_workspace_inner(
                 serde_json::to_vec_pretty(&base_ref)?,
             )?;
 
-            // Content-based diff: base root vs worktree root
+            let skip_gitignore = workspace.read_metadata()?.map_or(false, |m| m.skip_gitignore);
             let _ = fs::write(
                 workspace.indexing_progress_path(),
                 "scanning (content-based)",
             );
-            let old = MerkleSnapshot::build_content_based(&main_root)?;
-            let new = MerkleSnapshot::build_content_based(&workspace.root)?;
+            let old = MerkleSnapshot::build_content_based(&main_root, skip_gitignore)?;
+            let new = MerkleSnapshot::build_content_based(&workspace.root, skip_gitignore)?;
             let diff = old.diff(&new);
 
             eprintln!(
@@ -265,6 +268,7 @@ fn index_workspace_inner(
         None
     };
 
+    let skip_gitignore = workspace.read_metadata()?.map_or(false, |m| m.skip_gitignore);
     // When not in overlay creation mode, use the standard Merkle diff path
     let diff = if let Some(overlay_diff) = overlay_mode {
         overlay_diff
@@ -272,7 +276,7 @@ fn index_workspace_inner(
         // Incremental update to existing overlay
         let old = MerkleSnapshot::load(&workspace.merkle_snapshot_path())?;
         let _ = fs::write(workspace.indexing_progress_path(), "scanning");
-        let new = MerkleSnapshot::build(&workspace.root)?;
+        let new = MerkleSnapshot::build(&workspace.root, skip_gitignore)?;
         let d = old.diff(&new);
         new.save(&workspace.merkle_snapshot_path())?;
         d
@@ -280,7 +284,7 @@ fn index_workspace_inner(
         // Standard full-index path (non-worktree or base not available)
         let old = MerkleSnapshot::load(&workspace.merkle_snapshot_path())?;
         let _ = fs::write(workspace.indexing_progress_path(), "scanning");
-        let new = MerkleSnapshot::build(&workspace.root)?;
+        let new = MerkleSnapshot::build(&workspace.root, skip_gitignore)?;
         let d = old.diff(&new);
         if d.added_or_modified.is_empty() && d.deleted.is_empty() && workspace_is_indexed(workspace)
         {
@@ -404,7 +408,7 @@ fn index_workspace_inner(
         for batch_paths in diff_paths.chunks(4096) {
             let file_chunks: Vec<_> = batch_paths
                 .par_iter()
-                .filter_map(|rel_path| {
+                .filter_map(|(rel_path, is_ignored)| {
                     let abs_path = root_clone.join(rel_path);
                     if !abs_path.exists() {
                         progress_counter_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -423,7 +427,7 @@ fn index_workspace_inner(
                     };
 
                     let chunks = chunk_source(rel_path, &content);
-                    let indexed: Vec<_> = chunks.into_iter().map(build_indexed_chunk).collect();
+                    let indexed: Vec<_> = chunks.into_iter().map(|c| build_indexed_chunk(c, *is_ignored)).collect();
 
                     let n = progress_counter_clone
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -551,6 +555,10 @@ fn index_workspace_inner(
             .unwrap_or(now),
         last_indexed_at_unix: Some(now),
         watch_enabled: true,
+        skip_gitignore: match workspace.read_metadata() {
+            Ok(Some(m)) => m.skip_gitignore,
+            _ => false,
+        },
     };
     workspace.write_metadata(&metadata)?;
 
@@ -750,7 +758,7 @@ pub fn enhance_workspace_neural(
     Ok(newly_processed)
 }
 
-fn build_indexed_chunk(chunk: Chunk) -> IndexedChunk {
+fn build_indexed_chunk(chunk: Chunk, is_ignored: bool) -> IndexedChunk {
     let vector_key = vector_key_from_content_hash(&chunk.content_hash);
     let kind = format!("{:?}", chunk.kind);
 
@@ -764,6 +772,7 @@ fn build_indexed_chunk(chunk: Chunk) -> IndexedChunk {
         text: chunk.text,
         content_hash: chunk.content_hash,
         vector_key,
+        is_ignored,
     }
 }
 
@@ -839,7 +848,8 @@ fn add_chunk_doc(
         fields.language => chunk.language.clone(),
         fields.kind => chunk.kind.clone(),
         fields.text => chunk.text.clone(),
-        fields.content_hash => chunk.content_hash.clone()
+        fields.content_hash => chunk.content_hash.clone(),
+        fields.is_ignored => if chunk.is_ignored { 1u64 } else { 0u64 }
     ))?;
     Ok(())
 }
@@ -951,7 +961,8 @@ fn create_tables(conn: &Connection) -> Result<()> {
             text TEXT NOT NULL,
             content_hash TEXT NOT NULL,
             vector_key INTEGER NOT NULL,
-            modified_unix INTEGER NOT NULL
+            modified_unix INTEGER NOT NULL,
+            is_ignored INTEGER NOT NULL DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS _stats (
@@ -964,6 +975,13 @@ fn create_tables(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_chunks_language ON chunks(language);
         "#,
     )?;
+
+    // Migration: Add is_ignored column to older tables
+    let _ = conn.execute(
+        "ALTER TABLE chunks ADD COLUMN is_ignored INTEGER NOT NULL DEFAULT 0;",
+        [],
+    );
+
     Ok(())
 }
 
@@ -978,6 +996,7 @@ fn build_schema() -> Schema {
     // Not STORED — full text lives in SQLite
     schema.add_text_field("text", TEXT);
     schema.add_text_field("content_hash", STRING | STORED);
+    schema.add_u64_field("is_ignored", STORED);
     schema.build()
 }
 
@@ -1001,6 +1020,7 @@ pub fn open_tantivy_index(path: &Path) -> Result<(TantivyIndex, TantivyFields)> 
         kind: schema.get_field("kind")?,
         text: schema.get_field("text")?,
         content_hash: schema.get_field("content_hash")?,
+        is_ignored: schema.get_field("is_ignored")?,
     };
 
     Ok((index, fields))
@@ -1011,7 +1031,7 @@ pub fn fetch_chunk_by_vector_key(
     vector_key: u64,
 ) -> Result<Option<IndexedChunk>> {
     let mut stmt = conn.prepare(
-        "SELECT chunk_id, file_path, start_line, end_line, language, kind, text, content_hash, vector_key
+        "SELECT chunk_id, file_path, start_line, end_line, language, kind, text, content_hash, vector_key, is_ignored
          FROM chunks
          WHERE vector_key = ?1
          LIMIT 1",
@@ -1030,6 +1050,7 @@ pub fn fetch_chunk_by_vector_key(
             text: decompress_text(raw_text),
             content_hash: row.get(7)?,
             vector_key: row.get::<_, i64>(8)? as u64,
+            is_ignored: row.get::<_, bool>(9)?,
         };
 
         return Ok(Some(chunk));
@@ -1093,6 +1114,11 @@ pub fn fetch_chunk_by_id(
         .and_then(|v| v.as_str())?
         .to_string();
 
+    let is_ignored = search_doc
+        .get_first(fields.is_ignored)
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) > 0;
+
     let vector_key = vector_key_from_content_hash(&content_hash);
 
     Some(IndexedChunk {
@@ -1105,12 +1131,17 @@ pub fn fetch_chunk_by_id(
         text,
         content_hash,
         vector_key,
+        is_ignored,
     })
 }
 
 pub fn diff_for_workspace(workspace: &Workspace) -> Result<MerkleDiff> {
     let old_snapshot = MerkleSnapshot::load(&workspace.merkle_snapshot_path())?;
-    let new_snapshot = MerkleSnapshot::build(&workspace.root)?;
+    let skip_gitignore = match workspace.read_metadata()? {
+        Some(m) => m.skip_gitignore,
+        None => false,
+    };
+    let new_snapshot = MerkleSnapshot::build(&workspace.root, skip_gitignore)?;
     Ok(old_snapshot.diff(&new_snapshot))
 }
 
@@ -1164,6 +1195,7 @@ mod tests {
             created_at_unix: 0,
             last_indexed_at_unix: None,
             watch_enabled: false,
+            skip_gitignore: false,
         };
         std::fs::create_dir_all(&workspace.index_dir).unwrap();
         std::fs::write(workspace.sqlite_path(), "").unwrap();
@@ -1185,6 +1217,7 @@ mod tests {
             created_at_unix: 0,
             last_indexed_at_unix: Some(123),
             watch_enabled: false,
+            skip_gitignore: false,
         };
         std::fs::write(
             workspace.index_dir.join("workspace.json"),
