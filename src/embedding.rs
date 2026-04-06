@@ -378,10 +378,19 @@ impl EmbeddingModel for OnnxEmbeddingModel {
         if texts.is_empty() {
             return vec![];
         }
-        self.model
-            .lock()
-            .embed(texts, None)
-            .unwrap_or_else(|_| texts.iter().map(|_| vec![0.0; 384]).collect())
+        
+        // Fastembed handles batching internally, but passing 50K+ strings at once 
+        // can cause massive ONNX memory allocations. We explicitly chunk the input 
+        // string array to cap GPU memory usage (keeps it well under 8GB).
+        let mut all_results = Vec::with_capacity(texts.len());
+        for chunk in texts.chunks(256) {
+            let mut results = self.model
+                .lock()
+                .embed(chunk.to_vec(), None) // fastembed takes Vec<&str>
+                .unwrap_or_else(|_| chunk.iter().map(|_| vec![0.0; 384]).collect());
+            all_results.append(&mut results);
+        }
+        all_results
     }
 }
 
