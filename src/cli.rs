@@ -143,7 +143,7 @@ pub async fn run() -> Result<()> {
     }
 
     if let Some(path) = &cli.add_path {
-        return run_add(path, !cli.no_watch, cli.force, cli.skip_gitignore, cli.json).await;
+        return run_add(path, !cli.no_watch, cli.force, cli.skip_gitignore, cli.json, cli.hash).await;
     }
 
     if let Some(path) = &cli.rm_path {
@@ -427,8 +427,8 @@ fn format_timestamp_ago(unix_ts: u64) -> String {
     }
 }
 
-async fn run_add(path: &Path, watch: bool, force: bool, skip_gitignore: bool, json: bool) -> Result<()> {
-    let mut workspace = Workspace::resolve(path)?;
+async fn run_add(path: &Path, watch: bool, force: bool, skip_gitignore: bool, json: bool, hash: bool) -> Result<()> {
+    let workspace = Workspace::resolve(path)?;
     if skip_gitignore {
         let mut meta = workspace.read_metadata()?.unwrap_or_else(|| crate::workspace::WorkspaceMetadata {
             id: workspace.id.clone(),
@@ -472,7 +472,7 @@ async fn run_add(path: &Path, watch: bool, force: bool, skip_gitignore: bool, js
         return print_daemon_response(response, json);
     }
 
-    let model = create_model(false);
+    let model = create_model(hash);
     let summary = index_workspace(&workspace, model.as_ref())?;
 
     if json {

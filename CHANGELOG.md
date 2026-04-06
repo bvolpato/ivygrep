@@ -2,6 +2,12 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.12] — 2026-04-06
+
+### Performance
+- Bounded ONNX/GPU allocations by enforcing maximum chunk counts for embeddings, capping VRAM well below 8GB during massive batches
+- Fixed a bug where initial indexing incorrectly instantiated the background neural model even when `--hash` was passed
+
 ## [0.5.11] — 2026-04-06
 
 ### Added
