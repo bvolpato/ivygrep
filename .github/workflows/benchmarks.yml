@@ -54,6 +54,9 @@ jobs:
           '
 
 
+      - name: Restore Cargo.lock
+        run: git restore Cargo.lock || true
+
       - name: Track Benchmarks
         uses: benchmark-action/github-action-benchmark@v1
         with:
