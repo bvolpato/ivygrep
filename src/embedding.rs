@@ -253,8 +253,35 @@ fn register_hardware_acceleration(is_background: bool) {
     tracing::info!("CoreML execution provider registered");
 }
 
+/// Probe whether cuDNN is actually loadable at runtime.
+/// ONNX Runtime's CUDAExecutionProvider reports `is_available() == true`
+/// when the CUDA toolkit exists, but silently falls back to CPU if cuDNN
+/// is missing. We dlopen libcudnn to give an honest answer.
+#[cfg(all(feature = "neural", target_os = "linux"))]
+fn cudnn_is_loadable() -> bool {
+    unsafe {
+        let handle = libc::dlopen(c"libcudnn.so".as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD);
+        if !handle.is_null() {
+            libc::dlclose(handle);
+            return true;
+        }
+        // Try loading it for real (slower but definitive)
+        let handle = libc::dlopen(c"libcudnn.so".as_ptr(), libc::RTLD_LAZY);
+        if !handle.is_null() {
+            libc::dlclose(handle);
+            return true;
+        }
+        false
+    }
+}
+
 #[cfg(all(feature = "neural", target_os = "linux"))]
 fn register_hardware_acceleration(_is_background: bool) {
+    if !cudnn_is_loadable() {
+        tracing::info!("cuDNN not found — CUDA EP skipped, using CPU");
+        return;
+    }
+
     let _ = ort::init()
         .with_execution_providers([
             ort::execution_providers::CUDAExecutionProvider::default().build()
@@ -286,6 +313,7 @@ pub fn hardware_acceleration_info() -> &'static str {
             if ort::execution_providers::CUDAExecutionProvider::default()
                 .is_available()
                 .unwrap_or(false)
+                && cudnn_is_loadable()
             {
                 return "AllMiniLML6V2Q via CUDA";
             }
@@ -378,15 +406,16 @@ impl EmbeddingModel for OnnxEmbeddingModel {
         if texts.is_empty() {
             return vec![];
         }
-        
-        // Fastembed handles batching internally, but passing 50K+ strings at once 
-        // can cause massive ONNX memory allocations. We explicitly chunk the input 
+
+        // Fastembed handles batching internally, but passing 50K+ strings at once
+        // can cause massive ONNX memory allocations. We explicitly chunk the input
         // string array to cap GPU memory usage (keeps it well under 8GB).
         let mut all_results = Vec::with_capacity(texts.len());
         for chunk in texts.chunks(256) {
-            let mut results = self.model
+            let mut results = self
+                .model
                 .lock()
-                .embed(chunk.to_vec(), None) // fastembed takes Vec<&str>
+                .embed(chunk, None) // fastembed takes &[&str]
                 .unwrap_or_else(|_| chunk.iter().map(|_| vec![0.0; 384]).collect());
             all_results.append(&mut results);
         }
