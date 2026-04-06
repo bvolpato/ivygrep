@@ -2,6 +2,13 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.10] — 2026-04-05
+
+### Fixed
+- **Neural Error Observability:** Added explicit error messages to `ig --status` when background neural embedding operations fail (e.g. out of memory, network failure). The status no longer silently reverts to "run a query to trigger neural upgrade".
+- **Benchmark Fidelity:** Converted CI performance metrics to display in microseconds (µs) for improved readability in PR comments, and wired up the full suite of criterion benchmarks.
+- Eliminated internal compilation warnings and Clippy suggestions.
+
 ## [0.5.7] — 2026-04-05
 
 ### Fixed
