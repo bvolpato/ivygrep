@@ -238,16 +238,13 @@ fn device_context_allows_coreml(is_background: bool) -> bool {
 }
 
 /// Register CoreML execution provider (Apple Neural Engine / GPU).
-/// Automatically compiled in on macOS builds.
 #[cfg(all(feature = "neural", target_os = "macos"))]
-fn register_coreml(is_background: bool) {
+fn register_hardware_acceleration(is_background: bool) {
     if !device_context_allows_coreml(is_background) {
         tracing::info!("CoreML skipped due to adaptive device context rules");
         return;
     }
 
-    // ort::init() is idempotent; first call wins.
-    // In ort rc.11, commit() returns bool (true if this call did the init).
     let _ = ort::init()
         .with_execution_providers([
             ort::execution_providers::CoreMLExecutionProvider::default().build()
@@ -256,9 +253,18 @@ fn register_coreml(is_background: bool) {
     tracing::info!("CoreML execution provider registered");
 }
 
-/// No-op on non-macOS platforms (CoreML is Apple-only).
-#[cfg(all(feature = "neural", not(target_os = "macos")))]
-fn register_coreml(_is_background: bool) {}
+#[cfg(all(feature = "neural", target_os = "linux"))]
+fn register_hardware_acceleration(_is_background: bool) {
+    let _ = ort::init()
+        .with_execution_providers([
+            ort::execution_providers::CUDAExecutionProvider::default().build()
+        ])
+        .commit();
+    tracing::info!("CUDA execution provider registered (if available)");
+}
+
+#[cfg(all(feature = "neural", not(target_os = "macos"), not(target_os = "linux")))]
+fn register_hardware_acceleration(_is_background: bool) {}
 
 pub fn hardware_acceleration_info() -> &'static str {
     #[cfg(feature = "neural")]
@@ -271,6 +277,17 @@ pub fn hardware_acceleration_info() -> &'static str {
                 .unwrap_or(false)
             {
                 return "AllMiniLML6V2Q via CoreML";
+            }
+        }
+        
+        #[cfg(target_os = "linux")]
+        {
+            use ort::ep::ExecutionProvider;
+            if ort::execution_providers::CUDAExecutionProvider::default()
+                .is_available()
+                .unwrap_or(false)
+            {
+                return "AllMiniLML6V2Q via CUDA";
             }
         }
 
@@ -303,7 +320,7 @@ impl OnnxEmbeddingModel {
     fn new_internal(is_background: bool) -> anyhow::Result<Self> {
         use fastembed::{EmbeddingModel as FastModel, InitOptions};
 
-        register_coreml(is_background);
+        register_hardware_acceleration(is_background);
 
         let cache_dir = model_cache_dir();
         std::fs::create_dir_all(&cache_dir)?;

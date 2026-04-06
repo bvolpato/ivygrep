@@ -1,6 +1,6 @@
 [package]
 name = "ivygrep"
-version = "0.5.10"
+version = "0.5.11"
 edition = "2024"
 description = "Semantic grep that stays local"
 license = "MIT"
@@ -65,7 +65,7 @@ tempfile = "3.27"
 ort = { version = "=2.0.0-rc.11", optional = true, default-features = false, features = ["ndarray", "std", "coreml"] }
 
 [target."cfg(not(target_os = \"macos\"))".dependencies]
-ort = { version = "=2.0.0-rc.11", optional = true, default-features = false, features = ["ndarray", "std"] }
+ort = { version = "=2.0.0-rc.11", optional = true, default-features = false, features = ["ndarray", "std", "cuda"] }
 
 [profile.release]
 debug = true

@@ -2,6 +2,11 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.11] — 2026-04-05
+
+### Added
+- Optional hardware acceleration for Linux users with CUDA/GPU installed (significantly speeds up neural embedding generation)
+
 ## [0.5.10] — 2026-04-05
 
 ### Fixed
