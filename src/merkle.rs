@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use std::io::IsTerminal;
@@ -41,7 +40,7 @@ impl MerkleSnapshot {
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        let payload = serde_json::to_vec_pretty(self)?;
+        let payload = serde_json::to_vec(self)?;
         fs::write(path, payload)?;
         Ok(())
     }
@@ -63,41 +62,52 @@ impl MerkleSnapshot {
         let show_progress = std::io::stderr().is_terminal();
         let scanned = AtomicUsize::new(0);
 
-        // Collect all valid file entries first (walkdir is not Send)
-        let entries: Vec<_> = walker
-            .build()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_some_and(|ft| ft.is_file()))
-            .collect();
-
-        // Parallel stat + hash across all cores
+        // Use the parallel walker for I/O-bound stat+hash across all cores.
+        let pairs: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
         let root_owned = root.to_path_buf();
-        let pairs: Vec<_> = entries
-            .par_iter()
-            .filter_map(|entry| {
-                let path = entry.path();
-                let rel = path.strip_prefix(&root_owned).ok()?.to_path_buf();
 
-                let metadata = fs::metadata(path).ok()?;
-                if metadata.len() > MAX_INDEXABLE_FILE_BYTES {
-                    return None;
+        walker.build_parallel().run(|| {
+            let root_ref = &root_owned;
+            let scanned_ref = &scanned;
+            let pairs_ref = &pairs;
+            Box::new(move |entry| {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(_) => return ignore::WalkState::Continue,
+                };
+                if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                    return ignore::WalkState::Continue;
                 }
 
-                let n = scanned.fetch_add(1, Ordering::Relaxed) + 1;
-                if show_progress && n.is_multiple_of(2000) {
+                let path = entry.path();
+                let rel = match path.strip_prefix(root_ref) {
+                    Ok(r) => r.to_path_buf(),
+                    Err(_) => return ignore::WalkState::Continue,
+                };
+
+                let metadata = match fs::metadata(path) {
+                    Ok(m) => m,
+                    Err(_) => return ignore::WalkState::Continue,
+                };
+                if metadata.len() > MAX_INDEXABLE_FILE_BYTES {
+                    return ignore::WalkState::Continue;
+                }
+
+                let n = scanned_ref.fetch_add(1, Ordering::Relaxed) + 1;
+                if show_progress && n.is_multiple_of(5000) {
                     eprint!("\r\x1b[K  scanning files... {}", n);
                 }
 
                 let file_hash = if content_based {
-                    // Content-based: hash rel_path + file contents
-                    // Identical files across worktrees produce identical hashes
-                    let content = fs::read(path).ok()?;
+                    let content = match fs::read(path) {
+                        Ok(c) => c,
+                        Err(_) => return ignore::WalkState::Continue,
+                    };
                     let mut data = Vec::with_capacity(rel.to_string_lossy().len() + content.len());
                     data.extend_from_slice(rel.to_string_lossy().as_bytes());
                     data.extend_from_slice(&content);
                     hex::encode(xxhash_rust::xxh3::xxh3_128(&data).to_le_bytes())
                 } else {
-                    // Mtime-based: fast stat-only hash (default for normal indexing)
                     let mut data = Vec::with_capacity(128);
                     data.extend_from_slice(rel.to_string_lossy().as_bytes());
                     data.extend_from_slice(&metadata.len().to_le_bytes());
@@ -109,15 +119,19 @@ impl MerkleSnapshot {
                     hex::encode(xxhash_rust::xxh3::xxh3_128(&data).to_le_bytes())
                 };
 
-                Some((rel.to_string_lossy().to_string(), file_hash))
+                pairs_ref
+                    .lock()
+                    .unwrap()
+                    .push((rel.to_string_lossy().to_string(), file_hash));
+                ignore::WalkState::Continue
             })
-            .collect();
+        });
 
         if show_progress {
             eprint!("\r\x1b[K");
         }
 
-        let files: BTreeMap<String, String> = pairs.into_iter().collect();
+        let files: BTreeMap<String, String> = pairs.into_inner().unwrap().into_iter().collect();
         let root_hash = root_hash(&files);
         Ok(Self { root_hash, files })
     }

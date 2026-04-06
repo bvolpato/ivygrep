@@ -312,6 +312,13 @@ fn index_workspace_inner(
     };
 
     let mut sqlite = Connection::open(&sqlite_path)?;
+    // WAL mode + larger cache for bulk-write throughput on initial index.
+    sqlite.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA cache_size = -64000;
+         PRAGMA temp_store = MEMORY;",
+    )?;
     create_tables(&sqlite)?;
     if use_overlay {
         create_overlay_tables(&sqlite)?;
@@ -326,7 +333,7 @@ fn index_workspace_inner(
     // Retry with backoff — NFS/overlayfs may delay flock release.
     let mut writer = None;
     for attempt in 0..5u32 {
-        match tantivy.writer(50_000_000) {
+        match tantivy.writer(200_000_000) {
             Ok(w) => {
                 writer = Some(w);
                 break;
@@ -376,6 +383,11 @@ fn index_workspace_inner(
     let mut touched_files = HashSet::new();
     let mut chunks_since_commit = 0;
 
+    // On a fresh (empty) index, skip per-file remove_file_chunks entirely —
+    // there's nothing to delete, and the SELECT + DELETE per file is pure overhead
+    // on large initial indexes (~93K files in linux kernel).
+    let is_fresh_index = !workspace_is_indexed(workspace);
+
     // Stream through batches to rigidly bound memory footprints.
     // 4096 files is highly parallelizable while capping memory overhead effectively.
     let (tx_batch, rx_batch) =
@@ -416,10 +428,10 @@ fn index_workspace_inner(
                     let n = progress_counter_clone
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                         + 1;
-                    if show_progress && n.is_multiple_of(100) {
-                        eprint!("\r\x1b[K  [{n}/{total}] chunking...");
+                    if show_progress && n.is_multiple_of(500) {
+                        eprint!("\r\x1b[K  ⠋ indexing {n}/{total} files...");
                     }
-                    if n.is_multiple_of(500) {
+                    if n.is_multiple_of(2000) {
                         let _ = fs::write(&progress_path_clone, format!("{n}/{total}"));
                     }
 
@@ -452,7 +464,9 @@ fn index_workspace_inner(
             total_chunks_processed += indexed_chunks.len();
             chunks_since_commit += indexed_chunks.len();
 
-            remove_file_chunks(&tx, &mut writer, &fields, &mut vector_index, rel_path)?;
+            if !is_fresh_index {
+                remove_file_chunks(&tx, &mut writer, &fields, &mut vector_index, rel_path)?;
+            }
 
             // In overlay mode, tombstone the base version so search suppresses
             // the stale base chunks for this file path.
@@ -464,17 +478,23 @@ fn index_workspace_inner(
                 )?;
             }
 
+            // Batch the timestamp syscall per file, not per chunk.
+            let now_unix = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+
             for indexed in indexed_chunks {
                 let embedding = all_embeddings[embed_idx].clone();
                 embed_idx += 1;
                 vector_index.upsert(indexed.vector_key, embedding);
-                insert_chunk(&tx, indexed)?;
+                insert_chunk(&tx, indexed, is_fresh_index, now_unix)?;
                 add_chunk_doc(&mut writer, &fields, indexed)?;
             }
         }
 
         // Prevent memory/WAL ballooning on massive repositories
-        if chunks_since_commit >= 100_000 {
+        if chunks_since_commit >= 50_000 {
             tx.commit()?;
             writer.commit()?;
             vector_index.save()?;
@@ -824,8 +844,21 @@ fn add_chunk_doc(
     Ok(())
 }
 
-fn insert_chunk(conn: &Connection, chunk: &IndexedChunk) -> Result<()> {
-    let mut stmt = conn.prepare_cached(
+fn insert_chunk(conn: &Connection, chunk: &IndexedChunk, fresh: bool, now_unix: i64) -> Result<()> {
+    let sql = if fresh {
+        "INSERT INTO chunks (
+            chunk_id,
+            file_path,
+            start_line,
+            end_line,
+            language,
+            kind,
+            text,
+            content_hash,
+            vector_key,
+            modified_unix
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+    } else {
         "INSERT OR REPLACE INTO chunks (
             chunk_id,
             file_path,
@@ -837,8 +870,9 @@ fn insert_chunk(conn: &Connection, chunk: &IndexedChunk) -> Result<()> {
             content_hash,
             vector_key,
             modified_unix
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-    )?;
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+    };
+    let mut stmt = conn.prepare_cached(sql)?;
     stmt.execute(params![
         chunk.chunk_id,
         chunk.file_path.to_string_lossy().to_string(),
@@ -849,10 +883,7 @@ fn insert_chunk(conn: &Connection, chunk: &IndexedChunk) -> Result<()> {
         compress_text(&chunk.text),
         chunk.content_hash,
         chunk.vector_key as i64,
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i64,
+        now_unix,
     ])?;
     Ok(())
 }

@@ -2,10 +2,18 @@
 
 All notable changes to ivygrep are documented in this file.
 
-## [0.5.11] — 2026-04-05
+## [0.5.11] — 2026-04-06
 
 ### Added
 - Optional hardware acceleration for Linux users with CUDA/GPU installed (significantly speeds up neural embedding generation)
+
+### Performance
+- **Faster initial indexing:** Eliminated redundant per-file SQLite lookups and Tantivy deletes on fresh indexes (pure INSERT vs INSERT OR REPLACE)
+- **Parallel filesystem scanning:** Switched Merkle snapshot from sequential walk + parallel hash to fully parallel walker, improving scan throughput on large repos
+- **SQLite tuning:** Enabled WAL mode, larger page cache, and in-memory temp storage for bulk writes
+- **Tantivy heap:** Increased writer heap from 50MB to 200MB, reducing forced commit frequency
+- **Reduced I/O noise:** Lowered progress file writes from every 500 to every 2000 files, compact (non-pretty) Merkle JSON
+- **Batched timestamps:** Single syscall per file batch instead of per chunk (eliminates 1M+ syscalls on Linux kernel)
 
 ## [0.5.10] — 2026-04-05
 
