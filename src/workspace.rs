@@ -50,6 +50,8 @@ pub struct WorkspaceStatus {
     #[serde(default)]
     pub enhancing_paused_reason: Option<String>,
     #[serde(default)]
+    pub enhancing_error: Option<String>,
+    #[serde(default)]
     pub indexing_in_progress: bool,
     #[serde(default)]
     pub indexing_progress: Option<String>,
@@ -509,6 +511,12 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
             None
         };
 
+        let enhancing_error = if !enhancing_in_progress && index_dir.join(".enhancing.error").exists() {
+            std::fs::read_to_string(index_dir.join(".enhancing.error")).ok()
+        } else {
+            None
+        };
+
         let indexing_progress = if indexing_in_progress {
             let progress_path = index_dir.join(".indexing.progress");
             std::fs::read_to_string(&progress_path)
@@ -541,6 +549,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
                 enhancing_in_progress,
                 enhancing_progress_count,
                 enhancing_paused_reason,
+                enhancing_error,
                 indexing_in_progress,
                 indexing_progress,
                 is_worktree: ws_is_worktree,

@@ -171,11 +171,20 @@ pub async fn run() -> Result<()> {
         };
 
         let result = {
-            let model_res = crate::embedding::create_neural_model_background();
-            if let Ok(model) = model_res {
-                crate::indexer::enhance_workspace_neural(&workspace, model.as_ref())
-            } else {
-                Ok(0)
+            match crate::embedding::create_neural_model_background() {
+                Ok(model) => {
+                    let enhance_res = crate::indexer::enhance_workspace_neural(&workspace, model.as_ref());
+                    if let Err(e) = &enhance_res {
+                        let _ = std::fs::write(workspace.index_dir.join(".enhancing.error"), format!("Enhancement error: {:?}", e));
+                    } else {
+                        let _ = std::fs::remove_file(workspace.index_dir.join(".enhancing.error"));
+                    }
+                    enhance_res
+                }
+                Err(e) => {
+                    let _ = std::fs::write(workspace.index_dir.join(".enhancing.error"), format!("Model init error: {:?}", e));
+                    Ok(0)
+                }
             }
         };
 
@@ -339,6 +348,12 @@ async fn run_status(json: bool) -> Result<()> {
                             "{prefix}  Search: \x1b[35m⟐ overlay\x1b[0m (fully delegated to base)"
                         );
                     }
+                } else if let Some(err) = &ws.enhancing_error {
+                    // Neural enhancement failed! Show the error instead of "hash"
+                    println!(
+                        "{prefix}  Search: \x1b[1;31m⚠️ neural upgrade failed\x1b[0m (run `ig query` to retry, or check .enhancing.error)"
+                    );
+                    println!("{prefix}          Error: \x1b[31m{}\x1b[0m", err.lines().next().unwrap_or("unknown error"));
                 } else if ws.chunk_count > 0 {
                     println!(
                         "{prefix}  Search: \x1b[33m◆ hash\x1b[0m (fast, run a query to trigger neural upgrade)"
@@ -610,13 +625,11 @@ async fn run_query(cli: Cli) -> Result<()> {
                 None => {}
             }
         }
-    } else {
-        if daemon::request(&DaemonRequest::Status, !cli.no_watch)
-            .await?
-            .is_some()
-        {
-            search_via_daemon = true;
-        }
+    } else if daemon::request(&DaemonRequest::Status, !cli.no_watch)
+        .await?
+        .is_some()
+    {
+        search_via_daemon = true;
     }
 
     // Indexing always uses hash embeddings (instant, ~0.1s).
