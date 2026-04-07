@@ -459,10 +459,10 @@ pub fn hybrid_search(
             matches.truncate(candidate_limit);
 
             for vector_match in matches {
-                if let Some(chunk) = ctx.fetch_chunk_by_vector_key(vector_match.key)? {
-                    if options.skip_gitignore || !chunk.is_ignored {
-                        semantic_chunks.push((chunk, vector_match.score));
-                    }
+                if let Some(chunk) = ctx.fetch_chunk_by_vector_key(vector_match.key)?
+                    && (options.skip_gitignore || !chunk.is_ignored)
+                {
+                    semantic_chunks.push((chunk, vector_match.score));
                 }
             }
         }

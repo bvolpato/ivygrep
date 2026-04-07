@@ -66,12 +66,14 @@ impl MerkleSnapshot {
                 let paths_ref = &paths;
                 let root_ref = &root_owned;
                 Box::new(move |entry| {
-                    if let Ok(e) = entry {
-                        if e.file_type().is_some_and(|ft| ft.is_file()) {
-                            if let Ok(rel) = e.path().strip_prefix(root_ref) {
-                                paths_ref.lock().unwrap().insert(rel.to_string_lossy().to_string());
-                            }
-                        }
+                    if let Ok(e) = entry
+                        && e.file_type().is_some_and(|ft| ft.is_file())
+                        && let Ok(rel) = e.path().strip_prefix(root_ref)
+                    {
+                        paths_ref
+                            .lock()
+                            .unwrap()
+                            .insert(rel.to_string_lossy().to_string());
                     }
                     ignore::WalkState::Continue
                 })
@@ -152,10 +154,7 @@ impl MerkleSnapshot {
                     format!("{file_hash}-0")
                 };
 
-                pairs_ref
-                    .lock()
-                    .unwrap()
-                    .push((rel_str, final_hash));
+                pairs_ref.lock().unwrap().push((rel_str, final_hash));
                 ignore::WalkState::Continue
             })
         });
@@ -242,8 +241,14 @@ mod tests {
         let diff = first.diff(&second);
 
         assert!(diff.deleted.contains(&PathBuf::from("a.rs")));
-        assert!(diff.added_or_modified.contains(&(PathBuf::from("b.py"), false)));
-        assert!(diff.added_or_modified.contains(&(PathBuf::from("c.ts"), false)));
+        assert!(
+            diff.added_or_modified
+                .contains(&(PathBuf::from("b.py"), false))
+        );
+        assert!(
+            diff.added_or_modified
+                .contains(&(PathBuf::from("c.ts"), false))
+        );
     }
 
     #[test]

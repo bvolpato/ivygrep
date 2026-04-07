@@ -133,7 +133,11 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 message: err.to_string(),
             },
         },
-        DaemonRequest::Index { path, watch, skip_gitignore: _ } => {
+        DaemonRequest::Index {
+            path,
+            watch,
+            skip_gitignore: _,
+        } => {
             let workspace = match Workspace::resolve(&path) {
                 Ok(workspace) => workspace,
                 Err(err) => {

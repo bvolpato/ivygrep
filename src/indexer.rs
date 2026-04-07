@@ -237,7 +237,7 @@ fn index_workspace_inner(
                 serde_json::to_vec_pretty(&base_ref)?,
             )?;
 
-            let skip_gitignore = workspace.read_metadata()?.map_or(false, |m| m.skip_gitignore);
+            let skip_gitignore = workspace.read_metadata()?.is_some_and(|m| m.skip_gitignore);
             let _ = fs::write(
                 workspace.indexing_progress_path(),
                 "scanning (content-based)",
@@ -268,7 +268,7 @@ fn index_workspace_inner(
         None
     };
 
-    let skip_gitignore = workspace.read_metadata()?.map_or(false, |m| m.skip_gitignore);
+    let skip_gitignore = workspace.read_metadata()?.is_some_and(|m| m.skip_gitignore);
     // When not in overlay creation mode, use the standard Merkle diff path
     let diff = if let Some(overlay_diff) = overlay_mode {
         overlay_diff
@@ -427,7 +427,10 @@ fn index_workspace_inner(
                     };
 
                     let chunks = chunk_source(rel_path, &content);
-                    let indexed: Vec<_> = chunks.into_iter().map(|c| build_indexed_chunk(c, *is_ignored)).collect();
+                    let indexed: Vec<_> = chunks
+                        .into_iter()
+                        .map(|c| build_indexed_chunk(c, *is_ignored))
+                        .collect();
 
                     let n = progress_counter_clone
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -659,12 +662,13 @@ pub fn enhance_workspace_neural(
 ) -> Result<usize> {
     let sqlite = open_sqlite(&workspace.sqlite_path())?;
 
-    let mut stmt = sqlite.prepare("SELECT vector_key, text FROM chunks ORDER BY vector_key")?;
-    let rows = stmt.query_map([], |row| {
-        let key = row.get::<_, i64>(0)? as u64;
-        let raw: Vec<u8> = row.get(1)?;
-        Ok((key, decompress_text(raw)))
-    })?;
+    // Phase 1: Collect all vector_keys to determine which still need embedding.
+    // This avoids decompressing text for the ~31% already done.
+    let total_chunks: usize = sqlite
+        .query_row("SELECT COUNT(*) FROM chunks", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap_or(0) as usize;
 
     let mut vector_index = VectorStore::open(
         &workspace.vector_neural_path(),
@@ -672,15 +676,28 @@ pub fn enhance_workspace_neural(
         ScalarKind::F32,
     )?;
 
-    // Use a smaller batch size (16) to ensure Apple Silicon / CoreML stays within the L2 cache
-    // and doesn't trigger thermal throttling or high memory transfer overhead while still
-    // being 2x faster than the original setup.
-    let mut batch = Vec::with_capacity(16);
-    let mut newly_processed = 0;
+    // Pre-reserve capacity so the index doesn't need to grow repeatedly
+    let existing = vector_index.size();
+    let remaining = total_chunks.saturating_sub(existing);
+    vector_index.reserve_additional(remaining);
 
-    // To support resumption, we'll discover how many are already in the index
-    // so we can correctly broadcast our starting percentage.
-    let mut progress_count = 0;
+    let mut newly_processed = 0;
+    let mut progress_count = existing;
+
+    let progress_path = workspace.enhancing_progress_path();
+    let paused_path = workspace.enhancing_paused_path();
+
+    // Phase 2: Stream rows and skip already-embedded keys without decompressing text.
+    // Use a larger batch (512) to amortize ONNX session overhead.
+    const BATCH_SIZE: usize = 512;
+    let mut batch: Vec<(u64, String)> = Vec::with_capacity(BATCH_SIZE);
+
+    let mut stmt = sqlite.prepare("SELECT vector_key, text FROM chunks ORDER BY vector_key")?;
+    let rows = stmt.query_map([], |row| {
+        let key = row.get::<_, i64>(0)? as u64;
+        let raw: Vec<u8> = row.get(1)?;
+        Ok((key, raw))
+    })?;
 
     let process_batch =
         |batch: &mut Vec<(u64, String)>, count: &mut usize, v_index: &mut VectorStore| {
@@ -688,8 +705,6 @@ pub fn enhance_workspace_neural(
                 return;
             }
 
-            // Strictly cap each string to ~1024 bytes (slightly more than the 256 token limit of the model)
-            // to definitively bound ONNX memory allocation prior to tokenization.
             let texts: Vec<&str> = batch
                 .iter()
                 .map(|(_, t)| {
@@ -708,23 +723,26 @@ pub fn enhance_workspace_neural(
             let embeddings = neural_model.embed_batch(&texts);
 
             for ((key, _), embedding) in batch.iter().zip(embeddings) {
-                v_index.upsert(*key, embedding);
+                v_index.add_unchecked(*key, embedding);
             }
             *count += batch.len();
             batch.clear();
         };
 
-    let progress_path = workspace.enhancing_progress_path();
-    let paused_path = workspace.enhancing_paused_path();
-
     for row in rows.flatten() {
-        if vector_index.contains(row.0) {
+        let (key, raw) = row;
+
+        // Skip without decompressing if already embedded
+        if vector_index.contains(key) {
             progress_count += 1;
             continue;
         }
 
-        batch.push(row);
-        if batch.len() >= 16 {
+        // Only decompress text for keys we actually need to embed
+        let text = decompress_text(raw);
+        batch.push((key, text));
+
+        if batch.len() >= BATCH_SIZE {
             while let Some(reason) = check_system_constraints() {
                 let _ = std::fs::write(&paused_path, &reason);
                 std::thread::sleep(std::time::Duration::from_secs(10));
@@ -732,16 +750,13 @@ pub fn enhance_workspace_neural(
             let _ = std::fs::remove_file(&paused_path);
 
             process_batch(&mut batch, &mut newly_processed, &mut vector_index);
-            progress_count += 16;
+            progress_count += BATCH_SIZE;
 
-            if progress_count % 256 == 0 {
-                // Periodically update the human-readable progress file
+            if progress_count % 2048 == 0 {
                 let _ = std::fs::write(&progress_path, progress_count.to_string());
             }
 
-            if newly_processed % 8192 == 0 {
-                // Periodically save to disk to support partial resumption
-                // and immediate hybrid-search upgrades.
+            if newly_processed % 16384 == 0 {
                 let _ = vector_index.save();
             }
         }
@@ -1117,7 +1132,8 @@ pub fn fetch_chunk_by_id(
     let is_ignored = search_doc
         .get_first(fields.is_ignored)
         .and_then(|v| v.as_u64())
-        .unwrap_or(0) > 0;
+        .unwrap_or(0)
+        > 0;
 
     let vector_key = vector_key_from_content_hash(&content_hash);
 

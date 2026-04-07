@@ -104,7 +104,16 @@ mod tests {
             is_file: false,
         };
 
-        let hits = regex_search(&workspace, "applyFilter", None, Some(&scope), &[], &[], false).unwrap();
+        let hits = regex_search(
+            &workspace,
+            "applyFilter",
+            None,
+            Some(&scope),
+            &[],
+            &[],
+            false,
+        )
+        .unwrap();
         assert!(!hits.is_empty());
         assert!(
             hits.iter()
@@ -143,8 +152,16 @@ mod tests {
                 .collect::<std::collections::HashSet<_>>()
         );
 
-        let include_and_exclude =
-            regex_search(&workspace, "applyFilter", None, None, &include, &exclude, false).unwrap();
+        let include_and_exclude = regex_search(
+            &workspace,
+            "applyFilter",
+            None,
+            None,
+            &include,
+            &exclude,
+            false,
+        )
+        .unwrap();
         assert!(include_and_exclude.is_empty());
     }
 }

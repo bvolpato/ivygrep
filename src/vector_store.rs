@@ -122,6 +122,25 @@ impl VectorStore {
         let _ = self.index.remove(key);
     }
 
+    /// Reserve space for `additional` entries upfront, avoiding repeated
+    /// capacity doublings during bulk enhancement.
+    pub fn reserve_additional(&mut self, additional: usize) {
+        if additional == 0 {
+            return;
+        }
+        let needed = self.index.size() + additional;
+        if needed > self.index.capacity() {
+            let _ = self.index.reserve(needed);
+        }
+    }
+
+    /// Add a vector without checking for duplicates. Use only when the caller
+    /// guarantees the key does not already exist (e.g., fresh enhancement).
+    pub fn add_unchecked(&mut self, key: u64, vector: Vec<f32>) {
+        self.ensure_capacity_for_insert();
+        let _ = self.index.add(key, &vector);
+    }
+
     pub fn upsert(&mut self, key: u64, vector: Vec<f32>) {
         self.ensure_capacity_for_insert();
 

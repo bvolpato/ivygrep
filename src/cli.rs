@@ -143,7 +143,15 @@ pub async fn run() -> Result<()> {
     }
 
     if let Some(path) = &cli.add_path {
-        return run_add(path, !cli.no_watch, cli.force, cli.skip_gitignore, cli.json, cli.hash).await;
+        return run_add(
+            path,
+            !cli.no_watch,
+            cli.force,
+            cli.skip_gitignore,
+            cli.json,
+            cli.hash,
+        )
+        .await;
     }
 
     if let Some(path) = &cli.rm_path {
@@ -427,17 +435,27 @@ fn format_timestamp_ago(unix_ts: u64) -> String {
     }
 }
 
-async fn run_add(path: &Path, watch: bool, force: bool, skip_gitignore: bool, json: bool, hash: bool) -> Result<()> {
+async fn run_add(
+    path: &Path,
+    watch: bool,
+    force: bool,
+    skip_gitignore: bool,
+    json: bool,
+    hash: bool,
+) -> Result<()> {
     let workspace = Workspace::resolve(path)?;
     if skip_gitignore {
-        let mut meta = workspace.read_metadata()?.unwrap_or_else(|| crate::workspace::WorkspaceMetadata {
-            id: workspace.id.clone(),
-            root: workspace.root.clone(),
-            created_at_unix: 0,
-            last_indexed_at_unix: None,
-            watch_enabled: watch,
-            skip_gitignore: true,
-        });
+        let mut meta =
+            workspace
+                .read_metadata()?
+                .unwrap_or_else(|| crate::workspace::WorkspaceMetadata {
+                    id: workspace.id.clone(),
+                    root: workspace.root.clone(),
+                    created_at_unix: 0,
+                    last_indexed_at_unix: None,
+                    watch_enabled: watch,
+                    skip_gitignore: true,
+                });
         meta.skip_gitignore = true;
         workspace.ensure_dirs()?;
         workspace.write_metadata(&meta)?;
