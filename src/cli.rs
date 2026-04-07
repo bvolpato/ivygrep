@@ -441,7 +441,7 @@ async fn run_add(
     force: bool,
     skip_gitignore: bool,
     json: bool,
-    hash: bool,
+    _hash: bool,
 ) -> Result<()> {
     let workspace = Workspace::resolve(path)?;
     if skip_gitignore {
@@ -490,7 +490,7 @@ async fn run_add(
         return print_daemon_response(response, json);
     }
 
-    let model = create_model(hash);
+    let model = crate::embedding::create_hash_model();
     let summary = index_workspace(&workspace, model.as_ref())?;
 
     if json {

@@ -193,11 +193,11 @@ pub struct OnnxEmbeddingModel {
 }
 
 /// Maximum ONNX inter/intra-op thread count for background enhancement.
-/// Uses half the logical CPUs (min 2) so the system stays responsive.
+/// Uses 25% of logical CPUs (capped at 4) so the system stays responsive.
 #[cfg(feature = "neural")]
 fn ort_thread_budget() -> usize {
     let cpus = num_cpus::get();
-    (cpus / 2).max(2)
+    (cpus / 4).clamp(2, 4)
 }
 
 /// Adaptive check for CoreML in background daemon phase.
@@ -337,11 +337,21 @@ impl OnnxEmbeddingModel {
 
     /// Initialize with limited thread count for background processing.
     pub fn new_background() -> anyhow::Result<Self> {
-        // Set the ORT thread budget before model init
         let budget = ort_thread_budget();
-        // SAFETY: This is called in the background `--enhance-internal` subprocess
-        // which is single-threaded at this point (before model init).
-        unsafe { std::env::set_var("ORT_NUM_THREADS", budget.to_string()) };
+        // Limit CPU affinity so that `std::thread::available_parallelism()`
+        // returns our budget instead of all cores. fastembed reads this value
+        // to set ONNX intra-op threads, and there's no other override path.
+        #[cfg(target_os = "linux")]
+        {
+            use std::mem;
+            let mut set: libc::cpu_set_t = unsafe { mem::zeroed() };
+            for i in 0..budget {
+                unsafe { libc::CPU_SET(i, &mut set) };
+            }
+            unsafe {
+                libc::sched_setaffinity(0, mem::size_of::<libc::cpu_set_t>(), &set);
+            }
+        }
         Self::new_internal(true)
     }
 

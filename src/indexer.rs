@@ -68,7 +68,7 @@ pub struct TantivyFields {
     pub kind: Field,
     pub text: Field,
     pub content_hash: Field,
-    pub is_ignored: Field,
+    pub is_ignored: Option<Field>,
 }
 
 #[derive(Debug, Clone)]
@@ -759,6 +759,9 @@ pub fn enhance_workspace_neural(
             if newly_processed % 16384 == 0 {
                 let _ = vector_index.save();
             }
+
+            // Brief yield so the system stays responsive during background work
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
 
@@ -855,7 +858,7 @@ fn add_chunk_doc(
     fields: &TantivyFields,
     chunk: &IndexedChunk,
 ) -> Result<()> {
-    writer.add_document(doc!(
+    let mut doc = doc!(
         fields.chunk_id => chunk.chunk_id.clone(),
         fields.file_path => chunk.file_path.to_string_lossy().to_string(),
         fields.start_line => chunk.start_line as u64,
@@ -863,9 +866,12 @@ fn add_chunk_doc(
         fields.language => chunk.language.clone(),
         fields.kind => chunk.kind.clone(),
         fields.text => chunk.text.clone(),
-        fields.content_hash => chunk.content_hash.clone(),
-        fields.is_ignored => if chunk.is_ignored { 1u64 } else { 0u64 }
-    ))?;
+        fields.content_hash => chunk.content_hash.clone()
+    );
+    if let Some(f) = fields.is_ignored {
+        doc.add_u64(f, if chunk.is_ignored { 1u64 } else { 0u64 });
+    }
+    writer.add_document(doc)?;
     Ok(())
 }
 
@@ -1035,7 +1041,7 @@ pub fn open_tantivy_index(path: &Path) -> Result<(TantivyIndex, TantivyFields)> 
         kind: schema.get_field("kind")?,
         text: schema.get_field("text")?,
         content_hash: schema.get_field("content_hash")?,
-        is_ignored: schema.get_field("is_ignored")?,
+        is_ignored: schema.get_field("is_ignored").ok(),
     };
 
     Ok((index, fields))
@@ -1129,8 +1135,9 @@ pub fn fetch_chunk_by_id(
         .and_then(|v| v.as_str())?
         .to_string();
 
-    let is_ignored = search_doc
-        .get_first(fields.is_ignored)
+    let is_ignored = fields
+        .is_ignored
+        .and_then(|f| search_doc.get_first(f))
         .and_then(|v| v.as_u64())
         .unwrap_or(0)
         > 0;

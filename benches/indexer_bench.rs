@@ -141,7 +141,7 @@ fn bench_merkle(c: &mut Criterion) {
                 dir
             },
             |dir| {
-                MerkleSnapshot::build(dir.path()).unwrap();
+                MerkleSnapshot::build(dir.path(), false).unwrap();
             },
             BatchSize::LargeInput,
         )
@@ -158,11 +158,11 @@ fn bench_merkle(c: &mut Criterion) {
                     )
                     .unwrap();
                 }
-                let snap = MerkleSnapshot::build(dir.path()).unwrap();
+                let snap = MerkleSnapshot::build(dir.path(), false).unwrap();
                 (dir, snap)
             },
             |(dir, old)| {
-                let new = MerkleSnapshot::build(dir.path()).unwrap();
+                let new = MerkleSnapshot::build(dir.path(), false).unwrap();
                 let diff = old.diff(&new);
                 assert!(diff.added_or_modified.is_empty());
             },
