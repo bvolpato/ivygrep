@@ -2,6 +2,18 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.13] — 2026-04-07
+
+### Performance
+- **32x larger enhancement batches:** Increased ONNX inference batch size from 16 to 512 chunks, dramatically reducing session overhead during background neural enhancement
+- **Skip decompression for completed keys:** Enhancement loop now checks vector store before decompressing text, avoiding ~1M redundant zstd decompressions on resume
+- **CPU affinity limiting (Linux):** Background enhancement now uses `sched_setaffinity` to pin ONNX threads to 25% of available cores (capped at 4), keeping the system responsive during long-running enhancement
+- **Instant initial indexing:** `ig --add` now always uses the lightweight hash model for initial indexing; neural enhancement runs exclusively in the background daemon
+
+### Fixed
+- **Backward compatibility for `is_ignored` field:** Tantivy field is now optional, allowing v0.5.13 to seamlessly read indexes created by older versions without crashing
+- **Honest CUDA detection:** Added cuDNN probe to verify CUDA is actually functional before reporting GPU acceleration in `ig --status`
+
 ## [0.5.12] — 2026-04-06
 
 ### Performance
