@@ -337,13 +337,13 @@ impl OnnxEmbeddingModel {
 
     /// Initialize with limited thread count for background processing.
     pub fn new_background() -> anyhow::Result<Self> {
-        let budget = ort_thread_budget();
         // Limit CPU affinity so that `std::thread::available_parallelism()`
         // returns our budget instead of all cores. fastembed reads this value
         // to set ONNX intra-op threads, and there's no other override path.
         #[cfg(target_os = "linux")]
         {
             use std::mem;
+            let budget = ort_thread_budget();
             let mut set: libc::cpu_set_t = unsafe { mem::zeroed() };
             for i in 0..budget {
                 unsafe { libc::CPU_SET(i, &mut set) };
