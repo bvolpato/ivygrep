@@ -230,6 +230,104 @@ fn bench_search(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_regex_search(c: &mut Criterion) {
+    let mut group = c.benchmark_group("regex_search");
+    group.sample_size(10);
+
+    group.bench_function("regex_200_files", |b| {
+        b.iter_batched(
+            || setup_indexed_workspace(200),
+            |(_staging, _home, workspace, _model)| {
+                let hits = ivygrep::regex_search::regex_search(
+                    &workspace,
+                    r"calculate_tax",
+                    Some(50),
+                    None,
+                    &[],
+                    &[],
+                    false,
+                )
+                .unwrap();
+                assert!(!hits.is_empty());
+            },
+            BatchSize::LargeInput,
+        )
+    });
+
+    group.finish();
+}
+
+fn bench_vector_store(c: &mut Criterion) {
+    let mut group = c.benchmark_group("vector_store");
+    group.sample_size(20);
+
+    group.bench_function("upsert_1000_vectors", |b| {
+        b.iter_batched(
+            || {
+                let dir = tempfile::tempdir().unwrap();
+                let vectors: Vec<(u64, Vec<f32>)> = (0..1000)
+                    .map(|i| {
+                        let mut v = vec![0.0f32; EMBEDDING_DIMENSIONS];
+                        v[i % EMBEDDING_DIMENSIONS] = 1.0;
+                        (i as u64, v)
+                    })
+                    .collect();
+                (dir, vectors)
+            },
+            |(dir, vectors)| {
+                let mut store = ivygrep::vector_store::VectorStore::open(
+                    &dir.path().join("bench.usearch"),
+                    EMBEDDING_DIMENSIONS,
+                    ivygrep::vector_store::ScalarKind::F32,
+                )
+                .unwrap();
+                for (key, vec) in vectors {
+                    store.upsert(key, vec);
+                }
+                store.save().unwrap();
+            },
+            BatchSize::LargeInput,
+        )
+    });
+
+    group.bench_function("search_in_1000_vectors", |b| {
+        b.iter_batched(
+            || {
+                let dir = tempfile::tempdir().unwrap();
+                let mut store = ivygrep::vector_store::VectorStore::open(
+                    &dir.path().join("bench.usearch"),
+                    EMBEDDING_DIMENSIONS,
+                    ivygrep::vector_store::ScalarKind::F32,
+                )
+                .unwrap();
+                for i in 0..1000u64 {
+                    let mut v = vec![0.0f32; EMBEDDING_DIMENSIONS];
+                    v[(i as usize) % EMBEDDING_DIMENSIONS] = 1.0;
+                    store.upsert(i, v);
+                }
+                store.save().unwrap();
+
+                let mut query = vec![0.0f32; EMBEDDING_DIMENSIONS];
+                query[0] = 1.0;
+                (dir, query)
+            },
+            |(dir, query)| {
+                let store = ivygrep::vector_store::VectorStore::open_readonly(
+                    &dir.path().join("bench.usearch"),
+                    EMBEDDING_DIMENSIONS,
+                    ivygrep::vector_store::ScalarKind::F32,
+                )
+                .unwrap();
+                let results = store.search(&query, 10);
+                assert!(!results.is_empty());
+            },
+            BatchSize::LargeInput,
+        )
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_indexer,
@@ -237,5 +335,7 @@ criterion_group!(
     bench_merkle,
     bench_embedding,
     bench_search,
+    bench_regex_search,
+    bench_vector_store,
 );
 criterion_main!(benches);

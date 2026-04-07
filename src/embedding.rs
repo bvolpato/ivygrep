@@ -504,4 +504,88 @@ mod tests {
     fn model_dimensions_hash() {
         assert_eq!(model_dimensions(true), 256);
     }
+
+    #[test]
+    fn embed_batch_returns_correct_count() {
+        let model = HashEmbeddingModel::new(64);
+        let texts = vec!["fn foo() {}", "fn bar() {}", "fn baz() {}"];
+        let results = model.embed_batch(&texts);
+        assert_eq!(results.len(), 3);
+        for vec in &results {
+            assert_eq!(vec.len(), 64);
+        }
+    }
+
+    #[test]
+    fn embed_batch_matches_individual_embeds() {
+        let model = HashEmbeddingModel::new(128);
+        let texts = vec!["calculate tax", "process payment"];
+        let batch = model.embed_batch(&texts);
+        let individual: Vec<Vec<f32>> = texts.iter().map(|t| model.embed(t)).collect();
+        assert_eq!(batch, individual);
+    }
+
+    #[test]
+    fn create_hash_model_returns_correct_dimensions() {
+        let model = create_hash_model();
+        assert_eq!(model.dimensions(), 256);
+    }
+
+    #[test]
+    fn embeddings_are_l2_normalized() {
+        let model = HashEmbeddingModel::new(128);
+        let vec = model.embed("pub fn calculate_tax(amount: f64) -> f64 { amount * 0.2 }");
+        let norm: f32 = vec.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-5,
+            "embedding should be L2-normalized, got norm={norm}"
+        );
+    }
+
+    #[test]
+    fn empty_input_produces_valid_embedding() {
+        let model = HashEmbeddingModel::new(64);
+        let vec = model.embed("");
+        assert_eq!(vec.len(), 64);
+        // Empty input should still produce a valid vector (all zeros or normalized)
+    }
+
+    #[test]
+    fn semantic_token_variants_splits_camel_case() {
+        let variants = semantic_token_variants("calculateTax");
+        assert!(variants.contains(&"calculatetax".to_string()));
+        assert!(variants.contains(&"calculate".to_string()));
+        assert!(variants.contains(&"tax".to_string()));
+    }
+
+    #[test]
+    fn semantic_token_variants_handles_single_word() {
+        let variants = semantic_token_variants("hello");
+        assert!(variants.contains(&"hello".to_string()));
+    }
+
+    #[test]
+    fn semantic_token_variants_splits_snake_case() {
+        let variants = semantic_token_variants("process_payment");
+        assert!(variants.contains(&"process_payment".to_string()));
+        assert!(variants.contains(&"process".to_string()));
+        assert!(variants.contains(&"payment".to_string()));
+    }
+
+    #[test]
+    fn hardware_acceleration_info_returns_nonempty() {
+        let info = hardware_acceleration_info();
+        assert!(!info.is_empty());
+    }
+
+    #[test]
+    fn different_texts_produce_different_embeddings() {
+        let model = HashEmbeddingModel::new(128);
+        let v1 = model.embed("fn calculate_tax() {}");
+        let v2 = model.embed("struct DatabaseConnection {}");
+        assert_ne!(
+            v1, v2,
+            "semantically different texts should have different embeddings"
+        );
+    }
 }

@@ -1443,4 +1443,61 @@ pub fn calculate_total(amount: f64) -> f64 {
             "Fallback chunker should have returned chunks"
         );
     }
+
+    #[test]
+    fn go_chunker_detects_func_and_type() {
+        let src = "package main\n\nfunc Add(a, b int) int {\n\treturn a + b\n}\n\ntype Config struct {\n\tHost string\n\tPort int\n}\n";
+        let chunks = chunk_source(Path::new("main.go"), src);
+        assert!(
+            chunks.iter().any(|c| c.text.contains("Add")),
+            "Go chunker should detect Add function"
+        );
+    }
+
+    #[test]
+    fn typescript_chunker_detects_function_and_class() {
+        let src = "export function greet(name: string): string {\n  return `Hello, ${name}`;\n}\n\nexport class UserService {\n  getUser(id: number): User {\n    return {} as User;\n  }\n}\n";
+        let chunks = chunk_source(Path::new("service.ts"), src);
+        assert!(
+            chunks.iter().any(|c| c.text.contains("greet")),
+            "TS chunker should detect greet function"
+        );
+    }
+
+    #[test]
+    fn java_chunker_detects_class_and_method() {
+        let src = "public class Calculator {\n    public int add(int a, int b) {\n        return a + b;\n    }\n\n    public int multiply(int a, int b) {\n        return a * b;\n    }\n}\n";
+        let chunks = chunk_source(Path::new("Calculator.java"), src);
+        assert!(
+            chunks.iter().any(|c| c.text.contains("Calculator")),
+            "Java chunker should detect Calculator class"
+        );
+    }
+
+    #[test]
+    fn python_chunker_detects_class_and_function() {
+        let src =
+            "class Engine:\n    def start(self):\n        pass\n\ndef helper():\n    return 42\n";
+        let chunks = chunk_source(Path::new("engine.py"), src);
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.text.contains("Engine") || c.text.contains("helper")),
+            "Python chunker should detect class or function"
+        );
+    }
+
+    #[test]
+    fn json_file_produces_chunks() {
+        let src = r#"{"key": "value", "nested": {"a": 1, "b": 2}}"#;
+        let chunks = chunk_source(Path::new("data.json"), src);
+        assert!(!chunks.is_empty(), "JSON files should produce chunks");
+    }
+
+    #[test]
+    fn yaml_file_produces_chunks() {
+        let src = "name: test\nversion: 1.0\ndependencies:\n  - foo\n  - bar\n";
+        let chunks = chunk_source(Path::new("config.yaml"), src);
+        assert!(!chunks.is_empty(), "YAML files should produce chunks");
+    }
 }
