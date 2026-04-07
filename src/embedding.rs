@@ -194,7 +194,7 @@ pub struct OnnxEmbeddingModel {
 
 /// Maximum ONNX inter/intra-op thread count for background enhancement.
 /// Uses 25% of logical CPUs (capped at 4) so the system stays responsive.
-#[cfg(feature = "neural")]
+#[cfg(all(feature = "neural", target_os = "linux"))]
 fn ort_thread_budget() -> usize {
     let cpus = num_cpus::get();
     (cpus / 4).clamp(2, 4)
