@@ -740,45 +740,36 @@ async fn run_query(cli: Cli) -> Result<()> {
         }
     }
 
-    let mut is_regex = cli.regex;
-    let mut is_literal = cli.literal;
-
-    if cli.skip_gitignore && !is_regex {
-        let missing_ignored_files = if cli.all {
-            crate::workspace::list_workspaces()
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|w| crate::workspace::Workspace::resolve(&w.root).ok())
-                .any(|ws| {
-                    ws.read_metadata()
-                        .ok()
-                        .flatten()
-                        .map(|m| !m.skip_gitignore)
-                        .unwrap_or(false)
-                })
-        } else {
-            workspace
-                .read_metadata()
-                .ok()
-                .flatten()
-                .map(|m| !m.skip_gitignore)
-                .unwrap_or(false)
-        };
-
-        if missing_ignored_files {
-            is_regex = true;
-            is_literal = false;
+    if cli.skip_gitignore && !cli.all && (!cli.regex || cli.literal) {
+        #[allow(clippy::collapsible_if)]
+        if let Ok(Some(mut meta)) = workspace.read_metadata() {
+            if !meta.skip_gitignore {
+                tracing::info!("Re-indexing workspace to include gitignore entities as requested...");
+                meta.skip_gitignore = true;
+                let _ = workspace.write_metadata(&meta);
+                if search_via_daemon {
+                    let req = crate::protocol::DaemonRequest::Index {
+                        path: workspace.root.clone(),
+                        skip_gitignore: true,
+                        watch: false,
+                    };
+                    let _ = crate::daemon::request(&req, false).await;
+                } else {
+                    let model = crate::embedding::create_model(cli.hash);
+                    let _ = crate::indexer::index_workspace(&workspace, model.as_ref());
+                }
+            }
         }
     }
 
     let search_model: Option<Box<dyn crate::embedding::EmbeddingModel>> =
-        if !search_via_daemon && !is_regex && !is_literal {
+        if !search_via_daemon && !cli.regex && !cli.literal {
             Some(create_model(cli.hash))
         } else {
             None
         };
 
-    let hits = if is_literal {
+    let hits = if cli.literal {
         let request = DaemonRequest::LiteralSearch {
             path: query_path_opt.clone(),
             query: query.to_string(),
@@ -856,7 +847,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             }
             all_hits
         }
-    } else if is_regex {
+    } else if cli.regex {
         let request = DaemonRequest::RegexSearch {
             path: query_path_opt.clone(),
             pattern: query.to_string(),
