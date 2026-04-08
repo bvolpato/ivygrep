@@ -1,3 +1,4 @@
+use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
@@ -18,6 +19,37 @@ use crate::protocol::SearchHit;
 use crate::text::{singularize_token, split_identifier_segments};
 use crate::vector_store::{ScalarKind, VectorStore};
 use crate::workspace::{Workspace, WorkspaceScope};
+
+#[derive(Debug, Clone)]
+pub struct RawIndexedChunk {
+    pub chunk_id: String,
+    pub file_path: PathBuf,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub language: String,
+    pub kind: String,
+    pub raw_text: Vec<u8>,
+    pub content_hash: String,
+    pub vector_key: u64,
+    pub is_ignored: bool,
+}
+
+impl RawIndexedChunk {
+    fn decompress(self) -> IndexedChunk {
+        IndexedChunk {
+            chunk_id: self.chunk_id,
+            file_path: self.file_path,
+            start_line: self.start_line,
+            end_line: self.end_line,
+            language: self.language,
+            kind: self.kind,
+            text: crate::indexer::decompress_text(self.raw_text),
+            content_hash: self.content_hash,
+            vector_key: self.vector_key,
+            is_ignored: self.is_ignored,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct SearchOptions {
@@ -204,10 +236,16 @@ pub fn literal_search(
     );
 
     // Filter candidate chunks in parallel by checking the exact string against chunk.text.
-    use rayon::prelude::*;
     let candidate_chunks: Vec<IndexedChunk> = all_chunks
         .into_par_iter()
-        .filter(|chunk| matcher.is_match(&chunk.text))
+        .filter_map(|raw_chunk| {
+            let chunk = raw_chunk.decompress();
+            if matcher.is_match(&chunk.text) {
+                Some(chunk)
+            } else {
+                None
+            }
+        })
         .collect();
 
     tracing::trace!(
@@ -413,6 +451,7 @@ pub fn hybrid_search(
                 &options.include_globs,
                 options.skip_gitignore,
             );
+            let mut semantic_raw = Vec::new();
             // Score each filtered chunk against the query vector
             for chunk in filtered_chunks {
                 let mut score = None;
@@ -425,11 +464,15 @@ pub fn hybrid_search(
                     score = v.score(chunk.vector_key, &query_vector);
                 }
                 if let Some(s) = score {
-                    semantic_chunks.push((chunk, s));
+                    semantic_raw.push((chunk, s));
                 }
             }
-            semantic_chunks.sort_by(|a, b| b.1.total_cmp(&a.1));
-            semantic_chunks.truncate(candidate_limit);
+            semantic_raw.sort_by(|a, b| b.1.total_cmp(&a.1));
+            semantic_raw.truncate(candidate_limit);
+
+            for (raw_chunk, score) in semantic_raw {
+                semantic_chunks.push((raw_chunk.decompress(), score));
+            }
         } else {
             // Unfiltered path: standard ANN search over entire corpus
             let mut matches = Vec::new();
@@ -727,7 +770,7 @@ fn collect_filtered_chunks(
     type_filter: Option<&str>,
     include_globs: &[String],
     skip_gitignore: bool,
-) -> Vec<IndexedChunk> {
+) -> Vec<RawIndexedChunk> {
     let mut chunks = query_filtered_chunks(
         &ctx.sqlite,
         path_matcher,
@@ -758,7 +801,7 @@ fn query_filtered_chunks(
     type_filter: Option<&str>,
     include_globs: &[String],
     skip_gitignore: bool,
-) -> Vec<IndexedChunk> {
+) -> Vec<RawIndexedChunk> {
     // Build a SQL query that pushes as much filtering as possible into SQLite.
     let mut sql = String::from(
         "SELECT chunk_id, file_path, start_line, end_line, language, kind, text, content_hash, vector_key, is_ignored FROM chunks WHERE 1=1",
@@ -818,14 +861,14 @@ fn query_filtered_chunks(
         params_vec.iter().map(|p| p.as_ref()).collect();
     let Ok(rows) = stmt.query_map(params_refs.as_slice(), |row| {
         let raw_text: Vec<u8> = row.get(6)?;
-        Ok(IndexedChunk {
+        Ok(RawIndexedChunk {
             chunk_id: row.get(0)?,
             file_path: PathBuf::from(row.get::<_, String>(1)?),
             start_line: row.get::<_, i64>(2)? as usize,
             end_line: row.get::<_, i64>(3)? as usize,
             language: row.get(4)?,
             kind: row.get(5)?,
-            text: crate::indexer::decompress_text(raw_text),
+            raw_text,
             content_hash: row.get(7)?,
             vector_key: row.get::<_, i64>(8)? as u64,
             is_ignored: row.get::<_, bool>(9)?,
