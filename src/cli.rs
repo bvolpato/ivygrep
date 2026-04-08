@@ -740,14 +740,45 @@ async fn run_query(cli: Cli) -> Result<()> {
         }
     }
 
+    let mut is_regex = cli.regex;
+    let mut is_literal = cli.literal;
+
+    if cli.skip_gitignore && !is_regex {
+        let missing_ignored_files = if cli.all {
+            crate::workspace::list_workspaces()
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|w| crate::workspace::Workspace::resolve(&w.root).ok())
+                .any(|ws| {
+                    ws.read_metadata()
+                        .ok()
+                        .flatten()
+                        .map(|m| !m.skip_gitignore)
+                        .unwrap_or(false)
+                })
+        } else {
+            workspace
+                .read_metadata()
+                .ok()
+                .flatten()
+                .map(|m| !m.skip_gitignore)
+                .unwrap_or(false)
+        };
+
+        if missing_ignored_files {
+            is_regex = true;
+            is_literal = false;
+        }
+    }
+
     let search_model: Option<Box<dyn crate::embedding::EmbeddingModel>> =
-        if !search_via_daemon && !cli.regex && !cli.literal {
+        if !search_via_daemon && !is_regex && !is_literal {
             Some(create_model(cli.hash))
         } else {
             None
         };
 
-    let hits = if cli.literal {
+    let hits = if is_literal {
         let request = DaemonRequest::LiteralSearch {
             path: query_path_opt.clone(),
             query: query.to_string(),
@@ -825,7 +856,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             }
             all_hits
         }
-    } else if cli.regex {
+    } else if is_regex {
         let request = DaemonRequest::RegexSearch {
             path: query_path_opt.clone(),
             pattern: query.to_string(),
