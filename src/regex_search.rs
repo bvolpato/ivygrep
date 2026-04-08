@@ -1,5 +1,5 @@
 use anyhow::Result;
-use grep_regex::RegexMatcher;
+use grep_regex::RegexMatcherBuilder;
 use grep_searcher::sinks::UTF8;
 use grep_searcher::{Searcher, SearcherBuilder};
 
@@ -16,7 +16,9 @@ pub fn regex_search(
     exclude_globs: &[String],
     skip_gitignore: bool,
 ) -> Result<Vec<SearchHit>> {
-    let matcher = RegexMatcher::new(pattern)?;
+    let matcher = RegexMatcherBuilder::new()
+        .case_insensitive(true)
+        .build(pattern)?;
     let mut searcher: Searcher = SearcherBuilder::new().line_number(true).build();
     let max_hits = limit.unwrap_or(usize::MAX);
     let path_matcher = PathGlobMatcher::new(include_globs, exclude_globs)?;

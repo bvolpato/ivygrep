@@ -187,52 +187,36 @@ pub fn literal_search(
 
     let ctx = SearchContext::load(workspace, None)?;
 
-    // Use Tantivy QueryParser to find chunks whose text contains the query terms.
-    // This narrows the search space from all files to only matching chunks.
-    let mut parser =
-        QueryParser::for_index(&ctx.indexes[0], vec![ctx.fields.text, ctx.fields.file_path]);
-    parser.set_field_boost(ctx.fields.file_path, 2.0);
+    // Create highly optimized case-insensitive regex for exact substring matching
+    let matcher = regex::RegexBuilder::new(&regex::escape(query))
+        .case_insensitive(true)
+        .build()?;
 
-    // Build lexical queries from the literal text
-    let lexical_queries = build_lexical_queries(query);
-    let mut candidate_chunks = Vec::new();
-    let mut seen_ids = HashSet::new();
-    let candidate_limit = max_hits.max(100) * 5; // fetch more candidates than needed
+    // Fetch all chunks matching our path/lang constraints from SQLite.
+    // This is incredibly fast as it offloads filtering to SQLite and does single-pass ZSTD decompression.
+    let all_chunks = collect_filtered_chunks(
+        &ctx,
+        &path_matcher,
+        options.scope_filter.as_ref(),
+        options.type_filter.as_deref(),
+        &options.include_globs,
+        options.skip_gitignore,
+    );
 
-    for lexical_query in &lexical_queries {
-        let parsed = match parser.parse_query(lexical_query) {
-            Ok(q) => q,
-            Err(_) => continue,
-        };
+    // Filter candidate chunks in parallel by checking the exact string against chunk.text.
+    use rayon::prelude::*;
+    let candidate_chunks: Vec<IndexedChunk> = all_chunks
+        .into_par_iter()
+        .filter(|chunk| matcher.is_match(&chunk.text))
+        .collect();
 
-        for (i, searcher) in ctx.searchers.iter().enumerate() {
-            let top_docs = searcher.search(
-                &parsed,
-                &TopDocs::with_limit(candidate_limit).order_by_score(),
-            )?;
-
-            for (_score, addr) in top_docs {
-                let doc: TantivyDocument = searcher.doc(addr)?;
-                if let Some(chunk) = fetch_chunk_by_id(doc, &ctx.fields)
-                    .filter(|c| !ctx.is_shadowed_base_file(i, &c.file_path))
-                    .filter(|c| type_matches(c, options.type_filter.as_deref()))
-                    .filter(|c| scope_matches(c, options.scope_filter.as_ref()))
-                    .filter(|c| path_matches(c, &path_matcher))
-                    .filter(|c| options.skip_gitignore || !c.is_ignored)
-                    .filter(|c| seen_ids.insert(c.chunk_id.clone()))
-                {
-                    candidate_chunks.push(chunk);
-                }
-            }
-        }
-    }
     tracing::trace!(
-        "literal_tantivy={:?} candidates={}",
+        "literal_scan={:?} candidates={}",
         t0.elapsed(),
         candidate_chunks.len()
     );
 
-    // Now scan only the candidate chunks' source lines for exact literal matches.
+    // Now scan only the candidate chunks' source lines for precise matches and snippet extraction.
     // Group by file to read each file only once.
     let mut chunks_by_file: HashMap<PathBuf, Vec<IndexedChunk>> = HashMap::new();
     for chunk in candidate_chunks {
@@ -1056,8 +1040,7 @@ fn path_segment_boost(query_tokens: &[String], chunk: &IndexedChunk) -> f32 {
 }
 
 fn literal_match_boost(query_text: &str, chunk: &IndexedChunk) -> f32 {
-    const CASE_SENSITIVE_BOOST: f32 = 0.20;
-    const CASE_INSENSITIVE_BOOST: f32 = 0.14;
+    const LITERAL_MATCH_BOOST: f32 = 0.20;
     const NORMALIZED_IDENTIFIER_BOOST: f32 = 0.10;
 
     let query = query_text.trim();
@@ -1066,15 +1049,12 @@ fn literal_match_boost(query_text: &str, chunk: &IndexedChunk) -> f32 {
     }
 
     let file_path = chunk.file_path.to_string_lossy();
-    if chunk.text.contains(query) || file_path.contains(query) {
-        return CASE_SENSITIVE_BOOST;
-    }
-
     let query_lower = query.to_ascii_lowercase();
     let text_lower = chunk.text.to_ascii_lowercase();
     let path_lower = file_path.to_ascii_lowercase();
+
     if text_lower.contains(&query_lower) || path_lower.contains(&query_lower) {
-        return CASE_INSENSITIVE_BOOST;
+        return LITERAL_MATCH_BOOST;
     }
 
     let query_compact = compact_identifier(query);

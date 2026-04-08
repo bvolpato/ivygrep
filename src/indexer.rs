@@ -887,8 +887,9 @@ fn insert_chunk(conn: &Connection, chunk: &IndexedChunk, fresh: bool, now_unix: 
             text,
             content_hash,
             vector_key,
-            modified_unix
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+            modified_unix,
+            is_ignored
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
     } else {
         "INSERT OR REPLACE INTO chunks (
             chunk_id,
@@ -900,10 +901,12 @@ fn insert_chunk(conn: &Connection, chunk: &IndexedChunk, fresh: bool, now_unix: 
             text,
             content_hash,
             vector_key,
-            modified_unix
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+            modified_unix,
+            is_ignored
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
     };
     let mut stmt = conn.prepare_cached(sql)?;
+    let is_ignored_int = if chunk.is_ignored { 1i64 } else { 0i64 };
     stmt.execute(params![
         chunk.chunk_id,
         chunk.file_path.to_string_lossy().to_string(),
@@ -915,6 +918,7 @@ fn insert_chunk(conn: &Connection, chunk: &IndexedChunk, fresh: bool, now_unix: 
         chunk.content_hash,
         chunk.vector_key as i64,
         now_unix,
+        is_ignored_int,
     ])?;
     Ok(())
 }

@@ -347,3 +347,168 @@ async fn daemon_ipc_error_on_bad_path() {
     daemon_handle.await.unwrap();
     ivygrep::ipc::cleanup_socket();
 }
+
+// ---------------------------------------------------------------------------
+// 5. Test --skip-gitignore support
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[serial]
+async fn daemon_ipc_skip_gitignore() {
+    let home = tempdir().unwrap();
+    isolate_home(home.path());
+
+    let repo_dir = tempdir().unwrap();
+    let repo_path = repo_dir.path();
+
+    // Create a simple project structure
+    fs::write(repo_path.join(".gitignore"), "ignored.txt\n").unwrap();
+    fs::write(repo_path.join("tracked.txt"), "hello ivygrep").unwrap();
+    fs::write(repo_path.join("ignored.txt"), "hello ivygrep").unwrap(); // This should be ignored
+
+    let (listener, _) = ivygrep::ipc::bind().await.unwrap();
+
+    let daemon_handle = tokio::spawn(async move {
+        for _ in 0..3 {
+            serve_one(&listener, |req| match req {
+                DaemonRequest::Index {
+                    path,
+                    skip_gitignore,
+                    ..
+                } => {
+                    let workspace = ivygrep::workspace::Workspace::resolve(&path).unwrap();
+
+                    let _ = workspace.ensure_dirs();
+                    let mut meta = workspace
+                        .read_metadata()
+                        .unwrap_or(None)
+                        .unwrap_or_else(|| ivygrep::workspace::WorkspaceMetadata {
+                            id: workspace.id.clone(),
+                            root: workspace.root.clone(),
+                            created_at_unix: 0,
+                            last_indexed_at_unix: None,
+                            watch_enabled: false,
+                            skip_gitignore: false,
+                        });
+                    meta.skip_gitignore = skip_gitignore;
+                    let _ = workspace.write_metadata(&meta);
+
+                    let model = ivygrep::embedding::create_model(true);
+                    ivygrep::indexer::index_workspace(&workspace, model.as_ref()).unwrap();
+                    DaemonResponse::Ack {
+                        message: "indexed".into(),
+                    }
+                }
+                DaemonRequest::Search {
+                    path,
+                    query,
+                    limit,
+                    context,
+                    type_filter,
+                    include_globs,
+                    exclude_globs,
+                    scope_path: _,
+                    scope_is_file: _,
+                    skip_gitignore,
+                } => {
+                    let workspace =
+                        ivygrep::workspace::Workspace::resolve(path.as_ref().unwrap()).unwrap();
+                    let model = ivygrep::embedding::create_model(true);
+                    let options = ivygrep::search::SearchOptions {
+                        limit,
+                        context,
+                        type_filter,
+                        include_globs,
+                        exclude_globs,
+                        scope_filter: None,
+                        skip_gitignore,
+                    };
+                    let hits = ivygrep::search::hybrid_search(
+                        &workspace,
+                        &query,
+                        Some(model.as_ref()),
+                        &options,
+                    )
+                    .unwrap();
+                    DaemonResponse::SearchResults { hits }
+                }
+                _ => DaemonResponse::Error {
+                    message: "unexpected".into(),
+                },
+            })
+            .await;
+        }
+    });
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    // 1. Index WITH skip_gitignore = true
+    let index_response = roundtrip(&DaemonRequest::Index {
+        path: repo_path.to_path_buf(),
+        watch: false,
+        skip_gitignore: true,
+    })
+    .await;
+
+    match &index_response {
+        DaemonResponse::Ack { .. } => {}
+        other => panic!("expected Ack, got: {other:?}"),
+    }
+
+    // 2. Search WITH skip_gitignore = true - should return both tracked and ignored files
+    let search_all = roundtrip(&DaemonRequest::Search {
+        path: Some(repo_path.to_path_buf()),
+        query: "hello ivygrep".to_string(),
+        limit: Some(10),
+        context: 0,
+        type_filter: None,
+        include_globs: vec![],
+        exclude_globs: vec![],
+        scope_path: None,
+        scope_is_file: false,
+        skip_gitignore: true,
+    })
+    .await;
+
+    match &search_all {
+        DaemonResponse::SearchResults { hits } => {
+            assert_eq!(
+                hits.len(),
+                2,
+                "should find matches in both tracked and ignored files with skip_gitignore"
+            );
+        }
+        other => panic!("expected SearchResults, got: {other:?}"),
+    }
+
+    // 3. Search WITH skip_gitignore = false - should return only tracked file
+    let search_tracked_only = roundtrip(&DaemonRequest::Search {
+        path: Some(repo_path.to_path_buf()),
+        query: "hello ivygrep".to_string(),
+        limit: Some(10),
+        context: 0,
+        type_filter: None,
+        include_globs: vec![],
+        exclude_globs: vec![],
+        scope_path: None,
+        scope_is_file: false,
+        skip_gitignore: false,
+    })
+    .await;
+
+    match &search_tracked_only {
+        DaemonResponse::SearchResults { hits } => {
+            assert_eq!(
+                hits.len(),
+                1,
+                "should find match only in tracked file when skip_gitignore is false. Hits: {:?}",
+                hits
+            );
+            assert!(hits[0].file_path.to_string_lossy().contains("tracked.txt"));
+        }
+        other => panic!("expected SearchResults, got: {other:?}"),
+    }
+
+    daemon_handle.await.unwrap();
+    ivygrep::ipc::cleanup_socket();
+}
