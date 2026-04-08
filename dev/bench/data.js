@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775663897259,
+  "lastUpdate": 1775664426634,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -1270,6 +1270,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 573.07,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "c1cdb0d3158a3819a57fa910f0c39a0010a162ec",
+          "message": "fix(indexer): drastically reduce batch sizes to prevent memory ballooning and respect skip-gitignore on first run",
+          "timestamp": "2026-04-08T12:02:35-04:00",
+          "tree_id": "ab1fe69883064861ad4541c716fbfbd1dcb66de7",
+          "url": "https://github.com/bvolpato/ivygrep/commit/c1cdb0d3158a3819a57fa910f0c39a0010a162ec"
+        },
+        "date": 1775664425357,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 721921590,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 8056.89,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3830.79,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2706.77,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 10886.27,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 10609.71,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 6.73,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 522.48,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 15803.41,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 7067.94,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 4881.13,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 447495.2,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 474.45,
             "unit": "µs"
           }
         ]
