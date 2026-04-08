@@ -699,17 +699,20 @@ async fn run_query(cli: Cli) -> Result<()> {
             );
 
             let _ = workspace.ensure_dirs();
-            let mut meta = workspace.read_metadata().unwrap_or(None).unwrap_or_else(|| crate::workspace::WorkspaceMetadata {
-                id: workspace.id.clone(),
-                root: workspace.root.clone(),
-                created_at_unix: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs(),
-                last_indexed_at_unix: None,
-                watch_enabled: false,
-                skip_gitignore: false,
-            });
+            let mut meta = workspace
+                .read_metadata()
+                .unwrap_or(None)
+                .unwrap_or_else(|| crate::workspace::WorkspaceMetadata {
+                    id: workspace.id.clone(),
+                    root: workspace.root.clone(),
+                    created_at_unix: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    last_indexed_at_unix: None,
+                    watch_enabled: false,
+                    skip_gitignore: false,
+                });
 
             if meta.skip_gitignore != cli.skip_gitignore {
                 meta.skip_gitignore = cli.skip_gitignore;
@@ -763,7 +766,9 @@ async fn run_query(cli: Cli) -> Result<()> {
         #[allow(clippy::collapsible_if)]
         if let Ok(Some(mut meta)) = workspace.read_metadata() {
             if !meta.skip_gitignore {
-                tracing::info!("Re-indexing workspace to include gitignore entities as requested...");
+                tracing::info!(
+                    "Re-indexing workspace to include gitignore entities as requested..."
+                );
                 meta.skip_gitignore = true;
                 let _ = workspace.write_metadata(&meta);
                 if search_via_daemon {
