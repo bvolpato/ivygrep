@@ -405,7 +405,7 @@ fn index_workspace_inner(
     let _ = fs::write(&progress_path_clone, format!("0/{total}"));
 
     std::thread::spawn(move || {
-        for batch_paths in diff_paths.chunks(4096) {
+        for batch_paths in diff_paths.chunks(128) {
             let file_chunks: Vec<_> = batch_paths
                 .par_iter()
                 .filter_map(|(rel_path, is_ignored)| {
@@ -501,7 +501,7 @@ fn index_workspace_inner(
         }
 
         // Prevent memory/WAL ballooning on massive repositories
-        if chunks_since_commit >= 50_000 {
+        if chunks_since_commit >= 25_000 {
             tx.commit()?;
             writer.commit()?;
             vector_index.save()?;

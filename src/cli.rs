@@ -697,6 +697,14 @@ async fn run_query(cli: Cli) -> Result<()> {
                 msg.bold(),
                 workspace.root.display().to_string().dimmed()
             );
+
+            if let Ok(Some(mut meta)) = workspace.read_metadata() {
+                if meta.skip_gitignore != cli.skip_gitignore {
+                    meta.skip_gitignore = cli.skip_gitignore;
+                    let _ = workspace.write_metadata(&meta);
+                }
+            }
+
             let hash_model = crate::embedding::create_hash_model();
             let _summary = index_workspace(&workspace, hash_model.as_ref())?;
         }

@@ -136,7 +136,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
         DaemonRequest::Index {
             path,
             watch,
-            skip_gitignore: _,
+            skip_gitignore,
         } => {
             let workspace = match Workspace::resolve(&path) {
                 Ok(workspace) => workspace,
@@ -146,6 +146,14 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     };
                 }
             };
+
+            // Respect skip_gitignore by updating metadata before indexing
+            if let Ok(Some(mut meta)) = workspace.read_metadata() {
+                if meta.skip_gitignore != skip_gitignore {
+                    meta.skip_gitignore = skip_gitignore;
+                    let _ = workspace.write_metadata(&meta);
+                }
+            }
 
             let index_result = tokio::task::spawn_blocking(move || {
                 let hash_model = create_model(true);
