@@ -295,7 +295,15 @@ fn collect_literal_candidates(
     path_matcher: &PathGlobMatcher,
     options: &SearchOptions,
 ) -> Result<Vec<IndexedChunk>> {
-    let candidate_limit = options.limit.unwrap_or(500).max(500);
+    let candidate_limit = if let Some(limit) = options.limit {
+        if limit == usize::MAX {
+            10_000_000
+        } else {
+            limit.max(500)
+        }
+    } else {
+        500
+    };
 
     let parser =
         QueryParser::for_index(&ctx.indexes[0], vec![ctx.fields.text, ctx.fields.file_path]);
@@ -361,7 +369,15 @@ pub fn hybrid_search(
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
     let t0 = std::time::Instant::now();
-    let candidate_limit = options.limit.unwrap_or(500).max(100);
+    let candidate_limit = if let Some(limit) = options.limit {
+        if limit == usize::MAX {
+            10_000_000
+        } else {
+            limit.max(100)
+        }
+    } else {
+        100
+    };
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
 
     let ctx = SearchContext::load(workspace, embedding_model.map(|m| m.dimensions()))?;

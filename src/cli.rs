@@ -68,7 +68,7 @@ pub struct Cli {
     #[arg(long = "type", global = true)]
     pub type_filter: Option<String>,
 
-    #[arg(long, global = true)]
+    #[arg(long, alias = "all", global = true)]
     pub all_indices: bool,
 
     #[arg(long, value_name = "GLOBS", value_delimiter = ',', global = true)]
@@ -552,7 +552,13 @@ async fn run_query(cli: Cli) -> Result<()> {
     };
     let mut search_via_daemon = false;
 
-    let effective_limit = if cli.no_limit {
+    let backend_limit = if cli.no_limit || cli.file_name_only {
+        Some(usize::MAX)
+    } else {
+        cli.limit
+    };
+
+    let display_limit = if cli.no_limit || (cli.file_name_only && cli.limit.is_none()) {
         Some(usize::MAX)
     } else {
         cli.limit
@@ -811,7 +817,7 @@ async fn run_query(cli: Cli) -> Result<()> {
         let request = DaemonRequest::LiteralSearch {
             path: query_path_opt.clone(),
             query: query.to_string(),
-            limit: effective_limit,
+            limit: backend_limit,
             context: cli.context,
             type_filter: cli.type_filter.clone(),
             include_globs: cli.include.clone(),
@@ -829,7 +835,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                         "daemon literal search failed ({message}), falling back to local"
                     );
                     let options = SearchOptions {
-                        limit: effective_limit,
+                        limit: backend_limit,
                         context: cli.context,
                         type_filter: cli.type_filter.clone(),
                         include_globs: cli.include.clone(),
@@ -880,7 +886,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                 vec![workspace.clone()]
             };
             let options = SearchOptions {
-                limit: effective_limit,
+                limit: backend_limit,
                 context: cli.context,
                 type_filter: cli.type_filter.clone(),
                 include_globs: cli.include.clone(),
@@ -903,7 +909,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                     }
                 }
             }
-            if let Some(l) = effective_limit {
+            if let Some(l) = backend_limit {
                 all_hits.truncate(l);
             }
             all_hits
@@ -912,7 +918,7 @@ async fn run_query(cli: Cli) -> Result<()> {
         let request = DaemonRequest::RegexSearch {
             path: query_path_opt.clone(),
             pattern: query.to_string(),
-            limit: effective_limit,
+            limit: backend_limit,
             include_globs: cli.include.clone(),
             exclude_globs: cli.exclude.clone(),
             scope_path: scope_path.clone(),
@@ -944,7 +950,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                 match regex_search(
                     &ws,
                     query,
-                    effective_limit,
+                    backend_limit,
                     scope_filter.as_ref(),
                     &cli.include,
                     &cli.exclude,
@@ -963,7 +969,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                     }
                 }
             }
-            if let Some(l) = effective_limit {
+            if let Some(l) = backend_limit {
                 all_hits.truncate(l);
             }
             all_hits
@@ -972,7 +978,7 @@ async fn run_query(cli: Cli) -> Result<()> {
         let request = DaemonRequest::Search {
             path: query_path_opt.clone(),
             query: query.to_string(),
-            limit: effective_limit,
+            limit: backend_limit,
             context: cli.context,
             type_filter: cli.type_filter.clone(),
             include_globs: cli.include.clone(),
@@ -1015,7 +1021,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                     // of showing "No results." to the user.
                     tracing::warn!("daemon search failed ({message}), falling back to local");
                     let options = SearchOptions {
-                        limit: effective_limit,
+                        limit: backend_limit,
                         context: cli.context,
                         type_filter: cli.type_filter.clone(),
                         include_globs: cli.include.clone(),
@@ -1028,7 +1034,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                 other => {
                     tracing::warn!("daemon search unavailable ({other:?}), falling back to local");
                     let options = SearchOptions {
-                        limit: effective_limit,
+                        limit: backend_limit,
                         context: cli.context,
                         type_filter: cli.type_filter.clone(),
                         include_globs: cli.include.clone(),
@@ -1057,7 +1063,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                     query,
                     search_model.as_deref(),
                     &SearchOptions {
-                        limit: effective_limit,
+                        limit: backend_limit,
                         context: cli.context,
                         type_filter: cli.type_filter.clone(),
                         include_globs: cli.include.clone(),
@@ -1084,7 +1090,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                     .partial_cmp(&a.score)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
-            if let Some(l) = effective_limit {
+            if let Some(l) = backend_limit {
                 all_hits.truncate(l);
             }
             all_hits
@@ -1094,7 +1100,7 @@ async fn run_query(cli: Cli) -> Result<()> {
     render_hits(
         &hits,
         cli.json,
-        effective_limit,
+        display_limit,
         cli.first_line_only,
         cli.file_name_only,
         cli.verbose,
