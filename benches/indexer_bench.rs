@@ -8,6 +8,7 @@ use ivygrep::search::{SearchOptions, hybrid_search, literal_search};
 use ivygrep::workspace::Workspace;
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 /// Create a temp workspace with `n` small Rust files and return handles.
 fn setup_workspace(
@@ -62,7 +63,10 @@ fn setup_indexed_workspace(
 
 fn bench_indexer(c: &mut Criterion) {
     let mut group = c.benchmark_group("indexer");
-    group.sample_size(10);
+    group
+        .sample_size(20)
+        .warm_up_time(Duration::from_secs(5))
+        .measurement_time(Duration::from_secs(15));
 
     group.bench_function("index_small_workspace", |b| {
         b.iter_batched(
@@ -90,7 +94,10 @@ fn bench_indexer(c: &mut Criterion) {
 
 fn bench_chunking(c: &mut Criterion) {
     let mut group = c.benchmark_group("chunking");
-    group.sample_size(20);
+    group
+        .sample_size(30)
+        .warm_up_time(Duration::from_secs(3))
+        .measurement_time(Duration::from_secs(10));
 
     let rust_source = (0..100)
         .map(|i| {
@@ -125,7 +132,10 @@ fn bench_chunking(c: &mut Criterion) {
 
 fn bench_merkle(c: &mut Criterion) {
     let mut group = c.benchmark_group("merkle");
-    group.sample_size(10);
+    group
+        .sample_size(20)
+        .warm_up_time(Duration::from_secs(5))
+        .measurement_time(Duration::from_secs(15));
 
     group.bench_function("scan_500_files", |b| {
         b.iter_batched(
@@ -175,6 +185,9 @@ fn bench_merkle(c: &mut Criterion) {
 
 fn bench_embedding(c: &mut Criterion) {
     let mut group = c.benchmark_group("embedding");
+    group
+        .warm_up_time(Duration::from_secs(3))
+        .measurement_time(Duration::from_secs(10));
 
     let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
     let texts: Vec<&str> = vec![
@@ -196,7 +209,10 @@ fn bench_embedding(c: &mut Criterion) {
 
 fn bench_search(c: &mut Criterion) {
     let mut group = c.benchmark_group("search");
-    group.sample_size(10);
+    group
+        .sample_size(20)
+        .warm_up_time(Duration::from_secs(5))
+        .measurement_time(Duration::from_secs(15));
 
     group.bench_function("hybrid_search_200_files", |b| {
         b.iter_batched(
@@ -232,7 +248,10 @@ fn bench_search(c: &mut Criterion) {
 
 fn bench_regex_search(c: &mut Criterion) {
     let mut group = c.benchmark_group("regex_search");
-    group.sample_size(10);
+    group
+        .sample_size(20)
+        .warm_up_time(Duration::from_secs(5))
+        .measurement_time(Duration::from_secs(15));
 
     group.bench_function("regex_200_files", |b| {
         b.iter_batched(
@@ -259,7 +278,10 @@ fn bench_regex_search(c: &mut Criterion) {
 
 fn bench_vector_store(c: &mut Criterion) {
     let mut group = c.benchmark_group("vector_store");
-    group.sample_size(20);
+    group
+        .sample_size(20)
+        .warm_up_time(Duration::from_secs(5))
+        .measurement_time(Duration::from_secs(15));
 
     group.bench_function("upsert_1000_vectors", |b| {
         b.iter_batched(
