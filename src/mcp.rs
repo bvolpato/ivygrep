@@ -17,6 +17,7 @@ use crate::workspace::resolve_workspace_and_scope;
 
 const JSONRPC_VERSION: &str = "2.0";
 const TOOL_IG_SEARCH: &str = "ig_search";
+const TOOL_IG_STATUS: &str = "ig_status";
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
@@ -146,10 +147,10 @@ fn dispatch(method: &str, params: Value) -> Result<Value> {
                 "name": "ig",
                 "version": env!("CARGO_PKG_VERSION")
             },
-            "instructions": "Use ig_search(query, path) to run local semantic code search. If path is a subdirectory or file, results are restricted to that scope."
+            "instructions": "Use ig_search(query, path) to run local semantic code search. If path is a subdirectory or file, results are restricted to that scope. Use ig_status() to see the indexing status of your workspaces."
         })),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({"tools": [search_tool_schema()]})),
+        "tools/list" => Ok(json!({"tools": [search_tool_schema(), status_tool_schema()]})),
         "tools/call" => run_tool_call(params),
         "notifications/initialized" => Ok(json!({})),
         "shutdown" => Ok(json!({})),
@@ -184,14 +185,76 @@ fn search_tool_schema() -> Value {
     })
 }
 
+fn status_tool_schema() -> Value {
+    json!({
+        "name": TOOL_IG_STATUS,
+        "description": "Returns the list of indexed projects (workspaces) and their current indexing status, detailing if they are ready to query.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
+    })
+}
+
 fn run_tool_call(params: Value) -> Result<Value> {
     let call: ToolCallParams = serde_json::from_value(params)?;
-    if call.name != TOOL_IG_SEARCH {
+    if call.name == TOOL_IG_SEARCH {
+        let args: IvygrepSearchArgs = serde_json::from_value(call.arguments)?;
+        execute_ivygrep_search(args)
+    } else if call.name == TOOL_IG_STATUS {
+        execute_ivygrep_status()
+    } else {
         bail!("unknown tool: {}", call.name);
     }
+}
 
-    let args: IvygrepSearchArgs = serde_json::from_value(call.arguments)?;
-    execute_ivygrep_search(args)
+fn execute_ivygrep_status() -> Result<Value> {
+    let workspaces = crate::workspace::list_workspaces()?;
+
+    let mut projects = Vec::new();
+    for ws in workspaces {
+        let ready_to_query = ws.chunk_count > 0 && ws.last_indexed_at_unix.is_some();
+        let status_msg = if ready_to_query {
+            if ws.enhancing_in_progress {
+                "Ready to query (Neural enhancement in progress)"
+            } else if !ws.has_neural_vectors {
+                "Ready to query (Lexical only)"
+            } else {
+                "Ready to query"
+            }
+        } else if ws.indexing_in_progress {
+            "Indexing in progress (Not ready)"
+        } else {
+            "Not indexed"
+        };
+
+        projects.push(json!({
+            "workspace_root": ws.root,
+            "ready_to_query": ready_to_query,
+            "status": status_msg,
+            "chunk_count": ws.chunk_count,
+            "file_count": ws.file_count,
+            "indexing_in_progress": ws.indexing_in_progress,
+            "enhancing_in_progress": ws.enhancing_in_progress,
+        }));
+    }
+
+    let payload = json!({
+        "workspaces": projects
+    });
+
+    let text = serde_json::to_string_pretty(&payload)?;
+
+    Ok(json!({
+        "content": [
+            {
+                "type": "text",
+                "text": text
+            }
+        ],
+        "isError": false
+    }))
 }
 
 fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
@@ -645,13 +708,14 @@ mod tests {
     fn mcp_tools_list_returns_ig_search() {
         let result = dispatch("tools/list", json!({})).unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 1);
+        assert_eq!(tools.len(), 2);
         assert_eq!(tools[0]["name"], "ig_search");
         let schema = &tools[0]["inputSchema"];
         assert!(schema["properties"]["query"].is_object());
         assert!(schema["properties"]["regex"].is_object());
         let required = schema["required"].as_array().unwrap();
         assert!(required.contains(&json!("query")));
+        assert_eq!(tools[1]["name"], "ig_status");
     }
 
     #[test]
@@ -753,5 +817,16 @@ mod tests {
             .and_then(|v| v.as_str())
             .expect("tool response content text");
         serde_json::from_str(content).expect("valid JSON payload")
+    }
+
+    #[test]
+    fn mcp_status_returns_projects() {
+        let response = dispatch("tools/call", json!({
+            "name": "ig_status",
+            "arguments": {}
+        })).unwrap();
+        let payload = tool_json_payload(&response);
+        let workspaces = payload.get("workspaces").and_then(|v| v.as_array()).unwrap();
+        let _ = workspaces.len();
     }
 }
