@@ -9,11 +9,8 @@
 //!
 //! Use [`create_model`] to build the right model based on the `neural` flag.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-
-use crate::config;
 use crate::text::{singularize_token, split_identifier_segments};
+use std::collections::HashMap;
 
 /// Shared interface implemented by all embedding backends.
 pub trait EmbeddingModel: Send + Sync {
@@ -54,7 +51,7 @@ pub fn create_model(hash: bool) -> Box<dyn EmbeddingModel> {
     if !hash {
         #[cfg(feature = "neural")]
         {
-            match OnnxEmbeddingModel::new() {
+            match CandleEmbeddingModel::new() {
                 Ok(model) => return Box::new(model),
                 Err(e) => {
                     tracing::warn!("Failed to load neural model, falling back to hash: {e}");
@@ -76,7 +73,7 @@ pub fn create_hash_model() -> Box<dyn EmbeddingModel> {
 pub fn create_neural_model() -> anyhow::Result<Box<dyn EmbeddingModel>> {
     #[cfg(feature = "neural")]
     {
-        let model = OnnxEmbeddingModel::new()?;
+        let model = CandleEmbeddingModel::new()?;
         Ok(Box::new(model))
     }
     #[cfg(not(feature = "neural"))]
@@ -90,7 +87,7 @@ pub fn create_neural_model() -> anyhow::Result<Box<dyn EmbeddingModel>> {
 pub fn create_neural_model_background() -> anyhow::Result<Box<dyn EmbeddingModel>> {
     #[cfg(feature = "neural")]
     {
-        let model = OnnxEmbeddingModel::new_background()?;
+        let model = CandleEmbeddingModel::new_background()?;
         Ok(Box::new(model))
     }
     #[cfg(not(feature = "neural"))]
@@ -185,231 +182,61 @@ impl EmbeddingModel for HashEmbeddingModel {
     }
 }
 
-// ── ONNX neural embedding (behind `neural` feature) ───────────────────────
+// ── Candle neural embedding (behind `neural` feature) ───────────────────────
 
 #[cfg(feature = "neural")]
-pub struct OnnxEmbeddingModel {
-    model: parking_lot::Mutex<fastembed::TextEmbedding>,
+pub struct CandleEmbeddingModel {
+    model: parking_lot::Mutex<candle_embed::BasedBertEmbedder>,
 }
 
-/// Maximum ONNX inter/intra-op thread count for background enhancement.
-/// Uses 25% of logical CPUs (capped at 4) so the system stays responsive.
-#[cfg(all(feature = "neural", target_os = "linux"))]
-fn ort_thread_budget() -> usize {
-    let cpus = num_cpus::get();
-    (cpus / 4).clamp(2, 4)
-}
-
-/// Adaptive check for CoreML in background daemon phase.
-#[cfg(all(feature = "neural", target_os = "macos"))]
-fn device_context_allows_coreml(is_background: bool) -> bool {
-    use std::process::Command;
-
-    // In the background daemon phase, we adaptively disable CoreML (which uses ANE/GPU
-    // and can freeze the UI on heavy workloads) if the system is contextually constrained.
-    if is_background {
-        // 1. Check if we're on battery power
-        if let Ok(output) = Command::new("pmset").arg("-g").arg("batt").output() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if stdout.contains("Battery Power") {
-                tracing::info!("Battery power detected, disabling CoreML in background");
-                return false;
-            }
-        }
-
-        // 2. Check if the system is already under heavy load
-        let mut loadavg = [0.0f64; 3];
-        let has_load = unsafe { libc::getloadavg(loadavg.as_mut_ptr(), 3) };
-        if has_load > 0 {
-            let load1 = loadavg[0];
-            let cpus = num_cpus::get() as f64;
-            // If 1-minute load average > 70% of logical cores, system is quite busy
-            if load1 > cpus * 0.7 {
-                tracing::info!(
-                    "System load is high ({:.2}), disabling CoreML in background",
-                    load1
-                );
-                return false;
-            }
-        }
-    }
-
-    true
-}
-
-/// Register CoreML execution provider (Apple Neural Engine / GPU).
-#[cfg(all(feature = "neural", target_os = "macos"))]
-fn register_hardware_acceleration(is_background: bool) {
-    if !device_context_allows_coreml(is_background) {
-        tracing::info!("CoreML skipped due to adaptive device context rules");
-        return;
-    }
-
-    let _ = ort::init()
-        .with_execution_providers([
-            ort::execution_providers::CoreMLExecutionProvider::default().build()
-        ])
-        .commit();
-    tracing::info!("CoreML execution provider registered");
-}
-
-/// Probe whether cuDNN is actually loadable at runtime.
-/// ONNX Runtime's CUDAExecutionProvider reports `is_available() == true`
-/// when the CUDA toolkit exists, but silently falls back to CPU if cuDNN
-/// is missing. We dlopen libcudnn to give an honest answer.
-#[cfg(all(feature = "neural", target_os = "linux"))]
-fn cudnn_is_loadable() -> bool {
-    unsafe {
-        let handle = libc::dlopen(c"libcudnn.so".as_ptr(), libc::RTLD_LAZY | libc::RTLD_NOLOAD);
-        if !handle.is_null() {
-            libc::dlclose(handle);
-            return true;
-        }
-        // Try loading it for real (slower but definitive)
-        let handle = libc::dlopen(c"libcudnn.so".as_ptr(), libc::RTLD_LAZY);
-        if !handle.is_null() {
-            libc::dlclose(handle);
-            return true;
-        }
-        false
-    }
-}
-
-#[cfg(all(feature = "neural", target_os = "linux"))]
-fn register_hardware_acceleration(_is_background: bool) {
-    if !cudnn_is_loadable() {
-        tracing::info!("cuDNN not found — CUDA EP skipped, using CPU");
-        return;
-    }
-
-    let _ = ort::init()
-        .with_execution_providers([
-            ort::execution_providers::CUDAExecutionProvider::default().build()
-        ])
-        .commit();
-    tracing::info!("CUDA execution provider registered (if available)");
-}
-
-#[cfg(all(feature = "neural", not(target_os = "macos"), not(target_os = "linux")))]
-fn register_hardware_acceleration(_is_background: bool) {}
-
+#[cfg(feature = "neural")]
 pub fn hardware_acceleration_info() -> &'static str {
-    #[cfg(feature = "neural")]
-    {
-        #[cfg(target_os = "macos")]
-        {
-            use ort::ep::ExecutionProvider;
-            if ort::execution_providers::CoreMLExecutionProvider::default()
-                .is_available()
-                .unwrap_or(false)
-            {
-                return "AllMiniLML6V2Q via CoreML";
-            }
-        }
+    "AllMiniLML6V2 via Candle"
+}
 
-        #[cfg(target_os = "linux")]
-        {
-            use ort::ep::ExecutionProvider;
-            if ort::execution_providers::CUDAExecutionProvider::default()
-                .is_available()
-                .unwrap_or(false)
-                && cudnn_is_loadable()
-            {
-                return "AllMiniLML6V2Q via CUDA";
-            }
-        }
-
-        "AllMiniLML6V2Q via CPU"
-    }
-    #[cfg(not(feature = "neural"))]
-    {
-        "Disabled"
-    }
+#[cfg(not(feature = "neural"))]
+pub fn hardware_acceleration_info() -> &'static str {
+    "Disabled"
 }
 
 #[cfg(feature = "neural")]
-impl OnnxEmbeddingModel {
-    /// Initialize the neural model.  On first run this downloads
-    /// `all-MiniLM-L6-v2` (~23 MB) to `~/.local/share/ivygrep/models/`.
+impl CandleEmbeddingModel {
     pub fn new() -> anyhow::Result<Self> {
         Self::new_internal(false)
     }
 
-    /// Initialize with limited thread count for background processing.
     pub fn new_background() -> anyhow::Result<Self> {
-        // Limit CPU affinity so that `std::thread::available_parallelism()`
-        // returns our budget instead of all cores. fastembed reads this value
-        // to set ONNX intra-op threads, and there's no other override path.
-        #[cfg(target_os = "linux")]
-        {
-            use std::mem;
-            let budget = ort_thread_budget();
-            let mut set: libc::cpu_set_t = unsafe { mem::zeroed() };
-            for i in 0..budget {
-                unsafe { libc::CPU_SET(i, &mut set) };
-            }
-            unsafe {
-                libc::sched_setaffinity(0, mem::size_of::<libc::cpu_set_t>(), &set);
-            }
-        }
         Self::new_internal(true)
     }
 
-    fn new_internal(is_background: bool) -> anyhow::Result<Self> {
-        use fastembed::{EmbeddingModel as FastModel, InitOptions};
+    fn new_internal(_is_background: bool) -> anyhow::Result<Self> {
+        use candle_embed::{CandleEmbedBuilder, WithModel};
 
-        register_hardware_acceleration(is_background);
+        let embedder = CandleEmbedBuilder::new()
+            .set_model_from_presets(WithModel::AllMinilmL6V2)
+            .build()?;
 
-        let cache_dir = model_cache_dir();
-        std::fs::create_dir_all(&cache_dir)?;
-
-        let needs_download = cache_dir
-            .read_dir()
-            .ok()
-            .and_then(|mut entries| entries.next())
-            .is_none();
-        if needs_download {
-            eprintln!("⟐ Downloading embedding model (~23 MB, one-time)...");
-        }
-
-        let model = fastembed::TextEmbedding::try_new(
-            InitOptions::new(FastModel::AllMiniLML6V2Q)
-                .with_cache_dir(cache_dir)
-                .with_show_download_progress(true),
-        )?;
-
-        if needs_download {
-            eprintln!("✓ Model ready.");
-        }
+        embedder.load_tokenizer()?;
+        embedder.load_model()?;
 
         Ok(Self {
-            model: parking_lot::Mutex::new(model),
+            model: parking_lot::Mutex::new(embedder),
         })
     }
 }
 
-/// Returns the centralized model cache directory inside the ivygrep app home.
-/// Falls back to a temp directory if the app home cannot be resolved.
 #[cfg(feature = "neural")]
-fn model_cache_dir() -> PathBuf {
-    config::app_home()
-        .map(|home| home.join("models"))
-        .unwrap_or_else(|_| std::env::temp_dir().join("ivygrep-models"))
-}
-
-#[cfg(feature = "neural")]
-impl EmbeddingModel for OnnxEmbeddingModel {
+impl EmbeddingModel for CandleEmbeddingModel {
     fn dimensions(&self) -> usize {
         384
     }
 
     fn embed(&self, text: &str) -> Vec<f32> {
+        // BasedBertEmbedder returns Result<Vec<f32>>
         self.model
             .lock()
-            .embed(vec![text], None)
-            .ok()
-            .and_then(|mut vecs| vecs.pop())
-            .unwrap_or_else(|| vec![0.0; 384])
+            .embed_one(text)
+            .unwrap_or_else(|_| vec![0.0; 384])
     }
 
     fn embed_batch(&self, texts: &[&str]) -> Vec<Vec<f32>> {
@@ -417,15 +244,12 @@ impl EmbeddingModel for OnnxEmbeddingModel {
             return vec![];
         }
 
-        // Fastembed handles batching internally, but passing 50K+ strings at once
-        // can cause massive ONNX memory allocations. We explicitly chunk the input
-        // string array to cap GPU memory usage (keeps it well under 8GB).
         let mut all_results = Vec::with_capacity(texts.len());
         for chunk in texts.chunks(256) {
             let mut results = self
                 .model
                 .lock()
-                .embed(chunk, None) // fastembed takes &[&str]
+                .embed_batch(chunk)
                 .unwrap_or_else(|_| chunk.iter().map(|_| vec![0.0; 384]).collect());
             all_results.append(&mut results);
         }

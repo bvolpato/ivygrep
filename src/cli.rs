@@ -370,14 +370,19 @@ async fn run_status(json: bool) -> Result<()> {
                         );
                     }
                 } else if let Some(err) = &ws.enhancing_error {
-                    // Neural enhancement failed! Show the error instead of "hash"
-                    println!(
-                        "{prefix}  Search: \x1b[1;31m⚠️ neural upgrade failed\x1b[0m (run `ig query` to retry, or check .enhancing.error)"
-                    );
-                    println!(
-                        "{prefix}          Error: \x1b[31m{}\x1b[0m",
-                        err.lines().next().unwrap_or("unknown error")
-                    );
+                    let err_line = err.lines().next().unwrap_or("unknown error");
+                    if err_line.contains("neural feature not compiled") {
+                        // Expected for static/musl builds — not an error
+                        println!(
+                            "{prefix}  Search: \x1b[33m◆ hash\x1b[0m (neural not available in this build)"
+                        );
+                    } else {
+                        // Real ONNX failure
+                        println!(
+                            "{prefix}  Search: \x1b[1;31m⚠️ neural upgrade failed\x1b[0m (run `ig query` to retry, or check .enhancing.error)"
+                        );
+                        println!("{prefix}          Error: \x1b[31m{err_line}\x1b[0m");
+                    }
                 } else if ws.chunk_count > 0 {
                     println!(
                         "{prefix}  Search: \x1b[33m◆ hash\x1b[0m (fast, run a query to trigger neural upgrade)"
