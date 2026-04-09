@@ -60,17 +60,9 @@ jobs:
       - name: Build release binary
         run: |
           if [ "${{ matrix.use_cross }}" = "true" ]; then
-            if [[ "${{ matrix.target }}" == *"musl"* ]] || [[ "${{ matrix.target }}" == *"x86_64-apple-darwin"* ]]; then
-              cross build --release --target ${{ matrix.target }} --no-default-features
-            else
-              cross build --release --target ${{ matrix.target }}
-            fi
+            cross build --release --target ${{ matrix.target }}
           else
-            if [[ "${{ matrix.target }}" == *"musl"* ]] || [[ "${{ matrix.target }}" == *"x86_64-apple-darwin"* ]]; then
-              cargo build --release --target ${{ matrix.target }} --no-default-features
-            else
-              cargo build --release --target ${{ matrix.target }}
-            fi
+            cargo build --release --target ${{ matrix.target }}
           fi
         shell: bash
 
