@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775757435547,
+  "lastUpdate": 1775761966629,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -3940,6 +3940,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 466.16,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "7c0f46f630ffa58c38a8a3a859412e7c837ef129",
+          "message": "perf(merkle): replace per-entry mutex with FlushGuard + benchmark warmup (#8)\n\nEliminate parallel walker lock contention by collecting entries into\nper-thread buffers that flush once on drop via FlushGuard, reducing\nMutex acquisitions from N to T (~4-8 threads).\n\nAdd explicit warm_up_time (3-5s) and measurement_time (10-15s) to all\nbenchmark groups to reduce cold-start noise in CI.",
+          "timestamp": "2026-04-09T15:05:33-04:00",
+          "tree_id": "a1f86d91e629d9f21b1d7a56d044f5ae3a526f7e",
+          "url": "https://github.com/bvolpato/ivygrep/commit/7c0f46f630ffa58c38a8a3a859412e7c837ef129"
+        },
+        "date": 1775761966160,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 746122330,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 7982.47,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3822.79,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2703.47,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11101.39,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 10711.93,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 6.61,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 521.52,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 14975.54,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 10686.28,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 5221.92,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 449875.15,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 534.77,
             "unit": "µs"
           }
         ]
