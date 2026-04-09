@@ -2,6 +2,11 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.39] — 2026-04-09
+
+### Added
+- **MCP server `ig_status` tool:** Added MCP tool to list indexed projects and check index status.
+
 ## [0.5.13] — 2026-04-07
 
 ### Performance
