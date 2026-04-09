@@ -20,13 +20,19 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-20.04
+            archive_name: linux-x86_64-gnu
+            archive: tar.gz
+            use_cross: false
+          - target: x86_64-unknown-linux-musl
             runner: ubuntu-latest
-            archive_name: linux-x86_64
+            archive_name: linux-x86_64-musl
             archive: tar.gz
             use_cross: true
-          - target: aarch64-unknown-linux-gnu
+
+          - target: aarch64-unknown-linux-musl
             runner: ubuntu-latest
-            archive_name: linux-aarch64
+            archive_name: linux-aarch64-musl
             archive: tar.gz
             use_cross: true
           - target: x86_64-apple-darwin
@@ -59,9 +65,17 @@ jobs:
       - name: Build release binary
         run: |
           if [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }}
+            if [[ "${{ matrix.target }}" == *"musl"* ]]; then
+              cross build --release --target ${{ matrix.target }} --no-default-features
+            else
+              cross build --release --target ${{ matrix.target }}
+            fi
           else
-            cargo build --release --target ${{ matrix.target }}
+            if [[ "${{ matrix.target }}" == *"musl"* ]]; then
+              cargo build --release --target ${{ matrix.target }} --no-default-features
+            else
+              cargo build --release --target ${{ matrix.target }}
+            fi
           fi
         shell: bash
 
