@@ -212,9 +212,14 @@ impl CandleEmbeddingModel {
     fn new_internal(_is_background: bool) -> anyhow::Result<Self> {
         use candle_embed::{CandleEmbedBuilder, WithModel};
 
-        let embedder = CandleEmbedBuilder::new()
-            .set_model_from_presets(WithModel::AllMinilmL6V2)
-            .build()?;
+        let mut builder =
+            CandleEmbedBuilder::new().set_model_from_presets(WithModel::AllMinilmL6V2);
+
+        if !candle_core::utils::cuda_is_available() && !candle_core::utils::metal_is_available() {
+            builder = builder.with_device_cpu();
+        }
+
+        let embedder = builder.build()?;
 
         embedder.load_tokenizer()?;
         embedder.load_model()?;

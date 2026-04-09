@@ -1865,10 +1865,11 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "ivygrep"
-version = "0.5.35"
+version = "0.5.36"
 dependencies = [
  "anyhow",
  "assert_cmd",
+ "candle-core",
  "candle_embed",
  "clap",
  "colored",
