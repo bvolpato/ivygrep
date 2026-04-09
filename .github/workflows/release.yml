@@ -19,23 +19,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-musl
+          - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
             archive_name: linux-x86_64
             archive: tar.gz
-            cargo_flags: "--no-default-features"
             use_cross: true
-          - target: aarch64-unknown-linux-musl
+          - target: aarch64-unknown-linux-gnu
             runner: ubuntu-latest
             archive_name: linux-aarch64
             archive: tar.gz
-            cargo_flags: "--no-default-features"
             use_cross: true
           - target: x86_64-apple-darwin
             runner: macos-latest
             archive_name: macos-x86_64
             archive: tar.gz
-            cargo_flags: "--no-default-features"
           - target: aarch64-apple-darwin
             runner: macos-latest
             archive_name: macos-aarch64
@@ -62,14 +59,14 @@ jobs:
       - name: Build release binary
         run: |
           if [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} ${{ matrix.cargo_flags }}
+            cross build --release --target ${{ matrix.target }}
           else
-            cargo build --release --target ${{ matrix.target }} ${{ matrix.cargo_flags }}
+            cargo build --release --target ${{ matrix.target }}
           fi
         shell: bash
 
       - name: Set up QEMU
-        if: matrix.target == 'aarch64-unknown-linux-musl'
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
         uses: docker/setup-qemu-action@v3
 
       - name: Smoke test
