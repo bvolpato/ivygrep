@@ -299,3 +299,41 @@ fn cli_query_from_subdirectory_is_scope_restricted() {
     assert!(!files.is_empty());
     assert!(files.iter().all(|path| path.starts_with("scoped/")));
 }
+
+#[test]
+#[serial]
+fn cli_prevent_nested_indexing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let parent = tmp.path().join("parent");
+    let child = parent.join("child");
+    std::fs::create_dir_all(&child).unwrap();
+
+    let home = tmp.path().join("ivygrep_home");
+
+    // Index the child repository
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    cmd.current_dir(&child)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--add", "."])
+        .assert()
+        .success();
+
+    // Try to index the parent repository (should fail)
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    let output = cmd
+        .current_dir(&parent)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--add", "."])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+
+    let text = String::from_utf8(output).unwrap();
+    assert!(text.contains("because it contains already indexed sub-workspaces"));
+    assert!(text.contains("You must remove them first"));
+    assert!(text.contains(&format!("ig --rm {}", child.display())));
+}

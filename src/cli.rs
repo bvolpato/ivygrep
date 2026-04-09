@@ -447,6 +447,9 @@ async fn run_add(
     _hash: bool,
 ) -> Result<()> {
     let workspace = Workspace::resolve(path)?;
+
+    ensure_no_nested_workspaces(&workspace.root)?;
+
     if skip_gitignore {
         let mut meta =
             workspace
@@ -706,6 +709,8 @@ async fn run_query(cli: Cli) -> Result<()> {
                 msg.bold(),
                 workspace.root.display().to_string().dimmed()
             );
+
+            ensure_no_nested_workspaces(&workspace.root)?;
 
             let _ = workspace.ensure_dirs();
             let mut meta = workspace
@@ -1334,4 +1339,32 @@ fn local_fallback_search(
         all_hits.truncate(l);
     }
     all_hits
+}
+
+fn ensure_no_nested_workspaces(target_root: &Path) -> Result<()> {
+    if let Ok(workspaces) = list_workspaces() {
+        let mut conflicts = Vec::new();
+        for ws in workspaces {
+            if ws.root != target_root && ws.root.starts_with(target_root) {
+                conflicts.push(ws.root.clone());
+            }
+        }
+        if !conflicts.is_empty() {
+            let conflict_msgs: Vec<String> = conflicts
+                .iter()
+                .map(|p| format!("ig --rm {}", p.display()))
+                .collect();
+            let paths_list: Vec<String> = conflicts
+                .iter()
+                .map(|p| format!("  - {}", p.display()))
+                .collect();
+            bail!(
+                "Cannot index '{}' because it contains already indexed sub-workspaces:\n{}\n\nYou must remove them first:\n  {}",
+                target_root.display(),
+                paths_list.join("\n"),
+                conflict_msgs.join("\n  ")
+            );
+        }
+    }
+    Ok(())
 }
