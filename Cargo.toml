@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [features]
 default = ["neural"]
-neural = ["dep:fastembed", "dep:ort"]
+neural = ["dep:candle_embed"]
 
 [dependencies]
 anyhow = "1.0"
@@ -39,7 +39,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 usearch = { version = "2.24", default-features = false, features = ["fp16lib"] }
 uuid = { version = "1.22", features = ["v4", "serde"] }
-fastembed = { version = "5", optional = true }
 num_cpus = "1.16"
 libc = "0.2"
 tree-sitter = "0.26.7"
@@ -51,6 +50,7 @@ tree-sitter-go = "0.25.0"
 streaming-iterator = "0.1.9"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 zstd = "0.13"
+candle_embed = { version = "0.1.4", default-features = false, optional = true }
 
 [dev-dependencies]
 assert_cmd = "2.2"
@@ -62,11 +62,7 @@ proptest = "1.10"
 serial_test = "3.4"
 tempfile = "3.27"
 
-[target."cfg(target_os = \"macos\")".dependencies]
-ort = { version = "=2.0.0-rc.11", optional = true, default-features = false, features = ["ndarray", "std", "coreml"] }
 
-[target."cfg(not(target_os = \"macos\"))".dependencies]
-ort = { version = "=2.0.0-rc.11", optional = true, default-features = false, features = ["ndarray", "std", "cuda"] }
 
 [profile.release]
 debug = true
