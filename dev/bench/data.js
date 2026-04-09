@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775743939522,
+  "lastUpdate": 1775747483955,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -3406,6 +3406,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 581.7,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ab9e59cd20b5399009ce566192ff000e141e2d1c",
+          "message": "feat(neural): replace fastembed with candle_embed for universal static binaries (#6)\n\n* feat(neural): replace fastembed with candle_embed for universal static binaries\n\nReplaces fastembed/ort with pure-Rust candle_embed, making the neural feature available on static (musl) Linux builds without requiring dynamic glibc ONNX Runtime linkages. Downgrades half to 2.3.1 to avoid a rand_distr dependency mismatch with candle-core.\n\n* ci: prune linux-gnu targets from release matrix\n\nSince candle_embed produces exactly the same feature-rich neural binaries natively for musl and completely independently of any glibc ONNX installations, there's no need to build or distribute the legacy x86_64/aarch64 GNU fallback targets. The Linux static musl binaries provide complete platform-agnostic distribution.",
+          "timestamp": "2026-04-09T11:03:53-04:00",
+          "tree_id": "fafaccd6dac4b5020c5d77b7619787fb25a7f9de",
+          "url": "https://github.com/bvolpato/ivygrep/commit/ab9e59cd20b5399009ce566192ff000e141e2d1c"
+        },
+        "date": 1775747483323,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 761225620,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 8129.75,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3829.34,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2716.65,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 10769.17,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 10508.2,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 6.84,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 522.1,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 14654.61,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 10503.89,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 5177.43,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 450308.88,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 515.16,
             "unit": "µs"
           }
         ]
