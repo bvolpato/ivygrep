@@ -20,104 +20,22 @@
 
 ---
 
-## ⚡ What is ivygrep?
+## ⚡ Quick Start
 
-**ivygrep (`ig`)** is a local-first code search tool that understands natural language. It combines lexical search (like `grep`/`rg`) with semantic vector search — so you can search your code the way you *think* about it.
-
-```bash
-# Ask in English, find the code
-ig "where is tax calculated?"
-# → finds calculateTaxes(), applyVAT(), computeWithholding()
-
-ig "database connection retry logic"
-# → finds reconnect(), exponentialBackoff(), handleDbTimeout()
-```
-
-> **No API keys. No cloud. No telemetry. Your code never leaves your machine.**
-
----
-
-## 🤔 Why ivygrep?
-
-Traditional code search tools require you to know _exactly_ what you're looking for. ivygrep lets you search with intent.
-
-| Feature | `grep` / `rg` | GitHub Search | **ivygrep** |
-|---------|:---:|:---:|:---:|
-| Works offline | ✅ | ❌ | ✅ |
-| Natural language queries | ❌ | ⚠️ | ✅ |
-| Semantic understanding | ❌ | ❌ | ✅ |
-| Sub-100ms latency | ✅ | ❌ | ✅ |
-| Privacy-first (no upload) | ✅ | ❌ | ✅ |
-| Git-native (worktrees, branches) | ❌ | ❌ | ✅ |
-| AST-aware chunking | ❌ | ❌ | ✅ |
-| Incremental indexing | ❌ | ❌ | ✅ |
-| MCP server for AI agents | ❌ | ❌ | ✅ |
-
----
-
-## ⚡ Performance
-
-### Search — ivygrep vs grep vs ripgrep
-
-Benchmarked on the **Linux kernel** (92K files, 1.5M chunks) — query: `"kfree"`:
-
-| Tool | Mode | Time | Speedup |
-|------|------|-----:|--------:|
-| `grep -rn` | exact string | ~9.0 s | 1× |
-| `rg` | exact string | ~2.7 s | 3× |
-| **`ig`** | semantic: `"kernel memory allocation"` | **~72 ms** | **125×** |
-| **`ig --literal`** | **single identifier** (fast path) | **~17 ms** | **529×** |
-
-> `grep` and `rg` scan every file on each query. ivygrep queries a pre-built
-> index, so searches are **orders of magnitude faster** on warm repos — and
-> semantic mode finds related code even when you don't know the exact identifier.
-
-### Indexing
-
-| Operation | Time | Notes |
-|-----------|------|-------|
-| **First index** (40 files) | **0.0s** | Hash embeddings — instant |
-| **First index** (200 files) | **0.3s** | Parallel hash pipeline |
-| **Re-index** (no changes) | 0.01s | Merkle diff only |
-| **Neural enhancement** | ~24s | Background, non-blocking |
-
-### Concurrent search (AI agent load, 8 threads)
-
-| Metric | Mac M4 Max | Linux Ryzen 9 3950X |
-|--------|------------|---------------------|
-| **Average latency** | ~26 ms | ~11 ms |
-| **p95 latency** | ~62 ms | ~15 ms |
-| **Max latency** | ~98 ms | ~20 ms |
-
-> Tested on: Apple M4 Max (16-core, 128 GB) and AMD Ryzen 9 3950X (16-core/32-thread, 64 GB DDR4).
-
-> Indexing is sub-second for most projects. Search is sub-100ms. Neural quality upgrades happen silently.
-
----
-
-## 🚀 Quick Start
-
-### Install
-
-**Homebrew** (recommended):
+**Install via Homebrew (recommended):**
 ```bash
 brew tap bvolpato/tap
 brew install bvolpato/tap/ivygrep
 ```
 
-**From source**:
+**Build from source:**
 ```bash
 git clone https://github.com/bvolpato/ivygrep.git && cd ivygrep
 cargo build --release
 install -m 0755 ./target/release/ig ~/.local/bin/ig
 ```
 
-> **Note on macOS**: Building on macOS automatically enables the Apple CoreML Execution Provider, offloading embedding generation to the Neural Engine / GPU with zero configuration.
-
-**Binary downloads**: grab the latest from [Releases](https://github.com/bvolpato/ivygrep/releases/latest) — available for Linux (x86/ARM) and macOS (Intel/Apple Silicon).
-
-### First search in 10 seconds
-
+**Your first search:**
 ```bash
 ig "authentication flow"            # auto-indexes on first run, then searches
 ig "error handling" src/api/         # scope to a directory
@@ -125,8 +43,6 @@ ig --all "database migrations"      # search across all indexed projects
 ```
 
 That's it. No config files, no setup wizards, no prompts, no API keys. On first run, `ig` auto-indexes the workspace and spawns a background daemon for incremental updates.
-
-> **Tip**: Indexing is fast — `ig` uses hash embeddings for sub-second indexing on most projects, then silently upgrades to neural embeddings in the background.
 
 <p>
   <img src="assets/ig-demo.gif" alt="ivygrep demo — searching the opencode repo" width="700" />
@@ -136,13 +52,13 @@ That's it. No config files, no setup wizards, no prompts, no API keys. On first 
 
 ## 🤖 MCP Server — Supercharge Your AI Agent
 
-ivygrep is the **retrieval layer your coding agent is missing**. Instead of stuffing entire files into context, your agent pulls only the relevant code chunks.
+ivygrep is the **retrieval layer your coding agent is missing**. Instead of stuffing entire files into context, your agent pulls only the relevant code chunks natively.
 
 ```bash
 ig --mcp    # starts MCP server on stdio
 ```
 
-### One-line setup for every major agent:
+### One-line setup for agents:
 
 <details>
 <summary><b>Claude Code</b></summary>
@@ -150,67 +66,11 @@ ig --mcp    # starts MCP server on stdio
 ```bash
 claude mcp add -s user ig -- ig --mcp
 ```
-
 Or add to `~/.claude.json`:
 ```json
 {
   "mcpServers": {
     "ig": { "type": "stdio", "command": "ig", "args": ["--mcp"] }
-  }
-}
-```
-</details>
-
-<details>
-<summary><b>Codex</b></summary>
-
-```bash
-codex mcp add ig -- ig --mcp
-```
-
-Or add to `~/.codex/config.toml`:
-```toml
-[mcp_servers.ig]
-command = "ig"
-args = ["--mcp"]
-```
-</details>
-
-<details>
-<summary><b>OpenCode</b></summary>
-
-```bash
-opencode mcp add
-```
-
-Choose `Local` and set command to `ig --mcp`.
-
-Or add to `opencode.json`:
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "ig": { "type": "local", "command": ["ig", "--mcp"] }
-  }
-}
-```
-</details>
-
-<details>
-<summary><b>Gemini</b></summary>
-
-```bash
-gemini mcp add --transport stdio ig ig --mcp
-```
-
-Or add to `~/.gemini/settings.json`:
-```json
-{
-  "mcpServers": {
-    "ig": {
-      "command": "ig",
-      "args": ["--mcp"]
-    }
   }
 }
 ```
@@ -230,40 +90,87 @@ Add to `.cursor/mcp.json` or `~/.cursor/mcp.json`:
 Then refresh MCP servers in Cursor settings.
 </details>
 
-### Example agent prompt
+<details>
+<summary><b>Gemini</b></summary>
 
-> *"Refactor the payment flow. First call ig_search with path=src/payments to find where tax is computed."*
+```bash
+gemini mcp add --scope user --transport stdio ig ig --mcp
+```
+Or add to `~/.gemini/settings.json`:
+```json
+{
+  "mcpServers": {
+    "ig": { "command": "ig", "args": ["--mcp"] }
+  }
+}
+```
+</details>
 
-The agent searches, finds the exact function, and edits grounded in real code — not hallucinations.
+<details>
+<summary><b>OpenCode & Codex</b></summary>
 
-### MCP tool
+**OpenCode:** `opencode mcp add` -> Choose `Local` and set command to `ig --mcp`.
 
-`ig_search(query, path?, limit?, context?, type?, regex?, include?, exclude?, first_line_only?, file_name_only?, verbose?)`
-
-- Auto-indexes on first call
-- Scopes to subdirectory or file
-- Respects `.gitignore`
-- Compact JSON output (token-efficient for LLMs)
+**Codex:** Run `codex mcp add ig -- ig --mcp` or add to `~/.codex/config.toml`.
+</details>
 
 ---
 
-## 🌍 44 Languages Supported
+## 🤔 What is ivygrep?
 
-ivygrep provides AST-aware chunking for functions, classes, and modules:
+**ivygrep (`ig`)** is a local-first code search tool that understands natural language. It combines lexical search (like `grep`/`rg`) with semantic vector search — so you can search your code the way you *think* about it.
 
-| Category | Languages |
-|----------|-----------|
-| **Systems** | Rust, C, C++, Zig, Nim |
-| **Web** | JavaScript, TypeScript, HTML, CSS, GraphQL |
-| **Backend** | Python, Go, Java, Kotlin, Scala, C#, Ruby, PHP, Perl, Groovy |
-| **Functional** | Haskell, OCaml, Elixir, Erlang, Clojure |
-| **Mobile** | Swift, Dart, Objective-C |
-| **Scientific** | R, Julia |
-| **Shell** | Bash/Zsh, PowerShell, Lua |
-| **Data/Infra** | SQL, Protobuf, Thrift, Terraform, TOML, YAML, JSON, XML |
-| **Other** | Markdown, Dockerfile, Makefile, and plain text |
+Traditional tools require you to know _exactly_ what you're looking for. ivygrep lets you search with intent.
 
-> Unknown extensions are auto-detected — if it looks like text, it gets indexed.
+| Feature | `grep` / `rg` | GitHub Search | **ivygrep** |
+|---------|:---:|:---:|:---:|
+| Works offline | ✅ | ❌ | ✅ |
+| Natural language queries | ❌ | ⚠️ | ✅ |
+| Semantic understanding | ❌ | ❌ | ✅ |
+| Sub-100ms latency | ✅ | ❌ | ✅ |
+| Privacy-first (no upload) | ✅ | ❌ | ✅ |
+| Git-native (worktrees, branches) | ❌ | ❌ | ✅ |
+| AST-aware chunking | ❌ | ❌ | ✅ |
+| Incremental indexing | ❌ | ❌ | ✅ |
+| MCP server for AI agents | ❌ | ❌ | ✅ |
+
+### 🌍 44 Languages Supported
+ivygrep provides AST-aware chunking for functions, classes, and modules across all major domains:
+
+- **Systems:** Rust, C, C++, Zig, Nim
+- **Backend:** Python, Go, Java, Kotlin, Scala, C#, Ruby, PHP, Perl, Groovy
+- **Web & Mobile:** JavaScript, TypeScript, HTML, CSS, GraphQL, Swift, Dart, Objective-C
+- **Functional:** Haskell, OCaml, Elixir, Erlang, Clojure
+- **Data, Scripting & Config:** R, Julia, Bash, PowerShell, Lua, SQL, Protobuf, Terraform, TOML, YAML, JSON, Dockerfile, Makefile
+
+Unknown extensions are auto-detected and indexed as text.
+
+---
+
+## 🚀 Performance & Speed
+
+Benchmarked on the **Linux kernel** (92K files, 1.5M chunks):
+
+| Tool | Mode | Time | Speedup |
+|------|------|-----:|--------:|
+| `grep -rn` | exact string | ~9.0 s | 1× |
+| `rg` | exact string | ~2.7 s | 3× |
+| **`ig`** | semantic: `"kernel memory allocation"` | **~72 ms** | **125×** |
+| **`ig --literal`** | **single identifier** (fast path) | **~17 ms** | **529×** |
+
+Indexing is sub-second for most projects. Search is sub-100ms. Neural quality upgrades happen silently in the background via the default bundled ONNX runtime (`AllMiniLML6V2Q`).
+
+---
+
+## 🏗️ Architecture & Git-Native Intelligence
+
+ivygrep deeply understands git. This is a core design decision, not an afterthought:
+- **Worktree overlays:** Doesn't duplicate indexes contextually. Creates thin overlays mapping divergent chunks.
+- **Branch-switch deltas:** Targets Merkle-diff re-indexes of *only* changed files upon branch switch.
+- **Content-based deduplication:** Byte-identical files are never re-indexed across branches.
+- **`.gitignore` native:** Respects rules automatically at every level.
+
+**Tech stack:** `tantivy` (BM25), `usearch` (vector store), `tree-sitter` (AST), `fastembed` (embeddings), `xxh3` (SIMD hashes).
 
 ---
 
@@ -276,8 +183,6 @@ ig "query" ~/other/project         # search a different workspace
 ig --add .                         # register & index a workspace
 ig --rm .                          # unregister a workspace
 ig --status                        # show workspace health & embedding status
-ig --status --json                 # machine-readable workspace status
-ig --all "query"                   # search all indexed workspaces
 
 # Search modes
 ig --regex "fn\s+\w+_tax"          # regex mode (like rg)
@@ -292,48 +197,11 @@ ig --exclude "vendor/**" "query"   # exclude globs
 ig --json "query"                  # machine-readable JSON
 ig --first-line-only "query"       # compact grep-style output
 ig --file-name-only "query"        # file paths only
-ig --verbose "query"               # include match reasons
 
 # Daemon & server
 ig --daemon                        # start background watcher
 ig --mcp                           # start MCP server (stdio)
 ```
-
-> **Tip**: The daemon auto-spawns on your first search — no manual startup needed. Set `IVYGREP_NO_AUTOSPAWN=1` to disable (useful in CI).
-
----
-
-## 🏗️ Architecture
-
-```
-ivygrep
-├── tantivy         — lexical BM25 index
-├── usearch         — vector similarity index (hash + neural stores)
-├── tree-sitter     — AST-based code chunking (35+ languages)
-├── fastembed       — quantized ONNX embeddings (AllMiniLML6V2Q, 384-dim, CoreML accelerated)
-├── xxh3 (xxhash)   — hyper-fast 128-bit SIMD structural block hashes
-├── git2            — git-native: worktree detection, branch tracking, .gitignore
-├── notify          — filesystem watcher for live re-indexing
-├── SQLite          — metadata store natively synced via Async MPSC streaming channels
-└── Unix socket     — daemon IPC (auto-spawned)
-```
-
-**Index location**: `${IVYGREP_HOME:-${XDG_DATA_HOME:-~/.local/share}/ivygrep}/indexes/<workspace-id>/`
-
-Each workspace stores two vector indexes:
-- `vectors.usearch` — hash-based (always present, instant to compute)
-- `vectors_neural.usearch` — ONNX-based (created in background after first search)
-
-**Neural embeddings**: The default build bundles ONNX Runtime for high-quality semantic search. The quantized model (~23 MB) downloads automatically on first use. Indexing never blocks on this — it happens in the background. For a minimal binary without ONNX: `cargo build --release --no-default-features`.
-
-### 🌿 Git-Native Intelligence
-
-ivygrep deeply understands git. This is a core design decision, not an afterthought.
-
-- **Worktree overlays** — When you `git worktree add`, ivygrep does **not** copy the index. Instead it creates a thin _overlay_ that only stores divergent chunks + tombstones, referencing the base worktree's index by path. A 92K-file repo checkout with 50 changed files creates a ~200 KB overlay instead of duplicating a ~50 MB index.
-- **Branch-switch delta recomputation** — When you switch branches (`git checkout`, `git switch`), the filesystem watcher detects the changed files and triggers a targeted Merkle-diff re-index of only the delta — no full re-scan.
-- **Content-based deduplication** — Overlay diffs use content-based (not mtime-based) Merkle hashes, so files that are byte-identical across worktrees share the same hash and are never re-indexed.
-- **`.gitignore` native** — Respects `.gitignore` rules at every level. No configuration needed.
 
 ---
 
@@ -342,28 +210,16 @@ ivygrep deeply understands git. This is a core design decision, not an afterthou
 ```bash
 cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test
 ```
-
-The test suite covers unit tests, CLI snapshots, concurrency, golden queries,
-incremental CRUD, property-based Merkle invariants, and stress/benchmarks.
+The test suite covers unit tests, CLI snapshots, concurrency, golden queries, incremental CRUD, property-based Merkle invariants, and stress/benchmarks.
 
 ### Stress testing
-
 ```bash
 ./scripts/bootstrap_stress_fixtures.sh
 cargo test --test stress_harness -- --ignored --nocapture
 ```
 
-Fixtures include ripgrep, Shakespeare corpus, and Tantivy source.
-
----
-
-## 📄 License
-
-MIT — use it however you want.
-
 ---
 
 <p align="center">
-  Built by <a href="https://github.com/bvolpato">@bvolpato</a> · Contributions welcome
+  Built by <a href="https://github.com/bvolpato">@bvolpato</a> · Released under the MIT License
 </p>
-
