@@ -335,5 +335,5 @@ fn cli_prevent_nested_indexing() {
     let text = String::from_utf8(output).unwrap();
     assert!(text.contains("because it contains already indexed sub-workspaces"));
     assert!(text.contains("You must remove them first"));
-    assert!(text.contains(&format!("ig --rm {}", child.display())));
+    assert!(text.contains(&format!("ig --rm {}", child.canonicalize().unwrap().display())));
 }
