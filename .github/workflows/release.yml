@@ -20,7 +20,7 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            runner: ubuntu-20.04
+            runner: ubuntu-22.04
             archive_name: linux-x86_64-gnu
             archive: tar.gz
             use_cross: false
