@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775699274361,
+  "lastUpdate": 1775699918479,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -2516,6 +2516,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 535.81,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "2bbac10804091bbc6afec6b2f1d6d6694dd8690a",
+          "message": "fix(search): prevent literal match discard in hybrid search\n\nLiteral exact matches were being incorrectly filtered out by the\nadaptive threshold scoring system during hybrid search if their\nbase BM25 scores were low relative to other semantic matches, leading\nto inconsistent result counts between case-sensitive and case-insensitive\ninvocations that expanded search scopes. We now explicitly bypass\nthe threshold for any hits carrying the 'literal' provenance tag.",
+          "timestamp": "2026-04-08T21:54:08-04:00",
+          "tree_id": "d69c3bb1a0f0112fa29fdcc29d2364ee70ade673",
+          "url": "https://github.com/bvolpato/ivygrep/commit/2bbac10804091bbc6afec6b2f1d6d6694dd8690a"
+        },
+        "date": 1775699917785,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 721611310,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 8175.98,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3792.33,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2706.18,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 10907.92,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 10622.88,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 6.66,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 520.42,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 14425.24,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 10398.96,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 5147.99,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 450042.74,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 548.51,
             "unit": "µs"
           }
         ]
