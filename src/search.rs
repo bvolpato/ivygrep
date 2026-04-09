@@ -1130,7 +1130,9 @@ fn filter_meaningful_scores(
 
     let mut filtered = ranked
         .iter()
-        .filter(|(_, score, _)| *score >= adaptive_threshold)
+        .filter(|(_, score, sources)| {
+            *score >= adaptive_threshold || sources.contains(&"literal".to_string())
+        })
         .cloned()
         .collect::<Vec<_>>();
 
