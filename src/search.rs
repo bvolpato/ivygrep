@@ -1,4 +1,3 @@
-use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
@@ -198,10 +197,10 @@ impl SearchContext {
 
 /// Fast index-backed literal text search.
 ///
-/// Uses Tantivy to find chunks containing the literal terms, then scans
-/// only those chunks' source lines for exact case-insensitive substring
-/// matches. This is O(matched_chunks) instead of O(all_files), making it
-/// orders of magnitude faster than `--regex` for exact string searches.
+/// Uses Tantivy to find candidate chunks containing the query terms,
+/// then verifies exact case-insensitive substring matches only on those
+/// candidates. Falls back to a full SQLite scan only when the query
+/// contains terms that wouldn't be in the Tantivy tokenizer.
 pub fn literal_search(
     workspace: &Workspace,
     query_text: &str,
@@ -219,34 +218,14 @@ pub fn literal_search(
 
     let ctx = SearchContext::load(workspace, None)?;
 
-    // Create highly optimized case-insensitive regex for exact substring matching
     let matcher = regex::RegexBuilder::new(&regex::escape(query))
         .case_insensitive(true)
         .build()?;
 
-    // Fetch all chunks matching our path/lang constraints from SQLite.
-    // This is incredibly fast as it offloads filtering to SQLite and does single-pass ZSTD decompression.
-    let all_chunks = collect_filtered_chunks(
-        &ctx,
-        &path_matcher,
-        options.scope_filter.as_ref(),
-        options.type_filter.as_deref(),
-        &options.include_globs,
-        options.skip_gitignore,
-    );
-
-    // Filter candidate chunks in parallel by checking the exact string against chunk.text.
-    let candidate_chunks: Vec<IndexedChunk> = all_chunks
-        .into_par_iter()
-        .filter_map(|raw_chunk| {
-            let chunk = raw_chunk.decompress();
-            if matcher.is_match(&chunk.text) {
-                Some(chunk)
-            } else {
-                None
-            }
-        })
-        .collect();
+    // Use Tantivy index as a pre-filter: find candidate chunk IDs via the
+    // inverted index, then only decompress those to verify the exact match.
+    let candidate_chunks =
+        collect_literal_candidates(&ctx, query, &matcher, &path_matcher, options)?;
 
     tracing::trace!(
         "literal_scan={:?} candidates={}",
@@ -306,6 +285,75 @@ pub fn literal_search(
     Ok(hits)
 }
 
+/// Use the Tantivy inverted index to find candidate chunks likely to contain
+/// the literal query, then verify with regex on the decompressed text.
+/// This is O(index_lookup + matched_candidates) instead of O(all_chunks).
+fn collect_literal_candidates(
+    ctx: &SearchContext,
+    query: &str,
+    matcher: &regex::Regex,
+    path_matcher: &PathGlobMatcher,
+    options: &SearchOptions,
+) -> Result<Vec<IndexedChunk>> {
+    let candidate_limit = options.limit.unwrap_or(500).max(500);
+
+    let parser =
+        QueryParser::for_index(&ctx.indexes[0], vec![ctx.fields.text, ctx.fields.file_path]);
+
+    // Collect unique chunk IDs from Tantivy that contain the query tokens
+    let mut tantivy_chunks = HashMap::<String, IndexedChunk>::new();
+    for lexical_query in build_lexical_queries(query) {
+        let parsed_query = match parser.parse_query(&lexical_query) {
+            Ok(q) => q,
+            Err(_) => continue,
+        };
+
+        for (i, searcher) in ctx.searchers.iter().enumerate() {
+            let docs = searcher.search(
+                &parsed_query,
+                &TopDocs::with_limit(candidate_limit).order_by_score(),
+            )?;
+
+            for (_score, addr) in docs {
+                let doc: TantivyDocument = searcher.doc(addr)?;
+                if let Some(chunk) = fetch_chunk_by_id(doc, &ctx.fields)
+                    .filter(|c| !ctx.is_shadowed_base_file(i, &c.file_path))
+                    .filter(|c| type_matches(c, options.type_filter.as_deref()))
+                    .filter(|c| scope_matches(c, options.scope_filter.as_ref()))
+                    .filter(|c| path_matches(c, path_matcher))
+                    .filter(|c| options.skip_gitignore || !c.is_ignored)
+                {
+                    tantivy_chunks
+                        .entry(chunk.chunk_id.clone())
+                        .or_insert(chunk);
+                }
+            }
+        }
+    }
+
+    // Hydrate text from SQLite for chunks where Tantivy doesn't store it,
+    // then verify exact substring match via regex.
+    let need_text: Vec<(String, u64)> = tantivy_chunks
+        .iter()
+        .filter(|(_, chunk)| chunk.text.is_empty())
+        .map(|(id, chunk)| (id.clone(), chunk.vector_key))
+        .collect();
+    for (chunk_id, vector_key) in need_text {
+        if let Ok(Some(full)) = ctx.fetch_chunk_by_vector_key(vector_key)
+            && let Some(chunk) = tantivy_chunks.get_mut(&chunk_id)
+        {
+            chunk.text = full.text;
+        }
+    }
+
+    let verified: Vec<IndexedChunk> = tantivy_chunks
+        .into_values()
+        .filter(|chunk| matcher.is_match(&chunk.text))
+        .collect();
+
+    Ok(verified)
+}
+
 pub fn hybrid_search(
     workspace: &Workspace,
     query_text: &str,
@@ -319,6 +367,26 @@ pub fn hybrid_search(
     let ctx = SearchContext::load(workspace, embedding_model.map(|m| m.dimensions()))?;
     tracing::trace!("open_tantivy={:?}", t0.elapsed());
 
+    // ── Literal pass ────────────────────────────────────────────────────
+    // Always run a fast index-backed literal substring scan so exact matches
+    // surface even when tokenization splits them differently.
+    let literal_matcher = regex::RegexBuilder::new(&regex::escape(query_text.trim()))
+        .case_insensitive(true)
+        .build()
+        .ok();
+    let literal_chunks: Vec<(IndexedChunk, f32)> = if let Some(ref matcher) = literal_matcher
+        && !query_text.trim().is_empty()
+    {
+        let candidates =
+            collect_literal_candidates(&ctx, query_text.trim(), matcher, &path_matcher, options)
+                .unwrap_or_default();
+        tracing::trace!("literal_pass={:?} found={}", t0.elapsed(), candidates.len());
+        candidates.into_iter().map(|c| (c, 1.0)).collect()
+    } else {
+        Vec::new()
+    };
+
+    // ── Lexical (BM25) pass ─────────────────────────────────────────────
     let mut parser =
         QueryParser::for_index(&ctx.indexes[0], vec![ctx.fields.text, ctx.fields.file_path]);
     parser.set_field_boost(ctx.fields.file_path, 2.0);
@@ -500,7 +568,13 @@ pub fn hybrid_search(
         semantic_chunks.len()
     );
 
-    let merged = fuse_rrf(&lexical_chunks, &semantic_chunks, query_text, options.limit);
+    let merged = fuse_rrf(
+        &lexical_chunks,
+        &semantic_chunks,
+        &literal_chunks,
+        query_text,
+        options.limit,
+    );
     tracing::trace!("fuse_rrf={:?} merged={}", t0.elapsed(), merged.len());
 
     // Group hits by file path so we read each file only once
@@ -886,12 +960,14 @@ fn query_filtered_chunks(
 fn fuse_rrf(
     lexical: &[(IndexedChunk, f32)],
     semantic: &[(IndexedChunk, f32)],
+    literal: &[(IndexedChunk, f32)],
     query_text: &str,
     limit: Option<usize>,
 ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
     const K: f32 = 60.0;
     const LEXICAL_WEIGHT: f32 = 3.2;
     const SEMANTIC_WEIGHT: f32 = 1.0;
+    const LITERAL_WEIGHT: f32 = 4.0;
     const LEXICAL_SCORE_WEIGHT: f32 = 0.05;
     const SEMANTIC_SCORE_WEIGHT: f32 = 0.08;
     const SEMANTIC_ONLY_PENALTY: f32 = 0.82;
@@ -929,6 +1005,19 @@ fn fuse_rrf(
             .entry(chunk.chunk_id.clone())
             .or_default()
             .insert("semantic".to_string());
+    }
+
+    // Literal pass: verified exact substring matches get a strong boost
+    for (rank, (chunk, _)) in literal.iter().enumerate() {
+        let entry = scores.entry(chunk.chunk_id.clone()).or_insert(0.0);
+        *entry += LITERAL_WEIGHT / (K + rank as f32 + 1.0);
+        chunks
+            .entry(chunk.chunk_id.clone())
+            .or_insert_with(|| chunk.clone());
+        sources
+            .entry(chunk.chunk_id.clone())
+            .or_default()
+            .insert("literal".to_string());
     }
 
     // Chunk-density normalization (IDF-like):
