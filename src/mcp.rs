@@ -821,12 +821,19 @@ mod tests {
 
     #[test]
     fn mcp_status_returns_projects() {
-        let response = dispatch("tools/call", json!({
-            "name": "ig_status",
-            "arguments": {}
-        })).unwrap();
+        let response = dispatch(
+            "tools/call",
+            json!({
+                "name": "ig_status",
+                "arguments": {}
+            }),
+        )
+        .unwrap();
         let payload = tool_json_payload(&response);
-        let workspaces = payload.get("workspaces").and_then(|v| v.as_array()).unwrap();
+        let workspaces = payload
+            .get("workspaces")
+            .and_then(|v| v.as_array())
+            .unwrap();
         let _ = workspaces.len();
     }
 }

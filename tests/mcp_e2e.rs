@@ -1,6 +1,6 @@
+use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
-use serde_json::{json, Value};
 
 #[test]
 fn e2e_mcp_initialize() {
@@ -40,11 +40,13 @@ fn e2e_mcp_initialize() {
     let stdout = child.stdout.take().expect("Failed to get stdout");
     let mut reader = BufReader::new(stdout);
     let mut line = String::new();
-    reader.read_line(&mut line).expect("Failed to read from stdout");
+    reader
+        .read_line(&mut line)
+        .expect("Failed to read from stdout");
 
     // Parse the JSON response
     let response: Value = serde_json::from_str(&line).expect("Invalid JSON returned from stdout");
-    
+
     // Assert expectations
     assert_eq!(response["id"], 1);
     assert_eq!(response["jsonrpc"], "2.0");
