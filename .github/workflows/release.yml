@@ -30,6 +30,11 @@ jobs:
             archive: tar.gz
             use_cross: true
 
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-22.04-arm
+            archive_name: linux-aarch64-gnu
+            archive: tar.gz
+            use_cross: false
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-latest
             archive_name: linux-aarch64-musl
