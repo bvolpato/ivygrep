@@ -88,15 +88,36 @@ impl MerkleSnapshot {
         let show_progress = std::io::stderr().is_terminal();
         let scanned = AtomicUsize::new(0);
 
-        // Use the parallel walker for I/O-bound stat+hash across all cores.
-        let pairs: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+        // Each worker thread collects entries into its own buffer with zero
+        // lock contention. A FlushGuard wraps the buffer and flushes it into
+        // the shared Vec exactly once when the walker drops the per-thread
+        // closure (thread exit). This reduces Mutex acquisitions from N (one
+        // per file) to T (one per thread, typically 4-8).
+        let all_pairs: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
         let root_owned = root.to_path_buf();
+
+        struct FlushGuard<'a> {
+            buf: Vec<(String, String)>,
+            target: &'a std::sync::Mutex<Vec<(String, String)>>,
+        }
+        impl Drop for FlushGuard<'_> {
+            fn drop(&mut self) {
+                if !self.buf.is_empty() {
+                    self.target.lock().unwrap().append(&mut self.buf);
+                }
+            }
+        }
 
         walker.build_parallel().run(|| {
             let root_ref = &root_owned;
             let scanned_ref = &scanned;
-            let pairs_ref = &pairs;
+            let pairs_ref = &all_pairs;
             let unignored_paths_clone = unignored_paths.clone();
+            let mut guard = FlushGuard {
+                buf: Vec::with_capacity(512),
+                target: pairs_ref,
+            };
+
             Box::new(move |entry| {
                 let entry = match entry {
                     Ok(e) => e,
@@ -154,7 +175,7 @@ impl MerkleSnapshot {
                     format!("{file_hash}-0")
                 };
 
-                pairs_ref.lock().unwrap().push((rel_str, final_hash));
+                guard.buf.push((rel_str, final_hash));
                 ignore::WalkState::Continue
             })
         });
@@ -163,7 +184,7 @@ impl MerkleSnapshot {
             eprint!("\r\x1b[K");
         }
 
-        let files: BTreeMap<String, String> = pairs.into_inner().unwrap().into_iter().collect();
+        let files: BTreeMap<String, String> = all_pairs.into_inner().unwrap().into_iter().collect();
         let root_hash = root_hash(&files);
         Ok(Self { root_hash, files })
     }
