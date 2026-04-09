@@ -73,3 +73,6 @@ debug = true
 name = "indexer_bench"
 harness = false
 
+[patch.crates-io]
+hf-hub = { path = "vendor/hf-hub" }
+
