@@ -31,7 +31,7 @@ jobs:
             use_cross: true
 
           - target: aarch64-unknown-linux-gnu
-            runner: ubuntu-22.04-arm
+            runner: ubuntu-24.04-arm
             archive_name: linux-aarch64-gnu
             archive: tar.gz
             use_cross: false
@@ -41,7 +41,7 @@ jobs:
             archive: tar.gz
             use_cross: true
           - target: x86_64-apple-darwin
-            runner: macos-latest
+            runner: macos-13
             archive_name: macos-x86_64
             archive: tar.gz
           - target: aarch64-apple-darwin
@@ -51,7 +51,7 @@ jobs:
           # Windows excluded: usearch (simsimd) doesn't compile on MSVC.
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -85,7 +85,7 @@ jobs:
         shell: bash
 
       - name: Set up QEMU
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        if: "contains(matrix.target, 'aarch64') && contains(matrix.runner, 'ubuntu-latest')"
         uses: docker/setup-qemu-action@v3
 
       - name: Smoke test
@@ -140,7 +140,7 @@ jobs:
           echo "${SHA}  ${{ env.ARCHIVE_NAME }}.${ARCHIVE_EXT}" > "${{ env.ARCHIVE_PATH }}.sha256"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.ARCHIVE_NAME }}
           path: |
@@ -153,10 +153,10 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         with:
           path: artifacts
           merge-multiple: false
@@ -189,7 +189,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         with:
           path: artifacts
           merge-multiple: false
@@ -221,7 +221,7 @@ jobs:
           echo "sha_macos_arm64=$(get_sha "ivygrep-${TAG}-macos-aarch64.tar.gz.sha256")" >> $GITHUB_OUTPUT
 
       - name: Checkout homebrew-tap
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
         with:
           repository: bvolpato/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
