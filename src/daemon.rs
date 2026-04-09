@@ -210,8 +210,8 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
         } => {
             let state_clone = state.clone();
 
-            let workspaces = if let Some(p) = path {
-                match Workspace::resolve(&p) {
+            let workspaces = if let Some(ref p) = path {
+                match Workspace::resolve(p) {
                     Ok(workspace) => vec![workspace],
                     Err(err) => {
                         return DaemonResponse::Error {
@@ -256,7 +256,14 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
 
                 for workspace in &workspaces {
                     match hybrid_search(workspace, &query, Some(model.as_ref()), &options) {
-                        Ok(mut hits) => all_hits.append(&mut hits),
+                        Ok(mut hits) => {
+                            if path.is_none() {
+                                for hit in &mut hits {
+                                    hit.file_path = workspace.root.join(&hit.file_path);
+                                }
+                            }
+                            all_hits.append(&mut hits);
+                        }
                         Err(err) => {
                             warn!(
                                 "hybrid_search failed for {}: {err:#}",
@@ -313,8 +320,8 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             scope_is_file,
             skip_gitignore,
         } => {
-            let workspaces = if let Some(p) = path {
-                match Workspace::resolve(&p) {
+            let workspaces = if let Some(ref p) = path {
+                match Workspace::resolve(p) {
                     Ok(workspace) => vec![workspace],
                     Err(err) => {
                         return DaemonResponse::Error {
@@ -350,7 +357,14 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                         &exclude_globs,
                         skip_gitignore,
                     ) {
-                        Ok(mut hits) => all_hits.append(&mut hits),
+                        Ok(mut hits) => {
+                            if path.is_none() {
+                                for hit in &mut hits {
+                                    hit.file_path = workspace.root.join(&hit.file_path);
+                                }
+                            }
+                            all_hits.append(&mut hits);
+                        }
                         Err(err) => {
                             warn!(
                                 "regex_search failed for {}: {err:#}",
@@ -386,8 +400,8 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             scope_is_file,
             skip_gitignore,
         } => {
-            let workspaces = if let Some(p) = path {
-                match Workspace::resolve(&p) {
+            let workspaces = if let Some(ref p) = path {
+                match Workspace::resolve(p) {
                     Ok(workspace) => vec![workspace],
                     Err(err) => {
                         return DaemonResponse::Error {
@@ -426,7 +440,14 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 let mut all_errors: Vec<String> = Vec::new();
                 for workspace in &workspaces {
                     match literal_search(workspace, &query, &options) {
-                        Ok(mut hits) => all_hits.append(&mut hits),
+                        Ok(mut hits) => {
+                            if path.is_none() {
+                                for hit in &mut hits {
+                                    hit.file_path = workspace.root.join(&hit.file_path);
+                                }
+                            }
+                            all_hits.append(&mut hits);
+                        }
                         Err(err) => {
                             warn!(
                                 "literal_search failed for {}: {err:#}",

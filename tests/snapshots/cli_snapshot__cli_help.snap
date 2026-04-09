@@ -22,10 +22,11 @@ Options:
       --json                  
   -C, --context <CONTEXT>     [default: 2]
       --type <TYPE_FILTER>    
-      --all                   
+      --all-indices           
       --include <GLOBS>       
       --exclude <GLOBS>       
   -n, --limit <LIMIT>         
+      --no-limit              
       --no-watch              
       --first-line-only       
       --file-name-only        

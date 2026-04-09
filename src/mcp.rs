@@ -61,6 +61,7 @@ struct IvygrepSearchArgs {
     type_filter: Option<String>,
     regex: Option<bool>,
     literal: Option<bool>,
+    all_indices: Option<bool>,
     include: Option<String>,
     exclude: Option<String>,
     first_line_only: Option<bool>,
@@ -175,7 +176,8 @@ fn search_tool_schema() -> Value {
                 "first_line_only": {"type": "boolean", "description": "Return only the first non-empty preview line for each hit."},
                 "file_name_only": {"type": "boolean", "description": "Return only file paths (no hit details)."},
                 "verbose": {"type": "boolean", "description": "Include reason pointers in JSON output."},
-                "skip_gitignore": {"type": "boolean", "description": "Include files ignored by .gitignore."}
+                "skip_gitignore": {"type": "boolean", "description": "Include files ignored by .gitignore."},
+                "all_indices": {"type": "boolean", "description": "Search across all existing workspace indices."}
             },
             "required": ["query"]
         }
@@ -203,56 +205,83 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
         None => env::current_dir()?,
     };
 
-    let (workspace, scope_filter) = resolve_workspace_and_scope(Path::new(&input_path))?;
+    let (current_workspace, mut scope_filter) =
+        resolve_workspace_and_scope(Path::new(&input_path))?;
     let model = create_model(false);
 
-    if !workspace_is_indexed(&workspace) {
-        let _summary = index_workspace(&workspace, model.as_ref())?;
-    }
+    let workspaces = if args.all_indices.unwrap_or(false) {
+        scope_filter = None;
+        crate::workspace::list_workspaces()?
+            .into_iter()
+            .filter(|w| w.last_indexed_at_unix.is_some())
+            .filter_map(|w| crate::workspace::Workspace::resolve(&w.root).ok())
+            .collect()
+    } else {
+        if !workspace_is_indexed(&current_workspace) {
+            let _summary = index_workspace(&current_workspace, model.as_ref())?;
+        }
+        vec![current_workspace.clone()]
+    };
 
     let include_globs = parse_glob_csv(args.include.as_deref());
     let exclude_globs = parse_glob_csv(args.exclude.as_deref());
 
-    let hits = if args.literal.unwrap_or(false) {
-        literal_search(
-            &workspace,
-            query,
-            &SearchOptions {
-                limit: args.limit,
-                context: args.context.unwrap_or(2),
-                type_filter: args.type_filter.clone(),
-                include_globs: include_globs.clone(),
-                exclude_globs: exclude_globs.clone(),
-                scope_filter: scope_filter.clone(),
-                skip_gitignore: args.skip_gitignore.unwrap_or(false),
-            },
-        )?
-    } else if args.regex.unwrap_or(false) {
-        regex_search(
-            &workspace,
-            query,
-            args.limit,
-            scope_filter.as_ref(),
-            &include_globs,
-            &exclude_globs,
-            args.skip_gitignore.unwrap_or(false),
-        )?
-    } else {
-        hybrid_search(
-            &workspace,
-            query,
-            Some(model.as_ref()),
-            &SearchOptions {
-                limit: args.limit,
-                context: args.context.unwrap_or(2),
-                type_filter: args.type_filter.clone(),
-                include_globs: include_globs.clone(),
-                exclude_globs: exclude_globs.clone(),
-                scope_filter: scope_filter.clone(),
-                skip_gitignore: args.skip_gitignore.unwrap_or(false),
-            },
-        )?
-    };
+    let mut hits = Vec::new();
+
+    for workspace in workspaces {
+        let ws_hits = if args.literal.unwrap_or(false) {
+            literal_search(
+                &workspace,
+                query,
+                &SearchOptions {
+                    limit: args.limit,
+                    context: args.context.unwrap_or(2),
+                    type_filter: args.type_filter.clone(),
+                    include_globs: include_globs.clone(),
+                    exclude_globs: exclude_globs.clone(),
+                    scope_filter: scope_filter.clone(),
+                    skip_gitignore: args.skip_gitignore.unwrap_or(false),
+                },
+            )?
+        } else if args.regex.unwrap_or(false) {
+            regex_search(
+                &workspace,
+                query,
+                args.limit,
+                scope_filter.as_ref(),
+                &include_globs,
+                &exclude_globs,
+                args.skip_gitignore.unwrap_or(false),
+            )?
+        } else {
+            hybrid_search(
+                &workspace,
+                query,
+                Some(model.as_ref()),
+                &SearchOptions {
+                    limit: args.limit,
+                    context: args.context.unwrap_or(2),
+                    type_filter: args.type_filter.clone(),
+                    include_globs: include_globs.clone(),
+                    exclude_globs: exclude_globs.clone(),
+                    scope_filter: scope_filter.clone(),
+                    skip_gitignore: args.skip_gitignore.unwrap_or(false),
+                },
+            )?
+        };
+        hits.extend(ws_hits);
+    }
+
+    if !args.literal.unwrap_or(false) && !args.regex.unwrap_or(false) {
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+    if let Some(l) = args.limit {
+        hits.truncate(l);
+    }
 
     let mut grouped = group_hits_by_file(&hits, args.limit);
     let verbose = args.verbose.unwrap_or(false);
@@ -283,7 +312,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
 
     let payload = if file_name_only {
         json!({
-            "workspace_root": workspace.root,
+            "workspace_root": current_workspace.root,
             "scope_path": scope_filter.as_ref().map(|scope| scope.rel_path.clone()),
             "scope_is_file": scope_filter.as_ref().is_some_and(|scope| scope.is_file),
             "query": query,
@@ -295,7 +324,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
         })
     } else {
         json!({
-            "workspace_root": workspace.root,
+            "workspace_root": current_workspace.root,
             "scope_path": scope_filter.as_ref().map(|scope| scope.rel_path.clone()),
             "scope_is_file": scope_filter.as_ref().is_some_and(|scope| scope.is_file),
             "query": query,
@@ -454,6 +483,7 @@ mod tests {
             regex: Some(false),
             literal: None,
             include: None,
+            all_indices: None,
             exclude: None,
             first_line_only: Some(false),
             file_name_only: Some(false),
@@ -499,6 +529,7 @@ mod tests {
             regex: Some(false),
             literal: None,
             include: None,
+            all_indices: None,
             exclude: None,
             first_line_only: Some(false),
             file_name_only: Some(false),
@@ -550,6 +581,7 @@ mod tests {
             regex: Some(false),
             literal: None,
             include: Some("*.md".to_string()),
+            all_indices: None,
             exclude: None,
             first_line_only: Some(false),
             file_name_only: Some(true),
@@ -579,6 +611,7 @@ mod tests {
             regex: Some(false),
             literal: None,
             include: Some("*.md".to_string()),
+            all_indices: None,
             exclude: Some("match.md".to_string()),
             first_line_only: Some(false),
             file_name_only: Some(true),
@@ -657,6 +690,7 @@ mod tests {
             regex: Some(true),
             literal: None,
             include: None,
+            all_indices: None,
             exclude: None,
             first_line_only: Some(false),
             file_name_only: Some(false),
@@ -694,6 +728,7 @@ mod tests {
             type_filter: None,
             regex: None,
             literal: Some(true),
+            all_indices: None,
             include: None,
             exclude: None,
             first_line_only: Some(false),

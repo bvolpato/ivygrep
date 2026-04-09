@@ -69,7 +69,7 @@ pub struct Cli {
     pub type_filter: Option<String>,
 
     #[arg(long, global = true)]
-    pub all: bool,
+    pub all_indices: bool,
 
     #[arg(long, value_name = "GLOBS", value_delimiter = ',', global = true)]
     pub include: Vec<String>,
@@ -79,6 +79,9 @@ pub struct Cli {
 
     #[arg(short = 'n', long, global = true)]
     pub limit: Option<usize>,
+
+    #[arg(long, global = true, conflicts_with = "limit")]
+    pub no_limit: bool,
 
     #[arg(long, global = true)]
     pub no_watch: bool,
@@ -539,14 +542,20 @@ async fn run_query(cli: Cli) -> Result<()> {
     let scope_path = scope_filter.as_ref().map(|scope| scope.rel_path.clone());
     let scope_is_file = scope_filter.as_ref().is_some_and(|scope| scope.is_file);
 
-    let query_path_opt = if cli.all {
+    let query_path_opt = if cli.all_indices {
         None
     } else {
         Some(workspace.root.clone())
     };
     let mut search_via_daemon = false;
 
-    if !cli.all {
+    let effective_limit = if cli.no_limit {
+        Some(usize::MAX)
+    } else {
+        cli.limit
+    };
+
+    if !cli.all_indices {
         let first_run = !crate::indexer::workspace_is_indexed(&workspace);
         if first_run {
             // Always show progress for first-run, even when the daemon handles it.
@@ -683,7 +692,7 @@ async fn run_query(cli: Cli) -> Result<()> {
     // Background thread enhances the vector store with neural embeddings
     // after results are returned, silently upgrading quality.
 
-    if !search_via_daemon && !cli.all {
+    if !search_via_daemon && !cli.all_indices {
         let first_run = !workspace_is_indexed(&workspace);
         if first_run {
             let msg = if workspace.is_worktree() {
@@ -728,7 +737,7 @@ async fn run_query(cli: Cli) -> Result<()> {
         // slow for every query. Users can `ig --add .` to force re-index.
     }
 
-    if cli.wait_for_enhancement && !cli.all {
+    if cli.wait_for_enhancement && !cli.all_indices {
         loop {
             let ws_map = crate::workspace::list_workspaces().unwrap_or_default();
             if let Some(status) = ws_map.iter().find(|ws| ws.id == workspace.id) {
@@ -762,7 +771,7 @@ async fn run_query(cli: Cli) -> Result<()> {
         }
     }
 
-    if cli.skip_gitignore && !cli.all && (!cli.regex || cli.literal) {
+    if cli.skip_gitignore && !cli.all_indices && (!cli.regex || cli.literal) {
         #[allow(clippy::collapsible_if)]
         if let Ok(Some(mut meta)) = workspace.read_metadata() {
             if !meta.skip_gitignore {
@@ -797,7 +806,7 @@ async fn run_query(cli: Cli) -> Result<()> {
         let request = DaemonRequest::LiteralSearch {
             path: query_path_opt.clone(),
             query: query.to_string(),
-            limit: cli.limit,
+            limit: effective_limit,
             context: cli.context,
             type_filter: cli.type_filter.clone(),
             include_globs: cli.include.clone(),
@@ -815,7 +824,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                         "daemon literal search failed ({message}), falling back to local"
                     );
                     let options = SearchOptions {
-                        limit: cli.limit,
+                        limit: effective_limit,
                         context: cli.context,
                         type_filter: cli.type_filter.clone(),
                         include_globs: cli.include.clone(),
@@ -824,10 +833,26 @@ async fn run_query(cli: Cli) -> Result<()> {
                         skip_gitignore: cli.skip_gitignore,
                     };
                     let mut all_hits = Vec::new();
-                    let workspaces = vec![workspace.clone()];
+                    let workspaces = if cli.all_indices {
+                        list_workspaces()
+                            .unwrap_or_default()
+                            .into_iter()
+                            .filter(|w| w.last_indexed_at_unix.is_some())
+                            .filter_map(|w| Workspace::resolve(&w.root).ok())
+                            .collect()
+                    } else {
+                        vec![workspace.clone()]
+                    };
                     for ws in workspaces {
                         match literal_search(&ws, query, &options) {
-                            Ok(mut hits) => all_hits.append(&mut hits),
+                            Ok(mut hits) => {
+                                if cli.all_indices {
+                                    for hit in &mut hits {
+                                        hit.file_path = ws.root.join(&hit.file_path);
+                                    }
+                                }
+                                all_hits.append(&mut hits);
+                            }
                             Err(err) => tracing::warn!(
                                 "literal_search failed for {}: {err:#}",
                                 ws.root.display()
@@ -840,7 +865,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             }
         } else {
             let mut all_hits = Vec::new();
-            let workspaces = if cli.all {
+            let workspaces = if cli.all_indices {
                 list_workspaces()?
                     .into_iter()
                     .filter(|w| w.last_indexed_at_unix.is_some())
@@ -850,7 +875,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                 vec![workspace.clone()]
             };
             let options = SearchOptions {
-                limit: cli.limit,
+                limit: effective_limit,
                 context: cli.context,
                 type_filter: cli.type_filter.clone(),
                 include_globs: cli.include.clone(),
@@ -860,13 +885,20 @@ async fn run_query(cli: Cli) -> Result<()> {
             };
             for ws in workspaces {
                 match literal_search(&ws, query, &options) {
-                    Ok(mut hits) => all_hits.append(&mut hits),
+                    Ok(mut hits) => {
+                        if cli.all_indices {
+                            for hit in &mut hits {
+                                hit.file_path = ws.root.join(&hit.file_path);
+                            }
+                        }
+                        all_hits.append(&mut hits);
+                    }
                     Err(err) => {
                         tracing::warn!("literal_search failed for {}: {err:#}", ws.root.display())
                     }
                 }
             }
-            if let Some(l) = cli.limit {
+            if let Some(l) = effective_limit {
                 all_hits.truncate(l);
             }
             all_hits
@@ -875,7 +907,7 @@ async fn run_query(cli: Cli) -> Result<()> {
         let request = DaemonRequest::RegexSearch {
             path: query_path_opt.clone(),
             pattern: query.to_string(),
-            limit: cli.limit,
+            limit: effective_limit,
             include_globs: cli.include.clone(),
             exclude_globs: cli.exclude.clone(),
             scope_path: scope_path.clone(),
@@ -894,7 +926,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             }
         } else {
             let mut all_hits = Vec::new();
-            let workspaces = if cli.all {
+            let workspaces = if cli.all_indices {
                 list_workspaces()?
                     .into_iter()
                     .filter(|w| w.last_indexed_at_unix.is_some())
@@ -907,19 +939,26 @@ async fn run_query(cli: Cli) -> Result<()> {
                 match regex_search(
                     &ws,
                     query,
-                    cli.limit,
+                    effective_limit,
                     scope_filter.as_ref(),
                     &cli.include,
                     &cli.exclude,
                     cli.skip_gitignore,
                 ) {
-                    Ok(mut hits) => all_hits.append(&mut hits),
+                    Ok(mut hits) => {
+                        if cli.all_indices {
+                            for hit in &mut hits {
+                                hit.file_path = ws.root.join(&hit.file_path);
+                            }
+                        }
+                        all_hits.append(&mut hits);
+                    }
                     Err(err) => {
                         tracing::warn!("regex_search failed for {}: {err:#}", ws.root.display());
                     }
                 }
             }
-            if let Some(l) = cli.limit {
+            if let Some(l) = effective_limit {
                 all_hits.truncate(l);
             }
             all_hits
@@ -928,7 +967,7 @@ async fn run_query(cli: Cli) -> Result<()> {
         let request = DaemonRequest::Search {
             path: query_path_opt.clone(),
             query: query.to_string(),
-            limit: cli.limit,
+            limit: effective_limit,
             context: cli.context,
             type_filter: cli.type_filter.clone(),
             include_globs: cli.include.clone(),
@@ -971,7 +1010,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                     // of showing "No results." to the user.
                     tracing::warn!("daemon search failed ({message}), falling back to local");
                     let options = SearchOptions {
-                        limit: cli.limit,
+                        limit: effective_limit,
                         context: cli.context,
                         type_filter: cli.type_filter.clone(),
                         include_globs: cli.include.clone(),
@@ -979,12 +1018,12 @@ async fn run_query(cli: Cli) -> Result<()> {
                         scope_filter: scope_filter.clone(),
                         skip_gitignore: cli.skip_gitignore,
                     };
-                    local_fallback_search(&workspace, query, &options, cli.hash)
+                    local_fallback_search(&workspace, cli.all_indices, query, &options, cli.hash)
                 }
                 other => {
                     tracing::warn!("daemon search unavailable ({other:?}), falling back to local");
                     let options = SearchOptions {
-                        limit: cli.limit,
+                        limit: effective_limit,
                         context: cli.context,
                         type_filter: cli.type_filter.clone(),
                         include_globs: cli.include.clone(),
@@ -992,12 +1031,12 @@ async fn run_query(cli: Cli) -> Result<()> {
                         scope_filter: scope_filter.clone(),
                         skip_gitignore: cli.skip_gitignore,
                     };
-                    local_fallback_search(&workspace, query, &options, cli.hash)
+                    local_fallback_search(&workspace, cli.all_indices, query, &options, cli.hash)
                 }
             }
         } else {
             let mut all_hits = Vec::new();
-            let workspaces = if cli.all {
+            let workspaces = if cli.all_indices {
                 list_workspaces()?
                     .into_iter()
                     .filter(|w| w.last_indexed_at_unix.is_some())
@@ -1013,7 +1052,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                     query,
                     search_model.as_deref(),
                     &SearchOptions {
-                        limit: cli.limit,
+                        limit: effective_limit,
                         context: cli.context,
                         type_filter: cli.type_filter.clone(),
                         include_globs: cli.include.clone(),
@@ -1022,7 +1061,14 @@ async fn run_query(cli: Cli) -> Result<()> {
                         skip_gitignore: cli.skip_gitignore,
                     },
                 ) {
-                    Ok(mut hits) => all_hits.append(&mut hits),
+                    Ok(mut hits) => {
+                        if cli.all_indices {
+                            for hit in &mut hits {
+                                hit.file_path = ws.root.join(&hit.file_path);
+                            }
+                        }
+                        all_hits.append(&mut hits);
+                    }
                     Err(err) => {
                         tracing::warn!("hybrid_search failed for {}: {err:#}", ws.root.display());
                     }
@@ -1033,7 +1079,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                     .partial_cmp(&a.score)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
-            if let Some(l) = cli.limit {
+            if let Some(l) = effective_limit {
                 all_hits.truncate(l);
             }
             all_hits
@@ -1043,7 +1089,7 @@ async fn run_query(cli: Cli) -> Result<()> {
     render_hits(
         &hits,
         cli.json,
-        cli.limit,
+        effective_limit,
         cli.first_line_only,
         cli.file_name_only,
         cli.verbose,
@@ -1055,7 +1101,11 @@ async fn run_query(cli: Cli) -> Result<()> {
     // that occur perfectly cleanly tearing down `onnxruntime` when the main process exits.
     // Skipped in CI/test environments (IVYGREP_NO_AUTOSPAWN=1).
     let no_autospawn = env::var("IVYGREP_NO_AUTOSPAWN").is_ok();
-    if !cli.all && !cli.hash && !cli.regex && !no_autospawn && workspace.needs_neural_enhancement()
+    if !cli.all_indices
+        && !cli.hash
+        && !cli.regex
+        && !no_autospawn
+        && workspace.needs_neural_enhancement()
     {
         let _ = workspace.trigger_background_enhancement();
     }
@@ -1228,29 +1278,60 @@ async fn restart_daemon() {
 /// Run a local hybrid search as a fallback when the daemon is unavailable or broken.
 fn local_fallback_search(
     workspace: &Workspace,
+    all_indices: bool,
     query: &str,
     options: &SearchOptions,
     use_hash: bool,
 ) -> Vec<SearchHit> {
+    let mut all_hits = Vec::new();
+    let workspaces = if all_indices {
+        crate::workspace::list_workspaces()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|w| w.last_indexed_at_unix.is_some())
+            .filter_map(|w| Workspace::resolve(&w.root).ok())
+            .collect()
+    } else {
+        vec![workspace.clone()]
+    };
+
     let is_single_word = !query.contains(' ')
         && query
             .chars()
             .all(|c| c.is_alphanumeric() || c == '_' || c == '-');
     let model: Option<Box<dyn crate::embedding::EmbeddingModel>> = if is_single_word {
-        // Skip ONNX model in fallback path for speed.
         None
     } else {
         Some(create_model(use_hash))
     };
 
-    match hybrid_search(workspace, query, model.as_deref(), options) {
-        Ok(hits) => hits,
-        Err(err) => {
-            tracing::warn!(
-                "local fallback search also failed for {}: {err:#}",
-                workspace.root.display()
-            );
-            vec![]
+    for ws in workspaces {
+        match hybrid_search(&ws, query, model.as_deref(), options) {
+            Ok(mut hits) => {
+                if all_indices {
+                    for hit in &mut hits {
+                        hit.file_path = ws.root.join(&hit.file_path);
+                    }
+                }
+                all_hits.append(&mut hits);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    "local fallback search also failed for {}: {err:#}",
+                    ws.root.display()
+                );
+            }
         }
     }
+
+    all_hits.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    if let Some(l) = options.limit {
+        all_hits.truncate(l);
+    }
+    all_hits
 }
