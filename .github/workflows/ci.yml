@@ -43,8 +43,10 @@ jobs:
         include:
           - os: ubuntu-latest
             cargo_flags: ""
+            rust_flags: "-D warnings -C target-cpu=x86-64-v3"
           - os: macos-latest
-            cargo_flags: ""
+            cargo_flags: "--features accelerate"
+            rust_flags: "-D warnings"
           # Windows excluded: usearch (simsimd) uses AVX-512 FP16 intrinsics
           # that MSVC doesn't support. IPC layer is cross-platform ready.
     steps:
@@ -60,6 +62,8 @@ jobs:
 
       - name: Run unit & integration tests
         run: cargo test --all-targets ${{ matrix.cargo_flags }}
+        env:
+          RUSTFLAGS: ${{ matrix.rust_flags }}
 
   build:
     name: Build release (${{ matrix.os }})
@@ -70,8 +74,10 @@ jobs:
         include:
           - os: ubuntu-latest
             cargo_flags: ""
+            rust_flags: "-D warnings -C target-cpu=x86-64-v3"
           - os: macos-latest
-            cargo_flags: ""
+            cargo_flags: "--features accelerate"
+            rust_flags: "-D warnings"
           # Windows excluded: usearch (simsimd) doesn't compile on MSVC.
     steps:
       - uses: actions/checkout@v5
@@ -86,6 +92,8 @@ jobs:
 
       - name: Build release binary
         run: cargo build --release ${{ matrix.cargo_flags }}
+        env:
+          RUSTFLAGS: ${{ matrix.rust_flags }}
 
       - name: Smoke test
         shell: bash

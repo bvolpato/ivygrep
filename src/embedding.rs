@@ -191,7 +191,11 @@ pub struct CandleEmbeddingModel {
 
 #[cfg(feature = "neural")]
 pub fn hardware_acceleration_info() -> &'static str {
-    "AllMiniLML6V2 via Candle"
+    if cfg!(feature = "accelerate") {
+        "AllMiniLML6V2 via Candle (Accelerate)"
+    } else {
+        "AllMiniLML6V2 via Candle"
+    }
 }
 
 #[cfg(not(feature = "neural"))]

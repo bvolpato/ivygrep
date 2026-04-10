@@ -24,6 +24,7 @@ jobs:
             archive_name: linux-x86_64-musl
             archive: tar.gz
             use_cross: true
+            extra_rustflags: "-C target-cpu=x86-64-v3"
 
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-latest
@@ -34,10 +35,12 @@ jobs:
             runner: macos-15-intel
             archive_name: macos-x86_64
             archive: tar.gz
+            extra_features: accelerate
           - target: aarch64-apple-darwin
             runner: macos-latest
             archive_name: macos-aarch64
             archive: tar.gz
+            extra_features: accelerate
           # Windows excluded: usearch (simsimd) doesn't compile on MSVC.
 
     steps:
@@ -59,10 +62,17 @@ jobs:
 
       - name: Build release binary
         run: |
+          FEATURES=""
+          if [ -n "${{ matrix.extra_features }}" ]; then
+            FEATURES="--features ${{ matrix.extra_features }}"
+          fi
+          if [ -n "${{ matrix.extra_rustflags }}" ]; then
+            export RUSTFLAGS="${RUSTFLAGS:-} ${{ matrix.extra_rustflags }}"
+          fi
           if [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }}
+            cross build --release --target ${{ matrix.target }} $FEATURES
           else
-            cargo build --release --target ${{ matrix.target }}
+            cargo build --release --target ${{ matrix.target }} $FEATURES
           fi
         shell: bash
 

@@ -12,6 +12,7 @@ path = "src/main.rs"
 [features]
 default = ["neural"]
 neural = ["dep:candle_embed", "dep:candle-core"]
+accelerate = ["candle-core/accelerate"]
 
 [dependencies]
 anyhow = "1.0"
