@@ -44,9 +44,23 @@ jobs:
           - os: ubuntu-latest
             cargo_flags: ""
             rust_flags: "-D warnings -C target-cpu=x86-64-v3"
+            name: "Linux (Neural AVX2)"
+          - os: ubuntu-latest
+            cargo_flags: "--no-default-features"
+            rust_flags: "-D warnings"
+            name: "Linux (Hash-only)"
           - os: macos-latest
             cargo_flags: "--features accelerate"
             rust_flags: "-D warnings"
+            name: "macOS ARM (Neural Accelerate)"
+          - os: macos-13
+            cargo_flags: "--features accelerate"
+            rust_flags: "-D warnings"
+            name: "macOS Intel (Neural Accelerate)"
+          - os: macos-latest
+            cargo_flags: "--no-default-features"
+            rust_flags: "-D warnings"
+            name: "macOS ARM (Hash-only)"
           # Windows excluded: usearch (simsimd) uses AVX-512 FP16 intrinsics
           # that MSVC doesn't support. IPC layer is cross-platform ready.
     steps:
@@ -61,7 +75,7 @@ jobs:
           shared-key: "test"
 
       - name: Run unit & integration tests
-        run: cargo test --all-targets ${{ matrix.cargo_flags }}
+        run: cargo test --all-targets ${{ matrix.cargo_flags }} -- --test-threads=4
         env:
           RUSTFLAGS: ${{ matrix.rust_flags }}
 
@@ -75,8 +89,17 @@ jobs:
           - os: ubuntu-latest
             cargo_flags: ""
             rust_flags: "-D warnings -C target-cpu=x86-64-v3"
+          - os: ubuntu-latest
+            cargo_flags: "--no-default-features"
+            rust_flags: "-D warnings"
           - os: macos-latest
             cargo_flags: "--features accelerate"
+            rust_flags: "-D warnings"
+          - os: macos-13
+            cargo_flags: "--features accelerate"
+            rust_flags: "-D warnings"
+          - os: macos-latest
+            cargo_flags: "--no-default-features"
             rust_flags: "-D warnings"
           # Windows excluded: usearch (simsimd) doesn't compile on MSVC.
     steps:
@@ -102,5 +125,23 @@ jobs:
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             EXE_SUFFIX=".exe"
           fi
-          ./target/release/ig${EXE_SUFFIX} --help
-          ./target/release/ig${EXE_SUFFIX} --version
+          
+          IG_BIN="$PWD/target/release/ig${EXE_SUFFIX}"
+          
+          echo "==== Version ===="
+          $IG_BIN --version
+          
+          echo "==== Status ===="
+          $IG_BIN status
+          
+          echo "==== End-to-end Index & Search ===="
+          # Create a dummy project
+          mkdir -p /tmp/smoketest && cd /tmp/smoketest
+          echo "fn smoke_test_marker() { println!(\"Found smoke test\"); }" > main.rs
+          
+          # Force indexing and a search
+          $IG_BIN -e "smoke_test_marker" main.rs
+          if ! $IG_BIN -e "smoke_test_marker" main.rs | grep -q "Found smoke test"; then
+            echo "Smoke test string not found!"
+            exit 1
+          fi
