@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775857321549,
+  "lastUpdate": 1775857555961,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -5275,6 +5275,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 533.06,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "68234672a75cb86ea7b37ccc5a7b4449e03d6107",
+          "message": "feat: search relevance overhaul — definition ranking, query expansion, scoring rebalance\n\n- Rebalance RRF scoring: term_coverage 0.12→0.35, path_segment 0.08→0.20\n- Add definition_name_boost: prefer fn/class definitions over usage sites\n- Harden semantic-only penalty: 0.82→0.60, require both lexical+literal miss\n- Add zero-coverage noise filter for chunks with no query term overlap\n- Query expansion: generate snake_case and camelCase variants automatically\n- Density-aware literal scoring: count occurrences instead of flat 1.0\n- Add 5 targeted relevance integration tests\n- Create AGENTS_TESTING.md, AGENTS_DEPLOY.md, AGENTS_MONITOR.md",
+          "timestamp": "2026-04-10T17:38:35-04:00",
+          "tree_id": "0bfd97130008194fa096635923140685402c09dc",
+          "url": "https://github.com/bvolpato/ivygrep/commit/68234672a75cb86ea7b37ccc5a7b4449e03d6107"
+        },
+        "date": 1775857555556,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 742421230,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 8301.26,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3849.53,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2699,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 10954.68,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 10650.72,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 6.59,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 516.7,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 15413.81,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 10795.8,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 5238.7,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 454042.18,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 592.27,
             "unit": "µs"
           }
         ]
