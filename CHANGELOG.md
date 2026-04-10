@@ -2,6 +2,20 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.41] — 2026-04-10
+
+### Improved
+- **Search relevance overhaul:** Rebalanced hybrid RRF scoring weights for significantly better result quality
+- **Definition-site ranking:** New `definition_name_boost` signal strongly prefers function/class definitions over usage sites
+- **Query expansion:** Automatically generates `snake_case` and `camelCase` variants (e.g., "error handling" → `error_handling`, `errorHandling`)
+- **Density-aware literal scoring:** Exact-match pass now scores by occurrence count instead of flat 1.0
+- **Stronger semantic-only penalty:** Chunks found only by semantic search (no lexical/literal confirmation) are more aggressively demoted
+- **Zero-coverage noise filter:** Chunks with no query term overlap get an additional penalty
+- **Path-segment boost increased:** File path matching (e.g., "search" → `search.rs`) is now 2.5× more influential
+
+### Added
+- 5 new relevance-focused integration tests: snake_case matching, camelCase matching, definition-site ranking, file-path boosting, semantic-only penalty verification
+
 ## [0.5.39] — 2026-04-09
 
 ### Added

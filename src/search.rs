@@ -397,7 +397,14 @@ pub fn hybrid_search(
             collect_literal_candidates(&ctx, query_text.trim(), matcher, &path_matcher, options)
                 .unwrap_or_default();
         tracing::trace!("literal_pass={:?} found={}", t0.elapsed(), candidates.len());
-        candidates.into_iter().map(|c| (c, 1.0)).collect()
+        candidates
+            .into_iter()
+            .map(|c| {
+                let count = matcher.find_iter(&c.text).count().max(1) as f32;
+                let score = 1.0 + (count - 1.0).min(4.0) * 0.15; // 1.0 → 1.6 for 5+ matches
+                (c, score)
+            })
+            .collect()
     } else {
         Vec::new()
     };
@@ -797,6 +804,25 @@ fn build_lexical_queries(query_text: &str) -> Vec<String> {
         if compact.len() >= 4 && !compact.eq_ignore_ascii_case(query) {
             queries.push(compact);
         }
+
+        // snake_case variant: "error handling" → "error_handling"
+        if normalized_tokens.len() >= 2 {
+            let snake = normalized_tokens.join("_");
+            queries.push(snake);
+        }
+
+        // camelCase variant: "error handling" → "errorHandling"
+        if normalized_tokens.len() >= 2 {
+            let mut camel = normalized_tokens[0].clone();
+            for token in &normalized_tokens[1..] {
+                let mut chars = token.chars();
+                if let Some(first) = chars.next() {
+                    camel.push(first.to_ascii_uppercase());
+                    camel.extend(chars);
+                }
+            }
+            queries.push(camel);
+        }
     }
 
     queries.sort();
@@ -986,9 +1012,10 @@ fn fuse_rrf(
     const LITERAL_WEIGHT: f32 = 4.0;
     const LEXICAL_SCORE_WEIGHT: f32 = 0.05;
     const SEMANTIC_SCORE_WEIGHT: f32 = 0.08;
-    const SEMANTIC_ONLY_PENALTY: f32 = 0.82;
-    const TERM_COVERAGE_WEIGHT: f32 = 0.12;
-    const PATH_SEGMENT_WEIGHT: f32 = 0.08;
+    const SEMANTIC_ONLY_PENALTY: f32 = 0.60;
+    const TERM_COVERAGE_WEIGHT: f32 = 0.35;
+    const PATH_SEGMENT_WEIGHT: f32 = 0.20;
+    const DEFINITION_NAME_BONUS: f32 = 0.25;
 
     let query_tokens = tokenize_query(query_text);
 
@@ -1057,16 +1084,31 @@ fn fuse_rrf(
 
             let mut score = base_score + literal_match_boost(query_text, &chunk);
 
-            if !query_tokens.is_empty() {
-                score += term_coverage_boost(&query_tokens, &chunk) * TERM_COVERAGE_WEIGHT;
-            }
+            let coverage = if !query_tokens.is_empty() {
+                term_coverage_boost(&query_tokens, &chunk)
+            } else {
+                0.0
+            };
+            score += coverage * TERM_COVERAGE_WEIGHT;
 
             if !query_tokens.is_empty() {
                 score += path_segment_boost(&query_tokens, &chunk) * PATH_SEGMENT_WEIGHT;
             }
 
-            if !source_set.contains("lexical") {
+            if !query_tokens.is_empty() {
+                score += definition_name_boost(&query_tokens, &chunk) * DEFINITION_NAME_BONUS;
+            }
+
+            if !source_set.contains("lexical") && !source_set.contains("literal") {
                 score *= SEMANTIC_ONLY_PENALTY;
+            }
+
+            // Chunks with zero query term overlap despite having text are noise
+            if !query_tokens.is_empty()
+                && coverage < f32::EPSILON
+                && !source_set.contains("literal")
+            {
+                score *= 0.5;
             }
 
             score *= chunk_kind_boost(&chunk);
@@ -1185,6 +1227,35 @@ fn path_segment_boost(query_tokens: &[String], chunk: &IndexedChunk) -> f32 {
     let matched = query_tokens
         .iter()
         .filter(|t| segments.iter().any(|seg| seg.contains(t.as_str())))
+        .count();
+    matched as f32 / query_tokens.len() as f32
+}
+
+/// Bonus when a chunk's definition name (first non-blank line) contains query tokens.
+/// This is the "are we looking at the definition site?" signal — e.g., query "handle error"
+/// should strongly prefer `fn handle_error()` over a comment mentioning errors.
+fn definition_name_boost(query_tokens: &[String], chunk: &IndexedChunk) -> f32 {
+    if query_tokens.is_empty() {
+        return 0.0;
+    }
+    // Extract the first meaningful line (often the fn/class signature)
+    let first_line = chunk
+        .text
+        .lines()
+        .find(|l| {
+            let t = l.trim();
+            !t.is_empty() && !t.starts_with("//") && !t.starts_with('#')
+        })
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if first_line.is_empty() {
+        return 0.0;
+    }
+
+    let matched = query_tokens
+        .iter()
+        .filter(|t| first_line.contains(t.as_str()))
         .count();
     matched as f32 / query_tokens.len() as f32
 }
@@ -1747,5 +1818,190 @@ mod tests {
 
         let result = hybrid_search(&workspace, "", Some(&model), &SearchOptions::default());
         assert!(result.is_ok());
+    }
+
+    #[test]
+    #[serial]
+    fn query_expansion_matches_snake_case_identifier() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(
+            tmp.path().join("errors.rs"),
+            "pub fn handle_error(code: i32) -> String { format!(\"Error: {}\", code) }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("noise.rs"),
+            "pub fn compute_value(x: f64) -> f64 { x * 2.0 }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = hybrid_search(
+            &workspace,
+            "handle error",
+            Some(&model),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert!(!hits.is_empty());
+        assert!(
+            hits[0].preview.contains("handle_error"),
+            "Expected handle_error as #1, got: {}",
+            hits[0].preview.lines().next().unwrap_or("")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn query_expansion_matches_camel_case_identifier() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(
+            tmp.path().join("validator.java"),
+            "class Validator {\n    void validateInput(String data) { }\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("noise.java"),
+            "class Formatter {\n    void formatOutput() { }\n}\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = hybrid_search(
+            &workspace,
+            "validate input",
+            Some(&model),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert!(!hits.is_empty());
+        assert!(
+            hits.iter().any(|h| h.preview.contains("validateInput")),
+            "Should find validateInput in results"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn definition_site_ranks_above_usage() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(
+            tmp.path().join("definition.rs"),
+            "pub fn process_payment(amount: f64) -> bool {\n    amount > 0.0\n}\n",
+        )
+        .unwrap();
+        // A usage site: the function name appears but this is a caller, not the definition
+        std::fs::write(
+            tmp.path().join("caller.rs"),
+            "pub fn run_billing() {\n    let ok = process_payment(100.0);\n    println!(\"payment processed: {ok}\");\n}\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = hybrid_search(
+            &workspace,
+            "process payment",
+            Some(&model),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert!(!hits.is_empty());
+        assert!(
+            hits[0].preview.contains("pub fn process_payment"),
+            "Definition site should rank first, got: {}",
+            hits[0].preview.lines().next().unwrap_or("")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn file_path_boosts_relevant_results() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(
+            tmp.path().join("auth.rs"),
+            "pub fn login(user: &str) -> bool { true }\npub fn logout() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("utils.rs"),
+            "// auth redirect helper\npub fn redirect(url: &str) {}\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = hybrid_search(
+            &workspace,
+            "auth login",
+            Some(&model),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert!(!hits.is_empty());
+        assert!(
+            hits[0].file_path.to_string_lossy().contains("auth"),
+            "auth.rs should rank first due to path boost, got: {}",
+            hits[0].file_path.display()
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn semantic_only_results_penalized_below_lexical() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(
+            tmp.path().join("exact.rs"),
+            "pub fn calculate_discount(price: f64, rate: f64) -> f64 { price * rate }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("vague.rs"),
+            "pub fn apply_reduction(value: f64) -> f64 { value * 0.9 }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = hybrid_search(
+            &workspace,
+            "calculate discount",
+            Some(&model),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert!(!hits.is_empty());
+        assert!(
+            hits[0].preview.contains("calculate_discount"),
+            "Exact lexical match should rank #1, got: {}",
+            hits[0].preview.lines().next().unwrap_or("")
+        );
     }
 }
