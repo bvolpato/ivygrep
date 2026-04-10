@@ -33,7 +33,7 @@ fn e2e_mcp_initialize() {
     // Write to stdin and close it
     {
         let stdin = child.stdin.as_mut().expect("Failed to get stdin");
-        writeln!(stdin, "{}", init_req.to_string()).expect("Failed to write to stdin");
+        writeln!(stdin, "{init_req}").expect("Failed to write to stdin");
     }
 
     // Read the response from stdout
