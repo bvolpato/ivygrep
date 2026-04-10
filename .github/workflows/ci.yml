@@ -53,7 +53,7 @@ jobs:
             cargo_flags: "--features accelerate"
             rust_flags: "-D warnings"
             name: "macOS ARM (Neural Accelerate)"
-          - os: macos-13
+          - os: macos-15-intel
             cargo_flags: "--features accelerate"
             rust_flags: "-D warnings"
             name: "macOS Intel (Neural Accelerate)"
@@ -95,7 +95,7 @@ jobs:
           - os: macos-latest
             cargo_flags: "--features accelerate"
             rust_flags: "-D warnings"
-          - os: macos-13
+          - os: macos-15-intel
             cargo_flags: "--features accelerate"
             rust_flags: "-D warnings"
           - os: macos-latest
