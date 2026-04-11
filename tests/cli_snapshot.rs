@@ -340,3 +340,118 @@ fn cli_prevent_nested_indexing() {
         child.canonicalize().unwrap().display()
     )));
 }
+
+/// Regression: `ig --literal gquota` must find the term inside a top-level
+/// `const` declaration in TypeScript, not just inside functions/classes.
+#[test]
+#[serial]
+fn cli_literal_finds_top_level_string_constant() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+
+    std::fs::write(
+        root.join("plugin.ts"),
+        r#"import { Plugin } from "sdk";
+
+const GEMINI_QUOTA_COMMAND = "gquota";
+
+export function registerCommands(p: Plugin) {
+    p.registerCommand(GEMINI_QUOTA_COMMAND, () => {
+        console.log("checking quota...");
+    });
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("README.md"),
+        "# Plugin\n\nRun `/gquota` to check your quota.\n",
+    )
+    .unwrap();
+
+    let home = tmp.path().join("ivygrep_home");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    let output = cmd
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--json", "--hash", "--literal", "-f", "gquota"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let files: Vec<&str> = value
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry.get("file_path").and_then(|v| v.as_str()))
+        .collect();
+
+    assert!(
+        files.iter().any(|p| p.contains("plugin.ts")),
+        "literal search must find gquota in plugin.ts, got files: {:?}",
+        files
+    );
+    assert!(
+        files.iter().any(|p| p.contains("README.md")),
+        "literal search must find gquota in README.md, got files: {:?}",
+        files
+    );
+}
+
+/// Regression: hybrid (default) mode must also surface top-level constants.
+#[test]
+#[serial]
+fn cli_hybrid_finds_top_level_string_constant() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+
+    std::fs::write(
+        root.join("plugin.ts"),
+        r#"import { Plugin } from "sdk";
+
+const GEMINI_QUOTA_COMMAND = "gquota";
+
+export function registerCommands(p: Plugin) {
+    p.registerCommand(GEMINI_QUOTA_COMMAND, () => {
+        console.log("checking quota...");
+    });
+}
+"#,
+    )
+    .unwrap();
+
+    let home = tmp.path().join("ivygrep_home");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    let output = cmd
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--json", "--hash", "-f", "gquota"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let files: Vec<&str> = value
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry.get("file_path").and_then(|v| v.as_str()))
+        .collect();
+
+    assert!(
+        files.iter().any(|p| p.contains("plugin.ts")),
+        "hybrid search must find gquota in plugin.ts, got files: {:?}",
+        files
+    );
+}

@@ -542,13 +542,22 @@ fn try_tree_sitter_chunk_source(
 
     let mut chunks = Vec::new();
 
-    for (start, end, kind) in ranges {
+    // Track which 1-indexed lines are covered by AST chunks (start..=end)
+    let mut covered = vec![false; lines.len() + 1]; // index 0 unused
+
+    for (start, end, kind) in &ranges {
+        let start = *start;
+        let end = *end;
         if start == 0 || start > lines.len() {
             continue;
         }
         let safe_end = end.min(lines.len());
         if safe_end < start {
             continue;
+        }
+
+        for flag in covered.iter_mut().take(safe_end + 1).skip(start) {
+            *flag = true;
         }
 
         let block_lines = &lines[(start - 1)..safe_end];
@@ -564,9 +573,59 @@ fn try_tree_sitter_chunk_source(
             safe_end,
             block_text,
             language.to_string(),
-            kind,
+            kind.clone(),
         ));
     }
+
+    // Emit module-level chunks for uncovered line ranges (imports,
+    // constants, top-level expressions, etc.).
+    let mut gap_start: Option<usize> = None;
+    for i in 1..=lines.len() {
+        if !covered[i] && !lines[i - 1].trim().is_empty() {
+            if gap_start.is_none() {
+                gap_start = Some(i);
+            }
+        } else if let Some(gs) = gap_start {
+            let gs_end = i - 1;
+            if gs_end >= gs {
+                let block_lines = &lines[(gs - 1)..gs_end];
+                let block_text = format!(
+                    "// {}\n\n{}",
+                    rel_path.to_string_lossy(),
+                    block_lines.join("\n")
+                );
+                chunks.push(make_chunk(
+                    rel_path,
+                    gs,
+                    gs_end,
+                    block_text,
+                    language.to_string(),
+                    ChunkKind::Module,
+                ));
+            }
+            gap_start = None;
+        }
+    }
+    // Trailing gap at EOF
+    if let Some(gs) = gap_start {
+        let gs_end = lines.len();
+        let block_lines = &lines[(gs - 1)..gs_end];
+        let block_text = format!(
+            "// {}\n\n{}",
+            rel_path.to_string_lossy(),
+            block_lines.join("\n")
+        );
+        chunks.push(make_chunk(
+            rel_path,
+            gs,
+            gs_end,
+            block_text,
+            language.to_string(),
+            ChunkKind::Module,
+        ));
+    }
+
+    chunks.sort_by_key(|c| c.start_line);
 
     Some(chunks)
 }
@@ -1499,5 +1558,36 @@ pub fn calculate_total(amount: f64) -> f64 {
         let src = "name: test\nversion: 1.0\ndependencies:\n  - foo\n  - bar\n";
         let chunks = chunk_source(Path::new("config.yaml"), src);
         assert!(!chunks.is_empty(), "YAML files should produce chunks");
+    }
+
+    #[test]
+    fn typescript_captures_top_level_constants() {
+        let src = r#"import { Plugin } from "sdk";
+
+const COMMAND_NAME = "gquota";
+
+export function register(p: Plugin) {
+    p.run(COMMAND_NAME);
+}
+"#;
+        let chunks = chunk_source(Path::new("plugin.ts"), src);
+        let all_text: String = chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            all_text.contains("COMMAND_NAME"),
+            "top-level constant must be captured in a chunk, got {} chunks covering: {:?}",
+            chunks.len(),
+            chunks
+                .iter()
+                .map(|c| format!("L{}-{}", c.start_line, c.end_line))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            all_text.contains("gquota"),
+            "string literal 'gquota' must be present in chunk text"
+        );
     }
 }

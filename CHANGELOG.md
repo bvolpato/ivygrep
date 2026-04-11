@@ -2,6 +2,16 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.42] — 2026-04-11
+
+### Fixed
+- **Literal search recall:** Top-level code (imports, constants, type aliases) outside functions/classes was silently dropped by the tree-sitter chunker, causing `ig gquota` to miss matches that `rg` would find
+- **Gap-filling chunks:** Tree-sitter chunker now emits `Module`-kind chunks for any source lines not covered by function/class AST nodes, ensuring full index coverage
+
+### Added
+- CLI e2e tests for literal and hybrid search against top-level string constants
+- Unit tests for chunker gap-filling and literal search recall
+
 ## [0.5.41] — 2026-04-10
 
 ### Improved

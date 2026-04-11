@@ -285,8 +285,8 @@ pub fn literal_search(
     Ok(hits)
 }
 
-/// Use the Tantivy inverted index to find candidate chunks likely to contain
-/// the literal query, then verify with regex on the decompressed text.
+/// Use the Tantivy inverted index to find candidate chunks containing the
+/// literal query, then verify with regex on the decompressed text.
 /// This is O(index_lookup + matched_candidates) instead of O(all_chunks).
 fn collect_literal_candidates(
     ctx: &SearchContext,
@@ -308,8 +308,9 @@ fn collect_literal_candidates(
     let parser =
         QueryParser::for_index(&ctx.indexes[0], vec![ctx.fields.text, ctx.fields.file_path]);
 
-    // Collect unique chunk IDs from Tantivy that contain the query tokens
-    let mut tantivy_chunks = HashMap::<String, IndexedChunk>::new();
+    let mut found_ids = HashSet::<String>::new();
+    let mut verified = Vec::<IndexedChunk>::new();
+
     for lexical_query in build_lexical_queries(query) {
         let parsed_query = match parser.parse_query(&lexical_query) {
             Ok(q) => q,
@@ -324,40 +325,29 @@ fn collect_literal_candidates(
 
             for (_score, addr) in docs {
                 let doc: TantivyDocument = searcher.doc(addr)?;
-                if let Some(chunk) = fetch_chunk_by_id(doc, &ctx.fields)
+                if let Some(mut chunk) = fetch_chunk_by_id(doc, &ctx.fields)
                     .filter(|c| !ctx.is_shadowed_base_file(i, &c.file_path))
                     .filter(|c| type_matches(c, options.type_filter.as_deref()))
                     .filter(|c| scope_matches(c, options.scope_filter.as_ref()))
                     .filter(|c| path_matches(c, path_matcher))
                     .filter(|c| options.skip_gitignore || !c.is_ignored)
                 {
-                    tantivy_chunks
-                        .entry(chunk.chunk_id.clone())
-                        .or_insert(chunk);
+                    if found_ids.contains(&chunk.chunk_id) {
+                        continue;
+                    }
+                    if chunk.text.is_empty()
+                        && let Ok(Some(full)) = ctx.fetch_chunk_by_vector_key(chunk.vector_key)
+                    {
+                        chunk.text = full.text;
+                    }
+                    if matcher.is_match(&chunk.text) {
+                        found_ids.insert(chunk.chunk_id.clone());
+                        verified.push(chunk);
+                    }
                 }
             }
         }
     }
-
-    // Hydrate text from SQLite for chunks where Tantivy doesn't store it,
-    // then verify exact substring match via regex.
-    let need_text: Vec<(String, u64)> = tantivy_chunks
-        .iter()
-        .filter(|(_, chunk)| chunk.text.is_empty())
-        .map(|(id, chunk)| (id.clone(), chunk.vector_key))
-        .collect();
-    for (chunk_id, vector_key) in need_text {
-        if let Ok(Some(full)) = ctx.fetch_chunk_by_vector_key(vector_key)
-            && let Some(chunk) = tantivy_chunks.get_mut(&chunk_id)
-        {
-            chunk.text = full.text;
-        }
-    }
-
-    let verified: Vec<IndexedChunk> = tantivy_chunks
-        .into_values()
-        .filter(|chunk| matcher.is_match(&chunk.text))
-        .collect();
 
     Ok(verified)
 }
@@ -2002,6 +1992,77 @@ mod tests {
             hits[0].preview.contains("calculate_discount"),
             "Exact lexical match should rank #1, got: {}",
             hits[0].preview.lines().next().unwrap_or("")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn literal_search_finds_string_constants() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        // The term "gquota" appears ONLY inside a string literal and as part
+        // of a constant name. Tantivy's tokenizer may or may not produce a
+        // matching token — the SQLite fallback must catch it either way.
+        std::fs::write(
+            tmp.path().join("plugin.ts"),
+            r#"import { Plugin } from "sdk";
+
+const GEMINI_QUOTA_COMMAND = "gquota";
+
+export function registerCommands(p: Plugin) {
+    p.registerCommand(GEMINI_QUOTA_COMMAND, () => {
+        console.log("checking quota...");
+    });
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("README.md"),
+            "# Plugin\n\nRun `/gquota` to check your quota.\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        // --literal mode must find both files
+        let literal_hits = literal_search(&workspace, "gquota", &SearchOptions::default()).unwrap();
+
+        let literal_files: HashSet<String> = literal_hits
+            .iter()
+            .map(|h| h.file_path.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            literal_files.contains("plugin.ts"),
+            "literal search must find gquota in plugin.ts, got files: {:?}",
+            literal_files
+        );
+        assert!(
+            literal_files.contains("README.md"),
+            "literal search must find gquota in README.md, got files: {:?}",
+            literal_files
+        );
+
+        // hybrid mode must also surface plugin.ts
+        let hybrid_hits = hybrid_search(
+            &workspace,
+            "gquota",
+            Some(&model),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        let hybrid_files: HashSet<String> = hybrid_hits
+            .iter()
+            .map(|h| h.file_path.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            hybrid_files.contains("plugin.ts"),
+            "hybrid search must find gquota in plugin.ts, got files: {:?}",
+            hybrid_files
         );
     }
 }
