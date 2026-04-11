@@ -2,6 +2,18 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.43] — 2026-04-11
+
+### Added
+- **Code-aware tokenizer:** Custom BM25 tokenizer splits camelCase, snake_case, dots, colons, and path separators so that natural-language queries like "handle error" natively match `handleError`, `handle_error`, and `HandleError` at the BM25 scoring level
+- **BM25F multi-field scoring:** New `file_path_text` (5× boost) and `signature` (5× boost) fields bring Sourcegraph/Zoekt-style field-level relevance — function definitions and filename matches rank significantly higher than body text
+- Tests for code-aware tokenizer covering camelCase, snake_case, path separators, function signatures, and natural-language queries
+- BM25F relevance test proving definition-site ranking via signature boost
+
+### Improved
+- Lexical search now uses code-aware tokenization instead of Tantivy's default `SimpleTokenizer`, eliminating the reliance on post-hoc query expansion for identifier matching
+- Both literal and lexical search passes search across all BM25F fields for broader candidate recall
+
 ## [0.5.42] — 2026-04-11
 
 ### Fixed

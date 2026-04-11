@@ -305,8 +305,14 @@ fn collect_literal_candidates(
         500
     };
 
-    let parser =
-        QueryParser::for_index(&ctx.indexes[0], vec![ctx.fields.text, ctx.fields.file_path]);
+    let mut search_fields = vec![ctx.fields.text, ctx.fields.file_path];
+    if let Some(f) = ctx.fields.file_path_text {
+        search_fields.push(f);
+    }
+    if let Some(f) = ctx.fields.signature {
+        search_fields.push(f);
+    }
+    let parser = QueryParser::for_index(&ctx.indexes[0], search_fields);
 
     let mut found_ids = HashSet::<String>::new();
     let mut verified = Vec::<IndexedChunk>::new();
@@ -400,9 +406,24 @@ pub fn hybrid_search(
     };
 
     // ── Lexical (BM25) pass ─────────────────────────────────────────────
-    let mut parser =
-        QueryParser::for_index(&ctx.indexes[0], vec![ctx.fields.text, ctx.fields.file_path]);
+    // BM25F: search across text, tokenized file path, and definition signature.
+    // Boosts on path/signature fields implement Sourcegraph-style BM25F where
+    // matches on filenames and symbol definitions count 5× more than body text.
+    let mut search_fields = vec![ctx.fields.text, ctx.fields.file_path];
+    if let Some(f) = ctx.fields.file_path_text {
+        search_fields.push(f);
+    }
+    if let Some(f) = ctx.fields.signature {
+        search_fields.push(f);
+    }
+    let mut parser = QueryParser::for_index(&ctx.indexes[0], search_fields);
     parser.set_field_boost(ctx.fields.file_path, 2.0);
+    if let Some(f) = ctx.fields.file_path_text {
+        parser.set_field_boost(f, 5.0);
+    }
+    if let Some(f) = ctx.fields.signature {
+        parser.set_field_boost(f, 5.0);
+    }
 
     let mut allowed_languages = Vec::new();
     let mut can_pushdown_languages = options.include_globs.is_empty();
@@ -2063,6 +2084,80 @@ export function registerCommands(p: Plugin) {
             hybrid_files.contains("plugin.ts"),
             "hybrid search must find gquota in plugin.ts, got files: {:?}",
             hybrid_files
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn bm25f_signature_boost_ranks_definitions_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        // Definition site: the function signature should be indexed in the
+        // `signature` field with 5× boost via code tokenizer.
+        std::fs::write(
+            tmp.path().join("handler.rs"),
+            r#"pub fn handleError(code: i32) -> Result<(), Error> {
+    log::error!("error code: {}", code);
+    Err(Error::new(code))
+}
+"#,
+        )
+        .unwrap();
+        // Usage site: mentions handleError but is not the definition
+        std::fs::write(
+            tmp.path().join("main.rs"),
+            r#"fn main() {
+    let result = handler::handleError(404);
+    match result {
+        Ok(()) => println!("ok"),
+        Err(e) => println!("failed: {}", e),
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = hybrid_search(
+            &workspace,
+            "handle error",
+            Some(&model),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+
+        assert!(
+            !hits.is_empty(),
+            "BM25F should find results for 'handle error'"
+        );
+
+        // Both files should appear in results
+        let files: Vec<String> = hits
+            .iter()
+            .map(|h| {
+                h.file_path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        assert!(
+            files.contains(&"handler.rs".to_string()),
+            "definition file must appear in results, got: {:?}",
+            files
+        );
+
+        // Definition should rank first thanks to signature field boost
+        assert_eq!(
+            files[0], "handler.rs",
+            "definition site should rank #1 thanks to signature boost, got order: {:?}",
+            files
         );
     }
 }

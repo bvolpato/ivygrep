@@ -9,8 +9,12 @@ use rayon::prelude::*;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
-use tantivy::schema::{Field, STORED, STRING, Schema, TEXT, Value};
+use tantivy::schema::{
+    Field, IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing, TextOptions, Value,
+};
 use tantivy::{Index as TantivyIndex, TantivyDocument, Term, doc};
+
+use crate::text::{CODE_TOKENIZER_NAME, build_code_analyzer};
 
 use crate::chunking::{Chunk, chunk_source, is_indexable_file};
 use crate::embedding::EmbeddingModel;
@@ -69,6 +73,8 @@ pub struct TantivyFields {
     pub text: Field,
     pub content_hash: Field,
     pub is_ignored: Option<Field>,
+    pub file_path_text: Option<Field>,
+    pub signature: Option<Field>,
 }
 
 #[derive(Debug, Clone)]
@@ -853,6 +859,38 @@ fn remove_file_chunks(
     Ok(())
 }
 
+fn extract_signature(chunk: &IndexedChunk) -> String {
+    let is_definition = matches!(
+        chunk.kind.as_str(),
+        "Function"
+            | "function"
+            | "Class"
+            | "class"
+            | "Struct"
+            | "struct"
+            | "Trait"
+            | "trait"
+            | "Interface"
+            | "interface"
+            | "Impl"
+            | "impl"
+            | "Enum"
+            | "enum"
+    );
+    if !is_definition {
+        return String::new();
+    }
+    chunk
+        .text
+        .lines()
+        .find(|l| {
+            let t = l.trim();
+            !t.is_empty() && !t.starts_with("//") && !t.starts_with('#')
+        })
+        .unwrap_or_default()
+        .to_string()
+}
+
 fn add_chunk_doc(
     writer: &mut tantivy::IndexWriter,
     fields: &TantivyFields,
@@ -870,6 +908,15 @@ fn add_chunk_doc(
     );
     if let Some(f) = fields.is_ignored {
         doc.add_u64(f, if chunk.is_ignored { 1u64 } else { 0u64 });
+    }
+    if let Some(f) = fields.file_path_text {
+        doc.add_text(f, chunk.file_path.to_string_lossy());
+    }
+    if let Some(f) = fields.signature {
+        let sig = extract_signature(chunk);
+        if !sig.is_empty() {
+            doc.add_text(f, sig);
+        }
     }
     writer.add_document(doc)?;
     Ok(())
@@ -1011,6 +1058,11 @@ fn create_tables(conn: &Connection) -> Result<()> {
 }
 
 fn build_schema() -> Schema {
+    let code_indexing = TextFieldIndexing::default()
+        .set_tokenizer(CODE_TOKENIZER_NAME)
+        .set_index_option(IndexRecordOption::WithFreqsAndPositions);
+    let code_text_opts = TextOptions::default().set_indexing_options(code_indexing.clone());
+
     let mut schema = Schema::builder();
     schema.add_text_field("chunk_id", STRING | STORED);
     schema.add_text_field("file_path", STRING | STORED);
@@ -1018,10 +1070,13 @@ fn build_schema() -> Schema {
     schema.add_u64_field("end_line", STORED);
     schema.add_text_field("language", STRING | STORED);
     schema.add_text_field("kind", STRING | STORED);
-    // Not STORED — full text lives in SQLite
-    schema.add_text_field("text", TEXT);
+    // Full text indexed with code-aware tokenizer (not STORED — lives in SQLite)
+    schema.add_text_field("text", code_text_opts.clone());
     schema.add_text_field("content_hash", STRING | STORED);
     schema.add_u64_field("is_ignored", STORED);
+    // BM25F fields: tokenized path + definition signature with code tokenizer
+    schema.add_text_field("file_path_text", code_text_opts.clone());
+    schema.add_text_field("signature", code_text_opts);
     schema.build()
 }
 
@@ -1035,6 +1090,11 @@ pub fn open_tantivy_index(path: &Path) -> Result<(TantivyIndex, TantivyFields)> 
         TantivyIndex::create_in_dir(path, schema.clone())?
     };
 
+    // Register the code-aware tokenizer so both indexing and querying use it.
+    index
+        .tokenizers()
+        .register(CODE_TOKENIZER_NAME, build_code_analyzer());
+
     let schema = index.schema();
     let fields = TantivyFields {
         chunk_id: schema.get_field("chunk_id")?,
@@ -1046,6 +1106,8 @@ pub fn open_tantivy_index(path: &Path) -> Result<(TantivyIndex, TantivyFields)> 
         text: schema.get_field("text")?,
         content_hash: schema.get_field("content_hash")?,
         is_ignored: schema.get_field("is_ignored").ok(),
+        file_path_text: schema.get_field("file_path_text").ok(),
+        signature: schema.get_field("signature").ok(),
     };
 
     Ok((index, fields))
