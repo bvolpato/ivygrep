@@ -6,7 +6,9 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::chunking::is_indexable_file;
 use crate::config;
+use crate::walker::source_walker;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Workspace {
@@ -69,6 +71,37 @@ pub struct WorkspaceStatus {
 pub struct WorkspaceScope {
     pub rel_path: PathBuf,
     pub is_file: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceIndexState {
+    NotIndexed,
+    Healthy,
+    HealthyEmpty,
+    Unhealthy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceIndexHealth {
+    pub state: WorkspaceIndexState,
+    pub chunk_count: u64,
+    pub file_count: u64,
+    pub has_indexable_files: bool,
+    pub issues: Vec<String>,
+}
+
+impl WorkspaceIndexHealth {
+    pub fn is_queryable(&self) -> bool {
+        matches!(
+            self.state,
+            WorkspaceIndexState::Healthy | WorkspaceIndexState::HealthyEmpty
+        )
+    }
+
+    pub fn needs_rebuild(&self) -> bool {
+        self.state == WorkspaceIndexState::Unhealthy
+    }
 }
 
 impl WorkspaceScope {
@@ -249,6 +282,15 @@ impl Workspace {
         true
     }
 
+    pub fn should_block_on_neural_enhancement(&self, cutoff_bytes: u64) -> Result<bool> {
+        if !self.needs_neural_enhancement() {
+            return Ok(false);
+        }
+
+        let skip_gitignore = self.read_metadata()?.is_some_and(|m| m.skip_gitignore);
+        workspace_fits_within_byte_cutoff(&self.root, skip_gitignore, cutoff_bytes)
+    }
+
     /// Triggers an atomic background spawn of the neural enhancement process.
     /// Uses O_EXCL file lock mechanics to mathematically prevent race conditions
     /// even if multiple threads or processes try to spawn this simultaneously.
@@ -318,6 +360,97 @@ impl Workspace {
         let data = fs::read(path)?;
         let parsed = serde_json::from_slice(&data)?;
         Ok(Some(parsed))
+    }
+
+    pub fn index_health(&self) -> WorkspaceIndexHealth {
+        let mut issues = Vec::new();
+        let metadata = self.read_metadata().ok().flatten();
+        let has_any_index_artifacts = self.metadata_path().exists()
+            || self.sqlite_path().exists()
+            || self.tantivy_dir().exists()
+            || self.vector_path().exists();
+
+        if !has_any_index_artifacts {
+            return WorkspaceIndexHealth {
+                state: WorkspaceIndexState::NotIndexed,
+                chunk_count: 0,
+                file_count: 0,
+                has_indexable_files: workspace_has_indexable_files(&self.root, false),
+                issues,
+            };
+        }
+
+        if metadata.is_none() {
+            issues.push("missing workspace metadata".to_string());
+        }
+
+        let skip_gitignore = metadata.as_ref().is_some_and(|m| m.skip_gitignore);
+
+        if !self.sqlite_path().exists() {
+            issues.push("missing metadata.sqlite3".to_string());
+        }
+        if !self.tantivy_dir().exists() {
+            issues.push("missing Tantivy index".to_string());
+        }
+        if !self.vector_path().exists() {
+            issues.push("missing hash vector store".to_string());
+        }
+        if metadata
+            .as_ref()
+            .is_some_and(|m| m.last_indexed_at_unix.is_none())
+        {
+            issues.push("index metadata never recorded a completed run".to_string());
+        }
+
+        let (chunk_count, file_count) = read_sqlite_counts(&self.index_dir);
+
+        if chunk_count > 0 {
+            if let Err(err) = crate::indexer::open_tantivy_index(&self.tantivy_dir()) {
+                issues.push(format!("failed to open Tantivy index: {err:#}"));
+            }
+
+            match crate::vector_store::VectorStore::open_readonly(
+                &self.vector_path(),
+                256,
+                crate::vector_store::ScalarKind::F16,
+            ) {
+                Ok(store) if store.size() == 0 => {
+                    issues.push("hash vector store is empty despite indexed chunks".to_string());
+                }
+                Ok(_) => {}
+                Err(err) => issues.push(format!("failed to open hash vector store: {err:#}")),
+            }
+        }
+
+        let has_indexable_files = if chunk_count == 0 {
+            workspace_has_indexable_files(&self.root, skip_gitignore)
+        } else {
+            false
+        };
+
+        if chunk_count == 0 && has_indexable_files {
+            issues.push(
+                "index contains zero chunks but the workspace has indexable files".to_string(),
+            );
+        }
+
+        let state = if issues.is_empty() {
+            if chunk_count == 0 {
+                WorkspaceIndexState::HealthyEmpty
+            } else {
+                WorkspaceIndexState::Healthy
+            }
+        } else {
+            WorkspaceIndexState::Unhealthy
+        };
+
+        WorkspaceIndexHealth {
+            state,
+            chunk_count,
+            file_count,
+            has_indexable_files,
+            issues,
+        }
     }
 
     pub fn exists(&self) -> bool {
@@ -654,6 +787,48 @@ fn read_sqlite_counts(index_dir: &Path) -> (u64, u64) {
     (chunks as u64, files as u64)
 }
 
+fn workspace_has_indexable_files(root: &Path, skip_gitignore: bool) -> bool {
+    const SAMPLE_BYTES: usize = 8 * 1024;
+
+    for entry in source_walker(root, skip_gitignore).build().flatten() {
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+            continue;
+        }
+
+        let Ok(bytes) = fs::read(entry.path()) else {
+            continue;
+        };
+        let sample_len = bytes.len().min(SAMPLE_BYTES);
+        if is_indexable_file(entry.path(), &bytes[..sample_len]) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn workspace_fits_within_byte_cutoff(
+    root: &Path,
+    skip_gitignore: bool,
+    cutoff_bytes: u64,
+) -> Result<bool> {
+    let mut total_bytes = 0u64;
+
+    for entry in source_walker(root, skip_gitignore).build() {
+        let entry = entry?;
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+            continue;
+        }
+
+        total_bytes = total_bytes.saturating_add(entry.metadata()?.len());
+        if total_bytes > cutoff_bytes {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
 /// Fast index size estimate by stat-ing known index files instead of
 /// recursively walking potentially 17+ GB of index directories.
 fn dir_size_bytes(dir: &Path) -> u64 {
@@ -822,5 +997,58 @@ mod tests {
 
         // 2 vectors == 2 chunks → false
         assert!(!ws.needs_neural_enhancement());
+    }
+
+    #[test]
+    fn index_health_flags_zero_chunk_index_when_workspace_has_source_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(
+            tmp.path().join("lib.rs"),
+            "pub fn sample() -> bool { true }\n",
+        )
+        .unwrap();
+
+        let ws = Workspace::resolve(tmp.path()).unwrap();
+        ws.ensure_dirs().unwrap();
+        ws.write_metadata(&WorkspaceMetadata {
+            id: ws.id.clone(),
+            root: ws.root.clone(),
+            created_at_unix: 0,
+            last_indexed_at_unix: Some(1),
+            watch_enabled: false,
+            skip_gitignore: false,
+        })
+        .unwrap();
+        std::fs::write(ws.sqlite_path(), "").unwrap();
+        std::fs::create_dir_all(ws.tantivy_dir()).unwrap();
+        std::fs::write(ws.vector_path(), "").unwrap();
+
+        let health = ws.index_health();
+        assert_eq!(health.state, WorkspaceIndexState::Unhealthy);
+        assert!(health.has_indexable_files);
+    }
+
+    #[test]
+    fn small_workspace_can_block_on_neural_enhancement() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(
+            tmp.path().join("lib.rs"),
+            "pub fn sample() -> &'static str { \"tiny\" }\n",
+        )
+        .unwrap();
+
+        let ws = Workspace::resolve(tmp.path()).unwrap();
+        let model = crate::embedding::create_hash_model();
+        let _ = crate::indexer::index_workspace(&ws, model.as_ref()).unwrap();
+
+        assert!(ws.needs_neural_enhancement());
+        assert!(ws.should_block_on_neural_enhancement(1_000_000).unwrap());
+        assert!(!ws.should_block_on_neural_enhancement(16).unwrap());
     }
 }

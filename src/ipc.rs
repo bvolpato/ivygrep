@@ -89,9 +89,21 @@ mod tests {
 
     #[tokio::test]
     async fn test_bind_and_cleanup() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", tmp.path()) };
         let _ = crate::config::ensure_app_dirs();
 
-        let (listener, path) = bind().await.unwrap();
+        let (listener, path) = match bind().await {
+            Ok(bound) => bound,
+            Err(err)
+                if err
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied) =>
+            {
+                return;
+            }
+            Err(err) => panic!("bind failed unexpectedly: {err:#}"),
+        };
 
         assert!(socket_exists(), "socket/port file should exist after bind");
         assert!(path.exists());

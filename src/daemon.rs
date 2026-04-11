@@ -11,7 +11,9 @@ use tracing::{error, info, warn};
 
 use crate::config;
 use crate::embedding::{EmbeddingModel, create_model};
-use crate::indexer::{index_workspace, remove_workspace_index};
+use crate::indexer::{
+    index_workspace, maybe_complete_neural_for_small_workspace, remove_workspace_index,
+};
 use crate::protocol::{BUILD_VERSION, DaemonRequest, DaemonResponse};
 use crate::regex_search::regex_search;
 use crate::search::{SearchOptions, hybrid_search, literal_search};
@@ -255,6 +257,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     .collect();
 
                 for workspace in &workspaces {
+                    let _ = maybe_complete_neural_for_small_workspace(workspace);
                     match hybrid_search(workspace, &query, Some(model.as_ref()), &options) {
                         Ok(mut hits) => {
                             if path.is_none() {

@@ -85,27 +85,26 @@ pub struct SearchContext {
     pub searchers: Vec<tantivy::Searcher>,
     pub fields: TantivyFields,
 
-    pub vectors: Option<VectorStore>,
-    pub base_vectors: Option<VectorStore>,
+    pub hash_vectors: Option<VectorStore>,
+    pub base_hash_vectors: Option<VectorStore>,
+    pub neural_vectors: Option<VectorStore>,
+    pub base_neural_vectors: Option<VectorStore>,
 
     pub tombstones: HashSet<String>,
     pub overlay_files: HashSet<String>,
 }
 
 impl SearchContext {
-    pub fn load(workspace: &Workspace, emb_dim: Option<usize>) -> Result<Self> {
+    pub fn load(workspace: &Workspace, _emb_dim: Option<usize>) -> Result<Self> {
         let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
         if use_overlay {
             let overlay_sqlite = open_sqlite_readonly(&workspace.overlay_sqlite_path())?;
             let (overlay_idx, fields) = open_tantivy_index(&workspace.overlay_tantivy_dir())?;
             let overlay_reader = overlay_idx.reader()?;
             let overlay_searcher = overlay_reader.searcher();
-            let overlay_vec = if let Some(dim) = emb_dim {
-                VectorStore::open_readonly(&workspace.overlay_vector_path(), dim, ScalarKind::F16)
-                    .ok()
-            } else {
-                None
-            };
+            let overlay_hash_vec =
+                VectorStore::open_readonly(&workspace.overlay_vector_path(), 256, ScalarKind::F16)
+                    .ok();
 
             let base_dir = workspace
                 .base_index_dir
@@ -115,12 +114,15 @@ impl SearchContext {
             let (base_idx, _) = open_tantivy_index(&base_dir.join("tantivy"))?;
             let base_reader = base_idx.reader()?;
             let base_searcher = base_reader.searcher();
-            let base_vec = if let Some(dim) = emb_dim {
-                VectorStore::open_readonly(&base_dir.join("vectors.usearch"), dim, ScalarKind::F16)
-                    .ok()
-            } else {
-                None
-            };
+            let base_hash_vec =
+                VectorStore::open_readonly(&base_dir.join("vectors.usearch"), 256, ScalarKind::F16)
+                    .ok();
+            let base_neural_vec = VectorStore::open_readonly(
+                &base_dir.join("vectors_neural.usearch"),
+                384,
+                ScalarKind::F32,
+            )
+            .ok();
 
             let mut tombstones = HashSet::new();
             let mut overlay_files = HashSet::new();
@@ -144,8 +146,10 @@ impl SearchContext {
                 indexes: vec![overlay_idx, base_idx],
                 searchers: vec![overlay_searcher, base_searcher],
                 fields,
-                vectors: overlay_vec,
-                base_vectors: base_vec,
+                hash_vectors: overlay_hash_vec,
+                base_hash_vectors: base_hash_vec,
+                neural_vectors: None,
+                base_neural_vectors: base_neural_vec,
                 tombstones,
                 overlay_files,
             })
@@ -154,11 +158,11 @@ impl SearchContext {
             let (idx, fields) = open_tantivy_index(&workspace.tantivy_dir())?;
             let reader = idx.reader()?;
             let searcher = reader.searcher();
-            let vec = if let Some(dim) = emb_dim {
-                VectorStore::open_readonly(&workspace.vector_path(), dim, ScalarKind::F16).ok()
-            } else {
-                None
-            };
+            let hash_vec =
+                VectorStore::open_readonly(&workspace.vector_path(), 256, ScalarKind::F16).ok();
+            let neural_vec =
+                VectorStore::open_readonly(&workspace.vector_neural_path(), 384, ScalarKind::F32)
+                    .ok();
 
             Ok(Self {
                 sqlite,
@@ -166,8 +170,10 @@ impl SearchContext {
                 indexes: vec![idx],
                 searchers: vec![searcher],
                 fields,
-                vectors: vec,
-                base_vectors: None,
+                hash_vectors: hash_vec,
+                base_hash_vectors: None,
+                neural_vectors: neural_vec,
+                base_neural_vectors: None,
                 tombstones: HashSet::new(),
                 overlay_files: HashSet::new(),
             })
@@ -369,10 +375,10 @@ pub fn hybrid_search(
         if limit == usize::MAX {
             10_000_000
         } else {
-            limit.max(100)
+            limit.max(500)
         }
     } else {
-        100
+        500
     };
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
 
@@ -382,18 +388,43 @@ pub fn hybrid_search(
     // ── Literal pass ────────────────────────────────────────────────────
     // Always run a fast index-backed literal substring scan so exact matches
     // surface even when tokenization splits them differently.
-    let literal_matcher = regex::RegexBuilder::new(&regex::escape(query_text.trim()))
+    // Build a regex alternation of the original query plus snake_case/camelCase
+    // variants so "hybrid search" also matches "hybrid_search" and "hybridSearch".
+    let trimmed = query_text.trim();
+    let literal_variants = build_lexical_queries(trimmed);
+    let literal_pattern = literal_variants
+        .iter()
+        .map(|v| regex::escape(v))
+        .collect::<Vec<_>>()
+        .join("|");
+    let literal_matcher = regex::RegexBuilder::new(&literal_pattern)
         .case_insensitive(true)
         .build()
         .ok();
     let literal_chunks: Vec<(IndexedChunk, f32)> = if let Some(ref matcher) = literal_matcher
-        && !query_text.trim().is_empty()
+        && !trimmed.is_empty()
     {
-        let candidates =
-            collect_literal_candidates(&ctx, query_text.trim(), matcher, &path_matcher, options)
-                .unwrap_or_default();
-        tracing::trace!("literal_pass={:?} found={}", t0.elapsed(), candidates.len());
-        candidates
+        let mut all_candidates = Vec::new();
+        for variant in &literal_variants {
+            let variant_matcher = regex::RegexBuilder::new(&regex::escape(variant))
+                .case_insensitive(true)
+                .build();
+            if let Ok(ref vm) = variant_matcher
+                && let Ok(candidates) =
+                    collect_literal_candidates(&ctx, variant, vm, &path_matcher, options)
+            {
+                all_candidates.extend(candidates);
+            }
+        }
+        // Deduplicate by chunk_id
+        let mut seen = std::collections::HashSet::new();
+        all_candidates.retain(|c| seen.insert(c.chunk_id.clone()));
+        tracing::trace!(
+            "literal_pass={:?} found={}",
+            t0.elapsed(),
+            all_candidates.len()
+        );
+        all_candidates
             .into_iter()
             .map(|c| {
                 let count = matcher.find_iter(&c.text).count().max(1) as f32;
@@ -422,7 +453,7 @@ pub fn hybrid_search(
         parser.set_field_boost(f, 5.0);
     }
     if let Some(f) = ctx.fields.signature {
-        parser.set_field_boost(f, 5.0);
+        parser.set_field_boost(f, 10.0);
     }
 
     let mut allowed_languages = Vec::new();
@@ -496,10 +527,15 @@ pub fn hybrid_search(
                     .filter(|chunk| path_matches(chunk, &path_matcher))
                     .filter(|chunk| options.skip_gitignore || !chunk.is_ignored)
                 {
+                    let boosted = if is_definition_kind(&chunk.kind) {
+                        score * 2.0
+                    } else {
+                        score
+                    };
                     lexical_by_id
                         .entry(chunk.chunk_id.clone())
-                        .and_modify(|(_, best)| *best = best.max(score))
-                        .or_insert((chunk, score));
+                        .and_modify(|(_, best)| *best = best.max(boosted))
+                        .or_insert((chunk, boosted));
                 }
             }
         }
@@ -524,77 +560,49 @@ pub fn hybrid_search(
 
     tracing::trace!("open_vector={:?}", t0.elapsed());
 
-    // When glob filters or scope filters are active, pre-collect the set of
-    // vector_keys that match, so we can skip the expensive full-corpus vector
-    // search and only fetch relevant candidates from SQLite.
-    let has_filters = !options.include_globs.is_empty()
-        || !options.exclude_globs.is_empty()
-        || options.scope_filter.is_some()
-        || options.type_filter.is_some();
-
     let mut semantic_chunks = Vec::new();
-    // We only do semantic search if at least one vector index has records
-    let has_vectors = ctx.vectors.as_ref().map_or(0, |v| v.size()) > 0
-        || ctx.base_vectors.as_ref().map_or(0, |v| v.size()) > 0;
+    let has_hash_vectors = ctx.hash_vectors.as_ref().map_or(0, |v| v.size()) > 0
+        || ctx.base_hash_vectors.as_ref().map_or(0, |v| v.size()) > 0;
+    let has_neural_vectors = ctx.neural_vectors.as_ref().map_or(0, |v| v.size()) > 0
+        || ctx.base_neural_vectors.as_ref().map_or(0, |v| v.size()) > 0;
 
-    if let Some(model) = embedding_model
-        && has_vectors
-    {
-        // Only now do we pay the cost of embedding the query
-        let query_vector = model.embed(query_text);
+    if embedding_model.is_some() && (has_hash_vectors || has_neural_vectors) {
+        let mut semantic_by_id = HashMap::<String, (IndexedChunk, f32)>::new();
 
-        if has_filters {
-            // Pre-filtered path: query SQLite for matching chunks across overlay + base
-            let filtered_chunks = collect_filtered_chunks(
+        if has_hash_vectors {
+            let hash_model = crate::embedding::HashEmbeddingModel::new(256);
+            let hash_query_vector = hash_model.embed(query_text);
+            let hash_hits = collect_semantic_candidates(
                 &ctx,
                 &path_matcher,
-                options.scope_filter.as_ref(),
-                options.type_filter.as_deref(),
-                &options.include_globs,
-                options.skip_gitignore,
-            );
-            let mut semantic_raw = Vec::new();
-            // Score each filtered chunk against the query vector
-            for chunk in filtered_chunks {
-                let mut score = None;
-                if let Some(v) = &ctx.vectors {
-                    score = v.score(chunk.vector_key, &query_vector);
-                }
-                if score.is_none()
-                    && let Some(v) = &ctx.base_vectors
-                {
-                    score = v.score(chunk.vector_key, &query_vector);
-                }
-                if let Some(s) = score {
-                    semantic_raw.push((chunk, s));
-                }
-            }
-            semantic_raw.sort_by(|a, b| b.1.total_cmp(&a.1));
-            semantic_raw.truncate(candidate_limit);
-
-            for (raw_chunk, score) in semantic_raw {
-                semantic_chunks.push((raw_chunk.decompress(), score));
-            }
-        } else {
-            // Unfiltered path: standard ANN search over entire corpus
-            let mut matches = Vec::new();
-            if let Some(v) = &ctx.vectors {
-                matches.extend(v.search(&query_vector, candidate_limit));
-            }
-            if let Some(v) = &ctx.base_vectors {
-                matches.extend(v.search(&query_vector, candidate_limit));
-            }
-            matches.sort_by(|a, b| b.score.total_cmp(&a.score));
-            matches.truncate(candidate_limit);
-
-            for vector_match in matches {
-                if let Some(chunk) = ctx.fetch_chunk_by_vector_key(vector_match.key)?
-                    && (options.skip_gitignore || !chunk.is_ignored)
-                {
-                    semantic_chunks.push((chunk, vector_match.score));
-                }
-            }
+                options,
+                &hash_query_vector,
+                candidate_limit,
+                ctx.hash_vectors.as_ref(),
+                ctx.base_hash_vectors.as_ref(),
+            )?;
+            merge_semantic_candidates(&mut semantic_by_id, hash_hits, 1.0);
         }
+
+        if let Some(model) = embedding_model
+            && model.dimensions() == 384
+            && has_neural_vectors
+        {
+            let neural_query_vector = model.embed(query_text);
+            let neural_hits = collect_semantic_candidates(
+                &ctx,
+                &path_matcher,
+                options,
+                &neural_query_vector,
+                candidate_limit,
+                ctx.neural_vectors.as_ref(),
+                ctx.base_neural_vectors.as_ref(),
+            )?;
+            merge_semantic_candidates(&mut semantic_by_id, neural_hits, 1.08);
+        }
+
+        semantic_chunks = semantic_by_id.into_values().collect::<Vec<_>>();
+        semantic_chunks.sort_by(|a, b| b.1.total_cmp(&a.1));
     }
     tracing::trace!(
         "semantic={:?} found={}",
@@ -723,7 +731,7 @@ fn find_focus_line(chunk: &IndexedChunk, query_text: &str, lines: &[&str]) -> us
 
     let query_lower = query.to_ascii_lowercase();
     let query_compact = singularize_token(&compact_identifier(query));
-    let query_tokens = tokenize_query(query);
+    let query_tokens = expanded_query_tokens(query);
 
     let mut best_line = window_start;
     let mut best_score = 0.0f32;
@@ -783,7 +791,7 @@ fn summarize_reason(query_text: &str, focus_line: &str) -> String {
             return format!("line contains query terms: {}", truncate_for_reason(focus));
         }
 
-        for token in tokenize_query(query) {
+        for token in expanded_query_tokens(query) {
             if focus.to_ascii_lowercase().contains(&token) {
                 return format!(
                     "line matches token `{}`: {}",
@@ -836,6 +844,12 @@ fn build_lexical_queries(query_text: &str) -> Vec<String> {
         }
     }
 
+    for token in expanded_query_tokens(query) {
+        if !normalized_tokens.contains(&token) {
+            queries.push(token);
+        }
+    }
+
     queries.sort();
     queries.dedup();
     queries
@@ -843,21 +857,171 @@ fn build_lexical_queries(query_text: &str) -> Vec<String> {
 
 fn tokenize_query(query: &str) -> Vec<String> {
     let mut tokens = Vec::new();
+    let mut seen = HashSet::new();
     for raw in query
         .split(|ch: char| !ch.is_ascii_alphanumeric())
         .filter(|token| !token.is_empty())
     {
         for segment in split_identifier_segments(raw) {
-            let singular = singularize_token(&segment);
-            if singular.len() >= 2 {
-                tokens.push(singular);
+            let normalized = singularize_token(&segment.to_ascii_lowercase());
+            if normalized.len() >= 2
+                && !is_query_stopword(&normalized)
+                && seen.insert(normalized.clone())
+            {
+                tokens.push(normalized);
             }
         }
     }
 
-    tokens.sort();
-    tokens.dedup();
     tokens
+}
+
+fn expanded_query_tokens(query: &str) -> Vec<String> {
+    let primary = tokenize_query(query);
+    let mut expanded = primary.clone();
+    let mut seen = primary.iter().cloned().collect::<HashSet<_>>();
+
+    for token in &primary {
+        for alias in query_token_aliases(token) {
+            let alias = alias.to_string();
+            if alias.len() >= 2 && seen.insert(alias.clone()) {
+                expanded.push(alias);
+            }
+        }
+    }
+
+    for alias in query_phrase_aliases(&primary) {
+        let alias = alias.to_string();
+        if alias.len() >= 2 && seen.insert(alias.clone()) {
+            expanded.push(alias);
+        }
+    }
+
+    expanded
+}
+
+fn query_token_aliases(token: &str) -> &'static [&'static str] {
+    match token {
+        "implemented" | "implementing" | "implementation" | "implements" => &["implement"],
+        "defined" | "defining" | "definition" | "definitions" | "declared" | "declaration" => {
+            &["define"]
+        }
+        "ranked" | "ranking" => &["rank"],
+        "results" => &["result"],
+        "chunking" => &["chunk"],
+        "flags" | "flag" => &["cli", "arg", "option"],
+        "arguments" | "argument" | "args" | "arg" => &["cli", "flag", "option"],
+        "command" => &["cli"],
+        "parsing" => &["parse", "parser"],
+        "matching" => &["match", "matcher"],
+        "detection" | "detected" | "detecting" => &["detect", "detector"],
+        "counting" | "counts" => &["count", "counter"],
+        "output" => &["print", "printer"],
+        "colored" | "coloring" => &["color"],
+        "walker" => &["walk"],
+        _ => &[],
+    }
+}
+
+fn query_phrase_aliases(tokens: &[String]) -> Vec<&'static str> {
+    let has = |needle: &str| tokens.iter().any(|token| token == needle);
+    let mut aliases = Vec::new();
+
+    if has("command") && has("line") {
+        aliases.push("cli");
+    }
+    if has("output") && has("format") {
+        aliases.push("printer");
+    }
+    if has("result") && has("output") {
+        aliases.push("printer");
+    }
+    if has("line") && has("number") {
+        aliases.push("line_number");
+    }
+
+    aliases
+}
+
+fn is_query_stopword(token: &str) -> bool {
+    matches!(
+        token,
+        "a" | "an"
+            | "and"
+            | "are"
+            | "as"
+            | "at"
+            | "be"
+            | "been"
+            | "being"
+            | "by"
+            | "can"
+            | "could"
+            | "did"
+            | "do"
+            | "does"
+            | "done"
+            | "file"
+            | "files"
+            | "find"
+            | "for"
+            | "from"
+            | "how"
+            | "i"
+            | "in"
+            | "into"
+            | "is"
+            | "it"
+            | "locate"
+            | "located"
+            | "me"
+            | "of"
+            | "on"
+            | "please"
+            | "show"
+            | "the"
+            | "their"
+            | "there"
+            | "these"
+            | "this"
+            | "those"
+            | "to"
+            | "was"
+            | "were"
+            | "what"
+            | "where"
+            | "which"
+            | "who"
+            | "why"
+            | "with"
+            | "within"
+            | "code"
+    )
+}
+
+fn raw_query_terms(query: &str) -> Vec<String> {
+    query
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_ascii_lowercase())
+        .collect()
+}
+
+fn has_location_intent(query_text: &str) -> bool {
+    raw_query_terms(query_text).into_iter().any(|term| {
+        matches!(
+            term.as_str(),
+            "where"
+                | "find"
+                | "locate"
+                | "located"
+                | "implemented"
+                | "implementation"
+                | "defined"
+                | "definition"
+                | "done"
+        )
+    })
 }
 
 fn truncate_for_reason(line: &str) -> String {
@@ -886,6 +1050,28 @@ fn scope_matches(chunk: &IndexedChunk, scope_filter: Option<&WorkspaceScope>) ->
 
 fn path_matches(chunk: &IndexedChunk, path_matcher: &PathGlobMatcher) -> bool {
     path_matcher.matches(&chunk.file_path)
+}
+
+fn is_definition_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "Function"
+            | "function"
+            | "Class"
+            | "class"
+            | "Struct"
+            | "struct"
+            | "Trait"
+            | "trait"
+            | "Interface"
+            | "interface"
+            | "Impl"
+            | "impl"
+            | "Enum"
+            | "enum"
+            | "Module"
+            | "module"
+    )
 }
 
 /// Pre-collect chunks from SQLite that match glob/scope/type filters.
@@ -1010,6 +1196,85 @@ fn query_filtered_chunks(
         .collect()
 }
 
+fn collect_semantic_candidates(
+    ctx: &SearchContext,
+    path_matcher: &PathGlobMatcher,
+    options: &SearchOptions,
+    query_vector: &[f32],
+    candidate_limit: usize,
+    primary_store: Option<&VectorStore>,
+    base_store: Option<&VectorStore>,
+) -> Result<Vec<(IndexedChunk, f32)>> {
+    let mut semantic_chunks = Vec::new();
+    let has_filters = !options.include_globs.is_empty()
+        || !options.exclude_globs.is_empty()
+        || options.scope_filter.is_some()
+        || options.type_filter.is_some();
+
+    if has_filters {
+        let filtered_chunks = collect_filtered_chunks(
+            ctx,
+            path_matcher,
+            options.scope_filter.as_ref(),
+            options.type_filter.as_deref(),
+            &options.include_globs,
+            options.skip_gitignore,
+        );
+
+        let mut semantic_raw = Vec::new();
+        for chunk in filtered_chunks {
+            let mut score =
+                primary_store.and_then(|store| store.score(chunk.vector_key, query_vector));
+            if score.is_none() {
+                score = base_store.and_then(|store| store.score(chunk.vector_key, query_vector));
+            }
+            if let Some(score) = score {
+                semantic_raw.push((chunk, score));
+            }
+        }
+        semantic_raw.sort_by(|a, b| b.1.total_cmp(&a.1));
+        semantic_raw.truncate(candidate_limit);
+
+        for (raw_chunk, score) in semantic_raw {
+            semantic_chunks.push((raw_chunk.decompress(), score));
+        }
+    } else {
+        let mut matches = Vec::new();
+        if let Some(store) = primary_store {
+            matches.extend(store.search(query_vector, candidate_limit));
+        }
+        if let Some(store) = base_store {
+            matches.extend(store.search(query_vector, candidate_limit));
+        }
+        matches.sort_by(|a, b| b.score.total_cmp(&a.score));
+        matches.truncate(candidate_limit);
+
+        for vector_match in matches {
+            if let Some(chunk) = ctx.fetch_chunk_by_vector_key(vector_match.key)?
+                && (options.skip_gitignore || !chunk.is_ignored)
+            {
+                semantic_chunks.push((chunk, vector_match.score));
+            }
+        }
+    }
+
+    Ok(semantic_chunks)
+}
+
+fn merge_semantic_candidates(
+    semantic_by_id: &mut HashMap<String, (IndexedChunk, f32)>,
+    hits: Vec<(IndexedChunk, f32)>,
+    score_multiplier: f32,
+) {
+    for (chunk, score) in hits {
+        let adjusted = score * score_multiplier;
+        semantic_by_id
+            .entry(chunk.chunk_id.clone())
+            .and_modify(|(_, best_score)| *best_score = best_score.max(adjusted))
+            .or_insert((chunk, adjusted));
+    }
+}
+
 fn fuse_rrf(
     lexical: &[(IndexedChunk, f32)],
     semantic: &[(IndexedChunk, f32)],
@@ -1026,9 +1291,12 @@ fn fuse_rrf(
     const SEMANTIC_ONLY_PENALTY: f32 = 0.60;
     const TERM_COVERAGE_WEIGHT: f32 = 0.35;
     const PATH_SEGMENT_WEIGHT: f32 = 0.20;
+    const FILE_STEM_WEIGHT: f32 = 0.30;
     const DEFINITION_NAME_BONUS: f32 = 0.25;
+    const LOCATION_INTENT_WEIGHT: f32 = 0.20;
 
-    let query_tokens = tokenize_query(query_text);
+    let query_tokens = expanded_query_tokens(query_text);
+    let location_intent = has_location_intent(query_text);
 
     let mut scores = HashMap::<String, f32>::new();
     let mut chunks = HashMap::<String, IndexedChunk>::new();
@@ -1107,7 +1375,15 @@ fn fuse_rrf(
             }
 
             if !query_tokens.is_empty() {
+                score += file_stem_boost(&query_tokens, &chunk) * FILE_STEM_WEIGHT;
+            }
+
+            if !query_tokens.is_empty() {
                 score += definition_name_boost(&query_tokens, &chunk) * DEFINITION_NAME_BONUS;
+            }
+
+            if location_intent {
+                score += location_intent_boost(&chunk) * LOCATION_INTENT_WEIGHT;
             }
 
             if !source_set.contains("lexical") && !source_set.contains("literal") {
@@ -1125,14 +1401,14 @@ fn fuse_rrf(
             score *= chunk_kind_boost(&chunk);
             score *= file_authority_score(&chunk);
 
-            // Apply chunk-density normalization: 1/sqrt(n) where n is the number
+            // Apply chunk-density normalization: 1/n^0.3 where n is the number
             // of chunks this file has in the candidate set. Single-chunk files
-            // (focused modules) are unaffected; a file with 25 chunks gets 0.2x.
+            // (focused modules) are unaffected; a file with 25 chunks gets ~0.3x.
             let n_file_chunks = file_chunk_counts
                 .get(&chunk.file_path)
                 .copied()
                 .unwrap_or(1) as f32;
-            score /= n_file_chunks.sqrt();
+            score /= n_file_chunks.powf(0.3);
 
             Some((chunk, score, source_list))
         })
@@ -1240,6 +1516,61 @@ fn path_segment_boost(query_tokens: &[String], chunk: &IndexedChunk) -> f32 {
         .filter(|t| segments.iter().any(|seg| seg.contains(t.as_str())))
         .count();
     matched as f32 / query_tokens.len() as f32
+}
+
+fn file_stem_boost(query_tokens: &[String], chunk: &IndexedChunk) -> f32 {
+    if query_tokens.is_empty() {
+        return 0.0;
+    }
+
+    let Some(stem) = chunk
+        .file_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .map(|stem| stem.to_ascii_lowercase())
+    else {
+        return 0.0;
+    };
+
+    let compact_stem = compact_identifier(&stem);
+    let exact_match = query_tokens
+        .iter()
+        .any(|token| stem == *token || compact_stem == compact_identifier(token));
+    let partial_match = query_tokens
+        .iter()
+        .any(|token| stem.contains(token.as_str()));
+
+    if exact_match {
+        1.0
+    } else if partial_match {
+        0.5
+    } else {
+        0.0
+    }
+}
+
+fn location_intent_boost(chunk: &IndexedChunk) -> f32 {
+    let mut boost: f32 = 0.0;
+    let path = chunk.file_path.to_string_lossy().to_ascii_lowercase();
+
+    if is_definition_kind(&chunk.kind) {
+        boost += 0.7;
+    }
+    if matches!(chunk.kind.as_str(), "Module" | "module") {
+        boost += 0.5;
+    }
+    if path.starts_with("src/")
+        || path.starts_with("app/")
+        || path.starts_with("lib/")
+        || path.starts_with("pkg/")
+    {
+        boost += 0.35;
+    }
+    if is_test_path(&path) {
+        boost -= 0.35;
+    }
+
+    boost.max(0.0)
 }
 
 /// Bonus when a chunk's definition name (first non-blank line) contains query tokens.
@@ -1387,14 +1718,7 @@ fn file_authority_score(chunk: &IndexedChunk) -> f32 {
     }
 
     // Test / spec / mock files — useful but secondary to the implementation
-    if path.contains("test")
-        || path.contains("spec")
-        || path.contains("mock")
-        || path.contains("_test.")
-        || path.contains(".test.")
-        || path.contains("_spec.")
-        || path.contains(".spec.")
-    {
+    if is_test_path(&path) {
         return 0.6;
     }
 
@@ -1405,6 +1729,16 @@ fn file_authority_score(chunk: &IndexedChunk) -> f32 {
 
     // Core source code gets a small boost to positively separate it
     1.0
+}
+
+fn is_test_path(path: &str) -> bool {
+    path.contains("test")
+        || path.contains("spec")
+        || path.contains("mock")
+        || path.contains("_test.")
+        || path.contains(".test.")
+        || path.contains("_spec.")
+        || path.contains(".spec.")
 }
 
 pub fn workspace_has_results(workspace: &Workspace) -> Result<bool> {
@@ -1905,6 +2239,26 @@ mod tests {
     }
 
     #[test]
+    fn query_expansion_adds_cli_aliases_for_command_line_flags() {
+        let expanded = expanded_query_tokens("command line flags");
+        assert!(expanded.iter().any(|token| token == "cli"));
+        assert!(expanded.iter().any(|token| token == "arg"));
+        assert!(expanded.iter().any(|token| token == "option"));
+
+        let lexical = build_lexical_queries("command line flags");
+        assert!(lexical.iter().any(|query| query == "cli"));
+    }
+
+    #[test]
+    fn query_expansion_adds_printer_alias_for_output_format() {
+        let expanded = expanded_query_tokens("search results output format");
+        assert!(expanded.iter().any(|token| token == "printer"));
+
+        let lexical = build_lexical_queries("search results output format");
+        assert!(lexical.iter().any(|query| query == "printer"));
+    }
+
+    #[test]
     #[serial]
     fn definition_site_ranks_above_usage() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1977,6 +2331,84 @@ mod tests {
             "auth.rs should rank first due to path boost, got: {}",
             hits[0].file_path.display()
         );
+    }
+
+    #[test]
+    #[serial]
+    fn natural_language_query_prefers_chunking_source_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("benches")).unwrap();
+        std::fs::write(
+            tmp.path().join("src/chunking.rs"),
+            "pub fn chunk_source(input: &str) -> usize {\n    input.lines().count()\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("src/text.rs"),
+            "fn is_code_separator(ch: char) -> bool {\n    matches!(ch, '_' | '-')\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("benches/indexer_bench.rs"),
+            "fn bench_chunking() {\n    assert_eq!(2, 1 + 1);\n}\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = hybrid_search(
+            &workspace,
+            "where is code chunking done",
+            Some(&model),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert!(!hits.is_empty());
+        assert_eq!(
+            hits[0].file_path,
+            std::path::PathBuf::from("src/chunking.rs")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn implementation_query_prefers_source_over_tests() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("tests")).unwrap();
+        std::fs::write(
+            tmp.path().join("src/mcp.rs"),
+            "pub fn serve_stdio() {\n    println!(\"mcp server ready\");\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("tests/mcp_e2e.rs"),
+            "#[test]\nfn e2e_mcp_initialize() {\n    assert!(true);\n}\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = hybrid_search(
+            &workspace,
+            "where is mcp implemented",
+            Some(&model),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].file_path, std::path::PathBuf::from("src/mcp.rs"));
     }
 
     #[test]

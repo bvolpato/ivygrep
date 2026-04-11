@@ -130,12 +130,15 @@ Traditional tools require you to know _exactly_ what you're looking for. ivygrep
 | Sub-100ms latency | ✅ | ❌ | ✅ |
 | Privacy-first (no upload) | ✅ | ❌ | ✅ |
 | Git-native (worktrees, branches) | ❌ | ❌ | ✅ |
-| AST-aware chunking | ❌ | ❌ | ✅ |
+| Structural code chunking | ❌ | ❌ | ✅ |
 | Incremental indexing | ❌ | ❌ | ✅ |
 | MCP server for AI agents | ❌ | ❌ | ✅ |
 
 ### 🌍 44 Languages Supported
-ivygrep provides AST-aware chunking for functions, classes, and modules across all major domains:
+ivygrep indexes and structurally chunks 44 languages today:
+
+- **Tree-sitter AST chunking:** Rust, Python, Go, JavaScript, TypeScript
+- **Heuristic structural chunking:** the remaining supported languages below
 
 - **Systems:** Rust, C, C++, Zig, Nim
 - **Backend:** Python, Go, Java, Kotlin, Scala, C#, Ruby, PHP, Perl, Groovy
@@ -158,7 +161,7 @@ Benchmarked on the **Linux kernel** (92K files, 1.5M chunks):
 | **`ig`** | semantic: `"kernel memory allocation"` | **~72 ms** | **125×** |
 | **`ig --literal`** | **single identifier** (fast path) | **~17 ms** | **529×** |
 
-Indexing is sub-second for most projects. Search is sub-100ms. Neural quality upgrades happen silently in the background via the default bundled ONNX runtime (`AllMiniLML6V2Q`).
+Indexing is sub-second for most projects. Search is sub-100ms. Small repos can complete neural enhancement before first results; larger repos return immediately and upgrade in the background via the bundled ONNX model (`AllMiniLML6V2Q`).
 
 ---
 
@@ -183,6 +186,8 @@ ig "query" ~/other/project         # search a different workspace
 ig --add .                         # register & index a workspace
 ig --rm .                          # unregister a workspace
 ig --status                        # show workspace health & embedding status
+ig doctor                          # inspect index health for the current workspace
+ig doctor --fix                    # rebuild a broken or stale index
 
 # Search modes
 ig --regex "fn\s+\w+_tax"          # regex mode (like rg)
@@ -217,6 +222,11 @@ The test suite covers unit tests, CLI snapshots, concurrency, golden queries, in
 ./scripts/bootstrap_stress_fixtures.sh
 cargo test --test stress_harness -- --ignored --nocapture
 ```
+
+## Roadmap
+
+- **More Tree-sitter languages:** the next step is to promote the most-used heuristic languages into the AST pipeline one by one, starting with Java, Ruby, C#, PHP, and Swift.
+- **Symbol retrieval:** a practical path is to store symbol tables during chunking, then add a second index for definitions, references, and call edges. That would enable `symbol`, `refs`, and `callers` workflows without replacing the current hybrid text retrieval.
 
 ---
 

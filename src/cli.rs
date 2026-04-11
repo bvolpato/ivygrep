@@ -11,14 +11,19 @@ use tracing_subscriber::EnvFilter;
 use crate::config;
 use crate::daemon;
 use crate::embedding::create_model;
-use crate::indexer::{index_workspace, remove_workspace_index, workspace_is_indexed};
+use crate::indexer::{
+    index_workspace, maybe_complete_neural_for_small_workspace, remove_workspace_index,
+    workspace_is_indexed,
+};
 use crate::mcp;
 use crate::protocol::{
     BUILD_VERSION, DaemonRequest, DaemonResponse, SearchHit, group_hits_by_file,
 };
 use crate::regex_search::regex_search;
 use crate::search::{SearchOptions, hybrid_search, literal_search};
-use crate::workspace::{Workspace, list_workspaces, resolve_workspace_and_scope};
+use crate::workspace::{
+    Workspace, WorkspaceIndexState, list_workspaces, resolve_workspace_and_scope,
+};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "Semantic grep that stays local", long_about = None)]
@@ -112,6 +117,10 @@ pub async fn run() -> Result<()> {
     config::ensure_app_dirs()?;
 
     if maybe_run_legacy_mcp_stdio()? {
+        return Ok(());
+    }
+
+    if maybe_run_doctor_command()? {
         return Ok(());
     }
 
@@ -549,6 +558,7 @@ async fn run_query(cli: Cli) -> Result<()> {
     let (workspace, scope_filter) = resolve_workspace_and_scope(&query_path)?;
     let scope_path = scope_filter.as_ref().map(|scope| scope.rel_path.clone());
     let scope_is_file = scope_filter.as_ref().is_some_and(|scope| scope.is_file);
+    let initial_index_state = (!cli.all_indices).then(|| workspace.index_health().state);
 
     let query_path_opt = if cli.all_indices {
         None
@@ -570,10 +580,13 @@ async fn run_query(cli: Cli) -> Result<()> {
     };
 
     if !cli.all_indices {
-        let first_run = !crate::indexer::workspace_is_indexed(&workspace);
-        if first_run {
+        let first_run = matches!(initial_index_state, Some(WorkspaceIndexState::NotIndexed));
+        let needs_repair = matches!(initial_index_state, Some(WorkspaceIndexState::Unhealthy));
+        if first_run || needs_repair {
             // Always show progress for first-run, even when the daemon handles it.
-            let msg = if workspace.is_worktree() {
+            let msg = if needs_repair {
+                "Index unhealthy — rebuilding"
+            } else if workspace.is_worktree() {
                 "First run — computing worktree overlay"
             } else {
                 "First run — indexing"
@@ -707,9 +720,12 @@ async fn run_query(cli: Cli) -> Result<()> {
     // after results are returned, silently upgrading quality.
 
     if !search_via_daemon && !cli.all_indices {
-        let first_run = !workspace_is_indexed(&workspace);
-        if first_run {
-            let msg = if workspace.is_worktree() {
+        let first_run = matches!(initial_index_state, Some(WorkspaceIndexState::NotIndexed));
+        let needs_repair = matches!(initial_index_state, Some(WorkspaceIndexState::Unhealthy));
+        if first_run || needs_repair {
+            let msg = if needs_repair {
+                "Index unhealthy — rebuilding"
+            } else if workspace.is_worktree() {
                 "First run — computing worktree overlay"
             } else {
                 "First run — indexing"
@@ -1062,6 +1078,9 @@ async fn run_query(cli: Cli) -> Result<()> {
                 vec![workspace.clone()]
             };
             for ws in workspaces {
+                if !cli.hash {
+                    let _ = maybe_complete_neural_for_small_workspace(&ws);
+                }
                 let _t_search = std::time::Instant::now();
                 match hybrid_search(
                     &ws,
@@ -1253,6 +1272,73 @@ fn init_tracing() {
         .try_init();
 }
 
+fn maybe_run_doctor_command() -> Result<bool> {
+    let args = env::args().skip(1).collect::<Vec<_>>();
+    if args.first().is_none_or(|arg| arg != "doctor") {
+        return Ok(false);
+    }
+
+    let mut fix = false;
+    let mut json = false;
+    let mut path: Option<PathBuf> = None;
+
+    for arg in args.iter().skip(1) {
+        match arg.as_str() {
+            "--fix" => fix = true,
+            "--json" => json = true,
+            "-h" | "--help" => {
+                println!("Usage: ig doctor [PATH] [--fix] [--json]");
+                println!();
+                println!("Inspect the current workspace index and optionally rebuild it.");
+                return Ok(true);
+            }
+            value if value.starts_with('-') => {
+                bail!("unknown option for `ig doctor`: {value}");
+            }
+            value => {
+                if path.is_some() {
+                    bail!("too many arguments for `ig doctor`");
+                }
+                path = Some(PathBuf::from(value));
+            }
+        }
+    }
+
+    run_doctor(path.as_deref(), fix, json)?;
+    Ok(true)
+}
+
+fn run_doctor(path: Option<&Path>, fix: bool, json: bool) -> Result<()> {
+    let target = match path {
+        Some(path) => path.to_path_buf(),
+        None => env::current_dir()?,
+    };
+    let workspace = Workspace::resolve(&target)?;
+    let report = crate::doctor::inspect_and_maybe_fix(&workspace, fix)?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!("Workspace: {}", report.workspace_root.display());
+    println!("State: {:?}", report.state);
+    println!(
+        "Chunks: {}  Files: {}",
+        report.chunk_count, report.file_count
+    );
+
+    for finding in report.findings {
+        println!("- {finding}");
+    }
+
+    if fix && report.repaired {
+        println!("Repair complete.");
+    }
+
+    Ok(())
+}
+
 fn maybe_run_legacy_mcp_stdio() -> Result<bool> {
     let args = env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() {
@@ -1322,6 +1408,9 @@ fn local_fallback_search(
     };
 
     for ws in workspaces {
+        if !use_hash {
+            let _ = maybe_complete_neural_for_small_workspace(&ws);
+        }
         match hybrid_search(&ws, query, model.as_deref(), options) {
             Ok(mut hits) => {
                 if all_indices {

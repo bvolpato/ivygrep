@@ -8,7 +8,9 @@ use serde_json::{Value, json};
 
 use crate::config;
 use crate::embedding::create_model;
-use crate::indexer::{index_workspace, workspace_is_indexed};
+use crate::indexer::{
+    index_workspace, maybe_complete_neural_for_small_workspace, workspace_is_indexed,
+};
 use crate::path_glob::parse_glob_csv;
 use crate::protocol::group_hits_by_file;
 use crate::regex_search::regex_search;
@@ -317,6 +319,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
                 args.skip_gitignore.unwrap_or(false),
             )?
         } else {
+            let _ = maybe_complete_neural_for_small_workspace(&workspace);
             hybrid_search(
                 &workspace,
                 query,

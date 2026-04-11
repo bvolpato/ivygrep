@@ -2,17 +2,34 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.44] — 2026-04-11
+
+### Added
+- **`ig doctor` / `ig doctor --fix`:** new index-health inspection and repair flow for stale, partial, or corrupted local indexes
+- Relevance regressions for natural-language implementation queries and source-file lookup
+- Workspace health classification covering `not_indexed`, `healthy`, `healthy_empty`, and `unhealthy`
+
+### Improved
+- **Self-healing index detection:** `workspace_is_indexed()` now refuses zero-chunk indexes when the workspace still has indexable files, so broken indexes rebuild automatically instead of returning empty results
+- **Natural-language query understanding:** stopword filtering, light intent normalization, file-stem boosts, and location-intent ranking make plain-English queries less likely to drift into tests or unrelated helpers
+- **Semantic resilience:** hash vectors remain available immediately, neural vectors are used as an upgrade when present, and small repositories can complete neural enhancement before the first search returns
+- Documentation now distinguishes Tree-sitter AST chunking for core languages from heuristic structural chunking for the broader 44-language registry
+
 ## [0.5.43] — 2026-04-11
 
 ### Added
 - **Code-aware tokenizer:** Custom BM25 tokenizer splits camelCase, snake_case, dots, colons, and path separators so that natural-language queries like "handle error" natively match `handleError`, `handle_error`, and `HandleError` at the BM25 scoring level
-- **BM25F multi-field scoring:** New `file_path_text` (5× boost) and `signature` (5× boost) fields bring Sourcegraph/Zoekt-style field-level relevance — function definitions and filename matches rank significantly higher than body text
+- **BM25F multi-field scoring:** New `file_path_text` (5× boost) and `signature` (10× boost) fields bring Sourcegraph/Zoekt-style field-level relevance — function definitions and filename matches rank significantly higher than body text
+- **Literal variant expansion:** The literal pass now tries snake_case, camelCase, and compact variants of the query, so "hybrid search" also matches `hybrid_search` and `hybridSearch` as exact substrings
+- **Definition-kind boost:** 2× post-BM25 multiplier for Function, Class, Struct, Trait, Interface, Impl, Enum, and Module chunks counteracts BM25's document-length normalization penalty on large definitions
 - Tests for code-aware tokenizer covering camelCase, snake_case, path separators, function signatures, and natural-language queries
 - BM25F relevance test proving definition-site ranking via signature boost
 
 ### Improved
 - Lexical search now uses code-aware tokenization instead of Tantivy's default `SimpleTokenizer`, eliminating the reliance on post-hoc query expansion for identifier matching
 - Both literal and lexical search passes search across all BM25F fields for broader candidate recall
+- Increased default candidate limit from 100 to 500 to ensure BM25 retrieves definition chunks even for high-frequency terms
+- Softened file density normalization from 1/√n to 1/n^0.3 to preserve definition-site signal in files with many matching chunks
 
 ## [0.5.42] — 2026-04-11
 

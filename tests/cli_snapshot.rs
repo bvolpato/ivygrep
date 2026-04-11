@@ -2,6 +2,7 @@ use std::path::Path;
 
 use assert_cmd::Command;
 use fs_extra::dir::{CopyOptions, copy as copy_dir};
+use ivygrep::workspace::{Workspace, WorkspaceMetadata};
 use serial_test::serial;
 
 fn stage_fixture_repo(name: &str) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
@@ -17,6 +18,27 @@ fn stage_fixture_repo(name: &str) -> (tempfile::TempDir, std::path::PathBuf, std
 
     let home = tmp.path().join("ivygrep_home");
     (tmp, target_root, home)
+}
+
+fn create_unhealthy_index_fixture(root: &Path, home: &Path, skip_gitignore: bool) -> Workspace {
+    unsafe { std::env::set_var("IVYGREP_HOME", home) };
+
+    let workspace = Workspace::resolve(root).unwrap();
+    workspace.ensure_dirs().unwrap();
+    workspace
+        .write_metadata(&WorkspaceMetadata {
+            id: workspace.id.clone(),
+            root: workspace.root.clone(),
+            created_at_unix: 0,
+            last_indexed_at_unix: Some(1),
+            watch_enabled: false,
+            skip_gitignore,
+        })
+        .unwrap();
+    std::fs::write(workspace.sqlite_path(), "").unwrap();
+    std::fs::create_dir_all(workspace.tantivy_dir()).unwrap();
+    std::fs::write(workspace.vector_path(), "").unwrap();
+    workspace
 }
 
 #[test]
@@ -452,6 +474,113 @@ export function registerCommands(p: Plugin) {
     assert!(
         files.iter().any(|p| p.contains("plugin.ts")),
         "hybrid search must find gquota in plugin.ts, got files: {:?}",
+        files
+    );
+}
+
+#[test]
+#[serial]
+fn cli_doctor_json_reports_unhealthy_zero_chunk_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::write(root.join("lib.rs"), "pub fn answer() -> usize { 42 }\n").unwrap();
+
+    let home = tmp.path().join("ivygrep_home");
+    let _workspace = create_unhealthy_index_fixture(&root, &home, false);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    let output = cmd
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .args(["doctor", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["state"], "unhealthy");
+    assert_eq!(value["healthy"], false);
+    assert_eq!(value["chunk_count"], 0);
+    assert!(
+        value["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|finding| finding.as_str())
+            .any(|finding| finding.contains("zero chunks")),
+        "doctor findings should mention the zero-chunk failure mode: {value:#}"
+    );
+}
+
+#[test]
+#[serial]
+fn cli_doctor_fix_repairs_unhealthy_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::write(root.join("lib.rs"), "pub fn answer() -> usize { 42 }\n").unwrap();
+
+    let home = tmp.path().join("ivygrep_home");
+    let _workspace = create_unhealthy_index_fixture(&root, &home, false);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    let output = cmd
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .args(["doctor", "--fix", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(value["state"], "healthy");
+    assert_eq!(value["healthy"], true);
+    assert_eq!(value["repaired"], true);
+    assert!(
+        value["chunk_count"].as_u64().unwrap_or_default() >= 1,
+        "doctor --fix should rebuild the index: {value:#}"
+    );
+}
+
+#[test]
+#[serial]
+fn cli_query_auto_repairs_unhealthy_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::write(root.join("lib.rs"), "pub fn answer() -> usize { 42 }\n").unwrap();
+
+    let home = tmp.path().join("ivygrep_home");
+    let _workspace = create_unhealthy_index_fixture(&root, &home, false);
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    let output = cmd
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--json", "--hash", "-f", "answer"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let files = value
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry.get("file_path").and_then(|v| v.as_str()))
+        .collect::<Vec<_>>();
+
+    assert!(
+        files.iter().any(|path| path.ends_with("lib.rs")),
+        "search should recover from an unhealthy index and return lib.rs: {:?}",
         files
     );
 }

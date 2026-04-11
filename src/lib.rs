@@ -2,6 +2,7 @@ pub mod chunking;
 pub mod cli;
 pub mod config;
 pub mod daemon;
+pub mod doctor;
 pub mod embedding;
 pub mod indexer;
 pub mod ipc;

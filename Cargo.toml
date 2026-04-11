@@ -1,6 +1,6 @@
 [package]
 name = "ivygrep"
-version = "0.5.43"
+version = "0.5.44"
 edition = "2024"
 description = "Semantic grep that stays local"
 license = "MIT"
@@ -77,4 +77,3 @@ harness = false
 
 [patch.crates-io]
 hf-hub = { path = "vendor/hf-hub" }
-

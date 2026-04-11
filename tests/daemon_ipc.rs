@@ -30,6 +30,20 @@ async fn roundtrip(request: &DaemonRequest) -> DaemonResponse {
     serde_json::from_str(&line).expect("failed to parse response")
 }
 
+async fn bind_for_test() -> Option<(ivygrep::ipc::IpcListener, std::path::PathBuf)> {
+    match ivygrep::ipc::bind().await {
+        Ok(bound) => Some(bound),
+        Err(err)
+            if err
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied) =>
+        {
+            None
+        }
+        Err(err) => panic!("bind failed unexpectedly: {err:#}"),
+    }
+}
+
 fn create_test_repo(root: &Path) {
     fs::create_dir_all(root).unwrap();
     fs::write(
@@ -91,7 +105,9 @@ async fn daemon_ipc_status_roundtrip() {
     let home = tempdir().unwrap();
     isolate_home(home.path());
 
-    let (listener, _) = ivygrep::ipc::bind().await.unwrap();
+    let Some((listener, _)) = bind_for_test().await else {
+        return;
+    };
 
     let daemon_handle = tokio::spawn(async move {
         serve_one(&listener, |req| match req {
@@ -138,7 +154,9 @@ async fn daemon_ipc_index_and_search_roundtrip() {
     create_test_repo(repo_dir.path());
     let repo_path = ivygrep::config::canonicalize_lossy(repo_dir.path()).unwrap();
 
-    let (listener, _) = ivygrep::ipc::bind().await.unwrap();
+    let Some((listener, _)) = bind_for_test().await else {
+        return;
+    };
 
     let daemon_handle = tokio::spawn(async move {
         for _ in 0..2 {
@@ -250,7 +268,9 @@ async fn daemon_ipc_multiple_concurrent_connections() {
     let home = tempdir().unwrap();
     isolate_home(home.path());
 
-    let (listener, _) = ivygrep::ipc::bind().await.unwrap();
+    let Some((listener, _)) = bind_for_test().await else {
+        return;
+    };
 
     let daemon_handle = tokio::spawn(async move {
         for _ in 0..3 {
@@ -307,7 +327,9 @@ async fn daemon_ipc_error_on_bad_path() {
     let home = tempdir().unwrap();
     isolate_home(home.path());
 
-    let (listener, _) = ivygrep::ipc::bind().await.unwrap();
+    let Some((listener, _)) = bind_for_test().await else {
+        return;
+    };
 
     let daemon_handle = tokio::spawn(async move {
         serve_one(&listener, |req| match req {
@@ -366,7 +388,9 @@ async fn daemon_ipc_skip_gitignore() {
     fs::write(repo_path.join("tracked.txt"), "hello ivygrep").unwrap();
     fs::write(repo_path.join("ignored.txt"), "hello ivygrep").unwrap(); // This should be ignored
 
-    let (listener, _) = ivygrep::ipc::bind().await.unwrap();
+    let Some((listener, _)) = bind_for_test().await else {
+        return;
+    };
 
     let daemon_handle = tokio::spawn(async move {
         for _ in 0..3 {

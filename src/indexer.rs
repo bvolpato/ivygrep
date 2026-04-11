@@ -23,6 +23,7 @@ use crate::vector_store::{ScalarKind, VectorStore};
 use crate::workspace::{Workspace, WorkspaceMetadata};
 
 const ZSTD_MAGIC: &[u8] = &[0x28, 0xB5, 0x2F, 0xFD];
+pub const BLOCKING_NEURAL_CUTOFF_BYTES: u64 = 1_000_000;
 
 fn compress_text(text: &str) -> Vec<u8> {
     zstd::encode_all(text.as_bytes(), 3).unwrap_or_else(|_| text.as_bytes().to_vec())
@@ -85,13 +86,27 @@ pub struct StorageHandles {
 }
 
 pub fn workspace_is_indexed(workspace: &Workspace) -> bool {
-    workspace.sqlite_path().exists()
-        && workspace.tantivy_dir().exists()
-        && workspace.vector_path().exists()
-        && match workspace.read_metadata() {
-            Ok(Some(m)) => m.last_indexed_at_unix.is_some(),
-            _ => false,
+    workspace.index_health().is_queryable()
+}
+
+pub fn maybe_complete_neural_for_small_workspace(workspace: &Workspace) -> Result<bool> {
+    if !workspace.should_block_on_neural_enhancement(BLOCKING_NEURAL_CUTOFF_BYTES)? {
+        return Ok(false);
+    }
+
+    match crate::embedding::create_neural_model() {
+        Ok(model) => {
+            let _ = enhance_workspace_neural(workspace, model.as_ref())?;
+            Ok(true)
         }
+        Err(err) => {
+            tracing::warn!(
+                "failed to load neural model for blocking enhancement on {}: {err:#}",
+                workspace.root.display()
+            );
+            Ok(false)
+        }
+    }
 }
 
 pub fn remove_workspace_index(workspace: &Workspace) -> Result<()> {
@@ -128,6 +143,16 @@ pub fn index_workspace(
     workspace: &Workspace,
     embedding_model: &dyn EmbeddingModel,
 ) -> Result<IndexingSummary> {
+    let preserved_metadata = workspace.read_metadata().ok().flatten();
+    if workspace.index_health().needs_rebuild() {
+        remove_workspace_index(workspace)?;
+        workspace.ensure_dirs()?;
+        if let Some(mut metadata) = preserved_metadata {
+            metadata.last_indexed_at_unix = None;
+            workspace.write_metadata(&metadata)?;
+        }
+    }
+
     workspace.ensure_dirs()?;
 
     // Acquire an exclusive file lock to prevent concurrent writes to the

@@ -140,29 +140,30 @@ Runtime.
 **Why fastembed and not sentence-transformers:** fastembed is pure Rust/ONNX with
 no Python dependency. The model runs in the same process as the search engine.
 
-### Tree-sitter — AST-Aware Code Chunking
+### Tree-sitter — AST-Aware Chunking For Core Languages
 
 [Tree-sitter](https://tree-sitter.github.io/tree-sitter/) is an incremental
 parsing library that produces concrete syntax trees.
 
 **What we use it for:**
 
-- **Precise function/class boundaries** — for 5 core languages (Rust, Python,
-  Go, JavaScript, TypeScript), Tree-sitter parses the full AST and extracts
-  structural node ranges using S-expression queries like:
+- **Precise function/class boundaries** — today, Tree-sitter is enabled for 5
+  core languages (Rust, Python, Go, JavaScript, TypeScript). It parses the
+  full AST and extracts structural node ranges using S-expression queries like:
   ```
   (function_item) @fn (impl_item) @class (trait_item) @class
   ```
   Each matched node becomes a chunk with exact start/end line numbers.
 - **Quality over heuristics** — Tree-sitter gives perfect boundaries for nested
   functions, multi-line signatures, and trait impls. The regex-based fallback
-  (used for 35+ other languages) sometimes splits mid-function.
+  (used for the rest of the supported language set) sometimes splits
+  mid-function.
 
 **Why Tree-sitter and not regex-only:** regex can't reliably parse code. A line
 like `if (function_call()) {` looks like a function definition to a regex
 heuristic. Tree-sitter knows it's a control flow statement because it has the
-full parse tree. For languages without Tree-sitter grammars, we fall back to a
-data-driven regex heuristic (44 language definitions in `LANGUAGES`).
+full parse tree. For languages without an AST grammar wired in yet, we fall
+back to the data-driven structural heuristic registry in `LANGUAGES`.
 
 ### notify — Filesystem Watcher
 
