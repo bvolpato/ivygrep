@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775883909437,
+  "lastUpdate": 1775922833520,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -5453,6 +5453,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 586.62,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "a3eff112ce7d35d4fc17d11c972bc503f2e1dde0",
+          "message": "feat: BM25F code-aware tokenizer and multi-field relevance scoring\n\nImplement a custom Tantivy tokenizer that splits camelCase, snake_case,\ndots, colons, and path separators so BM25 natively matches natural-\nlanguage queries against code identifiers without post-hoc expansion.\n\nAdd two BM25F fields to the Tantivy schema:\n- file_path_text: tokenized path components (5× boost)\n- signature: first line of function/class definitions (5× boost)\n\nThis brings Sourcegraph/Zoekt-style field-level relevance: queries like\n'handle error' rank the handleError() definition above call sites, and\npath matches (e.g., 'auth' matching auth.rs) score 5× higher than body\ntext matches.\n\n- 7 new tokenizer unit tests (camelCase, snake_case, paths, etc.)\n- BM25F integration test proving definition-site ranking\n- All 132+ existing tests pass with no regressions",
+          "timestamp": "2026-04-11T11:46:48-04:00",
+          "tree_id": "6f4471748477d91c0e2377e68c39495690ad4ce7",
+          "url": "https://github.com/bvolpato/ivygrep/commit/a3eff112ce7d35d4fc17d11c972bc503f2e1dde0"
+        },
+        "date": 1775922833069,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 951882000,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 8206.1,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3818.56,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2809.6,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11327.69,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 10928.63,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 6.59,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 522.71,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 25856.56,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 15079.51,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 5320.21,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 450887.13,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 504.47,
             "unit": "µs"
           }
         ]
