@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1775857555961,
+  "lastUpdate": 1775883909437,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -5364,6 +5364,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 592.27,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "48822d0d3cf9591e50d9fe9d39189692bdc0c6ba",
+          "message": "fix: literal search recall for top-level code\n\nTree-sitter chunker was silently dropping source lines not covered by\nfunction/class AST nodes (imports, constants, type aliases). This caused\nliteral and hybrid search to miss terms like 'gquota' that only appeared\nin top-level const declarations.\n\nChanges:\n- chunking: emit Module-kind gap chunks for uncovered source lines\n- search: clean up collect_literal_candidates (Tantivy index only, no\n  SQLite full-scan fallback needed now that all text is indexed)\n- tests: add CLI e2e + unit tests for the exact gquota regression\n\nCloses the literal search recall bug reported for v0.5.41.",
+          "timestamp": "2026-04-11T00:57:54-04:00",
+          "tree_id": "5f8357d8b64deeec1a32ad498f40bedec0ba99b5",
+          "url": "https://github.com/bvolpato/ivygrep/commit/48822d0d3cf9591e50d9fe9d39189692bdc0c6ba"
+        },
+        "date": 1775883909055,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 925136550,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 8541.14,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3823.12,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2753.21,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11531.23,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 11338.21,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 6.94,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 531.25,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 21548.52,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 14451.09,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 5578.44,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 473965.99,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 586.62,
             "unit": "µs"
           }
         ]
