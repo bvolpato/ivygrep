@@ -87,7 +87,7 @@ pub struct StorageHandles {
 }
 
 pub fn workspace_is_indexed(workspace: &Workspace) -> bool {
-    workspace.index_health().is_queryable()
+    workspace.quick_index_health().is_queryable()
 }
 
 pub fn maybe_complete_neural_for_small_workspace(workspace: &Workspace) -> Result<bool> {
@@ -160,13 +160,8 @@ fn index_workspace_with_options(
     trust_live_watcher: bool,
 ) -> Result<IndexingSummary> {
     let preserved_metadata = workspace.read_metadata().ok().flatten();
-    if workspace.index_health().needs_rebuild() {
-        remove_workspace_index(workspace)?;
-        workspace.ensure_dirs()?;
-        if let Some(mut metadata) = preserved_metadata {
-            metadata.last_indexed_at_unix = None;
-            workspace.write_metadata(&metadata)?;
-        }
+    if workspace.quick_index_health().needs_rebuild() {
+        rebuild_index_storage(workspace, preserved_metadata.as_ref())?;
     }
 
     workspace.ensure_dirs()?;
@@ -253,8 +248,6 @@ fn index_workspace_inner(
     embedding_model: &dyn EmbeddingModel,
     trust_live_watcher: bool,
 ) -> Result<IndexingSummary> {
-    let _ = open_storage(workspace, embedding_model.dimensions())?;
-
     // Write metadata early so the workspace appears in `ig --status` during indexing.
     // The final write after completion updates last_indexed_at_unix.
     if workspace.read_metadata()?.is_none() {
@@ -402,6 +395,23 @@ fn index_workspace_inner(
             workspace.vector_path(),
         )
     };
+
+    if !use_overlay {
+        let preserved_metadata = workspace.read_metadata().ok().flatten();
+        if let Err(err) = open_storage(workspace, embedding_model.dimensions()) {
+            tracing::warn!(
+                "storage verification failed for {}: {err:#}; rebuilding index storage",
+                workspace.root.display()
+            );
+            rebuild_index_storage(workspace, preserved_metadata.as_ref())?;
+            let _ = open_storage(workspace, embedding_model.dimensions()).with_context(|| {
+                format!(
+                    "failed to reopen index storage after rebuild for {}",
+                    workspace.root.display()
+                )
+            })?;
+        }
+    }
 
     let mut sqlite = Connection::open(&sqlite_path)?;
     // WAL mode + larger cache for bulk-write throughput on initial index.
@@ -662,6 +672,19 @@ fn index_workspace_inner(
         deleted_files: diff.deleted.len(),
         total_chunks: count_workspace_chunks(workspace).unwrap_or(0),
     })
+}
+
+fn rebuild_index_storage(
+    workspace: &Workspace,
+    preserved_metadata: Option<&WorkspaceMetadata>,
+) -> Result<()> {
+    remove_workspace_index(workspace)?;
+    workspace.ensure_dirs()?;
+    if let Some(mut metadata) = preserved_metadata.cloned() {
+        metadata.last_indexed_at_unix = None;
+        workspace.write_metadata(&metadata)?;
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]

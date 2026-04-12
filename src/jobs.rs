@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -275,8 +274,23 @@ pub fn process_is_alive(pid: u32, expected_start_time: Option<&str>) -> bool {
 }
 
 pub fn process_start_time_token(pid: u32) -> Option<String> {
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let (_, rest) = stat.rsplit_once(") ")?;
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        let start_time = fields.get(19)?;
+        if start_time.is_empty() {
+            None
+        } else {
+            Some((*start_time).to_string())
+        }
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        use std::process::Command;
+
         let output = Command::new("ps")
             .args(["-p", &pid.to_string(), "-o", "lstart="])
             .output()

@@ -408,7 +408,15 @@ impl Workspace {
         Ok(Some(parsed))
     }
 
+    pub fn quick_index_health(&self) -> WorkspaceIndexHealth {
+        self.index_health_with_options(false)
+    }
+
     pub fn index_health(&self) -> WorkspaceIndexHealth {
+        self.index_health_with_options(true)
+    }
+
+    fn index_health_with_options(&self, verify_stores: bool) -> WorkspaceIndexHealth {
         let mut issues = Vec::new();
         let metadata = self.read_metadata().ok().flatten();
         let has_any_index_artifacts = self.metadata_path().exists()
@@ -421,7 +429,11 @@ impl Workspace {
                 state: WorkspaceIndexState::NotIndexed,
                 chunk_count: 0,
                 file_count: 0,
-                has_indexable_files: workspace_has_indexable_files(&self.root, false),
+                has_indexable_files: if verify_stores {
+                    workspace_has_indexable_files(&self.root, false)
+                } else {
+                    false
+                },
                 issues,
             };
         }
@@ -451,20 +463,36 @@ impl Workspace {
         let (chunk_count, file_count) = read_sqlite_counts(&self.index_dir);
 
         if chunk_count > 0 {
-            if let Err(err) = crate::indexer::open_tantivy_index(&self.tantivy_dir()) {
-                issues.push(format!("failed to open Tantivy index: {err:#}"));
+            if !dir_has_entries(&self.tantivy_dir()) {
+                issues.push("Tantivy index directory is empty despite indexed chunks".to_string());
             }
 
-            match crate::vector_store::VectorStore::open_readonly(
-                &self.vector_path(),
-                256,
-                crate::vector_store::ScalarKind::F16,
-            ) {
-                Ok(store) if store.size() == 0 => {
-                    issues.push("hash vector store is empty despite indexed chunks".to_string());
+            if self
+                .vector_path()
+                .metadata()
+                .map(|metadata| metadata.len() == 0)
+                .unwrap_or(false)
+            {
+                issues.push("hash vector store file is empty despite indexed chunks".to_string());
+            }
+
+            if verify_stores {
+                if let Err(err) = crate::indexer::open_tantivy_index(&self.tantivy_dir()) {
+                    issues.push(format!("failed to open Tantivy index: {err:#}"));
                 }
-                Ok(_) => {}
-                Err(err) => issues.push(format!("failed to open hash vector store: {err:#}")),
+
+                match crate::vector_store::VectorStore::open_readonly(
+                    &self.vector_path(),
+                    256,
+                    crate::vector_store::ScalarKind::F16,
+                ) {
+                    Ok(store) if store.size() == 0 => {
+                        issues
+                            .push("hash vector store is empty despite indexed chunks".to_string());
+                    }
+                    Ok(_) => {}
+                    Err(err) => issues.push(format!("failed to open hash vector store: {err:#}")),
+                }
             }
         }
 
@@ -895,6 +923,13 @@ fn workspace_has_indexable_files(root: &Path, skip_gitignore: bool) -> bool {
     }
 
     false
+}
+
+fn dir_has_entries(path: &Path) -> bool {
+    fs::read_dir(path)
+        .ok()
+        .and_then(|mut entries| entries.next())
+        .is_some()
 }
 
 fn workspace_fits_within_byte_cutoff(

@@ -2,6 +2,16 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.46] — 2026-04-12
+
+### Improved
+- **No-op reindex hot path:** restored incremental `index_workspace()` performance by using a cheap health check on the clean fast path and deferring full storage verification until an actual write is needed
+- **Resilient self-healing without benchmark tax:** suspicious or corrupt index storage still rebuilds automatically, but healthy indexes no longer pay the full doctor-grade verification cost on every no-change reindex
+- **Linux job liveness checks:** PID start-time verification now reads `/proc/<pid>/stat` instead of spawning `ps`, reducing background bookkeeping overhead on the common path
+
+### Added
+- **Critical benchmark guard:** the benchmark workflow now compares `indexer/incremental_reindex_no_change` against the base ref on the same runner and fails fast on regressions above the configured threshold
+
 ## [0.5.45] — 2026-04-12
 
 ### Added

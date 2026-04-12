@@ -18,6 +18,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -28,6 +30,24 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: "bench"
+
+      - name: Determine benchmark base
+        id: benchmark-base
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "ref=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ github.event.before }}" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+            echo "ref=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Guard critical benchmark regressions
+        if: steps.benchmark-base.outputs.ref != ''
+        run: |
+          python3 scripts/benchmark_guard.py \
+            --baseline-ref "${{ steps.benchmark-base.outputs.ref }}" \
+            --bench-target indexer_bench \
+            --bench-name indexer/incremental_reindex_no_change \
+            --threshold 1.15
 
       - name: Install cargo-criterion
         run: cargo install cargo-criterion
