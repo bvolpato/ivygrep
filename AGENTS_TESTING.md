@@ -17,7 +17,7 @@ cargo test -- --test-threads=1
 
 ```bash
 ./scripts/bootstrap_stress_fixtures.sh
-cargo test --test stress_harness -- --test-threads=1
+cargo test --test stress_harness -- --ignored --nocapture --test-threads=1
 ```
 
 ## CI Matrix

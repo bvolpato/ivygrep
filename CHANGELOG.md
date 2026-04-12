@@ -2,6 +2,13 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.47] — 2026-04-12
+
+### Fixed
+- **Stale legacy runtime PID cleanup:** `ig doctor --fix` now removes dead legacy watcher, indexing, and enhancement PID files instead of only reporting them
+- **Query-path self-healing:** normal CLI and MCP searches now clean stale legacy runtime PID files before searching, so old runtime markers stop lingering until a manual repair
+- **False stale warnings:** doctor now checks whether legacy PID files still point to a live process before flagging them as stale
+
 ## [0.5.46] — 2026-04-12
 
 ### Improved
