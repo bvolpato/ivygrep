@@ -140,15 +140,16 @@ Runtime.
 **Why fastembed and not sentence-transformers:** fastembed is pure Rust/ONNX with
 no Python dependency. The model runs in the same process as the search engine.
 
-### Tree-sitter — AST-Aware Chunking For Core Languages
+### Tree-sitter — AST-Aware Chunking For 10 Core Languages
 
 [Tree-sitter](https://tree-sitter.github.io/tree-sitter/) is an incremental
 parsing library that produces concrete syntax trees.
 
 **What we use it for:**
 
-- **Precise function/class boundaries** — today, Tree-sitter is enabled for 5
-  core languages (Rust, Python, Go, JavaScript, TypeScript). It parses the
+- **Precise function/class boundaries** — today, Tree-sitter is enabled for 10
+  core languages (Rust, Python, Go, JavaScript, TypeScript, Java, C#, PHP,
+  Ruby, Swift). It parses the
   full AST and extracts structural node ranges using S-expression queries like:
   ```
   (function_item) @fn (impl_item) @class (trait_item) @class

@@ -479,6 +479,36 @@ fn try_tree_sitter_chunk_source(
                 .ok()?;
             "(function_declaration) @fn (method_definition) @fn (class_declaration) @class (interface_declaration) @class"
         }
+        "java" => {
+            parser
+                .set_language(&tree_sitter_java::LANGUAGE.into())
+                .ok()?;
+            "(class_declaration) @class (interface_declaration) @class (enum_declaration) @class (annotation_type_declaration) @class (method_declaration) @fn (constructor_declaration) @fn"
+        }
+        "csharp" => {
+            parser
+                .set_language(&tree_sitter_c_sharp::LANGUAGE.into())
+                .ok()?;
+            "(class_declaration) @class (interface_declaration) @class (struct_declaration) @class (record_declaration) @class (enum_declaration) @class (method_declaration) @fn (constructor_declaration) @fn"
+        }
+        "php" => {
+            parser
+                .set_language(&tree_sitter_php::LANGUAGE_PHP.into())
+                .ok()?;
+            "(class_declaration) @class (interface_declaration) @class (trait_declaration) @class (enum_declaration) @class (function_definition) @fn (method_declaration) @fn"
+        }
+        "ruby" => {
+            parser
+                .set_language(&tree_sitter_ruby::LANGUAGE.into())
+                .ok()?;
+            "(class) @class (module) @class (method) @fn (singleton_method) @fn"
+        }
+        "swift" => {
+            parser
+                .set_language(&tree_sitter_swift::LANGUAGE.into())
+                .ok()?;
+            "(class_declaration) @class (struct_declaration) @class (protocol_declaration) @class (extension_declaration) @class (function_declaration) @fn (initializer_declaration) @fn"
+        }
         _ => return None,
     };
 
@@ -524,7 +554,16 @@ fn try_tree_sitter_chunk_source(
                 | "trait_item"
                 | "class_declaration"
                 | "interface_declaration"
-                | "type_declaration" => ChunkKind::Class,
+                | "type_declaration"
+                | "enum_declaration"
+                | "annotation_type_declaration"
+                | "struct_declaration"
+                | "record_declaration"
+                | "trait_declaration"
+                | "class"
+                | "module"
+                | "protocol_declaration"
+                | "extension_declaration" => ChunkKind::Class,
                 _ => ChunkKind::Function,
             };
 
@@ -1530,6 +1569,48 @@ pub fn calculate_total(amount: f64) -> f64 {
         assert!(
             chunks.iter().any(|c| c.text.contains("Calculator")),
             "Java chunker should detect Calculator class"
+        );
+    }
+
+    #[test]
+    fn csharp_chunker_detects_class_and_method() {
+        let src = "public class BillingService {\n    public decimal CalculateTotal(decimal subtotal) {\n        return subtotal * 1.2m;\n    }\n}\n";
+        let chunks = chunk_source(Path::new("BillingService.cs"), src);
+        assert!(
+            chunks.iter().any(|c| c.text.contains("CalculateTotal")),
+            "C# chunker should detect CalculateTotal"
+        );
+    }
+
+    #[test]
+    fn php_chunker_detects_class_and_method() {
+        let src = "<?php\nclass InvoiceService {\n    public function calculateTotal(float $subtotal): float {\n        return $subtotal * 1.2;\n    }\n}\n";
+        let chunks = chunk_source(Path::new("InvoiceService.php"), src);
+        assert!(
+            chunks.iter().any(|c| c.text.contains("calculateTotal")),
+            "PHP chunker should detect calculateTotal"
+        );
+    }
+
+    #[test]
+    fn ruby_chunker_detects_module_and_method() {
+        let src = "module Billing\n  class InvoiceService\n    def calculate_total(subtotal)\n      subtotal * 1.2\n    end\n  end\nend\n";
+        let chunks = chunk_source(Path::new("invoice_service.rb"), src);
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.text.contains("InvoiceService") || c.text.contains("calculate_total")),
+            "Ruby chunker should detect class or method"
+        );
+    }
+
+    #[test]
+    fn swift_chunker_detects_struct_and_method() {
+        let src = "struct InvoiceService {\n    func calculateTotal(subtotal: Double) -> Double {\n        subtotal * 1.2\n    }\n}\n";
+        let chunks = chunk_source(Path::new("InvoiceService.swift"), src);
+        assert!(
+            chunks.iter().any(|c| c.text.contains("calculateTotal")),
+            "Swift chunker should detect calculateTotal"
         );
     }
 

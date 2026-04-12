@@ -6,6 +6,7 @@ pub mod doctor;
 pub mod embedding;
 pub mod indexer;
 pub mod ipc;
+pub mod jobs;
 pub mod mcp;
 pub mod merkle;
 pub mod path_glob;

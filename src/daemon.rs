@@ -1,29 +1,81 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use anyhow::Result;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::mpsc;
+use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
 use crate::config;
 use crate::embedding::{EmbeddingModel, create_model};
 use crate::indexer::{
-    index_workspace, maybe_complete_neural_for_small_workspace, remove_workspace_index,
+    index_workspace, index_workspace_for_watcher, maybe_complete_neural_for_small_workspace,
+    remove_workspace_index,
 };
+use crate::jobs::{self, JobKind, JobUpdate};
 use crate::protocol::{BUILD_VERSION, DaemonRequest, DaemonResponse};
 use crate::regex_search::regex_search;
 use crate::search::{SearchOptions, hybrid_search, literal_search};
 use crate::workspace::{Workspace, WorkspaceScope, list_workspaces};
 
+struct WatchRegistration {
+    _watcher: RecommendedWatcher,
+    control: Arc<WatchControl>,
+}
+
+struct WatchControl {
+    workspace: Workspace,
+    notify: Notify,
+    dirty: AtomicBool,
+    indexing: AtomicBool,
+    active: AtomicBool,
+    pending_events: AtomicU64,
+    coalesced_events: AtomicU64,
+}
+
+impl WatchControl {
+    fn new(workspace: Workspace) -> Self {
+        Self {
+            workspace,
+            notify: Notify::new(),
+            dirty: AtomicBool::new(false),
+            indexing: AtomicBool::new(false),
+            active: AtomicBool::new(true),
+            pending_events: AtomicU64::new(0),
+            coalesced_events: AtomicU64::new(0),
+        }
+    }
+
+    fn mark_dirty(&self) {
+        self.dirty.store(true, Ordering::Relaxed);
+        self.pending_events.fetch_add(1, Ordering::Relaxed);
+        self.notify.notify_one();
+    }
+
+    fn snapshot_phase(&self) -> (&'static str, bool, bool, u64, u64) {
+        let indexing = self.indexing.load(Ordering::Relaxed);
+        let dirty = self.dirty.load(Ordering::Relaxed);
+        let pending_events = self.pending_events.load(Ordering::Relaxed);
+        let coalesced_events = self.coalesced_events.load(Ordering::Relaxed);
+        let phase = if indexing {
+            "indexing"
+        } else if dirty {
+            "dirty"
+        } else {
+            "idle"
+        };
+        (phase, indexing, dirty, pending_events, coalesced_events)
+    }
+}
+
 #[derive(Clone)]
 struct DaemonState {
     lazy_model: Arc<std::sync::OnceLock<Arc<dyn EmbeddingModel>>>,
-    watchers: Arc<Mutex<HashMap<String, RecommendedWatcher>>>,
-    trigger_tx: mpsc::UnboundedSender<PathBuf>,
+    watchers: Arc<Mutex<HashMap<String, WatchRegistration>>>,
 }
 
 impl DaemonState {
@@ -43,8 +95,6 @@ pub async fn run_daemon() -> Result<()> {
     let (listener, socket_path) = crate::ipc::bind().await?;
     eprintln!("ivygrep daemon listening on {}", socket_path.display());
 
-    let (trigger_tx, mut trigger_rx) = mpsc::unbounded_channel::<PathBuf>();
-
     // Defer model creation — the ONNX download happens on first use.
     let lazy_model: Arc<std::sync::OnceLock<Arc<dyn EmbeddingModel>>> =
         Arc::new(std::sync::OnceLock::new());
@@ -52,7 +102,6 @@ pub async fn run_daemon() -> Result<()> {
     let state = DaemonState {
         lazy_model: lazy_model.clone(),
         watchers: Arc::new(Mutex::new(HashMap::new())),
-        trigger_tx,
     };
 
     // Eagerly start loading the ONNX model in the background so it's ready
@@ -67,29 +116,6 @@ pub async fn run_daemon() -> Result<()> {
             });
         });
     }
-
-    tokio::spawn(async move {
-        while let Some(path) = trigger_rx.recv().await {
-            let index_path = path.clone();
-            if let Err(err) = tokio::task::spawn_blocking(move || {
-                let workspace = Workspace::resolve(&index_path)?;
-                let hash_model = create_model(true);
-                let _ = index_workspace(&workspace, hash_model.as_ref())?;
-                Result::<(), anyhow::Error>::Ok(())
-            })
-            .await
-            .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())))
-            {
-                eprintln!("watch update failed for {}: {err:#}", path.display());
-                warn!(
-                    "watch-triggered indexing failed for {}: {err:#}",
-                    path.display()
-                );
-            } else {
-                eprintln!("watch update indexed {}", path.display());
-            }
-        }
-    });
 
     info!("ivygrep daemon listening on {}", socket_path.display());
 
@@ -162,28 +188,37 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                         .unwrap_or_default()
                         .as_secs(),
                     last_indexed_at_unix: None,
-                    watch_enabled: false,
+                    watch_enabled: watch,
                     skip_gitignore: false,
                 });
 
             if meta.skip_gitignore != skip_gitignore {
                 meta.skip_gitignore = skip_gitignore;
-                let _ = workspace.write_metadata(&meta);
             }
+            meta.watch_enabled = watch;
+            let _ = workspace.write_metadata(&meta);
 
+            let index_workspace_target = workspace.clone();
             let index_result = tokio::task::spawn_blocking(move || {
                 let hash_model = create_model(true);
-                index_workspace(&workspace, hash_model.as_ref())
+                index_workspace(&index_workspace_target, hash_model.as_ref())
             })
             .await
             .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
 
             match index_result {
                 Ok(summary) => {
-                    if watch && let Err(err) = register_watcher(&state, &path) {
-                        return DaemonResponse::Error {
-                            message: format!("indexed but failed to watch: {err:#}"),
-                        };
+                    if watch {
+                        if let Err(err) = register_watcher(&state, &path) {
+                            return DaemonResponse::Error {
+                                message: format!("indexed but failed to watch: {err:#}"),
+                            };
+                        }
+                    } else if let Some(registration) = state.watchers.lock().remove(&workspace.id) {
+                        registration.control.active.store(false, Ordering::Relaxed);
+                        registration.control.notify.notify_waiters();
+                        let _ = jobs::finish_job(&workspace, JobKind::Watcher, "stopped", None);
+                        let _ = std::fs::remove_file(workspace.watcher_pid_path());
                     }
 
                     DaemonResponse::Ack {
@@ -484,8 +519,16 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
         DaemonRequest::Remove { path } => match Workspace::resolve(&path) {
             Ok(workspace) => {
                 // Stop watcher so no new indexing is triggered.
-                state.watchers.lock().remove(&workspace.id);
+                if let Some(registration) = state.watchers.lock().remove(&workspace.id) {
+                    registration.control.active.store(false, Ordering::Relaxed);
+                    registration.control.notify.notify_waiters();
+                }
+                let _ = jobs::finish_job(&workspace, JobKind::Watcher, "stopped", None);
                 let _ = std::fs::remove_file(workspace.watcher_pid_path());
+                if let Ok(Some(mut metadata)) = workspace.read_metadata() {
+                    metadata.watch_enabled = false;
+                    let _ = workspace.write_metadata(&metadata);
+                }
 
                 // Acquire the same fs2 lock that index_workspace holds to
                 // wait for any in-progress indexing before deleting.
@@ -545,17 +588,34 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
         return Ok(());
     }
 
-    let trigger_tx = state.trigger_tx.clone();
-    let root = workspace.root.clone();
+    let control = Arc::new(WatchControl::new(workspace.clone()));
+    let callback_control = control.clone();
 
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         if event.is_ok() {
-            let _ = trigger_tx.send(root.clone());
+            callback_control.mark_dirty();
         }
     })?;
 
     watcher.watch(&workspace.root, RecursiveMode::Recursive)?;
-    state.watchers.lock().insert(workspace.id.clone(), watcher);
+    state.watchers.lock().insert(
+        workspace.id.clone(),
+        WatchRegistration {
+            _watcher: watcher,
+            control: control.clone(),
+        },
+    );
+
+    let _ = jobs::start_job(&workspace, JobKind::Watcher, "idle", 1);
+    spawn_watch_heartbeat(control.clone());
+    spawn_watch_worker(control);
+
+    if let Ok(Some(mut metadata)) = workspace.read_metadata()
+        && !metadata.watch_enabled
+    {
+        metadata.watch_enabled = true;
+        let _ = workspace.write_metadata(&metadata);
+    }
 
     // Write the daemon PID so the CLI can verify the watcher is alive
     // and skip expensive Merkle scans ("trust but verify").
@@ -564,6 +624,126 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
     eprintln!("watching {}", workspace.root.display());
 
     Ok(())
+}
+
+fn spawn_watch_heartbeat(control: Arc<WatchControl>) {
+    tokio::spawn(async move {
+        loop {
+            if !control.active.load(Ordering::Relaxed) {
+                break;
+            }
+
+            let (phase, indexing, dirty, pending_events, coalesced_events) =
+                control.snapshot_phase();
+            let mut update = JobUpdate {
+                phase: Some(phase.to_string()),
+                active: Some(true),
+                ..Default::default()
+            };
+            update
+                .details
+                .insert("indexing".to_string(), indexing.to_string());
+            update
+                .details
+                .insert("dirty".to_string(), dirty.to_string());
+            update
+                .details
+                .insert("pending_events".to_string(), pending_events.to_string());
+            update
+                .details
+                .insert("coalesced_events".to_string(), coalesced_events.to_string());
+            let _ = jobs::heartbeat_job(&control.workspace, JobKind::Watcher, update);
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    });
+}
+
+fn spawn_watch_worker(control: Arc<WatchControl>) {
+    tokio::spawn(async move {
+        loop {
+            control.notify.notified().await;
+            if !control.active.load(Ordering::Relaxed) {
+                break;
+            }
+
+            if control.indexing.swap(true, Ordering::Relaxed) {
+                continue;
+            }
+
+            loop {
+                if !control.dirty.swap(false, Ordering::Relaxed) {
+                    break;
+                }
+
+                let pending = control.pending_events.swap(0, Ordering::Relaxed);
+                control
+                    .coalesced_events
+                    .fetch_add(pending.saturating_sub(1), Ordering::Relaxed);
+
+                let mut update = JobUpdate {
+                    phase: Some("indexing".to_string()),
+                    active: Some(true),
+                    ..Default::default()
+                };
+                update
+                    .details
+                    .insert("pending_events".to_string(), pending.to_string());
+                let _ = jobs::heartbeat_job(&control.workspace, JobKind::Watcher, update);
+
+                let workspace = control.workspace.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let hash_model = create_model(true);
+                    let _ = index_workspace_for_watcher(&workspace, hash_model.as_ref())?;
+                    Result::<(), anyhow::Error>::Ok(())
+                })
+                .await
+                .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
+
+                match result {
+                    Ok(()) => {
+                        eprintln!("watch update indexed {}", control.workspace.root.display());
+                        let success = JobUpdate {
+                            phase: Some(if control.dirty.load(Ordering::Relaxed) {
+                                "dirty".to_string()
+                            } else {
+                                "idle".to_string()
+                            }),
+                            last_error: Some(None),
+                            ..Default::default()
+                        };
+                        let _ = jobs::heartbeat_job(&control.workspace, JobKind::Watcher, success);
+                    }
+                    Err(err) => {
+                        eprintln!(
+                            "watch update failed for {}: {err:#}",
+                            control.workspace.root.display()
+                        );
+                        warn!(
+                            "watch-triggered indexing failed for {}: {err:#}",
+                            control.workspace.root.display()
+                        );
+                        let failed = JobUpdate {
+                            phase: Some("error".to_string()),
+                            last_error: Some(Some(format!("{err:#}"))),
+                            ..Default::default()
+                        };
+                        let _ = jobs::heartbeat_job(&control.workspace, JobKind::Watcher, failed);
+                    }
+                }
+            }
+
+            control.indexing.store(false, Ordering::Relaxed);
+            let idle = JobUpdate {
+                phase: Some(if control.dirty.load(Ordering::Relaxed) {
+                    "dirty".to_string()
+                } else {
+                    "idle".to_string()
+                }),
+                ..Default::default()
+            };
+            let _ = jobs::heartbeat_job(&control.workspace, JobKind::Watcher, idle);
+        }
+    });
 }
 
 fn scope_from_request(scope_path: Option<PathBuf>, scope_is_file: bool) -> Option<WorkspaceScope> {

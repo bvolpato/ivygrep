@@ -15,6 +15,7 @@ use crate::indexer::{
     index_workspace, maybe_complete_neural_for_small_workspace, remove_workspace_index,
     workspace_is_indexed,
 };
+use crate::jobs::{self, JobKind, JobUpdate};
 use crate::mcp;
 use crate::protocol::{
     BUILD_VERSION, DaemonRequest, DaemonResponse, SearchHit, group_hits_by_file,
@@ -177,21 +178,46 @@ pub async fn run() -> Result<()> {
         // Write PID file so --status can show "enhancing..."
         let pid_path = workspace.enhancing_pid_path();
         let _ = std::fs::write(&pid_path, std::process::id().to_string());
+        let _ = jobs::start_job(&workspace, JobKind::Enhancement, "starting", 1);
+        let stop_heartbeat = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let heartbeat_stop = stop_heartbeat.clone();
+        let heartbeat_workspace = workspace.clone();
+        std::thread::spawn(move || {
+            while !heartbeat_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                if heartbeat_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
 
-        struct EnhancingGuard {
-            pid_path: std::path::PathBuf,
-            progress_path: std::path::PathBuf,
-        }
-        impl Drop for EnhancingGuard {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_file(&self.pid_path);
-                let _ = std::fs::remove_file(&self.progress_path);
+                let progress =
+                    std::fs::read_to_string(heartbeat_workspace.enhancing_progress_path())
+                        .ok()
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty());
+                let paused_reason =
+                    std::fs::read_to_string(heartbeat_workspace.enhancing_paused_path())
+                        .ok()
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty());
+                let mut update = JobUpdate {
+                    phase: Some(if paused_reason.is_some() {
+                        "paused".to_string()
+                    } else if progress.is_some() {
+                        "running".to_string()
+                    } else {
+                        "starting".to_string()
+                    }),
+                    ..Default::default()
+                };
+                if let Some(progress) = progress {
+                    update.details.insert("progress".to_string(), progress);
+                }
+                if let Some(reason) = paused_reason {
+                    update.details.insert("paused_reason".to_string(), reason);
+                }
+                let _ = jobs::heartbeat_job(&heartbeat_workspace, JobKind::Enhancement, update);
             }
-        }
-        let _guard = EnhancingGuard {
-            pid_path: pid_path.clone(),
-            progress_path: workspace.enhancing_progress_path(),
-        };
+        });
 
         let result = {
             match crate::embedding::create_neural_model_background() {
@@ -221,9 +247,22 @@ pub async fn run() -> Result<()> {
         // ONNX clean teardown can sometimes segfault in multithreaded handlers.
         // We'll intentionally skip proper Rust panic runtime teardown and forcefully exit.
         if let Err(e) = result {
+            stop_heartbeat.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = jobs::finish_job(
+                &workspace,
+                JobKind::Enhancement,
+                "failed",
+                Some(format!("{e:#}")),
+            );
+            let _ = std::fs::remove_file(&pid_path);
+            let _ = std::fs::remove_file(workspace.enhancing_progress_path());
             eprintln!("Background enhancement failed: {:?}", e);
             std::process::exit(1);
         }
+        stop_heartbeat.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = jobs::finish_job(&workspace, JobKind::Enhancement, "completed", None);
+        let _ = std::fs::remove_file(&pid_path);
+        let _ = std::fs::remove_file(workspace.enhancing_progress_path());
         std::process::exit(0);
     }
 
@@ -299,8 +338,10 @@ async fn run_status(json: bool) -> Result<()> {
                 }
 
                 // Daemon/watcher
-                if ws.watch_enabled {
-                    println!("{prefix}  Watch:  \x1b[32m● watching\x1b[0m");
+                if ws.watch_enabled && ws.watcher_alive {
+                    println!("{prefix}  Watch:  \x1b[32m● configured + live\x1b[0m");
+                } else if ws.watch_enabled {
+                    println!("{prefix}  Watch:  \x1b[1;33m◐ configured, daemon stale\x1b[0m");
                 } else {
                     println!("{prefix}  Watch:  \x1b[90m○ static\x1b[0m");
                 }
@@ -346,6 +387,10 @@ async fn run_status(json: bool) -> Result<()> {
                             "{prefix}  Search: \x1b[1;33m⟳ enhancing\x1b[0m {progress_str}(computing {accel} in background...)"
                         );
                     }
+                } else if ws.enhancing_stalled {
+                    println!(
+                        "{prefix}  Search: \x1b[1;31m⚠ stalled neural upgrade\x1b[0m (run `ig doctor` or retry a query)"
+                    );
                 } else if ws.has_neural_vectors {
                     let pct = if ws.chunk_count > 0 {
                         let ratio = (ws.neural_vector_count as f64 / ws.chunk_count as f64) * 100.0;
@@ -368,6 +413,10 @@ async fn run_status(json: bool) -> Result<()> {
                         progress_str.to_string()
                     };
                     println!("{prefix}  Search: \x1b[1;33m⟳ indexing\x1b[0m ({detail})");
+                } else if ws.indexing_stalled {
+                    println!(
+                        "{prefix}  Search: \x1b[1;31m⚠ stalled indexing\x1b[0m (run `ig doctor --fix`)"
+                    );
                 } else if is_overlay {
                     if ws.chunk_count > 0 {
                         println!(
@@ -464,22 +513,26 @@ async fn run_add(
 
     ensure_no_nested_workspaces(&workspace.root)?;
 
+    let mut meta =
+        workspace
+            .read_metadata()?
+            .unwrap_or_else(|| crate::workspace::WorkspaceMetadata {
+                id: workspace.id.clone(),
+                root: workspace.root.clone(),
+                created_at_unix: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                last_indexed_at_unix: None,
+                watch_enabled: watch,
+                skip_gitignore,
+            });
+    meta.watch_enabled = watch;
     if skip_gitignore {
-        let mut meta =
-            workspace
-                .read_metadata()?
-                .unwrap_or_else(|| crate::workspace::WorkspaceMetadata {
-                    id: workspace.id.clone(),
-                    root: workspace.root.clone(),
-                    created_at_unix: 0,
-                    last_indexed_at_unix: None,
-                    watch_enabled: watch,
-                    skip_gitignore: true,
-                });
         meta.skip_gitignore = true;
-        workspace.ensure_dirs()?;
-        workspace.write_metadata(&meta)?;
     }
+    workspace.ensure_dirs()?;
+    workspace.write_metadata(&meta)?;
 
     if force {
         let remove_request = DaemonRequest::Remove {
@@ -773,6 +826,9 @@ async fn run_query(cli: Cli) -> Result<()> {
         loop {
             let ws_map = crate::workspace::list_workspaces().unwrap_or_default();
             if let Some(status) = ws_map.iter().find(|ws| ws.id == workspace.id) {
+                if status.enhancing_stalled {
+                    break;
+                }
                 if !status.enhancing_in_progress {
                     break;
                 }
@@ -798,8 +854,15 @@ async fn run_query(cli: Cli) -> Result<()> {
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         }
-        if std::io::stderr().is_terminal() {
-            eprintln!("\r\x1b[K  ✓ neural enhancement complete");
+        if std::io::stderr().is_terminal()
+            && let Ok(ws_map) = crate::workspace::list_workspaces()
+            && let Some(status) = ws_map.iter().find(|ws| ws.id == workspace.id)
+        {
+            if status.enhancing_stalled {
+                eprintln!("\r\x1b[K  ⚠ neural enhancement stalled");
+            } else {
+                eprintln!("\r\x1b[K  ✓ neural enhancement complete");
+            }
         }
     }
 

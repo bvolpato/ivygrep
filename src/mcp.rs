@@ -220,6 +220,8 @@ fn execute_ivygrep_status() -> Result<Value> {
         let status_msg = if ready_to_query {
             if ws.enhancing_in_progress {
                 "Ready to query (Neural enhancement in progress)"
+            } else if ws.enhancing_stalled {
+                "Ready to query (Neural enhancement stalled)"
             } else if !ws.has_neural_vectors {
                 "Ready to query (Lexical only)"
             } else {
@@ -227,6 +229,8 @@ fn execute_ivygrep_status() -> Result<Value> {
             }
         } else if ws.indexing_in_progress {
             "Indexing in progress (Not ready)"
+        } else if ws.indexing_stalled {
+            "Indexing stalled (Needs attention)"
         } else {
             "Not indexed"
         };
@@ -239,6 +243,10 @@ fn execute_ivygrep_status() -> Result<Value> {
             "file_count": ws.file_count,
             "indexing_in_progress": ws.indexing_in_progress,
             "enhancing_in_progress": ws.enhancing_in_progress,
+            "watch_enabled": ws.watch_enabled,
+            "watcher_alive": ws.watcher_alive,
+            "indexing_stalled": ws.indexing_stalled,
+            "enhancing_stalled": ws.enhancing_stalled,
         }));
     }
 

@@ -18,6 +18,7 @@ use crate::text::{CODE_TOKENIZER_NAME, build_code_analyzer};
 
 use crate::chunking::{Chunk, chunk_source, is_indexable_file};
 use crate::embedding::EmbeddingModel;
+use crate::jobs::{self, JobKind, JobUpdate};
 use crate::merkle::{MerkleDiff, MerkleSnapshot};
 use crate::vector_store::{ScalarKind, VectorStore};
 use crate::workspace::{Workspace, WorkspaceMetadata};
@@ -143,6 +144,21 @@ pub fn index_workspace(
     workspace: &Workspace,
     embedding_model: &dyn EmbeddingModel,
 ) -> Result<IndexingSummary> {
+    index_workspace_with_options(workspace, embedding_model, true)
+}
+
+pub fn index_workspace_for_watcher(
+    workspace: &Workspace,
+    embedding_model: &dyn EmbeddingModel,
+) -> Result<IndexingSummary> {
+    index_workspace_with_options(workspace, embedding_model, false)
+}
+
+fn index_workspace_with_options(
+    workspace: &Workspace,
+    embedding_model: &dyn EmbeddingModel,
+    trust_live_watcher: bool,
+) -> Result<IndexingSummary> {
     let preserved_metadata = workspace.read_metadata().ok().flatten();
     if workspace.index_health().needs_rebuild() {
         remove_workspace_index(workspace)?;
@@ -186,15 +202,56 @@ pub fn index_workspace(
         progress_path: workspace.indexing_progress_path(),
     };
 
-    let result = index_workspace_inner(workspace, embedding_model);
+    let _ = jobs::start_job(workspace, JobKind::Indexing, "starting", 1);
+    let stop_heartbeat = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let heartbeat_stop = stop_heartbeat.clone();
+    let heartbeat_workspace = workspace.clone();
+    std::thread::spawn(move || {
+        while !heartbeat_stop.load(std::sync::atomic::Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            if heartbeat_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+
+            let progress = std::fs::read_to_string(heartbeat_workspace.indexing_progress_path())
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            let mut update = JobUpdate {
+                phase: Some(progress.clone().unwrap_or_else(|| "running".to_string())),
+                ..Default::default()
+            };
+            if let Some(progress) = progress {
+                update.details.insert("progress".to_string(), progress);
+            }
+            let _ = jobs::heartbeat_job(&heartbeat_workspace, JobKind::Indexing, update);
+        }
+    });
+
+    let result = index_workspace_inner(workspace, embedding_model, trust_live_watcher);
 
     let _ = fs2::FileExt::unlock(&lock_file);
+    stop_heartbeat.store(true, std::sync::atomic::Ordering::Relaxed);
+    match &result {
+        Ok(_) => {
+            let _ = jobs::finish_job(workspace, JobKind::Indexing, "completed", None);
+        }
+        Err(err) => {
+            let _ = jobs::finish_job(
+                workspace,
+                JobKind::Indexing,
+                "failed",
+                Some(format!("{err:#}")),
+            );
+        }
+    }
     result
 }
 
 fn index_workspace_inner(
     workspace: &Workspace,
     embedding_model: &dyn EmbeddingModel,
+    trust_live_watcher: bool,
 ) -> Result<IndexingSummary> {
     let _ = open_storage(workspace, embedding_model.dimensions())?;
 
@@ -210,7 +267,7 @@ fn index_workspace_inner(
             root: workspace.root.clone(),
             created_at_unix: now,
             last_indexed_at_unix: None,
-            watch_enabled: true,
+            watch_enabled: false,
             skip_gitignore: false,
         })?;
     }
@@ -218,7 +275,7 @@ fn index_workspace_inner(
     // Trust-but-verify: if a live watcher daemon is confirmed, skip the
     // expensive Merkle rebuild entirely. The watcher already triggered
     // re-indexing for any changed files through filesystem events.
-    if workspace.is_watcher_alive() && workspace_is_indexed(workspace) {
+    if trust_live_watcher && workspace.is_watcher_alive() && workspace_is_indexed(workspace) {
         return Ok(IndexingSummary {
             workspace_id: workspace.id.clone(),
             indexed_files: 0,
@@ -588,7 +645,10 @@ fn index_workspace_inner(
             .map(|m| m.created_at_unix)
             .unwrap_or(now),
         last_indexed_at_unix: Some(now),
-        watch_enabled: true,
+        watch_enabled: workspace
+            .read_metadata()?
+            .map(|m| m.watch_enabled)
+            .unwrap_or(false),
         skip_gitignore: match workspace.read_metadata() {
             Ok(Some(m)) => m.skip_gitignore,
             _ => false,

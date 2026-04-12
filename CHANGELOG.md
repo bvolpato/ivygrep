@@ -2,6 +2,20 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.45] — 2026-04-12
+
+### Added
+- **Persistent job ledgers:** each workspace now tracks watcher, indexing, and enhancement jobs in `job.json` with generation, heartbeat, phase, attempt count, PID identity, and last error details
+- Recovery-focused tests covering stalled job detection, watcher event storms, parser-backed language retrieval, and watcher-triggered reindexing
+- Tree-sitter AST chunking for **Java, C#, PHP, Ruby, and Swift**
+
+### Improved
+- **Watcher stability:** background file watching now uses per-workspace coalescing (`dirty` + `indexing` + rerun-once semantics) instead of an unbounded event queue, eliminating redundant full reindexes during save storms
+- **Status accuracy:** `ig --status` now distinguishes “configured to watch” from “watcher alive”, and reports stalled indexing / enhancement jobs instead of showing them as indefinitely active
+- **Doctor coverage:** `ig doctor` now flags stale legacy PID files, stale job heartbeats, long-paused neural enhancement, and watcher queue saturation symptoms
+- **Watcher reindex correctness:** daemon-triggered updates now bypass the watcher short-circuit and actually process filesystem mutations
+- **Configuration fidelity:** indexing now preserves the workspace’s requested watch mode instead of silently forcing `watch_enabled = true`
+
 ## [0.5.44] — 2026-04-11
 
 ### Added

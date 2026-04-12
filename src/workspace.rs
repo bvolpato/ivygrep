@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::chunking::is_indexable_file;
 use crate::config;
+use crate::jobs::{
+    self, ENHANCEMENT_HEARTBEAT_TTL_SECS, INDEXING_HEARTBEAT_TTL_SECS, JobKind,
+    WATCHER_HEARTBEAT_TTL_SECS,
+};
 use crate::walker::source_walker;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,6 +46,8 @@ pub struct WorkspaceStatus {
     pub root: PathBuf,
     pub last_indexed_at_unix: Option<u64>,
     pub watch_enabled: bool,
+    #[serde(default)]
+    pub watcher_alive: bool,
     pub chunk_count: u64,
     pub file_count: u64,
     pub index_size_bytes: u64,
@@ -56,9 +62,15 @@ pub struct WorkspaceStatus {
     #[serde(default)]
     pub enhancing_error: Option<String>,
     #[serde(default)]
+    pub enhancing_stalled: bool,
+    #[serde(default)]
     pub indexing_in_progress: bool,
     #[serde(default)]
     pub indexing_progress: Option<String>,
+    #[serde(default)]
+    pub indexing_stalled: bool,
+    #[serde(default)]
+    pub watcher_coalesced_events: Option<u64>,
     #[serde(default)]
     pub is_worktree: bool,
     #[serde(default)]
@@ -168,6 +180,14 @@ impl Workspace {
         self.index_dir.join("workspace.json")
     }
 
+    pub fn job_ledger_path(&self) -> PathBuf {
+        self.index_dir.join("job.json")
+    }
+
+    pub fn job_lock_path(&self) -> PathBuf {
+        self.index_dir.join("job.lock")
+    }
+
     pub fn sqlite_path(&self) -> PathBuf {
         self.index_dir.join("metadata.sqlite3")
     }
@@ -242,17 +262,38 @@ impl Workspace {
     /// Trust-but-verify: check if a filesystem watcher daemon is alive for this workspace.
     /// Returns true only if the PID file exists AND the process is still running.
     pub fn is_watcher_alive(&self) -> bool {
-        is_active_pid_alive(&self.watcher_pid_path())
+        let status = jobs::job_status(self, JobKind::Watcher, WATCHER_HEARTBEAT_TTL_SECS);
+        if status.record.is_some() {
+            status.active()
+        } else {
+            is_active_pid_alive(&self.watcher_pid_path())
+        }
     }
 
     /// Checks if an enhancement process is currently running for this workspace.
     pub fn is_enhancing_active(&self) -> bool {
-        is_active_pid_alive(&self.enhancing_pid_path())
+        let status = jobs::job_status(self, JobKind::Enhancement, ENHANCEMENT_HEARTBEAT_TTL_SECS);
+        if status.record.is_some() {
+            status.active()
+        } else {
+            is_active_pid_alive(&self.enhancing_pid_path())
+        }
     }
 
     /// Checks if we need to trigger neural enhancement (e.g. if we have un-enhanced chunks).
     pub fn needs_neural_enhancement(&self) -> bool {
-        if self.is_enhancing_active() {
+        let enhancement_status =
+            jobs::job_status(self, JobKind::Enhancement, ENHANCEMENT_HEARTBEAT_TTL_SECS);
+        if enhancement_status.active() {
+            return false;
+        }
+
+        if enhancement_status
+            .record
+            .as_ref()
+            .and_then(|record| record.last_error.as_deref())
+            .is_some_and(|err| err.contains("neural feature not compiled"))
+        {
             return false;
         }
 
@@ -297,6 +338,11 @@ impl Workspace {
     pub fn trigger_background_enhancement(&self) -> Result<()> {
         let exe = std::env::current_exe()?;
         let pid_path = self.enhancing_pid_path();
+
+        if jobs::job_status(self, JobKind::Enhancement, ENHANCEMENT_HEARTBEAT_TTL_SECS).active() {
+            return Ok(());
+        }
+        let _ = is_active_pid_alive(&pid_path);
 
         let lock = std::fs::OpenOptions::new()
             .write(true)
@@ -620,13 +666,40 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
             0
         };
 
-        // Check if enhancement is actively running
-        let pid_path = index_dir.join(".enhancing.pid");
-        let enhancing_in_progress = is_active_pid_alive(&pid_path);
+        let workspace = Workspace {
+            id: metadata.id.clone(),
+            root: metadata.root.clone(),
+            index_dir: index_dir.clone(),
+            repo_id: None,
+            base_index_dir: None,
+        };
 
-        // Check if indexing is actively running
-        let indexing_pid_path = index_dir.join(".indexing.pid");
-        let indexing_in_progress = is_active_pid_alive(&indexing_pid_path);
+        let watcher_status =
+            jobs::job_status(&workspace, JobKind::Watcher, WATCHER_HEARTBEAT_TTL_SECS);
+        let watcher_alive = if watcher_status.record.is_some() {
+            watcher_status.active()
+        } else {
+            is_active_pid_alive(&index_dir.join(".watcher.pid"))
+        };
+
+        let enhancement_status = jobs::job_status(
+            &workspace,
+            JobKind::Enhancement,
+            ENHANCEMENT_HEARTBEAT_TTL_SECS,
+        );
+        let enhancing_in_progress = if enhancement_status.record.is_some() {
+            enhancement_status.active()
+        } else {
+            is_active_pid_alive(&index_dir.join(".enhancing.pid"))
+        };
+
+        let indexing_status =
+            jobs::job_status(&workspace, JobKind::Indexing, INDEXING_HEARTBEAT_TTL_SECS);
+        let indexing_in_progress = if indexing_status.record.is_some() {
+            indexing_status.active()
+        } else {
+            is_active_pid_alive(&index_dir.join(".indexing.pid"))
+        };
 
         let enhancing_progress_count = if enhancing_in_progress {
             let progress_path = index_dir.join(".enhancing.progress");
@@ -646,12 +719,17 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
             None
         };
 
-        let enhancing_error =
-            if !enhancing_in_progress && index_dir.join(".enhancing.error").exists() {
-                std::fs::read_to_string(index_dir.join(".enhancing.error")).ok()
-            } else {
-                None
-            };
+        let enhancing_error = enhancement_status
+            .record
+            .as_ref()
+            .and_then(|record| record.last_error.clone())
+            .or_else(|| {
+                if !enhancing_in_progress && index_dir.join(".enhancing.error").exists() {
+                    std::fs::read_to_string(index_dir.join(".enhancing.error")).ok()
+                } else {
+                    None
+                }
+            });
 
         let indexing_progress = if indexing_in_progress {
             let progress_path = index_dir.join(".indexing.progress");
@@ -661,6 +739,14 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
         } else {
             None
         };
+
+        let enhancing_stalled = enhancement_status.stalled;
+        let indexing_stalled = indexing_status.stalled;
+        let watcher_coalesced_events = watcher_status
+            .record
+            .as_ref()
+            .and_then(|record| record.details.get("coalesced_events"))
+            .and_then(|value| value.parse::<u64>().ok());
 
         let ws_is_worktree = metadata.root.join(".git").is_file();
         let base_repo_root = if ws_is_worktree {
@@ -677,6 +763,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
                 root: metadata.root,
                 last_indexed_at_unix: metadata.last_indexed_at_unix,
                 watch_enabled: metadata.watch_enabled,
+                watcher_alive,
                 chunk_count,
                 file_count,
                 index_size_bytes,
@@ -686,8 +773,11 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
                 enhancing_progress_count,
                 enhancing_paused_reason,
                 enhancing_error,
+                enhancing_stalled,
                 indexing_in_progress,
                 indexing_progress,
+                indexing_stalled,
+                watcher_coalesced_events,
                 is_worktree: ws_is_worktree,
                 base_repo_root,
                 seeded_from_base,
