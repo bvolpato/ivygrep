@@ -1003,6 +1003,7 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use serial_test::serial;
 
     #[test]
     fn resolve_workspace_and_scope_tracks_subpaths() {
@@ -1090,6 +1091,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn index_health_flags_zero_chunk_index_when_workspace_has_source_files() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
@@ -1122,6 +1124,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn small_workspace_can_block_on_neural_enhancement() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();

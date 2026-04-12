@@ -337,8 +337,10 @@ fn write_job_ledger_locked(path: impl AsRef<Path>, ledger: &JobLedger) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn ledger_start_and_finish_roundtrip() {
         let root = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();

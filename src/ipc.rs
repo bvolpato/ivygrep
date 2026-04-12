@@ -86,8 +86,10 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[tokio::test]
+    #[serial]
     async fn test_bind_and_cleanup() {
         let tmp = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", tmp.path()) };
