@@ -998,22 +998,35 @@ fn dir_size_bytes(dir: &Path) -> u64 {
 /// Check if a background process is alive by reading the PID file.
 /// Returns false (and cleans up the file) if the PID is stale.
 fn is_active_pid_alive(pid_path: &Path) -> bool {
+    matches!(legacy_pid_status(pid_path, true), LegacyPidStatus::Alive)
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum LegacyPidStatus {
+    Missing,
+    Alive,
+    Stale,
+}
+
+fn legacy_pid_status(pid_path: &Path, cleanup_stale: bool) -> LegacyPidStatus {
     let content = match fs::read_to_string(pid_path) {
         Ok(c) => c,
-        Err(_) => return false,
+        Err(_) => return LegacyPidStatus::Missing,
     };
 
     let content = content.trim();
     if content.is_empty() || content == "PENDING" {
         // Temporarily locked by a concurrent spawning thread, treat as alive
-        return true;
+        return LegacyPidStatus::Alive;
     }
 
     let pid: i32 = match content.parse() {
         Ok(p) => p,
         Err(_) => {
-            let _ = fs::remove_file(pid_path);
-            return false;
+            if cleanup_stale {
+                let _ = fs::remove_file(pid_path);
+            }
+            return LegacyPidStatus::Stale;
         }
     };
 
@@ -1021,15 +1034,99 @@ fn is_active_pid_alive(pid_path: &Path) -> bool {
     #[cfg(unix)]
     {
         let alive = unsafe { libc::kill(pid, 0) } == 0;
-        if !alive {
+        if !alive && cleanup_stale {
             let _ = fs::remove_file(pid_path);
         }
-        alive
+        if alive {
+            LegacyPidStatus::Alive
+        } else {
+            LegacyPidStatus::Stale
+        }
     }
     #[cfg(not(unix))]
     {
-        // On non-unix, just check if the file exists (best effort)
-        true
+        let _ = cleanup_stale;
+        LegacyPidStatus::Alive
+    }
+}
+
+impl Workspace {
+    pub fn stale_legacy_runtime_findings(&self) -> Vec<String> {
+        let mut findings = Vec::new();
+
+        if jobs::job_status(self, JobKind::Watcher, WATCHER_HEARTBEAT_TTL_SECS)
+            .record
+            .is_none()
+            && matches!(
+                legacy_pid_status(&self.watcher_pid_path(), false),
+                LegacyPidStatus::Stale
+            )
+        {
+            findings.push("legacy watcher pid file is stale".to_string());
+        }
+
+        if jobs::job_status(self, JobKind::Indexing, INDEXING_HEARTBEAT_TTL_SECS)
+            .record
+            .is_none()
+            && matches!(
+                legacy_pid_status(&self.indexing_pid_path(), false),
+                LegacyPidStatus::Stale
+            )
+        {
+            findings.push("legacy indexing pid file is stale".to_string());
+        }
+
+        if jobs::job_status(self, JobKind::Enhancement, ENHANCEMENT_HEARTBEAT_TTL_SECS)
+            .record
+            .is_none()
+            && matches!(
+                legacy_pid_status(&self.enhancing_pid_path(), false),
+                LegacyPidStatus::Stale
+            )
+        {
+            findings.push("legacy enhancement pid file is stale".to_string());
+        }
+
+        findings
+    }
+
+    pub fn cleanup_stale_legacy_runtime_files(&self) -> Vec<String> {
+        let mut cleaned = Vec::new();
+
+        if jobs::job_status(self, JobKind::Watcher, WATCHER_HEARTBEAT_TTL_SECS)
+            .record
+            .is_none()
+            && matches!(
+                legacy_pid_status(&self.watcher_pid_path(), true),
+                LegacyPidStatus::Stale
+            )
+        {
+            cleaned.push("removed stale legacy watcher pid file".to_string());
+        }
+
+        if jobs::job_status(self, JobKind::Indexing, INDEXING_HEARTBEAT_TTL_SECS)
+            .record
+            .is_none()
+            && matches!(
+                legacy_pid_status(&self.indexing_pid_path(), true),
+                LegacyPidStatus::Stale
+            )
+        {
+            cleaned.push("removed stale legacy indexing pid file".to_string());
+        }
+
+        if jobs::job_status(self, JobKind::Enhancement, ENHANCEMENT_HEARTBEAT_TTL_SECS)
+            .record
+            .is_none()
+            && matches!(
+                legacy_pid_status(&self.enhancing_pid_path(), true),
+                LegacyPidStatus::Stale
+            )
+        {
+            cleaned.push("removed stale legacy enhancement pid file".to_string());
+        }
+
+        cleaned
     }
 }
 

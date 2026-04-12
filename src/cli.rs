@@ -609,6 +609,7 @@ async fn run_query(cli: Cli) -> Result<()> {
         None => env::current_dir()?,
     };
     let (workspace, scope_filter) = resolve_workspace_and_scope(&query_path)?;
+    let _ = workspace.cleanup_stale_legacy_runtime_files();
     let scope_path = scope_filter.as_ref().map(|scope| scope.rel_path.clone());
     let scope_is_file = scope_filter.as_ref().is_some_and(|scope| scope.is_file);
     let initial_index_state = (!cli.all_indices).then(|| workspace.index_health().state);
@@ -1141,6 +1142,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                 vec![workspace.clone()]
             };
             for ws in workspaces {
+                let _ = ws.cleanup_stale_legacy_runtime_files();
                 if !cli.hash {
                     let _ = maybe_complete_neural_for_small_workspace(&ws);
                 }

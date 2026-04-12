@@ -53,6 +53,11 @@ pub fn inspect_workspace(workspace: &Workspace) -> DoctorReport {
 }
 
 pub fn inspect_and_maybe_fix(workspace: &Workspace, fix: bool) -> Result<DoctorReport> {
+    let cleanup_actions = if fix {
+        workspace.cleanup_stale_legacy_runtime_files()
+    } else {
+        Vec::new()
+    };
     let initial = workspace.index_health();
     if !fix {
         return Ok(DoctorReport::from_health(
@@ -70,19 +75,26 @@ pub fn inspect_and_maybe_fix(workspace: &Workspace, fix: bool) -> Result<DoctorR
     };
 
     if !should_rebuild {
-        let mut findings = default_findings(&initial);
+        let repaired_runtime = !cleanup_actions.is_empty();
+        let mut findings = cleanup_actions;
+        findings.extend(runtime_findings(workspace));
+        findings.extend(default_findings(&initial));
         if findings.is_empty() {
             findings.push("no repair needed".to_string());
         }
         return Ok(DoctorReport::from_health(
-            workspace, initial, false, findings,
+            workspace,
+            initial,
+            repaired_runtime,
+            findings,
         ));
     }
 
     rebuild_workspace_index(workspace)?;
 
     let repaired = workspace.index_health();
-    let mut findings = runtime_findings(workspace);
+    let mut findings = cleanup_actions;
+    findings.extend(runtime_findings(workspace));
     findings.extend(default_findings(&repaired));
     if repaired.is_queryable() {
         findings.insert(0, "index rebuilt successfully".to_string());
@@ -105,9 +117,7 @@ fn runtime_findings(workspace: &Workspace) -> Vec<String> {
     if watcher_status.stalled {
         findings.push("watcher job heartbeat is stale".to_string());
     }
-    if watcher_status.record.is_none() && workspace.watcher_pid_path().exists() {
-        findings.push("legacy watcher pid file is stale".to_string());
-    }
+    findings.extend(workspace.stale_legacy_runtime_findings());
     if let Some(record) = watcher_status.record.as_ref()
         && record
             .details
@@ -123,9 +133,6 @@ fn runtime_findings(workspace: &Workspace) -> Vec<String> {
     if indexing_status.stalled {
         findings.push("indexing job heartbeat is stale".to_string());
     }
-    if indexing_status.record.is_none() && workspace.indexing_pid_path().exists() {
-        findings.push("legacy indexing pid file is stale".to_string());
-    }
 
     let enhancement_status = jobs::job_status(
         workspace,
@@ -134,9 +141,6 @@ fn runtime_findings(workspace: &Workspace) -> Vec<String> {
     );
     if enhancement_status.stalled {
         findings.push("background neural enhancement heartbeat is stale".to_string());
-    }
-    if enhancement_status.record.is_none() && workspace.enhancing_pid_path().exists() {
-        findings.push("legacy enhancement pid file is stale".to_string());
     }
     if let Ok(meta) = std::fs::metadata(workspace.enhancing_paused_path())
         && let Ok(modified) = meta.modified()
@@ -332,6 +336,37 @@ mod tests {
                 .iter()
                 .any(|finding| finding.contains("heavy burst of filesystem events")),
             "expected watcher coalescing finding, got {:#?}",
+            report.findings
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn doctor_fix_removes_stale_legacy_watcher_pid() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(
+            root.path().join("lib.rs"),
+            "pub fn answer() -> usize { 42 }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = create_hash_model();
+        let _ = index_workspace(&workspace, model.as_ref()).unwrap();
+        std::fs::write(workspace.watcher_pid_path(), "999999").unwrap();
+
+        let report = inspect_and_maybe_fix(&workspace, true).unwrap();
+        assert!(report.repaired);
+        assert!(!workspace.watcher_pid_path().exists());
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.contains("removed stale legacy watcher pid file")),
+            "expected stale watcher cleanup finding, got {:#?}",
             report.findings
         );
     }

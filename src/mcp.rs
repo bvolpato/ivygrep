@@ -302,6 +302,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
     let mut hits = Vec::new();
 
     for workspace in workspaces {
+        let _ = workspace.cleanup_stale_legacy_runtime_files();
         let ws_hits = if args.literal.unwrap_or(false) {
             literal_search(
                 &workspace,

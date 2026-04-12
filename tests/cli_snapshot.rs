@@ -2,6 +2,8 @@ use std::path::Path;
 
 use assert_cmd::Command;
 use fs_extra::dir::{CopyOptions, copy as copy_dir};
+use ivygrep::embedding::create_hash_model;
+use ivygrep::indexer::index_workspace;
 use ivygrep::workspace::{Workspace, WorkspaceMetadata};
 use serial_test::serial;
 
@@ -582,5 +584,30 @@ fn cli_query_auto_repairs_unhealthy_index() {
         files.iter().any(|path| path.ends_with("lib.rs")),
         "search should recover from an unhealthy index and return lib.rs: {:?}",
         files
+    );
+}
+
+#[test]
+#[serial]
+fn cli_query_cleans_stale_legacy_watcher_pid() {
+    let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
+    unsafe { std::env::set_var("IVYGREP_HOME", &home) };
+
+    let workspace = Workspace::resolve(&target_root).unwrap();
+    let model = create_hash_model();
+    let _ = index_workspace(&workspace, model.as_ref()).unwrap();
+    std::fs::write(workspace.watcher_pid_path(), "999999").unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    cmd.current_dir(&target_root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--json", "--hash", "-f", "where is the tax calculated?"])
+        .assert()
+        .success();
+
+    assert!(
+        !workspace.watcher_pid_path().exists(),
+        "query should remove stale legacy watcher pid files"
     );
 }
