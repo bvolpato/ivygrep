@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776044707476,
+  "lastUpdate": 1776108448498,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -6254,6 +6254,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 598,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "b69c04cf9939309b4267272da2b453382072a05a",
+          "message": "fix: prevent silent data loss on crash and improve test-path precision\n\nCritical fix: Merkle snapshot was saved BEFORE index stores were committed.\nA crash (SIGKILL/OOM/power loss) between the snapshot save and the final\ntx.commit()/writer.commit()/vector_index.save() left the snapshot claiming\nfiles were indexed while stores were empty/partial. On next run, the diff\nwas empty and missing files were silently never re-indexed.\n\nFix 1 (indexer.rs): Defer snapshot save to after all store commits and\nwrite_metadata(). The snapshot is now a high-water mark of actually-persisted\nstate. Crash mid-indexing → stale snapshot → non-empty diff → re-index.\n\nFix 2 (workspace.rs): Detect crashed indexing in index_health_with_options.\nIf .indexing.pid exists but the PID is dead (SIGKILL bypasses Drop), mark\nindex as Unhealthy → forces rebuild_index_storage on next run.\n\nFix 3 (merkle.rs): Atomic snapshot write via write-to-tmp + fs::rename().\nCrash during save can no longer leave truncated JSON.\n\nFix 4 (search.rs): is_test_path() used bare .contains(\"test\") which\npenalized files like attestation.rs, contest.rs, inspect.py as test files.\nReplaced with boundary-aware matching: directory segments (tests/, __tests__/)\nand filename conventions (_test., .test., test_).\n\nAdded 2 test functions with 27 assertions for is_test_path coverage.",
+          "timestamp": "2026-04-13T15:18:26-04:00",
+          "tree_id": "4945e0ee1df6b861c28c9896651b739032ad4144",
+          "url": "https://github.com/bvolpato/ivygrep/commit/b69c04cf9939309b4267272da2b453382072a05a"
+        },
+        "date": 1776108448242,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 899399960,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 8263.71,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3813.59,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2844.14,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11319.33,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 10799.3,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 6.75,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 519.81,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 58373.5,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 15152.89,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 5365.11,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 449763.72,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 618.18,
             "unit": "µs"
           }
         ]
