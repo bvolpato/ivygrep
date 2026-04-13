@@ -2,6 +2,11 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.49] — 2026-04-12
+
+### Fixed
+- **CI daemon recovery coverage:** the end-to-end watcher recovery test now explicitly opts back into daemon autospawn, so it exercises the real recovery path even under CI’s `IVYGREP_NO_AUTOSPAWN=1` guard
+
 ## [0.5.48] — 2026-04-12
 
 ### Fixed
