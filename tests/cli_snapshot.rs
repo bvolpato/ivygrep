@@ -35,6 +35,7 @@ fn create_unhealthy_index_fixture(root: &Path, home: &Path, skip_gitignore: bool
             last_indexed_at_unix: Some(1),
             watch_enabled: false,
             skip_gitignore,
+            index_generation: 0,
         })
         .unwrap();
     std::fs::write(workspace.sqlite_path(), "").unwrap();

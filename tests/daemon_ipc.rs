@@ -413,6 +413,7 @@ async fn daemon_ipc_skip_gitignore() {
                             last_indexed_at_unix: None,
                             watch_enabled: false,
                             skip_gitignore: false,
+                            index_generation: 0,
                         });
                     meta.skip_gitignore = skip_gitignore;
                     let _ = workspace.write_metadata(&meta);

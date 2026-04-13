@@ -38,6 +38,10 @@ pub struct WorkspaceMetadata {
     pub watch_enabled: bool,
     #[serde(default)]
     pub skip_gitignore: bool,
+    /// Monotonically increasing counter bumped on every successful index commit.
+    /// Worktree overlays record this at creation to detect base-index drift.
+    #[serde(default)]
+    pub index_generation: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1254,6 +1258,7 @@ mod tests {
             last_indexed_at_unix: Some(1),
             watch_enabled: false,
             skip_gitignore: false,
+            index_generation: 0,
         })
         .unwrap();
         std::fs::write(ws.sqlite_path(), "").unwrap();

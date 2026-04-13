@@ -221,6 +221,7 @@ mod tests {
                 last_indexed_at_unix: Some(1),
                 watch_enabled: false,
                 skip_gitignore: false,
+                index_generation: 0,
             })
             .unwrap();
         std::fs::write(workspace.sqlite_path(), "").unwrap();
@@ -255,6 +256,7 @@ mod tests {
                 last_indexed_at_unix: Some(1),
                 watch_enabled: false,
                 skip_gitignore: false,
+                index_generation: 0,
             })
             .unwrap();
         std::fs::write(workspace.sqlite_path(), "").unwrap();

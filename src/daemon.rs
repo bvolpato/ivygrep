@@ -230,6 +230,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     last_indexed_at_unix: None,
                     watch_enabled: watch,
                     skip_gitignore: false,
+                    index_generation: 0,
                 });
 
             if meta.skip_gitignore != skip_gitignore {
@@ -965,6 +966,7 @@ mod tests {
             ),
             watch_enabled: true,
             skip_gitignore: false,
+            index_generation: 0,
         };
         workspace.write_metadata(&metadata).unwrap();
 

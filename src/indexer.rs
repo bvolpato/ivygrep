@@ -262,6 +262,7 @@ fn index_workspace_inner(
             last_indexed_at_unix: None,
             watch_enabled: false,
             skip_gitignore: false,
+            index_generation: 0,
         })?;
     }
 
@@ -301,13 +302,20 @@ fn index_workspace_inner(
             eprintln!("  ⚡ creating worktree overlay (no copy)...");
             let _ = fs::write(workspace.indexing_progress_path(), "building overlay");
 
-            // Record base reference
+            // Record base reference, including the base's current generation
+            // so we can detect staleness on subsequent indexing runs.
             let main_root = workspace
                 .main_worktree_root()
                 .context("cannot find main worktree root")?;
+            let base_ws = crate::workspace::Workspace::resolve(&main_root)?;
+            let base_generation = base_ws
+                .read_metadata()?
+                .map(|m| m.index_generation)
+                .unwrap_or(0);
             let base_ref = serde_json::json!({
                 "base_index_dir": base_dir.to_string_lossy(),
                 "base_workspace_root": main_root.to_string_lossy(),
+                "base_generation": base_generation,
                 "created_at_unix": SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
@@ -339,7 +347,29 @@ fn index_workspace_inner(
 
             Some(diff)
         } else if workspace.has_overlay() {
-            // Overlay already exists — do normal incremental update on overlay stores
+            // Overlay exists — check if the base index has been updated since
+            // this overlay was created. If so, the tombstone/shadow sets are
+            // stale and will produce wrong search results. Force a rebuild.
+            let stale = (|| -> Option<bool> {
+                let ref_data = fs::read(workspace.base_ref_path()).ok()?;
+                let ref_json: serde_json::Value = serde_json::from_slice(&ref_data).ok()?;
+                let overlay_gen = ref_json.get("base_generation")?.as_u64()?;
+                let main_root = workspace.main_worktree_root()?;
+                let base_ws = crate::workspace::Workspace::resolve(&main_root).ok()?;
+                let current_gen = base_ws.read_metadata().ok()??.index_generation;
+                Some(current_gen != overlay_gen)
+            })();
+            if stale == Some(true) {
+                eprintln!("  ⚠ base index has changed since overlay was created — rebuilding overlay...");
+                // Delete stale overlay stores to force fresh creation
+                let _ = fs::remove_file(workspace.overlay_sqlite_path());
+                let _ = fs::remove_dir_all(workspace.overlay_tantivy_dir());
+                let _ = fs::remove_file(workspace.overlay_vector_path());
+                let _ = fs::remove_file(workspace.base_ref_path());
+                let _ = fs::remove_file(workspace.merkle_snapshot_path());
+                // Re-enter this function to take the fresh overlay creation path
+                return index_workspace_inner(workspace, embedding_model, trust_live_watcher);
+            }
             None
         } else {
             // Base doesn't exist yet — fall through to full index
@@ -649,21 +679,29 @@ fn index_workspace_inner(
         .unwrap_or_default()
         .as_secs();
 
+    let existing_meta = workspace.read_metadata()?.unwrap_or_else(|| WorkspaceMetadata {
+        id: workspace.id.clone(),
+        root: workspace.root.clone(),
+        created_at_unix: now,
+        last_indexed_at_unix: None,
+        watch_enabled: false,
+        skip_gitignore: false,
+        index_generation: 0,
+    });
     let metadata = WorkspaceMetadata {
         id: workspace.id.clone(),
         root: workspace.root.clone(),
-        created_at_unix: workspace
-            .read_metadata()?
-            .map(|m| m.created_at_unix)
-            .unwrap_or(now),
+        created_at_unix: existing_meta.created_at_unix,
         last_indexed_at_unix: Some(now),
-        watch_enabled: workspace
-            .read_metadata()?
-            .map(|m| m.watch_enabled)
-            .unwrap_or(false),
-        skip_gitignore: match workspace.read_metadata() {
-            Ok(Some(m)) => m.skip_gitignore,
-            _ => false,
+        watch_enabled: existing_meta.watch_enabled,
+        skip_gitignore: existing_meta.skip_gitignore,
+        // Bump generation only for non-overlay (base) workspaces.
+        // Overlay workspaces inherit the base generation; bumping here
+        // would create a false positive on the staleness check.
+        index_generation: if use_overlay {
+            existing_meta.index_generation
+        } else {
+            existing_meta.index_generation + 1
         },
     };
     workspace.write_metadata(&metadata)?;
@@ -1403,6 +1441,7 @@ mod tests {
             last_indexed_at_unix: None,
             watch_enabled: false,
             skip_gitignore: false,
+            index_generation: 0,
         };
         std::fs::create_dir_all(&workspace.index_dir).unwrap();
         std::fs::write(workspace.sqlite_path(), "").unwrap();
@@ -1425,6 +1464,7 @@ mod tests {
             last_indexed_at_unix: Some(123),
             watch_enabled: false,
             skip_gitignore: false,
+            index_generation: 0,
         };
         std::fs::write(
             workspace.index_dir.join("workspace.json"),

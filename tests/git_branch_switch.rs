@@ -1419,3 +1419,78 @@ fn worktree_delete_then_readd_shows_new_content() {
         &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
     );
 }
+
+// ===========================================================================
+// WORKTREE OVERLAY: Staleness invalidation upon base index update
+// ===========================================================================
+
+#[test]
+#[serial]
+fn worktree_overlay_staleness_invalidation() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    git(root.path(), &["init", "-b", "main"]);
+    fs::write(root.path().join("base.rs"), "pub fn base_v1() {}\n").unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base v1"]);
+
+    setup_and_index(root.path(), home.path());
+
+    git(root.path(), &["checkout", "-b", "wt-branch"]);
+    fs::write(root.path().join("wt.rs"), "pub fn wt_only() {}\n").unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "wt branch"]);
+    git(root.path(), &["checkout", "main"]);
+
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_stale");
+    git(
+        root.path(),
+        &["worktree", "add", wt_path.to_str().unwrap(), "wt-branch"],
+    );
+
+    setup_and_index(&wt_path, home.path());
+
+    let wt_ws = workspace_for(&wt_path);
+
+    let r1 = search_file_paths(&wt_ws, "base_v1");
+    assert!(r1.iter().any(|p| p.contains("base.rs")));
+
+    // 4. Update base!
+    fs::write(
+        root.path().join("base.rs"),
+        "pub fn base_v1() {}\npub fn base_v2() {}\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base v2"]);
+
+    // Index base (bumps generation)
+    setup_and_index(root.path(), home.path());
+    let base_ws = workspace_for(root.path());
+    let r_base = search_file_paths(&base_ws, "base_v2");
+    assert!(r_base.iter().any(|p| p.contains("base.rs")));
+
+    // 5. Re-index worktree! Should detect staleness and REBUILD overlay.
+    setup_and_index(&wt_path, home.path());
+
+    // It should now find base_v2 inherited from base!
+    let r2 = search_file_paths(&wt_ws, "base_v2");
+    assert!(
+        r2.iter().any(|p| p.contains("base.rs")),
+        "Worktree overlay must find new base content after base updates and worktree re-indexes"
+    );
+
+    // And make sure wt.rs is still there
+    let r3 = search_file_paths(&wt_ws, "wt_only");
+    assert!(
+        r3.iter().any(|p| p.contains("wt.rs")),
+        "Worktree overlay must still find its own files after invalidation rebuild"
+    );
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}

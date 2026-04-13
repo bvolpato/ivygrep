@@ -538,6 +538,7 @@ async fn run_add(
                 last_indexed_at_unix: None,
                 watch_enabled: watch,
                 skip_gitignore,
+                index_generation: 0,
             });
     meta.watch_enabled = watch;
     if skip_gitignore {
@@ -841,6 +842,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                     last_indexed_at_unix: None,
                     watch_enabled: false,
                     skip_gitignore: false,
+                    index_generation: 0,
                 });
 
             if meta.skip_gitignore != cli.skip_gitignore {
@@ -1602,6 +1604,7 @@ mod tests {
                 last_indexed_at_unix: Some(now),
                 watch_enabled: true,
                 skip_gitignore: false,
+                index_generation: 0,
             })
             .unwrap();
 
