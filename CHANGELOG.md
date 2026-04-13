@@ -2,6 +2,14 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.50] — 2026-04-13
+
+### Fixed
+- **Critical: prevent silent data loss on crash.** Merkle snapshot was saved before index stores were committed — a crash (SIGKILL/OOM/power loss) between snapshot save and final commit left the snapshot claiming files were indexed while stores were empty/partial. On next run, the diff was empty and missing files were silently never re-indexed. The snapshot is now saved after all store commits, making it a true high-water mark of persisted state
+- **Crash detection safety net:** `index_health_with_options` now detects a stale `.indexing.pid` file (left behind when SIGKILL bypasses the IndexingGuard's Drop) and marks the index as Unhealthy, forcing a rebuild on the next run
+- **Atomic Merkle snapshot writes:** `MerkleSnapshot::save()` now uses write-to-tmp + `fs::rename()` instead of bare `fs::write()`, preventing truncated JSON on crash during save
+- **Test-path false positives:** `is_test_path()` used bare `.contains("test")` which penalized files like `attestation.rs`, `contest.rs`, `inspect.py` as test files. Replaced with boundary-aware matching using directory segments (`tests/`, `__tests__/`) and filename conventions (`_test.`, `.test.`, `test_`)
+
 ## [0.5.49] — 2026-04-12
 
 ### Fixed

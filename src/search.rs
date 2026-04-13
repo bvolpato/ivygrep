@@ -1755,7 +1755,7 @@ fn is_test_path(path: &str) -> bool {
         || path.ends_with("_test.go")
         // Filename-prefix conventions
         || path.contains("/test_")    // Python: test_handler.py
-        || path.starts_with("test_")  // Python: test_handler.py (at root)
+        || path.starts_with("test_") // Python: test_handler.py (at root)
 }
 
 pub fn workspace_has_results(workspace: &Workspace) -> Result<bool> {
