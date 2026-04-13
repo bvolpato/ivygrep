@@ -52,6 +52,7 @@ mod tests {
 
         Command::new(cargo_bin!("ig"))
             .env("IVYGREP_HOME", home.path())
+            .env_remove("IVYGREP_NO_AUTOSPAWN")
             .args(["--add", repo.path().to_str().unwrap()])
             .assert()
             .success();
@@ -70,6 +71,7 @@ mod tests {
         Command::new(cargo_bin!("ig"))
             .current_dir(repo.path())
             .env("IVYGREP_HOME", home.path())
+            .env_remove("IVYGREP_NO_AUTOSPAWN")
             .arg("daemon recovery marker")
             .assert()
             .success();
