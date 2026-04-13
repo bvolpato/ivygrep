@@ -2,6 +2,11 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.51] — 2026-04-13
+
+### Fixed
+- **Worktree overlay staleness:** Track base index generation so worktree overlays can rebuild automatically instead of returning stale results when the base index updates.
+
 ## [0.5.50] — 2026-04-13
 
 ### Fixed
