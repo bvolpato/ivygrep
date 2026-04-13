@@ -341,7 +341,7 @@ async fn run_status(json: bool) -> Result<()> {
                 if ws.watch_enabled && ws.watcher_alive {
                     println!("{prefix}  Watch:  \x1b[32m● configured + live\x1b[0m");
                 } else if ws.watch_enabled {
-                    println!("{prefix}  Watch:  \x1b[1;33m◐ configured, daemon stale\x1b[0m");
+                    println!("{prefix}  Watch:  \x1b[1;33m◐ configured, watcher offline\x1b[0m");
                 } else {
                     println!("{prefix}  Watch:  \x1b[90m○ static\x1b[0m");
                 }
@@ -501,6 +501,18 @@ fn format_timestamp_ago(unix_ts: u64) -> String {
     }
 }
 
+fn should_autospawn_daemon_for_query(workspace: &Workspace, no_watch: bool) -> bool {
+    if no_watch {
+        return false;
+    }
+
+    workspace
+        .read_metadata()
+        .ok()
+        .flatten()
+        .is_some_and(|meta| meta.watch_enabled)
+}
+
 async fn run_add(
     path: &Path,
     watch: bool,
@@ -559,7 +571,7 @@ async fn run_add(
         skip_gitignore,
     };
 
-    if let Some(response) = daemon::request(&request, false).await? {
+    if let Some(response) = daemon::request(&request, watch).await? {
         return print_daemon_response(response, json);
     }
 
@@ -610,6 +622,7 @@ async fn run_query(cli: Cli) -> Result<()> {
     };
     let (workspace, scope_filter) = resolve_workspace_and_scope(&query_path)?;
     let _ = workspace.cleanup_stale_legacy_runtime_files();
+    let watch_configured = should_autospawn_daemon_for_query(&workspace, cli.no_watch);
     let scope_path = scope_filter.as_ref().map(|scope| scope.rel_path.clone());
     let scope_is_file = scope_filter.as_ref().is_some_and(|scope| scope.is_file);
     let initial_index_state = (!cli.all_indices).then(|| workspace.index_health().state);
@@ -733,10 +746,31 @@ async fn run_query(cli: Cli) -> Result<()> {
             // Already indexed. Just check if the daemon is online to route the search request.
             // Also verify the daemon version matches — stale daemons silently break search.
             let _t = std::time::Instant::now();
-            match daemon::request(&DaemonRequest::Status, false).await? {
-                Some(DaemonResponse::Status { version, .. }) => {
+            match daemon::request(&DaemonRequest::Status, watch_configured).await? {
+                Some(DaemonResponse::Status {
+                    version,
+                    workspaces,
+                }) => {
                     if version.as_deref() == Some(BUILD_VERSION) {
-                        search_via_daemon = true;
+                        let watcher_offline = watch_configured
+                            && workspaces
+                                .iter()
+                                .find(|status| status.id == workspace.id)
+                                .is_some_and(|status| {
+                                    status.watch_enabled && !status.watcher_alive
+                                });
+                        if watcher_offline {
+                            tracing::warn!(
+                                "daemon online but watcher offline for {}, restarting",
+                                workspace.root.display()
+                            );
+                            restart_daemon().await;
+                            search_via_daemon = daemon::request(&DaemonRequest::Status, true)
+                                .await?
+                                .is_some();
+                        } else {
+                            search_via_daemon = true;
+                        }
                     } else {
                         tracing::warn!(
                             "daemon version mismatch: daemon={:?} cli={}, restarting",
@@ -1532,4 +1566,46 @@ fn ensure_no_nested_workspaces(target_root: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use serial_test::serial;
+    use tempfile::tempdir;
+
+    use crate::workspace::WorkspaceMetadata;
+
+    #[test]
+    #[serial]
+    fn query_autospawn_only_when_watch_is_configured() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn marker() {}\n").unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        workspace.ensure_dirs().unwrap();
+
+        assert!(!should_autospawn_daemon_for_query(&workspace, false));
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        workspace
+            .write_metadata(&WorkspaceMetadata {
+                id: workspace.id.clone(),
+                root: workspace.root.clone(),
+                created_at_unix: now,
+                last_indexed_at_unix: Some(now),
+                watch_enabled: true,
+                skip_gitignore: false,
+            })
+            .unwrap();
+
+        assert!(should_autospawn_daemon_for_query(&workspace, false));
+        assert!(!should_autospawn_daemon_for_query(&workspace, true));
+    }
 }

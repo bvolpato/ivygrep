@@ -104,6 +104,8 @@ pub async fn run_daemon() -> Result<()> {
         watchers: Arc::new(Mutex::new(HashMap::new())),
     };
 
+    restore_configured_watchers(&state);
+
     // Eagerly start loading the ONNX model in the background so it's ready
     // when the first search arrives. Searches that arrive before loading
     // completes will use a fast hash-based fallback.
@@ -128,6 +130,44 @@ pub async fn run_daemon() -> Result<()> {
                 error!("daemon connection error: {err:#}");
             }
         });
+    }
+}
+
+fn restore_configured_watchers(state: &DaemonState) {
+    let workspaces = match list_workspaces() {
+        Ok(workspaces) => workspaces,
+        Err(err) => {
+            warn!("failed to enumerate workspaces for watcher restore: {err:#}");
+            return;
+        }
+    };
+
+    for workspace in workspaces {
+        if !workspace.watch_enabled || workspace.last_indexed_at_unix.is_none() {
+            continue;
+        }
+
+        if let Err(err) = register_watcher(state, &workspace.root) {
+            warn!(
+                "failed to restore watcher for {}: {err:#}",
+                workspace.root.display()
+            );
+        }
+    }
+}
+
+fn stop_watcher(workspace: &Workspace, registration: WatchRegistration) {
+    registration.control.active.store(false, Ordering::Relaxed);
+    registration.control.notify.notify_waiters();
+    let _ = jobs::finish_job(workspace, JobKind::Watcher, "stopped", None);
+    let _ = std::fs::remove_file(workspace.watcher_pid_path());
+}
+
+fn stop_all_watchers(state: &DaemonState) {
+    let registrations: Vec<_> = state.watchers.lock().drain().collect();
+    for (_, registration) in registrations {
+        let workspace = registration.control.workspace.clone();
+        stop_watcher(&workspace, registration);
     }
 }
 
@@ -215,10 +255,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                             };
                         }
                     } else if let Some(registration) = state.watchers.lock().remove(&workspace.id) {
-                        registration.control.active.store(false, Ordering::Relaxed);
-                        registration.control.notify.notify_waiters();
-                        let _ = jobs::finish_job(&workspace, JobKind::Watcher, "stopped", None);
-                        let _ = std::fs::remove_file(workspace.watcher_pid_path());
+                        stop_watcher(&workspace, registration);
                     }
 
                     DaemonResponse::Ack {
@@ -520,11 +557,8 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             Ok(workspace) => {
                 // Stop watcher so no new indexing is triggered.
                 if let Some(registration) = state.watchers.lock().remove(&workspace.id) {
-                    registration.control.active.store(false, Ordering::Relaxed);
-                    registration.control.notify.notify_waiters();
+                    stop_watcher(&workspace, registration);
                 }
-                let _ = jobs::finish_job(&workspace, JobKind::Watcher, "stopped", None);
-                let _ = std::fs::remove_file(workspace.watcher_pid_path());
                 if let Ok(Some(mut metadata)) = workspace.read_metadata() {
                     metadata.watch_enabled = false;
                     let _ = workspace.write_metadata(&metadata);
@@ -567,6 +601,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
         },
         DaemonRequest::Restart => {
             info!("restart requested, shutting down");
+            stop_all_watchers(&state);
             // Clean up socket so the new daemon can bind immediately
             crate::ipc::cleanup_socket();
             // Schedule exit after the response is sent
@@ -884,4 +919,109 @@ pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<
 
     let response: DaemonResponse = serde_json::from_str(&line)?;
     Ok(Some(response))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use serial_test::serial;
+    use tempfile::tempdir;
+
+    use crate::embedding::create_hash_model;
+    use crate::indexer::index_workspace;
+    use crate::search::{SearchOptions, hybrid_search};
+    use crate::workspace::WorkspaceMetadata;
+
+    #[tokio::test]
+    #[serial]
+    async fn restore_configured_watchers_makes_workspace_live_and_updates_search() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        std::fs::write(
+            repo.path().join("lib.rs"),
+            "pub fn before_restart() -> bool { true }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+
+        let metadata = WorkspaceMetadata {
+            id: workspace.id.clone(),
+            root: workspace.root.clone(),
+            created_at_unix: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            last_indexed_at_unix: Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            ),
+            watch_enabled: true,
+            skip_gitignore: false,
+        };
+        workspace.write_metadata(&metadata).unwrap();
+
+        let state = DaemonState {
+            lazy_model: Arc::new(std::sync::OnceLock::new()),
+            watchers: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        restore_configured_watchers(&state);
+
+        let mut watcher_live = false;
+        for _ in 0..20 {
+            if crate::workspace::list_workspaces()
+                .unwrap()
+                .into_iter()
+                .find(|status| status.id == workspace.id)
+                .is_some_and(|status| status.watcher_alive)
+            {
+                watcher_live = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            watcher_live,
+            "restored daemon should revive configured watcher"
+        );
+
+        std::fs::write(
+            repo.path().join("lib.rs"),
+            "pub fn after_restart() -> bool { true }\n",
+        )
+        .unwrap();
+
+        let mut updated = false;
+        for _ in 0..30 {
+            let hits = hybrid_search(
+                &workspace,
+                "after restart",
+                Some(model.as_ref()),
+                &SearchOptions {
+                    limit: Some(5),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            if hits.iter().any(|hit| hit.preview.contains("after_restart")) {
+                updated = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(
+            updated,
+            "restored watcher should process file changes after daemon startup"
+        );
+
+        stop_all_watchers(&state);
+    }
 }
