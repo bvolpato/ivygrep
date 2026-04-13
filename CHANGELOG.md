@@ -2,6 +2,11 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.52] — 2026-04-13
+
+### Added
+- **E2E verification:** Added a full E2E CLI test preventing regressions in worktree overlay invalidation.
+
 ## [0.5.51] — 2026-04-13
 
 ### Fixed
