@@ -2,6 +2,14 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.48] — 2026-04-12
+
+### Fixed
+- **Watcher daemon recovery:** `ig --add` now autospawns the daemon when watch mode is enabled, so newly indexed workspaces do not get stuck as “configured” without a live watcher
+- **Daemon startup recovery:** restarting `ig --daemon` now restores filesystem watchers for already indexed workspaces that were previously configured with watch mode
+- **Query-path recovery:** a normal query now revives an offline watcher for watch-configured workspaces instead of leaving status permanently degraded
+- **Status clarity:** `ig --status` now reports `watcher offline` instead of the vaguer `daemon stale`, which better matches the actual failure mode
+
 ## [0.5.47] — 2026-04-12
 
 ### Fixed
