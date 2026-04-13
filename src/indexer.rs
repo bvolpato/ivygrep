@@ -350,17 +350,20 @@ fn index_workspace_inner(
     };
 
     let skip_gitignore = workspace.read_metadata()?.is_some_and(|m| m.skip_gitignore);
-    // When not in overlay creation mode, use the standard Merkle diff path
-    let diff = if let Some(overlay_diff) = overlay_mode {
-        overlay_diff
+    // When not in overlay creation mode, use the standard Merkle diff path.
+    // IMPORTANT: The snapshot is NOT saved here — it is deferred to after all
+    // store commits complete. Saving it earlier creates a crash window where
+    // the snapshot claims files are indexed but the actual stores are empty/partial.
+    // See: snapshot must be a high-water mark of persisted state, not of intent.
+    let (diff, pending_snapshot) = if let Some(overlay_diff) = overlay_mode {
+        (overlay_diff, None)
     } else if workspace.has_overlay() {
         // Incremental update to existing overlay
         let old = MerkleSnapshot::load(&workspace.merkle_snapshot_path())?;
         let _ = fs::write(workspace.indexing_progress_path(), "scanning");
         let new = MerkleSnapshot::build(&workspace.root, skip_gitignore)?;
         let d = old.diff(&new);
-        new.save(&workspace.merkle_snapshot_path())?;
-        d
+        (d, Some(new))
     } else {
         // Standard full-index path (non-worktree or base not available)
         let old = MerkleSnapshot::load(&workspace.merkle_snapshot_path())?;
@@ -376,8 +379,7 @@ fn index_workspace_inner(
                 total_chunks: count_workspace_chunks(workspace).unwrap_or(0),
             });
         }
-        new.save(&workspace.merkle_snapshot_path())?;
-        d
+        (d, Some(new))
     };
 
     // Determine which stores to write to: overlay or main
@@ -665,6 +667,14 @@ fn index_workspace_inner(
         },
     };
     workspace.write_metadata(&metadata)?;
+
+    // Persist the Merkle snapshot AFTER all stores are committed and metadata
+    // is written. This ensures the snapshot is a high-water mark: if we crash
+    // before this point, the next run will see a non-empty diff and re-index
+    // the affected files. `remove_file_chunks` cleans any partial state.
+    if let Some(snapshot) = pending_snapshot {
+        snapshot.save(&workspace.merkle_snapshot_path())?;
+    }
 
     Ok(IndexingSummary {
         workspace_id: workspace.id.clone(),

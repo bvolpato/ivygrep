@@ -41,7 +41,12 @@ impl MerkleSnapshot {
 
     pub fn save(&self, path: &Path) -> Result<()> {
         let payload = serde_json::to_vec(self)?;
-        fs::write(path, payload)?;
+        // Atomic write: write to a sibling tmp file, then rename.
+        // rename() is atomic on POSIX when src and dst are on the same
+        // filesystem (guaranteed here since tmp is in the same directory).
+        let tmp = path.with_extension("tmp");
+        fs::write(&tmp, payload)?;
+        fs::rename(&tmp, path)?;
         Ok(())
     }
 

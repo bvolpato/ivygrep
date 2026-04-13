@@ -442,6 +442,16 @@ impl Workspace {
             issues.push("missing workspace metadata".to_string());
         }
 
+        // Detect crashed indexing: if .indexing.pid exists but the process is
+        // dead, the IndexingGuard's Drop never ran (SIGKILL / OOM / power loss).
+        // The index is in an unknown partial state — force a rebuild.
+        if matches!(
+            legacy_pid_status(&self.indexing_pid_path(), true),
+            LegacyPidStatus::Stale
+        ) {
+            issues.push("previous indexing process crashed (stale .indexing.pid)".to_string());
+        }
+
         let skip_gitignore = metadata.as_ref().is_some_and(|m| m.skip_gitignore);
 
         if !self.sqlite_path().exists() {

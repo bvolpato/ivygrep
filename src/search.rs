@@ -1732,13 +1732,30 @@ fn file_authority_score(chunk: &IndexedChunk) -> f32 {
 }
 
 fn is_test_path(path: &str) -> bool {
-    path.contains("test")
-        || path.contains("spec")
-        || path.contains("mock")
-        || path.contains("_test.")
-        || path.contains(".test.")
-        || path.contains("_spec.")
-        || path.contains(".spec.")
+    // Directory-level signals (path segments that are test directories)
+    path.contains("/tests/")
+        || path.contains("/test/")
+        || path.contains("/__tests__/")
+        || path.contains("/spec/")
+        || path.contains("/specs/")
+        || path.contains("/mocks/")
+        || path.contains("/mock/")
+        || path.contains("/__mocks__/")
+        || path.starts_with("tests/")
+        || path.starts_with("test/")
+        || path.starts_with("spec/")
+        // File-level signals (naming conventions across languages)
+        || path.contains("_test.")    // Go, Rust: foo_test.go, foo_test.rs
+        || path.contains(".test.")    // JS/TS: foo.test.ts, foo.test.js
+        || path.contains("_spec.")    // Ruby, JS: foo_spec.rb, foo.spec.ts
+        || path.contains(".spec.")    // JS/TS: foo.spec.ts
+        || path.contains("_mock.")    // foo_mock.go, foo_mock.rs
+        || path.contains(".mock.")    // foo.mock.ts
+        || path.ends_with("_test.rs")
+        || path.ends_with("_test.go")
+        // Filename-prefix conventions
+        || path.contains("/test_")    // Python: test_handler.py
+        || path.starts_with("test_")  // Python: test_handler.py (at root)
 }
 
 pub fn workspace_has_results(workspace: &Workspace) -> Result<bool> {
@@ -2591,5 +2608,47 @@ export function registerCommands(p: Plugin) {
             "definition site should rank #1 thanks to signature boost, got order: {:?}",
             files
         );
+    }
+
+    #[test]
+    fn is_test_path_true_positives() {
+        // Directory conventions
+        assert!(is_test_path("tests/unit/handler.rs"));
+        assert!(is_test_path("test/integration/db.go"));
+        assert!(is_test_path("src/__tests__/Button.test.tsx"));
+        assert!(is_test_path("spec/models/user_spec.rb"));
+        assert!(is_test_path("src/__mocks__/api.ts"));
+
+        // Filename conventions
+        assert!(is_test_path("src/handler_test.go"));
+        assert!(is_test_path("src/handler_test.rs"));
+        assert!(is_test_path("src/Button.test.tsx"));
+        assert!(is_test_path("src/user_spec.rb"));
+        assert!(is_test_path("src/handler.spec.ts"));
+        assert!(is_test_path("src/handler_mock.go"));
+        assert!(is_test_path("src/handler.mock.ts"));
+        assert!(is_test_path("test_handler.py"));
+        assert!(is_test_path("lib/test_utils.py"));
+    }
+
+    #[test]
+    fn is_test_path_false_positives_avoided() {
+        // These contain "test" as a substring but are NOT test files
+        assert!(!is_test_path("src/attestation.rs"));
+        assert!(!is_test_path("src/contest.rs"));
+        assert!(!is_test_path("src/fastest.go"));
+        assert!(!is_test_path("src/detest.py"));
+        assert!(!is_test_path("src/latest_handler.rs"));
+        assert!(!is_test_path("src/protest.go"));
+
+        // These contain "spec" as a substring but are NOT spec files
+        assert!(!is_test_path("src/inspect.rs"));
+        assert!(!is_test_path("src/specification.py"));
+        assert!(!is_test_path("src/respect.go"));
+
+        // Core source files
+        assert!(!is_test_path("src/search.rs"));
+        assert!(!is_test_path("src/handler.rs"));
+        assert!(!is_test_path("lib/utils.py"));
     }
 }
