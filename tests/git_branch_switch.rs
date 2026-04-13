@@ -1494,3 +1494,57 @@ fn worktree_overlay_staleness_invalidation() {
         &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
     );
 }
+
+#[test]
+#[serial]
+fn worktree_overlay_auto_reindex_via_cli_e2e() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    git(root.path(), &["init", "-b", "main"]);
+    fs::write(root.path().join("base.rs"), "pub fn base_v1() {}\n").unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base v1"]);
+
+    setup_and_index(root.path(), home.path());
+
+    git(root.path(), &["checkout", "-b", "wt-e2e-branch"]);
+    fs::write(root.path().join("wt.rs"), "pub fn wt_only_e2e() {}\n").unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "wt e2e branch"]);
+    git(root.path(), &["checkout", "main"]);
+
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_stale_e2e");
+    git(
+        root.path(),
+        &["worktree", "add", wt_path.to_str().unwrap(), "wt-e2e-branch"],
+    );
+
+    // Initial explicit index of the worktree
+    setup_and_index(&wt_path, home.path());
+
+    // 4. Update base!
+    fs::write(
+        root.path().join("base.rs"),
+        "pub fn base_v1() {}\npub fn base_v2_e2e() {}\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base v2"]);
+
+    // Index base (bumps generation)
+    setup_and_index(root.path(), home.path());
+    
+    // Now NO explicit index in worktree!
+    // Just run a search using the IG CLI, which should detect staleness.
+    use assert_cmd::Command;
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    cmd.current_dir(&wt_path)
+        .env("IVYGREP_HOME", home.path())
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .arg("base_v2_e2e")
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("base.rs"));
+}
