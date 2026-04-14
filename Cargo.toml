@@ -1,6 +1,6 @@
 [package]
 name = "ivygrep"
-version = "0.5.52"
+version = "0.5.53"
 edition = "2024"
 description = "Semantic grep that stays local"
 license = "MIT"

@@ -2,6 +2,12 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.53] — 2026-04-13
+
+### Fixed
+- **Semantic scope leakage:** directory-scoped semantic searches now escape SQLite `LIKE` wildcards in scope paths, so `_` and `%` in real directory names no longer leak hits from similarly named siblings.
+- **Hybrid recall under scoped search:** semantic candidate collection now re-checks `scope_matches()` before scoring and truncation, preventing out-of-scope chunks from stealing top-K slots.
+
 ## [0.5.52] — 2026-04-13
 
 ### Added
