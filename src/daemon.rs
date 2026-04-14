@@ -620,7 +620,8 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
 fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
     let workspace = Workspace::resolve(path)?;
 
-    if state.watchers.lock().contains_key(&workspace.id) {
+    let mut watchers = state.watchers.lock();
+    if watchers.contains_key(&workspace.id) {
         return Ok(());
     }
 
@@ -634,13 +635,14 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
     })?;
 
     watcher.watch(&workspace.root, RecursiveMode::Recursive)?;
-    state.watchers.lock().insert(
+    watchers.insert(
         workspace.id.clone(),
         WatchRegistration {
             _watcher: watcher,
             control: control.clone(),
         },
     );
+    drop(watchers);
 
     let _ = jobs::start_job(&workspace, JobKind::Watcher, "idle", 1);
     spawn_watch_heartbeat(control.clone());
