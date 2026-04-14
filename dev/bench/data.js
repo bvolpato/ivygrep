@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776133335241,
+  "lastUpdate": 1776144874159,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -7055,6 +7055,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 544.8,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "8bb8c1bf683201e4e77da8e1a76cf72c1c9c86f6",
+          "message": "fix: prevent flock race in pre-lock rebuild_index_storage\n\nMove the needs_rebuild() health check and rebuild_index_storage() call\ninside the flock critical section. Previously, rebuild ran before the\nlock was acquired, calling remove_dir_all on index_dir which destroyed\nthe index.lock inode. Any concurrent process that already held the\nflock on the old inode lost mutual exclusion — both believed they had\nexclusive access, causing silent index corruption.\n\nChanges:\n- Add remove_workspace_index_contents() that removes everything in\n  index_dir except index.lock, preserving the flock inode\n- Move health check + rebuild after lock_exclusive()\n- rebuild_index_storage now uses lock-preserving removal so the\n  secondary call (storage verification fallback) also can't break\n  a held lock\n\nBump: 0.5.54 → 0.5.55",
+          "timestamp": "2026-04-14T01:25:27-04:00",
+          "tree_id": "897d2230630d50091a076dfe21962c629e3d94c2",
+          "url": "https://github.com/bvolpato/ivygrep/commit/8bb8c1bf683201e4e77da8e1a76cf72c1c9c86f6"
+        },
+        "date": 1776144873760,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 913656800,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 8971.5,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3779.17,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2815.51,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 10952.58,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 10715.9,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 7.01,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 517.56,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 57829.32,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 14859.39,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 5237.65,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 449223.26,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 534.76,
             "unit": "µs"
           }
         ]
