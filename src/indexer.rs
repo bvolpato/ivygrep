@@ -360,7 +360,9 @@ fn index_workspace_inner(
                 Some(current_gen != overlay_gen)
             })();
             if stale == Some(true) {
-                eprintln!("  ⚠ base index has changed since overlay was created — rebuilding overlay...");
+                eprintln!(
+                    "  ⚠ base index has changed since overlay was created — rebuilding overlay..."
+                );
                 // Delete stale overlay stores to force fresh creation
                 let _ = fs::remove_file(workspace.overlay_sqlite_path());
                 let _ = fs::remove_dir_all(workspace.overlay_tantivy_dir());
@@ -679,15 +681,17 @@ fn index_workspace_inner(
         .unwrap_or_default()
         .as_secs();
 
-    let existing_meta = workspace.read_metadata()?.unwrap_or_else(|| WorkspaceMetadata {
-        id: workspace.id.clone(),
-        root: workspace.root.clone(),
-        created_at_unix: now,
-        last_indexed_at_unix: None,
-        watch_enabled: false,
-        skip_gitignore: false,
-        index_generation: 0,
-    });
+    let existing_meta = workspace
+        .read_metadata()?
+        .unwrap_or_else(|| WorkspaceMetadata {
+            id: workspace.id.clone(),
+            root: workspace.root.clone(),
+            created_at_unix: now,
+            last_indexed_at_unix: None,
+            watch_enabled: false,
+            skip_gitignore: false,
+            index_generation: 0,
+        });
     let metadata = WorkspaceMetadata {
         id: workspace.id.clone(),
         root: workspace.root.clone(),

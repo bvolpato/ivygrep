@@ -1518,7 +1518,12 @@ fn worktree_overlay_auto_reindex_via_cli_e2e() {
     let wt_path = wt_dir.path().join("wt_stale_e2e");
     git(
         root.path(),
-        &["worktree", "add", wt_path.to_str().unwrap(), "wt-e2e-branch"],
+        &[
+            "worktree",
+            "add",
+            wt_path.to_str().unwrap(),
+            "wt-e2e-branch",
+        ],
     );
 
     // Initial explicit index of the worktree
@@ -1535,7 +1540,7 @@ fn worktree_overlay_auto_reindex_via_cli_e2e() {
 
     // Index base (bumps generation)
     setup_and_index(root.path(), home.path());
-    
+
     // Now NO explicit index in worktree!
     // Just run a search using the IG CLI, which should detect staleness.
     use assert_cmd::Command;

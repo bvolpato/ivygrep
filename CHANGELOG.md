@@ -2,6 +2,12 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.5.54] — 2026-04-13
+
+### Fixed
+- **Watcher registration TOCTOU race:** Concurrent requests to watch the same workspace could both pass the `contains_key` check and create duplicate watchers, silently leaking the first watcher's tokio task and file descriptor. The lock is now held across check+build+insert.
+
+
 ## [0.5.53] — 2026-04-13
 
 ### Fixed

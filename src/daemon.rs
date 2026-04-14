@@ -1028,4 +1028,55 @@ mod tests {
 
         stop_all_watchers(&state);
     }
+
+    #[tokio::test]
+    #[serial]
+    async fn concurrent_register_watcher_creates_exactly_one() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        std::fs::write(
+            repo.path().join("lib.rs"),
+            "pub fn concurrent_watcher_target() -> bool { true }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+
+        let state = DaemonState {
+            lazy_model: Arc::new(std::sync::OnceLock::new()),
+            watchers: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        let state_arc = Arc::new(state);
+        let barrier = Arc::new(tokio::sync::Barrier::new(8));
+        let repo_path = repo.path().to_path_buf();
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let state = Arc::clone(&state_arc);
+                let barrier = Arc::clone(&barrier);
+                let path = repo_path.clone();
+                tokio::spawn(async move {
+                    barrier.wait().await;
+                    let _ = register_watcher(&state, &path);
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.await.expect("register_watcher task panicked");
+        }
+
+        let watcher_count = state_arc.watchers.lock().len();
+        assert_eq!(
+            watcher_count, 1,
+            "exactly one watcher should exist after concurrent registrations, got {watcher_count}"
+        );
+
+        stop_all_watchers(&state_arc);
+    }
 }
