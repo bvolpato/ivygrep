@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{MAIN_SEPARATOR, Path, PathBuf};
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -1041,15 +1041,27 @@ fn type_matches(chunk: &IndexedChunk, type_filter: Option<&str>) -> bool {
     }
 }
 
+fn scope_path_matches(rel_path: &Path, scope_filter: Option<&WorkspaceScope>) -> bool {
+    scope_filter.is_none_or(|scope| scope.matches(rel_path))
+}
+
 fn scope_matches(chunk: &IndexedChunk, scope_filter: Option<&WorkspaceScope>) -> bool {
-    match scope_filter {
-        Some(scope) => scope.matches(&chunk.file_path),
-        None => true,
-    }
+    scope_path_matches(&chunk.file_path, scope_filter)
 }
 
 fn path_matches(chunk: &IndexedChunk, path_matcher: &PathGlobMatcher) -> bool {
     path_matcher.matches(&chunk.file_path)
+}
+
+fn escape_like_pattern(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped
 }
 
 fn is_definition_kind(kind: &str) -> bool {
@@ -1136,8 +1148,9 @@ fn query_filtered_chunks(
             sql.push_str(" AND file_path = ?");
             params_vec.push(Box::new(prefix));
         } else {
-            sql.push_str(" AND file_path LIKE ?");
-            params_vec.push(Box::new(format!("{}%", prefix)));
+            let dir_prefix = format!("{prefix}{MAIN_SEPARATOR}");
+            sql.push_str(" AND file_path LIKE ? ESCAPE '\\'");
+            params_vec.push(Box::new(format!("{}%", escape_like_pattern(&dir_prefix))));
         }
     }
 
@@ -1192,6 +1205,7 @@ fn query_filtered_chunks(
 
     // Apply full glob filtering in Rust for complex patterns
     rows.flatten()
+        .filter(|chunk| scope_path_matches(&chunk.file_path, scope_filter))
         .filter(|chunk| path_matcher.matches(&chunk.file_path))
         .collect()
 }
@@ -1774,6 +1788,9 @@ pub fn workspace_has_results(workspace: &Workspace) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    use std::path::{Path, PathBuf};
+
     use serial_test::serial;
 
     use crate::EMBEDDING_DIMENSIONS;
@@ -1782,6 +1799,77 @@ mod tests {
     use crate::workspace::{Workspace, WorkspaceScope};
 
     use super::*;
+
+    fn assert_hybrid_search_scope_filter(scope_dir: &str, out_of_scope_dirs: &[&str]) {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::create_dir_all(tmp.path().join(scope_dir)).unwrap();
+        std::fs::write(
+            tmp.path().join(scope_dir).join("match.rs"),
+            "pub fn applyFilter() -> bool { true }\n",
+        )
+        .unwrap();
+
+        for dir in out_of_scope_dirs {
+            std::fs::create_dir_all(tmp.path().join(dir)).unwrap();
+            std::fs::write(
+                tmp.path().join(dir).join("match.rs"),
+                "pub fn applyFilter() -> bool { true }\n",
+            )
+            .unwrap();
+        }
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = hybrid_search(
+            &workspace,
+            "applyFilter",
+            Some(&model),
+            &SearchOptions {
+                limit: None,
+                context: 2,
+                type_filter: None,
+                include_globs: vec![],
+                exclude_globs: vec![],
+                scope_filter: Some(WorkspaceScope {
+                    rel_path: PathBuf::from(scope_dir),
+                    is_file: false,
+                }),
+                skip_gitignore: false,
+            },
+        )
+        .unwrap();
+
+        assert!(!hits.is_empty());
+        assert!(hits[0].sources.iter().any(|source| source == "lexical"));
+        assert!(hits[0].sources.iter().any(|source| source == "semantic"));
+
+        let files = hits
+            .iter()
+            .map(|hit| hit.file_path.clone())
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            files,
+            HashSet::from([PathBuf::from(format!("{scope_dir}/match.rs"))])
+        );
+        assert!(
+            hits.iter()
+                .all(|hit| hit.file_path.starts_with(Path::new(scope_dir)))
+        );
+    }
+
+    #[test]
+    fn escape_like_pattern_escapes_sql_wildcards() {
+        assert_eq!(
+            escape_like_pattern(r"test_utils\match%"),
+            r"test\_utils\\match\%"
+        );
+    }
 
     #[test]
     #[serial]
@@ -1929,51 +2017,22 @@ mod tests {
     #[test]
     #[serial]
     fn hybrid_search_respects_scope_filter() {
-        let tmp = tempfile::tempdir().unwrap();
-        let home = tempfile::tempdir().unwrap();
+        assert_hybrid_search_scope_filter("scoped", &["other"]);
+    }
 
-        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
-
-        std::fs::create_dir_all(tmp.path().join("scoped")).unwrap();
-        std::fs::create_dir_all(tmp.path().join("other")).unwrap();
-        std::fs::write(
-            tmp.path().join("scoped/match.rs"),
-            "pub fn applyFilter() -> bool { true }\n",
-        )
-        .unwrap();
-        std::fs::write(
-            tmp.path().join("other/match.rs"),
-            "pub fn applyFilter() -> bool { true }\n",
-        )
-        .unwrap();
-
-        let workspace = Workspace::resolve(tmp.path()).unwrap();
-        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
-        index_workspace(&workspace, &model).unwrap();
-
-        let hits = hybrid_search(
-            &workspace,
-            "applyFilter",
-            Some(&model),
-            &SearchOptions {
-                limit: None,
-                context: 2,
-                type_filter: None,
-                include_globs: vec![],
-                exclude_globs: vec![],
-                scope_filter: Some(WorkspaceScope {
-                    rel_path: std::path::PathBuf::from("scoped"),
-                    is_file: false,
-                }),
-                skip_gitignore: false,
-            },
-        )
-        .unwrap();
-        assert!(!hits.is_empty());
-        assert!(
-            hits.iter()
-                .all(|hit| hit.file_path.starts_with(std::path::Path::new("scoped")))
+    #[test]
+    #[serial]
+    fn hybrid_search_respects_scope_filter_with_underscore_in_directory_name() {
+        assert_hybrid_search_scope_filter(
+            "test_utils",
+            &["testXutils", "test.utils", "test_utils_extra"],
         );
+    }
+
+    #[test]
+    #[serial]
+    fn hybrid_search_respects_scope_filter_with_percent_in_directory_name() {
+        assert_hybrid_search_scope_filter("test%utils", &["testXutils", "testXXutils"]);
     }
 
     #[test]
