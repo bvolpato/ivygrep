@@ -34,14 +34,23 @@ impl VectorStore {
             let path_str = path
                 .to_str()
                 .context("vector path contains invalid UTF-8")?;
-            if index.load(path_str).is_err() && !matches!(quantization, ScalarKind::F32) {
-                // Old index may use different quantization; retry with F32
-                let fallback = make_index(ScalarKind::F32)?;
-                fallback.load(path_str)?;
-                return Ok(Self {
-                    path: path.to_path_buf(),
-                    index: fallback,
-                });
+            match index.load(path_str) {
+                Ok(()) => {}
+                Err(err) => {
+                    if matches!(quantization, ScalarKind::F32) {
+                        // Already F32 — no fallback possible. Propagate the
+                        // error instead of silently returning an empty index
+                        // (which would wipe the file on the next save()).
+                        return Err(err.into());
+                    }
+                    // Old index may use different quantization; retry with F32
+                    let fallback = make_index(ScalarKind::F32)?;
+                    fallback.load(path_str)?;
+                    return Ok(Self {
+                        path: path.to_path_buf(),
+                        index: fallback,
+                    });
+                }
             }
         }
 
@@ -73,14 +82,20 @@ impl VectorStore {
             let path_str = path
                 .to_str()
                 .context("vector path contains invalid UTF-8")?;
-            if index.view(path_str).is_err() && !matches!(quantization, ScalarKind::F32) {
-                // Old index may use different quantization; retry with F32
-                let fallback = make_index(ScalarKind::F32)?;
-                fallback.view(path_str)?;
-                return Ok(Self {
-                    path: path.to_path_buf(),
-                    index: fallback,
-                });
+            match index.view(path_str) {
+                Ok(()) => {}
+                Err(err) => {
+                    if matches!(quantization, ScalarKind::F32) {
+                        return Err(err.into());
+                    }
+                    // Old index may use different quantization; retry with F32
+                    let fallback = make_index(ScalarKind::F32)?;
+                    fallback.view(path_str)?;
+                    return Ok(Self {
+                        path: path.to_path_buf(),
+                        index: fallback,
+                    });
+                }
             }
         }
 

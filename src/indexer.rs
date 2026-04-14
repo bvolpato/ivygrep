@@ -371,9 +371,13 @@ fn index_workspace_inner(
                 diff.deleted.len()
             );
 
-            // Save the content-based snapshot as the worktree's Merkle state
-            // Future incremental diffs will use mtime mode from this baseline
-            new.save(&workspace.merkle_snapshot_path())?;
+            // Save an mtime-based snapshot for this worktree so that future
+            // incremental diffs (which use MerkleSnapshot::build / mtime mode)
+            // produce correct deltas. The content-based snapshots above were
+            // only needed for the initial cross-worktree diff; persisting them
+            // would cause every file's hash to differ on the next watcher tick.
+            let mtime_snapshot = MerkleSnapshot::build(&workspace.root, skip_gitignore)?;
+            mtime_snapshot.save(&workspace.merkle_snapshot_path())?;
 
             Some(diff)
         } else if workspace.has_overlay() {
