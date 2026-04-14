@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776144874159,
+  "lastUpdate": 1776173535472,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -7144,6 +7144,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 534.76,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "ab85f8e0284ecef1dc1647de535a50b218bae6ff",
+          "message": "fix: overlay merkle snapshot mismatch + VectorStore F32 silent data loss\n\n1. Overlay merkle snapshot format mismatch (perf bug):\n   Overlay creation saved a content-based snapshot (xxh3 of path+bytes)\n   but subsequent watcher runs called MerkleSnapshot::build (mtime-based).\n   Every file's hash differed, triggering a full re-index on every watcher\n   event. Fix: save mtime-based snapshot after overlay creation so\n   incremental diffs use the same hash format.\n\n2. VectorStore::open() F32 silent empty fallback (data loss):\n   When quantization was F32, a failed load() fell through to returning\n   an empty index (the !F32 guard skipped the fallback branch). Next\n   save() overwrites the corrupt file, wiping all neural vectors.\n   Fix: propagate the error for F32 loads instead of silently returning\n   empty. Applied to both open() and open_readonly().\n\nBump: 0.5.55 → 0.5.56",
+          "timestamp": "2026-04-14T09:22:57-04:00",
+          "tree_id": "209dc037707d6e3ba8e278779c713f3894980c89",
+          "url": "https://github.com/bvolpato/ivygrep/commit/ab85f8e0284ecef1dc1647de535a50b218bae6ff"
+        },
+        "date": 1776173534801,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 953711840,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 7942.79,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3841.88,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2837.98,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11031.26,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 10925.22,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 6.77,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 518.54,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 56834.37,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 14852.07,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 5355.79,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 450368.66,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 592.7,
             "unit": "µs"
           }
         ]
