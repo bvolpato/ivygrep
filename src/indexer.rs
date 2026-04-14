@@ -117,6 +117,29 @@ pub fn remove_workspace_index(workspace: &Workspace) -> Result<()> {
     Ok(())
 }
 
+/// Remove all index contents EXCEPT `index.lock`. This is safe to call while
+/// holding the flock because the lock file's inode is preserved, keeping the
+/// advisory lock valid.
+fn remove_workspace_index_contents(workspace: &Workspace) -> Result<()> {
+    if !workspace.index_dir.exists() {
+        return Ok(());
+    }
+    let lock_name = std::ffi::OsStr::new("index.lock");
+    for entry in fs::read_dir(&workspace.index_dir)? {
+        let entry = entry?;
+        if entry.file_name() == lock_name {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            fs::remove_dir_all(&path)?;
+        } else {
+            fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn open_storage(workspace: &Workspace, embedding_dimensions: usize) -> Result<StorageHandles> {
     workspace.ensure_dirs()?;
     fs::create_dir_all(workspace.tantivy_dir())?;
@@ -159,16 +182,15 @@ fn index_workspace_with_options(
     embedding_model: &dyn EmbeddingModel,
     trust_live_watcher: bool,
 ) -> Result<IndexingSummary> {
-    let preserved_metadata = workspace.read_metadata().ok().flatten();
-    if workspace.quick_index_health().needs_rebuild() {
-        rebuild_index_storage(workspace, preserved_metadata.as_ref())?;
-    }
-
     workspace.ensure_dirs()?;
 
     // Acquire an exclusive file lock to prevent concurrent writes to the
     // vector store (usearch) and other index files. The lock is advisory
     // and automatically released when `_lock_file` is dropped.
+    //
+    // IMPORTANT: The health check and rebuild MUST happen AFTER acquiring
+    // this lock. Doing them before would destroy the lock file inode,
+    // breaking flock mutual exclusion for any concurrent holder.
     let lock_path = workspace.lock_path();
     let lock_file = fs::OpenOptions::new()
         .create(true)
@@ -178,6 +200,14 @@ fn index_workspace_with_options(
         .with_context(|| format!("failed to open lock file {}", lock_path.display()))?;
     fs2::FileExt::lock_exclusive(&lock_file)
         .with_context(|| format!("failed to acquire index lock {}", lock_path.display()))?;
+
+    // Now that we truly own the workspace via flock, it's safe to inspect
+    // health and rebuild if needed. rebuild_index_storage preserves the
+    // lock file so our flock remains valid.
+    let preserved_metadata = workspace.read_metadata().ok().flatten();
+    if workspace.quick_index_health().needs_rebuild() {
+        rebuild_index_storage(workspace, preserved_metadata.as_ref())?;
+    }
 
     let pid_path = workspace.indexing_pid_path();
     let _ = fs::write(&pid_path, std::process::id().to_string());
@@ -730,7 +760,9 @@ fn rebuild_index_storage(
     workspace: &Workspace,
     preserved_metadata: Option<&WorkspaceMetadata>,
 ) -> Result<()> {
-    remove_workspace_index(workspace)?;
+    // Use lock-preserving removal so that any held flock remains valid.
+    // The caller is expected to already hold the advisory lock.
+    remove_workspace_index_contents(workspace)?;
     workspace.ensure_dirs()?;
     if let Some(mut metadata) = preserved_metadata.cloned() {
         metadata.last_indexed_at_unix = None;
