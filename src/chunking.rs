@@ -439,7 +439,8 @@ pub fn chunk_source(rel_path: &Path, text: &str) -> Vec<Chunk> {
 }
 
 /// Uses Tree-sitter to reliably extract accurately bounded functions and classes
-/// for supported main languages (Rust, Python, Go, JS, TS).
+/// for supported languages (Rust, Python, Go, JS, TS, Java, C#, PHP, Ruby, Swift,
+/// C, C++, Scala, Bash, Haskell, OCaml, Lua, Dart, Objective-C, Perl).
 fn try_tree_sitter_chunk_source(
     rel_path: &Path,
     text: &str,
@@ -509,6 +510,64 @@ fn try_tree_sitter_chunk_source(
                 .ok()?;
             "(class_declaration) @class (struct_declaration) @class (protocol_declaration) @class (extension_declaration) @class (function_declaration) @fn (initializer_declaration) @fn"
         }
+        "c" => {
+            parser.set_language(&tree_sitter_c::LANGUAGE.into()).ok()?;
+            "(function_definition) @fn (struct_specifier) @class (enum_specifier) @class (union_specifier) @class"
+        }
+        "cpp" => {
+            parser
+                .set_language(&tree_sitter_cpp::LANGUAGE.into())
+                .ok()?;
+            "(function_definition) @fn (class_specifier) @class (struct_specifier) @class (enum_specifier) @class (namespace_definition) @class"
+        }
+        "scala" => {
+            parser
+                .set_language(&tree_sitter_scala::LANGUAGE.into())
+                .ok()?;
+            "(class_definition) @class (trait_definition) @class (object_definition) @class (function_definition) @fn (val_definition) @fn"
+        }
+        "bash" | "shell" => {
+            parser
+                .set_language(&tree_sitter_bash::LANGUAGE.into())
+                .ok()?;
+            "(function_definition) @fn"
+        }
+        "haskell" => {
+            parser
+                .set_language(&tree_sitter_haskell::LANGUAGE.into())
+                .ok()?;
+            "(function) @fn (signature) @fn (data_type) @class (class) @class (instance) @class"
+        }
+        "ocaml" => {
+            parser
+                .set_language(&tree_sitter_ocaml::LANGUAGE_OCAML.into())
+                .ok()?;
+            "(value_definition) @fn (type_definition) @class (module_definition) @class"
+        }
+        "lua" => {
+            parser
+                .set_language(&tree_sitter_lua::LANGUAGE.into())
+                .ok()?;
+            "(function_declaration) @fn (function_definition) @fn"
+        }
+        "dart" => {
+            parser
+                .set_language(&tree_sitter_dart::LANGUAGE.into())
+                .ok()?;
+            "(class_declaration) @class (function_signature) @fn (method_signature) @fn"
+        }
+        "objc" => {
+            parser
+                .set_language(&tree_sitter_objc::LANGUAGE.into())
+                .ok()?;
+            "(class_interface) @class (class_implementation) @class (protocol_declaration) @class (category_interface) @class (category_implementation) @class"
+        }
+        "perl" => {
+            parser
+                .set_language(&tree_sitter_perl::LANGUAGE.into())
+                .ok()?;
+            "(function_definition) @fn (package_statement) @class"
+        }
         _ => return None,
     };
 
@@ -563,7 +622,29 @@ fn try_tree_sitter_chunk_source(
                 | "class"
                 | "module"
                 | "protocol_declaration"
-                | "extension_declaration" => ChunkKind::Class,
+                | "extension_declaration"
+                // C/C++
+                | "struct_specifier"
+                | "enum_specifier"
+                | "union_specifier"
+                | "class_specifier"
+                | "namespace_definition"
+                // Scala
+                | "trait_definition"
+                | "object_definition"
+                // Haskell
+                | "data_type"
+                | "instance"
+                // OCaml
+                | "type_definition"
+                | "module_definition"
+                // Obj-C
+                | "class_interface"
+                | "class_implementation"
+                | "category_interface"
+                | "category_implementation"
+                // Perl
+                | "package_statement" => ChunkKind::Class,
                 _ => ChunkKind::Function,
             };
 
@@ -1669,6 +1750,157 @@ export function register(p: Plugin) {
         assert!(
             all_text.contains("gquota"),
             "string literal 'gquota' must be present in chunk text"
+        );
+    }
+
+    // ── Tree-sitter language promotion tests ──────────────────────────
+
+    #[test]
+    fn c_tree_sitter_detects_struct_and_function() {
+        let src = "struct Point {\n    int x;\n    int y;\n};\n\nint add(int a, int b) {\n    return a + b;\n}\n";
+        let chunks = chunk_source(Path::new("math.c"), src);
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.kind == ChunkKind::Class && c.text.contains("Point"))
+        );
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.kind == ChunkKind::Function && c.text.contains("add"))
+        );
+    }
+
+    #[test]
+    fn cpp_tree_sitter_detects_class_and_function() {
+        let src =
+            "class Engine {\npublic:\n    void start() {}\n};\n\nint main() {\n    return 0;\n}\n";
+        let chunks = chunk_source(Path::new("engine.cpp"), src);
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.kind == ChunkKind::Class && c.text.contains("Engine"))
+        );
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.kind == ChunkKind::Function && c.text.contains("main"))
+        );
+    }
+
+    #[test]
+    fn scala_tree_sitter_detects_object_and_trait() {
+        let src = "object Main {\n  def run(): Unit = println(\"hi\")\n}\n\ntrait Service {\n  def execute(): Int\n}\n";
+        let chunks = chunk_source(Path::new("Main.scala"), src);
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.kind == ChunkKind::Class && c.text.contains("Main"))
+        );
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.kind == ChunkKind::Class && c.text.contains("Service"))
+        );
+    }
+
+    #[test]
+    fn bash_tree_sitter_detects_functions() {
+        let src = "#!/bin/bash\n\nsetup() {\n    echo setup\n}\n\nfunction teardown {\n    echo done\n}\n";
+        let chunks = chunk_source(Path::new("run.sh"), src);
+        let fn_chunks: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.kind == ChunkKind::Function)
+            .collect();
+        assert!(
+            fn_chunks.len() >= 2,
+            "bash should detect at least 2 functions, got {}",
+            fn_chunks.len()
+        );
+    }
+
+    #[test]
+    fn haskell_tree_sitter_detects_functions_and_data() {
+        let src = "module Main where\n\nadd :: Int -> Int -> Int\nadd x y = x + y\n\ndata Color = Red | Blue\n";
+        let chunks = chunk_source(Path::new("Main.hs"), src);
+        assert!(
+            chunks.iter().any(|c| c.text.contains("add")),
+            "haskell should detect add function"
+        );
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.kind == ChunkKind::Class && c.text.contains("Color"))
+        );
+    }
+
+    #[test]
+    fn ocaml_tree_sitter_detects_let_and_type() {
+        let src = "let add a b = a + b\n\ntype color = Red | Blue\n\nmodule M = struct end\n";
+        let chunks = chunk_source(Path::new("lib.ml"), src);
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.kind == ChunkKind::Function && c.text.contains("add"))
+        );
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.kind == ChunkKind::Class && c.text.contains("color"))
+        );
+    }
+
+    #[test]
+    fn lua_tree_sitter_detects_functions() {
+        let src = "function add(a, b)\n    return a + b\nend\n\nlocal function helper()\n    return 42\nend\n";
+        let chunks = chunk_source(Path::new("util.lua"), src);
+        let fn_chunks: Vec<_> = chunks
+            .iter()
+            .filter(|c| c.kind == ChunkKind::Function)
+            .collect();
+        assert!(
+            fn_chunks.len() >= 2,
+            "lua should detect at least 2 functions, got {}",
+            fn_chunks.len()
+        );
+    }
+
+    #[test]
+    fn dart_tree_sitter_detects_class_and_function() {
+        let src = "class Calculator {\n  int add(int a, int b) {\n    return a + b;\n  }\n}\n\nvoid main() {\n  print('hi');\n}\n";
+        let chunks = chunk_source(Path::new("main.dart"), src);
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.kind == ChunkKind::Class && c.text.contains("Calculator"))
+        );
+        assert!(chunks.iter().any(|c| c.text.contains("main")));
+    }
+
+    #[test]
+    fn objc_tree_sitter_detects_interface_and_implementation() {
+        let src = "@interface Foo : NSObject\n- (void)bar;\n@end\n\n@implementation Foo\n- (void)bar {\n}\n@end\n";
+        let chunks = chunk_source(Path::new("Foo.m"), src);
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.kind == ChunkKind::Class && c.text.contains("Foo"))
+        );
+    }
+
+    #[test]
+    fn perl_tree_sitter_detects_sub_and_package() {
+        let src = "package Math;\n\nsub add {\n    my ($a, $b) = @_;\n    return $a + $b;\n}\n\nsub mul {\n    return $_[0] * $_[1];\n}\n";
+        let chunks = chunk_source(Path::new("Math.pm"), src);
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.kind == ChunkKind::Class && c.text.contains("Math"))
+        );
+        assert!(
+            chunks
+                .iter()
+                .any(|c| c.kind == ChunkKind::Function && c.text.contains("add"))
         );
     }
 }
