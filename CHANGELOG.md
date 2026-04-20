@@ -2,6 +2,12 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.6.2] — 2026-04-20
+
+### Added
+- **Killer TUI Mode!** You can now launch an interactive `ratatui`-powered Terminal User Interface by running `ig -i` or `ig --interactive`. It supports real-time substring/semantic search as you type, and previews source files with `syntect` syntax highlighting natively within the terminal.
+
+
 ## [0.6.1] — 2026-04-20
 
 ### Improved
