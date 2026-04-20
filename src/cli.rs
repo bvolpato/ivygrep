@@ -56,6 +56,9 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub force: bool,
 
+    #[arg(short = 'i', long, global = true)]
+    pub interactive: bool,
+
     /// Fast exact-match search backed by the index. Deterministic results,
     /// orders of magnitude faster than grep/rg for indexed repos.
     #[arg(long, short = 'l', global = true)]
@@ -264,6 +267,10 @@ pub async fn run() -> Result<()> {
         let _ = std::fs::remove_file(&pid_path);
         let _ = std::fs::remove_file(workspace.enhancing_progress_path());
         std::process::exit(0);
+    }
+
+    if cli.interactive {
+        return crate::tui::run_tui(cli).await;
     }
 
     run_query(cli).await

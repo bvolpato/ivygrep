@@ -17,6 +17,7 @@ pub mod text;
 pub mod vector_store;
 pub mod walker;
 pub mod workspace;
+pub mod tui;
 
 /// Legacy constant kept for tests. Prefer [`embedding::model_dimensions`].
 pub const EMBEDDING_DIMENSIONS: usize = 256;

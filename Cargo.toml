@@ -46,6 +46,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 usearch = { version = "2.24", default-features = false, features = ["fp16lib"] }
 uuid = { version = "1.22", features = ["v4", "serde"] }
 num_cpus = "1.16"
+ratatui = "0.29.0"
+crossterm = { version = "0.28", features = ["event-stream"] }
+tui-input = "0.11"
+syntect = "5.2.0"
+arboard = "3.4.0"
 libc = "0.2"
 tree-sitter = "0.26.7"
 tree-sitter-rust = "0.24.1"
