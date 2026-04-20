@@ -537,3 +537,28 @@ async fn daemon_ipc_skip_gitignore() {
     daemon_handle.await.unwrap();
     ivygrep::ipc::cleanup_socket();
 }
+
+#[tokio::test]
+#[serial]
+async fn daemon_ipc_recovers_stale_socket() {
+    let home = tempdir().unwrap();
+    isolate_home(home.path());
+
+    // Bind once to create the socket file
+    let Some((listener, path)) = bind_for_test().await else {
+        return;
+    };
+    
+    // Drop the listener to leave a stale socket file on disk
+    drop(listener);
+    assert!(path.exists(), "Stale socket should be left on disk");
+
+    // Attempting to bind again should succeed and replace it
+    let Some((new_listener, new_path)) = bind_for_test().await else {
+        panic!("Should have recovered from stale socket");
+    };
+    
+    assert!(new_path.exists(), "New socket should exist");
+    drop(new_listener);
+    ivygrep::ipc::cleanup_socket();
+}
