@@ -2,8 +2,13 @@
 name = "ivygrep"
 version = "0.6.0"
 edition = "2024"
-description = "Semantic grep that stays local"
+description = "Semantic grep that stays local — hybrid BM25 + vector search for code"
 license = "MIT"
+homepage = "https://bvolpato.github.io/ivygrep"
+repository = "https://github.com/bvolpato/ivygrep"
+readme = "README.md"
+keywords = ["grep", "search", "semantic", "code-search", "mcp"]
+categories = ["command-line-utilities", "development-tools", "text-processing"]
 
 [[bin]]
 name = "ig"

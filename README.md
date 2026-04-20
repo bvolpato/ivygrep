@@ -137,7 +137,7 @@ Traditional tools require you to know _exactly_ what you're looking for. ivygrep
 ### 🌍 44 Languages Supported
 ivygrep indexes and structurally chunks 44 languages today:
 
-- **Tree-sitter AST chunking:** Rust, Python, Go, JavaScript, TypeScript, Java, C#, PHP, Ruby, Swift
+- **Tree-sitter AST chunking (20 languages):** Rust, Python, Go, JavaScript, TypeScript, Java, C, C++, C#, Scala, PHP, Ruby, Swift, Bash, Haskell, OCaml, Lua, Dart, Objective-C, Perl
 - **Heuristic structural chunking:** the remaining supported languages below
 
 - **Systems:** Rust, C, C++, Zig, Nim
@@ -225,9 +225,16 @@ cargo test --test stress_harness -- --ignored --nocapture
 
 ## Roadmap
 
-- **More Tree-sitter languages:** the next step is to keep promoting high-traffic heuristic languages into the AST pipeline, starting with Kotlin, Scala, Dart, Objective-C, and SQL.
-- **Symbol retrieval:** a practical path is to store symbol tables during chunking, then add a second index for definitions, references, and call edges. That would enable `symbol`, `refs`, and `callers` workflows without replacing the current hybrid text retrieval.
-- **Background job resilience:** job ledgers, heartbeats, and coalesced watcher scheduling are now in place; the next step is richer queue diagnostics and resumable worker state across daemon restarts.
+- **More Tree-sitter languages:** expand the AST pipeline to Kotlin, SQL, and additional grammars as high-quality tree-sitter parsers mature.
+- **Symbol retrieval:** store symbol tables during chunking, add a second index for definitions, references, and call edges. Enable `symbol`, `refs`, and `callers` workflows without replacing the current hybrid text retrieval.
+- **Interactive TUI:** `ig -i` for fuzzy, real-time interactive search with preview windows (like `fzf` for code).
+- **Editor integrations:** VS Code extension and Neovim telescope plugin for in-editor semantic search.
+- **Windows support:** resolve usearch/simsimd MSVC compatibility for native Windows builds.
+- **Background job resilience:** richer queue diagnostics and resumable worker state across daemon restarts.
+
+## Contributing
+
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ---
 

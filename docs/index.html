@@ -3,10 +3,23 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ivygrep | Semantic code search that never phones home</title>
-    <meta name="description" content="Local-first semantic code search combining lexical tools with neural vector search. Sub-100ms latency, zero telemetry.">
-    <meta name="theme-color" content="#0a0a0f">
-    
+    <title>ivygrep — Semantic code search that never phones home</title>
+    <meta name="description" content="Local-first semantic code search combining BM25 lexical search with neural vector embeddings. Sub-100ms latency, zero telemetry, 44 languages, built-in MCP server for AI agents.">
+    <meta name="theme-color" content="#06070a">
+
+    <!-- Open Graph -->
+    <meta property="og:title" content="ivygrep — Semantic code search that never phones home">
+    <meta property="og:description" content="Ask questions in English, get answers in code. 100% local, sub-100ms, zero telemetry.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://bvolpato.github.io/ivygrep">
+    <meta property="og:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner.png">
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="ivygrep — Semantic code search that never phones home">
+    <meta name="twitter:description" content="Ask questions in English, get answers in code. 100% local, sub-100ms, zero telemetry.">
+    <meta name="twitter:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner.png">
+
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Outfit:wght@300;400;600;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -17,44 +30,65 @@
     <div class="bg-fx"></div>
     <div class="bg-fx-glow"></div>
 
+    <!-- Floating particles -->
+    <div class="particles" id="particles"></div>
+
+    <!-- ─── Navigation ─── -->
     <nav class="navbar relative z-10 fade-in">
         <div class="container nav-content">
-            <div class="logo">
-                <!-- Fallback to text if logo image is missing -->
-                <a href="#"><img src="assets/icon.svg" alt="ivygrep icon" onerror="this.style.display='none'; this.nextElementSibling.style.display='block';"/></a>
+            <a href="#" class="logo">
+                <img src="assets/icon.svg" alt="ivygrep" onerror="this.style.display='none'; this.nextElementSibling.style.display='inline';"/>
                 <span style="display:none;" class="logo-text">ivy<span class="highlight">grep</span></span>
-            </div>
+            </a>
             <div class="nav-links">
                 <a href="#features">Features</a>
                 <a href="#how-it-works">Architecture</a>
                 <a href="#performance">Performance</a>
-                <a href="#mcp">AI Agents (MCP)</a>
-                <a href="https://github.com/bvolpato/ivygrep" class="btn btn-outline" target="_blank">
-                    <svg height="20" viewBox="0 0 16 16" width="20" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+                <a href="#languages">Languages</a>
+                <a href="#mcp">AI Agents</a>
+                <a href="#install">Install</a>
+                <a href="https://github.com/bvolpato/ivygrep" class="btn btn-outline" target="_blank" rel="noopener">
+                    <svg height="18" viewBox="0 0 16 16" width="18" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
                     GitHub
                 </a>
             </div>
+            <button class="mobile-menu-btn" aria-label="Toggle menu" onclick="document.querySelector('.nav-links').classList.toggle('nav-open')">
+                <svg width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+            </button>
         </div>
     </nav>
 
+    <!-- ─── Hero ─── -->
     <header class="hero relative z-10">
         <div class="container hero-content">
-            <div class="hero-logo-container slide-up" style="margin-bottom: 2.5rem;">
-                <img src="assets/logo.svg" alt="ivygrep logo" style="height: 240px; width: auto; margin: 0 auto; display: block;" onerror="this.src='assets/logo.png'"/>
+            <div class="hero-badge slide-up">
+                <span class="badge-dot"></span>
+                v0.6.0 — 20 Tree-sitter languages, MCP server
+            </div>
+            <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
+                <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" onerror="this.src='assets/logo.png'"/>
             </div>
             <h1 class="slide-up delay-1">Semantic code search that <br/><span class="highlight-gradient">never phones home.</span></h1>
-            <p class="subtitle slide-up delay-2">Ask questions in English. Get answers in code. 100% local, lightning fast, and seamlessly integrated with AI agents.</p>
-            
-            <div class="cta-group slide-up delay-3">
-                <div class="terminal-install code-block relative">
-                    <button class="copy-btn" onclick="navigator.clipboard.writeText('brew tap bvolpato/tap\nbrew install bvolpato/tap/ivygrep'); this.innerText='Copied!'; setTimeout(() => this.innerText='Copy', 2000)">Copy</button>
-                    <span class="prompt">$</span> brew tap bvolpato/tap<br>
-                    <span class="prompt">$</span> brew install bvolpato/tap/ivygrep
-                </div>
+            <p class="subtitle slide-up delay-2">Ask questions in English. Get answers in code.<br>100% local, lightning fast, zero telemetry.</p>
+
+            <div class="cta-row slide-up delay-3">
+                <a href="#install" class="btn btn-primary">
+                    <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
+                    Install
+                </a>
+                <a href="https://github.com/bvolpato/ivygrep" class="btn btn-ghost" target="_blank" rel="noopener">
+                    <svg height="18" viewBox="0 0 16 16" width="18" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
+                    Source
+                </a>
+                <a href="#mcp" class="btn btn-ghost">
+                    <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 1v6m0 6v6M1 12h6m6 0h6"/></svg>
+                    MCP Setup
+                </a>
             </div>
         </div>
     </header>
 
+    <!-- ─── Demo Terminal ─── -->
     <section class="demo-section relative z-10 slide-up delay-3">
         <div class="container">
             <div class="glass-panel mockup-window">
@@ -62,49 +96,103 @@
                     <span class="dot red"></span>
                     <span class="dot yellow"></span>
                     <span class="dot green"></span>
+                    <span class="mockup-title">Terminal — ig</span>
                 </div>
                 <div class="mockup-body code-font">
                     <div class="line"><span class="comment"># Ask in English, find the code intuitively</span></div>
                     <div class="line typing"><span class="prompt">$</span> ig "where is tax calculated?"</div>
                     <div class="line output success">✓ Found 3 semantic matches in 45ms</div>
                     <div class="line output"><span class="path">src/finance/billing.rs:182</span></div>
-                    <div class="line output match">    pub fn <span class="highlight-match">calculate_inclusive_taxes</span>(...) -> Decimal {</div>
-                    <div class="line output"><span class="path">src/finance/checkout.rs:44</span></div>
-                    <div class="line output match">    fn <span class="highlight-match">apply_vat_and_withholding</span>(...) {</div>
-                    <div class="line output"><span class="path">src/finance/invoice.rs:301</span></div>
+                    <div class="line output match">    pub fn <span class="highlight-match">calculate_sales_tax</span>(amount: f64, rate: f64) -> f64 {</div>
+                    <div class="line output"><span class="path">src/checkout/tax.rs:44</span></div>
+                    <div class="line output match">    fn <span class="highlight-match">apply_vat_rate</span>(subtotal: Decimal, region: &Region) -> Decimal {</div>
+                    <div class="line output"><span class="path">src/invoice/total.rs:301</span></div>
                     <div class="line output match">    let <span class="highlight-match">tax_total</span> = subtotal * self.region.tax_rate;</div>
                 </div>
             </div>
         </div>
     </section>
 
+    <!-- ─── Social Proof Strip ─── -->
+    <section class="social-proof relative z-10">
+        <div class="container">
+            <div class="proof-strip">
+                <div class="proof-item">
+                    <span class="proof-value">44</span>
+                    <span class="proof-label">Languages</span>
+                </div>
+                <div class="proof-divider"></div>
+                <div class="proof-item">
+                    <span class="proof-value">&lt;100ms</span>
+                    <span class="proof-label">Query latency</span>
+                </div>
+                <div class="proof-divider"></div>
+                <div class="proof-item">
+                    <span class="proof-value">0</span>
+                    <span class="proof-label">Bytes uploaded</span>
+                </div>
+                <div class="proof-divider"></div>
+                <div class="proof-item">
+                    <span class="proof-value">20</span>
+                    <span class="proof-label">Tree-sitter ASTs</span>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ─── Features ─── -->
     <section id="features" class="container relative z-10 section-spacing">
-        <h2 class="section-title text-center">Why ivygrep?</h2>
-        <div class="grid grid-3">
+        <div class="section-header">
+            <span class="section-tag">Capabilities</span>
+            <h2 class="section-title text-center">Why developers choose ivygrep</h2>
+            <p class="text-center subtitle-small">The speed of grep with the understanding of an IDE — all running locally.</p>
+        </div>
+
+        <div class="grid grid-3 mt-4">
             <div class="glass-card fade-in-scroll">
-                <div class="card-icon">⚡</div>
+                <div class="card-icon-wrap"><span class="card-icon-emoji">⚡</span></div>
                 <h3>Blazing Fast</h3>
-                <p>Sub-100ms latency. Hash embeddings deliver instant indexing; small repos can finish neural enhancement up front, while larger repos upgrade in the background.</p>
+                <p>Sub-100ms queries on repos with millions of lines. Hash embeddings deliver instant indexing; neural models upgrade silently in the background.</p>
             </div>
             <div class="glass-card fade-in-scroll">
-                <div class="card-icon">🔒</div>
+                <div class="card-icon-wrap"><span class="card-icon-emoji">🔒</span></div>
                 <h3>100% Local Privacy</h3>
-                <p>No API keys. No cloud backend. No telemetry. Your proprietary codebase never leaves your machine.</p>
+                <p>No API keys. No cloud backend. No telemetry. Your proprietary codebase never leaves your machine — ever.</p>
             </div>
             <div class="glass-card fade-in-scroll">
-                <div class="card-icon">🧠</div>
+                <div class="card-icon-wrap"><span class="card-icon-emoji">🧠</span></div>
                 <h3>Natural Language</h3>
-                <p>Combines classic exact matching (like grep/rg) with 384-dimensional quantized ONNX embeddings to match code semantically.</p>
+                <p>Combines classic BM25 text matching with 384-dimensional quantized ONNX neural embeddings. Ask "where is the tax calculated?" and get the right function.</p>
+            </div>
+            <div class="glass-card fade-in-scroll">
+                <div class="card-icon-wrap"><span class="card-icon-emoji">🌿</span></div>
+                <h3>Git-Native</h3>
+                <p>Understands branches, worktrees, and .gitignore natively. Branch switches trigger instant Merkle-diff re-indexes — never a full re-scan.</p>
+            </div>
+            <div class="glass-card fade-in-scroll">
+                <div class="card-icon-wrap"><span class="card-icon-emoji">🤖</span></div>
+                <h3>Built for AI Agents</h3>
+                <p>Ships with a built-in MCP server. One command to connect Claude Code, Cursor, Codex, Gemini, or OpenCode — no plugins needed.</p>
+            </div>
+            <div class="glass-card fade-in-scroll">
+                <div class="card-icon-wrap"><span class="card-icon-emoji">🏗️</span></div>
+                <h3>Code-Aware Chunking</h3>
+                <p>20 languages with Tree-sitter AST parsing. Understands functions, classes, and imports — not just lines of text.</p>
             </div>
         </div>
 
+        <!-- Comparison Table -->
         <div class="comparison-table glass-panel mt-4 fade-in-scroll">
+            <div class="table-header">
+                <h3>How ivygrep compares</h3>
+            </div>
             <table>
                 <thead>
                     <tr>
                         <th>Feature</th>
-                        <th><a href="https://www.gnu.org/software/grep/" target="_blank" style="color: inherit;"><code>grep</code></a> / <a href="https://github.com/BurntSushi/ripgrep" target="_blank" style="color: inherit;"><code>rg</code></a></th>
+                        <th><a href="https://www.gnu.org/software/grep/" target="_blank" rel="noopener" style="color: inherit;"><code>grep</code></a> / <a href="https://github.com/BurntSushi/ripgrep" target="_blank" rel="noopener" style="color: inherit;"><code>rg</code></a></th>
                         <th>GitHub Search</th>
+                        <th><a href="https://github.com/google/zoekt" target="_blank" rel="noopener" style="color: inherit;"><code>zoekt</code></a></th>
                         <th><span class="highlight">ivygrep</span></th>
                     </tr>
                 </thead>
@@ -113,16 +201,19 @@
                         <td>Works offline</td>
                         <td>✅</td>
                         <td>❌</td>
+                        <td>✅</td>
                         <td><span class="highlight">✅</span></td>
                     </tr>
                     <tr>
                         <td>Natural language queries</td>
                         <td>❌</td>
                         <td>⚠️</td>
+                        <td>❌</td>
                         <td><span class="highlight">✅</span></td>
                     </tr>
                     <tr>
                         <td>Semantic understanding</td>
+                        <td>❌</td>
                         <td>❌</td>
                         <td>❌</td>
                         <td><span class="highlight">✅</span></td>
@@ -131,28 +222,40 @@
                         <td>Sub-100ms latency</td>
                         <td>✅</td>
                         <td>❌</td>
+                        <td>✅</td>
                         <td><span class="highlight">✅</span></td>
                     </tr>
                     <tr>
                         <td>Privacy-first (no upload)</td>
                         <td>✅</td>
                         <td>❌</td>
+                        <td>✅</td>
                         <td><span class="highlight">✅</span></td>
                     </tr>
                     <tr>
-                        <td>Structural code chunking</td>
+                        <td>AST code chunking</td>
+                        <td>❌</td>
+                        <td>❌</td>
+                        <td>⚠️</td>
+                        <td><span class="highlight">✅</span></td>
+                    </tr>
+                    <tr>
+                        <td>Incremental Merkle indexing</td>
+                        <td>❌</td>
                         <td>❌</td>
                         <td>❌</td>
                         <td><span class="highlight">✅</span></td>
                     </tr>
                     <tr>
-                        <td>Incremental indexing</td>
+                        <td>Git worktree overlays</td>
+                        <td>❌</td>
                         <td>❌</td>
                         <td>❌</td>
                         <td><span class="highlight">✅</span></td>
                     </tr>
                     <tr>
-                        <td>Git-native (worktrees, branches)</td>
+                        <td>Built-in MCP server</td>
+                        <td>❌</td>
                         <td>❌</td>
                         <td>❌</td>
                         <td><span class="highlight">✅</span></td>
@@ -162,12 +265,68 @@
         </div>
     </section>
 
-    <section id="performance" class="container relative z-10 section-spacing">
-        <h2 class="section-title text-center">Speed That Scales</h2>
-        <p class="text-center subtitle-small mb-4">Benchmarked on the <strong>Linux kernel</strong> (92K files, 1.5M chunks) — query: <code>"kfree"</code>. <a href="https://www.gnu.org/software/grep/" target="_blank" style="color: var(--accent-green); text-decoration: none;"><code>grep</code></a> and <a href="https://github.com/BurntSushi/ripgrep" target="_blank" style="color: var(--accent-green); text-decoration: none;"><code>rg</code></a> scan every file on each query. ivygrep queries a pre-built index.</p>
+    <!-- ─── Architecture ─── -->
+    <section id="how-it-works" class="container relative z-10 section-spacing">
+        <div class="section-header">
+            <span class="section-tag">Under the Hood</span>
+            <h2 class="section-title text-center">Two-Tier Hybrid Architecture</h2>
+            <p class="text-center subtitle-small">Fast indexing with progressive quality upgrades — you never wait for neural models.</p>
+        </div>
 
-        <!-- Head-to-head benchmark comparison -->
-        <div class="glass-panel fade-in-scroll benchmark-panel">
+        <div class="flow-diagram glass-panel fade-in-scroll mt-4">
+            <div class="flow-step">
+                <div class="flow-icon pulse-glow">1</div>
+                <h4>Hash Index</h4>
+                <p>Sub-second indexing via 128-bit xxh3 SIMD structural hashes. Instant search availability.</p>
+            </div>
+            <div class="flow-arrow">
+                <svg width="40" height="20" viewBox="0 0 40 20" fill="none"><path d="M0 10h35M30 5l5 5-5 5" stroke="currentColor" stroke-width="2"/></svg>
+            </div>
+            <div class="flow-step">
+                <div class="flow-icon pulse-glow">2</div>
+                <h4>Hybrid Fusion</h4>
+                <p>Lexical BM25 (Tantivy) and semantic ANN (USearch) fuse via Reciprocal Rank Fusion for high-precision results.</p>
+            </div>
+            <div class="flow-arrow">
+                <svg width="40" height="20" viewBox="0 0 40 20" fill="none"><path d="M0 10h35M30 5l5 5-5 5" stroke="currentColor" stroke-width="2"/></svg>
+            </div>
+            <div class="flow-step">
+                <div class="flow-icon pulse-glow">3</div>
+                <h4>Neural Enhancement</h4>
+                <p>Background daemon silently upgrades to quantized ONNX (AllMiniLML6V2) with Apple CoreML / CUDA acceleration.</p>
+            </div>
+        </div>
+
+        <!-- Git-Native -->
+        <div class="glass-panel fade-in-scroll mt-4 git-panel">
+            <h3 class="git-panel-title">
+                <svg width="22" height="22" fill="none" stroke="#10b981" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M16 8V5a1 1 0 0 0-1-1H9a1 1 0 0 0-1 1v3M8 16v3a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-3"/></svg>
+                Git-Native Intelligence
+            </h3>
+            <p class="git-panel-subtitle">Deeply understands git. Not an afterthought — a core design decision.</p>
+            <div class="grid grid-2" style="gap: 1.5rem;">
+                <div class="git-feature">
+                    <h4>Worktree Overlays</h4>
+                    <p>When you <code>git worktree add</code>, ivygrep does <strong>not</strong> copy the index. It creates a thin overlay storing only divergent chunks & tombstones — referencing the base index. A 92K-file repo with 50 changed files creates a ~200 KB overlay instead of duplicating ~50 MB.</p>
+                </div>
+                <div class="git-feature">
+                    <h4>Branch-Switch Deltas</h4>
+                    <p>Switching branches triggers a targeted Merkle-diff re-index of <strong>only the changed files</strong> — no full re-scan. Content-based hashes mean byte-identical files across branches are never re-processed.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ─── Performance ─── -->
+    <section id="performance" class="container relative z-10 section-spacing">
+        <div class="section-header">
+            <span class="section-tag">Benchmarks</span>
+            <h2 class="section-title text-center">Speed That Scales</h2>
+            <p class="text-center subtitle-small">Benchmarked on the <strong>Linux kernel</strong> (92K files, 1.5M chunks) — query: <code>"kfree"</code></p>
+        </div>
+
+        <!-- Benchmark bars -->
+        <div class="glass-panel fade-in-scroll benchmark-panel mt-4">
             <div class="benchmark-row">
                 <div class="benchmark-tool"><code>grep -rn</code><span class="benchmark-mode">exact string</span></div>
                 <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-grep" data-width="100%"><span class="benchmark-time">~9.0 s</span></div></div>
@@ -191,13 +350,13 @@
             <p class="benchmark-note">grep and rg scan every file at query time. ivygrep queries a pre-built index — searches are <strong>orders of magnitude faster</strong> on warm repos, and semantic mode finds related code even when you don't know the exact identifier.</p>
         </div>
 
-        <!-- Stat callouts + Concurrent search -->
+        <!-- Stats + Concurrent Search -->
         <div class="grid grid-2 align-center mt-4">
             <div class="fade-in-scroll">
                 <div class="stats-grid">
                     <div class="stat-box">
-                        <div class="stat-value">529&times;</div>
-                        <div class="stat-label">Faster than grep</div>
+                        <div class="stat-value counter" data-target="529">0</div>
+                        <div class="stat-label">× faster than grep</div>
                     </div>
                     <div class="stat-box">
                         <div class="stat-value">~17ms</div>
@@ -208,8 +367,8 @@
                         <div class="stat-label">Semantic: "kernel memory allocation"</div>
                     </div>
                     <div class="stat-box">
-                        <div class="stat-value">0.3s</div>
-                        <div class="stat-label">Index 200 files from scratch</div>
+                        <div class="stat-value">2.3×</div>
+                        <div class="stat-label">Index-to-source ratio</div>
                     </div>
                 </div>
             </div>
@@ -236,55 +395,83 @@
         </div>
     </section>
 
-    <section id="how-it-works" class="container relative z-10 section-spacing">
-        <h2 class="section-title text-center">Two-Tier Hybrid Architecture</h2>
-        <p class="text-center subtitle-small mb-4">ivygrep uses a dual-engine architecture: fast indexing with progressive quality upgrades.</p>
-        
-        <div class="flow-diagram glass-panel fade-in-scroll">
-            <div class="flow-step">
-                <div class="flow-icon">1</div>
-                <h4>Hash Index</h4>
-                <p>Sub-second indexing via 128-bit SIMD structural hashes. Instant search availability.</p>
-            </div>
-            <div class="flow-arrow">→</div>
-            <div class="flow-step">
-                <div class="flow-icon">2</div>
-                <h4>Hybrid Fusion</h4>
-                <p>Lexical BM25 (Tantivy) and Semantic paths fuse via RRF to return high-precision results.</p>
-            </div>
-            <div class="flow-arrow">→</div>
-            <div class="flow-step">
-                <div class="flow-icon">3</div>
-                <h4>Neural Enhancement</h4>
-                <p>Background daemon silently upgrades chunks to quantized ONNX (AllMiniLML6V2Q) with Apple CoreML acceleration on macOS.</p>
-            </div>
+    <!-- ─── Languages ─── -->
+    <section id="languages" class="container relative z-10 section-spacing">
+        <div class="section-header">
+            <span class="section-tag">Language Support</span>
+            <h2 class="section-title text-center">44 Languages, 20 Tree-sitter ASTs</h2>
+            <p class="text-center subtitle-small">Tree-sitter languages get function/class-level structural chunking. All others get intelligent heuristic chunking with full index coverage.</p>
         </div>
 
-        <div class="glass-panel fade-in-scroll mt-4" style="border-left: 3px solid #10b981;">
-            <h3 style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">🌿 Git-Native Intelligence</h3>
-            <p style="opacity: 0.75; font-size: 0.95rem; margin-bottom: 1.2rem;">ivygrep deeply understands git. This is a core design decision, not an afterthought.</p>
-            <div class="grid grid-2" style="gap: 1.5rem;">
-                <div>
-                    <h4 style="color: #10b981; margin-bottom: 0.3rem;">Worktree Overlays</h4>
-                    <p class="text-xs opacity-80">When you <code>git worktree add</code>, ivygrep does <strong>not</strong> copy the index. It creates a thin overlay storing only divergent chunks &amp; tombstones — referencing the base index by path. A 92K-file repo with 50 changed files creates a ~200 KB overlay instead of duplicating ~50 MB.</p>
+        <div class="lang-grid glass-panel fade-in-scroll mt-4">
+            <div class="lang-category">
+                <h4>🌲 Tree-sitter AST <span class="lang-badge">20 languages</span></h4>
+                <div class="lang-tags">
+                    <span class="lang-tag lang-ast">Rust</span>
+                    <span class="lang-tag lang-ast">Python</span>
+                    <span class="lang-tag lang-ast">Go</span>
+                    <span class="lang-tag lang-ast">JavaScript</span>
+                    <span class="lang-tag lang-ast">TypeScript</span>
+                    <span class="lang-tag lang-ast">Java</span>
+                    <span class="lang-tag lang-ast">C</span>
+                    <span class="lang-tag lang-ast">C++</span>
+                    <span class="lang-tag lang-ast">C#</span>
+                    <span class="lang-tag lang-ast">Scala</span>
+                    <span class="lang-tag lang-ast">PHP</span>
+                    <span class="lang-tag lang-ast">Ruby</span>
+                    <span class="lang-tag lang-ast">Swift</span>
+                    <span class="lang-tag lang-ast">Bash</span>
+                    <span class="lang-tag lang-ast">Haskell</span>
+                    <span class="lang-tag lang-ast">OCaml</span>
+                    <span class="lang-tag lang-ast">Lua</span>
+                    <span class="lang-tag lang-ast">Dart</span>
+                    <span class="lang-tag lang-ast">Objective-C</span>
+                    <span class="lang-tag lang-ast">Perl</span>
                 </div>
-                <div>
-                    <h4 style="color: #10b981; margin-bottom: 0.3rem;">Branch-Switch Deltas</h4>
-                    <p class="text-xs opacity-80">Switching branches triggers a targeted Merkle-diff re-index of <strong>only the changed files</strong> — no full re-scan. Content-based hashes mean byte-identical files across branches are never re-processed.</p>
+            </div>
+            <div class="lang-category">
+                <h4>📐 Heuristic Chunking <span class="lang-badge lang-badge-muted">24 more</span></h4>
+                <div class="lang-tags">
+                    <span class="lang-tag">Kotlin</span>
+                    <span class="lang-tag">Zig</span>
+                    <span class="lang-tag">Nim</span>
+                    <span class="lang-tag">Groovy</span>
+                    <span class="lang-tag">Elixir</span>
+                    <span class="lang-tag">Erlang</span>
+                    <span class="lang-tag">Clojure</span>
+                    <span class="lang-tag">R</span>
+                    <span class="lang-tag">Julia</span>
+                    <span class="lang-tag">PowerShell</span>
+                    <span class="lang-tag">SQL</span>
+                    <span class="lang-tag">GraphQL</span>
+                    <span class="lang-tag">HTML</span>
+                    <span class="lang-tag">CSS</span>
+                    <span class="lang-tag">Protobuf</span>
+                    <span class="lang-tag">Terraform</span>
+                    <span class="lang-tag">TOML</span>
+                    <span class="lang-tag">YAML</span>
+                    <span class="lang-tag">JSON</span>
+                    <span class="lang-tag">Dockerfile</span>
+                    <span class="lang-tag">Makefile</span>
+                    <span class="lang-tag">+ unknown exts</span>
                 </div>
             </div>
         </div>
     </section>
 
+    <!-- ─── MCP / AI Agents ─── -->
     <section id="mcp" class="mcp-section relative z-10 section-spacing">
         <div class="container">
-            <h2 class="section-title text-center">Supercharge Your AI Agents</h2>
-            <p class="text-center subtitle-small mb-4">ivygrep exposes an MCP (Model Context Protocol) server. Instead of stuffing entire files into your LLM context, your agent can query your codebase natively.</p>
-            
-            <div class="grid agent-grid">
+            <div class="section-header">
+                <span class="section-tag">Model Context Protocol</span>
+                <h2 class="section-title text-center">Supercharge Your AI Agents</h2>
+                <p class="text-center subtitle-small">ivygrep ships a built-in MCP server. Instead of stuffing entire repos into context windows, your agent queries your indexed codebase natively — with sub-100ms latency.</p>
+            </div>
+
+            <div class="grid agent-grid mt-4">
                 <div class="agent-card glass-card fade-in-scroll">
-                    <h4 style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
-                        <img src="https://cdn.simpleicons.org/claude/white" width="18" height="18" alt="Claude logo" />
+                    <h4 class="agent-title">
+                        <img src="https://cdn.simpleicons.org/claude/white" width="20" height="20" alt="Claude" loading="lazy"/>
                         Claude Code
                     </h4>
                     <div class="agent-cmd">
@@ -293,8 +480,8 @@
                     </div>
                 </div>
                 <div class="agent-card glass-card fade-in-scroll">
-                    <h4 style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
-                        <img src="https://api.iconify.design/tabler:brand-openai.svg?color=white" width="18" height="18" alt="OpenAI logo" />
+                    <h4 class="agent-title">
+                        <img src="https://api.iconify.design/tabler:brand-openai.svg?color=white" width="20" height="20" alt="OpenAI" loading="lazy"/>
                         Codex
                     </h4>
                     <div class="agent-cmd">
@@ -303,19 +490,9 @@
                     </div>
                 </div>
                 <div class="agent-card glass-card fade-in-scroll">
-                    <h4 style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
-                        <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
-                        OpenCode
-                    </h4>
-                    <div class="agent-cmd">
-                        <code>opencode mcp add</code>
-                        <button class="agent-copy-btn" data-copy="opencode mcp add" onclick="copyAgentCmd(this)">Copy</button>
-                    </div>
-                </div>
-                <div class="agent-card glass-card fade-in-scroll">
-                    <h4 style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
-                        <img src="https://cdn.simpleicons.org/googlegemini/white" width="18" height="18" alt="Gemini logo" />
-                        Gemini
+                    <h4 class="agent-title">
+                        <img src="https://cdn.simpleicons.org/googlegemini/white" width="20" height="20" alt="Gemini" loading="lazy"/>
+                        Gemini CLI
                     </h4>
                     <div class="agent-cmd">
                         <code>gemini mcp add --transport stdio ig ig --mcp</code>
@@ -323,8 +500,8 @@
                     </div>
                 </div>
                 <div class="agent-card glass-card fade-in-scroll">
-                    <h4 style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem;">
-                        <img src="https://cdn.simpleicons.org/cursor/white" width="18" height="18" alt="Cursor logo" />
+                    <h4 class="agent-title">
+                        <img src="https://cdn.simpleicons.org/cursor/white" width="20" height="20" alt="Cursor" loading="lazy"/>
                         Cursor
                     </h4>
                     <div class="agent-cmd">
@@ -332,21 +509,136 @@
                         <button class="agent-copy-btn" data-copy='{"ig": {"command": "ig", "args": ["--mcp"]}}' onclick="copyAgentCmd(this)">Copy</button>
                     </div>
                 </div>
+                <div class="agent-card glass-card fade-in-scroll">
+                    <h4 class="agent-title">
+                        <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>
+                        OpenCode
+                    </h4>
+                    <div class="agent-cmd">
+                        <code>opencode mcp add</code>
+                        <button class="agent-copy-btn" data-copy="opencode mcp add" onclick="copyAgentCmd(this)">Copy</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="mcp-workflow glass-panel fade-in-scroll mt-4">
+                <h3 class="text-center" style="margin-bottom: 1.5rem;">How MCP Search Works</h3>
+                <div class="mcp-flow">
+                    <div class="mcp-flow-step">
+                        <div class="mcp-flow-icon">🤖</div>
+                        <div class="mcp-flow-label">Agent sends query</div>
+                        <div class="mcp-flow-detail">"find error handling logic"</div>
+                    </div>
+                    <div class="mcp-flow-arrow">→</div>
+                    <div class="mcp-flow-step">
+                        <div class="mcp-flow-icon">🔍</div>
+                        <div class="mcp-flow-label">ig searches index</div>
+                        <div class="mcp-flow-detail">BM25 + Vector + Literal</div>
+                    </div>
+                    <div class="mcp-flow-arrow">→</div>
+                    <div class="mcp-flow-step">
+                        <div class="mcp-flow-icon">📄</div>
+                        <div class="mcp-flow-label">Returns top chunks</div>
+                        <div class="mcp-flow-detail">Function bodies, classes, imports</div>
+                    </div>
+                    <div class="mcp-flow-arrow">→</div>
+                    <div class="mcp-flow-step">
+                        <div class="mcp-flow-icon">✅</div>
+                        <div class="mcp-flow-label">Agent gets context</div>
+                        <div class="mcp-flow-detail">Without loading entire files</div>
+                    </div>
+                </div>
             </div>
         </div>
     </section>
 
+    <!-- ─── Install ─── -->
+    <section id="install" class="container relative z-10 section-spacing">
+        <div class="section-header">
+            <span class="section-tag">Get Started</span>
+            <h2 class="section-title text-center">Install ivygrep</h2>
+            <p class="text-center subtitle-small">Two commands to semantic search bliss.</p>
+        </div>
+
+        <div class="grid grid-2 mt-4">
+            <div class="glass-panel fade-in-scroll install-card">
+                <h3 class="install-title">🍺 Homebrew (macOS / Linux)</h3>
+                <div class="install-code relative">
+                    <pre class="code-block"><span class="prompt">$</span> brew tap bvolpato/tap
+<span class="prompt">$</span> brew install bvolpato/tap/ivygrep</pre>
+                    <button class="copy-btn" onclick="navigator.clipboard.writeText('brew tap bvolpato/tap\nbrew install bvolpato/tap/ivygrep'); this.innerText='Copied!'; setTimeout(() => this.innerText='Copy', 2000)">Copy</button>
+                </div>
+            </div>
+            <div class="glass-panel fade-in-scroll install-card">
+                <h3 class="install-title">📦 Pre-built Binaries</h3>
+                <div class="install-code relative">
+                    <pre class="code-block"><span class="comment"># Download from GitHub Releases</span>
+<span class="prompt">$</span> curl -L https://github.com/bvolpato/ivygrep/releases/latest/download/ig-$(uname -m)-$(uname -s | tr A-Z a-z).tar.gz | tar xz
+<span class="prompt">$</span> sudo mv ig /usr/local/bin/</pre>
+                    <button class="copy-btn" onclick="navigator.clipboard.writeText('# Download the latest binary\ncurl -L https://github.com/bvolpato/ivygrep/releases/latest/download/ig-$(uname -m)-$(uname -s | tr A-Z a-z).tar.gz | tar xz\nsudo mv ig /usr/local/bin/'); this.innerText='Copied!'; setTimeout(() => this.innerText='Copy', 2000)">Copy</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="glass-panel fade-in-scroll mt-4 quickstart-panel">
+            <h3 class="text-center" style="margin-bottom: 1.5rem;">Quick Start</h3>
+            <div class="quickstart-grid">
+                <div class="quickstart-step">
+                    <span class="quickstart-number">1</span>
+                    <div>
+                        <h4>Index your project</h4>
+                        <code class="quickstart-code">ig --add .</code>
+                    </div>
+                </div>
+                <div class="quickstart-step">
+                    <span class="quickstart-number">2</span>
+                    <div>
+                        <h4>Search with natural language</h4>
+                        <code class="quickstart-code">ig "where is authentication handled?"</code>
+                    </div>
+                </div>
+                <div class="quickstart-step">
+                    <span class="quickstart-number">3</span>
+                    <div>
+                        <h4>Or find exact identifiers</h4>
+                        <code class="quickstart-code">ig --literal "handleAuth"</code>
+                    </div>
+                </div>
+                <div class="quickstart-step">
+                    <span class="quickstart-number">4</span>
+                    <div>
+                        <h4>Connect AI agents</h4>
+                        <code class="quickstart-code">claude mcp add -s user ig -- ig --mcp</code>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ─── Footer ─── -->
     <footer class="footer relative z-10">
-        <div class="container text-center">
-            <p>Built by <a href="https://github.com/bvolpato">@bvolpato</a>. Released under the MIT License.</p>
-            <div class="mt-2">
-                <a href="https://github.com/bvolpato/ivygrep" class="footer-link">Repository</a> | 
-                <a href="https://github.com/bvolpato/ivygrep/releases" class="footer-link">Releases</a>
+        <div class="container">
+            <div class="footer-content">
+                <div class="footer-brand">
+                    <img src="assets/icon.svg" alt="ivygrep" height="28" onerror="this.style.display='none'"/>
+                    <span class="footer-tagline">Semantic code search that never phones home.</span>
+                </div>
+                <div class="footer-links">
+                    <a href="https://github.com/bvolpato/ivygrep" class="footer-link">GitHub</a>
+                    <a href="https://github.com/bvolpato/ivygrep/releases" class="footer-link">Releases</a>
+                    <a href="https://github.com/bvolpato/ivygrep/blob/main/ARCHITECTURE.md" class="footer-link">Architecture</a>
+                    <a href="https://github.com/bvolpato/ivygrep/blob/main/CONTRIBUTING.md" class="footer-link">Contributing</a>
+                    <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md" class="footer-link">Changelog</a>
+                </div>
+                <div class="footer-copy">
+                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v0.6.0</p>
+                </div>
             </div>
         </div>
     </footer>
 
     <script>
+        // ─── Copy handler for agent cards ───
         function copyAgentCmd(btn) {
             navigator.clipboard.writeText(btn.dataset.copy);
             btn.textContent = 'Copied!';
@@ -354,75 +646,109 @@
             setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
         }
 
-        // Intersection Observer for scroll animations
-        const observerOptions = {
-            root: null,
-            rootMargin: '0px',
-            threshold: 0.1
-        };
-
-        const observer = new IntersectionObserver((entries, observer) => {
+        // ─── Intersection Observer for scroll animations ───
+        const observer = new IntersectionObserver((entries) => {
             entries.forEach(entry => {
                 if (entry.isIntersecting) {
                     entry.target.classList.add('visible');
                     observer.unobserve(entry.target);
                 }
             });
-        }, observerOptions);
+        }, { threshold: 0.1 });
 
-        document.querySelectorAll('.fade-in-scroll').forEach((el) => {
-            observer.observe(el);
-        });
+        document.querySelectorAll('.fade-in-scroll').forEach(el => observer.observe(el));
 
-        // Typing effect logic
+        // ─── Typing effect ───
         const typingEl = document.querySelector('.typing');
-        const originalText = typingEl.innerHTML;
-        const prompt = '<span class="prompt">$</span> ';
-        const textToType = 'ig "where is tax calculated?"';
-        
-        typingEl.innerHTML = prompt;
-        
-        // Hide outputs initially
-        const outputs = document.querySelectorAll('.output');
-        outputs.forEach(out => out.style.opacity = '0');
+        if (typingEl) {
+            const prompt = '<span class="prompt">$</span> ';
+            const textToType = 'ig "where is tax calculated?"';
+            typingEl.innerHTML = prompt;
+            const outputs = document.querySelectorAll('.output');
+            outputs.forEach(out => { out.style.opacity = '0'; out.style.transform = 'translateY(8px)'; });
 
-        setTimeout(() => {
-            let i = 0;
-            const interval = setInterval(() => {
-                typingEl.innerHTML = prompt + textToType.substring(0, i+1);
-                i++;
-                if (i >= textToType.length) {
-                    clearInterval(interval);
-                    // Show outputs one by one quickly
-                    setTimeout(() => {
-                        outputs.forEach((out, index) => {
-                            setTimeout(() => {
-                                out.style.opacity = '1';
-                                out.style.transform = 'translateY(0)';
-                            }, index * 100); // 100ms between each output line
-                        });
-                    }, 300);
-                }
-            }, 50); // 50ms per keystroke
-        }, 1500); // Wait 1.5s before starting
+            setTimeout(() => {
+                let i = 0;
+                const interval = setInterval(() => {
+                    typingEl.innerHTML = prompt + textToType.substring(0, i + 1);
+                    i++;
+                    if (i >= textToType.length) {
+                        clearInterval(interval);
+                        setTimeout(() => {
+                            outputs.forEach((out, idx) => {
+                                setTimeout(() => {
+                                    out.style.transition = 'opacity 0.3s ease, transform 0.3s ease';
+                                    out.style.opacity = '1';
+                                    out.style.transform = 'translateY(0)';
+                                }, idx * 80);
+                            });
+                        }, 200);
+                    }
+                }, 40);
+            }, 1200);
+        }
 
-        // Animate benchmark bars on scroll
+        // ─── Animated benchmark bars ───
         const benchmarkPanel = document.querySelector('.benchmark-panel');
         if (benchmarkPanel) {
-            const benchmarkObserver = new IntersectionObserver((entries) => {
+            const benchObserver = new IntersectionObserver((entries) => {
                 entries.forEach(entry => {
                     if (entry.isIntersecting) {
                         entry.target.querySelectorAll('.benchmark-bar').forEach((bar, i) => {
-                            setTimeout(() => {
-                                bar.style.width = bar.dataset.width;
-                            }, i * 200);
+                            setTimeout(() => { bar.style.width = bar.dataset.width; }, i * 200);
                         });
-                        benchmarkObserver.unobserve(entry.target);
+                        benchObserver.unobserve(entry.target);
                     }
                 });
             }, { threshold: 0.3 });
-            benchmarkObserver.observe(benchmarkPanel);
+            benchObserver.observe(benchmarkPanel);
         }
+
+        // ─── Counter animation ───
+        const counters = document.querySelectorAll('.counter');
+        const counterObserver = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    const el = entry.target;
+                    const target = parseInt(el.dataset.target);
+                    let current = 0;
+                    const step = Math.ceil(target / 40);
+                    const timer = setInterval(() => {
+                        current += step;
+                        if (current >= target) { current = target; clearInterval(timer); }
+                        el.textContent = current;
+                    }, 30);
+                    counterObserver.unobserve(el);
+                }
+            });
+        }, { threshold: 0.5 });
+        counters.forEach(c => counterObserver.observe(c));
+
+        // ─── Floating particles (subtle) ───
+        const particlesContainer = document.getElementById('particles');
+        if (particlesContainer) {
+            for (let i = 0; i < 30; i++) {
+                const dot = document.createElement('div');
+                dot.className = 'particle';
+                dot.style.left = Math.random() * 100 + '%';
+                dot.style.top = Math.random() * 100 + '%';
+                dot.style.animationDelay = Math.random() * 8 + 's';
+                dot.style.animationDuration = (6 + Math.random() * 10) + 's';
+                particlesContainer.appendChild(dot);
+            }
+        }
+
+        // ─── Smooth scroll for nav links ───
+        document.querySelectorAll('a[href^="#"]').forEach(a => {
+            a.addEventListener('click', e => {
+                const target = document.querySelector(a.getAttribute('href'));
+                if (target) {
+                    e.preventDefault();
+                    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    document.querySelector('.nav-links')?.classList.remove('nav-open');
+                }
+            });
+        });
     </script>
 </body>
 </html>
