@@ -2,6 +2,14 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.6.1] — 2026-04-20
+
+### Improved
+- **Documentation and Branding:** Complete visual and content overhaul of the documentation site, highlighting the new MCP server architecture with interactive animations and setup guides.
+- **MCP Server Capabilities:** Enhanced E2E integration covering full lifecycle queries (`tools/list`, `tools/call`, `ig_status`, `ig_search`).
+- **Daemon Resilience:** Better recovery logic handling stale UNIX domain socket binding collisions natively across restarts.
+- **CI Modernization:** Removed minor checkout version skew across parallel workflows.
+
 ## [0.5.54] — 2026-04-13
 
 ### Fixed
