@@ -264,7 +264,9 @@ pub fn literal_search(
 
             for (i, line) in lines[start..end].iter().enumerate() {
                 let line_num = start + i + 1;
-                if line.to_ascii_lowercase().contains(&query_lower) {
+                let match_found = line.to_ascii_lowercase().contains(&query_lower);
+
+                if match_found {
                     let (snippet_start, snippet_end) =
                         snippet_bounds(line_num, options.context, lines.len());
                     let preview = lines[snippet_start.saturating_sub(1)..snippet_end].join("\n");
@@ -301,15 +303,18 @@ fn collect_literal_candidates(
     path_matcher: &PathGlobMatcher,
     options: &SearchOptions,
 ) -> Result<Vec<IndexedChunk>> {
-    let candidate_limit = if let Some(limit) = options.limit {
+    let mut candidate_limit = if let Some(limit) = options.limit {
         if limit == usize::MAX {
             10_000_000
         } else {
-            limit.max(500)
+            limit.max(1_000)
         }
     } else {
-        500
+        10_000
     };
+    if options.scope_filter.is_some() || !options.skip_gitignore {
+        candidate_limit = 1_000_000;
+    }
 
     let mut search_fields = vec![ctx.fields.text, ctx.fields.file_path];
     if let Some(f) = ctx.fields.file_path_text {
@@ -371,15 +376,18 @@ pub fn hybrid_search(
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
     let t0 = std::time::Instant::now();
-    let candidate_limit = if let Some(limit) = options.limit {
+    let mut candidate_limit = if let Some(limit) = options.limit {
         if limit == usize::MAX {
             10_000_000
         } else {
-            limit.max(500)
+            limit.max(1_000)
         }
     } else {
-        500
+        10_000
     };
+    if options.scope_filter.is_some() || !options.skip_gitignore {
+        candidate_limit = 1_000_000;
+    }
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
 
     let ctx = SearchContext::load(workspace, embedding_model.map(|m| m.dimensions()))?;

@@ -56,8 +56,8 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub force: bool,
 
-    #[arg(short = 'i', long, global = true)]
-    pub interactive: bool,
+    #[arg(long, global = true)]
+    pub ui: bool,
 
     /// Fast exact-match search backed by the index. Deterministic results,
     /// orders of magnitude faster than grep/rg for indexed repos.
@@ -269,7 +269,7 @@ pub async fn run() -> Result<()> {
         std::process::exit(0);
     }
 
-    if cli.interactive {
+    if cli.ui {
         return crate::tui::run_tui(cli).await;
     }
 

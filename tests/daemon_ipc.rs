@@ -432,8 +432,8 @@ async fn daemon_ipc_skip_gitignore() {
                     type_filter,
                     include_globs,
                     exclude_globs,
-                    scope_path: _,
-                    scope_is_file: _,
+                    scope_path,
+                    scope_is_file,
                     skip_gitignore,
                 } => {
                     let workspace =
