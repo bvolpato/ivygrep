@@ -62,6 +62,15 @@ fn cli_help_snapshot() {
 
 #[test]
 #[serial]
+fn cli_interactive_aliases_are_accepted() {
+    for flag in ["-i", "--interactive", "--ui"] {
+        let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+        cmd.arg(flag).arg("--version").assert().success();
+    }
+}
+
+#[test]
+#[serial]
 fn cli_query_json_snapshot() {
     let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
 
@@ -323,6 +332,71 @@ fn cli_query_from_subdirectory_is_scope_restricted() {
 
     assert!(!files.is_empty());
     assert!(files.iter().all(|path| path.starts_with("scoped/")));
+}
+
+#[test]
+#[serial]
+fn cli_scoped_literal_search_survives_high_scoring_parent_matches() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    let scoped = root.join("scoped");
+    let other = root.join("other");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::create_dir_all(&scoped).unwrap();
+    std::fs::create_dir_all(&other).unwrap();
+
+    for i in 0..700 {
+        std::fs::write(
+            other.join(format!("targettoken_noise_{i:03}.rs")),
+            format!(
+                "pub fn noisy_{i}() {{\n    // {}\n}}\n",
+                "targettoken ".repeat(80)
+            ),
+        )
+        .unwrap();
+    }
+
+    std::fs::write(
+        scoped.join("match.rs"),
+        "pub fn scoped_match() -> &'static str { \"targettoken\" }\n",
+    )
+    .unwrap();
+
+    let home = tmp.path().join("ivygrep_home");
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    let output = cmd
+        .current_dir(&scoped)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args([
+            "--json",
+            "--hash",
+            "--literal",
+            "-f",
+            "-n",
+            "1",
+            "targettoken",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let files = value
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry.get("file_path").and_then(|v| v.as_str()))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        files,
+        vec!["scoped/match.rs"],
+        "literal search from a subdirectory should not lose scoped hits behind high-scoring parent matches"
+    );
 }
 
 #[test]

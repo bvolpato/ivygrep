@@ -89,65 +89,81 @@ fn e2e_mcp_full_session() {
 
     let read_response = |reader: &mut BufReader<std::process::ChildStdout>| -> Value {
         let mut line = String::new();
-        reader.read_line(&mut line).expect("Failed to read from stdout");
+        reader
+            .read_line(&mut line)
+            .expect("Failed to read from stdout");
         serde_json::from_str(&line).expect("Invalid JSON returned from stdout")
     };
 
     // 1. Initialize
-    send_request(&mut stdin, json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2024-11-05",
-            "capabilities": {},
-            "clientInfo": { "name": "test-client", "version": "1.0.0" }
-        }
-    }));
+    send_request(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": { "name": "test-client", "version": "1.0.0" }
+            }
+        }),
+    );
     let init_res = read_response(&mut reader);
     assert_eq!(init_res["id"], 1);
 
     // 2. tools/list
-    send_request(&mut stdin, json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/list",
-        "params": {}
-    }));
+    send_request(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        }),
+    );
     let list_res = read_response(&mut reader);
     assert_eq!(list_res["id"], 2);
-    let tools = list_res["result"]["tools"].as_array().expect("tools should be an array");
+    let tools = list_res["result"]["tools"]
+        .as_array()
+        .expect("tools should be an array");
     assert!(tools.iter().any(|t| t["name"] == "ig_search"));
     assert!(tools.iter().any(|t| t["name"] == "ig_status"));
 
     // 3. tools/call ig_status
-    send_request(&mut stdin, json!({
-        "jsonrpc": "2.0",
-        "id": 3,
-        "method": "tools/call",
-        "params": {
-            "name": "ig_status",
-            "arguments": {}
-        }
-    }));
+    send_request(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "ig_status",
+                "arguments": {}
+            }
+        }),
+    );
     let status_res = read_response(&mut reader);
     assert_eq!(status_res["id"], 3);
     assert!(status_res["result"]["content"].as_array().is_some());
 
     // 4. tools/call ig_search
-    send_request(&mut stdin, json!({
-        "jsonrpc": "2.0",
-        "id": 4,
-        "method": "tools/call",
-        "params": {
-            "name": "ig_search",
-            "arguments": {
-                "query": "foo",
-                "path": repo.to_string_lossy().to_string(),
-                "literal": true
+    send_request(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "ig_search",
+                "arguments": {
+                    "query": "foo",
+                    "path": repo.to_string_lossy().to_string(),
+                    "literal": true
+                }
             }
-        }
-    }));
+        }),
+    );
     let search_res = read_response(&mut reader);
     assert_eq!(search_res["id"], 4);
     let content = &search_res["result"]["content"][0]["text"];

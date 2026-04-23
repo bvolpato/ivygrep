@@ -18,7 +18,7 @@ Options:
       --mcp                   
       --wait-for-enhancement  
   -f, --force                 
-      --ui                    
+  -i, --interactive           Launch the interactive terminal UI [aliases: --ui]
   -l, --literal               Fast exact-match search backed by the index. Deterministic results, orders of magnitude faster than grep/rg for indexed repos
       --json                  
   -C, --context <CONTEXT>     [default: 2]

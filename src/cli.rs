@@ -56,7 +56,8 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub force: bool,
 
-    #[arg(long, global = true)]
+    /// Launch the interactive terminal UI.
+    #[arg(short = 'i', long = "interactive", visible_alias = "ui", global = true)]
     pub ui: bool,
 
     /// Fast exact-match search backed by the index. Deterministic results,

@@ -432,8 +432,8 @@ async fn daemon_ipc_skip_gitignore() {
                     type_filter,
                     include_globs,
                     exclude_globs,
-                    scope_path,
-                    scope_is_file,
+                    scope_path: _,
+                    scope_is_file: _,
                     skip_gitignore,
                 } => {
                     let workspace =
@@ -548,7 +548,7 @@ async fn daemon_ipc_recovers_stale_socket() {
     let Some((listener, path)) = bind_for_test().await else {
         return;
     };
-    
+
     // Drop the listener to leave a stale socket file on disk
     drop(listener);
     assert!(path.exists(), "Stale socket should be left on disk");
@@ -557,7 +557,7 @@ async fn daemon_ipc_recovers_stale_socket() {
     let Some((new_listener, new_path)) = bind_for_test().await else {
         panic!("Should have recovered from stale socket");
     };
-    
+
     assert!(new_path.exists(), "New socket should exist");
     drop(new_listener);
     ivygrep::ipc::cleanup_socket();
