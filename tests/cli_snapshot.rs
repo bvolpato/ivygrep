@@ -62,11 +62,18 @@ fn cli_help_snapshot() {
 
 #[test]
 #[serial]
-fn cli_interactive_aliases_are_accepted() {
-    for flag in ["-i", "--interactive", "--ui"] {
+fn cli_interactive_long_flags_are_accepted() {
+    for flag in ["--interactive", "--ui"] {
         let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
         cmd.arg(flag).arg("--version").assert().success();
     }
+}
+
+#[test]
+#[serial]
+fn cli_short_i_is_not_interactive_alias() {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    cmd.arg("-i").arg("--version").assert().failure();
 }
 
 #[test]
