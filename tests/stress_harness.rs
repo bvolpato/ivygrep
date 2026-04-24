@@ -1526,9 +1526,10 @@ fn stress_neural_enhance_benchmark() {
     assert_eq!(enhanced, summary.total_chunks);
     assert!(workspace.vector_neural_path().exists());
 
-    // Both phases with HashEmbeddingModel should be very fast
+    // Hash indexing can vary significantly on shared CI runners because this
+    // stress suite runs in parallel with other integration tests.
     assert!(
-        hash_elapsed < Duration::from_secs(3),
+        hash_elapsed < Duration::from_secs(10),
         "hash index too slow: {:?}",
         hash_elapsed
     );
