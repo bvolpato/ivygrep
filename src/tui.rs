@@ -1,4 +1,4 @@
-use std::io::{IsTerminal, stdout};
+use std::io::stdout;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -167,7 +167,7 @@ impl App {
             None => std::env::current_dir()?,
         };
         let (workspace, scope_filter) = resolve_workspace_and_scope(&query_path)?;
-        prepare_workspace_for_tui(&cli, &workspace, &runtime)?;
+        let bg_status = prepare_workspace_for_tui(&cli, &workspace, &runtime);
 
         Ok(Self {
             input: Input::default().with_value(cli.query.clone().unwrap_or_default()),
@@ -186,7 +186,7 @@ impl App {
             cli,
             workspace,
             scope_filter,
-            status_message: Some("Type to search".to_string()),
+            status_message: Some(bg_status.unwrap_or_else(|| "Type to search".to_string())),
             flash: None,
             ps: SyntaxSet::load_defaults_newlines(),
             ts: ThemeSet::load_defaults(),
@@ -427,23 +427,32 @@ impl App {
 // Workspace / search helpers (unchanged)
 // ---------------------------------------------------------------------------
 
+/// Kick off indexing if needed, but **never** block the TUI launch.
+///
+/// Returns an optional status message to show in the TUI while indexing
+/// proceeds in the background.
 fn prepare_workspace_for_tui(
     cli: &Cli,
     workspace: &Workspace,
     runtime: &tokio::runtime::Handle,
-) -> Result<()> {
+) -> Option<String> {
     if cli.all_indices && !cli.skip_gitignore {
-        return Ok(());
+        return None;
     }
 
-    let needs_reindex_for_gitignore =
-        cli.skip_gitignore && !workspace.read_metadata()?.is_some_and(|m| m.skip_gitignore);
+    let needs_reindex_for_gitignore = cli.skip_gitignore
+        && !workspace
+            .read_metadata()
+            .ok()
+            .flatten()
+            .is_some_and(|m| m.skip_gitignore);
 
     // Fast existence-only check: avoids opening SQLite (which can block for
-    // minutes on huge repos if the enhancer holds a WAL lock or if the
-    // _stats cache-migration path triggers COUNT(*) on millions of rows).
+    // minutes on huge repos if the enhancer holds a WAL lock).
     let metadata_present = workspace
-        .read_metadata()?
+        .read_metadata()
+        .ok()
+        .flatten()
         .is_some_and(|m| m.last_indexed_at_unix.is_some());
     let artifacts_exist = workspace.sqlite_path().exists()
         && workspace.tantivy_dir().exists()
@@ -451,65 +460,40 @@ fn prepare_workspace_for_tui(
     let looks_indexed = metadata_present && artifacts_exist;
 
     if looks_indexed && !needs_reindex_for_gitignore {
-        return Ok(());
+        return None;
     }
 
-    if std::io::stderr().is_terminal() {
-        eprintln!(
-            "⟐ Preparing interactive search index for {}",
-            workspace.root.display()
-        );
-    }
-
-    let request = DaemonRequest::Index {
-        path: workspace.root.clone(),
-        watch: !cli.no_watch,
-        skip_gitignore: cli.skip_gitignore,
-    };
-    let daemon_result = tokio::task::block_in_place(|| {
-        runtime.block_on(async { daemon::request(&request, !cli.no_watch).await })
+    // Not indexed — fire-and-forget: kick off indexing in the background
+    // and let the TUI launch immediately.  trigger_search() already falls
+    // back to local search if the daemon isn't ready yet.
+    let root = workspace.root.clone();
+    let watch = !cli.no_watch;
+    let skip_gitignore = cli.skip_gitignore;
+    let ws = workspace.clone();
+    let rt = runtime.clone();
+    std::thread::spawn(move || {
+        let request = DaemonRequest::Index {
+            path: root,
+            watch,
+            skip_gitignore,
+        };
+        let daemon_result = rt.block_on(async { daemon::request(&request, watch).await });
+        if matches!(daemon_result, Ok(None)) {
+            // No daemon — index locally in this background thread.
+            if skip_gitignore
+                && let Ok(Some(mut meta)) = ws.read_metadata()
+                && !meta.skip_gitignore
+            {
+                meta.skip_gitignore = true;
+                let _ = ws.ensure_dirs();
+                let _ = ws.write_metadata(&meta);
+            }
+            let model = crate::embedding::create_hash_model();
+            let _ = crate::indexer::index_workspace(&ws, model.as_ref());
+        }
     });
 
-    match daemon_result {
-        Ok(Some(DaemonResponse::Ack { .. })) => Ok(()),
-        Ok(Some(DaemonResponse::Error { message })) => bail!(message),
-        Ok(None) => {
-            ensure_local_skip_gitignore_metadata(cli, workspace)?;
-            let model = crate::embedding::create_hash_model();
-            crate::indexer::index_workspace(workspace, model.as_ref())?;
-            Ok(())
-        }
-        Ok(Some(other)) => bail!("unexpected daemon response while preparing TUI: {other:?}"),
-        Err(err) => Err(err),
-    }
-}
-
-fn ensure_local_skip_gitignore_metadata(cli: &Cli, workspace: &Workspace) -> Result<()> {
-    if !cli.skip_gitignore {
-        return Ok(());
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let mut metadata =
-        workspace
-            .read_metadata()?
-            .unwrap_or_else(|| crate::workspace::WorkspaceMetadata {
-                id: workspace.id.clone(),
-                root: workspace.root.clone(),
-                created_at_unix: now,
-                last_indexed_at_unix: None,
-                watch_enabled: false,
-                skip_gitignore: false,
-                index_generation: 0,
-            });
-    if !metadata.skip_gitignore {
-        metadata.skip_gitignore = true;
-        workspace.ensure_dirs()?;
-        workspace.write_metadata(&metadata)?;
-    }
-    Ok(())
+    Some("Indexing in background… search results may be partial".to_string())
 }
 
 fn tui_limit(cli: &Cli) -> Option<usize> {
