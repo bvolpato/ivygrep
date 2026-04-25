@@ -266,14 +266,17 @@ impl App {
             && let Some(file) = self.grouped_files.get(file_idx)
         {
             let abs = self.absolute_path_for(&file.file_path);
-            if self.file_view_cache.as_ref().is_some_and(|(p, _)| p == &abs) {
+            if self
+                .file_view_cache
+                .as_ref()
+                .is_some_and(|(p, _)| p == &abs)
+            {
                 return;
             }
             match std::fs::read_to_string(&abs) {
                 Ok(content) => self.file_view_cache = Some((abs, content)),
                 Err(e) => {
-                    self.file_view_cache =
-                        Some((abs, format!("(error reading file: {e})")));
+                    self.file_view_cache = Some((abs, format!("(error reading file: {e})")));
                 }
             }
         }
@@ -403,10 +406,8 @@ fn prepare_workspace_for_tui(
         return Ok(());
     }
 
-    let needs_reindex_for_gitignore = cli.skip_gitignore
-        && !workspace
-            .read_metadata()?
-            .is_some_and(|m| m.skip_gitignore);
+    let needs_reindex_for_gitignore =
+        cli.skip_gitignore && !workspace.read_metadata()?.is_some_and(|m| m.skip_gitignore);
 
     if crate::indexer::workspace_is_indexed(workspace) && !needs_reindex_for_gitignore {
         return Ok(());
@@ -650,10 +651,7 @@ fn render_snippet_lines(
         };
         lines.push(Line::from(vec![
             Span::styled(marker, hdr_style),
-            Span::styled(
-                format!(":{}-{}", hit.start_line, hit.end_line),
-                hdr_style,
-            ),
+            Span::styled(format!(":{}-{}", hit.start_line, hit.end_line), hdr_style),
             Span::styled(
                 format!("  score {:.2}", hit.score),
                 Style::default().fg(Color::DarkGray),
@@ -678,8 +676,7 @@ fn render_snippet_lines(
         };
 
         for src_line in syntect::util::LinesWithEndings::from(&hit.preview) {
-            let ranges: Vec<(SynStyle, &str)> =
-                hl.highlight_line(src_line, ps).unwrap_or_default();
+            let ranges: Vec<(SynStyle, &str)> = hl.highlight_line(src_line, ps).unwrap_or_default();
             let spans: Vec<Span> = ranges
                 .into_iter()
                 .map(|(sty, text)| {
@@ -754,8 +751,7 @@ fn render_file_view_lines(
 
         // Need to add a newline so syntect can parse.
         let src_nl = format!("{src}\n");
-        let ranges: Vec<(SynStyle, &str)> =
-            hl.highlight_line(&src_nl, ps).unwrap_or_default();
+        let ranges: Vec<(SynStyle, &str)> = hl.highlight_line(&src_nl, ps).unwrap_or_default();
         for (sty, text) in ranges {
             let mut rs = syn_to_ratatui(sty);
             if in_hl {
@@ -882,10 +878,8 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     .iter()
                     .enumerate()
                     .map(|(idx, file_result)| {
-                        let is_active = matches!(
-                            app.mode,
-                            Mode::SnippetList | Mode::FileView
-                        ) && app.file_list_state.selected() == Some(idx);
+                        let is_active = matches!(app.mode, Mode::SnippetList | Mode::FileView)
+                            && app.file_list_state.selected() == Some(idx);
 
                         let filename = file_result
                             .file_path
@@ -898,11 +892,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                             .parent()
                             .map(|p| {
                                 let s = p.to_string_lossy().to_string();
-                                if s.is_empty() {
-                                    ".".to_string()
-                                } else {
-                                    s
-                                }
+                                if s.is_empty() { ".".to_string() } else { s }
                             })
                             .unwrap_or_else(|| ".".to_string());
                         let active_indicator = if is_active { "▸" } else { " " };
@@ -918,10 +908,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         };
 
                         ListItem::new(Line::from(vec![
-                            Span::styled(
-                                format!("{active_indicator} {filename}"),
-                                name_style,
-                            ),
+                            Span::styled(format!("{active_indicator} {filename}"), name_style),
                             Span::styled(
                                 format!("  {dir}"),
                                 Style::default().fg(Color::Rgb(120, 120, 135)),
@@ -952,12 +939,11 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
             f.render_stateful_widget(file_list, main[0], &mut app.file_list_state);
 
             // ----- right panel -----
-            let right_border_color =
-                if matches!(app.mode, Mode::SnippetList | Mode::FileView) {
-                    Color::Cyan
-                } else {
-                    Color::DarkGray
-                };
+            let right_border_color = if matches!(app.mode, Mode::SnippetList | Mode::FileView) {
+                Color::Cyan
+            } else {
+                Color::DarkGray
+            };
 
             match app.mode {
                 // -- FileView: full file with line numbers --
@@ -1078,11 +1064,8 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     Mode::FileView => hints_file_view(),
                 }
             };
-            let status_bar = Paragraph::new(bar_line).style(
-                Style::default()
-                    .bg(Color::Rgb(30, 30, 45))
-                    .fg(Color::White),
-            );
+            let status_bar = Paragraph::new(bar_line)
+                .style(Style::default().bg(Color::Rgb(30, 30, 45)).fg(Color::White));
             f.render_widget(status_bar, outer[2]);
 
             // ========== cursor (only when typing) ==========
@@ -1181,8 +1164,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     {
                         let path = app.absolute_path_for(&file.file_path);
                         let text = path.display().to_string();
-                        match arboard::Clipboard::new()
-                            .and_then(|mut cb| cb.set_text(text.clone()))
+                        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text.clone()))
                         {
                             Ok(()) => app.flash(format!("Copied {text}")),
                             Err(e) => app.flash(format!("Clipboard: {e}")),
@@ -1222,8 +1204,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         app.ensure_file_view_cache();
                         // Scroll to the snippet's start line.
                         if let Some(hit) = app.selected_snippet() {
-                            app.file_view_scroll =
-                                (hit.start_line as u16).saturating_sub(5);
+                            app.file_view_scroll = (hit.start_line as u16).saturating_sub(5);
                         }
                         app.mode = Mode::FileView;
                     }
@@ -1242,8 +1223,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     if let Some(hit) = app.selected_snippet() {
                         let path = app.absolute_path_for(&hit.file_path);
                         let text = format!("{}:{}", path.display(), hit.start_line);
-                        match arboard::Clipboard::new()
-                            .and_then(|mut cb| cb.set_text(text.clone()))
+                        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text.clone()))
                         {
                             Ok(()) => app.flash(format!("Copied {text}")),
                             Err(e) => app.flash(format!("Clipboard: {e}")),
@@ -1301,8 +1281,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     if let Some(hit) = app.selected_snippet() {
                         let path = app.absolute_path_for(&hit.file_path);
                         let text = format!("{}:{}", path.display(), hit.start_line);
-                        match arboard::Clipboard::new()
-                            .and_then(|mut cb| cb.set_text(text.clone()))
+                        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text.clone()))
                         {
                             Ok(()) => app.flash(format!("Copied {text}")),
                             Err(e) => app.flash(format!("Clipboard: {e}")),
