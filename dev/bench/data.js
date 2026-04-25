@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777142816536,
+  "lastUpdate": 1777145485368,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -8301,6 +8301,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 581.34,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "894c27cf857bd86636dd18a66d198a3ed0f33ac0",
+          "message": "tui: add mouse support, draggable separator, and Tab/Shift+Tab cycling\n\n- Mouse click: focus search input, file list, or snippet panel\n- Mouse scroll: navigate lists or scroll file view (3 lines per tick)\n- Draggable separator: click+drag the border to resize panels (15-70%)\n- Tab cycles forward: Search → FileList → SnippetList → Search\n- Shift+Tab cycles backward\n- Status bar hints updated with Tab and mouse indicators\n- 11 new unit tests (211 total)",
+          "timestamp": "2026-04-25T15:22:15-04:00",
+          "tree_id": "76b5b9388c90bc2af69698f0b80052e98ccc3d1a",
+          "url": "https://github.com/bvolpato/ivygrep/commit/894c27cf857bd86636dd18a66d198a3ed0f33ac0"
+        },
+        "date": 1777145484779,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 934442780,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 7982.87,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3826.73,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2815.51,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11121.09,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 10799.23,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 6.7,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 522.87,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 71662.93,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 14974.8,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 5364.67,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 450824.06,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 535.89,
             "unit": "µs"
           }
         ]
