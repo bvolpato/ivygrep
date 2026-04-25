@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777095660490,
+  "lastUpdate": 1777142815004,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -8123,6 +8123,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 538.3,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "124ee2a15f120af7fa65e84f3df844ce8e292295",
+          "message": "tui: fix clippy lints and add comprehensive unit tests\n\n- Fix type_complexity: add FileViewCache type alias\n- Fix collapsible_match: fold if-guards into match arms\n- Add 27 new unit tests covering:\n  - File navigation wrapping (next/prev, empty list)\n  - Snippet navigation wrapping (next/prev, empty)\n  - Mode transitions and equality\n  - current_snippets / selected_snippet behavior\n  - Flash message lifecycle\n  - reset_results state clearing\n  - Snippet rendering (dividers, scores, empty, selection)\n  - File view rendering (with/without highlight)\n  - Path resolution (relative/absolute)\n  - Hint line generation\n  - FileViewCache type alias\n  - group_hits_by_file dedup and score aggregation\n\nTotal test count: 200 (up from 173)",
+          "timestamp": "2026-04-25T14:37:32-04:00",
+          "tree_id": "8bf0049b2249e73f8be93818c37a16dd35d5f828",
+          "url": "https://github.com/bvolpato/ivygrep/commit/124ee2a15f120af7fa65e84f3df844ce8e292295"
+        },
+        "date": 1777142814468,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 959273630,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 9223.19,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3816.53,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2793.47,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11032.09,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 10746.86,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 6.68,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 533.81,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 71362.04,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 14730.88,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 5277.97,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 450323.98,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 550.6,
             "unit": "µs"
           }
         ]
