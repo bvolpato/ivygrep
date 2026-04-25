@@ -190,6 +190,8 @@ ig doctor                          # inspect index health for the current worksp
 ig doctor --fix                    # rebuild a broken or stale index
 
 # Search modes
+ig --interactive \"query\"             # interactive TUI with file/snippet browsing
+ig --literal \"fn_name\"               # fast exact-match search (index-backed)
 ig --regex "fn\s+\w+_tax"          # regex mode (like rg)
 ig --hash "query"                  # force hash embeddings (skip neural)
 
@@ -227,7 +229,7 @@ cargo test --test stress_harness -- --ignored --nocapture
 
 - **More Tree-sitter languages:** expand the AST pipeline to Kotlin, SQL, and additional grammars as high-quality tree-sitter parsers mature.
 - **Symbol retrieval:** store symbol tables during chunking, add a second index for definitions, references, and call edges. Enable `symbol`, `refs`, and `callers` workflows without replacing the current hybrid text retrieval.
-- **Interactive TUI:** `ig -i` for fuzzy, real-time interactive search with preview windows (like `fzf` for code).
+
 - **Editor integrations:** VS Code extension and Neovim telescope plugin for in-editor semantic search.
 - **Windows support:** resolve usearch/simsimd MSVC compatibility for native Windows builds.
 - **Background job resilience:** richer queue diagnostics and resumable worker state across daemon restarts.

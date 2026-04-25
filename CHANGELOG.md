@@ -2,6 +2,20 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.6.4] — 2026-04-24
+
+### Changed
+- **TUI Redesign — Hierarchical Code Browser:** The interactive TUI (`ig --interactive`) has been completely rebuilt with a four-mode navigation model: **Search → FileList → SnippetList → FileView**. Files are now deduplicated in the left panel with hit counts; the right panel shows syntax-highlighted snippet previews that become individually navigable on Enter. Pressing Enter again expands the full file with line numbers, gutter highlighting on matched regions, and scrolling.
+- **Editor integration via `e` key:** Press `e` at any level to open `$EDITOR` at the matched line. Enter no longer opens an external editor — it navigates deeper into the result hierarchy.
+- **Clipboard copy via `y` key:** Copy `file:line` to the system clipboard using `arboard`.
+- **Esc/Ctrl+C clear-then-quit:** In the search box, Esc clears the query first; pressing Esc again (or when empty) exits the TUI.
+- **Status bar with mode-dependent hints:** Every mode shows context-sensitive key bindings.
+- **Visual polish:** Proper `────` divider lines between snippets, higher-contrast color scheme, stronger selection highlights, mode indicator in the title bar.
+
+### Fixed
+- **README roadmap:** Removed TUI from the future roadmap (shipped in 0.6.2). Added `--interactive` and `--literal` to the CLI reference.
+
+
 ## [0.6.2] — 2026-04-20
 
 ### Added
