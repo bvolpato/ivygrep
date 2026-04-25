@@ -810,9 +810,11 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
     let _session = TerminalSession::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
-    // Pre-filled query → immediate search.
+    // Pre-filled query → defer search so the UI draws "Searching…" first.
     if !app.input.value().is_empty() {
-        app.trigger_search();
+        app.status_message = Some("Searching…".to_string());
+        app.pending_search = true;
+        app.debounce_timer = None;
         app.last_query = app.input.value().to_string();
     }
 

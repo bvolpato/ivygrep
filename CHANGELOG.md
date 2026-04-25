@@ -2,6 +2,11 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.6.7] — 2026-04-25
+
+### Fixed
+- **TUI pre-filled query hang:** Fixes an issue where running `ig --ui <query>` would hang with a blinking cursor before rendering the TUI, because the search blocked the initial draw. The TUI now renders immediately with a "Searching…" status.
+
 ## [0.6.6] — 2026-04-25
 
 ### Added
