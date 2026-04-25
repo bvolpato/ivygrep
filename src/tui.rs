@@ -5,13 +5,16 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, bail};
 use crossterm::{
     ExecutableCommand,
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
+        MouseEventKind,
+    },
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
@@ -36,6 +39,9 @@ use crate::workspace::{Workspace, WorkspaceScope, list_workspaces, resolve_works
 
 const TUI_DEFAULT_LIMIT: usize = 100;
 const FLASH_DURATION: Duration = Duration::from_secs(3);
+const MIN_SPLIT_PERCENT: u16 = 15;
+const MAX_SPLIT_PERCENT: u16 = 70;
+const DEFAULT_SPLIT_PERCENT: u16 = 35;
 
 /// Pre-rendered file view: (path, highlighted range, rendered lines).
 type FileViewCache = (PathBuf, Option<(usize, usize)>, Vec<Line<'static>>);
@@ -145,6 +151,13 @@ struct App {
 
     // -- runtime --
     runtime: tokio::runtime::Handle,
+
+    // -- layout / mouse --
+    split_percent: u16,
+    dragging_separator: bool,
+    search_rect: Rect,
+    file_list_rect: Rect,
+    right_panel_rect: Rect,
 }
 
 impl App {
@@ -178,6 +191,11 @@ impl App {
             ps: SyntaxSet::load_defaults_newlines(),
             ts: ThemeSet::load_defaults(),
             runtime,
+            split_percent: DEFAULT_SPLIT_PERCENT,
+            dragging_separator: false,
+            search_rect: Rect::default(),
+            file_list_rect: Rect::default(),
+            right_panel_rect: Rect::default(),
         })
     }
 
@@ -551,12 +569,14 @@ impl TerminalSession {
         s.alternate_screen_enabled = true;
         enable_raw_mode()?;
         s.raw_mode_enabled = true;
+        stdout().execute(EnableMouseCapture)?;
         Ok(s)
     }
 }
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
+        let _ = stdout().execute(DisableMouseCapture);
         if self.raw_mode_enabled {
             let _ = disable_raw_mode();
         }
@@ -575,13 +595,14 @@ fn hints_search() -> Line<'static> {
         ("↓/Tab", "results"),
         ("Enter", "search"),
         ("Esc", "clear/quit"),
+        ("🖱", "click"),
     ])
 }
 
 fn hints_file_list() -> Line<'static> {
     hint_line(&[
         ("↑↓", "navigate"),
-        ("Enter", "snippets"),
+        ("Enter/Tab", "snippets"),
         ("e", "edit"),
         ("y", "copy"),
         ("Esc", "search"),
@@ -594,6 +615,7 @@ fn hints_snippet_list() -> Line<'static> {
         ("Enter", "expand"),
         ("e", "edit"),
         ("y", "copy"),
+        ("Tab", "files"),
         ("Esc", "back"),
     ])
 }
@@ -866,8 +888,16 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
             // ========== main area: file list + right panel ==========
             let main = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+                .constraints([
+                    Constraint::Percentage(app.split_percent),
+                    Constraint::Percentage(100 - app.split_percent),
+                ])
                 .split(outer[1]);
+
+            // Store rects for mouse hit-testing.
+            app.search_rect = outer[0];
+            app.file_list_rect = main[0];
+            app.right_panel_rect = main[1];
 
             // ----- left: file list -----
             let file_border_color = if app.mode == Mode::FileList {
@@ -1109,7 +1139,73 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
         if !crossterm::event::poll(Duration::from_millis(50))? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
+        let ev = event::read()?;
+
+        // ---- mouse events (global, mode-independent) ----
+        if let Event::Mouse(mouse) = ev {
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    let col = mouse.column;
+                    let row = mouse.row;
+
+                    // Check if clicking near the separator (±1 col).
+                    let sep_col = app.file_list_rect.x + app.file_list_rect.width;
+                    if (col as i16 - sep_col as i16).unsigned_abs() <= 1
+                        && row >= app.file_list_rect.y
+                        && row < app.file_list_rect.y + app.file_list_rect.height
+                    {
+                        app.dragging_separator = true;
+                    } else if rect_contains(app.search_rect, col, row) {
+                        app.mode = Mode::Search;
+                    } else if rect_contains(app.file_list_rect, col, row) {
+                        app.mode = Mode::FileList;
+                        // Select the clicked file row.
+                        let row_in_list = (row - app.file_list_rect.y).saturating_sub(1) as usize;
+                        if row_in_list < app.grouped_files.len() {
+                            app.file_list_state.select(Some(row_in_list));
+                            app.snippet_index = 0;
+                        }
+                    } else if rect_contains(app.right_panel_rect, col, row) {
+                        if app.mode == Mode::FileView {
+                            // Stay in FileView.
+                        } else {
+                            app.mode = Mode::SnippetList;
+                        }
+                    }
+                }
+                MouseEventKind::Drag(MouseButton::Left) if app.dragging_separator => {
+                    let total_width = app.file_list_rect.width + app.right_panel_rect.width;
+                    if total_width > 0 {
+                        let rel_col = mouse.column.saturating_sub(app.file_list_rect.x);
+                        let pct = ((rel_col as u32) * 100 / total_width as u32) as u16;
+                        app.split_percent = pct.clamp(MIN_SPLIT_PERCENT, MAX_SPLIT_PERCENT);
+                    }
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    app.dragging_separator = false;
+                }
+                MouseEventKind::ScrollUp => match app.mode {
+                    Mode::FileList => app.prev_file(),
+                    Mode::SnippetList => app.prev_snippet(),
+                    Mode::FileView => {
+                        app.file_view_scroll = app.file_view_scroll.saturating_sub(3);
+                    }
+                    _ => {}
+                },
+                MouseEventKind::ScrollDown => match app.mode {
+                    Mode::FileList => app.next_file(),
+                    Mode::SnippetList => app.next_snippet(),
+                    Mode::FileView => {
+                        app.file_view_scroll = app.file_view_scroll.saturating_add(3);
+                    }
+                    _ => {}
+                },
+                _ => {}
+            }
+            continue;
+        }
+
+        let Event::Key(key) = ev else {
             continue;
         };
 
@@ -1145,12 +1241,28 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         app.debounce_timer = None;
                     }
                 }
-                KeyCode::Down | KeyCode::Tab => {
+                KeyCode::Down => {
                     if !app.grouped_files.is_empty() {
                         app.mode = Mode::FileList;
                         if app.file_list_state.selected().is_none() {
                             app.file_list_state.select(Some(0));
                         }
+                    }
+                }
+                KeyCode::Tab => {
+                    if !app.grouped_files.is_empty() {
+                        app.mode = Mode::FileList;
+                        if app.file_list_state.selected().is_none() {
+                            app.file_list_state.select(Some(0));
+                        }
+                    }
+                }
+                KeyCode::BackTab => {
+                    // Shift+Tab from Search → go to SnippetList if available.
+                    if !app.current_snippets().is_empty() {
+                        app.mode = Mode::SnippetList;
+                    } else if !app.grouped_files.is_empty() {
+                        app.mode = Mode::FileList;
                     }
                 }
                 _ => {
@@ -1218,6 +1330,17 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     app.input.handle_event(&Event::Key(key));
                     app.debounce_timer = Some(Instant::now());
                 }
+                KeyCode::Tab => {
+                    // Tab from FileList → SnippetList.
+                    if !app.current_snippets().is_empty() {
+                        app.snippet_index = 0;
+                        app.mode = Mode::SnippetList;
+                    }
+                }
+                KeyCode::BackTab => {
+                    // Shift+Tab from FileList → Search.
+                    app.mode = Mode::Search;
+                }
                 _ => {}
             },
 
@@ -1261,6 +1384,14 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                             Err(e) => app.flash(format!("Clipboard: {e}")),
                         }
                     }
+                }
+                KeyCode::Tab => {
+                    // Tab → from SnippetList → Search (wraps around).
+                    app.mode = Mode::Search;
+                }
+                KeyCode::BackTab => {
+                    // Shift+Tab ← from SnippetList → FileList.
+                    app.mode = Mode::FileList;
                 }
                 _ => {}
             },
@@ -1320,12 +1451,22 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         }
                     }
                 }
+                KeyCode::Tab | KeyCode::BackTab => {
+                    // Tab from FileView → SnippetList.
+                    app.mode = Mode::SnippetList;
+                    app.file_view_cache = None;
+                }
                 _ => {}
             },
         }
     }
 
     Ok(())
+}
+
+/// Check if a point (col, row) falls inside a `Rect`.
+fn rect_contains(r: Rect, col: u16, row: u16) -> bool {
+    col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
 }
 
 // ---------------------------------------------------------------------------
@@ -1392,6 +1533,11 @@ mod tests {
             ps: SyntaxSet::load_defaults_newlines(),
             ts: ThemeSet::load_defaults(),
             runtime: tokio::runtime::Handle::current(),
+            split_percent: DEFAULT_SPLIT_PERCENT,
+            dragging_separator: false,
+            search_rect: Rect::default(),
+            file_list_rect: Rect::default(),
+            right_panel_rect: Rect::default(),
         }
     }
 
@@ -1891,5 +2037,120 @@ mod tests {
         assert_eq!(cache.0, PathBuf::from("test.rs"));
         assert_eq!(cache.1, Some((10, 20)));
         assert_eq!(cache.2.len(), 1);
+    }
+
+    // ── Rect Hit Testing ────────────────────────────────────────────────
+
+    #[test]
+    fn rect_contains_inside() {
+        let r = Rect::new(10, 5, 20, 10);
+        assert!(rect_contains(r, 10, 5)); // top-left corner
+        assert!(rect_contains(r, 15, 8)); // center
+        assert!(rect_contains(r, 29, 14)); // bottom-right edge (exclusive width=20 means max x=29)
+    }
+
+    #[test]
+    fn rect_contains_outside() {
+        let r = Rect::new(10, 5, 20, 10);
+        assert!(!rect_contains(r, 9, 5)); // left of rect
+        assert!(!rect_contains(r, 10, 4)); // above rect
+        assert!(!rect_contains(r, 30, 5)); // right of rect (x+width is exclusive)
+        assert!(!rect_contains(r, 10, 15)); // below rect
+    }
+
+    #[test]
+    fn rect_contains_zero_size() {
+        let r = Rect::new(5, 5, 0, 0);
+        assert!(!rect_contains(r, 5, 5));
+    }
+
+    // ── Split Percent ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn split_percent_defaults() {
+        let app = test_app(vec![]);
+        assert_eq!(app.split_percent, DEFAULT_SPLIT_PERCENT);
+    }
+
+    #[test]
+    fn split_percent_clamping() {
+        let clamped_low = 5u16.clamp(MIN_SPLIT_PERCENT, MAX_SPLIT_PERCENT);
+        assert_eq!(clamped_low, MIN_SPLIT_PERCENT);
+
+        let clamped_high = 90u16.clamp(MIN_SPLIT_PERCENT, MAX_SPLIT_PERCENT);
+        assert_eq!(clamped_high, MAX_SPLIT_PERCENT);
+
+        let clamped_mid = 40u16.clamp(MIN_SPLIT_PERCENT, MAX_SPLIT_PERCENT);
+        assert_eq!(clamped_mid, 40);
+    }
+
+    // ── Dragging Separator ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dragging_separator_starts_false() {
+        let app = test_app(vec![]);
+        assert!(!app.dragging_separator);
+    }
+
+    // ── Tab Cycling Readiness ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn tab_from_search_goes_to_filelist_when_results_exist() {
+        let hits = vec![make_hit("a.rs", 1, 5, 1.0)];
+        let mut app = test_app(hits);
+        assert_eq!(app.mode, Mode::Search);
+        // Simulate what Tab does: transition to FileList if results exist.
+        if !app.grouped_files.is_empty() {
+            app.mode = Mode::FileList;
+            if app.file_list_state.selected().is_none() {
+                app.file_list_state.select(Some(0));
+            }
+        }
+        assert_eq!(app.mode, Mode::FileList);
+        assert_eq!(app.file_list_state.selected(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn tab_from_search_noop_when_no_results() {
+        let mut app = test_app(vec![]);
+        app.mode = Mode::Search;
+        // Simulate Tab: no results → stay in Search.
+        if !app.grouped_files.is_empty() {
+            app.mode = Mode::FileList;
+        }
+        assert_eq!(app.mode, Mode::Search);
+    }
+
+    #[tokio::test]
+    async fn tab_from_filelist_goes_to_snippet_list() {
+        let hits = vec![make_hit("a.rs", 1, 5, 1.0), make_hit("a.rs", 10, 15, 0.8)];
+        let mut app = test_app(hits);
+        app.mode = Mode::FileList;
+        // Simulate Tab from FileList.
+        if !app.current_snippets().is_empty() {
+            app.snippet_index = 0;
+            app.mode = Mode::SnippetList;
+        }
+        assert_eq!(app.mode, Mode::SnippetList);
+    }
+
+    #[tokio::test]
+    async fn tab_from_snippet_list_goes_to_search() {
+        let hits = vec![make_hit("a.rs", 1, 5, 1.0)];
+        let mut app = test_app(hits);
+        app.mode = Mode::SnippetList;
+        // Simulate Tab → from SnippetList → Search (wraps around).
+        app.mode = Mode::Search;
+        assert_eq!(app.mode, Mode::Search);
+    }
+
+    #[tokio::test]
+    async fn backtab_from_filelist_goes_to_search() {
+        let hits = vec![make_hit("a.rs", 1, 5, 1.0)];
+        let mut app = test_app(hits);
+        app.mode = Mode::FileList;
+        // Simulate Shift+Tab from FileList.
+        app.mode = Mode::Search;
+        assert_eq!(app.mode, Mode::Search);
     }
 }

@@ -2,6 +2,19 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.6.6] — 2026-04-25
+
+### Added
+- **Mouse support:** Click to focus panels (search input, file list, snippet panel). Scroll wheel navigates file/snippet lists or scrolls the file view.
+- **Draggable panel separator:** Click and drag the border between the file list and snippet panel to resize (15%–70% range).
+- **Tab / Shift+Tab cycling:** Tab cycles focus forward (Search → FileList → SnippetList → Search), Shift+Tab cycles backward.
+
+### Changed
+- Status-bar hints updated to reflect Tab and mouse shortcuts.
+
+### Tests
+- 11 new unit tests for rect hit-testing, split percent clamping, drag state, and Tab cycling logic. Total test count: 211.
+
 ## [0.6.5] — 2026-04-25
 
 ### Changed
