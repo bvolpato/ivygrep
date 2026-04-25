@@ -37,6 +37,9 @@ use crate::workspace::{Workspace, WorkspaceScope, list_workspaces, resolve_works
 const TUI_DEFAULT_LIMIT: usize = 100;
 const FLASH_DURATION: Duration = Duration::from_secs(3);
 
+/// Pre-rendered file view: (path, highlighted range, rendered lines).
+type FileViewCache = (PathBuf, Option<(usize, usize)>, Vec<Line<'static>>);
+
 // ---------------------------------------------------------------------------
 // Interaction modes
 // ---------------------------------------------------------------------------
@@ -118,7 +121,7 @@ struct App {
     // -- view --
     mode: Mode,
     file_view_scroll: u16,
-    file_view_cache: Option<(PathBuf, Option<(usize, usize)>, Vec<Line<'static>>)>,
+    file_view_cache: Option<FileViewCache>,
 
     // -- search lifecycle --
     is_searching: bool,
@@ -1169,11 +1172,11 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                 }
                 KeyCode::Up | KeyCode::Char('k') => app.prev_file(),
                 KeyCode::Down | KeyCode::Char('j') => app.next_file(),
-                KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
-                    if !app.current_snippets().is_empty() {
-                        app.snippet_index = 0;
-                        app.mode = Mode::SnippetList;
-                    }
+                KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')
+                    if !app.current_snippets().is_empty() =>
+                {
+                    app.snippet_index = 0;
+                    app.mode = Mode::SnippetList;
                 }
                 KeyCode::Char('e') => {
                     if let Some(file_idx) = app.file_list_state.selected()
@@ -1228,15 +1231,15 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                 }
                 KeyCode::Up | KeyCode::Char('k') => app.prev_snippet(),
                 KeyCode::Down | KeyCode::Char('j') => app.next_snippet(),
-                KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
-                    if app.selected_snippet().is_some() {
-                        app.ensure_file_view_cache();
-                        // Scroll to the snippet's start line.
-                        if let Some(hit) = app.selected_snippet() {
-                            app.file_view_scroll = (hit.start_line as u16).saturating_sub(5);
-                        }
-                        app.mode = Mode::FileView;
+                KeyCode::Enter | KeyCode::Right | KeyCode::Char('l')
+                    if app.selected_snippet().is_some() =>
+                {
+                    app.ensure_file_view_cache();
+                    // Scroll to the snippet's start line.
+                    if let Some(hit) = app.selected_snippet() {
+                        app.file_view_scroll = (hit.start_line as u16).saturating_sub(5);
                     }
+                    app.mode = Mode::FileView;
                 }
                 KeyCode::Char('e') => {
                     if let Some(hit) = app.selected_snippet() {
@@ -1337,6 +1340,63 @@ mod tests {
 
     use super::*;
 
+    // ── Helpers ──────────────────────────────────────────────────────────
+
+    fn make_hit(path: &str, start: usize, end: usize, score: f32) -> SearchHit {
+        SearchHit {
+            file_path: PathBuf::from(path),
+            start_line: start,
+            end_line: end,
+            preview: format!("line {}..{}\n", start, end),
+            reason: String::new(),
+            score,
+            sources: vec![],
+        }
+    }
+
+    /// Build a minimal `App` state *without* a real workspace or runtime.
+    /// Only the fields used by the navigation / rendering logic are populated.
+    fn test_app(hits: Vec<SearchHit>) -> App {
+        let cli = Cli::parse_from(["ig", "--interactive", "test"]);
+        let grouped = group_hits_by_file(&hits, None);
+        let mut state = ListState::default();
+        if !grouped.is_empty() {
+            state.select(Some(0));
+        }
+        App {
+            input: Input::default(),
+            hits,
+            grouped_files: grouped,
+            file_list_state: state,
+            snippet_index: 0,
+            mode: Mode::Search,
+            file_view_scroll: 0,
+            file_view_cache: None,
+            is_searching: false,
+            pending_search: false,
+            transition_after_search: false,
+            last_query: String::new(),
+            debounce_timer: None,
+            cli,
+            // SAFETY: only used by trigger_search / editor; not called in unit tests.
+            workspace: Workspace {
+                id: "test".into(),
+                root: PathBuf::from("/tmp/test"),
+                index_dir: PathBuf::from("/tmp/test/.ivygrep"),
+                repo_id: None,
+                base_index_dir: None,
+            },
+            scope_filter: None,
+            status_message: None,
+            flash: None,
+            ps: SyntaxSet::load_defaults_newlines(),
+            ts: ThemeSet::load_defaults(),
+            runtime: tokio::runtime::Handle::current(),
+        }
+    }
+
+    // ── Request Building Tests ──────────────────────────────────────────
+
     #[test]
     fn tui_search_request_preserves_workspace_scope() {
         let cli = Cli::parse_from([
@@ -1418,6 +1478,8 @@ mod tests {
         }
     }
 
+    // ── Flash / Timer Tests ─────────────────────────────────────────────
+
     #[test]
     fn flash_expires_after_duration() {
         let mut flash: Option<(String, Instant)> =
@@ -1447,27 +1509,13 @@ mod tests {
         }
     }
 
+    // ── Rendering Tests ─────────────────────────────────────────────────
+
     #[test]
     fn snippet_rendering_produces_lines_and_offsets() {
         let hits = vec![
-            SearchHit {
-                file_path: PathBuf::from("test.rs"),
-                start_line: 10,
-                end_line: 15,
-                preview: "fn foo() {}\nfn bar() {}\n".to_string(),
-                reason: String::new(),
-                score: 0.9,
-                sources: vec![],
-            },
-            SearchHit {
-                file_path: PathBuf::from("test.rs"),
-                start_line: 30,
-                end_line: 35,
-                preview: "fn baz() {}\n".to_string(),
-                reason: String::new(),
-                score: 0.5,
-                sources: vec![],
-            },
+            make_hit("test.rs", 10, 15, 0.9),
+            make_hit("test.rs", 30, 35, 0.5),
         ];
         let ps = SyntaxSet::load_defaults_newlines();
         let ts = ThemeSet::load_defaults();
@@ -1477,5 +1525,371 @@ mod tests {
         assert_eq!(offsets[0], 0);
         assert!(offsets[1] > 0);
         assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn snippet_rendering_without_selection() {
+        let hits = vec![make_hit("a.py", 1, 5, 0.8)];
+        let ps = SyntaxSet::load_defaults_newlines();
+        let ts = ThemeSet::load_defaults();
+
+        let (lines, offsets) = render_snippet_lines(&hits, None, &ps, &ts);
+        assert_eq!(offsets.len(), 1);
+        assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn snippet_rendering_empty_list() {
+        let ps = SyntaxSet::load_defaults_newlines();
+        let ts = ThemeSet::load_defaults();
+
+        let (lines, offsets) = render_snippet_lines(&[], None, &ps, &ts);
+        assert!(lines.is_empty());
+        assert!(offsets.is_empty());
+    }
+
+    #[test]
+    fn file_view_rendering_without_highlight() {
+        let ps = SyntaxSet::load_defaults_newlines();
+        let ts = ThemeSet::load_defaults();
+        let content = "fn main() {\n    println!(\"hello\");\n}\n";
+        let path = PathBuf::from("test.rs");
+
+        let lines = render_file_view_lines(content, &path, None, &ps, &ts);
+        assert_eq!(lines.len(), 3);
+    }
+
+    #[test]
+    fn file_view_rendering_with_highlight() {
+        let ps = SyntaxSet::load_defaults_newlines();
+        let ts = ThemeSet::load_defaults();
+        let content = "line1\nline2\nline3\nline4\nline5\n";
+        let path = PathBuf::from("test.txt");
+
+        let lines = render_file_view_lines(content, &path, Some((2, 4)), &ps, &ts);
+        assert_eq!(lines.len(), 5);
+    }
+
+    // ── File Navigation Tests ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn next_file_wraps_around() {
+        let hits = vec![
+            make_hit("a.rs", 1, 5, 1.0),
+            make_hit("b.rs", 10, 15, 0.8),
+            make_hit("c.rs", 20, 25, 0.6),
+        ];
+        let mut app = test_app(hits);
+        assert_eq!(app.file_list_state.selected(), Some(0));
+
+        app.next_file();
+        assert_eq!(app.file_list_state.selected(), Some(1));
+
+        app.next_file();
+        assert_eq!(app.file_list_state.selected(), Some(2));
+
+        // Wraps back to 0.
+        app.next_file();
+        assert_eq!(app.file_list_state.selected(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn prev_file_wraps_around() {
+        let hits = vec![make_hit("a.rs", 1, 5, 1.0), make_hit("b.rs", 10, 15, 0.8)];
+        let mut app = test_app(hits);
+        assert_eq!(app.file_list_state.selected(), Some(0));
+
+        // Wraps to last.
+        app.prev_file();
+        assert_eq!(app.file_list_state.selected(), Some(1));
+
+        app.prev_file();
+        assert_eq!(app.file_list_state.selected(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn next_file_on_empty_list_is_noop() {
+        let mut app = test_app(vec![]);
+        app.next_file();
+        assert_eq!(app.file_list_state.selected(), None);
+    }
+
+    #[tokio::test]
+    async fn prev_file_on_empty_list_is_noop() {
+        let mut app = test_app(vec![]);
+        app.prev_file();
+        assert_eq!(app.file_list_state.selected(), None);
+    }
+
+    #[tokio::test]
+    async fn file_navigation_resets_snippet_index() {
+        let hits = vec![
+            make_hit("a.rs", 1, 5, 1.0),
+            make_hit("a.rs", 10, 15, 0.8),
+            make_hit("b.rs", 20, 25, 0.6),
+        ];
+        let mut app = test_app(hits);
+        app.snippet_index = 1; // Was browsing second snippet of file a.rs.
+
+        app.next_file(); // Move to b.rs.
+        assert_eq!(
+            app.snippet_index, 0,
+            "snippet_index should reset on file change"
+        );
+    }
+
+    // ── Snippet Navigation Tests ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn next_snippet_wraps_around() {
+        let hits = vec![
+            make_hit("a.rs", 1, 5, 1.0),
+            make_hit("a.rs", 10, 15, 0.8),
+            make_hit("a.rs", 20, 25, 0.6),
+        ];
+        let mut app = test_app(hits);
+        assert_eq!(app.current_snippets().len(), 3);
+
+        app.next_snippet();
+        assert_eq!(app.snippet_index, 1);
+
+        app.next_snippet();
+        assert_eq!(app.snippet_index, 2);
+
+        app.next_snippet();
+        assert_eq!(app.snippet_index, 0);
+    }
+
+    #[tokio::test]
+    async fn prev_snippet_wraps_around() {
+        let hits = vec![make_hit("a.rs", 1, 5, 1.0), make_hit("a.rs", 10, 15, 0.8)];
+        let mut app = test_app(hits);
+
+        app.prev_snippet();
+        assert_eq!(app.snippet_index, 1);
+
+        app.prev_snippet();
+        assert_eq!(app.snippet_index, 0);
+    }
+
+    #[tokio::test]
+    async fn snippet_navigation_on_empty_is_noop() {
+        let mut app = test_app(vec![]);
+        app.next_snippet();
+        assert_eq!(app.snippet_index, 0);
+        app.prev_snippet();
+        assert_eq!(app.snippet_index, 0);
+    }
+
+    // ── Snippet Access Tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn current_snippets_returns_hits_for_selected_file() {
+        let hits = vec![
+            make_hit("a.rs", 1, 5, 1.0),
+            make_hit("a.rs", 10, 15, 0.8),
+            make_hit("b.rs", 20, 25, 0.6),
+        ];
+        let mut app = test_app(hits);
+
+        // File 0 = a.rs with 2 snippets.
+        assert_eq!(app.current_snippets().len(), 2);
+
+        app.next_file(); // File 1 = b.rs with 1 snippet.
+        assert_eq!(app.current_snippets().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn selected_snippet_tracks_index() {
+        let hits = vec![make_hit("a.rs", 1, 5, 1.0), make_hit("a.rs", 10, 15, 0.8)];
+        let mut app = test_app(hits);
+
+        let s0 = app.selected_snippet().unwrap();
+        assert_eq!(s0.start_line, 1);
+
+        app.snippet_index = 1;
+        let s1 = app.selected_snippet().unwrap();
+        assert_eq!(s1.start_line, 10);
+    }
+
+    #[tokio::test]
+    async fn selected_snippet_returns_none_when_empty() {
+        let app = test_app(vec![]);
+        assert!(app.selected_snippet().is_none());
+    }
+
+    // ── Path Resolution Tests ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn absolute_path_for_relative() {
+        let app = test_app(vec![]);
+        let result = app.absolute_path_for(&PathBuf::from("src/main.rs"));
+        assert_eq!(result, PathBuf::from("/tmp/test/src/main.rs"));
+    }
+
+    #[tokio::test]
+    async fn absolute_path_for_already_absolute() {
+        let app = test_app(vec![]);
+        let result = app.absolute_path_for(&PathBuf::from("/usr/lib/foo.rs"));
+        assert_eq!(result, PathBuf::from("/usr/lib/foo.rs"));
+    }
+
+    // ── Flash Message Tests ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn flash_message_lifecycle() {
+        let mut app = test_app(vec![]);
+        assert!(app.active_flash().is_none());
+
+        app.flash("hello world");
+        assert_eq!(app.active_flash(), Some("hello world"));
+
+        // Flash is still active (within FLASH_DURATION).
+        assert_eq!(app.active_flash(), Some("hello world"));
+    }
+
+    // ── Reset Tests ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn reset_clears_all_state() {
+        let hits = vec![make_hit("a.rs", 1, 5, 1.0), make_hit("b.rs", 10, 15, 0.8)];
+        let mut app = test_app(hits);
+        app.mode = Mode::FileList;
+        app.snippet_index = 1;
+        app.file_view_scroll = 42;
+
+        app.reset_results();
+
+        assert!(app.hits.is_empty());
+        assert!(app.grouped_files.is_empty());
+        assert_eq!(app.file_list_state.selected(), None);
+        assert_eq!(app.snippet_index, 0);
+        assert!(app.file_view_cache.is_none());
+        assert_eq!(app.file_view_scroll, 0);
+        assert_eq!(app.status_message, Some("Type to search".to_string()));
+    }
+
+    // ── Mode Enumeration Tests ──────────────────────────────────────────
+
+    #[test]
+    fn mode_equality() {
+        assert_eq!(Mode::Search, Mode::Search);
+        assert_ne!(Mode::Search, Mode::FileList);
+        assert_ne!(Mode::FileList, Mode::SnippetList);
+        assert_ne!(Mode::SnippetList, Mode::FileView);
+    }
+
+    // ── Hint Rendering Tests ────────────────────────────────────────────
+
+    #[test]
+    fn hint_lines_are_nonempty() {
+        let search = hints_search();
+        let file_list = hints_file_list();
+        let snippet_list = hints_snippet_list();
+        let file_view = hints_file_view();
+
+        assert!(!search.spans.is_empty());
+        assert!(!file_list.spans.is_empty());
+        assert!(!snippet_list.spans.is_empty());
+        assert!(!file_view.spans.is_empty());
+    }
+
+    // ── Divider Test ────────────────────────────────────────────────────
+
+    #[test]
+    fn snippet_rendering_includes_dividers_between_snippets() {
+        let hits = vec![make_hit("a.rs", 1, 5, 0.9), make_hit("a.rs", 10, 15, 0.7)];
+        let ps = SyntaxSet::load_defaults_newlines();
+        let ts = ThemeSet::load_defaults();
+
+        let (lines, _) = render_snippet_lines(&hits, None, &ps, &ts);
+        let divider_count = lines
+            .iter()
+            .filter(|line| line.spans.iter().any(|span| span.content.contains("────")))
+            .count();
+        assert_eq!(
+            divider_count, 1,
+            "expected exactly one divider between two snippets"
+        );
+    }
+
+    #[test]
+    fn single_snippet_has_no_divider() {
+        let hits = vec![make_hit("a.rs", 1, 5, 0.9)];
+        let ps = SyntaxSet::load_defaults_newlines();
+        let ts = ThemeSet::load_defaults();
+
+        let (lines, _) = render_snippet_lines(&hits, None, &ps, &ts);
+        let divider_count = lines
+            .iter()
+            .filter(|line| line.spans.iter().any(|span| span.content.contains("────")))
+            .count();
+        assert_eq!(
+            divider_count, 0,
+            "single snippet should have no trailing divider"
+        );
+    }
+
+    // ── Score Display Tests ─────────────────────────────────────────────
+
+    #[test]
+    fn snippet_header_shows_score() {
+        let hits = vec![make_hit("a.rs", 1, 5, 0.85)];
+        let ps = SyntaxSet::load_defaults_newlines();
+        let ts = ThemeSet::load_defaults();
+
+        let (lines, _) = render_snippet_lines(&hits, None, &ps, &ts);
+        // The header line should contain the score.
+        let header_text: String = lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(
+            header_text.contains("0.85"),
+            "header should contain score, got: {header_text}"
+        );
+    }
+
+    // ── Group Hits Tests ────────────────────────────────────────────────
+
+    #[test]
+    fn group_hits_deduplicates_files() {
+        let hits = vec![
+            make_hit("a.rs", 1, 5, 1.0),
+            make_hit("a.rs", 10, 15, 0.8),
+            make_hit("b.rs", 20, 25, 0.6),
+        ];
+        let grouped = group_hits_by_file(&hits, None);
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[0].hit_count, 2);
+        assert_eq!(grouped[1].hit_count, 1);
+    }
+
+    #[test]
+    fn group_hits_aggregate_score() {
+        let hits = vec![make_hit("a.rs", 1, 5, 1.0), make_hit("a.rs", 10, 15, 0.5)];
+        let grouped = group_hits_by_file(&hits, None);
+        assert_eq!(grouped.len(), 1);
+        let total = grouped[0].total_score;
+        assert!(
+            (total - 1.5).abs() < 0.01,
+            "expected total_score ~1.5, got {total}"
+        );
+    }
+
+    // ── FileViewCache Type Sanity ───────────────────────────────────────
+
+    #[test]
+    fn file_view_cache_type_is_used() {
+        // Ensure the type alias compiles and can be constructed.
+        let cache: FileViewCache = (
+            PathBuf::from("test.rs"),
+            Some((10, 20)),
+            vec![Line::from("hello")],
+        );
+        assert_eq!(cache.0, PathBuf::from("test.rs"));
+        assert_eq!(cache.1, Some((10, 20)));
+        assert_eq!(cache.2.len(), 1);
     }
 }
