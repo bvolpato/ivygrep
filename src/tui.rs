@@ -17,7 +17,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Style as SynStyle, ThemeSet};
@@ -145,6 +145,10 @@ struct App {
     status_message: Option<String>,
     flash: Option<(String, Instant)>,
 
+    // -- bg indexing progress --
+    bg_indexing_active: bool,
+    last_bg_check: Instant,
+
     // -- syntax --
     ps: SyntaxSet,
     ts: ThemeSet,
@@ -186,7 +190,13 @@ impl App {
             cli,
             workspace,
             scope_filter,
-            status_message: Some(bg_status.unwrap_or_else(|| "Type to search".to_string())),
+            status_message: Some(
+                bg_status
+                    .clone()
+                    .unwrap_or_else(|| "Type to search".to_string()),
+            ),
+            bg_indexing_active: bg_status.is_some(),
+            last_bg_check: Instant::now(),
             flash: None,
             ps: SyntaxSet::load_defaults_newlines(),
             ts: ThemeSet::load_defaults(),
@@ -832,6 +842,62 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
             app.debounce_timer = None;
         }
 
+        // ---- bg progress polling ----
+        if app.bg_indexing_active && app.last_bg_check.elapsed() > Duration::from_millis(500) {
+            app.last_bg_check = Instant::now();
+
+            let e_prog = app.workspace.index_dir.join(".enhancing.progress");
+            let i_prog = app.workspace.index_dir.join(".indexing.progress");
+
+            if e_prog.exists() {
+                if let Ok(content) = std::fs::read_to_string(&e_prog) {
+                    let total = if app.workspace.sqlite_path().exists() {
+                        let Ok(c) = rusqlite::Connection::open_with_flags(
+                            app.workspace.sqlite_path(),
+                            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                                | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                        ) else {
+                            return Err(anyhow::anyhow!("db error"));
+                        };
+                        c.query_row(
+                            "SELECT value FROM _stats WHERE key = 'total_chunks'",
+                            [],
+                            |r| r.get::<_, i64>(0),
+                        )
+                        .unwrap_or(0)
+                    } else {
+                        0
+                    };
+
+                    let count = content.trim().parse::<i64>().unwrap_or(0);
+                    if total > 0 {
+                        let pct = (count as f64 / total as f64 * 100.0) as u64;
+                        app.status_message = Some(format!(
+                            "⟳ enhancing ({} / {} chunks, ~{}%)",
+                            count, total, pct
+                        ));
+                    } else {
+                        app.status_message = Some(format!("⟳ enhancing ({} chunks)", count));
+                    }
+                }
+            } else if i_prog.exists() {
+                if let Ok(content) = std::fs::read_to_string(&i_prog) {
+                    app.status_message = Some(format!("⟳ indexing ({})", content.trim()));
+                }
+            } else if !app.workspace.index_dir.join(".enhancing.pid").exists()
+                && !app.workspace.index_dir.join(".indexing.pid").exists()
+            {
+                // Done. If searching isn't happening via type-debounce, clear it.
+                app.bg_indexing_active = false;
+                if !app.is_searching
+                    && app.debounce_timer.is_none()
+                    && app.status_message.as_deref().unwrap_or("").starts_with("⟳")
+                {
+                    app.status_message = Some("Index complete".to_string());
+                }
+            }
+        }
+
         // ---- render ----
         terminal.draw(|f| {
             let outer = Layout::default()
@@ -981,6 +1047,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                 )
                 .highlight_symbol("❯ ");
 
+            f.render_widget(Clear, main[0]);
             f.render_stateful_widget(file_list, main[0], &mut app.file_list_state);
 
             // ----- right panel -----
@@ -1027,6 +1094,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                                 .border_style(Style::default().fg(right_border_color))
                                 .title(format!(" {display_path}{scroll_info} ")),
                         );
+                    f.render_widget(Clear, main[1]);
                     f.render_widget(view_widget, main[1]);
                 }
 
@@ -1083,6 +1151,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                                 .border_style(Style::default().fg(right_border_color))
                                 .title(right_title),
                         );
+                    f.render_widget(Clear, main[1]);
                     f.render_widget(snippet_widget, main[1]);
                 }
             }
@@ -1576,6 +1645,8 @@ mod tests {
             transition_after_search: false,
             last_query: String::new(),
             debounce_timer: None,
+            bg_indexing_active: false,
+            last_bg_check: std::time::Instant::now(),
             cli,
             // SAFETY: only used by trigger_search / editor; not called in unit tests.
             workspace: Workspace {
