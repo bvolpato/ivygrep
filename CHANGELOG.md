@@ -2,6 +2,12 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.6.8] — 2026-04-25
+
+### Fixed
+- **TUI phantom text rendering:** Fixed an issue where resizing panels or rendering shorter snippets left phantom artifacts ("ghost text") from previous renders.
+- **Live formatting progress:** The TUI now displays an active progress bar with precise chunks/percent estimates in the status bar while indexing or enhancing in the background.
+
 ## [0.6.7] — 2026-04-25
 
 ### Fixed
