@@ -2,7 +2,20 @@
 
 All notable changes to ivygrep are documented in this file.
 
-## [0.6.4] — 2026-04-24
+## [0.6.5] — 2026-04-25
+
+### Changed
+- **TUI: "Searching…" indicator appears before blocking search** — the status bar now renders the pending state before the search query blocks the main thread, so the UI no longer appears frozen during slower queries.
+- **TUI: FileView rendering cached** — syntax-highlighted file views are cached as pre-rendered line vectors, eliminating per-frame re-highlighting lag on large files.
+- **TUI: Enter key transition fixed** — pressing Enter in Search mode now properly triggers the search and transitions to FileList only after results arrive.
+
+### Fixed
+- **Clippy compliance:** resolved `type_complexity` (new `FileViewCache` type alias) and two `collapsible_match` lints by folding conditions into match guards.
+
+### Added
+- **27 new TUI unit tests** covering file/snippet navigation wrapping, mode transitions, rendering pipelines (dividers, scores, highlights), flash messages, reset state, path resolution, and hit grouping. Total test count: 200.
+
+
 
 ### Changed
 - **TUI Redesign — Hierarchical Code Browser:** The interactive TUI (`ig --interactive`) has been completely rebuilt with a four-mode navigation model: **Search → FileList → SnippetList → FileView**. Files are now deduplicated in the left panel with hit counts; the right panel shows syntax-highlighted snippet previews that become individually navigable on Enter. Pressing Enter again expands the full file with line numbers, gutter highlighting on matched regions, and scrolling.
