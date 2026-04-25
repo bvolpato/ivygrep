@@ -118,10 +118,12 @@ struct App {
     // -- view --
     mode: Mode,
     file_view_scroll: u16,
-    file_view_cache: Option<(PathBuf, String)>,
+    file_view_cache: Option<(PathBuf, Option<(usize, usize)>, Vec<Line<'static>>)>,
 
     // -- search lifecycle --
     is_searching: bool,
+    pending_search: bool,
+    transition_after_search: bool,
     last_query: String,
     debounce_timer: Option<Instant>,
 
@@ -161,6 +163,8 @@ impl App {
             file_view_scroll: 0,
             file_view_cache: None,
             is_searching: false,
+            pending_search: false,
+            transition_after_search: false,
             last_query: String::new(),
             debounce_timer: Some(Instant::now()),
             cli,
@@ -266,19 +270,25 @@ impl App {
             && let Some(file) = self.grouped_files.get(file_idx)
         {
             let abs = self.absolute_path_for(&file.file_path);
+            let hl_range = self
+                .selected_snippet()
+                .map(|hit| (hit.start_line, hit.end_line));
+
             if self
                 .file_view_cache
                 .as_ref()
-                .is_some_and(|(p, _)| p == &abs)
+                .is_some_and(|(p, hl, _)| p == &abs && hl == &hl_range)
             {
                 return;
             }
-            match std::fs::read_to_string(&abs) {
-                Ok(content) => self.file_view_cache = Some((abs, content)),
-                Err(e) => {
-                    self.file_view_cache = Some((abs, format!("(error reading file: {e})")));
-                }
-            }
+
+            let content = match std::fs::read_to_string(&abs) {
+                Ok(c) => c,
+                Err(e) => format!("(error reading file: {e})"),
+            };
+
+            let lines = render_file_view_lines(&content, &abs, hl_range, &self.ps, &self.ts);
+            self.file_view_cache = Some((abs, hl_range, lines));
         }
     }
 
@@ -304,7 +314,6 @@ impl App {
         }
 
         self.is_searching = true;
-        self.status_message = Some("Searching…".to_string());
 
         let request = build_search_request(
             &self.cli,
@@ -795,7 +804,8 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
             let current = app.input.value().to_string();
             if current != app.last_query {
                 app.last_query = current;
-                app.trigger_search();
+                app.status_message = Some("Searching…".to_string());
+                app.pending_search = true;
             }
             app.debounce_timer = None;
         }
@@ -954,17 +964,11 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                 // -- FileView: full file with line numbers --
                 Mode::FileView => {
                     app.ensure_file_view_cache();
-                    let (content, file_path) =
-                        if let Some((ref path, ref content)) = app.file_view_cache {
-                            (content.as_str(), path.clone())
-                        } else {
-                            ("", PathBuf::new())
-                        };
-
-                    let hl_range = app.selected_snippet().map(|h| (h.start_line, h.end_line));
-
-                    let view_lines =
-                        render_file_view_lines(content, &file_path, hl_range, &app.ps, &app.ts);
+                    let view_lines = if let Some((_, _, ref lines)) = app.file_view_cache {
+                        lines.clone()
+                    } else {
+                        vec![Line::from("...")]
+                    };
                     let total = view_lines.len() as u16;
                     let visible = main[1].height.saturating_sub(2);
                     let max_scroll = total.saturating_sub(visible);
@@ -1082,6 +1086,22 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
             }
         })?;
 
+        if app.pending_search {
+            app.trigger_search();
+            app.pending_search = false;
+
+            // If the user hit Enter while in Search mode, they want to focus the results.
+            if app.transition_after_search {
+                if !app.grouped_files.is_empty() {
+                    app.mode = Mode::FileList;
+                }
+                app.transition_after_search = false;
+            }
+
+            // Loop back immediately to draw the updated results
+            continue;
+        }
+
         // ---- input handling ----
         if !crossterm::event::poll(Duration::from_millis(50))? {
             continue;
@@ -1112,10 +1132,14 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     app.debounce_timer = None;
                 }
                 KeyCode::Enter => {
-                    app.trigger_search();
-                    app.last_query = app.input.value().to_string();
-                    if !app.grouped_files.is_empty() {
-                        app.mode = Mode::FileList;
+                    if app.input.value().is_empty() {
+                        app.transition_after_search = false;
+                    } else {
+                        app.pending_search = true;
+                        app.transition_after_search = true;
+                        app.last_query = app.input.value().to_string();
+                        app.status_message = Some("Searching…".to_string());
+                        app.debounce_timer = None;
                     }
                 }
                 KeyCode::Down | KeyCode::Tab => {
