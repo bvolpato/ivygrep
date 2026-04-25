@@ -439,7 +439,18 @@ fn prepare_workspace_for_tui(
     let needs_reindex_for_gitignore =
         cli.skip_gitignore && !workspace.read_metadata()?.is_some_and(|m| m.skip_gitignore);
 
-    if crate::indexer::workspace_is_indexed(workspace) && !needs_reindex_for_gitignore {
+    // Fast existence-only check: avoids opening SQLite (which can block for
+    // minutes on huge repos if the enhancer holds a WAL lock or if the
+    // _stats cache-migration path triggers COUNT(*) on millions of rows).
+    let metadata_present = workspace
+        .read_metadata()?
+        .is_some_and(|m| m.last_indexed_at_unix.is_some());
+    let artifacts_exist = workspace.sqlite_path().exists()
+        && workspace.tantivy_dir().exists()
+        && workspace.vector_path().exists();
+    let looks_indexed = metadata_present && artifacts_exist;
+
+    if looks_indexed && !needs_reindex_for_gitignore {
         return Ok(());
     }
 
@@ -604,7 +615,7 @@ fn hints_file_list() -> Line<'static> {
         ("↑↓", "navigate"),
         ("Enter/Tab", "snippets"),
         ("e", "edit"),
-        ("y", "copy"),
+        ("y", "copy ref"),
         ("Esc", "search"),
     ])
 }
@@ -614,7 +625,7 @@ fn hints_snippet_list() -> Line<'static> {
         ("↑↓", "navigate"),
         ("Enter", "expand"),
         ("e", "edit"),
-        ("y", "copy"),
+        ("y/Y", "copy ref/content"),
         ("Tab", "files"),
         ("Esc", "back"),
     ])
@@ -625,7 +636,7 @@ fn hints_file_view() -> Line<'static> {
         ("↑↓", "scroll"),
         ("PgUp/Dn", "fast"),
         ("e", "edit"),
-        ("y", "copy"),
+        ("y/Y", "copy ref/content"),
         ("Esc", "back"),
     ])
 }
@@ -1315,6 +1326,16 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         }
                     }
                 }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if app.input.value().is_empty() {
+                        break;
+                    }
+                    app.input = Input::default();
+                    app.reset_results();
+                    app.last_query.clear();
+                    app.debounce_timer = None;
+                    app.mode = Mode::Search;
+                }
                 // Other printable chars → switch to search and type.
                 KeyCode::Char(_)
                     if !key
@@ -1385,6 +1406,31 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         }
                     }
                 }
+                KeyCode::Char('Y') => {
+                    if let Some(hit) = app.selected_snippet() {
+                        let text = hit.preview.clone();
+                        let label = format!(
+                            "{}:{} ({} chars)",
+                            hit.file_path.display(),
+                            hit.start_line,
+                            text.len()
+                        );
+                        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+                            Ok(()) => app.flash(format!("Copied content {label}")),
+                            Err(e) => app.flash(format!("Clipboard: {e}")),
+                        }
+                    }
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if app.input.value().is_empty() {
+                        break;
+                    }
+                    app.input = Input::default();
+                    app.reset_results();
+                    app.last_query.clear();
+                    app.debounce_timer = None;
+                    app.mode = Mode::Search;
+                }
                 KeyCode::Tab => {
                     // Tab → from SnippetList → Search (wraps around).
                     app.mode = Mode::Search;
@@ -1450,6 +1496,32 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                             Err(e) => app.flash(format!("Clipboard: {e}")),
                         }
                     }
+                }
+                KeyCode::Char('Y') => {
+                    if let Some(hit) = app.selected_snippet() {
+                        let text = hit.preview.clone();
+                        let label = format!(
+                            "{}:{} ({} chars)",
+                            hit.file_path.display(),
+                            hit.start_line,
+                            text.len()
+                        );
+                        match arboard::Clipboard::new().and_then(|mut cb| cb.set_text(text)) {
+                            Ok(()) => app.flash(format!("Copied content {label}")),
+                            Err(e) => app.flash(format!("Clipboard: {e}")),
+                        }
+                    }
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if app.input.value().is_empty() {
+                        break;
+                    }
+                    app.input = Input::default();
+                    app.reset_results();
+                    app.last_query.clear();
+                    app.debounce_timer = None;
+                    app.mode = Mode::Search;
+                    app.file_view_cache = None;
                 }
                 KeyCode::Tab | KeyCode::BackTab => {
                     // Tab from FileView → SnippetList.
