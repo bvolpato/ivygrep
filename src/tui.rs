@@ -1351,12 +1351,12 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     app.input.handle_event(&Event::Key(key));
                     app.debounce_timer = Some(Instant::now());
                 }
-                KeyCode::Tab => {
+                KeyCode::Tab
                     // Tab from FileList → SnippetList.
-                    if !app.current_snippets().is_empty() {
-                        app.snippet_index = 0;
-                        app.mode = Mode::SnippetList;
-                    }
+                    if !app.current_snippets().is_empty() =>
+                {
+                    app.snippet_index = 0;
+                    app.mode = Mode::SnippetList;
                 }
                 KeyCode::BackTab => {
                     // Shift+Tab from FileList → Search.
