@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1776992288650,
+  "lastUpdate": 1777087805025,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -7767,6 +7767,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 633.73,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "5e3f5c6bf4153cf2a7318152f1eed2f8a473615c",
+          "message": "tui: redesign interactive mode with hierarchical code browser\n\n- Four-mode navigation: Search → FileList → SnippetList → FileView\n- Deduplicated file list with hit counts in left panel\n- Snippet browsing with syntax-highlighted previews\n- Full file expansion with line numbers and gutter highlighting\n- Editor integration via 'e' key, clipboard copy via 'y'\n- Esc/Ctrl+C clear-then-quit behavior in search box\n- Status bar with mode-dependent key hints\n- Visual polish: divider lines, higher-contrast colors\n- Update README: remove TUI from roadmap, add --interactive to CLI ref",
+          "timestamp": "2026-04-24T23:20:48-04:00",
+          "tree_id": "48155f4323bafb1c7fb0ff90c14bec836856ae0b",
+          "url": "https://github.com/bvolpato/ivygrep/commit/5e3f5c6bf4153cf2a7318152f1eed2f8a473615c"
+        },
+        "date": 1777087804799,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 956377840,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 7937.22,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3716.57,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2765.32,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11495.3,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 11336.54,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 6.58,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 518.19,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 71595.92,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 14950.68,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 5585.24,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 472296.61,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 570.7,
             "unit": "µs"
           }
         ]
