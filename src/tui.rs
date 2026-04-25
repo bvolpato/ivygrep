@@ -653,8 +653,8 @@ fn render_snippet_lines(
             Span::styled(marker, hdr_style),
             Span::styled(format!(":{}-{}", hit.start_line, hit.end_line), hdr_style),
             Span::styled(
-                format!("  score {:.2}", hit.score),
-                Style::default().fg(Color::DarkGray),
+                format!("  [score {:.2}]", hit.score),
+                Style::default().fg(Color::Rgb(140, 140, 150)),
             ),
         ]));
 
@@ -914,7 +914,12 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                                 Style::default().fg(Color::Rgb(120, 120, 135)),
                             ),
                             Span::styled(
-                                format!("  {}", file_result.hit_count),
+                                format!(
+                                    "  [{} hit{} · score {:.2}]",
+                                    file_result.hit_count,
+                                    if file_result.hit_count == 1 { "" } else { "s" },
+                                    file_result.total_score
+                                ),
                                 Style::default().fg(Color::Yellow),
                             ),
                         ]))
