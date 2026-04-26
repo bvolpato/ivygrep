@@ -447,6 +447,7 @@ async fn daemon_ipc_skip_gitignore() {
                         exclude_globs,
                         scope_filter: None,
                         skip_gitignore,
+                        progress_tx: None,
                     };
                     let hits = ivygrep::search::hybrid_search(
                         &workspace,

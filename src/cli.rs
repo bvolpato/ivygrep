@@ -26,8 +26,9 @@ use crate::workspace::{
     Workspace, WorkspaceIndexState, list_workspaces, resolve_workspace_and_scope,
 };
 
-#[derive(Debug, Parser)]
-#[command(author, version, about = "Semantic grep that stays local", long_about = None)]
+#[derive(Parser, Debug, Clone)]
+#[command(
+    name = "ivygrep", version, about = "Semantic grep that stays local", long_about = None)]
 pub struct Cli {
     #[arg(value_name = "QUERY", required = false)]
     pub query: Option<String>,
@@ -560,7 +561,9 @@ async fn run_add(
             path: workspace.root.clone(),
         };
 
-        if let Some(response) = daemon::request(&remove_request, false).await? {
+        if let Some(response) =
+            daemon::request::<fn(String, usize, usize)>(&remove_request, false, None).await?
+        {
             if let DaemonResponse::Error { message } = response {
                 bail!(message);
             }
@@ -580,7 +583,9 @@ async fn run_add(
         skip_gitignore,
     };
 
-    if let Some(response) = daemon::request(&request, watch).await? {
+    if let Some(response) =
+        daemon::request::<fn(String, usize, usize)>(&request, watch, None).await?
+    {
         return print_daemon_response(response, json);
     }
 
@@ -604,7 +609,9 @@ async fn run_remove(path: &Path, json: bool) -> Result<()> {
     let request = DaemonRequest::Remove {
         path: workspace.root.clone(),
     };
-    if let Some(response) = daemon::request(&request, false).await? {
+    if let Some(response) =
+        daemon::request::<fn(String, usize, usize)>(&request, false, None).await?
+    {
         return print_daemon_response(response, json);
     }
 
@@ -685,7 +692,11 @@ async fn run_query(cli: Cli) -> Result<()> {
             let ws_id = workspace.id.clone();
             let show_progress = std::io::stderr().is_terminal();
 
-            let response_future = daemon::request(&daemon_index_request, !cli.no_watch);
+            let response_future = daemon::request::<fn(String, usize, usize)>(
+                &daemon_index_request,
+                !cli.no_watch,
+                None,
+            );
 
             if show_progress {
                 // Poll for progress while waiting for the daemon to finish indexing
@@ -755,7 +766,13 @@ async fn run_query(cli: Cli) -> Result<()> {
             // Already indexed. Just check if the daemon is online to route the search request.
             // Also verify the daemon version matches — stale daemons silently break search.
             let _t = std::time::Instant::now();
-            match daemon::request(&DaemonRequest::Status, watch_configured).await? {
+            match daemon::request::<fn(String, usize, usize)>(
+                &DaemonRequest::Status,
+                watch_configured,
+                None,
+            )
+            .await?
+            {
                 Some(DaemonResponse::Status {
                     version,
                     workspaces,
@@ -774,9 +791,13 @@ async fn run_query(cli: Cli) -> Result<()> {
                                 workspace.root.display()
                             );
                             restart_daemon().await;
-                            search_via_daemon = daemon::request(&DaemonRequest::Status, true)
-                                .await?
-                                .is_some();
+                            search_via_daemon = daemon::request::<fn(String, usize, usize)>(
+                                &DaemonRequest::Status,
+                                true,
+                                None,
+                            )
+                            .await?
+                            .is_some();
                         } else {
                             search_via_daemon = true;
                         }
@@ -788,25 +809,37 @@ async fn run_query(cli: Cli) -> Result<()> {
                         );
                         restart_daemon().await;
                         // Re-check if the new daemon is up
-                        search_via_daemon = daemon::request(&DaemonRequest::Status, false)
-                            .await?
-                            .is_some();
+                        search_via_daemon = daemon::request::<fn(String, usize, usize)>(
+                            &DaemonRequest::Status,
+                            false,
+                            None,
+                        )
+                        .await?
+                        .is_some();
                     }
                 }
                 Some(_) => {
                     // Old daemon without version field — restart it
                     tracing::warn!("daemon has no version field, restarting");
                     restart_daemon().await;
-                    search_via_daemon = daemon::request(&DaemonRequest::Status, false)
-                        .await?
-                        .is_some();
+                    search_via_daemon = daemon::request::<fn(String, usize, usize)>(
+                        &DaemonRequest::Status,
+                        false,
+                        None,
+                    )
+                    .await?
+                    .is_some();
                 }
                 None => {}
             }
         }
-    } else if daemon::request(&DaemonRequest::Status, !cli.no_watch)
-        .await?
-        .is_some()
+    } else if daemon::request::<fn(String, usize, usize)>(
+        &DaemonRequest::Status,
+        !cli.no_watch,
+        None,
+    )
+    .await?
+    .is_some()
     {
         search_via_daemon = true;
     }
@@ -926,7 +959,8 @@ async fn run_query(cli: Cli) -> Result<()> {
                         skip_gitignore: true,
                         watch: false,
                     };
-                    let _ = crate::daemon::request(&req, false).await;
+                    let _ =
+                        crate::daemon::request::<fn(String, usize, usize)>(&req, false, None).await;
                 } else {
                     let model = crate::embedding::create_model(cli.hash);
                     let _ = crate::indexer::index_workspace(&workspace, model.as_ref());
@@ -957,7 +991,7 @@ async fn run_query(cli: Cli) -> Result<()> {
         };
 
         if search_via_daemon {
-            match daemon::request(&request, false).await? {
+            match daemon::request::<fn(String, usize, usize)>(&request, false, None).await? {
                 Some(DaemonResponse::SearchResults { hits }) => hits,
                 Some(DaemonResponse::Error { message }) => {
                     tracing::warn!(
@@ -971,6 +1005,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                         exclude_globs: cli.exclude.clone(),
                         scope_filter: scope_filter.clone(),
                         skip_gitignore: cli.skip_gitignore,
+                        progress_tx: None,
                     };
                     let mut all_hits = Vec::new();
                     let workspaces = if cli.all_indices {
@@ -1022,6 +1057,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                 exclude_globs: cli.exclude.clone(),
                 scope_filter: scope_filter.clone(),
                 skip_gitignore: cli.skip_gitignore,
+                progress_tx: None,
             };
             for ws in workspaces {
                 match literal_search(&ws, query, &options) {
@@ -1056,7 +1092,7 @@ async fn run_query(cli: Cli) -> Result<()> {
         };
 
         if search_via_daemon {
-            match daemon::request(&request, false).await? {
+            match daemon::request::<fn(String, usize, usize)>(&request, false, None).await? {
                 Some(DaemonResponse::SearchResults { hits }) => hits,
                 Some(DaemonResponse::Error { message }) => bail!(message),
                 other => {
@@ -1120,7 +1156,7 @@ async fn run_query(cli: Cli) -> Result<()> {
         if search_via_daemon {
             let show_spinner = std::io::stderr().is_terminal();
             let _t_search = std::time::Instant::now();
-            let search_future = daemon::request(&request, false);
+            let search_future = daemon::request::<fn(String, usize, usize)>(&request, false, None);
 
             let daemon_result = if show_spinner {
                 let spinner_handle = tokio::spawn(async move {
@@ -1140,7 +1176,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                 eprint!("\r\x1b[K");
                 result?
             } else {
-                daemon::request(&request, false).await?
+                daemon::request::<fn(String, usize, usize)>(&request, false, None).await?
             };
 
             match daemon_result {
@@ -1157,6 +1193,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                         exclude_globs: cli.exclude.clone(),
                         scope_filter: scope_filter.clone(),
                         skip_gitignore: cli.skip_gitignore,
+                        progress_tx: None,
                     };
                     local_fallback_search(&workspace, cli.all_indices, query, &options, cli.hash)
                 }
@@ -1170,6 +1207,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                         exclude_globs: cli.exclude.clone(),
                         scope_filter: scope_filter.clone(),
                         skip_gitignore: cli.skip_gitignore,
+                        progress_tx: None,
                     };
                     local_fallback_search(&workspace, cli.all_indices, query, &options, cli.hash)
                 }
@@ -1203,6 +1241,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                         exclude_globs: cli.exclude.clone(),
                         scope_filter: scope_filter.clone(),
                         skip_gitignore: cli.skip_gitignore,
+                        progress_tx: None,
                     },
                 ) {
                     Ok(mut hits) => {
@@ -1371,6 +1410,7 @@ fn print_daemon_response(response: DaemonResponse, json: bool) -> Result<()> {
             }
             Ok(())
         }
+        DaemonResponse::SearchProgress { .. } => Ok(()),
     }
 }
 
@@ -1470,7 +1510,7 @@ fn maybe_run_legacy_mcp_stdio() -> Result<bool> {
 async fn restart_daemon() {
     // Send a graceful restart request over the socket.
     // The daemon cleans up its own socket and exits after replying.
-    let _ = daemon::request(&DaemonRequest::Restart, false).await;
+    let _ = daemon::request::<fn(String, usize, usize)>(&DaemonRequest::Restart, false, None).await;
 
     // Give the old daemon a moment to exit
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -1483,7 +1523,7 @@ async fn restart_daemon() {
     }
 
     // Auto-spawn the new daemon via the standard request path
-    let _ = daemon::request(&DaemonRequest::Status, true).await;
+    let _ = daemon::request::<fn(String, usize, usize)>(&DaemonRequest::Status, true, None).await;
 }
 
 /// Run a local hybrid search as a fallback when the daemon is unavailable or broken.

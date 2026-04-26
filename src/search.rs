@@ -59,6 +59,7 @@ pub struct SearchOptions {
     pub exclude_globs: Vec<String>,
     pub scope_filter: Option<WorkspaceScope>,
     pub skip_gitignore: bool,
+    pub progress_tx: Option<std::sync::mpsc::Sender<(String, usize, usize)>>,
 }
 
 impl Default for SearchOptions {
@@ -71,6 +72,7 @@ impl Default for SearchOptions {
             exclude_globs: vec![],
             scope_filter: None,
             skip_gitignore: false,
+            progress_tx: None,
         }
     }
 }
@@ -1849,6 +1851,7 @@ mod tests {
                     is_file: false,
                 }),
                 skip_gitignore: false,
+                progress_tx: None,
             },
         )
         .unwrap();

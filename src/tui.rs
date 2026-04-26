@@ -30,7 +30,7 @@ use crate::daemon;
 use crate::protocol::{
     DaemonRequest, DaemonResponse, FileSearchResult, SearchHit, group_hits_by_file,
 };
-use crate::search::{SearchOptions, hybrid_search};
+use crate::search::SearchOptions;
 use crate::workspace::{Workspace, WorkspaceScope, list_workspaces, resolve_workspace_and_scope};
 
 // ---------------------------------------------------------------------------
@@ -111,6 +111,10 @@ fn open_in_editor(
 // ---------------------------------------------------------------------------
 // App state
 // ---------------------------------------------------------------------------
+enum TuiSearchProgress {
+    Searching(String, usize, usize),
+    Done(Result<Vec<SearchHit>>),
+}
 
 struct App {
     // -- input --
@@ -140,6 +144,7 @@ struct App {
     cli: Cli,
     workspace: Workspace,
     scope_filter: Option<WorkspaceScope>,
+    search_rx: Option<std::sync::mpsc::Receiver<TuiSearchProgress>>,
 
     // -- ui chrome --
     status_message: Option<String>,
@@ -190,6 +195,7 @@ impl App {
             cli,
             workspace,
             scope_filter,
+            search_rx: None,
             status_message: Some(
                 bg_status
                     .clone()
@@ -353,84 +359,108 @@ impl App {
             q.clone(),
         );
 
-        let daemon_result = tokio::task::block_in_place(|| {
-            self.runtime
-                .block_on(async { daemon::request(&request, !self.cli.no_watch).await })
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.search_rx = Some(rx);
+
+        let watch = !self.cli.no_watch;
+        let cli = self.cli.clone();
+        let query_clone = q.clone();
+        let workspace = self.workspace.clone();
+        let scope_filter = self.scope_filter.clone();
+
+        self.runtime.spawn(async move {
+            let tx_clone = tx.clone();
+            let progress_cb = Some(Box::new(
+                move |stage: String, scanned: usize, total: usize| {
+                    let _ = tx_clone.send(TuiSearchProgress::Searching(stage, scanned, total));
+                },
+            ));
+
+            let daemon_result = daemon::request(&request, watch, progress_cb).await;
+            let result = match daemon_result {
+                Ok(Some(DaemonResponse::SearchResults { hits })) => Ok(hits),
+                Ok(Some(DaemonResponse::Error { message })) => {
+                    tracing::warn!("daemon TUI search failed ({message}), falling back to local");
+                    local_search_detached(
+                        &cli,
+                        &workspace,
+                        scope_filter.as_ref(),
+                        &query_clone,
+                        &tx,
+                    )
+                }
+                Ok(None) => local_search_detached(
+                    &cli,
+                    &workspace,
+                    scope_filter.as_ref(),
+                    &query_clone,
+                    &tx,
+                ),
+                Ok(Some(other)) => {
+                    tracing::warn!("unexpected daemon response: {other:?}");
+                    local_search_detached(
+                        &cli,
+                        &workspace,
+                        scope_filter.as_ref(),
+                        &query_clone,
+                        &tx,
+                    )
+                }
+                Err(err) => Err(err),
+            };
+
+            let _ = tx.send(TuiSearchProgress::Done(result));
         });
-        let result = match daemon_result {
-            Ok(Some(DaemonResponse::SearchResults { hits })) => Ok(hits),
-            Ok(Some(DaemonResponse::Error { message })) => {
-                tracing::warn!("daemon TUI search failed ({message}), falling back to local");
-                self.local_search(&q)
-            }
-            Ok(None) => self.local_search(&q),
-            Ok(Some(other)) => {
-                tracing::warn!("unexpected daemon response: {other:?}");
-                self.local_search(&q)
-            }
-            Err(err) => Err(err),
-        };
+    }
+}
 
-        self.is_searching = false;
+fn local_search_detached(
+    cli: &Cli,
+    workspace: &Workspace,
+    scope_filter: Option<&WorkspaceScope>,
+    query: &str,
+    progress_tx: &std::sync::mpsc::Sender<TuiSearchProgress>,
+) -> Result<Vec<SearchHit>> {
+    let model = crate::embedding::create_model(cli.hash);
+    let options = build_search_options(cli, scope_filter);
+    let mut all_hits = Vec::new();
 
-        match result {
-            Ok(mut hits) => {
-                hits.sort_by(|a, b| {
-                    b.score
-                        .partial_cmp(&a.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
-                self.hits = hits;
-                self.grouped_files = group_hits_by_file(&self.hits, None);
-                if self.grouped_files.is_empty() {
-                    self.file_list_state.select(None);
-                    self.status_message = Some("No results".to_string());
-                } else {
-                    self.file_list_state.select(Some(0));
-                    self.status_message = None;
-                }
-                self.snippet_index = 0;
-                self.file_view_cache = None;
-                self.file_view_scroll = 0;
-            }
-            Err(err) => {
-                self.reset_results();
-                self.status_message = Some(format!("Search failed: {err:#}"));
+    let workspaces = if cli.all_indices {
+        list_workspaces()?
+            .into_iter()
+            .filter(|ws| ws.last_indexed_at_unix.is_some())
+            .filter_map(|ws| Workspace::resolve(&ws.root).ok())
+            .collect::<Vec<_>>()
+    } else {
+        vec![workspace.clone()]
+    };
+
+    let (std_tx, std_rx) = std::sync::mpsc::channel();
+    let ui_tx = progress_tx.clone();
+
+    std::thread::spawn(move || {
+        while let Ok((stage, scanned, total)) = std_rx.recv() {
+            let _ = ui_tx.send(TuiSearchProgress::Searching(stage, scanned, total));
+        }
+    });
+
+    for ws in workspaces {
+        let mut ws_opts = options.clone();
+        ws_opts.progress_tx = Some(std_tx.clone());
+        let mut hits = crate::search::hybrid_search(&ws, query, Some(model.as_ref()), &ws_opts)?;
+        if cli.all_indices {
+            for hit in &mut hits {
+                hit.file_path = ws.root.join(&hit.file_path);
             }
         }
+        all_hits.append(&mut hits);
     }
 
-    fn local_search(&self, query: &str) -> Result<Vec<SearchHit>> {
-        let model = crate::embedding::create_model(self.cli.hash);
-        let options = build_search_options(&self.cli, self.scope_filter.as_ref());
-        let mut all_hits = Vec::new();
-
-        let workspaces = if self.cli.all_indices {
-            list_workspaces()?
-                .into_iter()
-                .filter(|ws| ws.last_indexed_at_unix.is_some())
-                .filter_map(|ws| Workspace::resolve(&ws.root).ok())
-                .collect::<Vec<_>>()
-        } else {
-            vec![self.workspace.clone()]
-        };
-
-        for ws in workspaces {
-            let mut hits = hybrid_search(&ws, query, Some(model.as_ref()), &options)?;
-            if self.cli.all_indices {
-                for hit in &mut hits {
-                    hit.file_path = ws.root.join(&hit.file_path);
-                }
-            }
-            all_hits.append(&mut hits);
-        }
-
-        if let Some(limit) = tui_limit(&self.cli) {
-            all_hits.truncate(limit);
-        }
-
-        Ok(all_hits)
+    if let Some(limit) = tui_limit(cli) {
+        all_hits.truncate(limit);
     }
+
+    Ok(all_hits)
 }
 
 // ---------------------------------------------------------------------------
@@ -487,7 +517,9 @@ fn prepare_workspace_for_tui(
             watch,
             skip_gitignore,
         };
-        let daemon_result = rt.block_on(async { daemon::request(&request, watch).await });
+        let daemon_result = rt.block_on(async {
+            daemon::request(&request, watch, None::<fn(String, usize, usize)>).await
+        });
         if matches!(daemon_result, Ok(None)) {
             // No daemon — index locally in this background thread.
             if skip_gitignore
@@ -527,6 +559,7 @@ fn build_search_options(cli: &Cli, scope_filter: Option<&WorkspaceScope>) -> Sea
             scope_filter.cloned()
         },
         skip_gitignore: cli.skip_gitignore,
+        progress_tx: None,
     }
 }
 
@@ -840,6 +873,58 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                 app.pending_search = true;
             }
             app.debounce_timer = None;
+        }
+
+        // ---- search progress polling ----
+        if let Some(ref rx) = app.search_rx {
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    TuiSearchProgress::Searching(stage, scanned, total) => {
+                        if total > 0 {
+                            app.status_message =
+                                Some(format!("Searching… {} ({} / {})", stage, scanned, total));
+                        } else {
+                            app.status_message = Some(format!("Searching… {}", stage));
+                        }
+                    }
+                    TuiSearchProgress::Done(result) => {
+                        app.search_rx = None;
+                        app.is_searching = false;
+                        match result {
+                            Ok(mut hits) => {
+                                hits.sort_by(|a, b| {
+                                    b.score
+                                        .partial_cmp(&a.score)
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                });
+                                app.hits = hits;
+                                app.grouped_files = group_hits_by_file(&app.hits, None);
+                                if app.grouped_files.is_empty() {
+                                    app.file_list_state.select(None);
+                                    app.status_message = Some("No results".to_string());
+                                } else {
+                                    app.file_list_state.select(Some(0));
+                                    app.status_message = None;
+                                }
+                                app.snippet_index = 0;
+                                app.file_view_cache = None;
+                                app.file_view_scroll = 0;
+                            }
+                            Err(err) => {
+                                app.reset_results();
+                                app.status_message = Some(format!("Search failed: {err:#}"));
+                            }
+                        }
+                        if app.transition_after_search {
+                            app.transition_after_search = false;
+                            if !app.grouped_files.is_empty() {
+                                app.mode = Mode::FileList;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
         }
 
         // ---- bg progress polling ----
@@ -1635,6 +1720,7 @@ mod tests {
             input: Input::default(),
             hits,
             grouped_files: grouped,
+            search_rx: None,
             file_list_state: state,
             snippet_index: 0,
             mode: Mode::Search,

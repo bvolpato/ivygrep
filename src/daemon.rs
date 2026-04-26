@@ -317,6 +317,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 exclude_globs,
                 scope_filter: scope_from_request(scope_path, scope_is_file),
                 skip_gitignore,
+                progress_tx: None,
             };
 
             let result = tokio::task::spawn_blocking(move || {
@@ -509,6 +510,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 exclude_globs,
                 scope_filter,
                 skip_gitignore,
+                progress_tx: None,
             };
 
             let result = tokio::task::spawn_blocking(move || {
@@ -791,7 +793,14 @@ fn scope_from_request(scope_path: Option<PathBuf>, scope_is_file: bool) -> Optio
     })
 }
 
-pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<DaemonResponse>> {
+pub async fn request<F>(
+    request: &DaemonRequest,
+    autospawn: bool,
+    mut progress_cb: Option<F>,
+) -> Result<Option<DaemonResponse>>
+where
+    F: FnMut(String, usize, usize) + Send,
+{
     if crate::ipc::socket_exists() && crate::ipc::connect().await.is_err() {
         crate::ipc::cleanup_socket();
     }
@@ -906,22 +915,37 @@ pub async fn request(request: &DaemonRequest, autospawn: bool) -> Result<Option<
         DaemonRequest::Remove { .. } => 30,  // cleanup
     };
 
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_secs),
-        reader.read_line(&mut line),
-    )
-    .await
-    {
-        Ok(Ok(_)) => {}
-        Ok(Err(_)) | Err(_) => return Ok(None),
-    }
+    loop {
+        line.clear();
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_secs),
+            reader.read_line(&mut line),
+        )
+        .await
+        {
+            Ok(Ok(0)) => return Ok(None),
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) | Err(_) => return Ok(None),
+        }
 
-    if line.trim().is_empty() {
-        return Ok(None);
-    }
+        if line.trim().is_empty() {
+            continue;
+        }
 
-    let response: DaemonResponse = serde_json::from_str(&line)?;
-    Ok(Some(response))
+        let response: DaemonResponse = serde_json::from_str(&line)?;
+        match response {
+            DaemonResponse::SearchProgress {
+                stage,
+                scanned,
+                total,
+            } => {
+                if let Some(cb) = &mut progress_cb {
+                    cb(stage, scanned, total);
+                }
+            }
+            other => return Ok(Some(other)),
+        }
+    }
 }
 
 #[cfg(test)]

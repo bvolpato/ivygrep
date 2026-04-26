@@ -96,6 +96,11 @@ pub enum DaemonResponse {
     SearchResults {
         hits: Vec<SearchHit>,
     },
+    SearchProgress {
+        stage: String,
+        scanned: usize,
+        total: usize,
+    },
     Error {
         message: String,
     },
