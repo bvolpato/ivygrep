@@ -319,14 +319,15 @@ fn collect_literal_candidates(
 ) -> Result<Vec<IndexedChunk>> {
     let candidate_limit = if let Some(limit) = options.limit {
         if limit == usize::MAX {
-            5_000
+            50_000
         } else {
             // Literal pass needs exact substring verification via SQLite (text
-            // not stored in Tantivy), so keep candidate count low.
-            (limit * 5).clamp(200, 500)
+            // not stored in Tantivy), so keep candidate count proportional but
+            // capped. Default ~50 → 250, --limit 500 → 2500, --limit 5000 → 25K.
+            (limit * 5).clamp(200, 25_000)
         }
     } else {
-        500
+        250
     };
 
     let mut search_fields = vec![ctx.fields.text, ctx.fields.file_path];
@@ -407,16 +408,27 @@ pub fn hybrid_search(
     let output_limit = options.limit.unwrap_or(50);
     // Tantivy lexical candidates: enough headroom for post-hoc filters
     // (gitignore, scope, globs) without blowing up on huge repos.
+    // Default ~50 → 500, --limit 500 → 5K, --limit 5000 → 50K.
     let candidate_limit = if output_limit == usize::MAX {
         50_000
     } else {
-        (output_limit * 10).clamp(500, 5_000)
+        (output_limit * 10).clamp(500, 50_000)
     };
-    // Literal pass only needs enough hits to surface exact string matches.
-    let literal_limit = candidate_limit.min(500);
-    // Semantic (vector ANN) search: k=200 is fast (~30ms on 3M vectors),
-    // k=10K takes 15+ seconds on USearch HNSW. Keep it small.
-    let semantic_limit = output_limit.clamp(50, 200);
+    // Literal pass needs exact substring verification via SQLite (text not
+    // stored in Tantivy), so cap tighter: default → 250, scales up with limit.
+    let literal_limit = if output_limit == usize::MAX {
+        25_000
+    } else {
+        (output_limit * 5).clamp(250, 25_000)
+    };
+    // Semantic (vector ANN) search: keep proportional but bounded.
+    // Default ~50 → 50, --limit 500 → 500, --limit 5000 → 2000.
+    // k=200 is ~30ms on 3M vectors; k=2000 is ~200ms. Both acceptable.
+    let semantic_limit = if output_limit == usize::MAX {
+        2_000
+    } else {
+        output_limit.clamp(50, 2_000)
+    };
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
 
     let ctx = SearchContext::load(workspace, embedding_model.map(|m| m.dimensions()))?;
