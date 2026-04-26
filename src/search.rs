@@ -614,10 +614,10 @@ pub fn hybrid_search(
 
     // Populate text from SQLite for the top chunks where Tantivy doesn't store it.
     for (chunk, _) in &mut lexical_chunks {
-        if chunk.text.is_empty() {
-            if let Ok(Some(full)) = ctx.fetch_chunk_by_vector_key(chunk.vector_key) {
-                chunk.text = full.text;
-            }
+        if chunk.text.is_empty()
+            && let Ok(Some(full)) = ctx.fetch_chunk_by_vector_key(chunk.vector_key)
+        {
+            chunk.text = full.text;
         }
     }
     tracing::trace!("lexical={:?} found={}", t0.elapsed(), lexical_chunks.len());
