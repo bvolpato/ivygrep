@@ -60,6 +60,8 @@ pub struct SearchOptions {
     pub scope_filter: Option<WorkspaceScope>,
     pub skip_gitignore: bool,
     pub progress_tx: Option<std::sync::mpsc::Sender<(String, usize, usize)>>,
+    /// When set to `true`, the search should bail out as soon as possible.
+    pub cancel_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Default for SearchOptions {
@@ -73,7 +75,17 @@ impl Default for SearchOptions {
             scope_filter: None,
             skip_gitignore: false,
             progress_tx: None,
+            cancel_token: None,
         }
+    }
+}
+
+impl SearchOptions {
+    /// Returns `true` when the caller has requested cancellation.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel_token
+            .as_ref()
+            .is_some_and(|t| t.load(std::sync::atomic::Ordering::Relaxed))
     }
 }
 
@@ -395,6 +407,10 @@ pub fn hybrid_search(
     let ctx = SearchContext::load(workspace, embedding_model.map(|m| m.dimensions()))?;
     tracing::trace!("open_tantivy={:?}", t0.elapsed());
 
+    if options.is_cancelled() {
+        return Ok(Vec::new());
+    }
+
     // ── Literal pass ────────────────────────────────────────────────────
     // Always run a fast index-backed literal substring scan so exact matches
     // surface even when tokenization splits them differently.
@@ -445,6 +461,10 @@ pub fn hybrid_search(
     } else {
         Vec::new()
     };
+
+    if options.is_cancelled() {
+        return Ok(Vec::new());
+    }
 
     // ── Lexical (BM25) pass ─────────────────────────────────────────────
     // BM25F: search across text, tokenized file path, and definition signature.
@@ -570,6 +590,10 @@ pub fn hybrid_search(
 
     tracing::trace!("open_vector={:?}", t0.elapsed());
 
+    if options.is_cancelled() {
+        return Ok(Vec::new());
+    }
+
     let mut semantic_chunks = Vec::new();
     let has_hash_vectors = ctx.hash_vectors.as_ref().map_or(0, |v| v.size()) > 0
         || ctx.base_hash_vectors.as_ref().map_or(0, |v| v.size()) > 0;
@@ -619,6 +643,10 @@ pub fn hybrid_search(
         t0.elapsed(),
         semantic_chunks.len()
     );
+
+    if options.is_cancelled() {
+        return Ok(Vec::new());
+    }
 
     let merged = fuse_rrf(
         &lexical_chunks,
@@ -1852,6 +1880,7 @@ mod tests {
                 }),
                 skip_gitignore: false,
                 progress_tx: None,
+                cancel_token: None,
             },
         )
         .unwrap();

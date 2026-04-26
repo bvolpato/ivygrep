@@ -1006,6 +1006,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                         scope_filter: scope_filter.clone(),
                         skip_gitignore: cli.skip_gitignore,
                         progress_tx: None,
+                        cancel_token: None,
                     };
                     let mut all_hits = Vec::new();
                     let workspaces = if cli.all_indices {
@@ -1058,6 +1059,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                 scope_filter: scope_filter.clone(),
                 skip_gitignore: cli.skip_gitignore,
                 progress_tx: None,
+                cancel_token: None,
             };
             for ws in workspaces {
                 match literal_search(&ws, query, &options) {
@@ -1194,6 +1196,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                         scope_filter: scope_filter.clone(),
                         skip_gitignore: cli.skip_gitignore,
                         progress_tx: None,
+                        cancel_token: None,
                     };
                     local_fallback_search(&workspace, cli.all_indices, query, &options, cli.hash)
                 }
@@ -1208,6 +1211,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                         scope_filter: scope_filter.clone(),
                         skip_gitignore: cli.skip_gitignore,
                         progress_tx: None,
+                        cancel_token: None,
                     };
                     local_fallback_search(&workspace, cli.all_indices, query, &options, cli.hash)
                 }
@@ -1242,6 +1246,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                         scope_filter: scope_filter.clone(),
                         skip_gitignore: cli.skip_gitignore,
                         progress_tx: None,
+                        cancel_token: None,
                     },
                 ) {
                     Ok(mut hits) => {

@@ -139,6 +139,7 @@ struct App {
     transition_after_search: bool,
     last_query: String,
     debounce_timer: Option<Instant>,
+    cancel_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 
     // -- config --
     cli: Cli,
@@ -192,6 +193,7 @@ impl App {
             transition_after_search: false,
             last_query: String::new(),
             debounce_timer: Some(Instant::now()),
+            cancel_token: None,
             cli,
             workspace,
             scope_filter,
@@ -342,15 +344,32 @@ impl App {
 
     // -- search --
 
+    /// Cancel any in-flight search immediately. The background task will
+    /// notice the token on its next cancellation check and bail out.
+    fn cancel_search(&mut self) {
+        if let Some(token) = self.cancel_token.take() {
+            token.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        self.search_rx = None;
+        self.is_searching = false;
+        self.pending_search = false;
+    }
+
     fn trigger_search(&mut self) {
+        // Cancel any previous search first.
+        self.cancel_search();
+
         let q = self.input.value().trim().to_string();
         if q.is_empty() {
             self.reset_results();
-            self.is_searching = false;
             return;
         }
 
         self.is_searching = true;
+
+        // Fresh cancellation token for this search.
+        let token = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.cancel_token = Some(token.clone());
 
         let request = build_search_request(
             &self.cli,
@@ -387,6 +406,7 @@ impl App {
                         scope_filter.as_ref(),
                         &query_clone,
                         &tx,
+                        &token,
                     )
                 }
                 Ok(None) => local_search_detached(
@@ -395,6 +415,7 @@ impl App {
                     scope_filter.as_ref(),
                     &query_clone,
                     &tx,
+                    &token,
                 ),
                 Ok(Some(other)) => {
                     tracing::warn!("unexpected daemon response: {other:?}");
@@ -404,6 +425,7 @@ impl App {
                         scope_filter.as_ref(),
                         &query_clone,
                         &tx,
+                        &token,
                     )
                 }
                 Err(err) => Err(err),
@@ -420,6 +442,7 @@ fn local_search_detached(
     scope_filter: Option<&WorkspaceScope>,
     query: &str,
     progress_tx: &std::sync::mpsc::Sender<TuiSearchProgress>,
+    cancel_token: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<Vec<SearchHit>> {
     let model = crate::embedding::create_model(cli.hash);
     let options = build_search_options(cli, scope_filter);
@@ -447,6 +470,7 @@ fn local_search_detached(
     for ws in workspaces {
         let mut ws_opts = options.clone();
         ws_opts.progress_tx = Some(std_tx.clone());
+        ws_opts.cancel_token = Some(cancel_token.clone());
         let mut hits = crate::search::hybrid_search(&ws, query, Some(model.as_ref()), &ws_opts)?;
         if cli.all_indices {
             for hit in &mut hits {
@@ -560,6 +584,7 @@ fn build_search_options(cli: &Cli, scope_filter: Option<&WorkspaceScope>) -> Sea
         },
         skip_gitignore: cli.skip_gitignore,
         progress_tx: None,
+        cancel_token: None,
     }
 }
 
@@ -628,13 +653,18 @@ impl Drop for TerminalSession {
 // Status-bar hint lines
 // ---------------------------------------------------------------------------
 
-fn hints_search() -> Line<'static> {
-    hint_line(&[
-        ("↓/Tab", "results"),
-        ("Enter", "search"),
-        ("Esc", "clear/quit"),
-        ("🖱", "click"),
-    ])
+fn hints_search(is_searching: bool) -> Line<'static> {
+    if is_searching {
+        hint_line(&[("Ctrl+C", "cancel search"), ("Esc", "cancel")])
+    } else {
+        hint_line(&[
+            ("↓/Tab", "results"),
+            ("Enter", "search"),
+            ("Ctrl+C", "clear/quit"),
+            ("Esc", "clear/quit"),
+            ("🖱", "click"),
+        ])
+    }
 }
 
 fn hints_file_list() -> Line<'static> {
@@ -1251,7 +1281,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                 ))
             } else {
                 match app.mode {
-                    Mode::Search => hints_search(),
+                    Mode::Search => hints_search(app.is_searching),
                     Mode::FileList => hints_file_list(),
                     Mode::SnippetList => hints_snippet_list(),
                     Mode::FileView => hints_file_view(),
@@ -1364,22 +1394,33 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
             // ===== SEARCH MODE =====
             Mode::Search => match key.code {
                 KeyCode::Esc => {
-                    if app.input.value().is_empty() {
+                    if app.is_searching {
+                        app.cancel_search();
+                        app.status_message = Some("Search cancelled".to_string());
+                    } else if app.input.value().is_empty() {
                         break; // quit
+                    } else {
+                        app.input = Input::default();
+                        app.reset_results();
+                        app.last_query.clear();
+                        app.debounce_timer = None;
                     }
-                    app.input = Input::default();
-                    app.reset_results();
-                    app.last_query.clear();
-                    app.debounce_timer = None;
                 }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if app.input.value().is_empty() {
+                    if app.is_searching {
+                        // 1st press: cancel in-flight search
+                        app.cancel_search();
+                        app.status_message = Some("Search cancelled".to_string());
+                    } else if !app.input.value().is_empty() {
+                        // 2nd press: clear input
+                        app.input = Input::default();
+                        app.reset_results();
+                        app.last_query.clear();
+                        app.debounce_timer = None;
+                    } else {
+                        // 3rd press: quit
                         break;
                     }
-                    app.input = Input::default();
-                    app.reset_results();
-                    app.last_query.clear();
-                    app.debounce_timer = None;
                 }
                 KeyCode::Enter => {
                     if app.input.value().is_empty() {
@@ -1420,6 +1461,10 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     let prev = app.input.value().to_string();
                     app.input.handle_event(&Event::Key(key));
                     if prev != app.input.value() {
+                        // Cancel any in-flight search — the query just changed.
+                        if app.is_searching {
+                            app.cancel_search();
+                        }
                         app.debounce_timer = Some(Instant::now());
                     }
                 }
@@ -1467,14 +1512,19 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     }
                 }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if app.input.value().is_empty() {
+                    if app.is_searching {
+                        app.cancel_search();
+                        app.status_message = Some("Search cancelled".to_string());
+                        app.mode = Mode::Search;
+                    } else if !app.input.value().is_empty() {
+                        app.input = Input::default();
+                        app.reset_results();
+                        app.last_query.clear();
+                        app.debounce_timer = None;
+                        app.mode = Mode::Search;
+                    } else {
                         break;
                     }
-                    app.input = Input::default();
-                    app.reset_results();
-                    app.last_query.clear();
-                    app.debounce_timer = None;
-                    app.mode = Mode::Search;
                 }
                 // Other printable chars → switch to search and type.
                 KeyCode::Char(_)
@@ -1562,14 +1612,19 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     }
                 }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if app.input.value().is_empty() {
+                    if app.is_searching {
+                        app.cancel_search();
+                        app.status_message = Some("Search cancelled".to_string());
+                        app.mode = Mode::Search;
+                    } else if !app.input.value().is_empty() {
+                        app.input = Input::default();
+                        app.reset_results();
+                        app.last_query.clear();
+                        app.debounce_timer = None;
+                        app.mode = Mode::Search;
+                    } else {
                         break;
                     }
-                    app.input = Input::default();
-                    app.reset_results();
-                    app.last_query.clear();
-                    app.debounce_timer = None;
-                    app.mode = Mode::Search;
                 }
                 KeyCode::Tab => {
                     // Tab → from SnippetList → Search (wraps around).
@@ -1653,15 +1708,21 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     }
                 }
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if app.input.value().is_empty() {
+                    if app.is_searching {
+                        app.cancel_search();
+                        app.status_message = Some("Search cancelled".to_string());
+                        app.mode = Mode::Search;
+                        app.file_view_cache = None;
+                    } else if !app.input.value().is_empty() {
+                        app.input = Input::default();
+                        app.reset_results();
+                        app.last_query.clear();
+                        app.debounce_timer = None;
+                        app.mode = Mode::Search;
+                        app.file_view_cache = None;
+                    } else {
                         break;
                     }
-                    app.input = Input::default();
-                    app.reset_results();
-                    app.last_query.clear();
-                    app.debounce_timer = None;
-                    app.mode = Mode::Search;
-                    app.file_view_cache = None;
                 }
                 KeyCode::Tab | KeyCode::BackTab => {
                     // Tab from FileView → SnippetList.
@@ -1731,6 +1792,7 @@ mod tests {
             transition_after_search: false,
             last_query: String::new(),
             debounce_timer: None,
+            cancel_token: None,
             bg_indexing_active: false,
             last_bg_check: std::time::Instant::now(),
             cli,
@@ -2144,7 +2206,7 @@ mod tests {
 
     #[test]
     fn hint_lines_are_nonempty() {
-        let search = hints_search();
+        let search = hints_search(false);
         let file_list = hints_file_list();
         let snippet_list = hints_snippet_list();
         let file_view = hints_file_view();

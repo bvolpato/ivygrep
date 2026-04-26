@@ -318,6 +318,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 scope_filter: scope_from_request(scope_path, scope_is_file),
                 skip_gitignore,
                 progress_tx: None,
+                cancel_token: None,
             };
 
             let result = tokio::task::spawn_blocking(move || {
@@ -511,6 +512,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 scope_filter,
                 skip_gitignore,
                 progress_tx: None,
+                cancel_token: None,
             };
 
             let result = tokio::task::spawn_blocking(move || {

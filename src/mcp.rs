@@ -316,6 +316,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
                     scope_filter: scope_filter.clone(),
                     skip_gitignore: args.skip_gitignore.unwrap_or(false),
                     progress_tx: None,
+                    cancel_token: None,
                 },
             )?
         } else if args.regex.unwrap_or(false) {
@@ -343,6 +344,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
                     scope_filter: scope_filter.clone(),
                     skip_gitignore: args.skip_gitignore.unwrap_or(false),
                     progress_tx: None,
+                    cancel_token: None,
                 },
             )?
         };

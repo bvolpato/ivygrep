@@ -119,6 +119,7 @@ fn run_index_and_query(
             scope_filter: None,
             skip_gitignore: false,
             progress_tx: None,
+            cancel_token: None,
         },
     )
     .unwrap();
@@ -219,6 +220,7 @@ fn stress_ripgrep_deep_relevance() {
                 scope_filter: None,
                 skip_gitignore: false,
                 progress_tx: None,
+                cancel_token: None,
             },
         )
         .unwrap();
@@ -302,6 +304,7 @@ fn stress_tantivy_deep_relevance() {
                 scope_filter: None,
                 skip_gitignore: false,
                 progress_tx: None,
+                cancel_token: None,
             },
         )
         .unwrap();
@@ -485,6 +488,7 @@ fn stress_concurrent_query_storm_ripgrep() {
                             scope_filter: None,
                             skip_gitignore: false,
                             progress_tx: None,
+                            cancel_token: None,
                         },
                     );
                     let elapsed = start.elapsed();
@@ -1211,6 +1215,7 @@ fn stress_concurrent_search_during_reindex_large() {
                             scope_filter: None,
                             skip_gitignore: false,
                             progress_tx: None,
+                            cancel_token: None,
                         },
                     );
                     // May error during concurrent write, but must not panic
