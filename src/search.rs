@@ -317,18 +317,17 @@ fn collect_literal_candidates(
     path_matcher: &PathGlobMatcher,
     options: &SearchOptions,
 ) -> Result<Vec<IndexedChunk>> {
-    let mut candidate_limit = if let Some(limit) = options.limit {
+    let candidate_limit = if let Some(limit) = options.limit {
         if limit == usize::MAX {
-            10_000_000
+            5_000
         } else {
-            limit.max(1_000)
+            // Literal pass needs exact substring verification via SQLite (text
+            // not stored in Tantivy), so keep candidate count low.
+            (limit * 5).clamp(200, 500)
         }
     } else {
-        10_000
+        500
     };
-    if options.scope_filter.is_some() || !options.skip_gitignore {
-        candidate_limit = 1_000_000;
-    }
 
     let mut search_fields = vec![ctx.fields.text, ctx.fields.file_path];
     if let Some(f) = ctx.fields.file_path_text {
@@ -341,8 +340,14 @@ fn collect_literal_candidates(
 
     let mut found_ids = HashSet::<String>::new();
     let mut verified = Vec::<IndexedChunk>::new();
+    // Cap on SQLite lookups: text is NOT stored in Tantivy, so every
+    // candidate requires an individual SQLite fetch. On a 3M-chunk index
+    // this dominates the literal pass. Stop after checking enough.
+    let verify_budget = candidate_limit;
+    let mut verify_count = 0usize;
+    let target_hits = options.limit.unwrap_or(100).min(500);
 
-    for lexical_query in build_lexical_queries(query) {
+    'outer: for lexical_query in build_lexical_queries(query) {
         let parsed_query = match parser.parse_query(&lexical_query) {
             Ok(q) => q,
             Err(_) => continue,
@@ -371,9 +376,18 @@ fn collect_literal_candidates(
                     {
                         chunk.text = full.text;
                     }
+                    verify_count += 1;
                     if matcher.is_match(&chunk.text) {
                         found_ids.insert(chunk.chunk_id.clone());
                         verified.push(chunk);
+                        if verified.len() >= target_hits {
+                            break 'outer;
+                        }
+                    }
+                    // Stop burning SQLite lookups if we've already checked
+                    // enough candidates without finding many matches.
+                    if verify_count >= verify_budget {
+                        break 'outer;
                     }
                 }
             }
@@ -390,18 +404,19 @@ pub fn hybrid_search(
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
     let t0 = std::time::Instant::now();
-    let mut candidate_limit = if let Some(limit) = options.limit {
-        if limit == usize::MAX {
-            10_000_000
-        } else {
-            limit.max(1_000)
-        }
+    let output_limit = options.limit.unwrap_or(50);
+    // Tantivy lexical candidates: enough headroom for post-hoc filters
+    // (gitignore, scope, globs) without blowing up on huge repos.
+    let candidate_limit = if output_limit == usize::MAX {
+        50_000
     } else {
-        10_000
+        (output_limit * 10).clamp(500, 5_000)
     };
-    if options.scope_filter.is_some() || !options.skip_gitignore {
-        candidate_limit = 1_000_000;
-    }
+    // Literal pass only needs enough hits to surface exact string matches.
+    let literal_limit = candidate_limit.min(500);
+    // Semantic (vector ANN) search: k=200 is fast (~30ms on 3M vectors),
+    // k=10K takes 15+ seconds on USearch HNSW. Keep it small.
+    let semantic_limit = output_limit.clamp(50, 200);
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
 
     let ctx = SearchContext::load(workspace, embedding_model.map(|m| m.dimensions()))?;
@@ -431,20 +446,27 @@ pub fn hybrid_search(
         && !trimmed.is_empty()
     {
         let mut all_candidates = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         for variant in &literal_variants {
             let variant_matcher = regex::RegexBuilder::new(&regex::escape(variant))
                 .case_insensitive(true)
                 .build();
             if let Ok(ref vm) = variant_matcher
-                && let Ok(candidates) =
+                && let Ok(mut candidates) =
                     collect_literal_candidates(&ctx, variant, vm, &path_matcher, options)
             {
-                all_candidates.extend(candidates);
+                candidates.truncate(literal_limit);
+                for c in candidates {
+                    if seen.insert(c.chunk_id.clone()) {
+                        all_candidates.push(c);
+                    }
+                }
+            }
+            // Once we have enough literal hits, stop trying variant queries
+            if all_candidates.len() >= literal_limit {
+                break;
             }
         }
-        // Deduplicate by chunk_id
-        let mut seen = std::collections::HashSet::new();
-        all_candidates.retain(|c| seen.insert(c.chunk_id.clone()));
         tracing::trace!(
             "literal_pass={:?} found={}",
             t0.elapsed(),
@@ -570,22 +592,22 @@ pub fn hybrid_search(
             }
         }
     }
-    // Populate text from SQLite for chunks where Tantivy doesn't store it.
-    let need_text: Vec<(String, u64)> = lexical_by_id
-        .iter()
-        .filter(|(_, (chunk, _))| chunk.text.is_empty())
-        .map(|(id, (chunk, _))| (id.clone(), chunk.vector_key))
-        .collect();
-    for (chunk_id, vector_key) in need_text {
-        if let Ok(Some(full)) = ctx.fetch_chunk_by_vector_key(vector_key)
-            && let Some((chunk, _)) = lexical_by_id.get_mut(&chunk_id)
-        {
-            chunk.text = full.text;
-        }
-    }
-
+    // Sort by BM25 score and truncate to candidate_limit BEFORE populating
+    // text from SQLite. This avoids O(all_results) individual SQLite lookups
+    // — we only fetch text for the top-scoring candidates that will survive
+    // RRF fusion.
     let mut lexical_chunks = lexical_by_id.into_values().collect::<Vec<_>>();
     lexical_chunks.sort_by(|a, b| b.1.total_cmp(&a.1));
+    lexical_chunks.truncate(candidate_limit);
+
+    // Populate text from SQLite for the top chunks where Tantivy doesn't store it.
+    for (chunk, _) in &mut lexical_chunks {
+        if chunk.text.is_empty() {
+            if let Ok(Some(full)) = ctx.fetch_chunk_by_vector_key(chunk.vector_key) {
+                chunk.text = full.text;
+            }
+        }
+    }
     tracing::trace!("lexical={:?} found={}", t0.elapsed(), lexical_chunks.len());
 
     tracing::trace!("open_vector={:?}", t0.elapsed());
@@ -611,7 +633,7 @@ pub fn hybrid_search(
                 &path_matcher,
                 options,
                 &hash_query_vector,
-                candidate_limit,
+                semantic_limit,
                 ctx.hash_vectors.as_ref(),
                 ctx.base_hash_vectors.as_ref(),
             )?;
@@ -628,7 +650,7 @@ pub fn hybrid_search(
                 &path_matcher,
                 options,
                 &neural_query_vector,
-                candidate_limit,
+                semantic_limit,
                 ctx.neural_vectors.as_ref(),
                 ctx.base_neural_vectors.as_ref(),
             )?;
