@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777150930235,
+  "lastUpdate": 1777184595044,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -8835,6 +8835,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 455.38,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "59ecff171ad32a07b7a52fe5c8e4d3e9b6192fab",
+          "message": "perf: 17x faster search on large repos (20s → 1.2s on dd-source)\n\nRoot cause: candidate limits were set to 1,000,000 by default for\nnon-skip-gitignore searches, causing:\n- Tantivy BM25: scoring/sorting millions of docs per query variant\n- USearch ANN: k=1M vector search (15s+ on 3.8M vectors)\n- SQLite: thousands of individual text lookups (text not in Tantivy)\n\nFixes:\n- Tantivy candidate_limit: 1M → 5K (10x output limit, capped)\n- Literal pass limit: 5K → 500 (text requires SQLite fetch per hit)\n- Semantic/vector limit: 1M → 200 (ANN with k=200 is ~30ms vs 15s)\n- Truncate BM25 results before SQLite text-population phase\n- Early termination in literal/variant loops when enough hits found\n\nBenchmarks on dd-source (289K files, 3.8M chunks, 7GB index):\n  'ddsqlizer client': 20s → 1.2s\n  'error handling':   → 0.5s\n  'kafka producer':   → 0.5s",
+          "timestamp": "2026-04-26T02:13:52-04:00",
+          "tree_id": "025c373b1f6be961a2825e4f4233d66cdfe595d3",
+          "url": "https://github.com/bvolpato/ivygrep/commit/59ecff171ad32a07b7a52fe5c8e4d3e9b6192fab"
+        },
+        "date": 1777184594835,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 947018350,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 7910.27,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3697.63,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2761.83,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11585.18,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 11330.96,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 6.91,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 507.63,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 37356.78,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 8913.36,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 5598.57,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 474571.79,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 594.75,
             "unit": "µs"
           }
         ]
