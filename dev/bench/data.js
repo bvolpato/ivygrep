@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777184595044,
+  "lastUpdate": 1777218581337,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -8924,6 +8924,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 594.75,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "8232e8ef1693491457605224d30f7239346527f9",
+          "message": "perf: candidate limits scale proportionally with --limit\n\nDefault (no --limit) remains fast (~1s on dd-source/3.8M chunks).\nWith --limit N, candidates grow proportionally:\n\n  Lexical (Tantivy BM25): 10×N, capped at 50K\n  Literal (substring):     5×N, capped at 25K\n  Semantic (vector ANN):   1×N, capped at 2K\n\nBenchmarks on dd-source (289K files, 3.8M chunks):\n  default:    1.1s\n  --limit 10: 183ms\n  --limit 100: 608ms\n  --limit 500: 2.7s",
+          "timestamp": "2026-04-26T11:40:23-04:00",
+          "tree_id": "1af80a8fcb96ceb998ec557f8d69e8d52792a770",
+          "url": "https://github.com/bvolpato/ivygrep/commit/8232e8ef1693491457605224d30f7239346527f9"
+        },
+        "date": 1777218581101,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 960671880,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 8606.15,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3719.46,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2757.43,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11692.75,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 11364.87,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 7.09,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 539.24,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 29937.75,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 9021.78,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 5603.3,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 471481.73,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 579.38,
             "unit": "µs"
           }
         ]
