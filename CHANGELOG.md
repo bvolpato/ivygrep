@@ -5,7 +5,7 @@ All notable changes to ivygrep are documented in this file.
 ## [0.6.10] — 2026-04-26
 
 ### Performance
-- **17× faster search on large repos:** Search on `dd-source` (289K files, 3.8M chunks) dropped from 20s to ~1s by replacing runaway 1M candidate limits with proportional budgets.
+- **17× faster search on large repos:** Search on a 7GB+ monorepo (289K files, 3.8M chunks) dropped from 20s to ~1s by replacing runaway 1M candidate limits with proportional budgets.
 - **Candidate limits scale with `--limit`:** Lexical (10×N), literal (5×N), and semantic (1×N) candidates now grow proportionally when `--limit` is increased, with sensible caps.
 
 ### Added

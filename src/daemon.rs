@@ -907,7 +907,7 @@ where
     let mut line = String::new();
 
     // Timeout varies by request type: Index can take 30+ min on massive repos
-    // (dd-source: 270K files), while Status should complete in seconds.
+    // (large monorepos: 270K+ files), while Status should complete in seconds.
     let timeout_secs = match request {
         DaemonRequest::Index { .. } => 1800, // 30 min for large repos
         DaemonRequest::Status | DaemonRequest::Restart => 5, // quick
