@@ -2,7 +2,18 @@
 
 All notable changes to ivygrep are documented in this file.
 
-## [0.6.8] — 2026-04-25
+## [0.6.10] — 2026-04-26
+
+### Performance
+- **17× faster search on large repos:** Search on `dd-source` (289K files, 3.8M chunks) dropped from 20s to ~1s by replacing runaway 1M candidate limits with proportional budgets.
+- **Candidate limits scale with `--limit`:** Lexical (10×N), literal (5×N), and semantic (1×N) candidates now grow proportionally when `--limit` is increased, with sensible caps.
+
+### Added
+- **Ctrl+C cancels in-flight search:** In the TUI, pressing Ctrl+C or Esc now cancels a running search instead of quitting. Three-tier behavior: cancel search → clear input → quit.
+- **Cooperative cancellation:** A shared `cancel_token` (AtomicBool) is threaded through the search pipeline, checked between literal, BM25, semantic, and RRF phases for instant abort.
+- **Auto-cancel on keystroke:** Typing a new query while a search is in flight automatically cancels the stale search before starting the debounce timer.
+
+## [0.6.9] — 2026-04-25
 
 ### Fixed
 - **TUI phantom text rendering:** Fixed an issue where resizing panels or rendering shorter snippets left phantom artifacts ("ghost text") from previous renders.
