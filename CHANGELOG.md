@@ -2,6 +2,18 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.6.11] — 2026-04-27
+
+### Performance
+- **60× faster regex search on large repos:** Regex patterns like `func.*DDSQLizer` on a 2GB+ monorepo (289K files, 3.8M chunks) dropped from 12s to ~0.2s. Extracts literal fragments from regex patterns and uses the Tantivy inverted index to pre-filter to only files that could match, then scans candidates in parallel with rayon.
+- **Removed unnecessary 10ms sleep in neural enhancer:** Background embedding now runs at full speed when the system is not constrained.
+
+### Added
+- **Path-based score boosting:** Files whose path contains the query term (e.g., searching for "my-service" surfaces `apps/my-service/` at the top) now receive a significant ranking boost, ensuring directory/filename matches outrank generic code hits.
+
+### Fixed
+- Dependency bumps: `openssl` 0.10.78, `rand` 0.8.6, `rustls-webpki` 0.103.13.
+
 ## [0.6.10] — 2026-04-26
 
 ### Performance

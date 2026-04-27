@@ -152,7 +152,7 @@ Unknown extensions are auto-detected and indexed as text.
 
 ## 🚀 Performance & Speed
 
-Benchmarked on the **Linux kernel** (92K files, 1.5M chunks):
+Benchmarked on the **Linux kernel** (92K files, 1.5M chunks) and **2GB+ monorepos** (289K files, 3.8M chunks):
 
 | Tool | Mode | Time | Speedup |
 |------|------|-----:|--------:|
@@ -160,6 +160,9 @@ Benchmarked on the **Linux kernel** (92K files, 1.5M chunks):
 | `rg` | exact string | ~2.7 s | 3× |
 | **`ig`** | semantic: `"kernel memory allocation"` | **~72 ms** | **125×** |
 | **`ig --literal`** | **single identifier** (fast path) | **~17 ms** | **529×** |
+| **`ig --regex`** | **regex on 2GB+ monorepo** | **~200 ms** | **60×** |
+
+Regex search extracts literal fragments from patterns and uses the Tantivy inverted index to pre-filter candidates before parallel scanning with rayon — turning a 12-second full-repo scan into a 200ms targeted search.
 
 Indexing is sub-second for most projects. Search is sub-100ms. Small repos can complete neural enhancement before first results; larger repos return immediately and upgrade in the background via the bundled ONNX model (`AllMiniLML6V2Q`).
 

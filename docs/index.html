@@ -63,7 +63,7 @@
         <div class="container hero-content">
             <div class="hero-badge slide-up">
                 <span class="badge-dot"></span>
-                v0.6.0 — 20 Tree-sitter languages, MCP server
+                v0.6.11 — 60× faster regex, path-boosted ranking
             </div>
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" onerror="this.src='assets/logo.png'"/>
@@ -322,7 +322,7 @@
         <div class="section-header">
             <span class="section-tag">Benchmarks</span>
             <h2 class="section-title text-center">Speed That Scales</h2>
-            <p class="text-center subtitle-small">Benchmarked on the <strong>Linux kernel</strong> (92K files, 1.5M chunks) — query: <code>"kfree"</code></p>
+            <p class="text-center subtitle-small">Benchmarked on the <strong>Linux kernel</strong> (92K files, 1.5M chunks) and <strong>2GB+ monorepos</strong> (289K files, 3.8M chunks)</p>
         </div>
 
         <!-- Benchmark bars -->
@@ -346,6 +346,11 @@
                 <div class="benchmark-tool"><code>ig --literal</code><span class="benchmark-mode">single identifier</span></div>
                 <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig" data-width="2%"><span class="benchmark-time">~17 ms</span></div></div>
                 <div class="benchmark-speed benchmark-speed-hero">529×</div>
+            </div>
+            <div class="benchmark-row benchmark-row-highlight">
+                <div class="benchmark-tool"><code>ig --regex</code><span class="benchmark-mode">2GB+ monorepo</span></div>
+                <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig-semantic" data-width="3%"><span class="benchmark-time">~200 ms</span></div></div>
+                <div class="benchmark-speed benchmark-speed-hero">60×</div>
             </div>
             <p class="benchmark-note">grep and rg scan every file at query time. ivygrep queries a pre-built index — searches are <strong>orders of magnitude faster</strong> on warm repos, and semantic mode finds related code even when you don't know the exact identifier.</p>
         </div>
@@ -631,7 +636,7 @@
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md" class="footer-link">Changelog</a>
                 </div>
                 <div class="footer-copy">
-                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v0.6.0</p>
+                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v0.6.11</p>
                 </div>
             </div>
         </div>
