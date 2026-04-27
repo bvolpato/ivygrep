@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777299493696,
+  "lastUpdate": 1777302335147,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -9903,6 +9903,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 547,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "f3595da9a4da466113b44b75a37b342389988446",
+          "message": "feat: --type accepts extensions and aliases (rs, py, md, c++, bash, js, ...)\n\nThe --type flag now resolves user-friendly inputs to canonical language\nnames automatically:\n\n  ig --type rs    →  filters to 'rust' files\n  ig --type py    →  filters to 'python' files\n  ig --type md    →  filters to 'markdown' files\n  ig --type c++   →  filters to 'cpp' files\n  ig --type bash  →  filters to 'shell' files\n  ig --type .rs   →  filters to 'rust' files (dot prefix stripped)\n\nResolution happens at three levels:\n1. Canonical name match (rust, python, javascript, ...)\n2. Extension match (rs→rust, py→python, go→go, cs→csharp, ...)\n3. Common aliases (c++→cpp, c#→csharp, js→javascript, bash→shell, ...)\n\nWorks in CLI, MCP server, and daemon paths. Includes 6 new unit tests\ncovering canonical names, extensions, aliases, case-insensitivity,\ndot-prefix handling, and unknown inputs.",
+          "timestamp": "2026-04-27T10:56:07-04:00",
+          "tree_id": "e12599763d390016785bbf9e6a130287beb0305e",
+          "url": "https://github.com/bvolpato/ivygrep/commit/f3595da9a4da466113b44b75a37b342389988446"
+        },
+        "date": 1777302334669,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 963610410,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 7856.96,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3816.11,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2798.43,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11214.24,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 11592.99,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 7.19,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 554.32,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 30683.77,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 8941.62,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 11483.29,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 455756.76,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 603.97,
             "unit": "µs"
           }
         ]
