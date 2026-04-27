@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777304686575,
+  "lastUpdate": 1777324157930,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -10081,6 +10081,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 579.34,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "3462216036f6aff3e2d5a7e72d75d07ad4f9a712",
+          "message": "perf: batch SQLite lookups and add read-path PRAGMAs for large repos\n\n- Add mmap_size, cache_size, temp_store PRAGMAs to open_sqlite_readonly\n  for dramatically better cold-start I/O on multi-GB databases\n- Add fetch_chunks_by_vector_keys_batch() using WHERE vector_key IN (...)\n  to replace O(N) individual SQLite round-trips with 1-2 batched queries\n- Use prepare_cached() for fetch_chunk_by_vector_key to reuse compiled SQL\n- Wire batch fetch into lexical text population and semantic candidate paths\n\nOn a large repo (~290K files, ~3.8M chunks, ~11GB index):\n  Neural hybrid (warm): 0.73s -> 0.57s (22% faster)\n  Hash hybrid (warm):   4.1s  -> 0.51s (87% faster / 8x)\n  Cold start:           5.4s  -> 3.5s  (35% faster)",
+          "timestamp": "2026-04-27T16:59:37-04:00",
+          "tree_id": "8e928630aea9ce26998ab9593f10dae52711dda4",
+          "url": "https://github.com/bvolpato/ivygrep/commit/3462216036f6aff3e2d5a7e72d75d07ad4f9a712"
+        },
+        "date": 1777324157672,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 940528330,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 7991.49,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3721.89,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2739.77,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11754.61,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 11592.14,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 6.6,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 515.83,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 22343.02,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 8363.32,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 10748.9,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 472195.51,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 584.67,
             "unit": "µs"
           }
         ]
