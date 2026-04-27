@@ -961,9 +961,6 @@ pub fn enhance_workspace_neural(
             if newly_processed % 16384 == 0 {
                 let _ = vector_index.save();
             }
-
-            // Brief yield so the system stays responsive during background work
-            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
 
