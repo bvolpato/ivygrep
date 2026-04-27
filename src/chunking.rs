@@ -366,6 +366,61 @@ pub fn language_for_path(path: &Path) -> Option<&'static str> {
     find_language_def(path).map(|def| def.name)
 }
 
+/// Resolve a user-provided type filter to a canonical language name.
+///
+/// Accepts canonical names (`rust`), file extensions (`rs`, `py`, `md`),
+/// and common aliases (`c++`, `bash`, `js`, `objective-c`).
+/// Returns `None` if no match is found.
+pub fn resolve_type_alias(input: &str) -> Option<&'static str> {
+    let lower = input.to_ascii_lowercase();
+    let lower = lower.trim_start_matches('.');
+
+    // 1. Exact canonical name match
+    if let Some(lang) = LANGUAGES.iter().find(|l| l.name == lower) {
+        return Some(lang.name);
+    }
+
+    // 2. Extension match (e.g. "rs" → "rust", "py" → "python")
+    if let Some(lang) = LANGUAGES
+        .iter()
+        .find(|l| l.extensions.iter().any(|e| e.eq_ignore_ascii_case(lower)))
+    {
+        return Some(lang.name);
+    }
+
+    // 3. Common aliases not covered by name or extension
+    let alias = match lower {
+        "c++" | "cplusplus" => "cpp",
+        "c#" => "csharp",
+        "js" => "javascript",
+        "ts" | "tsx" => "typescript",
+        "jsx" | "mjs" | "cjs" => "javascript",
+        "bash" | "zsh" | "fish" => "shell",
+        "yml" | "toml" | "yaml" | "ini" | "cfg" => "config",
+        "objective-c" | "objective_c" | "objectivec" => "objc",
+        "proto" => "protobuf",
+        "tf" | "hcl" => "terraform",
+        "gql" => "graphql",
+        "rb" | "rake" => "ruby",
+        "kt" | "kts" => "kotlin",
+        "ex" | "exs" => "elixir",
+        "erl" | "hrl" => "erlang",
+        "hs" => "haskell",
+        "ml" | "mli" => "ocaml",
+        "pl" | "pm" => "perl",
+        "clj" | "cljs" | "cljc" => "clojure",
+        "jl" => "julia",
+        "ps1" | "psm1" => "powershell",
+        "sc" => "scala",
+        "htm" | "xhtml" => "html",
+        "scss" | "sass" | "less" => "css",
+        "mdx" => "markdown",
+        "pyi" => "python",
+        _ => return None,
+    };
+    Some(alias)
+}
+
 pub fn is_indexable_path(path: &Path) -> bool {
     language_for_path(path).is_some()
 }
@@ -1902,5 +1957,63 @@ export function register(p: Plugin) {
                 .iter()
                 .any(|c| c.kind == ChunkKind::Function && c.text.contains("add"))
         );
+    }
+
+    #[test]
+    fn resolve_type_alias_canonical_names() {
+        assert_eq!(resolve_type_alias("rust"), Some("rust"));
+        assert_eq!(resolve_type_alias("python"), Some("python"));
+        assert_eq!(resolve_type_alias("markdown"), Some("markdown"));
+        assert_eq!(resolve_type_alias("javascript"), Some("javascript"));
+        assert_eq!(resolve_type_alias("typescript"), Some("typescript"));
+    }
+
+    #[test]
+    fn resolve_type_alias_extensions() {
+        assert_eq!(resolve_type_alias("rs"), Some("rust"));
+        assert_eq!(resolve_type_alias("py"), Some("python"));
+        assert_eq!(resolve_type_alias("md"), Some("markdown"));
+        assert_eq!(resolve_type_alias("go"), Some("go"));
+        assert_eq!(resolve_type_alias("java"), Some("java"));
+        assert_eq!(resolve_type_alias("cs"), Some("csharp"));
+        assert_eq!(resolve_type_alias("cpp"), Some("cpp"));
+        assert_eq!(resolve_type_alias("cc"), Some("cpp"));
+        assert_eq!(resolve_type_alias("sql"), Some("sql"));
+        assert_eq!(resolve_type_alias("html"), Some("html"));
+        assert_eq!(resolve_type_alias("css"), Some("css"));
+    }
+
+    #[test]
+    fn resolve_type_alias_common_aliases() {
+        assert_eq!(resolve_type_alias("c++"), Some("cpp"));
+        assert_eq!(resolve_type_alias("c#"), Some("csharp"));
+        assert_eq!(resolve_type_alias("js"), Some("javascript"));
+        assert_eq!(resolve_type_alias("ts"), Some("typescript"));
+        assert_eq!(resolve_type_alias("bash"), Some("shell"));
+        assert_eq!(resolve_type_alias("yml"), Some("config"));
+        assert_eq!(resolve_type_alias("objective-c"), Some("objc"));
+        assert_eq!(resolve_type_alias("proto"), Some("protobuf"));
+    }
+
+    #[test]
+    fn resolve_type_alias_case_insensitive() {
+        assert_eq!(resolve_type_alias("Rust"), Some("rust"));
+        assert_eq!(resolve_type_alias("PYTHON"), Some("python"));
+        assert_eq!(resolve_type_alias("Rs"), Some("rust"));
+        assert_eq!(resolve_type_alias("PY"), Some("python"));
+        assert_eq!(resolve_type_alias("C++"), Some("cpp"));
+    }
+
+    #[test]
+    fn resolve_type_alias_with_dot_prefix() {
+        assert_eq!(resolve_type_alias(".rs"), Some("rust"));
+        assert_eq!(resolve_type_alias(".py"), Some("python"));
+        assert_eq!(resolve_type_alias(".md"), Some("markdown"));
+    }
+
+    #[test]
+    fn resolve_type_alias_unknown() {
+        assert_eq!(resolve_type_alias("foobar"), None);
+        assert_eq!(resolve_type_alias("xyz"), None);
     }
 }

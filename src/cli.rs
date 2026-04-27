@@ -76,7 +76,11 @@ pub struct Cli {
     #[arg(short = 'C', long, default_value_t = 2, global = true)]
     pub context: usize,
 
-    #[arg(long = "type", global = true)]
+    #[arg(
+        long = "type",
+        global = true,
+        help = "Filter by language name, extension, or alias (e.g. rust, rs, py, python, c++, bash, md)"
+    )]
     pub type_filter: Option<String>,
 
     #[arg(long, alias = "all", global = true)]
@@ -130,7 +134,14 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
+
+    // Resolve --type aliases: "rs" → "rust", "py" → "python", "c++" → "cpp", etc.
+    if let Some(ref tf) = cli.type_filter
+        && let Some(canonical) = crate::chunking::resolve_type_alias(tf)
+    {
+        cli.type_filter = Some(canonical.to_string());
+    }
     let action_count = [
         cli.add_path.is_some(),
         cli.rm_path.is_some(),

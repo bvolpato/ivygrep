@@ -523,7 +523,10 @@ pub fn hybrid_search(
     let mut allowed_languages = Vec::new();
     let mut can_pushdown_languages = options.include_globs.is_empty();
     if let Some(tf) = &options.type_filter {
-        allowed_languages.push(tf.to_string());
+        let resolved = crate::chunking::resolve_type_alias(tf)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| tf.to_string());
+        allowed_languages.push(resolved);
         can_pushdown_languages = true;
     } else if !options.include_globs.is_empty() {
         can_pushdown_languages = true;
@@ -1155,7 +1158,17 @@ fn truncate_for_reason(line: &str) -> String {
 
 fn type_matches(chunk: &IndexedChunk, type_filter: Option<&str>) -> bool {
     match type_filter {
-        Some(filter) => chunk.language.eq_ignore_ascii_case(filter),
+        Some(filter) => {
+            if chunk.language.eq_ignore_ascii_case(filter) {
+                return true;
+            }
+            // Resolve aliases: "rs" → "rust", "py" → "python", etc.
+            if let Some(canonical) = crate::chunking::resolve_type_alias(filter) {
+                chunk.language.eq_ignore_ascii_case(canonical)
+            } else {
+                false
+            }
+        }
         None => true,
     }
 }
