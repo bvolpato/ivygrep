@@ -10,8 +10,8 @@ use tantivy::query::QueryParser;
 
 use crate::embedding::EmbeddingModel;
 use crate::indexer::{
-    IndexedChunk, fetch_chunk_by_id, fetch_chunk_by_vector_key, open_sqlite_readonly,
-    open_tantivy_index,
+    IndexedChunk, fetch_chunk_by_id, fetch_chunk_by_vector_key, fetch_chunks_by_vector_keys_batch,
+    open_sqlite_readonly, open_tantivy_index,
 };
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
@@ -212,6 +212,30 @@ impl SearchContext {
             return Ok(Some(chunk));
         }
         Ok(None)
+    }
+
+    /// Batch-fetch chunks by vector keys, checking overlay then base.
+    pub fn fetch_chunks_by_vector_keys_batch(
+        &self,
+        keys: &[u64],
+    ) -> Result<HashMap<u64, IndexedChunk>> {
+        let mut result = fetch_chunks_by_vector_keys_batch(&self.sqlite, keys)?;
+        if let Some(base_sqlite) = &self.base_sqlite {
+            let missing: Vec<u64> = keys
+                .iter()
+                .filter(|k| !result.contains_key(k))
+                .copied()
+                .collect();
+            if !missing.is_empty() {
+                let base_chunks = fetch_chunks_by_vector_keys_batch(base_sqlite, &missing)?;
+                for (key, chunk) in base_chunks {
+                    if !self.is_shadowed_base_file(1, &chunk.file_path) {
+                        result.insert(key, chunk);
+                    }
+                }
+            }
+        }
+        Ok(result)
     }
 }
 
@@ -662,12 +686,23 @@ pub fn hybrid_search(
         }
     }
 
-    // Populate text from SQLite for the top chunks where Tantivy doesn't store it.
-    for (chunk, _) in &mut lexical_chunks {
-        if chunk.text.is_empty()
-            && let Ok(Some(full)) = ctx.fetch_chunk_by_vector_key(chunk.vector_key)
-        {
-            chunk.text = full.text;
+    // Batch-populate text from SQLite for the top chunks where Tantivy
+    // doesn't store it. Uses a single batched query instead of N individual
+    // round-trips, which is dramatically faster on large indexes.
+    let empty_text_keys: Vec<u64> = lexical_chunks
+        .iter()
+        .filter(|(c, _)| c.text.is_empty())
+        .map(|(c, _)| c.vector_key)
+        .collect();
+    if !empty_text_keys.is_empty()
+        && let Ok(batch_result) = ctx.fetch_chunks_by_vector_keys_batch(&empty_text_keys)
+    {
+        for (chunk, _) in &mut lexical_chunks {
+            if chunk.text.is_empty()
+                && let Some(full) = batch_result.get(&chunk.vector_key)
+            {
+                chunk.text = full.text.clone();
+            }
         }
     }
     tracing::trace!("lexical={:?} found={}", t0.elapsed(), lexical_chunks.len());
@@ -1395,11 +1430,14 @@ fn collect_semantic_candidates(
         matches.sort_by(|a, b| b.score.total_cmp(&a.score));
         matches.truncate(candidate_limit);
 
+        // Batch-fetch all candidate chunks in one SQL round-trip.
+        let keys: Vec<u64> = matches.iter().map(|m| m.key).collect();
+        let batch_result = ctx.fetch_chunks_by_vector_keys_batch(&keys)?;
         for vector_match in matches {
-            if let Some(chunk) = ctx.fetch_chunk_by_vector_key(vector_match.key)?
+            if let Some(chunk) = batch_result.get(&vector_match.key)
                 && (options.skip_gitignore || !chunk.is_ignored)
             {
-                semantic_chunks.push((chunk, vector_match.score));
+                semantic_chunks.push((chunk.clone(), vector_match.score));
             }
         }
     }

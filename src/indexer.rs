@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -1207,6 +1207,16 @@ pub fn open_sqlite_readonly(sqlite_path: &Path) -> Result<Connection> {
         sqlite_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
+
+    // Performance PRAGMAs for read-heavy workloads on large databases.
+    // On multi-GB databases (large repos with millions of chunks), the default
+    // 2 MB page cache causes constant disk re-reads.
+    conn.execute_batch(
+        "PRAGMA mmap_size = 2147483648;
+         PRAGMA cache_size = -65536;
+         PRAGMA temp_store = MEMORY;",
+    )?;
+
     Ok(conn)
 }
 
@@ -1310,7 +1320,7 @@ pub fn fetch_chunk_by_vector_key(
     conn: &Connection,
     vector_key: u64,
 ) -> Result<Option<IndexedChunk>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT chunk_id, file_path, start_line, end_line, language, kind, text, content_hash, vector_key, is_ignored
          FROM chunks
          WHERE vector_key = ?1
@@ -1337,6 +1347,61 @@ pub fn fetch_chunk_by_vector_key(
     }
 
     Ok(None)
+}
+
+/// Batch-fetch chunks by vector key in a single SQL round-trip.
+/// On large indexes (3.8M chunks), this reduces hundreds of individual
+/// B-tree traversals to 1-2 batched queries.
+pub fn fetch_chunks_by_vector_keys_batch(
+    conn: &Connection,
+    keys: &[u64],
+) -> Result<HashMap<u64, IndexedChunk>> {
+    let mut result = HashMap::with_capacity(keys.len());
+    if keys.is_empty() {
+        return Ok(result);
+    }
+
+    // SQLite supports up to 999 bind parameters; batch in groups of 500.
+    for batch in keys.chunks(500) {
+        let placeholders = batch.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let query = format!(
+            "SELECT chunk_id, file_path, start_line, end_line, language, kind, text, \
+             content_hash, vector_key, is_ignored \
+             FROM chunks WHERE vector_key IN ({})",
+            placeholders
+        );
+        let mut stmt = conn.prepare(&query)?;
+
+        let params: Vec<rusqlite::types::Value> = batch
+            .iter()
+            .map(|k| rusqlite::types::Value::Integer(*k as i64))
+            .collect();
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
+            .iter()
+            .map(|v| v as &dyn rusqlite::types::ToSql)
+            .collect();
+
+        let mut rows = stmt.query(param_refs.as_slice())?;
+        while let Some(row) = rows.next()? {
+            let raw_text: Vec<u8> = row.get(6)?;
+            let vector_key = row.get::<_, i64>(8)? as u64;
+            let chunk = IndexedChunk {
+                chunk_id: row.get::<_, String>(0)?,
+                file_path: PathBuf::from(row.get::<_, String>(1)?),
+                start_line: row.get::<_, i64>(2)? as usize,
+                end_line: row.get::<_, i64>(3)? as usize,
+                language: row.get(4)?,
+                kind: row.get(5)?,
+                text: decompress_text(raw_text),
+                content_hash: row.get(7)?,
+                vector_key,
+                is_ignored: row.get::<_, bool>(9)?,
+            };
+            result.insert(vector_key, chunk);
+        }
+    }
+
+    Ok(result)
 }
 
 pub fn read_preview_line(content: &str) -> String {
