@@ -621,16 +621,17 @@ pub fn hybrid_search(
         path_parser.set_conjunction_by_default();
         let trimmed = query_text.trim();
         let path_query_variants = build_lexical_queries(trimmed);
-        let mut path_ids: HashSet<String> =
-            lexical_chunks.iter().map(|(c, _)| c.chunk_id.clone()).collect();
+        let mut path_ids: HashSet<String> = lexical_chunks
+            .iter()
+            .map(|(c, _)| c.chunk_id.clone())
+            .collect();
 
         for pq in &path_query_variants {
             if let Ok(parsed) = path_parser.parse_query(pq) {
                 for (i, searcher) in ctx.searchers.iter().enumerate() {
-                    if let Ok(docs) = searcher.search(
-                        &parsed,
-                        &TopDocs::with_limit(100).order_by_score(),
-                    ) {
+                    if let Ok(docs) =
+                        searcher.search(&parsed, &TopDocs::with_limit(100).order_by_score())
+                    {
                         for (_score, addr) in docs {
                             if let Ok(doc) = searcher.doc::<TantivyDocument>(addr)
                                 && let Some(mut chunk) = fetch_chunk_by_id(doc, &ctx.fields)
