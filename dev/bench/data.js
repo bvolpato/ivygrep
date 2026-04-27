@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777256109522,
+  "lastUpdate": 1777267250712,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -9725,6 +9725,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 668.53,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "cdca1109ece96ac063cdda9739b467824a03b910",
+          "message": "perf: index-backed regex search with Tantivy pre-filtering and rayon parallelism\n\nRegex search on large repos was scanning every file on disk (289K files\nfor a 2GB+ monorepo), taking 12+ seconds even for simple patterns.\n\nNow extracts literal fragments from regex patterns (e.g. 'DDSQLizer' from\n'func.*DDSQLizer') and uses the Tantivy inverted index to pre-filter to\nonly files that could possibly match. Those candidates are then regex-scanned\nin parallel using rayon.\n\nResults on a 289K-file, 3.8M-chunk monorepo:\n- 'func.*DDSQLizer':    12s → 0.2s  (60× faster)\n- 'SELECT.*FROM.*WHERE': ~12s → 0.8s (15× faster)\n\nFalls back gracefully to filesystem walk when no index exists or no\nliteral fragments can be extracted from the pattern.",
+          "timestamp": "2026-04-27T01:11:31-04:00",
+          "tree_id": "1882205043ba887f61effe78d5e6f36a3a13a024",
+          "url": "https://github.com/bvolpato/ivygrep/commit/cdca1109ece96ac063cdda9739b467824a03b910"
+        },
+        "date": 1777267250496,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 965756470,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 7851.76,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3745.03,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2762.89,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11656.68,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 11343.47,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 6.72,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 508.23,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 29948.79,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 8874.79,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 10768.09,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 472649.64,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 564.93,
             "unit": "µs"
           }
         ]
