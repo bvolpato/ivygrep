@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777251952884,
+  "lastUpdate": 1777253578507,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -9280,6 +9280,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 537.73,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "67eb88f99aea6fb90b6b126bc3f8e71f4faafd00",
+          "message": "feat: boost files whose path matches the query\n\nAdd a path-match pass that queries the file_path_text index for\nchunks whose directory or file name contains all query tokens.\nResults are injected into the lexical candidate set with high\npriority so they dominate after RRF fusion.\n\nAlso add path_exact_match_boost (weight 3.0) in the scoring\nfunction: when the full query appears verbatim as a path segment,\nthat chunk gets a massive score boost.\n\nCombined effect: searching for a hyphenated service name like\n\"my-service\" now correctly ranks files under apps/my-service/\nat the very top instead of burying them under random code matches\nfor individual tokens like \"service\" or \"controller\".\n\nAlso increased PATH_SEGMENT_WEIGHT (0.20 → 0.40) and\nFILE_STEM_WEIGHT (0.30 → 0.50) for stronger general path ranking.",
+          "timestamp": "2026-04-26T21:18:24-04:00",
+          "tree_id": "6f98a3db58e3d81dc47396fcaade27577b8f316d",
+          "url": "https://github.com/bvolpato/ivygrep/commit/67eb88f99aea6fb90b6b126bc3f8e71f4faafd00"
+        },
+        "date": 1777253577910,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 930833280,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 7797.75,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3863.01,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2760.01,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11539.9,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 11356.45,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 7.01,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 547.33,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 29928.43,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 8888.65,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 5582.92,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 471835.08,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 597.53,
             "unit": "µs"
           }
         ]
