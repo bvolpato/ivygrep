@@ -611,6 +611,52 @@ pub fn hybrid_search(
     let mut lexical_chunks = lexical_by_id.into_values().collect::<Vec<_>>();
     lexical_chunks.sort_by(|a, b| b.1.total_cmp(&a.1));
     lexical_chunks.truncate(candidate_limit);
+    // ── Path-match pass ──────────────────────────────────────────────────
+    // Inject chunks whose file_path contains the query as a directory/file
+    // name. This ensures "my-service" finds files under
+    // apps/my-service/ even when the code-content BM25 candidates are
+    // dominated by generic single-token matches like "service".
+    if let Some(fpt_field) = ctx.fields.file_path_text {
+        let mut path_parser = QueryParser::for_index(&ctx.indexes[0], vec![fpt_field]);
+        path_parser.set_conjunction_by_default();
+        let trimmed = query_text.trim();
+        let path_query_variants = build_lexical_queries(trimmed);
+        let mut path_ids: HashSet<String> =
+            lexical_chunks.iter().map(|(c, _)| c.chunk_id.clone()).collect();
+
+        for pq in &path_query_variants {
+            if let Ok(parsed) = path_parser.parse_query(pq) {
+                for (i, searcher) in ctx.searchers.iter().enumerate() {
+                    if let Ok(docs) = searcher.search(
+                        &parsed,
+                        &TopDocs::with_limit(100).order_by_score(),
+                    ) {
+                        for (_score, addr) in docs {
+                            if let Ok(doc) = searcher.doc::<TantivyDocument>(addr)
+                                && let Some(mut chunk) = fetch_chunk_by_id(doc, &ctx.fields)
+                                    .filter(|c| !ctx.is_shadowed_base_file(i, &c.file_path))
+                                    .filter(|c| type_matches(c, options.type_filter.as_deref()))
+                                    .filter(|c| scope_matches(c, options.scope_filter.as_ref()))
+                                    .filter(|c| path_matches(c, &path_matcher))
+                                    .filter(|c| options.skip_gitignore || !c.is_ignored)
+                                && path_ids.insert(chunk.chunk_id.clone())
+                            {
+                                if chunk.text.is_empty()
+                                    && let Ok(Some(full)) =
+                                        ctx.fetch_chunk_by_vector_key(chunk.vector_key)
+                                {
+                                    chunk.text = full.text;
+                                }
+                                // High BM25 score so path matches rank
+                                // above content-only matches after RRF.
+                                lexical_chunks.push((chunk, 100.0));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Populate text from SQLite for the top chunks where Tantivy doesn't store it.
     for (chunk, _) in &mut lexical_chunks {
@@ -1376,10 +1422,11 @@ fn fuse_rrf(
     const SEMANTIC_SCORE_WEIGHT: f32 = 0.08;
     const SEMANTIC_ONLY_PENALTY: f32 = 0.60;
     const TERM_COVERAGE_WEIGHT: f32 = 0.35;
-    const PATH_SEGMENT_WEIGHT: f32 = 0.20;
-    const FILE_STEM_WEIGHT: f32 = 0.30;
+    const PATH_SEGMENT_WEIGHT: f32 = 0.40;
+    const FILE_STEM_WEIGHT: f32 = 0.50;
     const DEFINITION_NAME_BONUS: f32 = 0.25;
     const LOCATION_INTENT_WEIGHT: f32 = 0.20;
+    const PATH_EXACT_MATCH_WEIGHT: f32 = 3.0;
 
     let query_tokens = expanded_query_tokens(query_text);
     let location_intent = has_location_intent(query_text);
@@ -1459,6 +1506,8 @@ fn fuse_rrf(
             if !query_tokens.is_empty() {
                 score += path_segment_boost(&query_tokens, &chunk) * PATH_SEGMENT_WEIGHT;
             }
+
+            score += path_exact_match_boost(query_text, &chunk) * PATH_EXACT_MATCH_WEIGHT;
 
             if !query_tokens.is_empty() {
                 score += file_stem_boost(&query_tokens, &chunk) * FILE_STEM_WEIGHT;
@@ -1602,6 +1651,50 @@ fn path_segment_boost(query_tokens: &[String], chunk: &IndexedChunk) -> f32 {
         .filter(|t| segments.iter().any(|seg| seg.contains(t.as_str())))
         .count();
     matched as f32 / query_tokens.len() as f32
+}
+
+/// Massive boost when the full query appears as a path segment (directory or
+/// file name). Searching "my-service" should rank files under a directory
+/// literally named "my-service/" far above random code mentions.
+fn path_exact_match_boost(query: &str, chunk: &IndexedChunk) -> f32 {
+    let query_lower = query.trim().to_ascii_lowercase();
+    if query_lower.is_empty() {
+        return 0.0;
+    }
+    let path_lower = chunk.file_path.to_string_lossy().to_ascii_lowercase();
+    let segments: Vec<&str> = path_lower.split('/').collect();
+
+    // Also build variants: "my service" -> "my-service", "my_service"
+    let hyphenated = query_lower.replace(' ', "-");
+    let underscored = query_lower.replace(' ', "_");
+    let compacted = query_lower.replace(' ', "");
+
+    let candidates = [&query_lower, &hyphenated, &underscored, &compacted];
+
+    for seg in &segments {
+        for candidate in &candidates {
+            // Exact segment match: dir name IS the query
+            if *seg == candidate.as_str() {
+                return 1.0;
+            }
+            // Segment starts/ends with query (e.g. "my-service-v2")
+            if seg.len() > candidate.len()
+                && (seg.starts_with(candidate.as_str()) || seg.ends_with(candidate.as_str()))
+            {
+                return 0.7;
+            }
+        }
+    }
+
+    // Check if the full path contains the query as a substring
+    // (e.g. path has "my-service" embedded in a longer segment)
+    for candidate in &candidates {
+        if candidate.len() >= 4 && path_lower.contains(candidate.as_str()) {
+            return 0.4;
+        }
+    }
+
+    0.0
 }
 
 fn file_stem_boost(query_tokens: &[String], chunk: &IndexedChunk) -> f32 {
