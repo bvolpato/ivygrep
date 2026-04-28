@@ -189,8 +189,8 @@ ig "query" ~/other/project         # search a different workspace
 ig --add .                         # register & index a workspace
 ig --rm .                          # unregister a workspace
 ig --status                        # show workspace health & embedding status
-ig doctor                          # inspect index health for the current workspace
-ig doctor --fix                    # rebuild a broken or stale index
+ig --doctor                        # inspect index health for the current workspace
+ig --doctor --fix                  # rebuild a broken or stale index
 
 # Search modes
 ig --interactive \"query\"             # interactive TUI with file/snippet browsing

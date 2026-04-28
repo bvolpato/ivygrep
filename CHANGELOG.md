@@ -2,6 +2,11 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.6.13] — 2026-04-28
+
+### Changed
+- **`ig doctor` → `ig --doctor`:** The `doctor` subcommand is now a `--doctor` flag. This frees the word "doctor" for use as a search query — previously `ig doctor` was silently intercepted before clap parsing, making it impossible to search for the word "doctor". `--fix` is now a standalone flag that requires `--doctor`.
+
 ## [0.6.12] — 2026-04-27
 
 ### Performance
@@ -146,7 +151,7 @@ All notable changes to ivygrep are documented in this file.
 ## [0.5.47] — 2026-04-12
 
 ### Fixed
-- **Stale legacy runtime PID cleanup:** `ig doctor --fix` now removes dead legacy watcher, indexing, and enhancement PID files instead of only reporting them
+- **Stale legacy runtime PID cleanup:** `ig --doctor --fix` now removes dead legacy watcher, indexing, and enhancement PID files instead of only reporting them
 - **Query-path self-healing:** normal CLI and MCP searches now clean stale legacy runtime PID files before searching, so old runtime markers stop lingering until a manual repair
 - **False stale warnings:** doctor now checks whether legacy PID files still point to a live process before flagging them as stale
 
@@ -170,14 +175,14 @@ All notable changes to ivygrep are documented in this file.
 ### Improved
 - **Watcher stability:** background file watching now uses per-workspace coalescing (`dirty` + `indexing` + rerun-once semantics) instead of an unbounded event queue, eliminating redundant full reindexes during save storms
 - **Status accuracy:** `ig --status` now distinguishes “configured to watch” from “watcher alive”, and reports stalled indexing / enhancement jobs instead of showing them as indefinitely active
-- **Doctor coverage:** `ig doctor` now flags stale legacy PID files, stale job heartbeats, long-paused neural enhancement, and watcher queue saturation symptoms
+- **Doctor coverage:** `ig --doctor` now flags stale legacy PID files, stale job heartbeats, long-paused neural enhancement, and watcher queue saturation symptoms
 - **Watcher reindex correctness:** daemon-triggered updates now bypass the watcher short-circuit and actually process filesystem mutations
 - **Configuration fidelity:** indexing now preserves the workspace’s requested watch mode instead of silently forcing `watch_enabled = true`
 
 ## [0.5.44] — 2026-04-11
 
 ### Added
-- **`ig doctor` / `ig doctor --fix`:** new index-health inspection and repair flow for stale, partial, or corrupted local indexes
+- **`ig --doctor` / `ig --doctor --fix`:** new index-health inspection and repair flow for stale, partial, or corrupted local indexes
 - Relevance regressions for natural-language implementation queries and source-file lookup
 - Workspace health classification covering `not_indexed`, `healthy`, `healthy_empty`, and `unhealthy`
 

@@ -34,6 +34,7 @@ pub struct RawIndexedChunk {
 }
 
 impl RawIndexedChunk {
+    #[allow(dead_code)]
     fn decompress(self) -> IndexedChunk {
         IndexedChunk {
             chunk_id: self.chunk_id,
@@ -345,9 +346,6 @@ fn collect_literal_candidates(
         if limit == usize::MAX {
             50_000
         } else {
-            // Literal pass needs exact substring verification via SQLite (text
-            // not stored in Tantivy), so keep candidate count proportional but
-            // capped. Default ~50 → 250, --limit 500 → 2500, --limit 5000 → 25K.
             (limit * 5).clamp(200, 25_000)
         }
     } else {
@@ -364,14 +362,10 @@ fn collect_literal_candidates(
     let parser = QueryParser::for_index(&ctx.indexes[0], search_fields);
 
     let mut found_ids = HashSet::<String>::new();
-    let mut verified = Vec::<IndexedChunk>::new();
-    // Cap on SQLite lookups: text is NOT stored in Tantivy, so every
-    // candidate requires an individual SQLite fetch. On a 3M-chunk index
-    // this dominates the literal pass. Stop after checking enough.
-    let verify_budget = candidate_limit;
-    let mut verify_count = 0usize;
     let target_hits = options.limit.unwrap_or(100).min(500);
 
+    // Phase 1: Collect candidate chunks from Tantivy (metadata only, no text).
+    let mut candidates: Vec<IndexedChunk> = Vec::new();
     'outer: for lexical_query in build_lexical_queries(query) {
         let parsed_query = match parser.parse_query(&lexical_query) {
             Ok(q) => q,
@@ -386,35 +380,48 @@ fn collect_literal_candidates(
 
             for (_score, addr) in docs {
                 let doc: TantivyDocument = searcher.doc(addr)?;
-                if let Some(mut chunk) = fetch_chunk_by_id(doc, &ctx.fields)
+                if let Some(chunk) = fetch_chunk_by_id(doc, &ctx.fields)
                     .filter(|c| !ctx.is_shadowed_base_file(i, &c.file_path))
                     .filter(|c| type_matches(c, options.type_filter.as_deref()))
                     .filter(|c| scope_matches(c, options.scope_filter.as_ref()))
                     .filter(|c| path_matches(c, path_matcher))
                     .filter(|c| options.skip_gitignore || !c.is_ignored)
+                    && found_ids.insert(chunk.chunk_id.clone())
                 {
-                    if found_ids.contains(&chunk.chunk_id) {
-                        continue;
-                    }
-                    if chunk.text.is_empty()
-                        && let Ok(Some(full)) = ctx.fetch_chunk_by_vector_key(chunk.vector_key)
-                    {
-                        chunk.text = full.text;
-                    }
-                    verify_count += 1;
-                    if matcher.is_match(&chunk.text) {
-                        found_ids.insert(chunk.chunk_id.clone());
-                        verified.push(chunk);
-                        if verified.len() >= target_hits {
-                            break 'outer;
-                        }
-                    }
-                    // Stop burning SQLite lookups if we've already checked
-                    // enough candidates without finding many matches.
-                    if verify_count >= verify_budget {
+                    candidates.push(chunk);
+                    if candidates.len() >= candidate_limit {
                         break 'outer;
                     }
                 }
+            }
+        }
+    }
+
+    // Phase 2: Batch-fetch text from SQLite for all candidates at once.
+    let empty_keys: Vec<u64> = candidates
+        .iter()
+        .filter(|c| c.text.is_empty())
+        .map(|c| c.vector_key)
+        .collect();
+    if !empty_keys.is_empty()
+        && let Ok(batch) = ctx.fetch_chunks_by_vector_keys_batch(&empty_keys)
+    {
+        for c in &mut candidates {
+            if c.text.is_empty()
+                && let Some(full) = batch.get(&c.vector_key)
+            {
+                c.text = full.text.clone();
+            }
+        }
+    }
+
+    // Phase 3: Verify exact substring match.
+    let mut verified = Vec::<IndexedChunk>::new();
+    for chunk in candidates {
+        if matcher.is_match(&chunk.text) {
+            verified.push(chunk);
+            if verified.len() >= target_hits {
+                break;
             }
         }
     }
@@ -653,6 +660,8 @@ pub fn hybrid_search(
             .map(|(c, _)| c.chunk_id.clone())
             .collect();
 
+        // Phase 1: collect path-match candidates from Tantivy.
+        let mut path_candidates: Vec<IndexedChunk> = Vec::new();
         for pq in &path_query_variants {
             if let Ok(parsed) = path_parser.parse_query(pq) {
                 for (i, searcher) in ctx.searchers.iter().enumerate() {
@@ -661,7 +670,7 @@ pub fn hybrid_search(
                     {
                         for (_score, addr) in docs {
                             if let Ok(doc) = searcher.doc::<TantivyDocument>(addr)
-                                && let Some(mut chunk) = fetch_chunk_by_id(doc, &ctx.fields)
+                                && let Some(chunk) = fetch_chunk_by_id(doc, &ctx.fields)
                                     .filter(|c| !ctx.is_shadowed_base_file(i, &c.file_path))
                                     .filter(|c| type_matches(c, options.type_filter.as_deref()))
                                     .filter(|c| scope_matches(c, options.scope_filter.as_ref()))
@@ -669,20 +678,36 @@ pub fn hybrid_search(
                                     .filter(|c| options.skip_gitignore || !c.is_ignored)
                                 && path_ids.insert(chunk.chunk_id.clone())
                             {
-                                if chunk.text.is_empty()
-                                    && let Ok(Some(full)) =
-                                        ctx.fetch_chunk_by_vector_key(chunk.vector_key)
-                                {
-                                    chunk.text = full.text;
-                                }
-                                // High BM25 score so path matches rank
-                                // above content-only matches after RRF.
-                                lexical_chunks.push((chunk, 100.0));
+                                path_candidates.push(chunk);
                             }
                         }
                     }
                 }
             }
+        }
+
+        // Phase 2: batch-fetch text for path candidates.
+        let empty_keys: Vec<u64> = path_candidates
+            .iter()
+            .filter(|c| c.text.is_empty())
+            .map(|c| c.vector_key)
+            .collect();
+        if !empty_keys.is_empty()
+            && let Ok(batch) = ctx.fetch_chunks_by_vector_keys_batch(&empty_keys)
+        {
+            for c in &mut path_candidates {
+                if c.text.is_empty()
+                    && let Some(full) = batch.get(&c.vector_key)
+                {
+                    c.text = full.text.clone();
+                }
+            }
+        }
+
+        for chunk in path_candidates {
+            // High BM25 score so path matches rank
+            // above content-only matches after RRF.
+            lexical_chunks.push((chunk, 100.0));
         }
     }
 
@@ -1220,6 +1245,7 @@ fn path_matches(chunk: &IndexedChunk, path_matcher: &PathGlobMatcher) -> bool {
     path_matcher.matches(&chunk.file_path)
 }
 
+#[allow(dead_code)]
 fn escape_like_pattern(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for ch in value.chars() {
@@ -1255,6 +1281,7 @@ fn is_definition_kind(kind: &str) -> bool {
 
 /// Pre-collect chunks from SQLite that match glob/scope/type filters.
 /// Used to avoid full-corpus vector scan when targeted filters are set.
+#[allow(dead_code)]
 fn collect_filtered_chunks(
     ctx: &SearchContext,
     path_matcher: &PathGlobMatcher,
@@ -1286,6 +1313,7 @@ fn collect_filtered_chunks(
     chunks
 }
 
+#[allow(dead_code)]
 fn query_filtered_chunks(
     conn: &Connection,
     path_matcher: &PathGlobMatcher,
@@ -1392,52 +1420,50 @@ fn collect_semantic_candidates(
         || options.scope_filter.is_some()
         || options.type_filter.is_some();
 
-    if has_filters {
-        let filtered_chunks = collect_filtered_chunks(
-            ctx,
-            path_matcher,
-            options.scope_filter.as_ref(),
-            options.type_filter.as_deref(),
-            &options.include_globs,
-            options.skip_gitignore,
-        );
-
-        let mut semantic_raw = Vec::new();
-        for chunk in filtered_chunks {
-            let mut score =
-                primary_store.and_then(|store| store.score(chunk.vector_key, query_vector));
-            if score.is_none() {
-                score = base_store.and_then(|store| store.score(chunk.vector_key, query_vector));
-            }
-            if let Some(score) = score {
-                semantic_raw.push((chunk, score));
-            }
-        }
-        semantic_raw.sort_by(|a, b| b.1.total_cmp(&a.1));
-        semantic_raw.truncate(candidate_limit);
-
-        for (raw_chunk, score) in semantic_raw {
-            semantic_chunks.push((raw_chunk.decompress(), score));
-        }
+    // Always use the ANN index for initial candidates — even when filters are
+    // active. Over-fetch then post-filter is orders of magnitude faster than
+    // loading all matching rows from SQLite (which could be millions for common
+    // language filters like "Go" on large repos).
+    let ann_limit = if has_filters {
+        // Over-fetch so we still have enough candidates after filtering.
+        (candidate_limit * 10).min(20_000)
     } else {
-        let mut matches = Vec::new();
-        if let Some(store) = primary_store {
-            matches.extend(store.search(query_vector, candidate_limit));
-        }
-        if let Some(store) = base_store {
-            matches.extend(store.search(query_vector, candidate_limit));
-        }
-        matches.sort_by(|a, b| b.score.total_cmp(&a.score));
-        matches.truncate(candidate_limit);
+        candidate_limit
+    };
 
-        // Batch-fetch all candidate chunks in one SQL round-trip.
-        let keys: Vec<u64> = matches.iter().map(|m| m.key).collect();
-        let batch_result = ctx.fetch_chunks_by_vector_keys_batch(&keys)?;
-        for vector_match in matches {
-            if let Some(chunk) = batch_result.get(&vector_match.key)
-                && (options.skip_gitignore || !chunk.is_ignored)
-            {
-                semantic_chunks.push((chunk.clone(), vector_match.score));
+    let mut matches = Vec::new();
+    if let Some(store) = primary_store {
+        matches.extend(store.search(query_vector, ann_limit));
+    }
+    if let Some(store) = base_store {
+        matches.extend(store.search(query_vector, ann_limit));
+    }
+    matches.sort_by(|a, b| b.score.total_cmp(&a.score));
+    matches.truncate(ann_limit);
+
+    // Batch-fetch all candidate chunks in one SQL round-trip.
+    let keys: Vec<u64> = matches.iter().map(|m| m.key).collect();
+    let batch_result = ctx.fetch_chunks_by_vector_keys_batch(&keys)?;
+
+    for vector_match in matches {
+        if let Some(chunk) = batch_result.get(&vector_match.key)
+            && (options.skip_gitignore || !chunk.is_ignored)
+        {
+            // Post-filter: apply type/scope/glob filters in Rust.
+            if has_filters {
+                if !type_matches(chunk, options.type_filter.as_deref()) {
+                    continue;
+                }
+                if !scope_matches(chunk, options.scope_filter.as_ref()) {
+                    continue;
+                }
+                if !path_matches(chunk, path_matcher) {
+                    continue;
+                }
+            }
+            semantic_chunks.push((chunk.clone(), vector_match.score));
+            if semantic_chunks.len() >= candidate_limit {
+                break;
             }
         }
     }

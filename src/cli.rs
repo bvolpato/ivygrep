@@ -46,6 +46,13 @@ pub struct Cli {
     pub status: bool,
 
     #[arg(long, default_value_t = false)]
+    pub doctor: bool,
+
+    /// Repair a broken or stale index (used with --doctor).
+    #[arg(long, default_value_t = false, requires = "doctor")]
+    pub fix: bool,
+
+    #[arg(long, default_value_t = false)]
     pub daemon: bool,
 
     #[arg(long, default_value_t = false)]
@@ -130,10 +137,6 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
-    if maybe_run_doctor_command()? {
-        return Ok(());
-    }
-
     let mut cli = Cli::parse();
 
     // Resolve --type aliases: "rs" → "rust", "py" → "python", "c++" → "cpp", etc.
@@ -146,6 +149,7 @@ pub async fn run() -> Result<()> {
         cli.add_path.is_some(),
         cli.rm_path.is_some(),
         cli.status,
+        cli.doctor,
         cli.daemon,
         cli.mcp,
     ]
@@ -154,7 +158,7 @@ pub async fn run() -> Result<()> {
     .count();
 
     if action_count > 1 {
-        bail!("use only one action at a time: --add, --rm, --status, --daemon, or --mcp");
+        bail!("use only one action at a time: --add, --rm, --status, --doctor, --daemon, or --mcp");
     }
 
     if cli.daemon {
@@ -169,6 +173,12 @@ pub async fn run() -> Result<()> {
 
     if cli.status {
         return run_status(cli.json).await;
+    }
+
+    if cli.doctor {
+        let path = cli.query_path.as_deref();
+        run_doctor(path, cli.fix, cli.json)?;
+        return Ok(());
     }
 
     if let Some(path) = &cli.add_path {
@@ -409,7 +419,7 @@ async fn run_status(json: bool) -> Result<()> {
                     }
                 } else if ws.enhancing_stalled {
                     println!(
-                        "{prefix}  Search: \x1b[1;31m⚠ stalled neural upgrade\x1b[0m (run `ig doctor` or retry a query)"
+                        "{prefix}  Search: \x1b[1;31m⚠ stalled neural upgrade\x1b[0m (run `ig --doctor` or retry a query)"
                     );
                 } else if ws.has_neural_vectors {
                     let pct = if ws.chunk_count > 0 {
@@ -435,7 +445,7 @@ async fn run_status(json: bool) -> Result<()> {
                     println!("{prefix}  Search: \x1b[1;33m⟳ indexing\x1b[0m ({detail})");
                 } else if ws.indexing_stalled {
                     println!(
-                        "{prefix}  Search: \x1b[1;31m⚠ stalled indexing\x1b[0m (run `ig doctor --fix`)"
+                        "{prefix}  Search: \x1b[1;31m⚠ stalled indexing\x1b[0m (run `ig --doctor --fix`)"
                     );
                 } else if is_overlay {
                     if ws.chunk_count > 0 {
@@ -1435,42 +1445,6 @@ fn init_tracing() {
         .with_env_filter(EnvFilter::from_default_env())
         .with_target(false)
         .try_init();
-}
-
-fn maybe_run_doctor_command() -> Result<bool> {
-    let args = env::args().skip(1).collect::<Vec<_>>();
-    if args.first().is_none_or(|arg| arg != "doctor") {
-        return Ok(false);
-    }
-
-    let mut fix = false;
-    let mut json = false;
-    let mut path: Option<PathBuf> = None;
-
-    for arg in args.iter().skip(1) {
-        match arg.as_str() {
-            "--fix" => fix = true,
-            "--json" => json = true,
-            "-h" | "--help" => {
-                println!("Usage: ig doctor [PATH] [--fix] [--json]");
-                println!();
-                println!("Inspect the current workspace index and optionally rebuild it.");
-                return Ok(true);
-            }
-            value if value.starts_with('-') => {
-                bail!("unknown option for `ig doctor`: {value}");
-            }
-            value => {
-                if path.is_some() {
-                    bail!("too many arguments for `ig doctor`");
-                }
-                path = Some(PathBuf::from(value));
-            }
-        }
-    }
-
-    run_doctor(path.as_deref(), fix, json)?;
-    Ok(true)
 }
 
 fn run_doctor(path: Option<&Path>, fix: bool, json: bool) -> Result<()> {

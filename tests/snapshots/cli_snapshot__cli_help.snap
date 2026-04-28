@@ -1,5 +1,6 @@
 ---
 source: tests/cli_snapshot.rs
+assertion_line: 60
 expression: text
 ---
 Semantic grep that stays local
@@ -14,6 +15,8 @@ Options:
       --add [<PATH>]          
       --rm [<PATH>]           
       --status                
+      --doctor                
+      --fix                   Repair a broken or stale index (used with --doctor)
       --daemon                
       --mcp                   
       --wait-for-enhancement  

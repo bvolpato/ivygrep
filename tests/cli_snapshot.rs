@@ -577,7 +577,7 @@ fn cli_doctor_json_reports_unhealthy_zero_chunk_index() {
     let output = cmd
         .current_dir(&root)
         .env("IVYGREP_HOME", &home)
-        .args(["doctor", "--json"])
+        .args(["--doctor", "--json"])
         .assert()
         .success()
         .get_output()
@@ -614,7 +614,7 @@ fn cli_doctor_fix_repairs_unhealthy_index() {
     let output = cmd
         .current_dir(&root)
         .env("IVYGREP_HOME", &home)
-        .args(["doctor", "--fix", "--json"])
+        .args(["--doctor", "--fix", "--json"])
         .assert()
         .success()
         .get_output()
