@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777347361544,
+  "lastUpdate": 1777392229190,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -10259,6 +10259,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 543.27,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "fd2801f7052a93a214087785cacf725a6d4f43d5",
+          "message": "release: v0.6.13 — doctor subcommand → --doctor flag\n\nBreaking: `ig doctor` is now `ig --doctor`. The word 'doctor' was\nsilently intercepted before clap parsing, making it impossible to search\nfor the word 'doctor'. Now uses a proper --doctor flag with --fix as\na dependent flag (requires --doctor).\n\n- Convert `doctor` positional subcommand to `--doctor` clap flag\n- Add `--fix` flag with `requires = \"doctor\"` constraint\n- Remove raw env::args() interception in maybe_run_doctor_command()\n- Update all user-facing strings, docs, tests, and snapshots\n- Suppress pre-existing dead_code warnings for filtered chunk helpers",
+          "timestamp": "2026-04-28T11:54:02-04:00",
+          "tree_id": "f2fd2d283109653dce2f15887d8b18c67cf0133e",
+          "url": "https://github.com/bvolpato/ivygrep/commit/fd2801f7052a93a214087785cacf725a6d4f43d5"
+        },
+        "date": 1777392228901,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 949506960,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 7697.32,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3917.98,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2819.03,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11153.11,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 10856.27,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 7.42,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 564.43,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 19915.46,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 8205.51,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 10362.92,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 449556.66,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 513.57,
             "unit": "µs"
           }
         ]
