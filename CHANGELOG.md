@@ -2,6 +2,16 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.6.12] — 2026-04-27
+
+### Performance
+- **8× faster hybrid search on large repos:** Replaced O(N) individual SQLite lookups with batched `WHERE vector_key IN (...)` queries, reducing hundreds of B-tree traversals to 1-2 round-trips. Hash hybrid search dropped from ~4s to ~0.5s on a 290K-file, 3.8M-chunk repository.
+- **Read-path SQLite PRAGMAs:** Added `mmap_size` (2 GB), `cache_size` (64 MB), and `temp_store = MEMORY` to read-only connections. Cold-start search dropped from ~5.4s to ~3.5s on multi-GB indexes.
+- **Prepared statement caching:** `fetch_chunk_by_vector_key` now uses `prepare_cached()` to reuse compiled SQL across hundreds of calls per search.
+
+### Added
+- **`--type` accepts file extensions and aliases:** You can now use `ig --type rs`, `ig --type py`, `ig --type c++`, or `ig --type bash` instead of the full language name. Common aliases like `js` → JavaScript, `ts` → TypeScript, and `yml` → YAML are supported.
+
 ## [0.6.11] — 2026-04-27
 
 ### Performance
