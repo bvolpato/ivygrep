@@ -2,6 +2,14 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.6.14] — 2026-04-29
+
+### Performance
+- **Regex matcher hoisted out of hot loop:** `regex_search_parallel` was rebuilding the compiled regex matcher for every file in the `par_iter` loop. The matcher is now built once and shared across all threads, eliminating redundant compilation overhead on every file.
+
+### Tests
+- **8 new `filter_meaningful_scores` unit tests:** The adaptive score filtering function — which determines which search results users actually see — now has dedicated unit tests covering single-result passthrough, empty input, uniform distributions, outlier dropping, literal-source bypass, never-empty guarantee, tight cluster preservation, and wide-spread filtering. Total test count: 234.
+
 ## [0.6.13] — 2026-04-28
 
 ### Changed

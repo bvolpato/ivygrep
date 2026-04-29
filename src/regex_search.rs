@@ -207,7 +207,9 @@ fn regex_search_parallel(
     let done = AtomicBool::new(false);
     let results = Mutex::new(Vec::new());
 
-    let regex_pattern = pattern.to_string();
+    let matcher = RegexMatcherBuilder::new()
+        .case_insensitive(true)
+        .build(pattern)?;
 
     file_paths.par_iter().for_each(|rel_path| {
         if done.load(Ordering::Relaxed) {
@@ -219,13 +221,6 @@ fn regex_search_parallel(
             return;
         }
 
-        let matcher = match RegexMatcherBuilder::new()
-            .case_insensitive(true)
-            .build(&regex_pattern)
-        {
-            Ok(m) => m,
-            Err(_) => return,
-        };
         let mut searcher: Searcher = SearcherBuilder::new().line_number(true).build();
 
         let mut local_hits = Vec::new();

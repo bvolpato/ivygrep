@@ -2955,4 +2955,159 @@ export function registerCommands(p: Plugin) {
         assert!(!is_test_path("src/handler.rs"));
         assert!(!is_test_path("lib/utils.py"));
     }
+
+    // -----------------------------------------------------------------------
+    // filter_meaningful_scores unit tests
+    // -----------------------------------------------------------------------
+
+    fn make_chunk(id: &str) -> IndexedChunk {
+        crate::indexer::IndexedChunk {
+            chunk_id: id.to_string(),
+            file_path: PathBuf::from(format!("{id}.rs")),
+            start_line: 1,
+            end_line: 10,
+            language: "rust".to_string(),
+            kind: "function".to_string(),
+            text: format!("fn {id}() {{}}"),
+            content_hash: id.to_string(),
+            vector_key: 0,
+            is_ignored: false,
+        }
+    }
+
+    fn make_ranked(
+        entries: &[(&str, f32, &[&str])],
+    ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
+        entries
+            .iter()
+            .map(|(id, score, sources)| {
+                (
+                    make_chunk(id),
+                    *score,
+                    sources.iter().map(|s| s.to_string()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn filter_single_result_returns_it() {
+        let ranked = make_ranked(&[("a", 0.5, &["lexical"])]);
+        let filtered = filter_meaningful_scores(&ranked);
+        assert_eq!(filtered.len(), 1);
+    }
+
+    #[test]
+    fn filter_empty_input_returns_empty() {
+        let ranked: Vec<(IndexedChunk, f32, Vec<String>)> = vec![];
+        let filtered = filter_meaningful_scores(&ranked);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn filter_uniform_scores_keeps_all() {
+        // All scores are identical — stddev is 0, so threshold = max(mean, 0.35*best, 0.01)
+        // All entries equal that threshold so all should pass
+        let ranked = make_ranked(&[
+            ("a", 0.5, &["lexical"]),
+            ("b", 0.5, &["lexical"]),
+            ("c", 0.5, &["lexical"]),
+            ("d", 0.5, &["lexical"]),
+        ]);
+        let filtered = filter_meaningful_scores(&ranked);
+        assert_eq!(filtered.len(), 4, "all uniform scores should be kept");
+    }
+
+    #[test]
+    fn filter_drops_low_outliers() {
+        // One strong hit, several very weak ones — the weak ones should be filtered
+        let ranked = make_ranked(&[
+            ("strong", 1.0, &["lexical", "semantic"]),
+            ("ok", 0.5, &["lexical"]),
+            ("weak1", 0.02, &["semantic"]),
+            ("weak2", 0.01, &["semantic"]),
+        ]);
+        let filtered = filter_meaningful_scores(&ranked);
+        // The threshold should be high enough to drop weak1 and weak2
+        // (mean - stddev with a 0.35*best clamp of 0.35 means entries below 0.35 are cut)
+        assert!(
+            filtered.len() <= 3,
+            "very low scores should be filtered out, got {}",
+            filtered.len()
+        );
+        assert_eq!(filtered[0].0.chunk_id, "strong");
+    }
+
+    #[test]
+    fn filter_keeps_literal_sources_even_below_threshold() {
+        // Even a below-threshold result should be kept if it has a "literal" source
+        let ranked = make_ranked(&[
+            ("strong", 1.0, &["lexical"]),
+            ("literal_hit", 0.001, &["literal"]),
+        ]);
+        let filtered = filter_meaningful_scores(&ranked);
+        assert_eq!(filtered.len(), 2, "literal source should bypass threshold");
+        let has_literal = filtered.iter().any(|(c, _, _)| c.chunk_id == "literal_hit");
+        assert!(has_literal, "literal_hit must be preserved");
+    }
+
+    #[test]
+    fn filter_never_returns_empty_when_input_nonempty() {
+        // Even if all scores are terrible, at least the best one should be returned
+        let ranked = make_ranked(&[
+            ("barely", 0.001, &["semantic"]),
+            ("worse", 0.0001, &["semantic"]),
+        ]);
+        let filtered = filter_meaningful_scores(&ranked);
+        assert!(
+            !filtered.is_empty(),
+            "must return at least the best result"
+        );
+        assert_eq!(filtered[0].0.chunk_id, "barely");
+    }
+
+    #[test]
+    fn filter_tight_cluster_keeps_all() {
+        // Scores in a tight cluster should all survive (small stddev, mean ≈ values)
+        // 0.35*best(0.50) = 0.175, so all values are well above the clamp floor.
+        // mean=0.49, stddev≈0.007, threshold=max(0.483, 0.175, 0.01)=0.483
+        // All four values ≥ 0.483 ✓
+        let ranked = make_ranked(&[
+            ("a", 0.50, &["lexical"]),
+            ("b", 0.50, &["lexical"]),
+            ("c", 0.49, &["semantic"]),
+            ("d", 0.49, &["lexical"]),
+        ]);
+        let filtered = filter_meaningful_scores(&ranked);
+        assert_eq!(
+            filtered.len(),
+            4,
+            "tight cluster should keep all results, got {}",
+            filtered.len()
+        );
+    }
+
+    #[test]
+    fn filter_wide_spread_keeps_top_drops_bottom() {
+        // Wide spread: top is very high, bottom is very low
+        let ranked = make_ranked(&[
+            ("top", 2.0, &["lexical", "semantic"]),
+            ("mid", 1.0, &["lexical"]),
+            ("low", 0.3, &["semantic"]),
+            ("noise", 0.05, &["semantic"]),
+        ]);
+        let filtered = filter_meaningful_scores(&ranked);
+        // With best=2.0, the 0.35*best clamp = 0.70, so "noise" (0.05) and "low" (0.3) drop
+        assert!(
+            filtered.len() >= 2,
+            "should keep at least top and mid, got {}",
+            filtered.len()
+        );
+        assert!(
+            filtered.len() <= 3,
+            "should drop the noise, got {}",
+            filtered.len()
+        );
+        assert_eq!(filtered[0].0.chunk_id, "top");
+    }
 }
