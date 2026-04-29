@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777392229190,
+  "lastUpdate": 1777473117054,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -10348,6 +10348,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 513.57,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "f2c22e1f6a9d434584fe94a7c6203fde41e34f36",
+          "message": "release: v0.6.14 — regex perf fix + filter score tests\n\nPerformance:\n- Hoist regex matcher out of par_iter hot loop in regex_search_parallel,\n  eliminating per-file regex compilation overhead\n\nTests:\n- Add 8 unit tests for filter_meaningful_scores covering adaptive\n  threshold behavior, literal source bypass, and edge cases",
+          "timestamp": "2026-04-29T10:22:19-04:00",
+          "tree_id": "bf3c284beb5090f61cbe2c32836a66b9008fedb4",
+          "url": "https://github.com/bvolpato/ivygrep/commit/f2c22e1f6a9d434584fe94a7c6203fde41e34f36"
+        },
+        "date": 1777473116441,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 894666580,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 11971.29,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 2899.93,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2145.04,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 9432.22,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 9161.1,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 5.15,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 393.69,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 16465.22,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 10800.41,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 5261.89,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 375244.29,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 471.98,
             "unit": "µs"
           }
         ]
