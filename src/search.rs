@@ -2975,9 +2975,7 @@ export function registerCommands(p: Plugin) {
         }
     }
 
-    fn make_ranked(
-        entries: &[(&str, f32, &[&str])],
-    ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
+    fn make_ranked(entries: &[(&str, f32, &[&str])]) -> Vec<(IndexedChunk, f32, Vec<String>)> {
         entries
             .iter()
             .map(|(id, score, sources)| {
@@ -3059,10 +3057,7 @@ export function registerCommands(p: Plugin) {
             ("worse", 0.0001, &["semantic"]),
         ]);
         let filtered = filter_meaningful_scores(&ranked);
-        assert!(
-            !filtered.is_empty(),
-            "must return at least the best result"
-        );
+        assert!(!filtered.is_empty(), "must return at least the best result");
         assert_eq!(filtered[0].0.chunk_id, "barely");
     }
 
