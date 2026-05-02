@@ -178,13 +178,16 @@ impl EmbeddingModel for HashEmbeddingModel {
 
     fn embed_batch(&self, texts: &[&str]) -> Vec<Vec<f32>> {
         use rayon::prelude::*;
-        // Use a dedicated thread pool with bounded parallelism so hash
-        // embedding during initial indexing doesn't consume all CPU cores.
-        let n_threads = (num_cpus::get() / 2).max(1);
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(n_threads)
-            .build()
-            .expect("failed to build hash embed thread pool");
+        use std::sync::OnceLock;
+        // Cache the bounded thread pool so it's built once, not per batch.
+        static HASH_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+        let pool = HASH_POOL.get_or_init(|| {
+            let n_threads = (num_cpus::get() / 2).max(1);
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(n_threads)
+                .build()
+                .expect("failed to build hash embed thread pool")
+        });
         pool.install(|| texts.par_iter().map(|t| self.embed(t)).collect())
     }
 }
@@ -439,5 +442,49 @@ mod tests {
             v1, v2,
             "semantically different texts should have different embeddings"
         );
+    }
+
+    #[test]
+    fn embed_batch_large_batch_matches_sequential() {
+        // Verify that the bounded thread pool produces identical results to
+        // sequential embedding even with a large batch (exercises pool reuse).
+        let model = HashEmbeddingModel::new(128);
+        let texts: Vec<String> = (0..200)
+            .map(|i| format!("fn function_{i}(x: i32) -> i32 {{ x + {i} }}"))
+            .collect();
+        let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+
+        let batch_results = model.embed_batch(&refs);
+        let sequential_results: Vec<Vec<f32>> = refs.iter().map(|t| model.embed(t)).collect();
+
+        assert_eq!(batch_results.len(), sequential_results.len());
+        for (i, (batch, seq)) in batch_results
+            .iter()
+            .zip(sequential_results.iter())
+            .enumerate()
+        {
+            assert_eq!(batch, seq, "batch[{i}] differs from sequential[{i}]");
+        }
+    }
+
+    #[test]
+    fn embed_batch_repeated_calls_consistent() {
+        // Verify thread pool reuse (OnceLock) produces consistent results.
+        let model = HashEmbeddingModel::new(64);
+        let texts = vec!["fn alpha() {}", "fn beta() {}", "fn gamma() {}"];
+        let r1 = model.embed_batch(&texts);
+        let r2 = model.embed_batch(&texts);
+        assert_eq!(
+            r1, r2,
+            "repeated embed_batch calls should produce identical results"
+        );
+    }
+
+    #[test]
+    fn embed_batch_empty_input() {
+        let model = HashEmbeddingModel::new(64);
+        let empty: Vec<&str> = vec![];
+        let results = model.embed_batch(&empty);
+        assert!(results.is_empty());
     }
 }

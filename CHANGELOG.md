@@ -6,8 +6,11 @@ All notable changes to ivygrep are documented in this file.
 
 ### Performance
 - **Background neural enhancement no longer pegs the CPU:** The background `--enhance-internal` subprocess was running at full CPU (400%+ on multi-core machines) because the `_is_background` thread-limiting flag was dead code. The rayon global thread pool is now capped to 25% of cores (min 1) when running in background mode, and the subprocess is launched with `nice(10)` so the OS scheduler deprioritizes it below interactive work.
-- **Hash embedding uses bounded thread pool:** `HashEmbeddingModel::embed_batch` now uses a dedicated rayon `ThreadPool` with half the available cores instead of the unbounded global pool, preventing initial indexing from consuming all CPU.
+- **Hash embedding uses bounded thread pool:** `HashEmbeddingModel::embed_batch` now uses a cached `OnceLock<ThreadPool>` with half the available cores instead of the unbounded global pool.
+- **Search scoring loop eliminates redundant lowercasing:** Introduced `ChunkBoostContext` that precomputes `text_lower`, `path_lower`, `path_segments`, `file_stem`, `first_line`, `text_compact`, and `path_compact` once per candidate. All 7 boost functions and `file_authority_score` now use the precomputed context (~10 redundant string allocations per candidate eliminated).
 
+### Testing
+- Added 26 new tests: 8 ChunkBoostContext correctness tests, 10 boost function unit tests, 3 embed_batch thread pool consistency tests, 2 E2E hybrid search integration tests, and 3 file_authority_score tests. Total suite: **252 tests**.
 ## [0.6.14] — 2026-04-29
 
 ### Performance

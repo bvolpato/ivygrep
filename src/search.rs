@@ -1572,31 +1572,35 @@ fn fuse_rrf(
             let mut source_list = source_set.iter().cloned().collect::<Vec<_>>();
             source_list.sort();
 
-            let mut score = base_score + literal_match_boost(query_text, &chunk);
+            // Precompute lowercased text/path once per candidate instead of
+            // redundantly in every boost function.
+            let bctx = ChunkBoostContext::new(&chunk);
+
+            let mut score = base_score + literal_match_boost(query_text, &bctx);
 
             let coverage = if !query_tokens.is_empty() {
-                term_coverage_boost(&query_tokens, &chunk)
+                term_coverage_boost(&query_tokens, &bctx)
             } else {
                 0.0
             };
             score += coverage * TERM_COVERAGE_WEIGHT;
 
             if !query_tokens.is_empty() {
-                score += path_segment_boost(&query_tokens, &chunk) * PATH_SEGMENT_WEIGHT;
+                score += path_segment_boost(&query_tokens, &bctx) * PATH_SEGMENT_WEIGHT;
             }
 
-            score += path_exact_match_boost(query_text, &chunk) * PATH_EXACT_MATCH_WEIGHT;
+            score += path_exact_match_boost(query_text, &bctx) * PATH_EXACT_MATCH_WEIGHT;
 
             if !query_tokens.is_empty() {
-                score += file_stem_boost(&query_tokens, &chunk) * FILE_STEM_WEIGHT;
+                score += file_stem_boost(&query_tokens, &bctx) * FILE_STEM_WEIGHT;
             }
 
             if !query_tokens.is_empty() {
-                score += definition_name_boost(&query_tokens, &chunk) * DEFINITION_NAME_BONUS;
+                score += definition_name_boost(&query_tokens, &bctx) * DEFINITION_NAME_BONUS;
             }
 
             if location_intent {
-                score += location_intent_boost(&chunk) * LOCATION_INTENT_WEIGHT;
+                score += location_intent_boost(&chunk, &bctx) * LOCATION_INTENT_WEIGHT;
             }
 
             if !source_set.contains("lexical") && !source_set.contains("literal") {
@@ -1612,7 +1616,7 @@ fn fuse_rrf(
             }
 
             score *= chunk_kind_boost(&chunk);
-            score *= file_authority_score(&chunk);
+            score *= file_authority_score(&bctx);
 
             // Apply chunk-density normalization: 1/n^0.3 where n is the number
             // of chunks this file has in the candidate set. Single-chunk files
@@ -1704,29 +1708,85 @@ fn normalize_semantic_score(raw_score: f32) -> f32 {
     }
 }
 
+/// Precomputed lowercase text/path data for a candidate chunk.
+/// Built once per candidate in `fuse_rrf` and passed to all boost functions,
+/// eliminating ~10 redundant `.to_ascii_lowercase()` allocations per candidate.
+struct ChunkBoostContext {
+    text_lower: String,
+    path_lower: String,
+    /// Path split on '/', owned for lifetime independence.
+    path_segments: Vec<String>,
+    /// Lowercased file stem (e.g. "search" from "search.rs").
+    file_stem: Option<String>,
+    /// First meaningful line of the chunk (lowercased) — used for definition name boost.
+    first_line: String,
+    /// compact_identifier of the full chunk text (for literal_match_boost).
+    text_compact: String,
+    /// compact_identifier of the file path (for literal_match_boost).
+    path_compact: String,
+}
+
+impl ChunkBoostContext {
+    fn new(chunk: &IndexedChunk) -> Self {
+        let text_lower = chunk.text.to_ascii_lowercase();
+        let path_lossy = chunk.file_path.to_string_lossy();
+        let path_lower = path_lossy.to_ascii_lowercase();
+        let path_segments: Vec<String> = path_lower.split('/').map(String::from).collect();
+        let file_stem = chunk
+            .file_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map(|s| s.to_ascii_lowercase());
+
+        let first_line = chunk
+            .text
+            .lines()
+            .find(|l| {
+                let t = l.trim();
+                !t.is_empty() && !t.starts_with("//") && !t.starts_with('#')
+            })
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+
+        let text_compact = compact_identifier(&chunk.text);
+        let path_compact = compact_identifier(&path_lossy);
+
+        Self {
+            text_lower,
+            path_lower,
+            path_segments,
+            file_stem,
+            first_line,
+            text_compact,
+            path_compact,
+        }
+    }
+}
+
 /// Fraction of query tokens that appear (case-insensitive) in the chunk text.
-fn term_coverage_boost(query_tokens: &[String], chunk: &IndexedChunk) -> f32 {
+fn term_coverage_boost(query_tokens: &[String], bctx: &ChunkBoostContext) -> f32 {
     if query_tokens.is_empty() {
         return 0.0;
     }
-    let text_lower = chunk.text.to_ascii_lowercase();
     let matched = query_tokens
         .iter()
-        .filter(|t| text_lower.contains(t.as_str()))
+        .filter(|t| bctx.text_lower.contains(t.as_str()))
         .count();
     matched as f32 / query_tokens.len() as f32
 }
 
 /// Boost when query tokens match file-path segments (directory/filename).
-fn path_segment_boost(query_tokens: &[String], chunk: &IndexedChunk) -> f32 {
+fn path_segment_boost(query_tokens: &[String], bctx: &ChunkBoostContext) -> f32 {
     if query_tokens.is_empty() {
         return 0.0;
     }
-    let path_lower = chunk.file_path.to_string_lossy().to_ascii_lowercase();
-    let segments: Vec<&str> = path_lower.split('/').collect();
     let matched = query_tokens
         .iter()
-        .filter(|t| segments.iter().any(|seg| seg.contains(t.as_str())))
+        .filter(|t| {
+            bctx.path_segments
+                .iter()
+                .any(|seg| seg.contains(t.as_str()))
+        })
         .count();
     matched as f32 / query_tokens.len() as f32
 }
@@ -1734,13 +1794,11 @@ fn path_segment_boost(query_tokens: &[String], chunk: &IndexedChunk) -> f32 {
 /// Massive boost when the full query appears as a path segment (directory or
 /// file name). Searching "my-service" should rank files under a directory
 /// literally named "my-service/" far above random code mentions.
-fn path_exact_match_boost(query: &str, chunk: &IndexedChunk) -> f32 {
+fn path_exact_match_boost(query: &str, bctx: &ChunkBoostContext) -> f32 {
     let query_lower = query.trim().to_ascii_lowercase();
     if query_lower.is_empty() {
         return 0.0;
     }
-    let path_lower = chunk.file_path.to_string_lossy().to_ascii_lowercase();
-    let segments: Vec<&str> = path_lower.split('/').collect();
 
     // Also build variants: "my service" -> "my-service", "my_service"
     let hyphenated = query_lower.replace(' ', "-");
@@ -1749,10 +1807,10 @@ fn path_exact_match_boost(query: &str, chunk: &IndexedChunk) -> f32 {
 
     let candidates = [&query_lower, &hyphenated, &underscored, &compacted];
 
-    for seg in &segments {
+    for seg in &bctx.path_segments {
         for candidate in &candidates {
             // Exact segment match: dir name IS the query
-            if *seg == candidate.as_str() {
+            if seg == candidate.as_str() {
                 return 1.0;
             }
             // Segment starts/ends with query (e.g. "my-service-v2")
@@ -1767,7 +1825,7 @@ fn path_exact_match_boost(query: &str, chunk: &IndexedChunk) -> f32 {
     // Check if the full path contains the query as a substring
     // (e.g. path has "my-service" embedded in a longer segment)
     for candidate in &candidates {
-        if candidate.len() >= 4 && path_lower.contains(candidate.as_str()) {
+        if candidate.len() >= 4 && bctx.path_lower.contains(candidate.as_str()) {
             return 0.4;
         }
     }
@@ -1775,24 +1833,19 @@ fn path_exact_match_boost(query: &str, chunk: &IndexedChunk) -> f32 {
     0.0
 }
 
-fn file_stem_boost(query_tokens: &[String], chunk: &IndexedChunk) -> f32 {
+fn file_stem_boost(query_tokens: &[String], bctx: &ChunkBoostContext) -> f32 {
     if query_tokens.is_empty() {
         return 0.0;
     }
 
-    let Some(stem) = chunk
-        .file_path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .map(|stem| stem.to_ascii_lowercase())
-    else {
+    let Some(ref stem) = bctx.file_stem else {
         return 0.0;
     };
 
-    let compact_stem = compact_identifier(&stem);
+    let compact_stem = compact_identifier(stem);
     let exact_match = query_tokens
         .iter()
-        .any(|token| stem == *token || compact_stem == compact_identifier(token));
+        .any(|token| *stem == *token || compact_stem == compact_identifier(token));
     let partial_match = query_tokens
         .iter()
         .any(|token| stem.contains(token.as_str()));
@@ -1806,9 +1859,8 @@ fn file_stem_boost(query_tokens: &[String], chunk: &IndexedChunk) -> f32 {
     }
 }
 
-fn location_intent_boost(chunk: &IndexedChunk) -> f32 {
+fn location_intent_boost(chunk: &IndexedChunk, bctx: &ChunkBoostContext) -> f32 {
     let mut boost: f32 = 0.0;
-    let path = chunk.file_path.to_string_lossy().to_ascii_lowercase();
 
     if is_definition_kind(&chunk.kind) {
         boost += 0.7;
@@ -1816,14 +1868,14 @@ fn location_intent_boost(chunk: &IndexedChunk) -> f32 {
     if matches!(chunk.kind.as_str(), "Module" | "module") {
         boost += 0.5;
     }
-    if path.starts_with("src/")
-        || path.starts_with("app/")
-        || path.starts_with("lib/")
-        || path.starts_with("pkg/")
+    if bctx.path_lower.starts_with("src/")
+        || bctx.path_lower.starts_with("app/")
+        || bctx.path_lower.starts_with("lib/")
+        || bctx.path_lower.starts_with("pkg/")
     {
         boost += 0.35;
     }
-    if is_test_path(&path) {
+    if is_test_path(&bctx.path_lower) {
         boost -= 0.35;
     }
 
@@ -1833,33 +1885,19 @@ fn location_intent_boost(chunk: &IndexedChunk) -> f32 {
 /// Bonus when a chunk's definition name (first non-blank line) contains query tokens.
 /// This is the "are we looking at the definition site?" signal — e.g., query "handle error"
 /// should strongly prefer `fn handle_error()` over a comment mentioning errors.
-fn definition_name_boost(query_tokens: &[String], chunk: &IndexedChunk) -> f32 {
-    if query_tokens.is_empty() {
-        return 0.0;
-    }
-    // Extract the first meaningful line (often the fn/class signature)
-    let first_line = chunk
-        .text
-        .lines()
-        .find(|l| {
-            let t = l.trim();
-            !t.is_empty() && !t.starts_with("//") && !t.starts_with('#')
-        })
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-
-    if first_line.is_empty() {
+fn definition_name_boost(query_tokens: &[String], bctx: &ChunkBoostContext) -> f32 {
+    if query_tokens.is_empty() || bctx.first_line.is_empty() {
         return 0.0;
     }
 
     let matched = query_tokens
         .iter()
-        .filter(|t| first_line.contains(t.as_str()))
+        .filter(|t| bctx.first_line.contains(t.as_str()))
         .count();
     matched as f32 / query_tokens.len() as f32
 }
 
-fn literal_match_boost(query_text: &str, chunk: &IndexedChunk) -> f32 {
+fn literal_match_boost(query_text: &str, bctx: &ChunkBoostContext) -> f32 {
     const LITERAL_MATCH_BOOST: f32 = 0.20;
     const NORMALIZED_IDENTIFIER_BOOST: f32 = 0.10;
 
@@ -1868,12 +1906,8 @@ fn literal_match_boost(query_text: &str, chunk: &IndexedChunk) -> f32 {
         return 0.0;
     }
 
-    let file_path = chunk.file_path.to_string_lossy();
     let query_lower = query.to_ascii_lowercase();
-    let text_lower = chunk.text.to_ascii_lowercase();
-    let path_lower = file_path.to_ascii_lowercase();
-
-    if text_lower.contains(&query_lower) || path_lower.contains(&query_lower) {
+    if bctx.text_lower.contains(&query_lower) || bctx.path_lower.contains(&query_lower) {
         return LITERAL_MATCH_BOOST;
     }
 
@@ -1882,9 +1916,7 @@ fn literal_match_boost(query_text: &str, chunk: &IndexedChunk) -> f32 {
         return 0.0;
     }
 
-    let text_compact = compact_identifier(&chunk.text);
-    let path_compact = compact_identifier(&file_path);
-    if text_compact.contains(&query_compact) || path_compact.contains(&query_compact) {
+    if bctx.text_compact.contains(&query_compact) || bctx.path_compact.contains(&query_compact) {
         NORMALIZED_IDENTIFIER_BOOST
     } else {
         0.0
@@ -1925,8 +1957,8 @@ fn chunk_kind_boost(chunk: &IndexedChunk) -> f32 {
 /// are more authoritative than tests, fixtures, generated code, data files, and
 /// vendored dependencies. The scoring range is deliberately wide (0.3–1.3) to
 /// create meaningful separation in the final ranking.
-fn file_authority_score(chunk: &IndexedChunk) -> f32 {
-    let path = chunk.file_path.to_string_lossy().to_ascii_lowercase();
+fn file_authority_score(bctx: &ChunkBoostContext) -> f32 {
+    let path = &bctx.path_lower;
 
     // Vendored / dependency code — almost never what the user wants
     if path.contains("vendor/")
@@ -1975,7 +2007,7 @@ fn file_authority_score(chunk: &IndexedChunk) -> f32 {
     }
 
     // Test / spec / mock files — useful but secondary to the implementation
-    if is_test_path(&path) {
+    if is_test_path(path) {
         return 0.6;
     }
 
@@ -3104,5 +3136,349 @@ export function registerCommands(p: Plugin) {
             filtered.len()
         );
         assert_eq!(filtered[0].0.chunk_id, "top");
+    }
+
+    // ── ChunkBoostContext tests ──────────────────────────────────────────
+
+    fn make_test_chunk(
+        id: &str,
+        path: &str,
+        text: &str,
+        kind: &str,
+    ) -> crate::indexer::IndexedChunk {
+        crate::indexer::IndexedChunk {
+            chunk_id: id.to_string(),
+            file_path: PathBuf::from(path),
+            start_line: 1,
+            end_line: 10,
+            language: "rust".to_string(),
+            kind: kind.to_string(),
+            text: text.to_string(),
+            content_hash: format!("hash-{id}"),
+            vector_key: 42,
+            is_ignored: false,
+        }
+    }
+
+    #[test]
+    fn boost_context_precomputes_text_lower() {
+        let chunk = make_test_chunk("a", "src/Foo.rs", "pub fn CalcTax() {}", "Function");
+        let bctx = ChunkBoostContext::new(&chunk);
+        assert_eq!(bctx.text_lower, "pub fn calctax() {}");
+    }
+
+    #[test]
+    fn boost_context_precomputes_path_lower() {
+        let chunk = make_test_chunk("a", "SRC/MyService/Handler.rs", "code", "Function");
+        let bctx = ChunkBoostContext::new(&chunk);
+        assert_eq!(bctx.path_lower, "src/myservice/handler.rs");
+    }
+
+    #[test]
+    fn boost_context_splits_path_segments() {
+        let chunk = make_test_chunk("a", "src/my-service/handler.rs", "code", "Function");
+        let bctx = ChunkBoostContext::new(&chunk);
+        assert_eq!(bctx.path_segments, vec!["src", "my-service", "handler.rs"]);
+    }
+
+    #[test]
+    fn boost_context_extracts_file_stem() {
+        let chunk = make_test_chunk("a", "pkg/search.rs", "code", "Function");
+        let bctx = ChunkBoostContext::new(&chunk);
+        assert_eq!(bctx.file_stem.as_deref(), Some("search"));
+    }
+
+    #[test]
+    fn boost_context_extracts_first_meaningful_line() {
+        let chunk = make_test_chunk(
+            "a",
+            "src/lib.rs",
+            "// copyright header\n# attribute\npub fn handle_error() {}",
+            "Function",
+        );
+        let bctx = ChunkBoostContext::new(&chunk);
+        assert_eq!(bctx.first_line, "pub fn handle_error() {}");
+    }
+
+    #[test]
+    fn boost_context_computes_compact_identifiers() {
+        let chunk = make_test_chunk("a", "src/my-service.rs", "fn foo_bar() {}", "Function");
+        let bctx = ChunkBoostContext::new(&chunk);
+        assert_eq!(bctx.text_compact, "fnfoobar");
+        assert_eq!(bctx.path_compact, "srcmyservicers");
+    }
+
+    #[test]
+    fn boost_context_handles_empty_text() {
+        let chunk = make_test_chunk("a", "src/empty.rs", "", "Block");
+        let bctx = ChunkBoostContext::new(&chunk);
+        assert!(bctx.text_lower.is_empty());
+        assert!(bctx.first_line.is_empty());
+        assert!(bctx.text_compact.is_empty());
+    }
+
+    #[test]
+    fn term_coverage_boost_uses_precomputed_text() {
+        let chunk = make_test_chunk("a", "src/lib.rs", "fn calculate_TAX() {}", "Function");
+        let bctx = ChunkBoostContext::new(&chunk);
+        let tokens = vec!["calculate".to_string(), "tax".to_string()];
+        let coverage = term_coverage_boost(&tokens, &bctx);
+        assert!(
+            (coverage - 1.0).abs() < f32::EPSILON,
+            "both tokens should match case-insensitively, got {coverage}"
+        );
+    }
+
+    #[test]
+    fn term_coverage_boost_partial_match() {
+        let chunk = make_test_chunk("a", "src/lib.rs", "fn calculate() {}", "Function");
+        let bctx = ChunkBoostContext::new(&chunk);
+        let tokens = vec!["calculate".to_string(), "tax".to_string()];
+        let coverage = term_coverage_boost(&tokens, &bctx);
+        assert!(
+            (coverage - 0.5).abs() < f32::EPSILON,
+            "one of two tokens matched, got {coverage}"
+        );
+    }
+
+    #[test]
+    fn path_segment_boost_matches_directory() {
+        let chunk = make_test_chunk("a", "src/tax/calculator.rs", "code", "Function");
+        let bctx = ChunkBoostContext::new(&chunk);
+        let tokens = vec!["tax".to_string()];
+        let boost = path_segment_boost(&tokens, &bctx);
+        assert!(
+            (boost - 1.0).abs() < f32::EPSILON,
+            "token 'tax' matches path segment 'tax', got {boost}"
+        );
+    }
+
+    #[test]
+    fn path_exact_match_boost_full_segment() {
+        let chunk = make_test_chunk("a", "services/my-service/handler.rs", "code", "Function");
+        let bctx = ChunkBoostContext::new(&chunk);
+        let boost = path_exact_match_boost("my service", &bctx);
+        assert!(
+            (boost - 1.0).abs() < f32::EPSILON,
+            "query 'my service' → 'my-service' should match path segment exactly, got {boost}"
+        );
+    }
+
+    #[test]
+    fn path_exact_match_boost_no_match() {
+        let chunk = make_test_chunk("a", "src/unrelated.rs", "code", "Function");
+        let bctx = ChunkBoostContext::new(&chunk);
+        let boost = path_exact_match_boost("my service", &bctx);
+        assert!(boost < f32::EPSILON, "no path match expected, got {boost}");
+    }
+
+    #[test]
+    fn file_stem_boost_exact_match() {
+        let chunk = make_test_chunk("a", "src/search.rs", "code", "Function");
+        let bctx = ChunkBoostContext::new(&chunk);
+        let tokens = vec!["search".to_string()];
+        let boost = file_stem_boost(&tokens, &bctx);
+        assert!(
+            (boost - 1.0).abs() < f32::EPSILON,
+            "exact stem match should return 1.0, got {boost}"
+        );
+    }
+
+    #[test]
+    fn file_stem_boost_partial_match() {
+        let chunk = make_test_chunk("a", "src/search_engine.rs", "code", "Function");
+        let bctx = ChunkBoostContext::new(&chunk);
+        let tokens = vec!["search".to_string()];
+        let boost = file_stem_boost(&tokens, &bctx);
+        assert!(
+            (boost - 0.5).abs() < f32::EPSILON,
+            "partial stem match should return 0.5, got {boost}"
+        );
+    }
+
+    #[test]
+    fn definition_name_boost_matches_function_signature() {
+        let chunk = make_test_chunk(
+            "a",
+            "src/lib.rs",
+            "pub fn handle_error(err: Error) -> Result<()> {}\n    // body",
+            "Function",
+        );
+        let bctx = ChunkBoostContext::new(&chunk);
+        let tokens = vec!["handle".to_string(), "error".to_string()];
+        let boost = definition_name_boost(&tokens, &bctx);
+        assert!(
+            (boost - 1.0).abs() < f32::EPSILON,
+            "both tokens should match the definition name, got {boost}"
+        );
+    }
+
+    #[test]
+    fn definition_name_boost_skips_comments_and_attributes() {
+        let chunk = make_test_chunk(
+            "a",
+            "src/lib.rs",
+            "// handle error here\n#[derive(Debug)]\npub fn unrelated() {}",
+            "Function",
+        );
+        let bctx = ChunkBoostContext::new(&chunk);
+        let tokens = vec!["handle".to_string(), "error".to_string()];
+        let boost = definition_name_boost(&tokens, &bctx);
+        assert!(
+            boost < f32::EPSILON,
+            "definition name is 'pub fn unrelated()', should not match, got {boost}"
+        );
+    }
+
+    #[test]
+    fn literal_match_boost_case_insensitive_text() {
+        let chunk = make_test_chunk("a", "src/lib.rs", "fn CalcTax() {}", "Function");
+        let bctx = ChunkBoostContext::new(&chunk);
+        let boost = literal_match_boost("calctax", &bctx);
+        assert!(
+            boost > 0.0,
+            "case-insensitive match should boost, got {boost}"
+        );
+    }
+
+    #[test]
+    fn literal_match_boost_compact_identifier_fallback() {
+        let chunk = make_test_chunk("a", "src/lib.rs", "fn calc_tax() {}", "Function");
+        let bctx = ChunkBoostContext::new(&chunk);
+        let boost = literal_match_boost("CalcTax", &bctx);
+        assert!(
+            boost > 0.0,
+            "compact identifier should match calc_tax ↔ CalcTax, got {boost}"
+        );
+    }
+
+    #[test]
+    fn location_intent_boost_prefers_src_definitions() {
+        let src_chunk = make_test_chunk("a", "src/handler.rs", "code", "Function");
+        let test_chunk = make_test_chunk("b", "tests/handler_test.rs", "code", "Function");
+        let src_bctx = ChunkBoostContext::new(&src_chunk);
+        let test_bctx = ChunkBoostContext::new(&test_chunk);
+        let src_boost = location_intent_boost(&src_chunk, &src_bctx);
+        let test_boost = location_intent_boost(&test_chunk, &test_bctx);
+        assert!(
+            src_boost > test_boost,
+            "src/ definition should rank above tests/ definition: {src_boost} vs {test_boost}"
+        );
+    }
+
+    #[test]
+    fn file_authority_score_penalizes_vendor() {
+        let vendor_chunk = make_test_chunk("a", "vendor/dep/lib.rs", "code", "Function");
+        let src_chunk = make_test_chunk("b", "src/handler.rs", "code", "Function");
+        let vendor_bctx = ChunkBoostContext::new(&vendor_chunk);
+        let src_bctx = ChunkBoostContext::new(&src_chunk);
+        assert!(
+            file_authority_score(&src_bctx) > file_authority_score(&vendor_bctx),
+            "src should rank above vendor"
+        );
+    }
+
+    #[test]
+    fn file_authority_score_penalizes_test_files() {
+        let test_chunk = make_test_chunk("a", "tests/integration_test.rs", "code", "Function");
+        let src_chunk = make_test_chunk("b", "src/core.rs", "code", "Function");
+        let test_bctx = ChunkBoostContext::new(&test_chunk);
+        let src_bctx = ChunkBoostContext::new(&src_chunk);
+        assert!(
+            file_authority_score(&src_bctx) > file_authority_score(&test_bctx),
+            "src should rank above tests"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn hybrid_search_e2e_with_boost_context_refactor() {
+        // Full E2E: create a workspace with source + test files, search, and verify
+        // that the refactored boost pipeline ranks the source definition above the test.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("tests")).unwrap();
+
+        std::fs::write(
+            tmp.path().join("src/calculator.rs"),
+            "pub fn calculate_total(items: &[f64]) -> f64 {\n    items.iter().sum()\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("tests/calculator_test.rs"),
+            "#[test]\nfn test_calculate_total() {\n    assert_eq!(calculate_total(&[1.0, 2.0]), 3.0);\n}\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = hybrid_search(
+            &workspace,
+            "calculate total",
+            Some(&model),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+
+        assert!(
+            !hits.is_empty(),
+            "search should return results for 'calculate total'"
+        );
+
+        // The source definition should rank first (src/ boost + definition kind boost)
+        let first_path = &hits[0].file_path;
+        assert!(
+            first_path.to_string_lossy().contains("src/calculator.rs"),
+            "definition in src/ should rank above test file, got {:?}",
+            first_path
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn hybrid_search_e2e_path_exact_match() {
+        // E2E: a query matching a directory name should surface files from that dir
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::create_dir_all(tmp.path().join("tax-engine/src")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("utils")).unwrap();
+
+        std::fs::write(
+            tmp.path().join("tax-engine/src/calc.rs"),
+            "pub fn apply() { /* tax calculation logic */ }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("utils/helper.rs"),
+            "pub fn apply() { /* generic helper */ }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = hybrid_search(
+            &workspace,
+            "tax engine",
+            Some(&model),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+
+        assert!(!hits.is_empty());
+        // The file under tax-engine/ should rank first due to path exact match boost
+        let first_path = hits[0].file_path.to_string_lossy();
+        assert!(
+            first_path.contains("tax-engine"),
+            "path exact match should rank tax-engine/ first, got {first_path}"
+        );
     }
 }
