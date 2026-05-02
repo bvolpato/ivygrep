@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use anyhow::Result;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -84,7 +85,7 @@ impl DaemonState {
     fn get_model_or_fallback(&self) -> Arc<dyn EmbeddingModel> {
         match self.lazy_model.get() {
             Some(model) => model.clone(),
-            None => Arc::from(create_model(true)),
+            None => cached_hash_model(),
         }
     }
 }
@@ -241,7 +242,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
 
             let index_workspace_target = workspace.clone();
             let index_result = tokio::task::spawn_blocking(move || {
-                let hash_model = create_model(true);
+                let hash_model = cached_hash_model();
                 index_workspace(&index_workspace_target, hash_model.as_ref())
             })
             .await
@@ -708,6 +709,10 @@ fn spawn_watch_worker(control: Arc<WatchControl>) {
                 break;
             }
 
+            // Debounce: wait 300ms after the first event so that burst saves
+            // (e.g., cargo fmt touching 50 files) coalesce before indexing.
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
             if control.indexing.swap(true, Ordering::Relaxed) {
                 continue;
             }
@@ -734,7 +739,7 @@ fn spawn_watch_worker(control: Arc<WatchControl>) {
 
                 let workspace = control.workspace.clone();
                 let result = tokio::task::spawn_blocking(move || {
-                    let hash_model = create_model(true);
+                    let hash_model = cached_hash_model();
                     let _ = index_workspace_for_watcher(&workspace, hash_model.as_ref())?;
                     Result::<(), anyhow::Error>::Ok(())
                 })
@@ -786,6 +791,15 @@ fn spawn_watch_worker(control: Arc<WatchControl>) {
             let _ = jobs::heartbeat_job(&control.workspace, JobKind::Watcher, idle);
         }
     });
+}
+
+/// Process-wide cached hash embedding model. Avoids rebuilding the alias
+/// hash map on every watcher event, index request, or fallback search.
+fn cached_hash_model() -> Arc<dyn EmbeddingModel> {
+    static HASH_MODEL: std::sync::OnceLock<Arc<dyn EmbeddingModel>> = std::sync::OnceLock::new();
+    HASH_MODEL
+        .get_or_init(|| Arc::from(create_model(true)))
+        .clone()
 }
 
 fn scope_from_request(scope_path: Option<PathBuf>, scope_is_file: bool) -> Option<WorkspaceScope> {

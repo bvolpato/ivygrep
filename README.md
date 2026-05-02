@@ -193,8 +193,8 @@ ig --doctor                        # inspect index health for the current worksp
 ig --doctor --fix                  # rebuild a broken or stale index
 
 # Search modes
-ig --interactive \"query\"             # interactive TUI with file/snippet browsing
-ig --literal \"fn_name\"               # fast exact-match search (index-backed)
+ig --interactive "query"             # interactive TUI with file/snippet browsing
+ig --literal "fn_name"               # fast exact-match search (index-backed)
 ig --regex "fn\s+\w+_tax"          # regex mode (like rg)
 ig --hash "query"                  # force hash embeddings (skip neural)
 
