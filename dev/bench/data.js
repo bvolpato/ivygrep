@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777697389505,
+  "lastUpdate": 1777698046715,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -10615,6 +10615,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 585.01,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "82e6c2363adfcf3a71cf0d888f75840a394425f1",
+          "message": "perf: eliminate redundant lowercasing in search scoring loop\n\nIntroduce ChunkBoostContext that precomputes text_lower, path_lower,\npath_segments, file_stem, first_line, text_compact, and path_compact\nonce per candidate chunk. All 7 boost functions and file_authority_score\nnow use the precomputed context instead of independently lowercasing\nthe same strings (~10 redundant allocations per candidate eliminated).\n\nAlso: cache the hash embedding thread pool in a OnceLock so it's built\nonce instead of per embed_batch call.\n\nAdds 26 new tests:\n- 8 ChunkBoostContext field correctness tests\n- 10 individual boost function tests with precomputed context\n- 3 embed_batch thread pool consistency tests (200-item batch)\n- 2 E2E hybrid search integration tests validating the full pipeline\n- 3 file_authority_score tests",
+          "timestamp": "2026-05-02T00:50:59-04:00",
+          "tree_id": "dd3682d04c82c7a46fb7981181dc91848beafa2b",
+          "url": "https://github.com/bvolpato/ivygrep/commit/82e6c2363adfcf3a71cf0d888f75840a394425f1"
+        },
+        "date": 1777698046121,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 907185000,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 8113.1,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3914.07,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2827.63,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11018.66,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 10741.19,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 7.28,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 732.8,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 20346.16,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 8346.69,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 6222.13,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 450254.63,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 545.75,
             "unit": "µs"
           }
         ]
