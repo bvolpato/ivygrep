@@ -2,6 +2,12 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.6.15] — 2026-05-02
+
+### Performance
+- **Background neural enhancement no longer pegs the CPU:** The background `--enhance-internal` subprocess was running at full CPU (400%+ on multi-core machines) because the `_is_background` thread-limiting flag was dead code. The rayon global thread pool is now capped to 25% of cores (min 1) when running in background mode, and the subprocess is launched with `nice(10)` so the OS scheduler deprioritizes it below interactive work.
+- **Hash embedding uses bounded thread pool:** `HashEmbeddingModel::embed_batch` now uses a dedicated rayon `ThreadPool` with half the available cores instead of the unbounded global pool, preventing initial indexing from consuming all CPU.
+
 ## [0.6.14] — 2026-04-29
 
 ### Performance

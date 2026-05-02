@@ -178,7 +178,14 @@ impl EmbeddingModel for HashEmbeddingModel {
 
     fn embed_batch(&self, texts: &[&str]) -> Vec<Vec<f32>> {
         use rayon::prelude::*;
-        texts.par_iter().map(|t| self.embed(t)).collect()
+        // Use a dedicated thread pool with bounded parallelism so hash
+        // embedding during initial indexing doesn't consume all CPU cores.
+        let n_threads = (num_cpus::get() / 2).max(1);
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(n_threads)
+            .build()
+            .expect("failed to build hash embed thread pool");
+        pool.install(|| texts.par_iter().map(|t| self.embed(t)).collect())
     }
 }
 
@@ -213,7 +220,19 @@ impl CandleEmbeddingModel {
         Self::new_internal(true)
     }
 
-    fn new_internal(_is_background: bool) -> anyhow::Result<Self> {
+    fn new_internal(is_background: bool) -> anyhow::Result<Self> {
+        // When running as a background enhancement process, limit rayon's
+        // global thread pool to 25% of cores (min 1) so the system stays
+        // responsive. This affects both the Candle BLAS work-stealing and
+        // any par_iter calls in the enhancement pipeline.
+        if is_background {
+            let bg_threads = (num_cpus::get() / 4).max(1);
+            let _ = rayon::ThreadPoolBuilder::new()
+                .num_threads(bg_threads)
+                .build_global();
+            tracing::info!("background mode: rayon global pool limited to {bg_threads} thread(s)");
+        }
+
         use candle_embed::{CandleEmbedBuilder, WithModel};
 
         let mut builder =

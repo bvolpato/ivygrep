@@ -360,6 +360,21 @@ impl Workspace {
             cmd.stdout(std::process::Stdio::null());
             cmd.stderr(std::process::Stdio::null());
 
+            // Lower the scheduling priority of the background process so
+            // interactive work (editor, shell, search) is never starved.
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                // SAFETY: nice(2) is async-signal-safe and has no side effects
+                // beyond adjusting the process niceness.
+                unsafe {
+                    cmd.pre_exec(|| {
+                        libc::nice(10);
+                        Ok(())
+                    });
+                }
+            }
+
             if let Ok(mut child) = cmd.spawn() {
                 let _ = std::fs::write(&pid_path, child.id().to_string());
 
