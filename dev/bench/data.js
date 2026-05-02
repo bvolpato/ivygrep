@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777526990928,
+  "lastUpdate": 1777697389505,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -10526,6 +10526,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 411.11,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "67be267c15f384d719e3ecf83058dca92f8b86b5",
+          "message": "perf: cap background CPU — wire thread limits and nice(10)\n\nThe background neural enhancement subprocess was running at full CPU\n(400%+ on multi-core machines) because the _is_background flag in\nCandleEmbeddingModel::new_internal was dead code (prefixed with _).\n\nChanges:\n- Wire is_background to set rayon global pool to cores/4 (min 1)\n- Add nice(10) via pre_exec on the --enhance-internal subprocess\n- Use a dedicated rayon ThreadPool (cores/2) for HashEmbeddingModel\n  embed_batch instead of the unbounded global pool",
+          "timestamp": "2026-05-02T00:40:17-04:00",
+          "tree_id": "9e7999b56b3f2d2bec8080a65a7e8347287ab4a2",
+          "url": "https://github.com/bvolpato/ivygrep/commit/67be267c15f384d719e3ecf83058dca92f8b86b5"
+        },
+        "date": 1777697389167,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 888241350,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 9358.81,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3860.5,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2824.8,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11523.78,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 11164.35,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 6.92,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 734.57,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 20158.91,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 8368.13,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 6265.36,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 450376.86,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 585.01,
             "unit": "µs"
           }
         ]
