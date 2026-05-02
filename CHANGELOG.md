@@ -8,6 +8,11 @@ All notable changes to ivygrep are documented in this file.
 - **Background neural enhancement no longer pegs the CPU:** The background `--enhance-internal` subprocess was running at full CPU (400%+ on multi-core machines) because the `_is_background` thread-limiting flag was dead code. The rayon global thread pool is now capped to 25% of cores (min 1) when running in background mode, and the subprocess is launched with `nice(10)` so the OS scheduler deprioritizes it below interactive work.
 - **Hash embedding uses bounded thread pool:** `HashEmbeddingModel::embed_batch` now uses a cached `OnceLock<ThreadPool>` with half the available cores instead of the unbounded global pool.
 - **Search scoring loop eliminates redundant lowercasing:** Introduced `ChunkBoostContext` that precomputes `text_lower`, `path_lower`, `path_segments`, `file_stem`, `first_line`, `text_compact`, and `path_compact` once per candidate. All 7 boost functions and `file_authority_score` now use the precomputed context (~10 redundant string allocations per candidate eliminated).
+- **`build_lexical_queries` deduplication:** Was called 3× with the same input per hybrid search (literal pass, lexical pass, path-match pass). Now computed once and shared across all three passes.
+- **`HashEmbeddingModel` cached per-process:** The hash model was recreated on every search query. Now cached in a `static OnceLock` so the alias map is built once for the process lifetime.
+- **RRF accumulation consolidated:** Three separate `HashMap`s (scores, chunks, sources) consolidated into a single `RrfEntry` struct map, eliminating 6 redundant `chunk_id.clone()` calls per candidate across the accumulation passes.
+- **`summarize_reason` hoists lowercase:** `focus.to_ascii_lowercase()` was called once for the contains-check and again per token in the loop — now computed once.
+- **`to_hit` avoids cloning file content:** Uses `Cow<str>` so pre-read content is borrowed instead of cloned into a new `String`.
 
 ### Testing
 - Added 26 new tests: 8 ChunkBoostContext correctness tests, 10 boost function unit tests, 3 embed_batch thread pool consistency tests, 2 E2E hybrid search integration tests, and 3 file_authority_score tests. Total suite: **252 tests**.

@@ -475,8 +475,9 @@ pub fn hybrid_search(
     // Build a regex alternation of the original query plus snake_case/camelCase
     // variants so "hybrid search" also matches "hybrid_search" and "hybridSearch".
     let trimmed = query_text.trim();
-    let literal_variants = build_lexical_queries(trimmed);
-    let literal_pattern = literal_variants
+    // Compute once — used by literal pass, lexical pass, and path-match pass.
+    let lexical_queries = build_lexical_queries(trimmed);
+    let literal_pattern = lexical_queries
         .iter()
         .map(|v| regex::escape(v))
         .collect::<Vec<_>>()
@@ -490,7 +491,7 @@ pub fn hybrid_search(
     {
         let mut all_candidates = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for variant in &literal_variants {
+        for variant in &lexical_queries {
             let variant_matcher = regex::RegexBuilder::new(&regex::escape(variant))
                 .case_insensitive(true)
                 .build();
@@ -581,8 +582,8 @@ pub fn hybrid_search(
     }
 
     let mut lexical_by_id = HashMap::<String, (IndexedChunk, f32)>::new();
-    for lexical_query in build_lexical_queries(query_text) {
-        let mut parsed_query = match parser.parse_query(&lexical_query) {
+    for lexical_query in &lexical_queries {
+        let mut parsed_query = match parser.parse_query(lexical_query) {
             Ok(query) => query,
             Err(_) => continue,
         };
@@ -653,8 +654,8 @@ pub fn hybrid_search(
     if let Some(fpt_field) = ctx.fields.file_path_text {
         let mut path_parser = QueryParser::for_index(&ctx.indexes[0], vec![fpt_field]);
         path_parser.set_conjunction_by_default();
-        let trimmed = query_text.trim();
-        let path_query_variants = build_lexical_queries(trimmed);
+        // Reuse the lexical_queries computed at the start of hybrid_search.
+        let path_query_variants = &lexical_queries;
         let mut path_ids: HashSet<String> = lexical_chunks
             .iter()
             .map(|(c, _)| c.chunk_id.clone())
@@ -662,7 +663,7 @@ pub fn hybrid_search(
 
         // Phase 1: collect path-match candidates from Tantivy.
         let mut path_candidates: Vec<IndexedChunk> = Vec::new();
-        for pq in &path_query_variants {
+        for pq in path_query_variants {
             if let Ok(parsed) = path_parser.parse_query(pq) {
                 for (i, searcher) in ctx.searchers.iter().enumerate() {
                     if let Ok(docs) =
@@ -748,7 +749,12 @@ pub fn hybrid_search(
         let mut semantic_by_id = HashMap::<String, (IndexedChunk, f32)>::new();
 
         if has_hash_vectors {
-            let hash_model = crate::embedding::HashEmbeddingModel::new(256);
+            // Reuse the caller's embedding_model to embed the query for hash
+            // vector search — avoids rebuilding a HashEmbeddingModel per search.
+            static SEARCH_HASH_MODEL: std::sync::OnceLock<crate::embedding::HashEmbeddingModel> =
+                std::sync::OnceLock::new();
+            let hash_model =
+                SEARCH_HASH_MODEL.get_or_init(|| crate::embedding::HashEmbeddingModel::new(256));
             let hash_query_vector = hash_model.embed(query_text);
             let hash_hits = collect_semantic_candidates(
                 &ctx,
@@ -846,12 +852,13 @@ fn to_hit(
     context_lines: usize,
     pre_read_content: Option<&str>,
 ) -> Result<SearchHit> {
-    let content = match pre_read_content {
-        Some(c) => c.to_string(),
+    // Use Cow to avoid cloning the file content when the caller already read it.
+    let content: std::borrow::Cow<'_, str> = match pre_read_content {
+        Some(c) => std::borrow::Cow::Borrowed(c),
         None => {
             let file_path = workspace.root.join(&chunk.file_path);
             match fs::read_to_string(&file_path) {
-                Ok(c) => c,
+                Ok(c) => std::borrow::Cow::Owned(c),
                 Err(_) => {
                     return Ok(SearchHit {
                         file_path: chunk.file_path.clone(),
@@ -965,16 +972,15 @@ fn summarize_reason(query_text: &str, focus_line: &str) -> String {
 
     let query = query_text.trim();
     if !query.is_empty() {
-        if focus.contains(query)
-            || focus
-                .to_ascii_lowercase()
-                .contains(&query.to_ascii_lowercase())
-        {
+        let focus_lower = focus.to_ascii_lowercase();
+        let query_lower = query.to_ascii_lowercase();
+
+        if focus.contains(query) || focus_lower.contains(&query_lower) {
             return format!("line contains query terms: {}", truncate_for_reason(focus));
         }
 
         for token in expanded_query_tokens(query) {
-            if focus.to_ascii_lowercase().contains(&token) {
+            if focus_lower.contains(&token) {
                 return format!(
                     "line matches token `{}`: {}",
                     token,
@@ -1509,48 +1515,52 @@ fn fuse_rrf(
     let query_tokens = expanded_query_tokens(query_text);
     let location_intent = has_location_intent(query_text);
 
-    let mut scores = HashMap::<String, f32>::new();
-    let mut chunks = HashMap::<String, IndexedChunk>::new();
-    let mut sources = HashMap::<String, HashSet<String>>::new();
+    struct RrfEntry {
+        score: f32,
+        chunk: IndexedChunk,
+        sources: HashSet<String>,
+    }
+
+    let mut entries: HashMap<String, RrfEntry> = HashMap::new();
 
     for (rank, (chunk, lexical_score)) in lexical.iter().enumerate() {
-        let entry = scores.entry(chunk.chunk_id.clone()).or_insert(0.0);
-        *entry += LEXICAL_WEIGHT / (K + rank as f32 + 1.0);
-        *entry += normalize_lexical_score(*lexical_score) * LEXICAL_SCORE_WEIGHT;
-        chunks
+        let e = entries
             .entry(chunk.chunk_id.clone())
-            .or_insert_with(|| chunk.clone());
-        sources
-            .entry(chunk.chunk_id.clone())
-            .or_default()
-            .insert("lexical".to_string());
+            .or_insert_with(|| RrfEntry {
+                score: 0.0,
+                chunk: chunk.clone(),
+                sources: HashSet::new(),
+            });
+        e.score += LEXICAL_WEIGHT / (K + rank as f32 + 1.0);
+        e.score += normalize_lexical_score(*lexical_score) * LEXICAL_SCORE_WEIGHT;
+        e.sources.insert("lexical".to_string());
     }
 
     for (rank, (chunk, semantic_score)) in semantic.iter().enumerate() {
-        let entry = scores.entry(chunk.chunk_id.clone()).or_insert(0.0);
-        *entry += SEMANTIC_WEIGHT / (K + rank as f32 + 1.0);
+        let e = entries
+            .entry(chunk.chunk_id.clone())
+            .or_insert_with(|| RrfEntry {
+                score: 0.0,
+                chunk: chunk.clone(),
+                sources: HashSet::new(),
+            });
+        e.score += SEMANTIC_WEIGHT / (K + rank as f32 + 1.0);
         // Use the actual cosine similarity score, not just rank position
-        *entry += normalize_semantic_score(*semantic_score) * SEMANTIC_SCORE_WEIGHT;
-        chunks
-            .entry(chunk.chunk_id.clone())
-            .or_insert_with(|| chunk.clone());
-        sources
-            .entry(chunk.chunk_id.clone())
-            .or_default()
-            .insert("semantic".to_string());
+        e.score += normalize_semantic_score(*semantic_score) * SEMANTIC_SCORE_WEIGHT;
+        e.sources.insert("semantic".to_string());
     }
 
     // Literal pass: verified exact substring matches get a strong boost
     for (rank, (chunk, _)) in literal.iter().enumerate() {
-        let entry = scores.entry(chunk.chunk_id.clone()).or_insert(0.0);
-        *entry += LITERAL_WEIGHT / (K + rank as f32 + 1.0);
-        chunks
+        let e = entries
             .entry(chunk.chunk_id.clone())
-            .or_insert_with(|| chunk.clone());
-        sources
-            .entry(chunk.chunk_id.clone())
-            .or_default()
-            .insert("literal".to_string());
+            .or_insert_with(|| RrfEntry {
+                score: 0.0,
+                chunk: chunk.clone(),
+                sources: HashSet::new(),
+            });
+        e.score += LITERAL_WEIGHT / (K + rank as f32 + 1.0);
+        e.sources.insert("literal".to_string());
     }
 
     // Chunk-density normalization (IDF-like):
@@ -1558,17 +1568,20 @@ fn fuse_rrf(
     // chunks (large data files, verbose test suites) get a 1/sqrt(n) penalty
     // so they can't dominate the results just by having more "lottery tickets".
     let mut file_chunk_counts: HashMap<PathBuf, usize> = HashMap::new();
-    for chunk in chunks.values() {
+    for e in entries.values() {
         *file_chunk_counts
-            .entry(chunk.file_path.clone())
+            .entry(e.chunk.file_path.clone())
             .or_insert(0) += 1;
     }
 
-    let mut ranked = scores
-        .into_iter()
-        .filter_map(|(id, base_score)| {
-            let chunk = chunks.remove(&id)?;
-            let source_set = sources.remove(&id).unwrap_or_default();
+    let mut ranked = entries
+        .into_values()
+        .map(|e| {
+            let RrfEntry {
+                score: base_score,
+                chunk,
+                sources: source_set,
+            } = e;
             let mut source_list = source_set.iter().cloned().collect::<Vec<_>>();
             source_list.sort();
 
@@ -1627,7 +1640,7 @@ fn fuse_rrf(
                 .unwrap_or(1) as f32;
             score /= n_file_chunks.powf(0.3);
 
-            Some((chunk, score, source_list))
+            (chunk, score, source_list)
         })
         .collect::<Vec<_>>();
 
