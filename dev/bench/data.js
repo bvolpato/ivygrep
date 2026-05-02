@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777698046715,
+  "lastUpdate": 1777736910468,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -10704,6 +10704,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 545.75,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "9206ba93dd69f40e04ef1fb95d3fd50a8b1db5f2",
+          "message": "perf: deduplicate hot-path calls across search pipeline\n\nSecond pass of the optimization audit:\n\n1. build_lexical_queries: was called 3x with the same input per hybrid\n   search (literal pass, lexical pass, path-match pass). Now computed\n   once and shared across all three passes.\n\n2. HashEmbeddingModel::new(256): was recreated on every search query\n   (rebuilding the alias hash map). Now cached in a static OnceLock so\n   it's built once for the process lifetime.\n\n3. RRF accumulation: consolidated 3 separate HashMaps (scores, chunks,\n   sources) into a single RrfEntry struct map, eliminating 6 redundant\n   chunk_id.clone() calls per candidate across accumulation passes.\n\n4. summarize_reason: focus.to_ascii_lowercase() was called once for\n   the contains-check and again per token in the loop — now hoisted\n   to a single allocation.\n\n5. to_hit: used c.to_string() to clone pre-read file content even\n   when passed by reference. Now uses Cow<str> for zero-copy borrows.",
+          "timestamp": "2026-05-02T11:38:45-04:00",
+          "tree_id": "6cc0fc022455fc2a1ff5837c86ba6ff52284d069",
+          "url": "https://github.com/bvolpato/ivygrep/commit/9206ba93dd69f40e04ef1fb95d3fd50a8b1db5f2"
+        },
+        "date": 1777736909780,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 904842770,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 7905.73,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3834.06,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2832.59,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11056.99,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 10789.26,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 7.09,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 728.42,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 20050.67,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 8331.92,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 6289.6,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 449897.93,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 532.08,
             "unit": "µs"
           }
         ]
