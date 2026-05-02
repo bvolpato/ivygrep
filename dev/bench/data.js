@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777736910468,
+  "lastUpdate": 1777754591555,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -10793,6 +10793,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 532.08,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "b7cf4c451e0e292a810d427fe46ff42db05b9a46",
+          "message": "perf: cache hash model in daemon + add watcher debounce\n\nTwo high-impact daemon optimizations:\n\n1. HashEmbeddingModel cached process-wide: The daemon was calling\n   create_model(true) on every watcher filesystem event, every Index\n   request, and every fallback search (when ONNX is still loading).\n   Now uses a static OnceLock<Arc<dyn EmbeddingModel>> so the alias\n   hash map is built exactly once for the daemon lifetime.\n\n2. Watcher debounce: The watch worker was waking and starting\n   re-indexing immediately on the first notify event. Added a 300ms\n   debounce sleep so burst saves (e.g., cargo fmt touching 50 files)\n   coalesce into a single indexing pass.\n\nAlso fixes escaped quotes in README CLI examples.",
+          "timestamp": "2026-05-02T16:33:51-04:00",
+          "tree_id": "811a4adf9a041117a46a0e0d2b4e6ce89af7d6e8",
+          "url": "https://github.com/bvolpato/ivygrep/commit/b7cf4c451e0e292a810d427fe46ff42db05b9a46"
+        },
+        "date": 1777754591311,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 915355700,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 7864.81,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3826.08,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2836.48,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11060.93,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 10734.25,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 7.1,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 711.65,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 19871.53,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 8267.97,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 6176.82,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 449650.85,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 526.42,
             "unit": "µs"
           }
         ]
