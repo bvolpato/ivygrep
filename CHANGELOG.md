@@ -2,6 +2,15 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.6.16] — 2026-05-03
+
+### Performance
+- **Daemon-wide hash model cache:** `HashEmbeddingModel` was rebuilt from scratch on every watcher filesystem event, every `Index` request, and every fallback search (when ONNX is still loading). Now cached in a process-wide `static OnceLock` so the alias hash map is constructed exactly once for the daemon's lifetime.
+- **Watcher debounce (300ms):** The file watcher previously triggered re-indexing immediately on the first `notify` event. Added a 300ms debounce delay so burst saves (e.g., `cargo fmt` touching 50 files in rapid succession) coalesce into a single indexing pass.
+
+### Fixed
+- **README CLI examples:** Removed escaped backslash-quotes (`\"`) in code blocks that rendered incorrectly.
+
 ## [0.6.15] — 2026-05-02
 
 ### Performance
