@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -112,21 +113,21 @@ impl WatchEventFilter {
     }
 
     fn path_should_reindex(&self, path: &Path) -> bool {
-        let Ok(rel) = path.strip_prefix(&self.root) else {
+        let Some((normalized_path, rel)) = self.normalize_watch_path(path) else {
             return false;
         };
-        if rel.as_os_str().is_empty() || is_always_ignored_watch_path(rel) {
+        if rel.as_os_str().is_empty() || is_always_ignored_watch_path(&rel) {
             return false;
         }
 
         if !self.skip_gitignore {
-            if is_common_build_output_path(rel) {
+            if is_common_build_output_path(&rel) {
                 return false;
             }
 
             if let Some(gitignore) = &self.root_gitignore
                 && gitignore
-                    .matched_path_or_any_parents(path, path.is_dir())
+                    .matched_path_or_any_parents(&normalized_path, normalized_path.is_dir())
                     .is_ignore()
             {
                 return false;
@@ -134,6 +135,39 @@ impl WatchEventFilter {
         }
 
         true
+    }
+
+    fn normalize_watch_path(&self, path: &Path) -> Option<(PathBuf, PathBuf)> {
+        let absolute = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.root.join(path)
+        };
+
+        if let Ok(rel) = absolute.strip_prefix(&self.root) {
+            return Some((absolute.clone(), rel.to_path_buf()));
+        }
+
+        let normalized = canonicalize_existing_prefix(&absolute)?;
+        let rel = normalized.strip_prefix(&self.root).ok()?.to_path_buf();
+        Some((normalized, rel))
+    }
+}
+
+fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
+    let mut cursor = path;
+    let mut missing = Vec::<OsString>::new();
+
+    loop {
+        if let Ok(mut normalized) = cursor.canonicalize() {
+            for component in missing.iter().rev() {
+                normalized.push(component);
+            }
+            return Some(normalized);
+        }
+
+        missing.push(cursor.file_name()?.to_os_string());
+        cursor = cursor.parent()?;
     }
 }
 
@@ -1344,6 +1378,38 @@ mod tests {
         assert!(filter.path_should_reindex(&repo.path().join("target/debug/build.o")));
         assert!(filter.path_should_reindex(&repo.path().join("secret.txt")));
         assert!(!filter.path_should_reindex(&repo.path().join(".git/index")));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[serial]
+    fn watch_event_filter_accepts_paths_through_symlinked_root() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+        std::fs::create_dir_all(repo.path().join("src")).unwrap();
+
+        let link = home.path().join("repo-link");
+        std::os::unix::fs::symlink(repo.path(), &link).unwrap();
+
+        let workspace = Workspace::resolve(&link).unwrap();
+        workspace.ensure_dirs().unwrap();
+        workspace
+            .write_metadata(&WorkspaceMetadata {
+                id: workspace.id.clone(),
+                root: workspace.root.clone(),
+                created_at_unix: 0,
+                last_indexed_at_unix: None,
+                watch_enabled: true,
+                skip_gitignore: false,
+                index_generation: 0,
+            })
+            .unwrap();
+
+        let filter = WatchEventFilter::new(&workspace);
+        assert!(filter.path_should_reindex(&link.join("src/lib.rs")));
     }
 
     #[test]
