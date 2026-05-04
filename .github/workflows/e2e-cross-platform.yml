@@ -1,0 +1,406 @@
+name: Cross-Platform E2E
+
+on:
+  # Manual trigger with architecture selection
+  workflow_dispatch:
+    inputs:
+      architectures:
+        description: "Architectures to test (comma-separated)"
+        required: false
+        default: "linux-x86_64,linux-aarch64,macos-arm64"
+        type: string
+      test_scope:
+        description: "Test scope"
+        required: false
+        default: "full"
+        type: choice
+        options:
+          - full      # cargo test --lib --bins --tests
+          - smoke     # Binary smoke test only (fast)
+          - stress    # Include stress tests
+
+  # Run on releases to validate every published binary
+  push:
+    tags:
+      - "v*"
+
+  # Weekly scheduled run to catch regressions early
+  schedule:
+    - cron: "0 6 * * 1" # Every Monday at 06:00 UTC
+
+env:
+  CARGO_TERM_COLOR: always
+  IVYGREP_NO_AUTOSPAWN: "1"
+
+jobs:
+  # ── Native runners (fast, no emulation) ─────────────────────────────
+  native-linux-x86_64:
+    name: "E2E: Linux x86_64 (native)"
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      contains(github.event.inputs.architectures, 'linux-x86_64')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "e2e-linux-x86_64"
+
+      - name: System info
+        run: |
+          uname -a
+          cat /proc/meminfo | head -5
+          cat /proc/sys/fs/inotify/max_user_watches
+          nproc
+
+      - name: Build
+        run: cargo build --release
+        env:
+          RUSTFLAGS: "-D warnings -C target-cpu=x86-64-v3"
+
+      - name: Run full test suite
+        if: github.event.inputs.test_scope != 'smoke'
+        run: cargo test --lib --bins --tests
+        env:
+          RUSTFLAGS: "-D warnings -C target-cpu=x86-64-v3"
+
+      - name: Run stress tests
+        if: github.event.inputs.test_scope == 'stress'
+        run: cargo test --test stress_harness -- --ignored
+        env:
+          RUSTFLAGS: "-D warnings -C target-cpu=x86-64-v3"
+
+      - name: E2E smoke test
+        run: |
+          IG_BIN="$PWD/target/release/ig"
+
+          echo "::group::Version & Status"
+          $IG_BIN --version
+          $IG_BIN status
+          echo "::endgroup::"
+
+          echo "::group::Index & Search"
+          mkdir -p /tmp/e2e-test && cd /tmp/e2e-test
+          # Create a realistic small project
+          mkdir -p src tests
+          cat > src/main.rs << 'EOF'
+          fn main() {
+              let result = calculate_fibonacci(10);
+              println!("Fibonacci(10) = {}", result);
+          }
+
+          fn calculate_fibonacci(n: u32) -> u64 {
+              match n {
+                  0 => 0,
+                  1 => 1,
+                  _ => calculate_fibonacci(n - 1) + calculate_fibonacci(n - 2),
+              }
+          }
+          EOF
+
+          cat > tests/test_fib.rs << 'EOF'
+          fn test_fibonacci_base_cases() {
+              assert_eq!(calculate_fibonacci(0), 0);
+              assert_eq!(calculate_fibonacci(1), 1);
+          }
+          EOF
+
+          # Test: literal search
+          $IG_BIN --literal "calculate_fibonacci" src/main.rs
+          $IG_BIN --literal "calculate_fibonacci" src/main.rs | grep -q "calculate_fibonacci" || { echo "FAIL: literal search"; exit 1; }
+
+          # Test: index the project
+          $IG_BIN --add .
+          $IG_BIN status --json | grep -q "e2e-test" || { echo "FAIL: workspace not indexed"; exit 1; }
+
+          # Test: semantic search
+          HITS=$($IG_BIN "fibonacci calculation" 2>/dev/null || true)
+          echo "$HITS"
+          echo "::endgroup::"
+
+          echo "::group::Daemon lifecycle"
+          # Test: daemon status (should show workspace)
+          $IG_BIN status
+          # Test: remove workspace
+          $IG_BIN --remove .
+          echo "::endgroup::"
+
+          echo "✅ All E2E checks passed on $(uname -m)"
+
+  native-macos-arm64:
+    name: "E2E: macOS ARM64 (native)"
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      contains(github.event.inputs.architectures, 'macos-arm64')
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "e2e-macos-arm64"
+
+      - name: System info
+        run: |
+          uname -a
+          sysctl hw.memsize hw.ncpu
+          arch
+
+      - name: Build
+        run: cargo build --release --features accelerate
+        env:
+          RUSTFLAGS: "-D warnings"
+
+      - name: Run full test suite
+        if: github.event.inputs.test_scope != 'smoke'
+        run: cargo test --lib --bins --tests --features accelerate
+        env:
+          RUSTFLAGS: "-D warnings"
+
+      - name: E2E smoke test
+        run: |
+          IG_BIN="$PWD/target/release/ig"
+
+          echo "::group::Version & Status"
+          $IG_BIN --version
+          $IG_BIN status
+          echo "::endgroup::"
+
+          echo "::group::Index & Search"
+          TMPDIR=$(mktemp -d)
+          cd "$TMPDIR"
+          mkdir -p src
+          echo 'pub fn macos_arm64_marker() -> &str { "verified" }' > src/lib.rs
+          echo 'fn main() { println!("{}", src::macos_arm64_marker()); }' > src/main.rs
+
+          $IG_BIN --literal "macos_arm64_marker" src/lib.rs | grep -q "macos_arm64_marker" || { echo "FAIL: literal search"; exit 1; }
+
+          $IG_BIN --add .
+          $IG_BIN status --json | grep -q "$TMPDIR" || { echo "FAIL: workspace not indexed"; exit 1; }
+          $IG_BIN --remove .
+          echo "::endgroup::"
+
+          echo "✅ All E2E checks passed on $(uname -m)"
+
+  native-macos-intel:
+    name: "E2E: macOS x86_64 (native)"
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      contains(github.event.inputs.architectures, 'macos-x86_64')
+    runs-on: macos-15-intel
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "e2e-macos-intel"
+
+      - name: System info
+        run: |
+          uname -a
+          sysctl hw.memsize hw.ncpu
+          arch
+
+      - name: Build
+        run: cargo build --release --features accelerate
+        env:
+          RUSTFLAGS: "-D warnings"
+
+      - name: Run full test suite
+        if: github.event.inputs.test_scope != 'smoke'
+        run: cargo test --lib --bins --tests --features accelerate
+        env:
+          RUSTFLAGS: "-D warnings"
+
+      - name: E2E smoke test
+        run: |
+          IG_BIN="$PWD/target/release/ig"
+          $IG_BIN --version
+
+          TMPDIR=$(mktemp -d)
+          cd "$TMPDIR"
+          echo 'fn intel_marker() { }' > test.rs
+          $IG_BIN --literal "intel_marker" test.rs | grep -q "intel_marker" || { echo "FAIL"; exit 1; }
+          $IG_BIN --add .
+          $IG_BIN status
+          $IG_BIN --remove .
+
+          echo "✅ All E2E checks passed on $(uname -m)"
+
+  # ── Cross-architecture via QEMU (slower but covers aarch64 on Linux) ─
+  cross-linux-aarch64:
+    name: "E2E: Linux aarch64 (QEMU)"
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      contains(github.event.inputs.architectures, 'linux-aarch64')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "e2e-linux-aarch64"
+
+      - name: Build with cross
+        run: cross build --release --target aarch64-unknown-linux-musl
+
+      - name: Run tests with cross
+        if: github.event.inputs.test_scope != 'smoke'
+        run: cross test --lib --bins --tests --target aarch64-unknown-linux-musl
+        env:
+          # Cross tests run inside a Docker container with QEMU;
+          # give them more time for emulation overhead.
+          CARGO_TEST_TIMEOUT: "300"
+
+      - name: E2E smoke test (QEMU)
+        run: |
+          # Run the binary directly through QEMU user-mode emulation
+          BINARY="./target/aarch64-unknown-linux-musl/release/ig"
+
+          # Verify binary is actually aarch64
+          file "$BINARY" | grep -qi "aarch64\|ARM" || { echo "FAIL: binary is not aarch64"; file "$BINARY"; exit 1; }
+
+          # Run through cross's Docker container for proper QEMU env
+          docker run --rm \
+            --platform linux/arm64 \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            -e IVYGREP_NO_AUTOSPAWN=1 \
+            alpine:latest sh -c '
+              set -e
+              IG="/workspace/target/aarch64-unknown-linux-musl/release/ig"
+
+              echo "=== Architecture ==="
+              uname -m
+
+              echo "=== Version ==="
+              $IG --version
+
+              echo "=== Status ==="
+              $IG status
+
+              echo "=== Literal Search ==="
+              mkdir -p /tmp/e2e
+              echo "fn aarch64_e2e_marker() { }" > /tmp/e2e/test.rs
+              $IG --literal "aarch64_e2e_marker" /tmp/e2e/test.rs
+              $IG --literal "aarch64_e2e_marker" /tmp/e2e/test.rs | grep -q "aarch64_e2e_marker"
+
+              echo "=== Index & Search ==="
+              cd /tmp/e2e
+              $IG --add .
+              $IG status
+              $IG --remove .
+
+              echo "✅ All E2E checks passed on $(uname -m)"
+            '
+
+  # ── Hash-only mode (no neural/ONNX — tests portability) ─────────────
+  hash-only-linux:
+    name: "E2E: Linux x86_64 (hash-only, no neural)"
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      contains(github.event.inputs.architectures, 'linux-x86_64')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "e2e-hash-only"
+
+      - name: Build (no default features)
+        run: cargo build --release --no-default-features
+        env:
+          RUSTFLAGS: "-D warnings"
+
+      - name: Run full test suite (hash-only)
+        if: github.event.inputs.test_scope != 'smoke'
+        run: cargo test --lib --bins --tests --no-default-features
+        env:
+          RUSTFLAGS: "-D warnings"
+
+      - name: E2E smoke test (hash-only)
+        run: |
+          IG_BIN="$PWD/target/release/ig"
+          $IG_BIN --version
+
+          mkdir -p /tmp/hash-only-e2e && cd /tmp/hash-only-e2e
+          echo 'fn hash_only_marker() { }' > test.rs
+          $IG_BIN --literal "hash_only_marker" test.rs | grep -q "hash_only_marker" || { echo "FAIL"; exit 1; }
+
+          $IG_BIN --add .
+          $IG_BIN status
+          $IG_BIN --remove .
+
+          echo "✅ Hash-only E2E passed"
+
+  # ── Summary ─────────────────────────────────────────────────────────
+  summary:
+    name: "E2E Summary"
+    needs:
+      - native-linux-x86_64
+      - native-macos-arm64
+      - native-macos-intel
+      - cross-linux-aarch64
+      - hash-only-linux
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report
+        run: |
+          echo "## Cross-Platform E2E Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Platform | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Linux x86_64 (native) | ${{ needs.native-linux-x86_64.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| macOS ARM64 (native) | ${{ needs.native-macos-arm64.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| macOS x86_64 (native) | ${{ needs.native-macos-intel.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Linux aarch64 (QEMU) | ${{ needs.cross-linux-aarch64.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Linux x86_64 (hash-only) | ${{ needs.hash-only-linux.result }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Check for failures
+        if: >-
+          needs.native-linux-x86_64.result == 'failure' ||
+          needs.native-macos-arm64.result == 'failure' ||
+          needs.native-macos-intel.result == 'failure' ||
+          needs.cross-linux-aarch64.result == 'failure' ||
+          needs.hash-only-linux.result == 'failure'
+        run: |
+          echo "❌ One or more E2E jobs failed!"
+          exit 1

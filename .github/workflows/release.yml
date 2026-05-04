@@ -82,12 +82,33 @@ jobs:
 
       - name: Smoke test
         shell: bash
+        env:
+          IVYGREP_NO_AUTOSPAWN: "1"
         run: |
           EXE_SUFFIX=""
           if [[ "${{ matrix.target }}" == *"windows"* ]]; then
             EXE_SUFFIX=".exe"
           fi
-          ./target/${{ matrix.target }}/release/ig${EXE_SUFFIX} --help
+          IG_BIN="./target/${{ matrix.target }}/release/ig${EXE_SUFFIX}"
+
+          # Basic sanity
+          $IG_BIN --version
+          $IG_BIN --help > /dev/null
+
+          # For native runners, do a full index+search smoke test.
+          # Cross-compiled aarch64 binaries can't run natively on x86 runners,
+          # so we skip the heavy test for those (covered by e2e-cross-platform.yml).
+          if [[ "${{ matrix.use_cross }}" != "true" ]]; then
+            mkdir -p /tmp/release-smoke && cd /tmp/release-smoke
+            echo 'fn release_smoke_test_marker() { println!("works"); }' > main.rs
+            $IG_BIN --literal "release_smoke_test_marker" main.rs | grep -q "release_smoke_test_marker" || { echo "FAIL: literal search"; exit 1; }
+            $IG_BIN --add .
+            $IG_BIN status
+            $IG_BIN --remove .
+            echo "✅ Release smoke test passed on $(uname -m)"
+          else
+            echo "⏭️ Skipping index test for cross-compiled binary (tested in e2e-cross-platform.yml)"
+          fi
 
       - name: Package archive
         shell: bash
