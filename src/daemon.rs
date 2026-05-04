@@ -112,7 +112,9 @@ impl WatchEventFilter {
     }
 
     fn path_should_reindex(&self, path: &Path) -> bool {
-        let rel = path.strip_prefix(&self.root).unwrap_or(path);
+        let Ok(rel) = path.strip_prefix(&self.root) else {
+            return false;
+        };
         if rel.as_os_str().is_empty() || is_always_ignored_watch_path(rel) {
             return false;
         }
@@ -124,7 +126,7 @@ impl WatchEventFilter {
 
             if let Some(gitignore) = &self.root_gitignore
                 && gitignore
-                    .matched_path_or_any_parents(rel, path.is_dir())
+                    .matched_path_or_any_parents(path, path.is_dir())
                     .is_ignore()
             {
                 return false;
