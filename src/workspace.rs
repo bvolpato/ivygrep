@@ -716,12 +716,18 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
         let (chunk_count, file_count) = read_sqlite_counts(&index_dir);
         let index_size_bytes = dir_size_bytes(&index_dir);
         let neural_path = index_dir.join("vectors_neural.usearch");
-        let has_neural_vectors = neural_path.exists();
-        let neural_vector_count = if has_neural_vectors {
-            neural_path.metadata().map(|m| m.len()).unwrap_or(0) / 4 // rough estimate
+        let neural_vector_count = if neural_path.exists() {
+            crate::vector_store::VectorStore::open_readonly(
+                &neural_path,
+                384,
+                crate::vector_store::ScalarKind::F32,
+            )
+            .map(|store| store.size() as u64)
+            .unwrap_or(0)
         } else {
             0
         };
+        let has_neural_vectors = neural_vector_count > 0;
 
         let workspace = Workspace {
             id: metadata.id.clone(),

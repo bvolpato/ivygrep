@@ -677,7 +677,7 @@ fn index_workspace_inner(
     }
 
     let t1 = std::time::Instant::now();
-    if total > 0 {
+    if show_progress && total > 0 {
         eprint!(
             "\r\x1b[K  ✓ {} files, {} chunks — indexed completely in {:.1}s\n",
             touched_files.len(),
@@ -850,7 +850,38 @@ fn check_system_constraints() -> Option<String> {
     None
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+fn check_system_constraints() -> Option<String> {
+    if cfg!(test) || std::env::var("CI").is_ok() {
+        return None;
+    }
+
+    let mut loadavg = [0.0f64; 3];
+    let has_load = unsafe { libc::getloadavg(loadavg.as_mut_ptr(), 3) };
+    if has_load > 0 {
+        let load1 = loadavg[0];
+        let cpus = num_cpus::get() as f64;
+        let max_load = cpus * 0.75;
+        if load1 > max_load {
+            return Some(format!("High System Load ({load1:.1} > {max_load:.1} max)"));
+        }
+    }
+
+    if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo")
+        && let Some(kb) = meminfo.lines().find_map(|line| {
+            line.strip_prefix("MemAvailable:")
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|value| value.parse::<u64>().ok())
+        })
+        && kb < 1_048_576
+    {
+        return Some(format!("Low Available Memory ({} MiB)", kb / 1024));
+    }
+
+    None
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
 fn check_system_constraints() -> Option<String> {
     None
 }

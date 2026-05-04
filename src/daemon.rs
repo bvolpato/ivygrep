@@ -1,5 +1,7 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
@@ -23,9 +25,20 @@ use crate::regex_search::regex_search;
 use crate::search::{SearchOptions, hybrid_search, literal_search};
 use crate::workspace::{Workspace, WorkspaceScope, list_workspaces};
 
+const WATCH_QUIET_PERIOD: Duration = Duration::from_secs(2);
+const WATCH_MAX_DEBOUNCE: Duration = Duration::from_secs(30);
+const MAX_DAEMON_LOG_BYTES: u64 = 10 * 1024 * 1024;
+
 struct WatchRegistration {
     _watcher: RecommendedWatcher,
     control: Arc<WatchControl>,
+}
+
+#[derive(Clone)]
+struct WatchEventFilter {
+    root: PathBuf,
+    skip_gitignore: bool,
+    root_gitignore: Option<ignore::gitignore::Gitignore>,
 }
 
 struct WatchControl {
@@ -73,9 +86,59 @@ impl WatchControl {
     }
 }
 
+impl WatchEventFilter {
+    fn new(workspace: &Workspace) -> Self {
+        let skip_gitignore = workspace
+            .read_metadata()
+            .ok()
+            .flatten()
+            .is_some_and(|metadata| metadata.skip_gitignore);
+        let root_gitignore = (!skip_gitignore)
+            .then(|| build_root_gitignore(&workspace.root))
+            .flatten();
+
+        Self {
+            root: workspace.root.clone(),
+            skip_gitignore,
+            root_gitignore,
+        }
+    }
+
+    fn should_reindex(&self, event: &notify::Event) -> bool {
+        event
+            .paths
+            .iter()
+            .any(|path| self.path_should_reindex(path))
+    }
+
+    fn path_should_reindex(&self, path: &Path) -> bool {
+        let rel = path.strip_prefix(&self.root).unwrap_or(path);
+        if rel.as_os_str().is_empty() || is_always_ignored_watch_path(rel) {
+            return false;
+        }
+
+        if !self.skip_gitignore {
+            if is_common_build_output_path(rel) {
+                return false;
+            }
+
+            if let Some(gitignore) = &self.root_gitignore
+                && gitignore
+                    .matched_path_or_any_parents(rel, path.is_dir())
+                    .is_ignore()
+            {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
 #[derive(Clone)]
 struct DaemonState {
     lazy_model: Arc<std::sync::OnceLock<Arc<dyn EmbeddingModel>>>,
+    model_loading: Arc<AtomicBool>,
     watchers: Arc<Mutex<HashMap<String, WatchRegistration>>>,
 }
 
@@ -88,13 +151,31 @@ impl DaemonState {
             None => cached_hash_model(),
         }
     }
+
+    fn maybe_start_model_load(&self) {
+        if self.lazy_model.get().is_some() || self.model_loading.swap(true, Ordering::Relaxed) {
+            return;
+        }
+
+        let lazy = self.lazy_model.clone();
+        let loading = self.model_loading.clone();
+        std::thread::spawn(move || {
+            daemon_log("loading embedding model...");
+            lazy.get_or_init(|| Arc::from(create_model(false)));
+            loading.store(false, Ordering::Relaxed);
+            daemon_log("embedding model ready");
+        });
+    }
 }
 
 pub async fn run_daemon() -> Result<()> {
     config::ensure_app_dirs()?;
 
     let (listener, socket_path) = crate::ipc::bind().await?;
-    eprintln!("ivygrep daemon listening on {}", socket_path.display());
+    daemon_log(&format!(
+        "ivygrep daemon listening on {}",
+        socket_path.display()
+    ));
 
     // Defer model creation — the ONNX download happens on first use.
     let lazy_model: Arc<std::sync::OnceLock<Arc<dyn EmbeddingModel>>> =
@@ -102,23 +183,11 @@ pub async fn run_daemon() -> Result<()> {
 
     let state = DaemonState {
         lazy_model: lazy_model.clone(),
+        model_loading: Arc::new(AtomicBool::new(false)),
         watchers: Arc::new(Mutex::new(HashMap::new())),
     };
 
     restore_configured_watchers(&state);
-
-    // Eagerly start loading the ONNX model in the background so it's ready
-    // when the first search arrives. Searches that arrive before loading
-    // completes will use a fast hash-based fallback.
-    {
-        let lazy = lazy_model.clone();
-        std::thread::spawn(move || {
-            lazy.get_or_init(|| {
-                eprintln!("loading embedding model...");
-                Arc::from(create_model(false))
-            });
-        });
-    }
 
     info!("ivygrep daemon listening on {}", socket_path.display());
 
@@ -321,6 +390,10 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 progress_tx: None,
                 cancel_token: None,
             };
+
+            if workspaces.iter().any(workspace_has_neural_vectors) {
+                state_clone.maybe_start_model_load();
+            }
 
             let result = tokio::task::spawn_blocking(move || {
                 let model = state_clone.get_model_or_fallback();
@@ -632,9 +705,12 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
 
     let control = Arc::new(WatchControl::new(workspace.clone()));
     let callback_control = control.clone();
+    let event_filter = WatchEventFilter::new(&workspace);
 
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        if event.is_ok() {
+        if let Ok(event) = event
+            && event_filter.should_reindex(&event)
+        {
             callback_control.mark_dirty();
         }
     })?;
@@ -664,7 +740,7 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
     // and skip expensive Merkle scans ("trust but verify").
     let _ = std::fs::write(workspace.watcher_pid_path(), std::process::id().to_string());
 
-    eprintln!("watching {}", workspace.root.display());
+    daemon_log(&format!("watching {}", workspace.root.display()));
 
     Ok(())
 }
@@ -709,9 +785,7 @@ fn spawn_watch_worker(control: Arc<WatchControl>) {
                 break;
             }
 
-            // Debounce: wait 300ms after the first event so that burst saves
-            // (e.g., cargo fmt touching 50 files) coalesce before indexing.
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            wait_for_watch_quiet(&control).await;
 
             if control.indexing.swap(true, Ordering::Relaxed) {
                 continue;
@@ -748,7 +822,10 @@ fn spawn_watch_worker(control: Arc<WatchControl>) {
 
                 match result {
                     Ok(()) => {
-                        eprintln!("watch update indexed {}", control.workspace.root.display());
+                        daemon_log(&format!(
+                            "watch update indexed {}",
+                            control.workspace.root.display()
+                        ));
                         let success = JobUpdate {
                             phase: Some(if control.dirty.load(Ordering::Relaxed) {
                                 "dirty".to_string()
@@ -761,10 +838,10 @@ fn spawn_watch_worker(control: Arc<WatchControl>) {
                         let _ = jobs::heartbeat_job(&control.workspace, JobKind::Watcher, success);
                     }
                     Err(err) => {
-                        eprintln!(
+                        daemon_log(&format!(
                             "watch update failed for {}: {err:#}",
                             control.workspace.root.display()
-                        );
+                        ));
                         warn!(
                             "watch-triggered indexing failed for {}: {err:#}",
                             control.workspace.root.display()
@@ -776,6 +853,10 @@ fn spawn_watch_worker(control: Arc<WatchControl>) {
                         };
                         let _ = jobs::heartbeat_job(&control.workspace, JobKind::Watcher, failed);
                     }
+                }
+
+                if control.dirty.load(Ordering::Relaxed) {
+                    wait_for_watch_quiet(&control).await;
                 }
             }
 
@@ -793,6 +874,32 @@ fn spawn_watch_worker(control: Arc<WatchControl>) {
     });
 }
 
+async fn wait_for_watch_quiet(control: &WatchControl) {
+    let started = tokio::time::Instant::now();
+    let mut last_seen = control.pending_events.load(Ordering::Relaxed);
+    let mut last_changed = tokio::time::Instant::now();
+
+    loop {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        if !control.active.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let current = control.pending_events.load(Ordering::Relaxed);
+        let now = tokio::time::Instant::now();
+        if current != last_seen {
+            last_seen = current;
+            last_changed = now;
+        }
+
+        if now.duration_since(last_changed) >= WATCH_QUIET_PERIOD
+            || now.duration_since(started) >= WATCH_MAX_DEBOUNCE
+        {
+            break;
+        }
+    }
+}
+
 /// Process-wide cached hash embedding model. Avoids rebuilding the alias
 /// hash map on every watcher event, index request, or fallback search.
 fn cached_hash_model() -> Arc<dyn EmbeddingModel> {
@@ -800,6 +907,84 @@ fn cached_hash_model() -> Arc<dyn EmbeddingModel> {
     HASH_MODEL
         .get_or_init(|| Arc::from(create_model(true)))
         .clone()
+}
+
+fn build_root_gitignore(root: &Path) -> Option<ignore::gitignore::Gitignore> {
+    let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
+    let gitignore = root.join(".gitignore");
+    if gitignore.exists() {
+        let _ = builder.add(&gitignore);
+    }
+    let git_exclude = root.join(".git/info/exclude");
+    if git_exclude.exists() {
+        let _ = builder.add(&git_exclude);
+    }
+    builder.build().ok()
+}
+
+fn is_always_ignored_watch_path(rel: &Path) -> bool {
+    rel.components().any(|component| {
+        let part = component.as_os_str();
+        part == ".git" || part == ".ivygrep"
+    })
+}
+
+fn is_common_build_output_path(rel: &Path) -> bool {
+    rel.components().any(|component| {
+        matches!(
+            component.as_os_str().to_str(),
+            Some(
+                "target"
+                    | "node_modules"
+                    | ".next"
+                    | ".nuxt"
+                    | ".svelte-kit"
+                    | ".turbo"
+                    | ".cache"
+                    | ".direnv"
+                    | "dist"
+                    | "build"
+                    | "coverage"
+            )
+        )
+    })
+}
+
+fn workspace_has_neural_vectors(workspace: &Workspace) -> bool {
+    workspace.vector_neural_path().exists()
+        || workspace
+            .base_index_dir
+            .as_ref()
+            .is_some_and(|base| base.join("vectors_neural.usearch").exists())
+}
+
+fn daemon_log(message: &str) {
+    eprintln!("{} {}", daemon_timestamp(), message);
+}
+
+fn daemon_timestamp() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("[{}.{:03}]", now.as_secs(), now.subsec_millis())
+}
+
+fn open_daemon_log_file() -> Result<File> {
+    let log_path = config::app_home()?.join("daemon.log");
+    if log_path
+        .metadata()
+        .map(|metadata| metadata.len() > MAX_DAEMON_LOG_BYTES)
+        .unwrap_or(false)
+    {
+        let rotated = log_path.with_extension("log.1");
+        let _ = std::fs::remove_file(&rotated);
+        let _ = std::fs::rename(&log_path, rotated);
+    }
+
+    Ok(OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)?)
 }
 
 fn scope_from_request(scope_path: Option<PathBuf>, scope_is_file: bool) -> Option<WorkspaceScope> {
@@ -837,17 +1022,8 @@ where
             cmd.arg("--daemon");
 
             // Redirect daemon I/O to a log file to keep the CLI terminal clean.
-            if let Ok(log_file) =
-                config::app_home()
-                    .map(|h| h.join("daemon.log"))
-                    .and_then(|log_path| {
-                        std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(log_path)
-                            .map_err(|e| anyhow::anyhow!(e))
-                    })
-            {
+            if let Ok(mut log_file) = open_daemon_log_file() {
+                let _ = writeln!(log_file, "{} spawning daemon", daemon_timestamp());
                 let log_stderr = log_file.try_clone();
                 cmd.stdout(std::process::Stdio::from(log_file));
                 if let Ok(stderr_file) = log_stderr {
@@ -861,6 +1037,12 @@ where
             {
                 use std::os::unix::process::CommandExt;
                 cmd.process_group(0);
+                unsafe {
+                    cmd.pre_exec(|| {
+                        libc::nice(5);
+                        Ok(())
+                    });
+                }
             }
 
             #[cfg(not(unix))]
@@ -1014,6 +1196,7 @@ mod tests {
 
         let state = DaemonState {
             lazy_model: Arc::new(std::sync::OnceLock::new()),
+            model_loading: Arc::new(AtomicBool::new(false)),
             watchers: Arc::new(Mutex::new(HashMap::new())),
         };
 
@@ -1088,6 +1271,7 @@ mod tests {
 
         let state = DaemonState {
             lazy_model: Arc::new(std::sync::OnceLock::new()),
+            model_loading: Arc::new(AtomicBool::new(false)),
             watchers: Arc::new(Mutex::new(HashMap::new())),
         };
 
@@ -1118,5 +1302,66 @@ mod tests {
         );
 
         stop_all_watchers(&state_arc);
+    }
+
+    #[test]
+    #[serial]
+    fn watch_event_filter_respects_gitignore_unless_skip_enabled() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join(".gitignore"), "target/\nsecret.txt\n").unwrap();
+        std::fs::create_dir_all(repo.path().join("src")).unwrap();
+        std::fs::create_dir_all(repo.path().join("target/debug")).unwrap();
+        std::fs::create_dir_all(repo.path().join(".git")).unwrap();
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        workspace.ensure_dirs().unwrap();
+        let mut metadata = WorkspaceMetadata {
+            id: workspace.id.clone(),
+            root: workspace.root.clone(),
+            created_at_unix: 0,
+            last_indexed_at_unix: None,
+            watch_enabled: true,
+            skip_gitignore: false,
+            index_generation: 0,
+        };
+        workspace.write_metadata(&metadata).unwrap();
+
+        let filter = WatchEventFilter::new(&workspace);
+        assert!(filter.path_should_reindex(&repo.path().join("src/lib.rs")));
+        assert!(!filter.path_should_reindex(&repo.path().join("target/debug/build.o")));
+        assert!(!filter.path_should_reindex(&repo.path().join("secret.txt")));
+        assert!(!filter.path_should_reindex(&repo.path().join(".git/index")));
+
+        metadata.skip_gitignore = true;
+        workspace.write_metadata(&metadata).unwrap();
+        let filter = WatchEventFilter::new(&workspace);
+        assert!(filter.path_should_reindex(&repo.path().join("src/lib.rs")));
+        assert!(filter.path_should_reindex(&repo.path().join("target/debug/build.o")));
+        assert!(filter.path_should_reindex(&repo.path().join("secret.txt")));
+        assert!(!filter.path_should_reindex(&repo.path().join(".git/index")));
+    }
+
+    #[test]
+    #[serial]
+    fn daemon_log_file_rotates_and_uses_timestamp_prefix() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::create_dir_all(home.path()).unwrap();
+        let log_path = home.path().join("daemon.log");
+        std::fs::write(&log_path, vec![b'x'; (MAX_DAEMON_LOG_BYTES + 1) as usize]).unwrap();
+
+        let mut log = open_daemon_log_file().unwrap();
+        writeln!(log, "{} test line", daemon_timestamp()).unwrap();
+        drop(log);
+
+        assert!(home.path().join("daemon.log.1").exists());
+        let current = std::fs::read_to_string(&log_path).unwrap();
+        assert!(
+            current.starts_with('[') && current.contains("] test line"),
+            "daemon log should use a timestamp prefix, got {current:?}"
+        );
     }
 }
