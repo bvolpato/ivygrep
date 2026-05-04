@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777901432503,
+  "lastUpdate": 1777905016388,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -11238,6 +11238,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 533.39,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "feb8c9c86d2f1b251dd5acf803f157944be4d3a4",
+          "message": "fix: Linux stability — cap memory, guard OOM, detect inotify limits\n\nCritical fixes for Linux crashes (OOM killer):\n\n1. Vector store capacity growth capped at 256K entries per reallocation\n   (was unbounded 2x doubling — could allocate 512MB in one shot)\n\n2. Tantivy writer heap: 200MB → 50MB\n\n3. SQLite WAL cache: 64MB → 16MB\n\n4. Pre-indexing memory guard: checks /proc/meminfo and refuses to\n   start when MemAvailable < 512 MiB\n\n5. WAL checkpoint(TRUNCATE) after indexing to reclaim disk\n\n6. inotify ENOSPC detection with actionable sysctl guidance",
+          "timestamp": "2026-05-04T10:20:34-04:00",
+          "tree_id": "406cb3079c3bde0b84eb0abc29e3327f9420cbd8",
+          "url": "https://github.com/bvolpato/ivygrep/commit/feb8c9c86d2f1b251dd5acf803f157944be4d3a4"
+        },
+        "date": 1777905016157,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 888118530,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 9857.74,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3831.48,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2846.44,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 10988.93,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 10820.78,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 7.15,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 717.48,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 19437.69,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 7949.01,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 5906.3,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 451904.49,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 545.13,
             "unit": "µs"
           }
         ]
