@@ -104,7 +104,7 @@ jobs:
             $IG_BIN --literal "release_smoke_test_marker" main.rs | grep -q "release_smoke_test_marker" || { echo "FAIL: literal search"; exit 1; }
             $IG_BIN --add .
             $IG_BIN status
-            $IG_BIN --remove .
+            $IG_BIN --rm .
             echo "✅ Release smoke test passed on $(uname -m)"
           else
             echo "⏭️ Skipping index test for cross-compiled binary (tested in e2e-cross-platform.yml)"

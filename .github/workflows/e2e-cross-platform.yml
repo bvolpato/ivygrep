@@ -128,7 +128,7 @@ jobs:
           # Test: daemon status (should show workspace)
           $IG_BIN status
           # Test: remove workspace
-          $IG_BIN --remove .
+          $IG_BIN --rm .
           echo "::endgroup::"
 
           echo "✅ All E2E checks passed on $(uname -m)"
@@ -188,7 +188,7 @@ jobs:
 
           $IG_BIN --add .
           $IG_BIN status --json | grep -q "$TMPDIR" || { echo "FAIL: workspace not indexed"; exit 1; }
-          $IG_BIN --remove .
+          $IG_BIN --rm .
           echo "::endgroup::"
 
           echo "✅ All E2E checks passed on $(uname -m)"
@@ -239,7 +239,7 @@ jobs:
           $IG_BIN --literal "intel_marker" test.rs | grep -q "intel_marker" || { echo "FAIL"; exit 1; }
           $IG_BIN --add .
           $IG_BIN status
-          $IG_BIN --remove .
+          $IG_BIN --rm .
 
           echo "✅ All E2E checks passed on $(uname -m)"
 
@@ -320,7 +320,7 @@ jobs:
               cd /tmp/e2e
               $IG --add .
               $IG status
-              $IG --remove .
+              $IG --rm .
 
               echo "✅ All E2E checks passed on $(uname -m)"
             '
@@ -366,7 +366,7 @@ jobs:
 
           $IG_BIN --add .
           $IG_BIN status
-          $IG_BIN --remove .
+          $IG_BIN --rm .
 
           echo "✅ Hash-only E2E passed"
 
