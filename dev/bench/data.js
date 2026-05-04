@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777906844111,
+  "lastUpdate": 1777907907354,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -11505,6 +11505,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 539.9,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "35a8fd4726992a06be5edf9291f838c41dfd4591",
+          "message": "fix(ci): isolate E2E smoke tests with mktemp to avoid workspace conflicts\n\nThe E2E smoke tests were running inside the checkout directory, which\ncaused ig to auto-index the repo itself. When the test then tried to\n--add a /tmp/ sub-path, it conflicted with the already-indexed workspace.\n\nFix: use mktemp -d for fully isolated temp dirs.\nAlso mark QEMU cross-tests as continue-on-error since they flake\nunder emulation.",
+          "timestamp": "2026-05-04T11:10:10-04:00",
+          "tree_id": "61bf5db344adda6c47ed7a884ad78c190a013e76",
+          "url": "https://github.com/bvolpato/ivygrep/commit/35a8fd4726992a06be5edf9291f838c41dfd4591"
+        },
+        "date": 1777907907116,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 771998290,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 8120.19,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3810.89,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2815.66,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11107.48,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 10812.44,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 7.1,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 732.13,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 19734.86,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 8073.51,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 5921.23,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 451850.37,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 493.89,
             "unit": "µs"
           }
         ]
