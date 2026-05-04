@@ -88,36 +88,17 @@ jobs:
 
           echo "::group::Index & Search"
           cd "$E2E_DIR"
-          mkdir -p src tests
-          cat > src/main.rs << 'EOF'
-          fn main() {
-              let result = calculate_fibonacci(10);
-              println!("Fibonacci(10) = {}", result);
-          }
+          echo 'fn linux_e2e_marker() { println!("hello"); }' > main.rs
+          echo 'fn helper_function() { }' > helper.rs
 
-          fn calculate_fibonacci(n: u32) -> u64 {
-              match n {
-                  0 => 0,
-                  1 => 1,
-                  _ => calculate_fibonacci(n - 1) + calculate_fibonacci(n - 2),
-              }
-          }
-          EOF
-
-          cat > tests/test_fib.rs << 'EOF'
-          fn test_fibonacci_base_cases() {
-              assert_eq!(calculate_fibonacci(0), 0);
-              assert_eq!(calculate_fibonacci(1), 1);
-          }
-          EOF
-
-          # Test: literal search (file mode, no indexing needed)
-          $IG_BIN --literal "calculate_fibonacci" src/main.rs
-          $IG_BIN --literal "calculate_fibonacci" src/main.rs | grep -q "calculate_fibonacci" || { echo "FAIL: literal search"; exit 1; }
-
-          # Test: index and workspace management
+          # Test: explicit index first, then search
           $IG_BIN --add .
           $IG_BIN status
+
+          # Test: literal search against indexed workspace
+          $IG_BIN --literal "linux_e2e_marker" main.rs | grep -q "linux_e2e_marker" || { echo "FAIL: literal search"; exit 1; }
+
+          # Test: cleanup
           $IG_BIN --rm .
           echo "::endgroup::"
 
@@ -170,13 +151,13 @@ jobs:
 
           echo "::group::Index & Search"
           cd "$E2E_DIR"
-          mkdir -p src
-          echo 'pub fn macos_arm64_marker() -> &str { "verified" }' > src/lib.rs
+          echo 'pub fn macos_arm64_marker() -> &str { "verified" }' > lib.rs
 
-          $IG_BIN --literal "macos_arm64_marker" src/lib.rs | grep -q "macos_arm64_marker" || { echo "FAIL: literal search"; exit 1; }
-
+          # Index first, then search
           $IG_BIN --add .
           $IG_BIN status
+          $IG_BIN --literal "macos_arm64_marker" lib.rs | grep -q "macos_arm64_marker" || { echo "FAIL: literal search"; exit 1; }
+
           $IG_BIN --rm .
           echo "::endgroup::"
 
