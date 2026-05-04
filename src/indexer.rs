@@ -184,6 +184,11 @@ fn index_workspace_with_options(
 ) -> Result<IndexingSummary> {
     workspace.ensure_dirs()?;
 
+    // On Linux, refuse to start indexing if available memory is critically low.
+    // This prevents the OOM killer from randomly stopping the computer.
+    #[cfg(target_os = "linux")]
+    check_linux_memory_before_index()?;
+
     // Acquire an exclusive file lock to prevent concurrent writes to the
     // vector store (usearch) and other index files. The lock is advisory
     // and automatically released when `_lock_file` is dropped.
@@ -254,6 +259,12 @@ fn index_workspace_with_options(
     });
 
     let result = index_workspace_inner(workspace, embedding_model, trust_live_watcher);
+
+    // Run a checkpoint to reclaim WAL space after bulk writes, then
+    // truncate the WAL file so it doesn't keep consuming disk.
+    if let Ok(conn) = Connection::open(workspace.sqlite_path()) {
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+    }
 
     let _ = fs2::FileExt::unlock(&lock_file);
     stop_heartbeat.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -486,7 +497,7 @@ fn index_workspace_inner(
     sqlite.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
-         PRAGMA cache_size = -64000;
+         PRAGMA cache_size = -16000;
          PRAGMA temp_store = MEMORY;",
     )?;
     create_tables(&sqlite)?;
@@ -503,7 +514,7 @@ fn index_workspace_inner(
     // Retry with backoff — NFS/overlayfs may delay flock release.
     let mut writer = None;
     for attempt in 0..5u32 {
-        match tantivy.writer(200_000_000) {
+        match tantivy.writer(50_000_000) {
             Ok(w) => {
                 writer = Some(w);
                 break;
@@ -879,6 +890,33 @@ fn check_system_constraints() -> Option<String> {
     }
 
     None
+}
+
+/// Guard for the indexer: refuse to start indexing when available memory
+/// is dangerously low. This prevents the OOM killer from firing during
+/// heavy workloads on Linux machines with limited RAM.
+#[cfg(target_os = "linux")]
+fn check_linux_memory_before_index() -> Result<()> {
+    if cfg!(test) || std::env::var("CI").is_ok() {
+        return Ok(());
+    }
+
+    if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo")
+        && let Some(kb) = meminfo.lines().find_map(|line| {
+            line.strip_prefix("MemAvailable:")
+                .and_then(|rest| rest.split_whitespace().next())
+                .and_then(|value| value.parse::<u64>().ok())
+        })
+        && kb < 524_288
+    {
+        anyhow::bail!(
+            "refusing to index: only {} MiB of memory available (need at least 512 MiB). \
+             Close other applications or free memory before re-indexing.",
+            kb / 1024
+        );
+    }
+
+    Ok(())
 }
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]

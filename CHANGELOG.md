@@ -2,6 +2,16 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.6.17] — 2026-05-04
+
+### Fixed — Linux Stability
+- **OOM: vector store capacity doubling was unbounded.** `usearch` grew capacity by 2× with no cap, causing a single 512 MB allocation on large repos (500K+ chunks). Now caps growth increments to 256K entries (~128 MB max per reallocation).
+- **OOM: Tantivy writer heap reduced from 200 MB to 50 MB.** Combined with usearch and SQLite, the old 200 MB heap pushed total working memory past 400 MB on the indexer alone, triggering the OOM killer on 8 GB Linux machines.
+- **OOM: SQLite cache reduced from 64 MB to 16 MB.** The WAL cache contributed to the combined memory pressure during bulk indexing.
+- **OOM: pre-indexing memory guard on Linux.** The indexer now checks `/proc/meminfo` before starting and refuses to index when `MemAvailable < 512 MiB`, preventing the OOM killer from crashing the entire machine.
+- **WAL bloat: SQLite WAL checkpoint after indexing.** Added `PRAGMA wal_checkpoint(TRUNCATE)` after index completion to reclaim WAL disk space immediately.
+- **inotify limit detection.** When the recursive watcher fails with `ENOSPC` on Linux (inotify watch limit exhausted), the daemon now logs actionable guidance (`echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf`) instead of silently failing.
+
 ## [0.6.16] — 2026-05-03
 
 ### Performance

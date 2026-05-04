@@ -751,7 +751,29 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
         }
     })?;
 
-    watcher.watch(&workspace.root, RecursiveMode::Recursive)?;
+    match watcher.watch(&workspace.root, RecursiveMode::Recursive) {
+        Ok(()) => {}
+        Err(err) => {
+            // On Linux, inotify has a system-wide watch limit. Exceeding it
+            // causes ENOSPC, which can cascade and break other watchers
+            // (editors, file managers) on the system.
+            let msg = format!("{err:#}");
+            if msg.contains("No space left on device") || msg.contains("ENOSPC") {
+                warn!(
+                    "inotify watch limit exhausted for {}. \
+                     Increase the limit with: \
+                     echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf && sudo sysctl -p",
+                    workspace.root.display()
+                );
+                daemon_log(&format!(
+                    "WARNING: inotify limit exhausted for {}. Run: \
+                     echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf && sudo sysctl -p",
+                    workspace.root.display()
+                ));
+            }
+            return Err(err.into());
+        }
+    }
     watchers.insert(
         workspace.id.clone(),
         WatchRegistration {

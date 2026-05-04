@@ -218,9 +218,14 @@ impl VectorStore {
             return;
         }
 
+        // Cap growth to avoid unbounded memory allocation. Each vector
+        // entry costs ~(dimensions * 2) bytes for F16 quantization, so
+        // 1M entries × 256 dims × 2 bytes = 512 MB. Capping at 256K
+        // increments keeps each reallocation under 128 MB.
+        const MAX_GROWTH: usize = 262_144;
         let next_capacity = match capacity {
             0 => 1024,
-            n => n.saturating_mul(2),
+            n => n.saturating_add(n.min(MAX_GROWTH)),
         };
 
         let _ = self.index.reserve(next_capacity);
