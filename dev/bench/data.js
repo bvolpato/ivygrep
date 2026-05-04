@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1777905016388,
+  "lastUpdate": 1777906104407,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -11327,6 +11327,95 @@ window.BENCHMARK_DATA = {
           {
             "name": "vector_store/search_in_1000_vectors",
             "value": 545.13,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "bvolpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "e57bb94cfcbd4eb055a8657854e5215e747368ab",
+          "message": "ci: add cross-platform E2E test workflow\n\n- New e2e-cross-platform.yml workflow with 5 test jobs:\n  * Linux x86_64 (native) — full test suite + E2E smoke\n  * macOS ARM64 (native) — full test suite + E2E smoke\n  * macOS x86_64 (native) — full test suite + E2E smoke\n  * Linux aarch64 (QEMU) — cross test + Docker smoke test\n  * Linux x86_64 (hash-only) — no-neural feature gate test\n\n- Triggers: manual (workflow_dispatch with architecture picker\n  and test scope selector), release tags, weekly schedule\n\n- Upgraded release.yml smoke test from bare --help to full\n  index+search cycle on native runners\n\n- Summary job produces a markdown table of results",
+          "timestamp": "2026-05-04T10:40:06-04:00",
+          "tree_id": "acebd6e6b7b910abfe9e02d2f91a4878ede4f9d7",
+          "url": "https://github.com/bvolpato/ivygrep/commit/e57bb94cfcbd4eb055a8657854e5215e747368ab"
+        },
+        "date": 1777906104053,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 774642560,
+            "unit": "ns"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 8965.65,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 3834.3,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 2827.29,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11165.59,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 10894.65,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 7.05,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 719.03,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 19560.02,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 8079.47,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 6021.3,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 450915.84,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 531.72,
             "unit": "µs"
           }
         ]
