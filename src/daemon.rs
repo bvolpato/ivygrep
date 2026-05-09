@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Config, PollWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Notify;
@@ -31,7 +31,7 @@ const WATCH_MAX_DEBOUNCE: Duration = Duration::from_secs(30);
 const MAX_DAEMON_LOG_BYTES: u64 = 10 * 1024 * 1024;
 
 struct WatchRegistration {
-    _watcher: RecommendedWatcher,
+    _watcher: Box<dyn Watcher + Send>,
     control: Arc<WatchControl>,
 }
 
@@ -223,7 +223,16 @@ pub async fn run_daemon() -> Result<()> {
         watchers: Arc::new(Mutex::new(HashMap::new())),
     };
 
-    restore_configured_watchers(&state);
+    // Defer watcher restoration by a few seconds so the daemon can start
+    // serving requests immediately. Restoring all watchers at once allocates
+    // inotify watches for every configured workspace, which on Linux can
+    // exhaust the system-wide watch limit and cause a memory spike that
+    // combines with the initial indexing to trigger the OOM killer.
+    let restore_state = state.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        restore_configured_watchers(&restore_state);
+    });
 
     info!("ivygrep daemon listening on {}", socket_path.display());
 
@@ -731,6 +740,63 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
     }
 }
 
+/// Try the native watcher (inotify on Linux, FSEvents on macOS, ReadDirectoryChanges
+/// on Windows). If the native backend fails because the inotify watch limit is
+/// exhausted (ENOSPC), fall back to PollWatcher which uses zero kernel watches.
+fn create_watcher(
+    workspace: &Workspace,
+    event_filter: WatchEventFilter,
+    callback_control: Arc<WatchControl>,
+) -> Result<Box<dyn Watcher + Send>> {
+    let make_callback = |ctrl: Arc<WatchControl>, filter: WatchEventFilter| {
+        move |event: notify::Result<notify::Event>| {
+            if let Ok(event) = event
+                && filter.should_reindex(&event)
+            {
+                ctrl.mark_dirty();
+            }
+        }
+    };
+
+    let mut watcher = notify::recommended_watcher(make_callback(
+        callback_control.clone(),
+        event_filter.clone(),
+    ))?;
+
+    match watcher.watch(&workspace.root, RecursiveMode::Recursive) {
+        Ok(()) => {
+            return Ok(Box::new(watcher));
+        }
+        Err(err) => {
+            let msg = format!("{err:#}");
+            if msg.contains("No space left on device") || msg.contains("ENOSPC") {
+                // inotify watch limit exhausted — fall back to PollWatcher
+                // which periodically scans the filesystem instead.
+                warn!(
+                    "inotify limit reached for {}, falling back to polling (5s interval). \
+                     To use native watching, increase the limit: \
+                     echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf && sudo sysctl -p",
+                    workspace.root.display()
+                );
+                daemon_log(&format!(
+                    "inotify limit reached for {} — using poll watcher (5s)",
+                    workspace.root.display()
+                ));
+            } else {
+                return Err(err.into());
+            }
+        }
+    }
+
+    // PollWatcher: scans the directory tree every 5 seconds. Less responsive
+    // than inotify but consumes zero kernel watches.
+    drop(watcher);
+    let config = Config::default().with_poll_interval(Duration::from_secs(5));
+    let mut poll = PollWatcher::new(make_callback(callback_control, event_filter), config)?;
+    poll.watch(&workspace.root, RecursiveMode::Recursive)?;
+    Ok(Box::new(poll))
+}
+
 fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
     let workspace = Workspace::resolve(path)?;
 
@@ -743,37 +809,8 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
     let callback_control = control.clone();
     let event_filter = WatchEventFilter::new(&workspace);
 
-    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        if let Ok(event) = event
-            && event_filter.should_reindex(&event)
-        {
-            callback_control.mark_dirty();
-        }
-    })?;
-
-    match watcher.watch(&workspace.root, RecursiveMode::Recursive) {
-        Ok(()) => {}
-        Err(err) => {
-            // On Linux, inotify has a system-wide watch limit. Exceeding it
-            // causes ENOSPC, which can cascade and break other watchers
-            // (editors, file managers) on the system.
-            let msg = format!("{err:#}");
-            if msg.contains("No space left on device") || msg.contains("ENOSPC") {
-                warn!(
-                    "inotify watch limit exhausted for {}. \
-                     Increase the limit with: \
-                     echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf && sudo sysctl -p",
-                    workspace.root.display()
-                );
-                daemon_log(&format!(
-                    "WARNING: inotify limit exhausted for {}. Run: \
-                     echo fs.inotify.max_user_watches=524288 | sudo tee -a /etc/sysctl.conf && sudo sysctl -p",
-                    workspace.root.display()
-                ));
-            }
-            return Err(err.into());
-        }
-    }
+    let watcher: Box<dyn Watcher + Send> =
+        create_watcher(&workspace, event_filter, callback_control)?;
     watchers.insert(
         workspace.id.clone(),
         WatchRegistration {

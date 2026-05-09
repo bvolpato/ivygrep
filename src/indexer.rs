@@ -1280,9 +1280,14 @@ pub fn open_sqlite_readonly(sqlite_path: &Path) -> Result<Connection> {
     // Performance PRAGMAs for read-heavy workloads on large databases.
     // On multi-GB databases (large repos with millions of chunks), the default
     // 2 MB page cache causes constant disk re-reads.
+    // On Linux with limited RAM (8 GB), the old 2 GB mmap + 64 MB cache
+    // pushed the process past the OOM killer threshold when combined with
+    // the daemon's ONNX model, Tantivy writer, and USearch vectors.
+    // 256 MB mmap + 16 MB cache is sufficient for multi-GB indexes while
+    // keeping total working memory under control.
     conn.execute_batch(
-        "PRAGMA mmap_size = 2147483648;
-         PRAGMA cache_size = -65536;
+        "PRAGMA mmap_size = 268435456;
+         PRAGMA cache_size = -16384;
          PRAGMA temp_store = MEMORY;",
     )?;
 
