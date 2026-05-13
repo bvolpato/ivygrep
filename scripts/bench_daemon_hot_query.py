@@ -244,7 +244,7 @@ def main() -> int:
         "samples": args.samples,
         "warmups": args.warmups,
         "build_seconds": build_seconds,
-        "index_created": index_created,
+        "index_created": int(index_created),
         "index_seconds": index_seconds,
     }
 
