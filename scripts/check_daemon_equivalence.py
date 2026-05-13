@@ -170,36 +170,57 @@ def normalize_output(raw: str) -> list[dict[str, Any]]:
     return normalized
 
 
-def run_case(
+def run_local_case(
     case: Case,
     *,
     binary: Path,
     cwd: Path,
     env: dict[str, str],
     repo: Path,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> list[dict[str, Any]]:
     path = case.path or repo
     base = [str(binary), "--json", *case.args, str(path)]
-    local = run([*base, "--no-watch"], cwd=cwd, env=env).stdout
-    daemon_first = run(base, cwd=cwd, env=env).stdout
-    daemon_second = run(base, cwd=cwd, env=env).stdout
-    return normalize_output(local), normalize_output(daemon_first), normalize_output(daemon_second)
+    return normalize_output(run([*base, "--no-watch"], cwd=cwd, env=env).stdout)
 
 
-def run_all_indices_cache_case(
+def run_daemon_case(
+    case: Case,
     *,
     binary: Path,
     cwd: Path,
     env: dict[str, str],
     repo: Path,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    path = case.path or repo
+    base = [str(binary), "--json", *case.args, str(path)]
+    daemon_first = run(base, cwd=cwd, env=env).stdout
+    daemon_second = run(base, cwd=cwd, env=env).stdout
+    return normalize_output(daemon_first), normalize_output(daemon_second)
+
+
+def run_all_indices_local_case(
+    *,
+    binary: Path,
+    cwd: Path,
+    env: dict[str, str],
+) -> list[dict[str, Any]]:
+    all_indices = [str(binary), "--json", "--hash", "--all", "-n", "5", "authenticate user"]
+    return normalize_output(run([*all_indices, "--no-watch"], cwd=cwd, env=env).stdout)
+
+
+def run_all_indices_daemon_cache_case(
+    *,
+    binary: Path,
+    cwd: Path,
+    env: dict[str, str],
+    repo: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     poison = [str(binary), "--json", "--hash", "-n", "5", "authenticate user", str(repo)]
     all_indices = [str(binary), "--json", "--hash", "--all", "-n", "5", "authenticate user"]
     run(poison, cwd=cwd, env=env)
-    local = run([*all_indices, "--no-watch"], cwd=cwd, env=env).stdout
     daemon_first = run(all_indices, cwd=cwd, env=env).stdout
     daemon_second = run(all_indices, cwd=cwd, env=env).stdout
-    return normalize_output(local), normalize_output(daemon_first), normalize_output(daemon_second)
+    return normalize_output(daemon_first), normalize_output(daemon_second)
 
 
 def main() -> int:
@@ -233,37 +254,49 @@ def main() -> int:
         cwd=repo_root,
         env=env,
     )
-    daemon = start_daemon(binary, cwd=repo_root, env=env, bench_home=bench_home)
     cases = [
         Case("hybrid_hash", ["--hash", "-n", "5", "authenticate user"]),
         Case("literal", ["--literal", "-n", "5", "csrf_guard"]),
         Case("regex", ["--regex", "-n", "5", r"csrf_[a-z]+"]),
         Case("type_filter", ["--hash", "--type", "rs", "-n", "5", "refresh session"]),
-        Case("include_exclude", ["--hash", "--include", "src/**", "--exclude", "tests/**", "-n", "5", "auth"]),
+        Case("include_exclude", ["--hash", "--include", "src/**", "--exclude", "tests/**", "-n", "5", "authenticate user"]),
         Case("scope_file", ["--hash", "-n", "5", "tax total"], fixture / "src" / "payments.py"),
     ]
 
     failures: list[str] = []
+    local_results = {
+        case.name: run_local_case(
+            case,
+            binary=binary,
+            cwd=repo_root,
+            env=env,
+            repo=fixture,
+        )
+        for case in cases
+    }
+    all_indices_local = run_all_indices_local_case(binary=binary, cwd=repo_root, env=env)
+
+    daemon = start_daemon(binary, cwd=repo_root, env=env, bench_home=bench_home)
     try:
         for case in cases:
-            local, daemon_first, daemon_second = run_case(
+            daemon_first, daemon_second = run_daemon_case(
                 case,
                 binary=binary,
                 cwd=repo_root,
                 env=env,
                 repo=fixture,
             )
-            if local != daemon_first:
+            if local_results[case.name] != daemon_first:
                 failures.append(f"{case.name}: local != daemon_first")
             if daemon_first != daemon_second:
                 failures.append(f"{case.name}: daemon_first != daemon_second")
-        local, daemon_first, daemon_second = run_all_indices_cache_case(
+        daemon_first, daemon_second = run_all_indices_daemon_cache_case(
             binary=binary,
             cwd=repo_root,
             env=env,
             repo=fixture,
         )
-        if local != daemon_first:
+        if all_indices_local != daemon_first:
             failures.append("all_indices_after_workspace_cache: local != daemon_first")
         if daemon_first != daemon_second:
             failures.append("all_indices_after_workspace_cache: daemon_first != daemon_second")
