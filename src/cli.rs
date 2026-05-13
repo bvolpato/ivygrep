@@ -783,6 +783,8 @@ async fn run_query(cli: Cli) -> Result<()> {
                     search_via_daemon = true;
                 }
             }
+        } else if should_skip_static_daemon_status(watch_configured) {
+            search_via_daemon = true;
         } else {
             // Already indexed. Just check if the daemon is online to route the search request.
             // Also verify the daemon version matches — stale daemons silently break search.
@@ -1592,6 +1594,12 @@ fn initial_query_index_state(workspace: &Workspace) -> WorkspaceIndexState {
     workspace.quick_index_health().state
 }
 
+fn should_skip_static_daemon_status(watch_configured: bool) -> bool {
+    !watch_configured
+        && std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_some()
+        && crate::ipc::socket_exists()
+}
+
 fn ensure_no_nested_workspaces(target_root: &Path) -> Result<()> {
     if let Ok(workspaces) = list_workspaces() {
         let mut conflicts = Vec::new();
@@ -1686,5 +1694,30 @@ mod tests {
             initial_query_index_state(&workspace),
             WorkspaceIndexState::Healthy
         );
+    }
+
+    #[test]
+    #[serial]
+    fn static_daemon_status_skip_requires_no_autospawn_and_socket() {
+        let home = tempdir().unwrap();
+        unsafe {
+            std::env::set_var("IVYGREP_HOME", home.path());
+            std::env::remove_var("IVYGREP_NO_AUTOSPAWN");
+        }
+        config::ensure_app_dirs().unwrap();
+        crate::ipc::cleanup_socket();
+
+        assert!(!should_skip_static_daemon_status(false));
+
+        unsafe { std::env::set_var("IVYGREP_NO_AUTOSPAWN", "1") };
+        assert!(!should_skip_static_daemon_status(false));
+
+        let socket_path = crate::ipc::socket_path().unwrap();
+        std::fs::write(&socket_path, b"placeholder").unwrap();
+        assert!(should_skip_static_daemon_status(false));
+        assert!(!should_skip_static_daemon_status(true));
+
+        crate::ipc::cleanup_socket();
+        unsafe { std::env::remove_var("IVYGREP_NO_AUTOSPAWN") };
     }
 }
