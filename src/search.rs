@@ -308,7 +308,7 @@ pub fn literal_search_with_context(
     // Use Tantivy index as a pre-filter: find candidate chunk IDs via the
     // inverted index, then only decompress those to verify the exact match.
     let candidate_chunks =
-        collect_literal_candidates(&ctx, query, &matcher, &path_matcher, options)?;
+        collect_literal_candidates(ctx, query, &matcher, &path_matcher, options)?;
 
     tracing::trace!(
         "literal_scan={:?} candidates={}",
@@ -547,7 +547,7 @@ pub fn hybrid_search_with_context(
                 .build();
             if let Ok(ref vm) = variant_matcher
                 && let Ok(mut candidates) =
-                    collect_literal_candidates(&ctx, variant, vm, &path_matcher, options)
+                    collect_literal_candidates(ctx, variant, vm, &path_matcher, options)
             {
                 candidates.truncate(literal_limit);
                 for c in candidates {
@@ -807,7 +807,7 @@ pub fn hybrid_search_with_context(
                 SEARCH_HASH_MODEL.get_or_init(|| crate::embedding::HashEmbeddingModel::new(256));
             let hash_query_vector = hash_model.embed(query_text);
             let hash_hits = collect_semantic_candidates(
-                &ctx,
+                ctx,
                 &path_matcher,
                 options,
                 &hash_query_vector,
@@ -824,7 +824,7 @@ pub fn hybrid_search_with_context(
         {
             let neural_query_vector = model.embed(query_text);
             let neural_hits = collect_semantic_candidates(
-                &ctx,
+                ctx,
                 &path_matcher,
                 options,
                 &neural_query_vector,
