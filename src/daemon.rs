@@ -131,6 +131,7 @@ struct CachedSearchContext {
 struct QueryCacheKey {
     workspace_ids: Vec<String>,
     signatures: Vec<SearchContextSignature>,
+    all_indices: bool,
     query: String,
     limit: Option<usize>,
     context: usize,
@@ -563,6 +564,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 progress_tx: None,
                 cancel_token: None,
             };
+            let all_indices = path.is_none();
 
             if workspaces.iter().any(workspace_has_neural_vectors) {
                 state_clone.maybe_start_model_load();
@@ -582,7 +584,13 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     let _ = maybe_complete_neural_for_small_workspace(workspace);
                 }
 
-                let cache_key = query_cache_key(&workspaces, &query, &options, model.dimensions());
+                let cache_key = query_cache_key(
+                    &workspaces,
+                    &query,
+                    &options,
+                    model.dimensions(),
+                    all_indices,
+                );
                 if let Some(cached_hits) = state_clone.cached_query_results(&cache_key) {
                     if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none() {
                         for root in ws_neural_missing {
@@ -617,7 +625,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                         &options,
                     ) {
                         Ok(mut hits) => {
-                            if path.is_none() {
+                            if all_indices {
                                 for hit in &mut hits {
                                     hit.file_path = workspace.root.join(&hit.file_path);
                                 }
@@ -1219,6 +1227,7 @@ fn query_cache_key(
     query: &str,
     options: &SearchOptions,
     emb_dim: usize,
+    all_indices: bool,
 ) -> QueryCacheKey {
     QueryCacheKey {
         workspace_ids: workspaces
@@ -1229,6 +1238,7 @@ fn query_cache_key(
             .iter()
             .map(|workspace| search_context_signature(workspace, Some(emb_dim)))
             .collect(),
+        all_indices,
         query: query.to_string(),
         limit: options.limit,
         context: options.context,
@@ -1832,6 +1842,84 @@ mod tests {
 
         state.clear_workspace_contexts(&workspace);
         assert!(state.query_results.lock().results.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn daemon_query_cache_keeps_all_indices_path_mode_separate() {
+        let home = tempdir().unwrap();
+        unsafe {
+            std::env::set_var("IVYGREP_HOME", home.path());
+            std::env::set_var("IVYGREP_NO_AUTOSPAWN", "1");
+        }
+
+        let repo = tempdir().unwrap();
+        std::fs::write(
+            repo.path().join("auth.rs"),
+            "pub fn authenticate_user(token: &str) -> bool { !token.is_empty() }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+
+        let state = test_state();
+        let normal_request = DaemonRequest::Search {
+            path: Some(workspace.root.clone()),
+            query: "authenticate user".to_string(),
+            limit: Some(5),
+            context: 2,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_path: None,
+            scope_is_file: false,
+            skip_gitignore: false,
+        };
+        let all_request = DaemonRequest::Search {
+            path: None,
+            query: "authenticate user".to_string(),
+            limit: Some(5),
+            context: 2,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_path: None,
+            scope_is_file: false,
+            skip_gitignore: false,
+        };
+
+        let normal = handle_request(state.clone(), normal_request).await;
+        match normal {
+            DaemonResponse::SearchResults { hits } => {
+                assert!(!hits.is_empty());
+                assert!(
+                    hits.iter().all(|hit| !hit.file_path.is_absolute()),
+                    "single-workspace search should return workspace-relative paths"
+                );
+            }
+            other => panic!("expected SearchResults, got {other:?}"),
+        }
+        assert_eq!(state.query_results.lock().results.len(), 1);
+
+        state.search_contexts.lock().clear();
+        let all = handle_request(state.clone(), all_request).await;
+        match all {
+            DaemonResponse::SearchResults { hits } => {
+                assert!(!hits.is_empty());
+                assert!(
+                    hits.iter().all(|hit| hit.file_path.is_absolute()),
+                    "--all search should return absolute paths even after normal query cache warmup"
+                );
+            }
+            other => panic!("expected SearchResults, got {other:?}"),
+        }
+        assert_eq!(state.query_results.lock().results.len(), 2);
+        assert!(
+            !state.search_contexts.lock().is_empty(),
+            "--all query should not reuse single-workspace cached results"
+        );
     }
 
     #[test]

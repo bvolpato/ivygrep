@@ -53,7 +53,7 @@ Raw results: [daemon-hot-query-cache-results.tsv](daemon-hot-query-cache-results
 
 The explore guard kept functionality coverage explicit:
 
-- daemon/local JSON equivalence: 6 representative cases, 0 failures
+- daemon/local JSON equivalence: 7 representative cases, 0 failures, including `--all` after single-workspace cache warmup
 - full `cargo test --locked --all-targets`
 - full `cargo clippy --locked --all-targets -- -D warnings`
 - `daemon_hits = 20`

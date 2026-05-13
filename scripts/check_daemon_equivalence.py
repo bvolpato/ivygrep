@@ -186,6 +186,22 @@ def run_case(
     return normalize_output(local), normalize_output(daemon_first), normalize_output(daemon_second)
 
 
+def run_all_indices_cache_case(
+    *,
+    binary: Path,
+    cwd: Path,
+    env: dict[str, str],
+    repo: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    poison = [str(binary), "--json", "--hash", "-n", "5", "authenticate user", str(repo)]
+    all_indices = [str(binary), "--json", "--hash", "--all", "-n", "5", "authenticate user"]
+    run(poison, cwd=cwd, env=env)
+    local = run([*all_indices, "--no-watch"], cwd=cwd, env=env).stdout
+    daemon_first = run(all_indices, cwd=cwd, env=env).stdout
+    daemon_second = run(all_indices, cwd=cwd, env=env).stdout
+    return normalize_output(local), normalize_output(daemon_first), normalize_output(daemon_second)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bench-home", type=Path, default=DEFAULT_HOME)
@@ -241,11 +257,21 @@ def main() -> int:
                 failures.append(f"{case.name}: local != daemon_first")
             if daemon_first != daemon_second:
                 failures.append(f"{case.name}: daemon_first != daemon_second")
+        local, daemon_first, daemon_second = run_all_indices_cache_case(
+            binary=binary,
+            cwd=repo_root,
+            env=env,
+            repo=fixture,
+        )
+        if local != daemon_first:
+            failures.append("all_indices_after_workspace_cache: local != daemon_first")
+        if daemon_first != daemon_second:
+            failures.append("all_indices_after_workspace_cache: daemon_first != daemon_second")
     finally:
         daemon.stop()
 
     metrics = {
-        "equivalence_cases": len(cases),
+        "equivalence_cases": len(cases) + 1,
         "equivalence_failures": len(failures),
     }
     print(json.dumps(metrics, sort_keys=True))
