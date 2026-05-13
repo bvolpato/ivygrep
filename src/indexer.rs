@@ -24,6 +24,7 @@ use crate::vector_store::{ScalarKind, VectorStore};
 use crate::workspace::{Workspace, WorkspaceMetadata};
 
 const ZSTD_MAGIC: &[u8] = &[0x28, 0xB5, 0x2F, 0xFD];
+const BULK_COMMIT_CHUNK_INTERVAL: usize = 100_000;
 pub const BLOCKING_NEURAL_CUTOFF_BYTES: u64 = 1_000_000;
 
 fn compress_text(text: &str) -> Vec<u8> {
@@ -685,7 +686,7 @@ fn index_workspace_inner(
         }
 
         // Prevent memory/WAL ballooning on massive repositories
-        if chunks_since_commit >= 25_000 {
+        if chunks_since_commit >= BULK_COMMIT_CHUNK_INTERVAL {
             tx.commit()?;
             writer.commit()?;
             // Fresh full indexes are not queryable until the final metadata and
