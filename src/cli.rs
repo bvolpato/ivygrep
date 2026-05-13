@@ -1023,6 +1023,17 @@ async fn run_query(cli: Cli) -> Result<()> {
             scope_is_file,
             skip_gitignore: cli.skip_gitignore,
         };
+        let local_options = SearchOptions {
+            limit: backend_limit,
+            context: cli.context,
+            type_filter: cli.type_filter.clone(),
+            include_globs: cli.include.clone(),
+            exclude_globs: cli.exclude.clone(),
+            scope_filter: scope_filter.clone(),
+            skip_gitignore: cli.skip_gitignore,
+            progress_tx: None,
+            cancel_token: None,
+        };
 
         if search_via_daemon {
             match daemon::request::<fn(String, usize, usize)>(&request, false, None).await? {
@@ -1031,89 +1042,17 @@ async fn run_query(cli: Cli) -> Result<()> {
                     tracing::warn!(
                         "daemon literal search failed ({message}), falling back to local"
                     );
-                    let options = SearchOptions {
-                        limit: backend_limit,
-                        context: cli.context,
-                        type_filter: cli.type_filter.clone(),
-                        include_globs: cli.include.clone(),
-                        exclude_globs: cli.exclude.clone(),
-                        scope_filter: scope_filter.clone(),
-                        skip_gitignore: cli.skip_gitignore,
-                        progress_tx: None,
-                        cancel_token: None,
-                    };
-                    let mut all_hits = Vec::new();
-                    let workspaces = if cli.all_indices {
-                        list_workspaces()
-                            .unwrap_or_default()
-                            .into_iter()
-                            .filter(|w| w.last_indexed_at_unix.is_some())
-                            .filter_map(|w| Workspace::resolve(&w.root).ok())
-                            .collect()
-                    } else {
-                        vec![workspace.clone()]
-                    };
-                    for ws in workspaces {
-                        match literal_search(&ws, query, &options) {
-                            Ok(mut hits) => {
-                                if cli.all_indices {
-                                    for hit in &mut hits {
-                                        hit.file_path = ws.root.join(&hit.file_path);
-                                    }
-                                }
-                                all_hits.append(&mut hits);
-                            }
-                            Err(err) => tracing::warn!(
-                                "literal_search failed for {}: {err:#}",
-                                ws.root.display()
-                            ),
-                        }
-                    }
-                    all_hits
+                    local_literal_search_hits(&workspace, cli.all_indices, query, &local_options)?
                 }
-                _ => vec![],
+                other => {
+                    tracing::warn!(
+                        "daemon literal search unavailable ({other:?}), falling back to local"
+                    );
+                    local_literal_search_hits(&workspace, cli.all_indices, query, &local_options)?
+                }
             }
         } else {
-            let mut all_hits = Vec::new();
-            let workspaces = if cli.all_indices {
-                list_workspaces()?
-                    .into_iter()
-                    .filter(|w| w.last_indexed_at_unix.is_some())
-                    .filter_map(|w| Workspace::resolve(&w.root).ok())
-                    .collect()
-            } else {
-                vec![workspace.clone()]
-            };
-            let options = SearchOptions {
-                limit: backend_limit,
-                context: cli.context,
-                type_filter: cli.type_filter.clone(),
-                include_globs: cli.include.clone(),
-                exclude_globs: cli.exclude.clone(),
-                scope_filter: scope_filter.clone(),
-                skip_gitignore: cli.skip_gitignore,
-                progress_tx: None,
-                cancel_token: None,
-            };
-            for ws in workspaces {
-                match literal_search(&ws, query, &options) {
-                    Ok(mut hits) => {
-                        if cli.all_indices {
-                            for hit in &mut hits {
-                                hit.file_path = ws.root.join(&hit.file_path);
-                            }
-                        }
-                        all_hits.append(&mut hits);
-                    }
-                    Err(err) => {
-                        tracing::warn!("literal_search failed for {}: {err:#}", ws.root.display())
-                    }
-                }
-            }
-            if let Some(l) = backend_limit {
-                all_hits.truncate(l);
-            }
-            all_hits
+            local_literal_search_hits(&workspace, cli.all_indices, query, &local_options)?
         }
     } else if cli.regex {
         let request = DaemonRequest::RegexSearch {
@@ -1126,54 +1065,31 @@ async fn run_query(cli: Cli) -> Result<()> {
             scope_is_file,
             skip_gitignore: cli.skip_gitignore,
         };
+        let local_options = SearchOptions {
+            limit: backend_limit,
+            context: cli.context,
+            type_filter: cli.type_filter.clone(),
+            include_globs: cli.include.clone(),
+            exclude_globs: cli.exclude.clone(),
+            scope_filter: scope_filter.clone(),
+            skip_gitignore: cli.skip_gitignore,
+            progress_tx: None,
+            cancel_token: None,
+        };
 
         if search_via_daemon {
             match daemon::request::<fn(String, usize, usize)>(&request, false, None).await? {
                 Some(DaemonResponse::SearchResults { hits }) => hits,
                 Some(DaemonResponse::Error { message }) => bail!(message),
                 other => {
-                    tracing::warn!("daemon regex search returned unexpected response: {other:?}");
-                    vec![]
+                    tracing::warn!(
+                        "daemon regex search unavailable ({other:?}), falling back to local"
+                    );
+                    local_regex_search_hits(&workspace, cli.all_indices, query, &local_options)?
                 }
             }
         } else {
-            let mut all_hits = Vec::new();
-            let workspaces = if cli.all_indices {
-                list_workspaces()?
-                    .into_iter()
-                    .filter(|w| w.last_indexed_at_unix.is_some())
-                    .filter_map(|w| Workspace::resolve(&w.root).ok())
-                    .collect()
-            } else {
-                vec![workspace.clone()]
-            };
-            for ws in workspaces {
-                match regex_search(
-                    &ws,
-                    query,
-                    backend_limit,
-                    scope_filter.as_ref(),
-                    &cli.include,
-                    &cli.exclude,
-                    cli.skip_gitignore,
-                ) {
-                    Ok(mut hits) => {
-                        if cli.all_indices {
-                            for hit in &mut hits {
-                                hit.file_path = ws.root.join(&hit.file_path);
-                            }
-                        }
-                        all_hits.append(&mut hits);
-                    }
-                    Err(err) => {
-                        tracing::warn!("regex_search failed for {}: {err:#}", ws.root.display());
-                    }
-                }
-            }
-            if let Some(l) = backend_limit {
-                all_hits.truncate(l);
-            }
-            all_hits
+            local_regex_search_hits(&workspace, cli.all_indices, query, &local_options)?
         }
     } else {
         let request = DaemonRequest::Search {
@@ -1588,6 +1504,88 @@ fn local_fallback_search(
         all_hits.truncate(l);
     }
     all_hits
+}
+
+fn local_literal_search_hits(
+    workspace: &Workspace,
+    all_indices: bool,
+    query: &str,
+    options: &SearchOptions,
+) -> Result<Vec<SearchHit>> {
+    let mut all_hits = Vec::new();
+    let workspaces = if all_indices {
+        list_workspaces()?
+            .into_iter()
+            .filter(|w| w.last_indexed_at_unix.is_some())
+            .filter_map(|w| Workspace::resolve(&w.root).ok())
+            .collect()
+    } else {
+        vec![workspace.clone()]
+    };
+
+    for ws in workspaces {
+        match literal_search(&ws, query, options) {
+            Ok(mut hits) => {
+                if all_indices {
+                    for hit in &mut hits {
+                        hit.file_path = ws.root.join(&hit.file_path);
+                    }
+                }
+                all_hits.append(&mut hits);
+            }
+            Err(err) => tracing::warn!("literal_search failed for {}: {err:#}", ws.root.display()),
+        }
+    }
+
+    if let Some(l) = options.limit {
+        all_hits.truncate(l);
+    }
+    Ok(all_hits)
+}
+
+fn local_regex_search_hits(
+    workspace: &Workspace,
+    all_indices: bool,
+    query: &str,
+    options: &SearchOptions,
+) -> Result<Vec<SearchHit>> {
+    let mut all_hits = Vec::new();
+    let workspaces = if all_indices {
+        list_workspaces()?
+            .into_iter()
+            .filter(|w| w.last_indexed_at_unix.is_some())
+            .filter_map(|w| Workspace::resolve(&w.root).ok())
+            .collect()
+    } else {
+        vec![workspace.clone()]
+    };
+
+    for ws in workspaces {
+        match regex_search(
+            &ws,
+            query,
+            options.limit,
+            options.scope_filter.as_ref(),
+            &options.include_globs,
+            &options.exclude_globs,
+            options.skip_gitignore,
+        ) {
+            Ok(mut hits) => {
+                if all_indices {
+                    for hit in &mut hits {
+                        hit.file_path = ws.root.join(&hit.file_path);
+                    }
+                }
+                all_hits.append(&mut hits);
+            }
+            Err(err) => tracing::warn!("regex_search failed for {}: {err:#}", ws.root.display()),
+        }
+    }
+
+    if let Some(l) = options.limit {
+        all_hits.truncate(l);
+    }
+    Ok(all_hits)
 }
 
 fn is_single_word_symbol_query(query: &str) -> bool {
