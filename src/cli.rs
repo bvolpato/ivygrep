@@ -662,7 +662,7 @@ async fn run_query(cli: Cli) -> Result<()> {
     let watch_configured = should_autospawn_daemon_for_query(&workspace, cli.no_watch);
     let scope_path = scope_filter.as_ref().map(|scope| scope.rel_path.clone());
     let scope_is_file = scope_filter.as_ref().is_some_and(|scope| scope.is_file);
-    let initial_index_state = (!cli.all_indices).then(|| workspace.index_health().state);
+    let initial_index_state = (!cli.all_indices).then(|| initial_query_index_state(&workspace));
 
     let query_path_opt = if cli.all_indices {
         None
@@ -1588,6 +1588,10 @@ fn is_single_word_symbol_query(query: &str) -> bool {
             .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
 }
 
+fn initial_query_index_state(workspace: &Workspace) -> WorkspaceIndexState {
+    workspace.quick_index_health().state
+}
+
 fn ensure_no_nested_workspaces(target_root: &Path) -> Result<()> {
     if let Ok(workspaces) = list_workspaces() {
         let mut conflicts = Vec::new();
@@ -1623,6 +1627,8 @@ mod tests {
     use serial_test::serial;
     use tempfile::tempdir;
 
+    use crate::embedding::create_hash_model;
+    use crate::indexer::index_workspace;
     use crate::workspace::WorkspaceMetadata;
 
     #[test]
@@ -1656,5 +1662,29 @@ mod tests {
 
         assert!(should_autospawn_daemon_for_query(&workspace, false));
         assert!(!should_autospawn_daemon_for_query(&workspace, true));
+    }
+
+    #[test]
+    #[serial]
+    fn initial_query_index_state_tracks_index_presence() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn marker() {}\n").unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+
+        assert_eq!(
+            initial_query_index_state(&workspace),
+            WorkspaceIndexState::NotIndexed
+        );
+
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+
+        assert_eq!(
+            initial_query_index_state(&workspace),
+            WorkspaceIndexState::Healthy
+        );
     }
 }
