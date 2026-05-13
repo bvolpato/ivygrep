@@ -27,7 +27,7 @@ const ZSTD_MAGIC: &[u8] = &[0x28, 0xB5, 0x2F, 0xFD];
 pub const BLOCKING_NEURAL_CUTOFF_BYTES: u64 = 1_000_000;
 
 fn compress_text(text: &str) -> Vec<u8> {
-    zstd::encode_all(text.as_bytes(), 3).unwrap_or_else(|_| text.as_bytes().to_vec())
+    zstd::encode_all(text.as_bytes(), 1).unwrap_or_else(|_| text.as_bytes().to_vec())
 }
 
 pub fn decompress_text(raw: Vec<u8>) -> String {
@@ -640,6 +640,9 @@ fn index_workspace_inner(
             .collect();
 
         let all_embeddings = embedding_model.embed_batch(&all_texts);
+        if is_fresh_index {
+            vector_index.reserve_additional(all_embeddings.len());
+        }
 
         // Phase 3: Sequential sync to persistence layers.
         let mut embed_idx = 0;
@@ -671,7 +674,11 @@ fn index_workspace_inner(
             for indexed in indexed_chunks {
                 let embedding = all_embeddings[embed_idx].clone();
                 embed_idx += 1;
-                vector_index.upsert(indexed.vector_key, embedding);
+                if is_fresh_index {
+                    vector_index.add_unchecked(indexed.vector_key, embedding);
+                } else {
+                    vector_index.upsert(indexed.vector_key, embedding);
+                }
                 insert_chunk(&tx, indexed, is_fresh_index, now_unix)?;
                 add_chunk_doc(&mut writer, &fields, indexed)?;
             }
@@ -681,7 +688,12 @@ fn index_workspace_inner(
         if chunks_since_commit >= 25_000 {
             tx.commit()?;
             writer.commit()?;
-            vector_index.save()?;
+            // Fresh full indexes are not queryable until the final metadata and
+            // Merkle snapshot write, so avoid repeatedly rewriting the whole
+            // vector file during initial bulk ingest.
+            if !is_fresh_index {
+                vector_index.save()?;
+            }
             tx = sqlite.transaction()?;
             chunks_since_commit = 0;
         }
@@ -1592,6 +1604,8 @@ mod tests {
         let summary = index_workspace(&workspace, &model).unwrap();
         assert_eq!(summary.deleted_files, 0);
         assert!(summary.total_chunks >= 1);
+        assert!(workspace_is_indexed(&workspace));
+        assert!(workspace.vector_path().metadata().unwrap().len() > 0);
     }
 
     #[test]
