@@ -688,7 +688,12 @@ fn index_workspace_inner(
         if chunks_since_commit >= 25_000 {
             tx.commit()?;
             writer.commit()?;
-            vector_index.save()?;
+            // Fresh full indexes are not queryable until the final metadata and
+            // Merkle snapshot write, so avoid repeatedly rewriting the whole
+            // vector file during initial bulk ingest.
+            if !is_fresh_index {
+                vector_index.save()?;
+            }
             tx = sqlite.transaction()?;
             chunks_since_commit = 0;
         }
@@ -1599,6 +1604,8 @@ mod tests {
         let summary = index_workspace(&workspace, &model).unwrap();
         assert_eq!(summary.deleted_files, 0);
         assert!(summary.total_chunks >= 1);
+        assert!(workspace_is_indexed(&workspace));
+        assert!(workspace.vector_path().metadata().unwrap().len() > 0);
     }
 
     #[test]
