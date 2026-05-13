@@ -281,6 +281,16 @@ pub fn literal_search(
     query_text: &str,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
+    let ctx = SearchContext::load(workspace, None)?;
+    literal_search_with_context(&ctx, workspace, query_text, options)
+}
+
+pub fn literal_search_with_context(
+    ctx: &SearchContext,
+    workspace: &Workspace,
+    query_text: &str,
+    options: &SearchOptions,
+) -> Result<Vec<SearchHit>> {
     let t0 = std::time::Instant::now();
     let query = query_text.trim();
     if query.is_empty() {
@@ -290,8 +300,6 @@ pub fn literal_search(
     let query_lower = query.to_ascii_lowercase();
     let max_hits = options.limit.unwrap_or(500);
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
-
-    let ctx = SearchContext::load(workspace, None)?;
 
     let matcher = regex::RegexBuilder::new(&regex::escape(query))
         .case_insensitive(true)
@@ -465,6 +473,17 @@ pub fn hybrid_search(
     embedding_model: Option<&dyn EmbeddingModel>,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
+    let ctx = SearchContext::load(workspace, embedding_model.map(|m| m.dimensions()))?;
+    hybrid_search_with_context(&ctx, workspace, query_text, embedding_model, options)
+}
+
+pub fn hybrid_search_with_context(
+    ctx: &SearchContext,
+    workspace: &Workspace,
+    query_text: &str,
+    embedding_model: Option<&dyn EmbeddingModel>,
+    options: &SearchOptions,
+) -> Result<Vec<SearchHit>> {
     let t0 = std::time::Instant::now();
     let output_limit = options.limit.unwrap_or(50);
     // Tantivy lexical candidates: enough headroom for post-hoc filters
@@ -492,7 +511,6 @@ pub fn hybrid_search(
     };
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
 
-    let ctx = SearchContext::load(workspace, embedding_model.map(|m| m.dimensions()))?;
     tracing::trace!("open_tantivy={:?}", t0.elapsed());
 
     if options.is_cancelled() {
