@@ -27,7 +27,7 @@ const ZSTD_MAGIC: &[u8] = &[0x28, 0xB5, 0x2F, 0xFD];
 pub const BLOCKING_NEURAL_CUTOFF_BYTES: u64 = 1_000_000;
 
 fn compress_text(text: &str) -> Vec<u8> {
-    zstd::encode_all(text.as_bytes(), 3).unwrap_or_else(|_| text.as_bytes().to_vec())
+    zstd::encode_all(text.as_bytes(), 1).unwrap_or_else(|_| text.as_bytes().to_vec())
 }
 
 pub fn decompress_text(raw: Vec<u8>) -> String {
