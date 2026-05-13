@@ -662,7 +662,14 @@ async fn run_query(cli: Cli) -> Result<()> {
     let watch_configured = should_autospawn_daemon_for_query(&workspace, cli.no_watch);
     let scope_path = scope_filter.as_ref().map(|scope| scope.rel_path.clone());
     let scope_is_file = scope_filter.as_ref().is_some_and(|scope| scope.is_file);
-    let initial_index_state = (!cli.all_indices).then(|| initial_query_index_state(&workspace));
+    let skip_static_daemon_status = should_skip_static_daemon_status(watch_configured);
+    let initial_index_state = if cli.all_indices {
+        None
+    } else if skip_static_daemon_status {
+        Some(workspace.quick_index_health().state)
+    } else {
+        Some(initial_query_index_state(&workspace))
+    };
 
     let query_path_opt = if cli.all_indices {
         None
@@ -783,7 +790,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                     search_via_daemon = true;
                 }
             }
-        } else if should_skip_static_daemon_status(watch_configured) {
+        } else if skip_static_daemon_status {
             search_via_daemon = true;
         } else {
             // Already indexed. Just check if the daemon is online to route the search request.
@@ -1591,7 +1598,7 @@ fn is_single_word_symbol_query(query: &str) -> bool {
 }
 
 fn initial_query_index_state(workspace: &Workspace) -> WorkspaceIndexState {
-    workspace.quick_index_health().state
+    workspace.index_health().state
 }
 
 fn should_skip_static_daemon_status(watch_configured: bool) -> bool {
@@ -1693,6 +1700,30 @@ mod tests {
         assert_eq!(
             initial_query_index_state(&workspace),
             WorkspaceIndexState::Healthy
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn initial_query_index_state_detects_corrupt_tantivy_store() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn marker() {}\n").unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+        std::fs::write(workspace.tantivy_dir().join("meta.json"), b"not valid json").unwrap();
+
+        assert_eq!(
+            workspace.quick_index_health().state,
+            WorkspaceIndexState::Healthy
+        );
+        assert_eq!(
+            initial_query_index_state(&workspace),
+            WorkspaceIndexState::Unhealthy
         );
     }
 
