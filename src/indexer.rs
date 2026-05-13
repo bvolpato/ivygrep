@@ -640,6 +640,9 @@ fn index_workspace_inner(
             .collect();
 
         let all_embeddings = embedding_model.embed_batch(&all_texts);
+        if is_fresh_index {
+            vector_index.reserve_additional(all_embeddings.len());
+        }
 
         // Phase 3: Sequential sync to persistence layers.
         let mut embed_idx = 0;
@@ -671,7 +674,11 @@ fn index_workspace_inner(
             for indexed in indexed_chunks {
                 let embedding = all_embeddings[embed_idx].clone();
                 embed_idx += 1;
-                vector_index.upsert(indexed.vector_key, embedding);
+                if is_fresh_index {
+                    vector_index.add_unchecked(indexed.vector_key, embedding);
+                } else {
+                    vector_index.upsert(indexed.vector_key, embedding);
+                }
                 insert_chunk(&tx, indexed, is_fresh_index, now_unix)?;
                 add_chunk_doc(&mut writer, &fields, indexed)?;
             }
