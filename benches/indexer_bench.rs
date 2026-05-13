@@ -97,6 +97,20 @@ fn setup_bulk_workspace(
     (staging, home, workspace, model)
 }
 
+fn setup_bulk_indexed_workspace(
+    files: usize,
+    functions_per_file: usize,
+) -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    Workspace,
+    HashEmbeddingModel,
+) {
+    let (staging, home, workspace, model) = setup_bulk_workspace(files, functions_per_file);
+    index_workspace(&workspace, &model).unwrap();
+    (staging, home, workspace, model)
+}
+
 fn bench_indexer(c: &mut Criterion) {
     let mut group = c.benchmark_group("indexer");
     group
@@ -334,6 +348,71 @@ fn bench_regex_search(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_base_search_patterns(c: &mut Criterion) {
+    let mut group = c.benchmark_group("base_search_patterns");
+    group
+        .sample_size(10)
+        .warm_up_time(Duration::from_secs(2))
+        .measurement_time(Duration::from_secs(8));
+
+    let (_staging, _home, workspace, model) = setup_bulk_indexed_workspace(1_000, 8);
+    let options = SearchOptions {
+        limit: Some(20),
+        ..SearchOptions::default()
+    };
+
+    group.bench_function("hybrid_simple_symbol_1000_files", |b| {
+        b.iter(|| {
+            let hits = hybrid_search(
+                &workspace,
+                "calculate_bulk_250_3",
+                Some(&model as &dyn ivygrep::embedding::EmbeddingModel),
+                &options,
+            )
+            .unwrap();
+            assert!(!hits.is_empty());
+        })
+    });
+
+    group.bench_function("hybrid_complex_phrase_1000_files", |b| {
+        b.iter(|| {
+            let hits = hybrid_search(
+                &workspace,
+                "calculate bulk amount",
+                Some(&model as &dyn ivygrep::embedding::EmbeddingModel),
+                &options,
+            )
+            .unwrap();
+            assert!(!hits.is_empty());
+        })
+    });
+
+    group.bench_function("literal_simple_symbol_1000_files", |b| {
+        b.iter(|| {
+            let hits = literal_search(&workspace, "calculate_bulk_250_3", &options).unwrap();
+            assert!(!hits.is_empty());
+        })
+    });
+
+    group.bench_function("regex_symbol_1000_files", |b| {
+        b.iter(|| {
+            let hits = ivygrep::regex_search::regex_search(
+                &workspace,
+                r"calculate_bulk_250_\d+",
+                Some(20),
+                None,
+                &[],
+                &[],
+                false,
+            )
+            .unwrap();
+            assert!(!hits.is_empty());
+        })
+    });
+
+    group.finish();
+}
+
 fn bench_vector_store(c: &mut Criterion) {
     let mut group = c.benchmark_group("vector_store");
     group
@@ -417,6 +496,7 @@ criterion_group!(
     bench_embedding,
     bench_search,
     bench_regex_search,
+    bench_base_search_patterns,
     bench_vector_store,
 );
 criterion_main!(benches);

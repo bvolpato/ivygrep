@@ -110,16 +110,25 @@ pub struct SearchContext {
 }
 
 impl SearchContext {
-    pub fn load(workspace: &Workspace, _emb_dim: Option<usize>) -> Result<Self> {
+    pub fn load(workspace: &Workspace, emb_dim: Option<usize>) -> Result<Self> {
+        let wants_hash_vectors = matches!(emb_dim, Some(256 | 384));
+        let wants_neural_vectors = matches!(emb_dim, Some(384));
         let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
         if use_overlay {
             let overlay_sqlite = open_sqlite_readonly(&workspace.overlay_sqlite_path())?;
             let (overlay_idx, fields) = open_tantivy_index(&workspace.overlay_tantivy_dir())?;
             let overlay_reader = overlay_idx.reader()?;
             let overlay_searcher = overlay_reader.searcher();
-            let overlay_hash_vec =
-                VectorStore::open_readonly(&workspace.overlay_vector_path(), 256, ScalarKind::F16)
-                    .ok();
+            let overlay_hash_vec = wants_hash_vectors
+                .then(|| {
+                    VectorStore::open_readonly(
+                        &workspace.overlay_vector_path(),
+                        256,
+                        ScalarKind::F16,
+                    )
+                    .ok()
+                })
+                .flatten();
 
             let base_dir = workspace
                 .base_index_dir
@@ -129,15 +138,26 @@ impl SearchContext {
             let (base_idx, _) = open_tantivy_index(&base_dir.join("tantivy"))?;
             let base_reader = base_idx.reader()?;
             let base_searcher = base_reader.searcher();
-            let base_hash_vec =
-                VectorStore::open_readonly(&base_dir.join("vectors.usearch"), 256, ScalarKind::F16)
-                    .ok();
-            let base_neural_vec = VectorStore::open_readonly(
-                &base_dir.join("vectors_neural.usearch"),
-                384,
-                ScalarKind::F32,
-            )
-            .ok();
+            let base_hash_vec = wants_hash_vectors
+                .then(|| {
+                    VectorStore::open_readonly(
+                        &base_dir.join("vectors.usearch"),
+                        256,
+                        ScalarKind::F16,
+                    )
+                    .ok()
+                })
+                .flatten();
+            let base_neural_vec = wants_neural_vectors
+                .then(|| {
+                    VectorStore::open_readonly(
+                        &base_dir.join("vectors_neural.usearch"),
+                        384,
+                        ScalarKind::F32,
+                    )
+                    .ok()
+                })
+                .flatten();
 
             let mut tombstones = HashSet::new();
             let mut overlay_files = HashSet::new();
@@ -173,11 +193,21 @@ impl SearchContext {
             let (idx, fields) = open_tantivy_index(&workspace.tantivy_dir())?;
             let reader = idx.reader()?;
             let searcher = reader.searcher();
-            let hash_vec =
-                VectorStore::open_readonly(&workspace.vector_path(), 256, ScalarKind::F16).ok();
-            let neural_vec =
-                VectorStore::open_readonly(&workspace.vector_neural_path(), 384, ScalarKind::F32)
-                    .ok();
+            let hash_vec = wants_hash_vectors
+                .then(|| {
+                    VectorStore::open_readonly(&workspace.vector_path(), 256, ScalarKind::F16).ok()
+                })
+                .flatten();
+            let neural_vec = wants_neural_vectors
+                .then(|| {
+                    VectorStore::open_readonly(
+                        &workspace.vector_neural_path(),
+                        384,
+                        ScalarKind::F32,
+                    )
+                    .ok()
+                })
+                .flatten();
 
             Ok(Self {
                 sqlite,
@@ -477,18 +507,20 @@ pub fn hybrid_search(
     let trimmed = query_text.trim();
     // Compute once — used by literal pass, lexical pass, and path-match pass.
     let lexical_queries = build_lexical_queries(trimmed);
-    let literal_pattern = lexical_queries
-        .iter()
-        .map(|v| regex::escape(v))
-        .collect::<Vec<_>>()
-        .join("|");
-    let literal_matcher = regex::RegexBuilder::new(&literal_pattern)
-        .case_insensitive(true)
-        .build()
-        .ok();
-    let literal_chunks: Vec<(IndexedChunk, f32)> = if let Some(ref matcher) = literal_matcher
-        && !trimmed.is_empty()
-    {
+    let literal_matcher = if should_run_literal_pass(trimmed) {
+        let literal_pattern = lexical_queries
+            .iter()
+            .map(|v| regex::escape(v))
+            .collect::<Vec<_>>()
+            .join("|");
+        regex::RegexBuilder::new(&literal_pattern)
+            .case_insensitive(true)
+            .build()
+            .ok()
+    } else {
+        None
+    };
+    let literal_chunks: Vec<(IndexedChunk, f32)> = if let Some(ref matcher) = literal_matcher {
         let mut all_candidates = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for variant in &lexical_queries {
@@ -1041,6 +1073,19 @@ fn build_lexical_queries(query_text: &str) -> Vec<String> {
     queries.sort();
     queries.dedup();
     queries
+}
+
+fn should_run_literal_pass(query_text: &str) -> bool {
+    let query = query_text.trim();
+    if query.is_empty() {
+        return false;
+    }
+
+    let tokens = tokenize_query(query);
+    tokens.len() <= 2
+        || query
+            .chars()
+            .any(|c| c == '_' || c == '-' || c == '/' || c == ':' || c.is_ascii_uppercase())
 }
 
 fn tokenize_query(query: &str) -> Vec<String> {
@@ -2082,11 +2127,28 @@ mod tests {
     use serial_test::serial;
 
     use crate::EMBEDDING_DIMENSIONS;
-    use crate::embedding::HashEmbeddingModel;
+    use crate::embedding::{EmbeddingModel, HashEmbeddingModel};
     use crate::indexer::index_workspace;
     use crate::workspace::{Workspace, WorkspaceScope};
 
     use super::*;
+
+    struct TestEmbeddingModel384;
+
+    impl EmbeddingModel for TestEmbeddingModel384 {
+        fn dimensions(&self) -> usize {
+            384
+        }
+
+        fn embed(&self, text: &str) -> Vec<f32> {
+            let mut vector = vec![0.0; 384];
+            for token in tokenize_query(text) {
+                let idx = token.bytes().fold(0usize, |acc, b| acc + b as usize) % 384;
+                vector[idx] += 1.0;
+            }
+            vector
+        }
+    }
 
     fn assert_hybrid_search_scope_filter(scope_dir: &str, out_of_scope_dirs: &[&str]) {
         let tmp = tempfile::tempdir().unwrap();
@@ -2354,6 +2416,59 @@ mod tests {
         .unwrap();
         assert!(!hits.is_empty());
         assert!(hits[0].preview.contains("process_payment"));
+        assert!(
+            hits.iter()
+                .any(|hit| hit.sources.iter().any(|source| source == "semantic")),
+            "hash vector search should contribute before neural vectors exist"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn search_uses_hash_vectors_until_neural_vectors_are_ready() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(
+            tmp.path().join("auth.rs"),
+            "pub fn authenticate_user(token: &str) -> bool { !token.is_empty() }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let hash_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        let neural_model = TestEmbeddingModel384;
+        index_workspace(&workspace, &hash_model).unwrap();
+        assert!(!workspace.vector_neural_path().exists());
+
+        let hits_before = hybrid_search(
+            &workspace,
+            "authenticate user",
+            Some(&neural_model),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert!(!hits_before.is_empty());
+        assert!(
+            hits_before
+                .iter()
+                .any(|hit| hit.sources.iter().any(|source| source == "semantic")),
+            "384-dim search should still use hash vectors before neural vectors exist"
+        );
+
+        crate::indexer::enhance_workspace_neural(&workspace, &neural_model).unwrap();
+        assert!(workspace.vector_neural_path().exists());
+
+        let hits_after = hybrid_search(
+            &workspace,
+            "authenticate user",
+            Some(&neural_model),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert!(!hits_after.is_empty());
+        assert!(hits_after[0].preview.contains("authenticate_user"));
     }
 
     #[test]
@@ -2492,6 +2607,40 @@ mod tests {
         let hits = literal_search(&workspace, "calculate_tax", &SearchOptions::default()).unwrap();
         assert!(!hits.is_empty());
         assert!(hits[0].preview.contains("calculate_tax"));
+    }
+
+    #[test]
+    #[serial]
+    fn search_context_loads_vectors_only_when_needed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(
+            tmp.path().join("tax.rs"),
+            "pub fn calculate_tax(amount: f64) -> f64 { amount * 0.2 }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let lexical_context = SearchContext::load(&workspace, None).unwrap();
+        assert!(lexical_context.hash_vectors.is_none());
+        assert!(lexical_context.neural_vectors.is_none());
+
+        let hash_context = SearchContext::load(&workspace, Some(256)).unwrap();
+        assert!(hash_context.hash_vectors.is_some());
+        assert!(hash_context.neural_vectors.is_none());
+    }
+
+    #[test]
+    fn literal_pass_runs_only_for_exactish_queries() {
+        assert!(should_run_literal_pass("calculate tax"));
+        assert!(should_run_literal_pass("calculate_tax_for_region"));
+        assert!(should_run_literal_pass("KernelMemoryAllocation"));
+        assert!(!should_run_literal_pass("kernel memory allocation"));
     }
 
     #[test]
