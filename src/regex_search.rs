@@ -329,6 +329,9 @@ mod tests {
     use serial_test::serial;
 
     use super::*;
+    use crate::EMBEDDING_DIMENSIONS;
+    use crate::embedding::HashEmbeddingModel;
+    use crate::indexer::index_workspace;
     use crate::workspace::{Workspace, WorkspaceScope};
 
     #[test]
@@ -434,5 +437,37 @@ mod tests {
         )
         .unwrap();
         assert!(include_and_exclude.is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn indexed_regex_search_respects_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        for i in 0..20 {
+            std::fs::write(
+                tmp.path().join(format!("match_{i}.rs")),
+                format!("pub fn applyFilter_{i}() -> bool {{ true }}\n"),
+            )
+            .unwrap();
+        }
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = regex_search(
+            &workspace,
+            r"applyFilter_\d+",
+            Some(3),
+            None,
+            &[],
+            &[],
+            false,
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 3);
     }
 }

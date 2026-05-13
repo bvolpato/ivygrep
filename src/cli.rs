@@ -992,7 +992,11 @@ async fn run_query(cli: Cli) -> Result<()> {
 
     let search_model: Option<Box<dyn crate::embedding::EmbeddingModel>> =
         if !search_via_daemon && !cli.regex && !cli.literal {
-            Some(create_model(cli.hash))
+            if is_single_word_symbol_query(query) {
+                None
+            } else {
+                Some(create_model(cli.hash))
+            }
         } else {
             None
         };
@@ -1536,15 +1540,12 @@ fn local_fallback_search(
         vec![workspace.clone()]
     };
 
-    let is_single_word = !query.contains(' ')
-        && query
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-');
-    let model: Option<Box<dyn crate::embedding::EmbeddingModel>> = if is_single_word {
-        None
-    } else {
-        Some(create_model(use_hash))
-    };
+    let model: Option<Box<dyn crate::embedding::EmbeddingModel>> =
+        if is_single_word_symbol_query(query) {
+            None
+        } else {
+            Some(create_model(use_hash))
+        };
 
     for ws in workspaces {
         if !use_hash {
@@ -1578,6 +1579,13 @@ fn local_fallback_search(
         all_hits.truncate(l);
     }
     all_hits
+}
+
+fn is_single_word_symbol_query(query: &str) -> bool {
+    !query.contains(' ')
+        && query
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
 }
 
 fn ensure_no_nested_workspaces(target_root: &Path) -> Result<()> {
