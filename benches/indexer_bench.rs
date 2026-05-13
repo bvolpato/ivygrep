@@ -6,6 +6,7 @@ use ivygrep::indexer::index_workspace;
 use ivygrep::merkle::MerkleSnapshot;
 use ivygrep::search::{SearchOptions, hybrid_search, literal_search};
 use ivygrep::workspace::Workspace;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 use std::time::Duration;
@@ -61,6 +62,41 @@ fn setup_indexed_workspace(
     (staging, home, workspace, model)
 }
 
+fn setup_bulk_workspace(
+    files: usize,
+    functions_per_file: usize,
+) -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    Workspace,
+    HashEmbeddingModel,
+) {
+    let staging = tempfile::tempdir().unwrap();
+    let ws_path = staging.path().join("workspace");
+    fs::create_dir_all(&ws_path).unwrap();
+
+    for file_idx in 0..files {
+        let mut source = String::with_capacity(functions_per_file * 96);
+        for fn_idx in 0..functions_per_file {
+            writeln!(
+                source,
+                "pub fn calculate_bulk_{file_idx}_{fn_idx}(amount: f64) -> f64 {{"
+            )
+            .unwrap();
+            writeln!(source, "    amount + {fn_idx}.0").unwrap();
+            writeln!(source, "}}\n").unwrap();
+        }
+        fs::write(ws_path.join(format!("bulk_{file_idx}.rs")), source).unwrap();
+    }
+
+    let home = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+    let workspace = Workspace::resolve(&ws_path).unwrap();
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+    (staging, home, workspace, model)
+}
+
 fn bench_indexer(c: &mut Criterion) {
     let mut group = c.benchmark_group("indexer");
     group
@@ -84,6 +120,28 @@ fn bench_indexer(c: &mut Criterion) {
             |(_staging, _home, workspace, model)| {
                 let summary = index_workspace(&workspace, &model).unwrap();
                 assert_eq!(summary.indexed_files, 0);
+            },
+            BatchSize::LargeInput,
+        )
+    });
+
+    group.finish();
+}
+
+fn bench_bulk_indexer(c: &mut Criterion) {
+    let mut group = c.benchmark_group("indexer_bulk");
+    group
+        .sample_size(10)
+        .warm_up_time(Duration::from_secs(1))
+        .measurement_time(Duration::from_secs(10));
+
+    group.bench_function("fresh_index_30k_chunks", |b| {
+        b.iter_batched(
+            || setup_bulk_workspace(300, 100),
+            |(_staging, _home, workspace, model)| {
+                let summary = index_workspace(&workspace, &model).unwrap();
+                assert_eq!(summary.deleted_files, 0);
+                assert!(summary.total_chunks >= 25_000);
             },
             BatchSize::LargeInput,
         )
@@ -353,6 +411,7 @@ fn bench_vector_store(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_indexer,
+    bench_bulk_indexer,
     bench_chunking,
     bench_merkle,
     bench_embedding,
