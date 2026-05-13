@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -31,6 +31,7 @@ use crate::workspace::{Workspace, WorkspaceScope, list_workspaces};
 const WATCH_QUIET_PERIOD: Duration = Duration::from_secs(2);
 const WATCH_MAX_DEBOUNCE: Duration = Duration::from_secs(30);
 const MAX_DAEMON_LOG_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_QUERY_CACHE_ENTRIES: usize = 128;
 
 struct WatchRegistration {
     _watcher: RecommendedWatcher,
@@ -95,7 +96,7 @@ struct SearchContextCacheKey {
     emb_dim: Option<usize>,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
 struct SearchContextSignature {
     index_generation: Option<u64>,
     sqlite: Option<FileStamp>,
@@ -108,13 +109,13 @@ struct SearchContextSignature {
     base_neural_vectors: Option<FileStamp>,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
 struct FileStamp {
     len: u64,
     modified_nanos: u128,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
 struct DirStamp {
     files: u64,
     len: u64,
@@ -124,6 +125,52 @@ struct DirStamp {
 struct CachedSearchContext {
     signature: SearchContextSignature,
     context: Arc<Mutex<SearchContext>>,
+}
+
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+struct QueryCacheKey {
+    workspace_ids: Vec<String>,
+    signatures: Vec<SearchContextSignature>,
+    query: String,
+    limit: Option<usize>,
+    context: usize,
+    type_filter: Option<String>,
+    include_globs: Vec<String>,
+    exclude_globs: Vec<String>,
+    scope_filter: Option<WorkspaceScope>,
+    skip_gitignore: bool,
+    emb_dim: usize,
+}
+
+#[derive(Default)]
+struct QueryResultCache {
+    results: HashMap<QueryCacheKey, Vec<crate::protocol::SearchHit>>,
+    order: VecDeque<QueryCacheKey>,
+}
+
+impl QueryResultCache {
+    fn get(&self, key: &QueryCacheKey) -> Option<Vec<crate::protocol::SearchHit>> {
+        self.results.get(key).cloned()
+    }
+
+    fn insert(&mut self, key: QueryCacheKey, hits: Vec<crate::protocol::SearchHit>) {
+        if !self.results.contains_key(&key) {
+            self.order.push_back(key.clone());
+        }
+        self.results.insert(key, hits);
+
+        while self.results.len() > MAX_QUERY_CACHE_ENTRIES {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.results.remove(&oldest);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.results.clear();
+        self.order.clear();
+    }
 }
 
 impl WatchEventFilter {
@@ -216,6 +263,7 @@ struct DaemonState {
     model_loading: Arc<AtomicBool>,
     watchers: Arc<Mutex<HashMap<String, WatchRegistration>>>,
     search_contexts: Arc<Mutex<HashMap<SearchContextCacheKey, CachedSearchContext>>>,
+    query_results: Arc<Mutex<QueryResultCache>>,
 }
 
 impl DaemonState {
@@ -278,6 +326,15 @@ impl DaemonState {
         self.search_contexts
             .lock()
             .retain(|key, _| key.workspace_id != workspace.id);
+        self.query_results.lock().clear();
+    }
+
+    fn cached_query_results(&self, key: &QueryCacheKey) -> Option<Vec<crate::protocol::SearchHit>> {
+        self.query_results.lock().get(key)
+    }
+
+    fn store_query_results(&self, key: QueryCacheKey, hits: &[crate::protocol::SearchHit]) {
+        self.query_results.lock().insert(key, hits.to_vec());
     }
 }
 
@@ -299,6 +356,7 @@ pub async fn run_daemon() -> Result<()> {
         model_loading: Arc::new(AtomicBool::new(false)),
         watchers: Arc::new(Mutex::new(HashMap::new())),
         search_contexts: Arc::new(Mutex::new(HashMap::new())),
+        query_results: Arc::new(Mutex::new(QueryResultCache::default())),
     };
 
     restore_configured_watchers(&state);
@@ -522,6 +580,21 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
 
                 for workspace in &workspaces {
                     let _ = maybe_complete_neural_for_small_workspace(workspace);
+                }
+
+                let cache_key = query_cache_key(&workspaces, &query, &options, model.dimensions());
+                if let Some(cached_hits) = state_clone.cached_query_results(&cache_key) {
+                    if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none() {
+                        for root in ws_neural_missing {
+                            if let Ok(ws) = Workspace::resolve(&root) {
+                                let _ = ws.trigger_background_enhancement();
+                            }
+                        }
+                    }
+                    return (cached_hits, all_errors);
+                }
+
+                for workspace in &workspaces {
                     let context = match state_clone
                         .cached_search_context(workspace, Some(model.dimensions()))
                     {
@@ -567,6 +640,9 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 });
                 if let Some(l) = options.limit {
                     all_hits.truncate(l);
+                }
+                if all_errors.is_empty() {
+                    state_clone.store_query_results(cache_key, &all_hits);
                 }
                 // Spawn background neural enhancement for workspaces that need it
                 if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none() {
@@ -1138,6 +1214,33 @@ fn search_context_signature(
     }
 }
 
+fn query_cache_key(
+    workspaces: &[Workspace],
+    query: &str,
+    options: &SearchOptions,
+    emb_dim: usize,
+) -> QueryCacheKey {
+    QueryCacheKey {
+        workspace_ids: workspaces
+            .iter()
+            .map(|workspace| workspace.id.clone())
+            .collect(),
+        signatures: workspaces
+            .iter()
+            .map(|workspace| search_context_signature(workspace, Some(emb_dim)))
+            .collect(),
+        query: query.to_string(),
+        limit: options.limit,
+        context: options.context,
+        type_filter: options.type_filter.clone(),
+        include_globs: options.include_globs.clone(),
+        exclude_globs: options.exclude_globs.clone(),
+        scope_filter: options.scope_filter.clone(),
+        skip_gitignore: options.skip_gitignore,
+        emb_dim,
+    }
+}
+
 fn file_stamp(path: &Path) -> Option<FileStamp> {
     let metadata = std::fs::metadata(path).ok()?;
     Some(FileStamp {
@@ -1435,6 +1538,7 @@ mod tests {
             model_loading: Arc::new(AtomicBool::new(false)),
             watchers: Arc::new(Mutex::new(HashMap::new())),
             search_contexts: Arc::new(Mutex::new(HashMap::new())),
+            query_results: Arc::new(Mutex::new(QueryResultCache::default())),
         }
     }
 
@@ -1669,6 +1773,65 @@ mod tests {
             lazy_model.get().is_none(),
             "daemon should not block-load neural model when only hash vectors exist"
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn daemon_search_caches_repeated_query_results() {
+        let home = tempdir().unwrap();
+        unsafe {
+            std::env::set_var("IVYGREP_HOME", home.path());
+            std::env::set_var("IVYGREP_NO_AUTOSPAWN", "1");
+        }
+
+        let repo = tempdir().unwrap();
+        std::fs::write(
+            repo.path().join("auth.rs"),
+            "pub fn authenticate_user(token: &str) -> bool { !token.is_empty() }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+
+        let state = test_state();
+        let request = DaemonRequest::Search {
+            path: Some(workspace.root.clone()),
+            query: "authenticate user".to_string(),
+            limit: Some(5),
+            context: 2,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_path: None,
+            scope_is_file: false,
+            skip_gitignore: false,
+        };
+
+        let first = handle_request(state.clone(), request.clone()).await;
+        let first_count = match first {
+            DaemonResponse::SearchResults { hits } => hits.len(),
+            other => panic!("expected SearchResults, got {other:?}"),
+        };
+        assert!(first_count > 0);
+        assert_eq!(state.query_results.lock().results.len(), 1);
+
+        state.search_contexts.lock().clear();
+        let second = handle_request(state.clone(), request).await;
+        let second_count = match second {
+            DaemonResponse::SearchResults { hits } => hits.len(),
+            other => panic!("expected SearchResults, got {other:?}"),
+        };
+
+        assert_eq!(second_count, first_count);
+        assert!(
+            state.search_contexts.lock().is_empty(),
+            "query cache hit should not reload SearchContext"
+        );
+
+        state.clear_workspace_contexts(&workspace);
+        assert!(state.query_results.lock().results.is_empty());
     }
 
     #[test]
