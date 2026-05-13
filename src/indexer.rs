@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::IsTerminal;
@@ -26,8 +27,18 @@ use crate::workspace::{Workspace, WorkspaceMetadata};
 const ZSTD_MAGIC: &[u8] = &[0x28, 0xB5, 0x2F, 0xFD];
 pub const BLOCKING_NEURAL_CUTOFF_BYTES: u64 = 1_000_000;
 
+thread_local! {
+    static ZSTD_COMPRESSOR: RefCell<zstd::bulk::Compressor<'static>> =
+        RefCell::new(zstd::bulk::Compressor::new(1).expect("failed to create zstd compressor"));
+}
+
 fn compress_text(text: &str) -> Vec<u8> {
-    zstd::encode_all(text.as_bytes(), 1).unwrap_or_else(|_| text.as_bytes().to_vec())
+    ZSTD_COMPRESSOR.with(|compressor| {
+        compressor
+            .borrow_mut()
+            .compress(text.as_bytes())
+            .unwrap_or_else(|_| text.as_bytes().to_vec())
+    })
 }
 
 pub fn decompress_text(raw: Vec<u8>) -> String {
