@@ -19,6 +19,7 @@ DEFAULT_KERNEL = Path("/home/bruno/githubworkspace/linux")
 DEFAULT_HOME = Path("/tmp/ivygrep-linux-bench-home")
 DEFAULT_QUERY = "kernel memory allocation"
 DEFAULT_LITERAL_QUERY = "kmalloc"
+TMP_ROOT = Path("/tmp").resolve()
 
 
 def run(cmd: list[str], *, cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
@@ -72,6 +73,17 @@ def ensure_kernel_checkout(path: Path) -> None:
         raise SystemExit(f"Linux kernel checkout not found at {path}")
 
 
+def ensure_bench_home_under_tmp(path: Path) -> Path:
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(TMP_ROOT)
+    except ValueError as exc:
+        raise SystemExit(f"--bench-home must resolve under {TMP_ROOT}, got {resolved}") from exc
+    if resolved == TMP_ROOT:
+        raise SystemExit(f"--bench-home must be a child of {TMP_ROOT}, got {resolved}")
+    return resolved
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kernel", type=Path, default=DEFAULT_KERNEL)
@@ -84,7 +96,7 @@ def main() -> int:
 
     repo = Path(__file__).resolve().parent.parent
     kernel = args.kernel.resolve()
-    bench_home = args.bench_home.resolve()
+    bench_home = ensure_bench_home_under_tmp(args.bench_home)
     binary = repo / "target" / "release" / "ig"
     ensure_kernel_checkout(kernel)
 

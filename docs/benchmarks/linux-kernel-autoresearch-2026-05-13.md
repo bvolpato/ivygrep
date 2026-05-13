@@ -44,6 +44,7 @@ Cold, hot, and literal queries each returned 20 hits in the best retained run.
 ## Retained Changes
 
 - Added `scripts/bench_linux_kernel.py` to measure release build, forced cold index, cold query, hot semantic queries, and hot literal queries.
+- Guarded `--bench-home` so the harness only deletes child paths that resolve under `/tmp`.
 - Changed chunk text compression from zstd level 3 to level 1.
 - Reserved vector capacity during fresh indexing.
 - Used unchecked vector insert for fresh indexes where duplicate keys cannot exist yet.
@@ -53,6 +54,7 @@ Cold, hot, and literal queries each returned 20 hits in the best retained run.
 ## Validation
 
 - `python3 -m py_compile scripts/bench_linux_kernel.py`
+- `python3 tests/test_bench_linux_kernel.py`
 - `python3 scripts/bench_linux_kernel.py --help`
 - `python3 scripts/bench_linux_kernel.py --kernel /home/bruno/githubworkspace/linux --samples 5`
 - `cargo fmt --check`
