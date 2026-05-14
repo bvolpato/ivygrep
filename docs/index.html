@@ -4,12 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ivygrep — Semantic code search that never phones home</title>
-    <meta name="description" content="Local-first semantic code search combining BM25 lexical search with neural vector embeddings. Sub-100ms latency, zero telemetry, 44 languages, built-in MCP server for AI agents.">
+    <meta name="description" content="Local-first semantic code search combining BM25 lexical search with neural vector embeddings. Single-digit-ms warm daemon queries, zero telemetry, 44 languages, built-in MCP server for AI agents.">
     <meta name="theme-color" content="#06070a">
 
     <!-- Open Graph -->
     <meta property="og:title" content="ivygrep — Semantic code search that never phones home">
-    <meta property="og:description" content="Ask questions in English, get answers in code. 100% local, sub-100ms, zero telemetry.">
+    <meta property="og:description" content="Ask questions in English, get answers in code. 100% local, single-digit-ms warm daemon queries, zero telemetry.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://bvolpato.github.io/ivygrep">
     <meta property="og:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner.png">
@@ -17,7 +17,7 @@
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="ivygrep — Semantic code search that never phones home">
-    <meta name="twitter:description" content="Ask questions in English, get answers in code. 100% local, sub-100ms, zero telemetry.">
+    <meta name="twitter:description" content="Ask questions in English, get answers in code. 100% local, single-digit-ms warm daemon queries, zero telemetry.">
     <meta name="twitter:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner.png">
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -63,7 +63,7 @@
         <div class="container hero-content">
             <div class="hero-badge slide-up">
                 <span class="badge-dot"></span>
-                v0.6.11 — 60× faster regex, path-boosted ranking
+                v0.6.18 — daemon hot queries under 6 ms, Linux kernel indexing 10.6% faster
             </div>
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" onerror="this.src='assets/logo.png'"/>
@@ -123,8 +123,8 @@
                 </div>
                 <div class="proof-divider"></div>
                 <div class="proof-item">
-                    <span class="proof-value">&lt;100ms</span>
-                    <span class="proof-label">Query latency</span>
+                    <span class="proof-value">&lt;6ms</span>
+                    <span class="proof-label">Hot daemon p95</span>
                 </div>
                 <div class="proof-divider"></div>
                 <div class="proof-item">
@@ -152,7 +152,7 @@
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">⚡</span></div>
                 <h3>Blazing Fast</h3>
-                <p>Sub-100ms queries on repos with millions of lines. Hash embeddings deliver instant indexing; neural models upgrade silently in the background.</p>
+                <p>Single-digit-ms warm daemon queries on large indexed repos. Hash embeddings deliver immediate first results; neural models upgrade silently in the background.</p>
             </div>
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">🔒</span></div>
@@ -219,7 +219,7 @@
                         <td><span class="highlight">✅</span></td>
                     </tr>
                     <tr>
-                        <td>Sub-100ms latency</td>
+                        <td>Warm indexed query latency</td>
                         <td>✅</td>
                         <td>❌</td>
                         <td>✅</td>
@@ -293,7 +293,7 @@
             <div class="flow-step">
                 <div class="flow-icon pulse-glow">3</div>
                 <h4>Neural Enhancement</h4>
-                <p>Background daemon silently upgrades to quantized ONNX (AllMiniLML6V2) with Apple CoreML / CUDA acceleration.</p>
+                <p>Background daemon silently upgrades to quantized ONNX (AllMiniLML6V2Q) with Apple CoreML / CUDA acceleration.</p>
             </div>
         </div>
 
@@ -307,7 +307,7 @@
             <div class="grid grid-2" style="gap: 1.5rem;">
                 <div class="git-feature">
                     <h4>Worktree Overlays</h4>
-                    <p>When you <code>git worktree add</code>, ivygrep does <strong>not</strong> copy the index. It creates a thin overlay storing only divergent chunks & tombstones — referencing the base index. A 92K-file repo with 50 changed files creates a ~200 KB overlay instead of duplicating ~50 MB.</p>
+                    <p>When you <code>git worktree add</code>, ivygrep does <strong>not</strong> copy the index. It creates a thin overlay storing only divergent chunks & tombstones — referencing the base index. A 93K-file repo with 50 changed files creates a ~200 KB overlay instead of duplicating ~50 MB.</p>
                 </div>
                 <div class="git-feature">
                     <h4>Branch-Switch Deltas</h4>
@@ -322,7 +322,7 @@
         <div class="section-header">
             <span class="section-tag">Benchmarks</span>
             <h2 class="section-title text-center">Speed That Scales</h2>
-            <p class="text-center subtitle-small">Benchmarked on the <strong>Linux kernel</strong> (92K files, 1.5M chunks) and <strong>2GB+ monorepos</strong> (289K files, 3.8M chunks)</p>
+            <p class="text-center subtitle-small">Benchmarked on the <strong>Linux kernel</strong> (93,493 indexed files, 4,666,431 chunks) and <strong>2GB+ monorepos</strong> (289K files, 3.8M chunks)</p>
         </div>
 
         <!-- Benchmark bars -->
@@ -338,21 +338,17 @@
                 <div class="benchmark-speed">3×</div>
             </div>
             <div class="benchmark-row benchmark-row-highlight">
-                <div class="benchmark-tool"><code>ig</code><span class="benchmark-mode">semantic search</span></div>
-                <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig-semantic" data-width="8%"><span class="benchmark-time">~72 ms</span></div></div>
-                <div class="benchmark-speed benchmark-speed-hero">125×</div>
+                <div class="benchmark-tool"><code>ig</code><span class="benchmark-mode">process-cold semantic query</span></div>
+                <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig-semantic" data-width="5%"><span class="benchmark-time">~402 ms</span></div></div>
+                <div class="benchmark-speed benchmark-speed-hero">22×</div>
             </div>
             <div class="benchmark-row benchmark-row-highlight">
-                <div class="benchmark-tool"><code>ig --literal</code><span class="benchmark-mode">single identifier</span></div>
-                <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig" data-width="2%"><span class="benchmark-time">~17 ms</span></div></div>
-                <div class="benchmark-speed benchmark-speed-hero">529×</div>
+                <div class="benchmark-tool"><code>ig</code><span class="benchmark-mode">warm daemon p95</span></div>
+                <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig" data-width="1%"><span class="benchmark-time">~4.9 ms</span></div></div>
+                <div class="benchmark-speed benchmark-speed-hero">1837×</div>
             </div>
-            <div class="benchmark-row benchmark-row-highlight">
-                <div class="benchmark-tool"><code>ig --regex</code><span class="benchmark-mode">2GB+ monorepo</span></div>
-                <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig-semantic" data-width="3%"><span class="benchmark-time">~200 ms</span></div></div>
-                <div class="benchmark-speed benchmark-speed-hero">60×</div>
-            </div>
-            <p class="benchmark-note">grep and rg scan every file at query time. ivygrep queries a pre-built index — searches are <strong>orders of magnitude faster</strong> on warm repos, and semantic mode finds related code even when you don't know the exact identifier.</p>
+            <p class="benchmark-note">grep and rg scan every file at query time. ivygrep queries a pre-built index. Latest retained runs measured 20 daemon hits and 20 local hits, preserving query behavior while cutting warm daemon p95 from ~455 ms to single-digit milliseconds.</p>
+            <p class="benchmark-note"><a href="benchmarks/daemon-hot-query-cache.html">Daemon hot-query benchmark</a> · <a href="benchmarks/linux-kernel-autoresearch-2026-05-13.html">Linux kernel indexing benchmark</a> · <a href="dev/bench/">CI benchmark dashboard</a></p>
         </div>
 
         <!-- Stats + Concurrent Search -->
@@ -360,20 +356,20 @@
             <div class="fade-in-scroll">
                 <div class="stats-grid">
                     <div class="stat-box">
-                        <div class="stat-value counter" data-target="529">0</div>
+                        <div class="stat-value counter" data-target="1837">0</div>
                         <div class="stat-label">× faster than grep</div>
                     </div>
                     <div class="stat-box">
-                        <div class="stat-value">~17ms</div>
-                        <div class="stat-label">Single identifier lookup</div>
+                        <div class="stat-value">~4.9ms</div>
+                        <div class="stat-label">Warm daemon p95</div>
                     </div>
                     <div class="stat-box">
-                        <div class="stat-value">~72ms</div>
-                        <div class="stat-label">Semantic: "kernel memory allocation"</div>
+                        <div class="stat-value">~402ms</div>
+                        <div class="stat-label">Process-cold semantic query</div>
                     </div>
                     <div class="stat-box">
-                        <div class="stat-value">2.3×</div>
-                        <div class="stat-label">Index-to-source ratio</div>
+                        <div class="stat-value">4.66M</div>
+                        <div class="stat-label">Linux kernel chunks</div>
                     </div>
                 </div>
             </div>
@@ -470,7 +466,7 @@
             <div class="section-header">
                 <span class="section-tag">Model Context Protocol</span>
                 <h2 class="section-title text-center">Supercharge Your AI Agents</h2>
-                <p class="text-center subtitle-small">ivygrep ships a built-in MCP server. Instead of stuffing entire repos into context windows, your agent queries your indexed codebase natively — with sub-100ms latency.</p>
+                <p class="text-center subtitle-small">ivygrep ships a built-in MCP server. Instead of stuffing entire repos into context windows, your agent queries your indexed codebase natively — with single-digit-ms warm daemon latency on large indexed repos.</p>
             </div>
 
             <div class="grid agent-grid mt-4">
@@ -562,7 +558,7 @@
         <div class="section-header">
             <span class="section-tag">Get Started</span>
             <h2 class="section-title text-center">Install ivygrep</h2>
-            <p class="text-center subtitle-small">Two commands to semantic search bliss.</p>
+            <p class="text-center subtitle-small">Install with Homebrew or a verified release archive.</p>
         </div>
 
         <div class="grid grid-2 mt-4">
@@ -577,10 +573,18 @@
             <div class="glass-panel fade-in-scroll install-card">
                 <h3 class="install-title">📦 Pre-built Binaries</h3>
                 <div class="install-code relative">
-                    <pre class="code-block"><span class="comment"># Download from GitHub Releases</span>
-<span class="prompt">$</span> curl -L https://github.com/bvolpato/ivygrep/releases/latest/download/ig-$(uname -m)-$(uname -s | tr A-Z a-z).tar.gz | tar xz
-<span class="prompt">$</span> sudo mv ig /usr/local/bin/</pre>
-                    <button class="copy-btn" onclick="navigator.clipboard.writeText('# Download the latest binary\ncurl -L https://github.com/bvolpato/ivygrep/releases/latest/download/ig-$(uname -m)-$(uname -s | tr A-Z a-z).tar.gz | tar xz\nsudo mv ig /usr/local/bin/'); this.innerText='Copied!'; setTimeout(() => this.innerText='Copy', 2000)">Copy</button>
+                    <pre class="code-block"><span class="prompt">$</span> tag=$(curl -fsSL https://api.github.com/repos/bvolpato/ivygrep/releases/latest | sed -n "s/.*\"tag_name\": \"\\(v[^\"]*\\)\".*/\\1/p")
+<span class="prompt">$</span> case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64) target=linux-x86_64-musl ;;
+  Linux-aarch64|Linux-arm64) target=linux-aarch64-musl ;;
+  Darwin-x86_64) target=macos-x86_64 ;;
+  Darwin-arm64) target=macos-aarch64 ;;
+  *) echo "unsupported platform: $(uname -s)-$(uname -m)" &gt;&amp;2; exit 1 ;;
+esac
+<span class="prompt">$</span> curl -fsSL "https://github.com/bvolpato/ivygrep/releases/download/${tag}/ivygrep-${tag}-${target}.tar.gz" | tar xz --strip-components=1 "ivygrep-${tag}-${target}/ig"
+<span class="prompt">$</span> mkdir -p ~/.local/bin
+<span class="prompt">$</span> install -m 0755 ig ~/.local/bin/ig</pre>
+                    <button class="copy-btn" onclick="navigator.clipboard.writeText('tag=$(curl -fsSL https://api.github.com/repos/bvolpato/ivygrep/releases/latest | sed -n &quot;s/.*\\&quot;tag_name\\&quot;: \\&quot;\\\\(v[^\\&quot;]*\\\\)\\&quot;.*/\\\\1/p&quot;)\ncase &quot;$(uname -s)-$(uname -m)&quot; in\n  Linux-x86_64) target=linux-x86_64-musl ;;\n  Linux-aarch64|Linux-arm64) target=linux-aarch64-musl ;;\n  Darwin-x86_64) target=macos-x86_64 ;;\n  Darwin-arm64) target=macos-aarch64 ;;\n  *) echo &quot;unsupported platform: $(uname -s)-$(uname -m)&quot; &gt;&amp;2; exit 1 ;;\nesac\ncurl -fsSL &quot;https://github.com/bvolpato/ivygrep/releases/download/${tag}/ivygrep-${tag}-${target}.tar.gz&quot; | tar xz --strip-components=1 &quot;ivygrep-${tag}-${target}/ig&quot;\nmkdir -p ~/.local/bin\ninstall -m 0755 ig ~/.local/bin/ig'); this.innerText='Copied!'; setTimeout(() => this.innerText='Copy', 2000)">Copy</button>
                 </div>
             </div>
         </div>
@@ -636,7 +640,7 @@
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md" class="footer-link">Changelog</a>
                 </div>
                 <div class="footer-copy">
-                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v0.6.11</p>
+                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v0.6.18</p>
                 </div>
             </div>
         </div>

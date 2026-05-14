@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ivygrep Daemon Hot-Query Benchmark</title>
+    <meta name="description" content="ivygrep daemon hot-query cache benchmark report with charts, raw TSV data, and validation notes.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Outfit:wght@300;400;600;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="report.css">
+    <link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
+</head>
+<body class="report-page">
+    <div class="bg-fx"></div>
+    <div class="bg-fx-glow"></div>
+    <main class="report-shell relative z-10">
+        <nav class="report-nav">
+            <a class="report-brand" href="../">
+                <img src="../assets/icon.svg" alt="ivygrep">
+                <span>ivygrep benchmarks</span>
+            </a>
+            <div class="report-links">
+                <a href="index.html">Reports</a>
+                <a href="../dev/bench/">CI Dashboard</a>
+                <a href="https://github.com/bvolpato/ivygrep/blob/main/docs/benchmarks/daemon-hot-query-cache.md">Source</a>
+            </div>
+        </nav>
+
+        <section class="report-hero">
+            <div class="report-eyebrow">Daemon Hot Query Cache</div>
+            <h1>Warm daemon queries under 6 ms</h1>
+            <p>Benchmark loop against a Linux kernel checkout with explicit daemon/local equivalence checks and full Rust test coverage.</p>
+        </section>
+
+        <section class="report-grid" aria-label="benchmark highlights">
+            <div class="report-stat"><strong>455.37 ms</strong><span>baseline daemon p95</span></div>
+            <div class="report-stat"><strong>4.90 ms</strong><span>best retained p95</span></div>
+            <div class="report-stat"><strong>20 / 20</strong><span>daemon/local hits</span></div>
+            <div class="report-stat"><strong>7 / 0</strong><span>equivalence cases/failures</span></div>
+        </section>
+
+        <section class="report-card">
+            <h2>Main Optimization Loop</h2>
+            <img class="report-figure" src="daemon-hot-query-cache-main.png" alt="Main daemon hot-query benchmark plot">
+            <div class="report-table-wrap">
+                <table class="report-table">
+                    <thead>
+                        <tr><th>Step</th><th>Change</th><th>daemon_hot_p95_ms</th><th>Delta</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>Baseline</td><td>process-cold CLI vs warm daemon baseline</td><td>455.37</td><td>-</td></tr>
+                        <tr><td>1</td><td>cache daemon SearchContext by workspace and embedding dimension</td><td>240.04</td><td>-215.32</td></tr>
+                        <tr><td>2</td><td>cache repeated daemon query results behind bounded request/index key</td><td>219.03</td><td>-21.01</td></tr>
+                        <tr><td>3</td><td>use quick query index health before daemon hot queries</td><td>8.04</td><td>-211.00</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <p>Final manual validation after cleanup measured <code>daemon_hot_p95_ms = 5.88</code> with <code>daemon_hits = 20</code> and <code>local_hits = 20</code>.</p>
+            <p><a href="daemon-hot-query-cache-results.tsv">Raw main-loop TSV</a></p>
+        </section>
+
+        <section class="report-card">
+            <h2>Regression Exploration Loop</h2>
+            <img class="report-figure" src="daemon-hot-query-cache-explore.png" alt="Explore daemon hot-query benchmark plot">
+            <div class="report-table-wrap">
+                <table class="report-table">
+                    <thead>
+                        <tr><th>Step</th><th>Change</th><th>daemon_hot_p95_ms</th><th>Delta</th></tr>
+                    </thead>
+                    <tbody>
+                        <tr><td>Baseline</td><td>post-main-loop 9-sample baseline</td><td>6.73</td><td>-</td></tr>
+                        <tr><td>1</td><td>skip daemon Status preflight for static hot-query runs with existing socket</td><td>4.90</td><td>-1.83</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <p>The explore guard kept daemon/local JSON equivalence explicit: 7 representative cases, 0 failures, including <code>--all</code> after single-workspace cache warmup.</p>
+            <p><a href="daemon-hot-query-cache-explore-results.tsv">Raw exploration TSV</a></p>
+        </section>
+
+        <section class="report-card">
+            <h2>Validation</h2>
+            <ul>
+                <li><code>cargo fmt -- --check</code></li>
+                <li><code>cargo clippy --locked --all-targets -- -D warnings</code></li>
+                <li><code>cargo test --locked --all-targets</code></li>
+                <li><code>python3 -m py_compile scripts/bench_daemon_hot_query.py scripts/check_daemon_equivalence.py</code></li>
+                <li><code>python3 scripts/check_daemon_equivalence.py --bench-home /tmp/ivygrep-daemon-equivalence-home</code></li>
+            </ul>
+        </section>
+    </main>
+</body>
+</html>

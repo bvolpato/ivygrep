@@ -28,6 +28,22 @@ brew tap bvolpato/tap
 brew install bvolpato/tap/ivygrep
 ```
 
+**Install a pre-built binary:**
+```bash
+tag=$(curl -fsSL https://api.github.com/repos/bvolpato/ivygrep/releases/latest | sed -n 's/.*"tag_name": "\(v[^"]*\)".*/\1/p')
+case "$(uname -s)-$(uname -m)" in
+  Linux-x86_64) target=linux-x86_64-musl ;;
+  Linux-aarch64|Linux-arm64) target=linux-aarch64-musl ;;
+  Darwin-x86_64) target=macos-x86_64 ;;
+  Darwin-arm64) target=macos-aarch64 ;;
+  *) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+esac
+curl -fsSL "https://github.com/bvolpato/ivygrep/releases/download/${tag}/ivygrep-${tag}-${target}.tar.gz" \
+  | tar xz --strip-components=1 "ivygrep-${tag}-${target}/ig"
+mkdir -p ~/.local/bin
+install -m 0755 ig ~/.local/bin/ig
+```
+
 **Build from source:**
 ```bash
 git clone https://github.com/bvolpato/ivygrep.git && cd ivygrep
@@ -127,7 +143,7 @@ Traditional tools require you to know _exactly_ what you're looking for. ivygrep
 | Works offline | ✅ | ❌ | ✅ |
 | Natural language queries | ❌ | ⚠️ | ✅ |
 | Semantic understanding | ❌ | ❌ | ✅ |
-| Sub-100ms latency | ✅ | ❌ | ✅ |
+| Warm indexed query latency | ✅ | ❌ | ✅ |
 | Privacy-first (no upload) | ✅ | ❌ | ✅ |
 | Git-native (worktrees, branches) | ❌ | ❌ | ✅ |
 | Structural code chunking | ❌ | ❌ | ✅ |
@@ -152,19 +168,18 @@ Unknown extensions are auto-detected and indexed as text.
 
 ## 🚀 Performance & Speed
 
-Benchmarked on the **Linux kernel** (92K files, 1.5M chunks) and **2GB+ monorepos** (289K files, 3.8M chunks):
+Benchmarked on the **Linux kernel** (93,493 indexed files, 4,666,431 chunks) and **2GB+ monorepos** (289K files, 3.8M chunks):
 
-| Tool | Mode | Time | Speedup |
-|------|------|-----:|--------:|
-| `grep -rn` | exact string | ~9.0 s | 1× |
-| `rg` | exact string | ~2.7 s | 3× |
-| **`ig`** | semantic: `"kernel memory allocation"` | **~72 ms** | **125×** |
-| **`ig --literal`** | **single identifier** (fast path) | **~17 ms** | **529×** |
-| **`ig --regex`** | **regex on 2GB+ monorepo** | **~200 ms** | **60×** |
+| Scenario | Metric | Result |
+|------|------|-----:|
+| Fresh Linux kernel index | full rebuild | ~27.3 min |
+| Cold semantic query | process-cold CLI | ~402 ms |
+| Warm daemon semantic query | p95 latency | ~4.9 ms |
+| Warm daemon correctness guard | daemon/local hits | 20 / 20 |
 
-Regex search extracts literal fragments from patterns and uses the Tantivy inverted index to pre-filter candidates before parallel scanning with rayon — turning a 12-second full-repo scan into a 200ms targeted search.
+The latest benchmark loop reduced Linux kernel fresh-index primary score by 10.6% and daemon hot-query p95 from ~455 ms to single-digit milliseconds. Benchmark writeups and charts live under [`docs/benchmarks/`](docs/benchmarks/).
 
-Indexing is sub-second for most projects. Search is sub-100ms. Small repos can complete neural enhancement before first results; larger repos return immediately and upgrade in the background via the bundled ONNX model (`AllMiniLML6V2Q`).
+Indexing is sub-second for most small projects. Large repos return hash/BM25 results immediately and upgrade in the background via the bundled ONNX model (`AllMiniLML6V2Q`).
 
 ---
 
@@ -195,7 +210,6 @@ ig --doctor --fix                  # rebuild a broken or stale index
 # Search modes
 ig --interactive "query"             # interactive TUI with file/snippet browsing
 ig --literal "fn_name"               # fast exact-match search (index-backed)
-ig --regex "fn\s+\w+_tax"          # regex mode (like rg)
 ig --hash "query"                  # force hash embeddings (skip neural)
 
 # Output control

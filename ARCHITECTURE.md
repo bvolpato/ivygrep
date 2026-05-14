@@ -53,8 +53,8 @@ embeddable in a single process with no JVM).
 
 **Why Tantivy and not ripgrep/grep:** grep scans every file on every query.
 Tantivy builds an inverted index once and answers term queries in milliseconds.
-On a 92K-file repo, a Tantivy lookup returns in ~17ms vs seconds for a full
-grep.
+On a 93K-file Linux checkout, indexed candidate lookup stays in milliseconds
+instead of scanning every file.
 
 ### USearch — Vector Similarity Index
 
@@ -75,8 +75,8 @@ approximate nearest-neighbor (ANN) search library. It implements HNSW
     (AllMiniLM-L6-v2), built asynchronously by a background subprocess. Higher
     quality, used when available.
 - **Memory-mapped reads** — search opens the vector index with `view()` (mmap)
-  instead of `load()`. On large indices (e.g. 1.5M vectors for the Linux
-  kernel), this reduces open time from ~450ms to <1ms.
+  instead of `load()`. On large indices (e.g. 4.66M vectors/chunks for the
+  Linux kernel), this keeps vector-store open time out of the hot path.
 - **Atomic writes** — vector saves write to a `.tmp` file then `rename()` to
   prevent corrupted reads by concurrent search processes.
 
@@ -178,8 +178,8 @@ event library.
   `RecursiveMode::Recursive`. Any file change event triggers an incremental
   re-index.
 - **Eliminating Merkle scans** — when a watcher is alive (verified via PID
-  file), the indexer skips the expensive full-filesystem Merkle diff. On a
-  92K-file repo, this saves ~2 seconds per query.
+  file), the indexer skips the expensive full-filesystem Merkle diff. On large
+  repositories, this avoids thousands of metadata reads per query.
 - **Debounced re-indexing** — file change events are sent through a
   `tokio::sync::mpsc` channel to a dedicated indexing task, which batches and
   processes them asynchronously.
@@ -200,7 +200,8 @@ Rust.
   sequentially written to storage.
 - **Parallel Merkle scanning** — the full-filesystem fingerprint scan
   (`MerkleSnapshot::build`) uses `par_iter()` to stat and hash files across all
-  cores. On a 92K-file repo this takes ~2 seconds instead of ~8.
+  cores. On large repositories this keeps cold validation bounded by parallel
+  metadata reads instead of serial tree walks.
 - **Parallel hash embedding** — the `HashEmbeddingModel::embed_batch()`
   implementation uses `par_iter()` to compute embeddings across all cores.
 
@@ -238,7 +239,7 @@ runs at memory bandwidth on modern CPUs (~30 GB/s with SIMD). SHA-256 would be
 The Merkle tree is how ivygrep avoids re-indexing unchanged files. Without it,
 every search on a cold daemon would require re-reading, re-chunking, and
 re-embedding every file in the workspace — minutes of work on a large repo. With
-it, re-indexing an unchanged 92K-file workspace takes ~10ms.
+it, re-indexing an unchanged large workspace can complete in milliseconds.
 
 **The data structure:**
 
@@ -265,9 +266,8 @@ read**. The inputs are:
 3. **Modification time** (16 bytes, nanoseconds since epoch)
 
 These three values are concatenated and hashed with `xxh3_128`. This means
-detecting whether 92K files have changed requires only 92K `stat()` calls and
-92K hashes — no disk reads. On a modern SSD, this completes in ~2 seconds
-(parallelized via rayon).
+detecting whether 93K files have changed requires only 93K `stat()` calls and
+93K hashes — no disk reads. On a modern SSD, this is parallelized via rayon.
 
 The **root hash** is computed by concatenating all `(path, file_hash)` pairs in
 sorted order (BTreeMap ensures deterministic ordering) and hashing the result
@@ -299,7 +299,7 @@ The indexer has three levels of shortcuts, each faster than the next:
 |-------|------|-----------------|
 | **Watcher alive** | O(1) — read PID file | Daemon is watching this workspace; filesystem events handle updates. Skip the entire Merkle scan. |
 | **Root hash match** | O(n) stat + hash | Merkle scan ran, but root hashes are identical. No files changed. |
-| **Per-file hash diff** | O(changed) | Root hashes differ, but only 3 of 92K files changed. Re-index just those 3. |
+| **Per-file hash diff** | O(changed) | Root hashes differ, but only 3 of 93K files changed. Re-index just those 3. |
 
 The daemon's `notify` watcher makes the first tier the common case. When the
 daemon is alive, the Merkle scan is skipped entirely — `is_watcher_alive()`

@@ -1,0 +1,51 @@
+name: Docs Pages
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "assets/**"
+      - "docs/**"
+      - ".github/workflows/docs-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gh-pages-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish docs to gh-pages
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v6
+
+      - name: Checkout gh-pages
+        uses: actions/checkout@v6
+        with:
+          ref: gh-pages
+          path: gh-pages
+
+      - name: Sync static docs
+        run: |
+          rsync -a --delete --exclude assets --exclude dev docs/ gh-pages/
+          rsync -a --delete assets/ gh-pages/assets/
+          touch gh-pages/.nojekyll
+
+      - name: Commit docs
+        run: |
+          cd gh-pages
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No docs changes to publish"
+          else
+            git commit -m "docs: publish static site"
+            git push origin gh-pages
+          fi
