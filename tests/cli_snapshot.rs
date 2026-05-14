@@ -5,6 +5,7 @@ use fs_extra::dir::{CopyOptions, copy as copy_dir};
 use ivygrep::embedding::create_hash_model;
 use ivygrep::indexer::index_workspace;
 use ivygrep::workspace::{Workspace, WorkspaceMetadata};
+use ivygrep::{config, ipc};
 use serial_test::serial;
 
 fn stage_fixture_repo(name: &str) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
@@ -42,6 +43,13 @@ fn create_unhealthy_index_fixture(root: &Path, home: &Path, skip_gitignore: bool
     std::fs::create_dir_all(workspace.tantivy_dir()).unwrap();
     std::fs::write(workspace.vector_path(), "").unwrap();
     workspace
+}
+
+fn write_stale_daemon_socket(home: &Path) {
+    unsafe { std::env::set_var("IVYGREP_HOME", home) };
+    config::ensure_app_dirs().unwrap();
+    ipc::cleanup_socket();
+    std::fs::write(ipc::socket_path().unwrap(), b"stale daemon socket").unwrap();
 }
 
 #[test]
@@ -507,6 +515,61 @@ export function registerCommands(p: Plugin) {
         files.iter().any(|p| p.contains("README.md")),
         "literal search must find gquota in README.md, got files: {:?}",
         files
+    );
+}
+
+#[test]
+#[serial]
+fn cli_literal_and_regex_fall_back_when_static_daemon_socket_is_stale() {
+    let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
+    unsafe { std::env::set_var("IVYGREP_HOME", &home) };
+
+    let workspace = Workspace::resolve(&target_root).unwrap();
+    let model = create_hash_model();
+    index_workspace(&workspace, model.as_ref()).unwrap();
+
+    write_stale_daemon_socket(&home);
+    let mut literal_cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    let literal_output = literal_cmd
+        .current_dir(&target_root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--json", "--hash", "--literal", "-f", "calculate_tax"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let literal_value: serde_json::Value = serde_json::from_slice(&literal_output).unwrap();
+    assert!(
+        literal_value.as_array().unwrap().iter().any(|entry| entry
+            .get("file_path")
+            .and_then(|value| value.as_str())
+            .is_some_and(|path| path.ends_with("src/lib.rs"))),
+        "literal search should fall back locally after stale daemon socket: {literal_value:#?}"
+    );
+
+    write_stale_daemon_socket(&home);
+    let mut regex_cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    let regex_output = regex_cmd
+        .current_dir(&target_root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--json", "--hash", "--regex", "-f", "calculate_.*tax"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let regex_value: serde_json::Value = serde_json::from_slice(&regex_output).unwrap();
+    assert!(
+        regex_value.as_array().unwrap().iter().any(|entry| entry
+            .get("file_path")
+            .and_then(|value| value.as_str())
+            .is_some_and(|path| path.ends_with("src/lib.rs"))),
+        "regex search should fall back locally after stale daemon socket: {regex_value:#?}"
     );
 }
 

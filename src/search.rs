@@ -281,6 +281,16 @@ pub fn literal_search(
     query_text: &str,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
+    let ctx = SearchContext::load(workspace, None)?;
+    literal_search_with_context(&ctx, workspace, query_text, options)
+}
+
+pub fn literal_search_with_context(
+    ctx: &SearchContext,
+    workspace: &Workspace,
+    query_text: &str,
+    options: &SearchOptions,
+) -> Result<Vec<SearchHit>> {
     let t0 = std::time::Instant::now();
     let query = query_text.trim();
     if query.is_empty() {
@@ -291,8 +301,6 @@ pub fn literal_search(
     let max_hits = options.limit.unwrap_or(500);
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
 
-    let ctx = SearchContext::load(workspace, None)?;
-
     let matcher = regex::RegexBuilder::new(&regex::escape(query))
         .case_insensitive(true)
         .build()?;
@@ -300,7 +308,7 @@ pub fn literal_search(
     // Use Tantivy index as a pre-filter: find candidate chunk IDs via the
     // inverted index, then only decompress those to verify the exact match.
     let candidate_chunks =
-        collect_literal_candidates(&ctx, query, &matcher, &path_matcher, options)?;
+        collect_literal_candidates(ctx, query, &matcher, &path_matcher, options)?;
 
     tracing::trace!(
         "literal_scan={:?} candidates={}",
@@ -465,6 +473,17 @@ pub fn hybrid_search(
     embedding_model: Option<&dyn EmbeddingModel>,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
+    let ctx = SearchContext::load(workspace, embedding_model.map(|m| m.dimensions()))?;
+    hybrid_search_with_context(&ctx, workspace, query_text, embedding_model, options)
+}
+
+pub fn hybrid_search_with_context(
+    ctx: &SearchContext,
+    workspace: &Workspace,
+    query_text: &str,
+    embedding_model: Option<&dyn EmbeddingModel>,
+    options: &SearchOptions,
+) -> Result<Vec<SearchHit>> {
     let t0 = std::time::Instant::now();
     let output_limit = options.limit.unwrap_or(50);
     // Tantivy lexical candidates: enough headroom for post-hoc filters
@@ -492,7 +511,6 @@ pub fn hybrid_search(
     };
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
 
-    let ctx = SearchContext::load(workspace, embedding_model.map(|m| m.dimensions()))?;
     tracing::trace!("open_tantivy={:?}", t0.elapsed());
 
     if options.is_cancelled() {
@@ -529,7 +547,7 @@ pub fn hybrid_search(
                 .build();
             if let Ok(ref vm) = variant_matcher
                 && let Ok(mut candidates) =
-                    collect_literal_candidates(&ctx, variant, vm, &path_matcher, options)
+                    collect_literal_candidates(ctx, variant, vm, &path_matcher, options)
             {
                 candidates.truncate(literal_limit);
                 for c in candidates {
@@ -789,7 +807,7 @@ pub fn hybrid_search(
                 SEARCH_HASH_MODEL.get_or_init(|| crate::embedding::HashEmbeddingModel::new(256));
             let hash_query_vector = hash_model.embed(query_text);
             let hash_hits = collect_semantic_candidates(
-                &ctx,
+                ctx,
                 &path_matcher,
                 options,
                 &hash_query_vector,
@@ -806,7 +824,7 @@ pub fn hybrid_search(
         {
             let neural_query_vector = model.embed(query_text);
             let neural_hits = collect_semantic_candidates(
-                &ctx,
+                ctx,
                 &path_matcher,
                 options,
                 &neural_query_vector,

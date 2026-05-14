@@ -83,7 +83,7 @@ pub struct WorkspaceStatus {
     pub seeded_from_base: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct WorkspaceScope {
     pub rel_path: PathBuf,
     pub is_file: bool,
