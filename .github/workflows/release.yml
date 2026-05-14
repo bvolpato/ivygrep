@@ -59,6 +59,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: "release-${{ matrix.target }}"
+          cache-bin: "false"
 
       - name: Build release binary
         run: |
@@ -89,11 +90,15 @@ jobs:
           if [[ "${{ matrix.target }}" == *"windows"* ]]; then
             EXE_SUFFIX=".exe"
           fi
-          IG_BIN="./target/${{ matrix.target }}/release/ig${EXE_SUFFIX}"
+          IG_BIN="$PWD/target/${{ matrix.target }}/release/ig${EXE_SUFFIX}"
 
-          # Basic sanity
-          $IG_BIN --version
-          $IG_BIN --help > /dev/null
+          # Basic sanity. Cross-compiled Linux aarch64 binaries are validated by
+          # e2e-cross-platform.yml under QEMU, not executed on this x86 runner.
+          file "$IG_BIN"
+          if [[ "${{ matrix.target }}" != "aarch64-unknown-linux-musl" ]]; then
+            $IG_BIN --version
+            $IG_BIN --help > /dev/null
+          fi
 
           # For native runners, do a full index+search smoke test.
           # Cross-compiled aarch64 binaries can't run natively on x86 runners,

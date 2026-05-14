@@ -30,6 +30,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: "bench"
+          cache-bin: "false"
 
       - name: Determine benchmark base
         id: benchmark-base

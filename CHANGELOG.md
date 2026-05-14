@@ -2,6 +2,24 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.6.18] — 2026-05-14
+
+### Performance
+- **92.9× faster daemon hot queries on the Linux kernel benchmark.** The daemon now keeps search context and bounded query-result caches warm, avoiding repeated SQLite/Tantivy/vector-store setup on repeated hot queries.
+- **Fresh-index vector persistence deferred to final commit.** Bulk ingest avoids rewriting the whole vector file for every batch while preserving bounded in-memory staging.
+- **Hot-query status preflight trimmed for static benchmark/no-autospawn runs.** Normal daemon and watcher health handling remains on the full safety path.
+
+### Fixed
+- **Daemon cache keys distinguish `--all` from workspace-scoped searches.** Prevents cross-mode query cache reuse when a prior single-workspace query warms the daemon.
+- **Corrupt index repair still uses full health verification.** Normal query repair detection opens the stores before deciding to skip rebuilds.
+- **Literal and regex searches fall back locally after stale daemon sockets.** `IVYGREP_NO_AUTOSPAWN` plus a stale socket no longer returns empty results for `--literal` or `--regex`.
+- **GitHub Actions no longer restores cached Cargo binaries.** CI, release, benchmark, and E2E workflows keep dependency/target caching but avoid poisoned `~/.cargo/bin` restores on macOS ARM.
+
+### Testing
+- Added daemon/local equivalence checks for hybrid, literal, regex, filters, scoped queries, and `--all` cache warmup.
+- Added stale-socket fallback coverage for literal and regex modes.
+- Added Linux hot-query benchmark harness and published charts under `docs/benchmarks/`.
+
 ## [0.6.17] — 2026-05-04
 
 ### Fixed — Linux Stability

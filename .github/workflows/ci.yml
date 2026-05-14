@@ -27,6 +27,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: "lint"
+          cache-bin: "false"
 
       - name: Check formatting
         run: cargo fmt -- --check
@@ -73,6 +74,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: "test"
+          cache-bin: "false"
 
       - name: Run unit & integration tests
         run: cargo test --lib --bins --tests ${{ matrix.cargo_flags }}
@@ -112,6 +114,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: "release"
+          cache-bin: "false"
 
       - name: Build release binary
         run: cargo build --release ${{ matrix.cargo_flags }}
