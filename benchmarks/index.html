@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ivygrep Benchmarks</title>
+    <meta name="description" content="ivygrep benchmark reports, charts, raw data, and validation notes.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Outfit:wght@300;400;600;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="report.css">
+    <link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
+</head>
+<body class="report-page">
+    <div class="bg-fx"></div>
+    <div class="bg-fx-glow"></div>
+    <main class="report-shell relative z-10">
+        <nav class="report-nav">
+            <a class="report-brand" href="../">
+                <img src="../assets/icon.svg" alt="ivygrep">
+                <span>ivygrep benchmarks</span>
+            </a>
+            <div class="report-links">
+                <a href="../">Docs</a>
+                <a href="../dev/bench/">CI Dashboard</a>
+                <a href="https://github.com/bvolpato/ivygrep">GitHub</a>
+            </div>
+        </nav>
+
+        <section class="report-hero">
+            <div class="report-eyebrow">Verified Reports</div>
+            <h1>Performance Evidence</h1>
+            <p>These pages publish benchmark loops, retained changes, raw data, and validation commands used for recent ivygrep performance work.</p>
+        </section>
+
+        <section class="report-card">
+            <h2>Reports</h2>
+            <ul>
+                <li><a href="daemon-hot-query-cache.html">Daemon hot-query cache benchmark</a> - warm daemon query p95 improved from 455.37 ms to 4.90 ms while preserving daemon/local result equivalence.</li>
+                <li><a href="linux-kernel-autoresearch-2026-05-13.html">Linux kernel cold-index benchmark</a> - fresh-index primary score improved by 10.62% on a 93,493-file Linux checkout.</li>
+                <li><a href="../dev/bench/">CI benchmark dashboard</a> - continuous Criterion benchmark history from GitHub Actions.</li>
+            </ul>
+        </section>
+    </main>
+</body>
+</html>

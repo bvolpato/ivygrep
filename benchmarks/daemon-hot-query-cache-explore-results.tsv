@@ -1,0 +1,27 @@
+# environment: linux checkout /home/bruno/githubworkspace/linux; bench homes under /tmp; fresh baseline from configured verify
+# metric_direction: lower
+# mode: loop
+# parallel: serial
+# web_search: disabled
+# workspace_root: /home/bruno/githubworkspace/ivygrep
+# artifact_root: /home/bruno/githubworkspace/ivygrep/autoresearch-results
+# primary_repo: /home/bruno/githubworkspace/ivygrep
+# goal: Find any additional low-risk ivygrep daemon hot-query performance improvements while preserving daemon/local functionality equivalence and hash-search fallback behavior.
+# scope: src/daemon.rs,src/search.rs,src/cli.rs,src/protocol.rs,src/workspace.rs,src/vector_store.rs,benches/indexer_bench.rs,scripts/bench_daemon_hot_query.py,scripts/check_daemon_equivalence.py,scripts/bench_linux_kernel.py,scripts/benchmark_guard.py,Cargo.toml,Cargo.lock,.github/workflows/benchmarks.yml
+# repos_json: [{"path":"/home/bruno/githubworkspace/ivygrep","role":"primary","scope":"src/daemon.rs,src/search.rs,src/cli.rs,src/protocol.rs,src/workspace.rs,src/vector_store.rs,benches/indexer_bench.rs,scripts/bench_daemon_hot_query.py,scripts/check_daemon_equivalence.py,scripts/bench_linux_kernel.py,scripts/benchmark_guard.py,Cargo.toml,Cargo.lock,.github/workflows/benchmarks.yml"}]
+# metric: daemon_hot_p95_ms
+# verify: python3 scripts/bench_daemon_hot_query.py --kernel /home/bruno/githubworkspace/linux --bench-home /tmp/ivygrep-linux-bench-home --samples 9 --warmups 3
+# verify_cwd: primary_repo
+# verify_format: metrics_json
+# primary_metric_key: daemon_hot_p95_ms
+# run_tag: daemon-hot-query-regression-explore
+# guard: cargo fmt -- --check && cargo clippy --locked --all-targets -- -D warnings && cargo test --locked --all-targets && python3 -m py_compile scripts/bench_daemon_hot_query.py scripts/check_daemon_equivalence.py && python3 scripts/check_daemon_equivalence.py --bench-home /tmp/ivygrep-daemon-equivalence-home
+# iterations: 5
+# stop_condition: current metric <= 5 after functionality equivalence remains covered; otherwise stop at iteration cap or when no low-risk greater than 1 percent improvement remains
+# rollback_policy: revert
+# execution_policy: danger_full_access
+# required_stop_labels: functionality-equivalence
+# required_keep_criteria_json: [{"metric_key":"daemon_hits","operator":">=","target":20},{"metric_key":"local_hits","operator":">=","target":20}]
+iteration	commit	metric	delta	guard	status	description
+0	a4077f80c0d0da0a314c34883ff10e5311e26235	6.7301848001079625	0	-	baseline	baseline daemon hot-query benchmark
+1	445fcb829d8e519849162ba237eb609d57b9006e	4.902387002948672	-1.8277977971592905	pass	keep	[labels: cli-fast-preflight, functionality-equivalence] skip daemon status preflight for static no-autospawn hot queries

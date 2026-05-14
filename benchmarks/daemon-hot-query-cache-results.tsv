@@ -1,0 +1,26 @@
+# environment: cpu=32 ram=124120MB disk_free=3007806MB gpu=none rust=1.95.0 python=3.14.4 network=disabled_by_policy
+# metric_direction: lower
+# mode: loop
+# parallel: serial
+# web_search: disabled
+# workspace_root: /home/bruno/githubworkspace/ivygrep
+# artifact_root: /home/bruno/githubworkspace/ivygrep/autoresearch-results
+# primary_repo: /home/bruno/githubworkspace/ivygrep
+# goal: Reduce ivygrep warm daemon hot-query latency on Linux kernel while preserving query behavior and hash-search fallback before embeddings are ready.
+# scope: src/daemon.rs,src/search.rs,src/cli.rs,src/protocol.rs,src/workspace.rs,src/vector_store.rs,benches/indexer_bench.rs,scripts/bench_daemon_hot_query.py,scripts/bench_linux_kernel.py,scripts/benchmark_guard.py,Cargo.toml,Cargo.lock,.github/workflows/benchmarks.yml
+# repos_json: [{"path":"/home/bruno/githubworkspace/ivygrep","role":"primary","scope":"src/daemon.rs,src/search.rs,src/cli.rs,src/protocol.rs,src/workspace.rs,src/vector_store.rs,benches/indexer_bench.rs,scripts/bench_daemon_hot_query.py,scripts/bench_linux_kernel.py,scripts/benchmark_guard.py,Cargo.toml,Cargo.lock,.github/workflows/benchmarks.yml"}]
+# metric: daemon_hot_p95_ms
+# verify: python3 scripts/bench_daemon_hot_query.py --kernel /home/bruno/githubworkspace/linux --bench-home /tmp/ivygrep-linux-bench-home --samples 7 --warmups 2
+# verify_cwd: primary_repo
+# verify_format: metrics_json
+# primary_metric_key: daemon_hot_p95_ms
+# run_tag: daemon-hot-query-cache
+# guard: cargo fmt -- --check && cargo test --locked --lib daemon::tests && cargo test --locked --lib cli::tests && cargo test --locked --lib search::tests && python3 -m py_compile scripts/bench_daemon_hot_query.py
+# stop_condition: Stop after retained daemon context-cache/query-cache implementation has passing guard, representative benchmark evidence, plot updated, and no obvious lower-risk next improvement remains; otherwise continue until true blocker or strategy exhaustion.
+# rollback_policy: revert
+# execution_policy: danger_full_access
+iteration	commit	metric	delta	guard	status	description
+0	9bb13080ce9cf35d20b7e5cc23149918544dd063	455.36826150200795	0	-	baseline	official 7-sample Linux kernel hot-query baseline
+1	f8f9b4460e424855a162e8f6704caba0882384d3	240.04350020113634	-215.32476130087161	pass	keep	[labels: context-cache, hash-fallback-preserved] cache daemon SearchContext per workspace and embedding dimension with index-signature invalidation
+2	ceb6bad034d40a2792c16021eab78685393aa720	219.03471310070017	-21.00878710043617	pass	keep	[labels: query-cache, context-cache, hash-fallback-preserved] cache repeated daemon query results under bounded request and index-signature key
+3	32ddb0a60972ef65fc328343b9f23a64be176625	8.03862460234086	-210.99608849835931	pass	keep	[labels: query-cache, context-cache, cli-fast-preflight, hash-fallback-preserved] use quick query index health so cached daemon query avoids full vector-store verification
