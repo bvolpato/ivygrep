@@ -12,10 +12,6 @@ permissions:
   pull-requests: write
   issues: write
 
-concurrency:
-  group: gh-pages-publish
-  cancel-in-progress: false
-
 jobs:
   benchmark:
     name: Run Benchmarks

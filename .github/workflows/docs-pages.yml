@@ -14,7 +14,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: gh-pages-publish
+  group: docs-pages
   cancel-in-progress: false
 
 jobs:
@@ -45,5 +45,9 @@ jobs:
             echo "No docs changes to publish"
           else
             git commit -m "docs: publish static site"
-            git push origin HEAD:gh-pages
+            git pull --rebase origin gh-pages
+            git push origin HEAD:gh-pages || {
+              git pull --rebase origin gh-pages
+              git push origin HEAD:gh-pages
+            }
           fi
