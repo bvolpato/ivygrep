@@ -128,6 +128,24 @@ fn labeled_relevance_suite_meets_quality_bar() {
             }],
             forbidden_top3: vec!["fixtures/", "vendor/", "data/"],
         },
+        QueryCase {
+            query: "background job scheduler",
+            judgments: vec![
+                Judgment {
+                    path: "src/jobs/scheduler.rs",
+                    grade: 3,
+                },
+                Judgment {
+                    path: "examples/job_scheduler_demo.rs",
+                    grade: 1,
+                },
+                Judgment {
+                    path: "tools/job_scheduler_probe.rs",
+                    grade: 1,
+                },
+            ],
+            forbidden_top3: vec!["examples/", "tools/", "fixtures/"],
+        },
     ];
 
     let mut diagnostics = Vec::new();
@@ -475,6 +493,15 @@ pub fn detect_binary_content(bytes: &[u8]) -> bool {
     );
     write_file(
         &root,
+        "src/jobs/scheduler.rs",
+        r#"
+pub fn schedule_background_job(queue: &mut JobQueue) -> Option<Job> {
+    queue.pop_next_ready_job()
+}
+"#,
+    );
+    write_file(
+        &root,
         "tests/auth_session_test.rs",
         r#"
 #[test]
@@ -510,6 +537,24 @@ documented here for maintainers, but implementation code lives in src/search.
 # Binary search guide
 
 This guide documents binary file detection behavior for maintainers and tests.
+"#,
+    );
+    write_file(
+        &root,
+        "examples/job_scheduler_demo.rs",
+        r#"
+pub fn demo_background_job_scheduler() {
+    println!("background job scheduler example");
+}
+"#,
+    );
+    write_file(
+        &root,
+        "tools/job_scheduler_probe.rs",
+        r#"
+pub fn probe_background_job_scheduler() {
+    println!("debug background job scheduler");
+}
 "#,
     );
     write_file(
