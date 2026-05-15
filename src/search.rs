@@ -1709,22 +1709,24 @@ fn fuse_rrf(
 
     ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
 
-    // Per-file hit diversity cap: keep at most 2 hits per file at full score,
-    // then aggressively decay. This prevents any single file from hogging the
-    // top results even after density normalization.
+    // Per-file hit diversity cap: keep the best chunk per file at full score,
+    // then aggressively decay. This mirrors web-search result diversity: a
+    // second snippet from the same file can still show up, but should not crowd
+    // out another authoritative file.
     let mut file_hit_counts: HashMap<PathBuf, usize> = HashMap::new();
     for item in &mut ranked {
         let count = file_hit_counts.entry(item.0.file_path.clone()).or_insert(0);
         *count += 1;
         match *count {
-            1..=2 => {}
-            3..=4 => item.1 *= 0.4,
-            _ => item.1 *= 0.1,
+            1 => {}
+            2 => item.1 *= 0.35,
+            3..=4 => item.1 *= 0.15,
+            _ => item.1 *= 0.05,
         }
     }
     ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
 
-    let mut filtered = filter_meaningful_scores(&ranked);
+    let mut filtered = filter_meaningful_scores(&ranked, query_text);
 
     if let Some(limit) = limit {
         filtered.truncate(limit);
@@ -1735,15 +1737,31 @@ fn fuse_rrf(
 
 fn filter_meaningful_scores(
     ranked: &[(IndexedChunk, f32, Vec<String>)],
+    query_text: &str,
 ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
+    let precise_query = is_precise_lookup_query(query_text);
     if ranked.len() <= 1 {
-        return ranked.to_vec();
+        if let Some((chunk, _, sources)) = ranked.first()
+            && has_direct_source(sources)
+            && direct_candidate_has_enough_authority(chunk, sources, precise_query)
+        {
+            return ranked.to_vec();
+        }
+        return vec![];
     }
 
     let best_score = ranked[0].1;
+    let has_direct_candidate = ranked
+        .iter()
+        .any(|(_, _, sources)| has_direct_source(sources));
+    if !has_direct_candidate {
+        return filter_semantic_only_scores(ranked);
+    }
 
-    // Adaptive threshold: use mean - 1 standard deviation of the score
-    // distribution, but clamp to reasonable bounds.
+    // Adaptive threshold: start from score distribution, then clamp against
+    // the best result. Low-authority files are suppressed unless the query is
+    // an exact identifier/path-style lookup with a verified literal hit; this
+    // avoids fixture/data/vendor junk leaking into high-confidence advice.
     let scores: Vec<f32> = ranked.iter().map(|(_, s, _)| *s).collect();
     let mean = scores.iter().sum::<f32>() / scores.len() as f32;
     let variance = scores.iter().map(|s| (s - mean).powi(2)).sum::<f32>() / scores.len() as f32;
@@ -1752,17 +1770,70 @@ fn filter_meaningful_scores(
 
     let mut filtered = ranked
         .iter()
-        .filter(|(_, score, sources)| {
-            *score >= adaptive_threshold || sources.contains(&"literal".to_string())
+        .filter(|(chunk, score, sources)| {
+            let authority = file_authority_score(&ChunkBoostContext::new(chunk));
+            if has_literal_source(sources) {
+                return authority >= 0.5 || precise_query;
+            }
+            *score >= adaptive_threshold && authority >= 0.5
         })
         .cloned()
         .collect::<Vec<_>>();
 
     if filtered.is_empty() {
-        filtered.push(ranked[0].clone());
+        let best = &ranked[0];
+        if has_direct_source(&best.2)
+            && direct_candidate_has_enough_authority(&best.0, &best.2, precise_query)
+        {
+            filtered.push(best.clone());
+        }
     }
 
     filtered
+}
+
+fn filter_semantic_only_scores(
+    ranked: &[(IndexedChunk, f32, Vec<String>)],
+) -> Vec<(IndexedChunk, f32, Vec<String>)> {
+    const SEMANTIC_ONLY_MIN_SCORE: f32 = 0.08;
+    const SEMANTIC_ONLY_DECISIVE_RATIO: f32 = 1.35;
+
+    let Some(best) = ranked.first() else {
+        return vec![];
+    };
+    let second_score = ranked.get(1).map(|(_, score, _)| *score).unwrap_or(0.0);
+    let decisive = best.1 >= SEMANTIC_ONLY_MIN_SCORE
+        || (best.1 >= SEMANTIC_ONLY_MIN_SCORE * 0.5
+            && second_score > f32::EPSILON
+            && best.1 / second_score >= SEMANTIC_ONLY_DECISIVE_RATIO);
+
+    if decisive { vec![best.clone()] } else { vec![] }
+}
+
+fn has_direct_source(sources: &[String]) -> bool {
+    has_literal_source(sources) || sources.iter().any(|source| source == "lexical")
+}
+
+fn has_literal_source(sources: &[String]) -> bool {
+    sources.iter().any(|source| source == "literal")
+}
+
+fn direct_candidate_has_enough_authority(
+    chunk: &IndexedChunk,
+    sources: &[String],
+    precise_query: bool,
+) -> bool {
+    let authority = file_authority_score(&ChunkBoostContext::new(chunk));
+    authority >= 0.5 || (precise_query && has_literal_source(sources))
+}
+
+fn is_precise_lookup_query(query_text: &str) -> bool {
+    let query = query_text.trim();
+    !query.is_empty()
+        && (tokenize_query(query).len() == 1
+            || query.chars().any(|ch| {
+                ch == '_' || ch == '-' || ch == '/' || ch == ':' || ch.is_ascii_uppercase()
+            }))
 }
 
 fn normalize_lexical_score(raw_score: f32) -> f32 {
@@ -3203,14 +3274,14 @@ export function registerCommands(p: Plugin) {
     #[test]
     fn filter_single_result_returns_it() {
         let ranked = make_ranked(&[("a", 0.5, &["lexical"])]);
-        let filtered = filter_meaningful_scores(&ranked);
+        let filtered = filter_meaningful_scores(&ranked, "a");
         assert_eq!(filtered.len(), 1);
     }
 
     #[test]
     fn filter_empty_input_returns_empty() {
         let ranked: Vec<(IndexedChunk, f32, Vec<String>)> = vec![];
-        let filtered = filter_meaningful_scores(&ranked);
+        let filtered = filter_meaningful_scores(&ranked, "anything");
         assert!(filtered.is_empty());
     }
 
@@ -3224,7 +3295,7 @@ export function registerCommands(p: Plugin) {
             ("c", 0.5, &["lexical"]),
             ("d", 0.5, &["lexical"]),
         ]);
-        let filtered = filter_meaningful_scores(&ranked);
+        let filtered = filter_meaningful_scores(&ranked, "a");
         assert_eq!(filtered.len(), 4, "all uniform scores should be kept");
     }
 
@@ -3237,7 +3308,7 @@ export function registerCommands(p: Plugin) {
             ("weak1", 0.02, &["semantic"]),
             ("weak2", 0.01, &["semantic"]),
         ]);
-        let filtered = filter_meaningful_scores(&ranked);
+        let filtered = filter_meaningful_scores(&ranked, "strong");
         // The threshold should be high enough to drop weak1 and weak2
         // (mean - stddev with a 0.35*best clamp of 0.35 means entries below 0.35 are cut)
         assert!(
@@ -3255,22 +3326,34 @@ export function registerCommands(p: Plugin) {
             ("strong", 1.0, &["lexical"]),
             ("literal_hit", 0.001, &["literal"]),
         ]);
-        let filtered = filter_meaningful_scores(&ranked);
+        let filtered = filter_meaningful_scores(&ranked, "literal_hit");
         assert_eq!(filtered.len(), 2, "literal source should bypass threshold");
         let has_literal = filtered.iter().any(|(c, _, _)| c.chunk_id == "literal_hit");
         assert!(has_literal, "literal_hit must be preserved");
     }
 
     #[test]
-    fn filter_never_returns_empty_when_input_nonempty() {
-        // Even if all scores are terrible, at least the best one should be returned
+    fn filter_drops_low_confidence_semantic_only_results() {
         let ranked = make_ranked(&[
             ("barely", 0.001, &["semantic"]),
             ("worse", 0.0001, &["semantic"]),
         ]);
-        let filtered = filter_meaningful_scores(&ranked);
-        assert!(!filtered.is_empty(), "must return at least the best result");
-        assert_eq!(filtered[0].0.chunk_id, "barely");
+        let filtered = filter_meaningful_scores(&ranked, "unrelated natural language");
+        assert!(
+            filtered.is_empty(),
+            "low-confidence semantic-only results should be suppressed"
+        );
+    }
+
+    #[test]
+    fn filter_keeps_decisive_semantic_only_result() {
+        let ranked = make_ranked(&[
+            ("strong", 0.12, &["semantic"]),
+            ("weak", 0.02, &["semantic"]),
+        ]);
+        let filtered = filter_meaningful_scores(&ranked, "conceptual query");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].0.chunk_id, "strong");
     }
 
     #[test]
@@ -3285,7 +3368,7 @@ export function registerCommands(p: Plugin) {
             ("c", 0.49, &["semantic"]),
             ("d", 0.49, &["lexical"]),
         ]);
-        let filtered = filter_meaningful_scores(&ranked);
+        let filtered = filter_meaningful_scores(&ranked, "a");
         assert_eq!(
             filtered.len(),
             4,
@@ -3303,7 +3386,7 @@ export function registerCommands(p: Plugin) {
             ("low", 0.3, &["semantic"]),
             ("noise", 0.05, &["semantic"]),
         ]);
-        let filtered = filter_meaningful_scores(&ranked);
+        let filtered = filter_meaningful_scores(&ranked, "top");
         // With best=2.0, the 0.35*best clamp = 0.70, so "noise" (0.05) and "low" (0.3) drop
         assert!(
             filtered.len() >= 2,

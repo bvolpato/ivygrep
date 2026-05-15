@@ -234,7 +234,7 @@ ig --mcp                           # start MCP server (stdio)
 ```bash
 cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test
 ```
-The test suite covers unit tests, CLI snapshots, concurrency, golden queries, incremental CRUD, property-based Merkle invariants, and stress/benchmarks.
+The test suite covers unit tests, CLI snapshots, concurrency, golden queries, labeled relevance metrics, incremental CRUD, property-based Merkle invariants, and stress/benchmarks.
 
 ### Stress testing
 ```bash

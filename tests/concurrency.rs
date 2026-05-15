@@ -72,7 +72,7 @@ fn concurrent_searches_do_not_panic() {
             let barrier = Arc::clone(&barrier);
             thread::spawn(move || {
                 barrier.wait(); // all threads start simultaneously
-                let queries = ["compute", "module documentation", "function", "f64"];
+                let queries = ["compute", "module documentation", "compute function", "f64"];
                 let query = queries[i % queries.len()];
                 let opts = SearchOptions::default();
                 let result = hybrid_search(&ws, query, Some(m.as_ref()), &opts);

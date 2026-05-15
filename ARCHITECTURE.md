@@ -365,9 +365,14 @@ Every query runs through a hybrid fusion pipeline:
 2. **Semantic** — USearch ANN search using the query's embedding vector
 3. **Fusion** — Reciprocal Rank Fusion (k=60) merges both ranked lists
 4. **Boosting** — literal match bonus, term coverage, path segment matching,
-   normalized identifier matching
-5. **Filtering** — adaptive score threshold based on result distribution
+   normalized identifier matching, file authority, and per-file diversity
+5. **Filtering** — adaptive score threshold plus quality gates for
+   low-authority files and low-confidence semantic-only neighbors
 6. **Context** — focus line detection + ±N context lines from source
+
+Relevance changes are guarded by `tests/relevance_quality.rs`, a labeled corpus
+that measures top-result relevance, MRR@10, nDCG@5, recommendation precision@3,
+forbidden low-authority leakage, and unrelated-query suppression.
 
 ### 3. Daemon Architecture
 
