@@ -87,6 +87,24 @@ fn labeled_relevance_suite_meets_quality_bar() {
             forbidden_top3: vec!["fixtures/", "vendor/", "data/"],
         },
         QueryCase {
+            query: "binary file detection",
+            judgments: vec![
+                Judgment {
+                    path: "src/io/binary_detector.rs",
+                    grade: 3,
+                },
+                Judgment {
+                    path: "tests/binary_detector_test.rs",
+                    grade: 1,
+                },
+                Judgment {
+                    path: "docs/binary-search.md",
+                    grade: 1,
+                },
+            ],
+            forbidden_top3: vec!["fixtures/", "vendor/", "data/"],
+        },
+        QueryCase {
             query: "password hashing",
             judgments: vec![Judgment {
                 path: "src/auth/password.rs",
@@ -234,6 +252,52 @@ fn unrelated_query_returns_no_low_confidence_recommendations() {
         hits.is_empty(),
         "unrelated query should not return arbitrary vector-neighbor recommendations, got {:?}",
         hit_paths(&hits)
+    );
+}
+
+#[test]
+#[serial]
+fn doc_or_test_intent_can_surface_secondary_sources() {
+    let (_tmp, workspace) = stage_relevance_corpus();
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+    index_workspace(&workspace, &model).unwrap();
+
+    let doc_hits = hybrid_search(
+        &workspace,
+        "binary detection docs",
+        Some(&model),
+        &SearchOptions {
+            limit: Some(5),
+            context: 1,
+            ..SearchOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        doc_hits
+            .iter()
+            .any(|hit| hit.file_path == Path::new("docs/binary-search.md")),
+        "doc intent should allow documentation result, got {:?}",
+        hit_paths(&doc_hits)
+    );
+
+    let test_hits = hybrid_search(
+        &workspace,
+        "refresh session token tests",
+        Some(&model),
+        &SearchOptions {
+            limit: Some(5),
+            context: 1,
+            ..SearchOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        test_hits
+            .iter()
+            .any(|hit| hit.file_path == Path::new("tests/auth_session_test.rs")),
+        "test intent should allow test result, got {:?}",
+        hit_paths(&test_hits)
     );
 }
 
@@ -402,11 +466,30 @@ pub fn dispatch_http_route(request: Request) -> Response {
     );
     write_file(
         &root,
+        "src/io/binary_detector.rs",
+        r#"
+pub fn detect_binary_content(bytes: &[u8]) -> bool {
+    bytes.iter().any(|byte| *byte == 0)
+}
+"#,
+    );
+    write_file(
+        &root,
         "tests/auth_session_test.rs",
         r#"
 #[test]
 fn refresh_session_token_extends_expiry() {
     assert!(true);
+}
+"#,
+    );
+    write_file(
+        &root,
+        "tests/binary_detector_test.rs",
+        r#"
+#[test]
+fn binary_file_detection_skips_nul_bytes() {
+    assert!(detect_binary_content(&[0, 1, 2]));
 }
 "#,
     );
@@ -418,6 +501,15 @@ fn refresh_session_token_extends_expiry() {
 
 The query parser feeds lexical ranking. Ranking score and filter thresholds are
 documented here for maintainers, but implementation code lives in src/search.
+"#,
+    );
+    write_file(
+        &root,
+        "docs/binary-search.md",
+        r#"
+# Binary search guide
+
+This guide documents binary file detection behavior for maintainers and tests.
 "#,
     );
     write_file(

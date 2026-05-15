@@ -1,0 +1,151 @@
+{
+  "version": 1,
+  "description": "Linux kernel intent-style relevance queries. Queries avoid exact function names and regex syntax so the benchmark measures contextual retrieval, ranking, and spam demotion.",
+  "queries": [
+    {
+      "id": "small-object-allocation",
+      "query": "where does kernel allocate tiny reusable memory objects",
+      "intent": "Small object allocation should favor core slab/slub allocator implementation over driver object wrappers.",
+      "judgments": [
+        { "pattern": "mm/slub.c", "grade": 3 },
+        { "pattern": "mm/slab_common.c", "grade": 3 },
+        { "pattern": "include/linux/slab.h", "grade": 2 },
+        { "pattern": "mm/page_alloc.c", "grade": 2 }
+      ],
+      "spam_patterns": ["drivers/gpu/**", "rust/**", "security/landlock/**"]
+    },
+    {
+      "id": "page-fault-resolution",
+      "query": "where are page faults resolved after missing memory mapping",
+      "intent": "Page-fault resolution should favor mm fault handling and architecture fault entry points.",
+      "judgments": [
+        { "pattern": "mm/memory.c", "grade": 3 },
+        { "pattern": "arch/*/mm/fault.c", "grade": 2 },
+        { "pattern": "arch/*/mm/fault.h", "grade": 1 },
+        { "pattern": "include/linux/mm.h", "grade": 1 }
+      ],
+      "spam_patterns": ["drivers/gpu/**", "fs/*/page.c"]
+    },
+    {
+      "id": "scheduler-pick-next",
+      "query": "how does scheduler choose next runnable task",
+      "intent": "Scheduling decisions should favor core scheduler code, not GPU scheduler wrappers or selftests.",
+      "judgments": [
+        { "pattern": "kernel/sched/core.c", "grade": 3 },
+        { "pattern": "kernel/sched/fair.c", "grade": 3 },
+        { "pattern": "kernel/sched/rt.c", "grade": 2 },
+        { "pattern": "kernel/sched/sched.h", "grade": 2 },
+        { "pattern": "include/linux/sched/task.h", "grade": 1 }
+      ],
+      "spam_patterns": ["drivers/gpu/**", "rust/kernel/task.rs", "security/landlock/**"]
+    },
+    {
+      "id": "workqueue-deferred-execution",
+      "query": "where are deferred background work items executed",
+      "intent": "Deferred work execution should favor workqueue internals, not unrelated filesystem item structs.",
+      "judgments": [
+        { "pattern": "kernel/workqueue.c", "grade": 3 },
+        { "pattern": "include/linux/workqueue.h", "grade": 2 }
+      ],
+      "spam_patterns": ["fs/xfs/*_item.h"]
+    },
+    {
+      "id": "bpf-program-verification",
+      "query": "where are eBPF programs checked before running",
+      "intent": "BPF safety checks should favor kernel verifier code over selftest programs.",
+      "judgments": [
+        { "pattern": "kernel/bpf/verifier.c", "grade": 3 },
+        { "pattern": "kernel/bpf/**", "grade": 2 },
+        { "pattern": "include/linux/bpf.h", "grade": 2 }
+      ],
+      "spam_patterns": ["tools/testing/selftests/bpf/**", "samples/bpf/**", "drivers/hid/**"]
+    },
+    {
+      "id": "packet-receive-entry",
+      "query": "where does packet receive processing enter network stack",
+      "intent": "Packet receive processing should favor net/core ingress paths over security or tracing examples.",
+      "judgments": [
+        { "pattern": "net/core/dev.c", "grade": 3 },
+        { "pattern": "include/linux/netdevice.h", "grade": 2 },
+        { "pattern": "net/packet/af_packet.c", "grade": 1 }
+      ],
+      "spam_patterns": ["tools/testing/**", "security/tomoyo/**", "lib/dump_stack.c"]
+    },
+    {
+      "id": "block-mq-dispatch",
+      "query": "where are block IO requests queued to hardware",
+      "intent": "Block request dispatch should favor blk-mq internals and headers.",
+      "judgments": [
+        { "pattern": "block/blk-mq.c", "grade": 3 },
+        { "pattern": "block/blk-mq-sched.c", "grade": 2 },
+        { "pattern": "include/linux/blk-mq.h", "grade": 2 },
+        { "pattern": "block/mq-deadline.c", "grade": 1 }
+      ],
+      "spam_patterns": ["drivers/gpu/**", "tools/**"]
+    },
+    {
+      "id": "dentry-cache-lookup",
+      "query": "where does filesystem dentry lookup cache names",
+      "intent": "Dentry cache lookup should favor VFS dcache/namei code over unrelated filesystem caches.",
+      "judgments": [
+        { "pattern": "fs/dcache.c", "grade": 3 },
+        { "pattern": "include/linux/dcache.h", "grade": 2 },
+        { "pattern": "fs/namei.c", "grade": 2 }
+      ],
+      "spam_patterns": ["fs/*/cache.c", "fs/*/lru_cache.h"]
+    },
+    {
+      "id": "cpufreq-policy",
+      "query": "how does CPU frequency governor update policy",
+      "intent": "Frequency policy updates should favor cpufreq core/governor code.",
+      "judgments": [
+        { "pattern": "drivers/cpufreq/cpufreq.c", "grade": 3 },
+        { "pattern": "drivers/cpufreq/cpufreq_governor.c", "grade": 2 },
+        { "pattern": "include/linux/cpufreq.h", "grade": 2 }
+      ],
+      "spam_patterns": ["Documentation/**", "tools/**"]
+    },
+    {
+      "id": "lockdep-deadlocks",
+      "query": "where does lock dependency tracking catch deadlocks",
+      "intent": "Lock dependency and deadlock detection should favor lockdep implementation.",
+      "judgments": [
+        { "pattern": "kernel/locking/lockdep.c", "grade": 3 },
+        { "pattern": "kernel/locking/lockdep*.c", "grade": 3 },
+        { "pattern": "include/linux/lockdep.h", "grade": 2 }
+      ],
+      "spam_patterns": ["tools/**", "Documentation/**"]
+    },
+    {
+      "id": "thermal-trip-handling",
+      "query": "how are thermal trip points handled",
+      "intent": "Thermal trip handling should favor thermal core/trip implementation.",
+      "judgments": [
+        { "pattern": "drivers/thermal/thermal_core.c", "grade": 3 },
+        { "pattern": "drivers/thermal/thermal_trip.c", "grade": 3 },
+        { "pattern": "include/linux/thermal.h", "grade": 2 }
+      ],
+      "spam_patterns": ["Documentation/**", "tools/**"]
+    },
+    {
+      "id": "random-entropy",
+      "query": "where does kernel collect entropy for random bytes",
+      "intent": "Random-byte entropy should favor random driver implementation and header.",
+      "judgments": [
+        { "pattern": "drivers/char/random.c", "grade": 3 },
+        { "pattern": "include/linux/random.h", "grade": 2 }
+      ],
+      "spam_patterns": ["tools/**", "Documentation/**", "samples/**"]
+    },
+    {
+      "id": "memory-cgroup-charges",
+      "query": "how are cgroup memory charges tracked",
+      "intent": "Memory cgroup charging should favor memcontrol implementation.",
+      "judgments": [
+        { "pattern": "mm/memcontrol.c", "grade": 3 },
+        { "pattern": "include/linux/memcontrol.h", "grade": 2 }
+      ],
+      "spam_patterns": ["tools/**", "Documentation/**", "samples/**"]
+    }
+  ]
+}

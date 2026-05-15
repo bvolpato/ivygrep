@@ -797,6 +797,7 @@ pub fn hybrid_search_with_context(
 
     if embedding_model.is_some() && (has_hash_vectors || has_neural_vectors) {
         let mut semantic_by_id = HashMap::<String, (IndexedChunk, f32)>::new();
+        let semantic_query_text = build_semantic_query_text(trimmed);
 
         if has_hash_vectors {
             // Reuse the caller's embedding_model to embed the query for hash
@@ -805,7 +806,7 @@ pub fn hybrid_search_with_context(
                 std::sync::OnceLock::new();
             let hash_model =
                 SEARCH_HASH_MODEL.get_or_init(|| crate::embedding::HashEmbeddingModel::new(256));
-            let hash_query_vector = hash_model.embed(query_text);
+            let hash_query_vector = hash_model.embed(&semantic_query_text);
             let hash_hits = collect_semantic_candidates(
                 ctx,
                 &path_matcher,
@@ -1157,21 +1158,52 @@ fn query_token_aliases(token: &str) -> &'static [&'static str] {
         "defined" | "defining" | "definition" | "definitions" | "declared" | "declaration" => {
             &["define"]
         }
+        "detecting" | "detected" | "detection" | "detector" => &["detect"],
         "ranked" | "ranking" => &["rank"],
+        "scoring" | "scores" => &["score", "rank"],
         "results" => &["result"],
         "chunking" => &["chunk"],
         "flags" | "flag" => &["cli", "arg", "option"],
         "arguments" | "argument" | "args" | "arg" => &["cli", "flag", "option"],
         "command" => &["cli"],
+        "grammar" => &["parse", "parser"],
         "parsing" => &["parse", "parser"],
         "matching" => &["match", "matcher"],
-        "detection" | "detected" | "detecting" => &["detect", "detector"],
         "counting" | "counts" => &["count", "counter"],
+        "indexed" | "indexing" => &["index"],
+        "dictionaries" => &["dictionary"],
+        "policies" => &["policy"],
         "output" => &["print", "printer"],
         "colored" | "coloring" => &["color"],
         "walker" => &["walk"],
         _ => &[],
     }
+}
+
+fn build_semantic_query_text(query_text: &str) -> String {
+    let query = query_text.trim();
+    if query.is_empty() {
+        return String::new();
+    }
+
+    let mut fragments = vec![query.to_string()];
+    let mut seen = HashSet::new();
+    let mut expanded = Vec::new();
+
+    for token in raw_query_terms(query)
+        .into_iter()
+        .chain(expanded_query_tokens(query))
+    {
+        if seen.insert(token.clone()) {
+            expanded.push(token);
+        }
+    }
+
+    if !expanded.is_empty() {
+        fragments.push(expanded.join(" "));
+    }
+
+    fragments.join(" ")
 }
 
 fn query_phrase_aliases(tokens: &[String]) -> Vec<&'static str> {
@@ -1271,6 +1303,34 @@ fn has_location_intent(query_text: &str) -> bool {
                 | "defined"
                 | "definition"
                 | "done"
+        )
+    })
+}
+
+fn query_targets_secondary_sources(query_text: &str) -> bool {
+    raw_query_terms(query_text).into_iter().any(|term| {
+        matches!(
+            term.as_str(),
+            "doc"
+                | "docs"
+                | "documentation"
+                | "example"
+                | "examples"
+                | "fixture"
+                | "fixtures"
+                | "guide"
+                | "mock"
+                | "mocks"
+                | "readme"
+                | "sample"
+                | "samples"
+                | "snapshot"
+                | "snapshots"
+                | "spec"
+                | "specs"
+                | "test"
+                | "tests"
+                | "tutorial"
         )
     })
 }
@@ -1740,13 +1800,8 @@ fn filter_meaningful_scores(
     query_text: &str,
 ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
     let precise_query = is_precise_lookup_query(query_text);
-    if ranked.len() <= 1 {
-        if let Some((chunk, _, sources)) = ranked.first()
-            && has_direct_source(sources)
-            && direct_candidate_has_enough_authority(chunk, sources, precise_query)
-        {
-            return ranked.to_vec();
-        }
+    let query_tokens = expanded_query_tokens(query_text);
+    if ranked.is_empty() {
         return vec![];
     }
 
@@ -1755,7 +1810,15 @@ fn filter_meaningful_scores(
         .iter()
         .any(|(_, _, sources)| has_direct_source(sources));
     if !has_direct_candidate {
-        return filter_semantic_only_scores(ranked);
+        return filter_semantic_only_scores(ranked, query_text, &query_tokens, precise_query);
+    }
+
+    if ranked.len() == 1 {
+        let (chunk, _, sources) = &ranked[0];
+        if direct_candidate_has_enough_authority(chunk, sources, query_text, &query_tokens) {
+            return ranked.to_vec();
+        }
+        return vec![];
     }
 
     // Adaptive threshold: start from score distribution, then clamp against
@@ -1772,10 +1835,13 @@ fn filter_meaningful_scores(
         .iter()
         .filter(|(chunk, score, sources)| {
             let authority = file_authority_score(&ChunkBoostContext::new(chunk));
+            let authority_floor =
+                recommendation_authority_floor(query_text, &query_tokens, sources, precise_query);
             if has_literal_source(sources) {
-                return authority >= 0.5 || precise_query;
+                return authority >= authority_floor
+                    && (precise_query || *score >= adaptive_threshold * 0.7);
             }
-            *score >= adaptive_threshold && authority >= 0.5
+            *score >= adaptive_threshold && authority >= authority_floor
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -1783,7 +1849,7 @@ fn filter_meaningful_scores(
     if filtered.is_empty() {
         let best = &ranked[0];
         if has_direct_source(&best.2)
-            && direct_candidate_has_enough_authority(&best.0, &best.2, precise_query)
+            && direct_candidate_has_enough_authority(&best.0, &best.2, query_text, &query_tokens)
         {
             filtered.push(best.clone());
         }
@@ -1794,20 +1860,46 @@ fn filter_meaningful_scores(
 
 fn filter_semantic_only_scores(
     ranked: &[(IndexedChunk, f32, Vec<String>)],
+    query_text: &str,
+    query_tokens: &[String],
+    precise_query: bool,
 ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
-    const SEMANTIC_ONLY_MIN_SCORE: f32 = 0.08;
-    const SEMANTIC_ONLY_DECISIVE_RATIO: f32 = 1.35;
-
     let Some(best) = ranked.first() else {
         return vec![];
     };
-    let second_score = ranked.get(1).map(|(_, score, _)| *score).unwrap_or(0.0);
-    let decisive = best.1 >= SEMANTIC_ONLY_MIN_SCORE
-        || (best.1 >= SEMANTIC_ONLY_MIN_SCORE * 0.5
-            && second_score > f32::EPSILON
-            && best.1 / second_score >= SEMANTIC_ONLY_DECISIVE_RATIO);
 
-    if decisive { vec![best.clone()] } else { vec![] }
+    let bctx = ChunkBoostContext::new(&best.0);
+    let support = support_signals(query_text, query_tokens, &bctx);
+    let authority = file_authority_score(&bctx);
+    let second_score = ranked.get(1).map(|(_, score, _)| *score).unwrap_or(0.0);
+    let authority_floor = if query_targets_secondary_sources(query_text) || precise_query {
+        0.5
+    } else {
+        0.65
+    };
+    let score_floor = if support.corroboration_count() >= 2 {
+        0.035
+    } else {
+        0.05
+    };
+    let decisive_ratio = if support.corroboration_count() >= 2 {
+        1.15
+    } else {
+        1.30
+    };
+    let decisive = best.1 >= score_floor
+        || (best.1 >= score_floor * 0.8
+            && second_score > f32::EPSILON
+            && best.1 / second_score >= decisive_ratio);
+
+    if authority >= authority_floor
+        && decisive
+        && support.is_enough_for_semantic_only(precise_query)
+    {
+        vec![best.clone()]
+    } else {
+        vec![]
+    }
 }
 
 fn has_direct_source(sources: &[String]) -> bool {
@@ -1821,10 +1913,58 @@ fn has_literal_source(sources: &[String]) -> bool {
 fn direct_candidate_has_enough_authority(
     chunk: &IndexedChunk,
     sources: &[String],
-    precise_query: bool,
+    query_text: &str,
+    query_tokens: &[String],
 ) -> bool {
     let authority = file_authority_score(&ChunkBoostContext::new(chunk));
-    authority >= 0.5 || (precise_query && has_literal_source(sources))
+    authority
+        >= recommendation_authority_floor(
+            query_text,
+            query_tokens,
+            sources,
+            is_precise_lookup_query(query_text),
+        )
+}
+
+fn recommendation_authority_floor(
+    query_text: &str,
+    _query_tokens: &[String],
+    sources: &[String],
+    precise_query: bool,
+) -> f32 {
+    if precise_query
+        || query_targets_secondary_sources(query_text)
+        || is_short_literal_lookup_query(query_text)
+    {
+        return 0.35;
+    }
+    if has_literal_source(sources) {
+        0.75
+    } else if has_direct_source(sources) {
+        0.65
+    } else {
+        0.70
+    }
+}
+
+fn is_short_literal_lookup_query(query_text: &str) -> bool {
+    let terms = raw_query_terms(query_text);
+    !terms.is_empty() && terms.len() <= 2 && !has_location_intent(query_text)
+}
+
+fn support_signals(
+    query_text: &str,
+    query_tokens: &[String],
+    bctx: &ChunkBoostContext,
+) -> SupportSignals {
+    SupportSignals {
+        coverage: term_coverage_boost(query_tokens, bctx),
+        path_segments: path_segment_boost(query_tokens, bctx),
+        file_stem: file_stem_boost(query_tokens, bctx),
+        definition_name: definition_name_boost(query_tokens, bctx),
+        exact_path: path_exact_match_boost(query_text, bctx),
+        literal: literal_match_boost(query_text, bctx),
+    }
 }
 
 fn is_precise_lookup_query(query_text: &str) -> bool {
@@ -1852,6 +1992,48 @@ fn normalize_semantic_score(raw_score: f32) -> f32 {
         (clamped * 2.0 + 1.0).ln() // maps 0→0, 0.5→0.69, 1.0→1.10
     } else {
         0.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct SupportSignals {
+    coverage: f32,
+    path_segments: f32,
+    file_stem: f32,
+    definition_name: f32,
+    exact_path: f32,
+    literal: f32,
+}
+
+impl SupportSignals {
+    fn corroboration_count(self) -> usize {
+        [
+            self.coverage >= 0.34,
+            self.path_segments >= 0.34,
+            self.file_stem >= 0.5,
+            self.definition_name >= 0.34,
+            self.exact_path >= 0.4,
+            self.literal > 0.0,
+        ]
+        .into_iter()
+        .filter(|matched| *matched)
+        .count()
+    }
+
+    fn is_enough_for_semantic_only(self, precise_query: bool) -> bool {
+        if self.exact_path >= 0.7 {
+            return true;
+        }
+        if precise_query {
+            return self.literal > 0.0
+                || self.file_stem > 0.0
+                || self.path_segments >= 0.34
+                || self.definition_name >= 0.34;
+        }
+        self.corroboration_count() >= 2
+            || self.coverage >= 0.5
+            || self.definition_name >= 0.5
+            || self.path_segments >= 0.5
     }
 }
 
@@ -3258,12 +3440,42 @@ export function registerCommands(p: Plugin) {
         }
     }
 
+    fn make_chunk_with_path(id: &str, path: &str, text: &str) -> IndexedChunk {
+        crate::indexer::IndexedChunk {
+            chunk_id: id.to_string(),
+            file_path: PathBuf::from(path),
+            start_line: 1,
+            end_line: 10,
+            language: "rust".to_string(),
+            kind: "function".to_string(),
+            text: text.to_string(),
+            content_hash: format!("hash-{id}"),
+            vector_key: 0,
+            is_ignored: false,
+        }
+    }
+
     fn make_ranked(entries: &[(&str, f32, &[&str])]) -> Vec<(IndexedChunk, f32, Vec<String>)> {
         entries
             .iter()
             .map(|(id, score, sources)| {
                 (
                     make_chunk(id),
+                    *score,
+                    sources.iter().map(|s| s.to_string()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    fn make_ranked_with_chunks(
+        entries: &[(IndexedChunk, f32, &[&str])],
+    ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
+        entries
+            .iter()
+            .map(|(chunk, score, sources)| {
+                (
+                    chunk.clone(),
                     *score,
                     sources.iter().map(|s| s.to_string()).collect(),
                 )
@@ -3283,6 +3495,51 @@ export function registerCommands(p: Plugin) {
         let ranked: Vec<(IndexedChunk, f32, Vec<String>)> = vec![];
         let filtered = filter_meaningful_scores(&ranked, "anything");
         assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn filter_keeps_single_high_confidence_semantic_result() {
+        let chunk = make_chunk_with_path(
+            "binary_detector",
+            "src/search/binary_detector.rs",
+            "pub fn detect_binary_content(bytes: &[u8]) -> bool { bytes.contains(&0) }",
+        );
+        let ranked = make_ranked_with_chunks(&[(chunk, 0.06, &["semantic"])]);
+        let filtered = filter_meaningful_scores(&ranked, "binary file detection");
+        assert_eq!(
+            filtered.len(),
+            1,
+            "strong single semantic hit should survive"
+        );
+        assert_eq!(filtered[0].0.chunk_id, "binary_detector");
+    }
+
+    #[test]
+    fn filter_drops_doc_literal_without_doc_intent() {
+        let doc_chunk = make_chunk_with_path(
+            "search_docs",
+            "docs/search.md",
+            "Search guide: where is tax calculated?",
+        );
+        let ranked = make_ranked_with_chunks(&[(doc_chunk, 0.9, &["literal", "lexical"])]);
+        let filtered = filter_meaningful_scores(&ranked, "where is tax calculated");
+        assert!(
+            filtered.is_empty(),
+            "docs example should not become high-confidence recommendation"
+        );
+    }
+
+    #[test]
+    fn filter_keeps_doc_literal_when_query_targets_docs() {
+        let doc_chunk = make_chunk_with_path(
+            "search_docs",
+            "docs/search.md",
+            "Search guide: ranking thresholds and examples",
+        );
+        let ranked = make_ranked_with_chunks(&[(doc_chunk, 0.9, &["literal", "lexical"])]);
+        let filtered = filter_meaningful_scores(&ranked, "search guide docs");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].0.chunk_id, "search_docs");
     }
 
     #[test]
@@ -3347,11 +3604,19 @@ export function registerCommands(p: Plugin) {
 
     #[test]
     fn filter_keeps_decisive_semantic_only_result() {
-        let ranked = make_ranked(&[
-            ("strong", 0.12, &["semantic"]),
-            ("weak", 0.02, &["semantic"]),
-        ]);
-        let filtered = filter_meaningful_scores(&ranked, "conceptual query");
+        let strong = make_chunk_with_path(
+            "strong",
+            "src/search/binary_detector.rs",
+            "pub fn detect_binary_content(bytes: &[u8]) -> bool { bytes.contains(&0) }",
+        );
+        let weak = make_chunk_with_path(
+            "weak",
+            "src/search/notes.rs",
+            "pub fn unrelated_feature() {}",
+        );
+        let ranked =
+            make_ranked_with_chunks(&[(strong, 0.12, &["semantic"]), (weak, 0.02, &["semantic"])]);
+        let filtered = filter_meaningful_scores(&ranked, "binary file detection");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].0.chunk_id, "strong");
     }
