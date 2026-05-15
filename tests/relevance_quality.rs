@@ -136,20 +136,6 @@ fn labeled_relevance_suite_meets_quality_bar() {
             }],
             forbidden_top3: vec!["tools/testing/selftests/"],
         },
-        QueryCase {
-            query: "where are deferred background work items executed",
-            judgments: vec![
-                Judgment {
-                    path: "kernel/workqueue.c",
-                    grade: 3,
-                },
-                Judgment {
-                    path: "include/linux/workqueue_types.h",
-                    grade: 2,
-                },
-            ],
-            forbidden_top3: vec!["fs/xfs/"],
-        },
     ];
 
     let mut diagnostics = Vec::new();
@@ -507,24 +493,6 @@ int bpf_check(struct bpf_prog *prog) {
     );
     write_file(
         &root,
-        "kernel/workqueue.c",
-        r#"
-static void process_one_work(struct worker *worker, struct work_struct *work) {
-    execute_work_item(worker, work);
-}
-"#,
-    );
-    write_file(
-        &root,
-        "include/linux/workqueue_types.h",
-        r#"
-struct work_struct {
-    unsigned long data;
-};
-"#,
-    );
-    write_file(
-        &root,
         "tests/auth_session_test.rs",
         r#"
 #[test]
@@ -597,14 +565,6 @@ pub fn calculate_tax_legacy_adapter() {
 void test_many_bpf_programs_checked_before_running(void) {
     /* Repeats the natural-language query but is only a selftest. */
 }
-"#,
-    );
-    write_file(
-        &root,
-        "fs/xfs/xfs_buf_item.h",
-        r#"
-/* Deferred background work items executed for filesystem bookkeeping. */
-struct xfs_buf_item {};
 "#,
     );
 

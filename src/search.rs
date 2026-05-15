@@ -525,13 +525,8 @@ pub fn hybrid_search_with_context(
     let trimmed = query_text.trim();
     // Compute once — used by literal pass, lexical pass, and path-match pass.
     let lexical_queries = build_lexical_queries(trimmed);
-    let literal_query_variants = lexical_queries
-        .iter()
-        .map(String::as_str)
-        .filter(|variant| should_run_literal_pass(variant))
-        .collect::<Vec<_>>();
-    let literal_matcher = if !literal_query_variants.is_empty() {
-        let literal_pattern = literal_query_variants
+    let literal_matcher = if should_run_literal_pass(trimmed) {
+        let literal_pattern = lexical_queries
             .iter()
             .map(|v| regex::escape(v))
             .collect::<Vec<_>>()
@@ -546,7 +541,7 @@ pub fn hybrid_search_with_context(
     let literal_chunks: Vec<(IndexedChunk, f32)> = if let Some(ref matcher) = literal_matcher {
         let mut all_candidates = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for variant in &literal_query_variants {
+        for variant in &lexical_queries {
             let variant_matcher = regex::RegexBuilder::new(&regex::escape(variant))
                 .case_insensitive(true)
                 .build();
