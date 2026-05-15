@@ -2382,8 +2382,16 @@ fn file_authority_score(bctx: &ChunkBoostContext) -> f32 {
     if path.starts_with("documentation/")
         || path.starts_with("tools/")
         || path.starts_with("samples/")
+        || path.starts_with("scripts/")
     {
         return 0.45;
+    }
+
+    if path.starts_with("include/trace/")
+        || path.starts_with("include/uapi/")
+        || path.starts_with("rust/")
+    {
+        return 0.65;
     }
 
     // Data / config files — they match many terms but are rarely the answer
@@ -4042,6 +4050,24 @@ export function registerCommands(p: Plugin) {
 
         assert!(authority < precise_floor);
         assert!(authority >= test_floor);
+    }
+
+    #[test]
+    fn file_authority_score_penalizes_kernel_secondary_paths() {
+        let source = make_test_chunk("source", "kernel/workqueue.c", "code", "Function");
+        let script = make_test_chunk("script", "scripts/gdb/linux/slab.py", "code", "Function");
+        let trace = make_test_chunk(
+            "trace",
+            "include/trace/events/workqueue.h",
+            "code",
+            "Function",
+        );
+        let uapi = make_test_chunk("uapi", "include/uapi/linux/thermal.h", "code", "Function");
+
+        let source_score = file_authority_score(&ChunkBoostContext::new(&source));
+        assert!(source_score > file_authority_score(&ChunkBoostContext::new(&script)));
+        assert!(source_score > file_authority_score(&ChunkBoostContext::new(&trace)));
+        assert!(source_score > file_authority_score(&ChunkBoostContext::new(&uapi)));
     }
 
     #[test]
