@@ -1794,6 +1794,8 @@ fn fuse_rrf(
                 score *= SEMANTIC_ONLY_PENALTY;
             }
 
+            score *= subsystem_authority_multiplier(&query_tokens, &bctx);
+
             // Chunks with zero query term overlap despite having text are noise
             if !query_tokens.is_empty()
                 && coverage < f32::EPSILON
@@ -2444,6 +2446,24 @@ fn chunk_density_exponent(bctx: &ChunkBoostContext) -> f32 {
     } else {
         0.3
     }
+}
+
+fn subsystem_authority_multiplier(query_tokens: &[String], bctx: &ChunkBoostContext) -> f32 {
+    let path = &bctx.path_lower;
+    let driver_intent = query_tokens.iter().any(|token| {
+        matches!(
+            token.as_str(),
+            "driver" | "drivers" | "gpu" | "drm" | "display"
+        )
+    });
+
+    if path.starts_with("drivers/gpu/") && !driver_intent {
+        return 0.35;
+    }
+    if path.starts_with("drivers/") && !is_core_implementation_path(path) && !driver_intent {
+        return 0.75;
+    }
+    1.0
 }
 
 fn is_header_like_path(path: &str) -> bool {
@@ -4068,6 +4088,22 @@ export function registerCommands(p: Plugin) {
         assert!(source_score > file_authority_score(&ChunkBoostContext::new(&script)));
         assert!(source_score > file_authority_score(&ChunkBoostContext::new(&trace)));
         assert!(source_score > file_authority_score(&ChunkBoostContext::new(&uapi)));
+    }
+
+    #[test]
+    fn subsystem_authority_demotes_driver_wrappers_without_driver_intent() {
+        let scheduler = make_test_chunk(
+            "scheduler",
+            "drivers/gpu/drm/i915/gvt/scheduler.h",
+            "code",
+            "Function",
+        );
+        let bctx = ChunkBoostContext::new(&scheduler);
+        let core_query = expanded_query_tokens("how does scheduler choose next runnable task");
+        let gpu_query = expanded_query_tokens("gpu driver scheduler");
+
+        assert!(subsystem_authority_multiplier(&core_query, &bctx) < 1.0);
+        assert_eq!(subsystem_authority_multiplier(&gpu_query, &bctx), 1.0);
     }
 
     #[test]
