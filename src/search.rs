@@ -2393,8 +2393,16 @@ fn file_authority_score(bctx: &ChunkBoostContext) -> f32 {
     if path.starts_with("documentation/")
         || path.starts_with("tools/")
         || path.starts_with("samples/")
+        || path.starts_with("scripts/")
     {
         return 0.45;
+    }
+
+    if path.starts_with("include/trace/")
+        || path.starts_with("include/uapi/")
+        || path.starts_with("rust/")
+    {
+        return 0.65;
     }
 
     // Data / config files — they match many terms but are rarely the answer
@@ -2422,7 +2430,15 @@ fn file_authority_score(bctx: &ChunkBoostContext) -> f32 {
     }
 
     if is_core_implementation_path(path) {
-        return 1.15;
+        return if is_header_path(path) { 0.9 } else { 1.2 };
+    }
+
+    if is_header_path(path) {
+        return 0.85;
+    }
+
+    if is_source_path(path) {
+        return 1.05;
     }
 
     // Core source code gets a small boost to positively separate it
@@ -2439,6 +2455,28 @@ fn is_core_implementation_path(path: &str) -> bool {
         || path.starts_with("drivers/char/")
         || path.starts_with("drivers/cpufreq/")
         || path.starts_with("drivers/thermal/")
+}
+
+fn is_header_path(path: &str) -> bool {
+    path.ends_with(".h") || path.ends_with(".hpp") || path.ends_with(".hh")
+}
+
+fn is_source_path(path: &str) -> bool {
+    path.ends_with(".c")
+        || path.ends_with(".cc")
+        || path.ends_with(".cpp")
+        || path.ends_with(".cxx")
+        || path.ends_with(".rs")
+        || path.ends_with(".go")
+        || path.ends_with(".java")
+        || path.ends_with(".kt")
+        || path.ends_with(".swift")
+        || path.ends_with(".py")
+        || path.ends_with(".rb")
+        || path.ends_with(".ts")
+        || path.ends_with(".tsx")
+        || path.ends_with(".js")
+        || path.ends_with(".jsx")
 }
 
 fn is_test_path(path: &str) -> bool {
@@ -4022,6 +4060,28 @@ export function registerCommands(p: Plugin) {
             file_authority_score(&src_bctx) > file_authority_score(&test_bctx),
             "src should rank above tests"
         );
+    }
+
+    #[test]
+    fn file_authority_score_prefers_kernel_source_over_secondary_paths() {
+        let source = make_test_chunk("source", "kernel/workqueue.c", "code", "Function");
+        let header = make_test_chunk("header", "include/linux/workqueue.h", "code", "Function");
+        let script = make_test_chunk("script", "scripts/gdb/linux/slab.py", "code", "Function");
+        let trace = make_test_chunk(
+            "trace",
+            "include/trace/events/workqueue.h",
+            "code",
+            "Function",
+        );
+
+        let source_score = file_authority_score(&ChunkBoostContext::new(&source));
+        let header_score = file_authority_score(&ChunkBoostContext::new(&header));
+        let script_score = file_authority_score(&ChunkBoostContext::new(&script));
+        let trace_score = file_authority_score(&ChunkBoostContext::new(&trace));
+
+        assert!(source_score > header_score);
+        assert!(header_score > script_score);
+        assert!(header_score > trace_score);
     }
 
     #[test]
