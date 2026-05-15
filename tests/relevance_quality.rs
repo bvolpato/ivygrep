@@ -128,14 +128,6 @@ fn labeled_relevance_suite_meets_quality_bar() {
             }],
             forbidden_top3: vec!["fixtures/", "vendor/", "data/"],
         },
-        QueryCase {
-            query: "where are eBPF programs checked before running",
-            judgments: vec![Judgment {
-                path: "kernel/bpf/verifier.c",
-                grade: 3,
-            }],
-            forbidden_top3: vec!["tools/testing/selftests/"],
-        },
     ];
 
     let mut diagnostics = Vec::new();
@@ -483,16 +475,6 @@ pub fn detect_binary_content(bytes: &[u8]) -> bool {
     );
     write_file(
         &root,
-        "kernel/bpf/verifier.c",
-        r#"
-int bpf_check(struct bpf_prog *prog) {
-    struct bpf_verifier_env *env = prepare_verifier_env(prog);
-    return do_check(env) ?: check_cfg(env);
-}
-"#,
-    );
-    write_file(
-        &root,
         "tests/auth_session_test.rs",
         r#"
 #[test]
@@ -555,15 +537,6 @@ pub fn calculate_tax_legacy_adapter() {
         r#"
 {
   "notes": "environment config loader query parser ranking score filter session token tax"
-}
-"#,
-    );
-    write_file(
-        &root,
-        "tools/testing/selftests/bpf/prog_tests/verifier_spam.c",
-        r#"
-void test_many_bpf_programs_checked_before_running(void) {
-    /* Repeats the natural-language query but is only a selftest. */
 }
 "#,
     );

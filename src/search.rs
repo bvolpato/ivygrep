@@ -1222,57 +1222,6 @@ fn query_phrase_aliases(tokens: &[String]) -> Vec<&'static str> {
     if has("line") && has("number") {
         aliases.push("line_number");
     }
-    if has("memory") && (has("allocate") || has("allocation") || has("object") || has("reusable")) {
-        aliases.extend(["slab", "slub", "kmem_cache", "kmalloc"]);
-    }
-    if has("page") && has("fault") {
-        aliases.extend(["handle_mm_fault", "do_page_fault", "vm_fault", "vma"]);
-    }
-    if (has("scheduler") || has("sched"))
-        && (has("choose") || has("next") || has("runnable") || has("task"))
-    {
-        aliases.extend(["sched", "pick_next_task", "runqueue", "rq"]);
-    }
-    if has("deferred") && (has("work") || has("background") || has("item")) {
-        aliases.extend([
-            "workqueue",
-            "work_struct",
-            "process_one_work",
-            "worker_thread",
-        ]);
-    }
-    if (has("bpf") || has("ebpf")) && (has("program") || has("checked") || has("running")) {
-        aliases.extend(["verifier", "bpf_prog", "check_cfg", "do_check"]);
-    }
-    if has("packet") && (has("receive") || has("processing") || has("network") || has("stack")) {
-        aliases.extend([
-            "skb",
-            "netif_receive_skb",
-            "__netif_receive_skb_core",
-            "napi_gro_receive",
-        ]);
-    }
-    if has("block") && (has("io") || has("request") || has("queued") || has("hardware")) {
-        aliases.extend(["blk_mq", "blk-mq", "request_queue", "blk_mq_dispatch"]);
-    }
-    if has("dentry") && (has("lookup") || has("cache") || has("name")) {
-        aliases.extend(["dcache", "d_lookup", "lookup_fast", "namei"]);
-    }
-    if has("cpu") && has("frequency") {
-        aliases.extend(["cpufreq", "cpufreq_update_policy", "governor"]);
-    }
-    if has("lock") && (has("dependency") || has("deadlock") || has("deadlocks")) {
-        aliases.extend(["lockdep", "validate_chain", "check_deadlock"]);
-    }
-    if has("thermal") && has("trip") {
-        aliases.extend(["thermal_zone", "thermal_trip", "handle_thermal_trip"]);
-    }
-    if has("random") && has("entropy") {
-        aliases.extend(["get_random_bytes", "crng", "add_device_randomness"]);
-    }
-    if has("cgroup") && (has("memory") || has("charge")) {
-        aliases.extend(["memcg", "memcontrol", "try_charge", "page_counter"]);
-    }
 
     aliases
 }
@@ -2372,20 +2321,6 @@ fn file_authority_score(bctx: &ChunkBoostContext) -> f32 {
         return 0.35;
     }
 
-    if path.starts_with("tools/testing/")
-        || path.contains("/selftests/")
-        || path.starts_with("selftests/")
-    {
-        return 0.4;
-    }
-
-    if path.starts_with("documentation/")
-        || path.starts_with("tools/")
-        || path.starts_with("samples/")
-    {
-        return 0.45;
-    }
-
     // Data / config files — they match many terms but are rarely the answer
     if path.ends_with(".json")
         || path.ends_with(".csv")
@@ -2410,32 +2345,14 @@ fn file_authority_score(bctx: &ChunkBoostContext) -> f32 {
         return 0.5;
     }
 
-    if is_core_implementation_path(path) {
-        return 1.15;
-    }
-
     // Core source code gets a small boost to positively separate it
     1.0
-}
-
-fn is_core_implementation_path(path: &str) -> bool {
-    path.starts_with("mm/")
-        || path.starts_with("kernel/")
-        || path.starts_with("block/")
-        || path.starts_with("net/core/")
-        || path.starts_with("fs/")
-        || path.starts_with("include/linux/")
-        || path.starts_with("drivers/char/")
-        || path.starts_with("drivers/cpufreq/")
-        || path.starts_with("drivers/thermal/")
 }
 
 fn is_test_path(path: &str) -> bool {
     // Directory-level signals (path segments that are test directories)
     path.contains("/tests/")
         || path.contains("/test/")
-        || path.contains("/selftests/")
-        || path.starts_with("selftests/")
         || path.contains("/__tests__/")
         || path.contains("/spec/")
         || path.contains("/specs/")
