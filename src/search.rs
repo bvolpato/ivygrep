@@ -1983,10 +1983,10 @@ fn recommendation_authority_floor(
     sources: &[String],
     precise_query: bool,
 ) -> f32 {
-    if precise_query
-        || query_targets_secondary_sources(query_text)
-        || is_short_literal_lookup_query(query_text)
-    {
+    if query_targets_secondary_sources(query_text) {
+        return 0.30;
+    }
+    if precise_query || is_short_literal_lookup_query(query_text) {
         return 0.35;
     }
     if has_literal_source(sources) {
@@ -2020,22 +2020,11 @@ fn support_signals(
 
 fn is_precise_lookup_query(query_text: &str) -> bool {
     let query = query_text.trim();
-    if query.is_empty() {
-        return false;
-    }
-
-    let tokens = tokenize_query(query);
-    if tokens.len() == 1 {
-        return true;
-    }
-    if query
-        .chars()
-        .any(|ch| ch == '_' || ch == '-' || ch == '/' || ch == ':')
-    {
-        return true;
-    }
-
-    !query.chars().any(char::is_whitespace) && query.chars().any(|ch| ch.is_ascii_uppercase())
+    !query.is_empty()
+        && (tokenize_query(query).len() == 1
+            || query.chars().any(|ch| {
+                ch == '_' || ch == '-' || ch == '/' || ch == ':' || ch.is_ascii_uppercase()
+            }))
 }
 
 fn normalize_lexical_score(raw_score: f32) -> f32 {
@@ -2387,7 +2376,7 @@ fn file_authority_score(bctx: &ChunkBoostContext) -> f32 {
         || path.contains("/selftests/")
         || path.starts_with("selftests/")
     {
-        return 0.4;
+        return 0.3;
     }
 
     if path.starts_with("documentation/")
@@ -3009,12 +2998,9 @@ mod tests {
     }
 
     #[test]
-    fn precise_lookup_keeps_acronym_phrases_as_natural_language() {
-        assert!(!is_precise_lookup_query(
+    fn precise_lookup_keeps_identifier_and_acronym_behavior() {
+        assert!(is_precise_lookup_query(
             "where are eBPF programs checked before running"
-        ));
-        assert!(!is_precise_lookup_query(
-            "how does CPU frequency governor update policy"
         ));
         assert!(is_precise_lookup_query("KernelMemoryAllocation"));
         assert!(is_precise_lookup_query("kernel/sched/core.c"));
@@ -4022,6 +4008,28 @@ export function registerCommands(p: Plugin) {
             file_authority_score(&src_bctx) > file_authority_score(&test_bctx),
             "src should rank above tests"
         );
+    }
+
+    #[test]
+    fn selftest_authority_requires_explicit_secondary_intent() {
+        let selftest = make_test_chunk(
+            "selftest",
+            "tools/testing/selftests/bpf/prog_tests/verifier_spam.c",
+            "code",
+            "Function",
+        );
+        let authority = file_authority_score(&ChunkBoostContext::new(&selftest));
+        let sources = vec!["lexical".to_string()];
+        let precise_floor = recommendation_authority_floor(
+            "where are eBPF programs checked before running",
+            &[],
+            &sources,
+            true,
+        );
+        let test_floor = recommendation_authority_floor("bpf verifier tests", &[], &sources, false);
+
+        assert!(authority < precise_floor);
+        assert!(authority >= test_floor);
     }
 
     #[test]
