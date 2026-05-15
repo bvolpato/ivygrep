@@ -1794,6 +1794,8 @@ fn fuse_rrf(
                 score *= SEMANTIC_ONLY_PENALTY;
             }
 
+            score *= subsystem_authority_multiplier(&query_tokens, &bctx);
+
             // Chunks with zero query term overlap despite having text are noise
             if !query_tokens.is_empty()
                 && coverage < f32::EPSILON
@@ -1885,7 +1887,8 @@ fn filter_meaningful_scores(
     let mut filtered = ranked
         .iter()
         .filter(|(chunk, score, sources)| {
-            let authority = file_authority_score(&ChunkBoostContext::new(chunk));
+            let bctx = ChunkBoostContext::new(chunk);
+            let authority = effective_authority_score(&query_tokens, &bctx);
             let authority_floor =
                 recommendation_authority_floor(query_text, &query_tokens, sources, precise_query);
             if has_literal_source(sources) {
@@ -1921,7 +1924,7 @@ fn filter_semantic_only_scores(
 
     let bctx = ChunkBoostContext::new(&best.0);
     let support = support_signals(query_text, query_tokens, &bctx);
-    let authority = file_authority_score(&bctx);
+    let authority = effective_authority_score(query_tokens, &bctx);
     let second_score = ranked.get(1).map(|(_, score, _)| *score).unwrap_or(0.0);
     let authority_floor = if query_targets_secondary_sources(query_text) || precise_query {
         0.5
@@ -1967,7 +1970,8 @@ fn direct_candidate_has_enough_authority(
     query_text: &str,
     query_tokens: &[String],
 ) -> bool {
-    let authority = file_authority_score(&ChunkBoostContext::new(chunk));
+    let bctx = ChunkBoostContext::new(chunk);
+    let authority = effective_authority_score(query_tokens, &bctx);
     authority
         >= recommendation_authority_floor(
             query_text,
@@ -2426,6 +2430,10 @@ fn file_authority_score(bctx: &ChunkBoostContext) -> f32 {
     1.0
 }
 
+fn effective_authority_score(query_tokens: &[String], bctx: &ChunkBoostContext) -> f32 {
+    file_authority_score(bctx) * subsystem_authority_multiplier(query_tokens, bctx)
+}
+
 fn is_core_implementation_path(path: &str) -> bool {
     path.starts_with("mm/")
         || path.starts_with("kernel/")
@@ -2444,6 +2452,24 @@ fn chunk_density_exponent(bctx: &ChunkBoostContext) -> f32 {
     } else {
         0.3
     }
+}
+
+fn subsystem_authority_multiplier(query_tokens: &[String], bctx: &ChunkBoostContext) -> f32 {
+    let path = &bctx.path_lower;
+    let driver_intent = query_tokens.iter().any(|token| {
+        matches!(
+            token.as_str(),
+            "driver" | "drivers" | "gpu" | "drm" | "display"
+        )
+    });
+
+    if path.starts_with("drivers/gpu/") && !driver_intent {
+        return 0.35;
+    }
+    if path.starts_with("drivers/") && !is_core_implementation_path(path) && !driver_intent {
+        return 0.75;
+    }
+    1.0
 }
 
 fn is_header_like_path(path: &str) -> bool {
@@ -4068,6 +4094,22 @@ export function registerCommands(p: Plugin) {
         assert!(source_score > file_authority_score(&ChunkBoostContext::new(&script)));
         assert!(source_score > file_authority_score(&ChunkBoostContext::new(&trace)));
         assert!(source_score > file_authority_score(&ChunkBoostContext::new(&uapi)));
+    }
+
+    #[test]
+    fn subsystem_authority_demotes_driver_wrappers_without_driver_intent() {
+        let scheduler = make_test_chunk(
+            "scheduler",
+            "drivers/gpu/drm/i915/gvt/scheduler.h",
+            "code",
+            "Function",
+        );
+        let bctx = ChunkBoostContext::new(&scheduler);
+        let core_query = expanded_query_tokens("how does scheduler choose next runnable task");
+        let gpu_query = expanded_query_tokens("gpu driver scheduler");
+
+        assert!(subsystem_authority_multiplier(&core_query, &bctx) < 1.0);
+        assert_eq!(subsystem_authority_multiplier(&gpu_query, &bctx), 1.0);
     }
 
     #[test]
