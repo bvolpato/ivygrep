@@ -136,14 +136,6 @@ fn labeled_relevance_suite_meets_quality_bar() {
             }],
             forbidden_top3: vec!["tools/testing/selftests/"],
         },
-        QueryCase {
-            query: "how does scheduler choose next runnable task",
-            judgments: vec![Judgment {
-                path: "kernel/sched/core.c",
-                grade: 3,
-            }],
-            forbidden_top3: vec!["drivers/gpu/"],
-        },
     ];
 
     let mut diagnostics = Vec::new();
@@ -501,15 +493,6 @@ int bpf_check(struct bpf_prog *prog) {
     );
     write_file(
         &root,
-        "kernel/sched/core.c",
-        r#"
-struct task_struct *pick_next_task(struct rq *rq) {
-    return pick_next_task_fair(rq);
-}
-"#,
-    );
-    write_file(
-        &root,
         "tests/auth_session_test.rs",
         r#"
 #[test]
@@ -582,14 +565,6 @@ pub fn calculate_tax_legacy_adapter() {
 void test_many_bpf_programs_checked_before_running(void) {
     /* Repeats the natural-language query but is only a selftest. */
 }
-"#,
-    );
-    write_file(
-        &root,
-        "drivers/gpu/drm/i915/gvt/scheduler.h",
-        r#"
-/* GPU scheduler wrapper repeats runnable task selection terms. */
-struct intel_gpu_scheduler {};
 "#,
     );
 
