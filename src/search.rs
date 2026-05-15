@@ -1812,7 +1812,7 @@ fn fuse_rrf(
                 .get(&chunk.file_path)
                 .copied()
                 .unwrap_or(1) as f32;
-            score /= n_file_chunks.powf(0.3);
+            score /= n_file_chunks.powf(chunk_density_exponent(&bctx));
 
             (chunk, score, source_list)
         })
@@ -2428,6 +2428,18 @@ fn is_core_implementation_path(path: &str) -> bool {
         || path.starts_with("drivers/char/")
         || path.starts_with("drivers/cpufreq/")
         || path.starts_with("drivers/thermal/")
+}
+
+fn chunk_density_exponent(bctx: &ChunkBoostContext) -> f32 {
+    if is_core_implementation_path(&bctx.path_lower) && !is_header_like_path(&bctx.path_lower) {
+        0.12
+    } else {
+        0.3
+    }
+}
+
+fn is_header_like_path(path: &str) -> bool {
+    path.ends_with(".h") || path.ends_with(".hpp") || path.ends_with(".hh")
 }
 
 fn is_test_path(path: &str) -> bool {
@@ -4030,6 +4042,22 @@ export function registerCommands(p: Plugin) {
 
         assert!(authority < precise_floor);
         assert!(authority >= test_floor);
+    }
+
+    #[test]
+    fn density_penalty_is_softer_for_core_source_than_headers() {
+        let source = make_test_chunk("source", "kernel/workqueue.c", "code", "Function");
+        let header = make_test_chunk("header", "include/linux/workqueue.h", "code", "Function");
+        let script = make_test_chunk("script", "scripts/gdb/linux/slab.py", "code", "Function");
+
+        assert!(
+            chunk_density_exponent(&ChunkBoostContext::new(&source))
+                < chunk_density_exponent(&ChunkBoostContext::new(&header))
+        );
+        assert_eq!(
+            chunk_density_exponent(&ChunkBoostContext::new(&script)),
+            0.3
+        );
     }
 
     #[test]
