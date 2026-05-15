@@ -1752,16 +1752,16 @@ fn fuse_rrf(
             }
 
             score *= chunk_kind_boost(&chunk);
-            score *= file_authority_score(&bctx);
+            score *= effective_authority_score(query_text, &query_tokens, &bctx);
 
-            // Apply chunk-density normalization: 1/n^0.3 where n is the number
+            // Apply chunk-density normalization: 1/n^x where n is the number
             // of chunks this file has in the candidate set. Single-chunk files
-            // (focused modules) are unaffected; a file with 25 chunks gets ~0.3x.
+            // are unaffected; large implementation files get a softer penalty.
             let n_file_chunks = file_chunk_counts
                 .get(&chunk.file_path)
                 .copied()
                 .unwrap_or(1) as f32;
-            score /= n_file_chunks.powf(0.3);
+            score /= n_file_chunks.powf(chunk_density_exponent(&bctx));
 
             (chunk, score, source_list)
         })
@@ -1834,7 +1834,8 @@ fn filter_meaningful_scores(
     let mut filtered = ranked
         .iter()
         .filter(|(chunk, score, sources)| {
-            let authority = file_authority_score(&ChunkBoostContext::new(chunk));
+            let bctx = ChunkBoostContext::new(chunk);
+            let authority = effective_authority_score(query_text, &query_tokens, &bctx);
             let authority_floor =
                 recommendation_authority_floor(query_text, &query_tokens, sources, precise_query);
             if has_literal_source(sources) {
@@ -1870,7 +1871,7 @@ fn filter_semantic_only_scores(
 
     let bctx = ChunkBoostContext::new(&best.0);
     let support = support_signals(query_text, query_tokens, &bctx);
-    let authority = file_authority_score(&bctx);
+    let authority = effective_authority_score(query_text, query_tokens, &bctx);
     let second_score = ranked.get(1).map(|(_, score, _)| *score).unwrap_or(0.0);
     let authority_floor = if query_targets_secondary_sources(query_text) || precise_query {
         0.5
@@ -1916,7 +1917,8 @@ fn direct_candidate_has_enough_authority(
     query_text: &str,
     query_tokens: &[String],
 ) -> bool {
-    let authority = file_authority_score(&ChunkBoostContext::new(chunk));
+    let bctx = ChunkBoostContext::new(chunk);
+    let authority = effective_authority_score(query_text, query_tokens, &bctx);
     authority
         >= recommendation_authority_floor(
             query_text,
@@ -1928,15 +1930,18 @@ fn direct_candidate_has_enough_authority(
 
 fn recommendation_authority_floor(
     query_text: &str,
-    _query_tokens: &[String],
+    query_tokens: &[String],
     sources: &[String],
     precise_query: bool,
 ) -> f32 {
-    if precise_query
-        || query_targets_secondary_sources(query_text)
-        || is_short_literal_lookup_query(query_text)
-    {
+    if query_targets_secondary_sources(query_text) {
+        return 0.30;
+    }
+    if precise_query || is_short_literal_lookup_query(query_text) {
         return 0.35;
+    }
+    if query_targets_implementation(query_tokens) {
+        return 0.72;
     }
     if has_literal_source(sources) {
         0.75
@@ -2282,10 +2287,9 @@ fn chunk_kind_boost(chunk: &IndexedChunk) -> f32 {
     }
 }
 
-/// File authority scoring inspired by PageRank: files that are "core" source code
-/// are more authoritative than tests, fixtures, generated code, data files, and
-/// vendored dependencies. The scoring range is deliberately wide (0.3–1.3) to
-/// create meaningful separation in the final ranking.
+/// File authority scoring inspired by PageRank: implementation code is usually
+/// more authoritative than support files, tests, fixtures, docs, data files, and
+/// vendored dependencies.
 fn file_authority_score(bctx: &ChunkBoostContext) -> f32 {
     let path = &bctx.path_lower;
 
@@ -2311,18 +2315,78 @@ fn file_authority_score(bctx: &ChunkBoostContext) -> f32 {
         return 0.2;
     }
 
-    // Generated / snapshot files
+    match path_role(path) {
+        PathRole::Generated => 0.35,
+        PathRole::Data => 0.4,
+        PathRole::Support => 0.45,
+        PathRole::Documentation => 0.5,
+        PathRole::Test => 0.6,
+        PathRole::PrimarySource => 1.0,
+    }
+}
+
+fn effective_authority_score(
+    query_text: &str,
+    query_tokens: &[String],
+    bctx: &ChunkBoostContext,
+) -> f32 {
+    let mut score = file_authority_score(bctx);
+    let secondary_intent = query_targets_secondary_sources(query_text);
+
+    if !secondary_intent {
+        if path_depth(&bctx.path_lower) <= 3
+            && path_role(&bctx.path_lower) == PathRole::PrimarySource
+        {
+            score *= 1.08;
+        }
+        if path_depth(&bctx.path_lower) >= 6 {
+            score *= match path_query_overlap(query_tokens, bctx) {
+                0 => 0.74,
+                1 => 0.86,
+                _ => 0.95,
+            };
+        }
+    }
+
+    score
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathRole {
+    PrimarySource,
+    Test,
+    Documentation,
+    Generated,
+    Data,
+    Support,
+}
+
+fn path_role(path: &str) -> PathRole {
     if path.contains("generated/")
         || path.contains("__snapshots__/")
         || path.contains("fixtures/")
         || path.contains("testdata/")
         || path.contains("test_data/")
     {
-        return 0.35;
+        return PathRole::Generated;
     }
+    if is_test_path(path) {
+        return PathRole::Test;
+    }
+    if path.ends_with(".md") || path.ends_with(".txt") || path.ends_with(".rst") {
+        return PathRole::Documentation;
+    }
+    if is_data_or_config_path(path) {
+        return PathRole::Data;
+    }
+    if is_support_path(path) {
+        return PathRole::Support;
+    }
+    PathRole::PrimarySource
+}
 
-    // Data / config files — they match many terms but are rarely the answer
-    if path.ends_with(".json")
+fn is_data_or_config_path(path: &str) -> bool {
+    path.ends_with(".json")
         || path.ends_with(".csv")
         || path.ends_with(".yaml")
         || path.ends_with(".yml")
@@ -2331,22 +2395,83 @@ fn file_authority_score(bctx: &ChunkBoostContext) -> f32 {
         || path.ends_with(".ini")
         || path.ends_with(".env")
         || path.ends_with(".sql")
+}
+
+fn is_support_path(path: &str) -> bool {
+    has_path_segment(path, "tools")
+        || has_path_segment(path, "tooling")
+        || has_path_segment(path, "scripts")
+        || has_path_segment(path, "script")
+        || has_path_segment(path, "examples")
+        || has_path_segment(path, "example")
+        || has_path_segment(path, "samples")
+        || has_path_segment(path, "sample")
+        || has_path_segment(path, "demos")
+        || has_path_segment(path, "demo")
+        || has_path_segment(path, "bench")
+        || has_path_segment(path, "benches")
+        || has_path_segment(path, "benchmarks")
+}
+
+fn has_path_segment(path: &str, needle: &str) -> bool {
+    path.split('/').any(|segment| segment == needle)
+}
+
+fn path_depth(path: &str) -> usize {
+    path.split('/')
+        .filter(|segment| !segment.is_empty())
+        .count()
+}
+
+fn path_query_overlap(query_tokens: &[String], bctx: &ChunkBoostContext) -> usize {
+    query_tokens
+        .iter()
+        .filter(|token| {
+            bctx.path_segments
+                .iter()
+                .any(|segment| segment.contains(token.as_str()))
+                || bctx
+                    .file_stem
+                    .as_ref()
+                    .is_some_and(|stem| stem.contains(token.as_str()))
+        })
+        .count()
+}
+
+fn chunk_density_exponent(bctx: &ChunkBoostContext) -> f32 {
+    if path_role(&bctx.path_lower) == PathRole::PrimarySource
+        && !is_header_like_path(&bctx.path_lower)
     {
-        return 0.4;
+        0.16
+    } else {
+        0.3
     }
+}
 
-    // Test / spec / mock files — useful but secondary to the implementation
-    if is_test_path(path) {
-        return 0.6;
-    }
+fn is_header_like_path(path: &str) -> bool {
+    path.ends_with(".h") || path.ends_with(".hpp") || path.ends_with(".hh")
+}
 
-    // Documentation — helpful but not code
-    if path.ends_with(".md") || path.ends_with(".txt") || path.ends_with(".rst") {
-        return 0.5;
-    }
-
-    // Core source code gets a small boost to positively separate it
-    1.0
+fn query_targets_implementation(query_tokens: &[String]) -> bool {
+    query_tokens.iter().any(|token| {
+        matches!(
+            token.as_str(),
+            "implement"
+                | "implementation"
+                | "implemented"
+                | "defined"
+                | "definition"
+                | "dispatch"
+                | "handler"
+                | "loader"
+                | "parser"
+                | "ranking"
+                | "score"
+                | "calculate"
+                | "refresh"
+                | "detect"
+        )
+    })
 }
 
 fn is_test_path(path: &str) -> bool {
@@ -2358,10 +2483,12 @@ fn is_test_path(path: &str) -> bool {
         || path.contains("/specs/")
         || path.contains("/mocks/")
         || path.contains("/mock/")
+        || path.contains("/selftests/")
         || path.contains("/__mocks__/")
         || path.starts_with("tests/")
         || path.starts_with("test/")
         || path.starts_with("spec/")
+        || path.starts_with("selftests/")
         // File-level signals (naming conventions across languages)
         || path.contains("_test.")    // Go, Rust: foo_test.go, foo_test.rs
         || path.contains(".test.")    // JS/TS: foo.test.ts, foo.test.js
@@ -3915,6 +4042,75 @@ export function registerCommands(p: Plugin) {
         assert!(
             file_authority_score(&src_bctx) > file_authority_score(&test_bctx),
             "src should rank above tests"
+        );
+    }
+
+    #[test]
+    fn path_role_demotes_generic_support_paths() {
+        assert_eq!(path_role("tools/debug_probe.rs"), PathRole::Support);
+        assert_eq!(path_role("scripts/reindex.rs"), PathRole::Support);
+        assert_eq!(path_role("examples/search_demo.rs"), PathRole::Support);
+        assert_eq!(path_role("src/search.rs"), PathRole::PrimarySource);
+    }
+
+    #[test]
+    fn selftests_count_as_tests_without_false_positive_substrings() {
+        assert!(is_test_path(
+            "tools/testing/selftests/bpf/prog_tests/verifier.c"
+        ));
+        assert!(!is_test_path("src/attestation.rs"));
+    }
+
+    #[test]
+    fn effective_authority_penalizes_deep_unsupported_paths() {
+        let shallow = make_test_chunk("a", "src/scheduler.rs", "code", "Function");
+        let deep = make_test_chunk(
+            "b",
+            "plugins/vendor/wrappers/generated/scheduler.rs",
+            "code",
+            "Function",
+        );
+        let tokens = expanded_query_tokens("background job scheduler");
+        let shallow_score = effective_authority_score(
+            "background job scheduler",
+            &tokens,
+            &ChunkBoostContext::new(&shallow),
+        );
+        let deep_score = effective_authority_score(
+            "background job scheduler",
+            &tokens,
+            &ChunkBoostContext::new(&deep),
+        );
+
+        assert!(shallow_score > deep_score);
+    }
+
+    #[test]
+    fn deep_path_single_token_overlap_still_gets_small_penalty() {
+        let deep = make_test_chunk(
+            "a",
+            "plugins/gpu/wrappers/examples/nested/scheduler.rs",
+            "code",
+            "Function",
+        );
+        let tokens = expanded_query_tokens("background job scheduler");
+        let bctx = ChunkBoostContext::new(&deep);
+
+        assert_eq!(path_query_overlap(&tokens, &bctx), 1);
+        assert!(
+            effective_authority_score("background job scheduler", &tokens, &bctx)
+                < file_authority_score(&bctx)
+        );
+    }
+
+    #[test]
+    fn chunk_density_penalty_is_softer_for_primary_source_than_headers() {
+        let source = make_test_chunk("a", "src/search.rs", "code", "Function");
+        let header = make_test_chunk("b", "include/search.h", "code", "Function");
+
+        assert!(
+            chunk_density_exponent(&ChunkBoostContext::new(&source))
+                < chunk_density_exponent(&ChunkBoostContext::new(&header))
         );
     }
 
