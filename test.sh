@@ -33,6 +33,10 @@ Examples:
   ./test.sh --filter query_aliases --nocapture
   ./scripts/bootstrap_stress_fixtures.sh && ./test.sh --stress
 EOF
+  echo
+  echo "Available sessions:"
+  echo "  ./build.sh      Build ivygrep binary with selected profile/features."
+  echo "  ./test.sh       Run ivygrep validation suite."
 }
 
 run() {

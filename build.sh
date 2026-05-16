@@ -26,6 +26,10 @@ Examples:
   ./build.sh --hash-only
   ./build.sh --features accelerate
 EOF
+  echo
+  echo "Available sessions:"
+  echo "  ./build.sh      Build ivygrep binary with selected profile/features."
+  echo "  ./test.sh       Run ivygrep validation suite."
 }
 
 run() {
