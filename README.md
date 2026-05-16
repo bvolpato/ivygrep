@@ -47,8 +47,20 @@ install -m 0755 ig ~/.local/bin/ig
 **Build from source:**
 ```bash
 git clone https://github.com/bvolpato/ivygrep.git && cd ivygrep
-cargo build --release
+./build.sh
 install -m 0755 ./target/release/ig ~/.local/bin/ig
+```
+
+**Developer targets:**
+```bash
+./build.sh --help
+./test.sh --help
+./bench.sh --help
+
+./build.sh          # release binary
+./test.sh --quick   # fast local check
+./test.sh           # fmt, clippy, unit/integration tests
+./bench.sh          # critical Criterion benchmark
 ```
 
 **Your first search:**

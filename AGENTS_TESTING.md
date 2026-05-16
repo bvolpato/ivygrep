@@ -3,21 +3,34 @@
 ## Quick Validation
 
 ```bash
-cargo test -- --test-threads=1
+./test.sh --quick
 ```
 
 ## Full Validation (with clippy)
 
 ```bash
-cargo clippy --all-targets
-cargo test -- --test-threads=1
+./test.sh
+```
+
+## Build
+
+```bash
+./build.sh
+./build.sh --help
+```
+
+## Benchmarks
+
+```bash
+./bench.sh
+./bench.sh --help
 ```
 
 ## Stress Tests (requires fixture download)
 
 ```bash
 ./scripts/bootstrap_stress_fixtures.sh
-cargo test --test stress_harness -- --ignored --nocapture --test-threads=1
+./test.sh --stress
 ```
 
 ## CI Matrix

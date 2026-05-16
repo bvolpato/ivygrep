@@ -1134,7 +1134,7 @@ fn expanded_query_tokens(query: &str) -> Vec<String> {
     let mut seen = primary.iter().cloned().collect::<HashSet<_>>();
 
     for token in &primary {
-        for alias in query_token_aliases(token) {
+        for alias in crate::query_aliases::token_aliases(token) {
             let alias = alias.to_string();
             if alias.len() >= 2 && seen.insert(alias.clone()) {
                 expanded.push(alias);
@@ -1142,7 +1142,7 @@ fn expanded_query_tokens(query: &str) -> Vec<String> {
         }
     }
 
-    for alias in query_phrase_aliases(&primary) {
+    for alias in crate::query_aliases::phrase_aliases(&primary) {
         let alias = alias.to_string();
         if alias.len() >= 2 && seen.insert(alias.clone()) {
             expanded.push(alias);
@@ -1150,34 +1150,6 @@ fn expanded_query_tokens(query: &str) -> Vec<String> {
     }
 
     expanded
-}
-
-fn query_token_aliases(token: &str) -> &'static [&'static str] {
-    match token {
-        "implemented" | "implementing" | "implementation" | "implements" => &["implement"],
-        "defined" | "defining" | "definition" | "definitions" | "declared" | "declaration" => {
-            &["define"]
-        }
-        "detecting" | "detected" | "detection" | "detector" => &["detect"],
-        "ranked" | "ranking" => &["rank"],
-        "scoring" | "scores" => &["score", "rank"],
-        "results" => &["result"],
-        "chunking" => &["chunk"],
-        "flags" | "flag" => &["cli", "arg", "option"],
-        "arguments" | "argument" | "args" | "arg" => &["cli", "flag", "option"],
-        "command" => &["cli"],
-        "grammar" => &["parse", "parser"],
-        "parsing" => &["parse", "parser"],
-        "matching" => &["match", "matcher"],
-        "counting" | "counts" => &["count", "counter"],
-        "indexed" | "indexing" => &["index"],
-        "dictionaries" => &["dictionary"],
-        "policies" => &["policy"],
-        "output" => &["print", "printer"],
-        "colored" | "coloring" => &["color"],
-        "walker" => &["walk"],
-        _ => &[],
-    }
 }
 
 fn build_semantic_query_text(query_text: &str) -> String {
@@ -1204,26 +1176,6 @@ fn build_semantic_query_text(query_text: &str) -> String {
     }
 
     fragments.join(" ")
-}
-
-fn query_phrase_aliases(tokens: &[String]) -> Vec<&'static str> {
-    let has = |needle: &str| tokens.iter().any(|token| token == needle);
-    let mut aliases = Vec::new();
-
-    if has("command") && has("line") {
-        aliases.push("cli");
-    }
-    if has("output") && has("format") {
-        aliases.push("printer");
-    }
-    if has("result") && has("output") {
-        aliases.push("printer");
-    }
-    if has("line") && has("number") {
-        aliases.push("line_number");
-    }
-
-    aliases
 }
 
 fn is_query_stopword(token: &str) -> bool {

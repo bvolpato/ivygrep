@@ -20,7 +20,8 @@ require_tool() {
 download_text_blob() {
   local url="$1"
   local destination="$2"
-  local tmp_file="${TMP_DIR}/$(basename "${destination}").download"
+  local tmp_file
+  tmp_file="${TMP_DIR}/$(basename "${destination}").download"
 
   if [[ -s "${destination}" ]]; then
     echo "[skip] text exists: ${destination}"

@@ -11,6 +11,7 @@ pub mod mcp;
 pub mod merkle;
 pub mod path_glob;
 pub mod protocol;
+pub(crate) mod query_aliases;
 pub mod regex_search;
 pub mod search;
 pub mod text;
