@@ -2,6 +2,13 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.6.20] — 2026-05-18
+
+### Testing
+- **Benchmark smoke runs no longer compare against stale local Criterion baselines.** `./bench.sh` now uses a temporary smoke baseline by default, with `--keep-baseline` available for intentional local history comparisons.
+- **Fast benchmark cases now collect longer timed samples.** Short per-operation results are repeated inside Criterion so the measured sample windows stay stable while reports still show per-operation latency.
+- **Benchmark docs now explain per-operation timing.** README, testing notes, and `./bench.sh --help` clarify why sub-100ms reported results can still be backed by multi-second timed samples.
+
 ## [0.6.19] — 2026-05-18
 
 ### Changed
