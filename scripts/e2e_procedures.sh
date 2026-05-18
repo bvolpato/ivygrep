@@ -86,7 +86,10 @@ esac
 
 [ -x "$ig_bin" ] || fail "ig binary not executable: $ig_bin"
 
-tmp_root=$(mktemp -d "${TMPDIR:-/tmp}/ivygrep-e2e.XXXXXX")
+tmp_parent=${TMPDIR:-/tmp}
+tmp_parent=${tmp_parent%/}
+tmp_root=$(mktemp -d "$tmp_parent/ivygrep-e2e.XXXXXX")
+tmp_root=$(CDPATH='' cd "$tmp_root" && pwd -P) || fail "could not resolve temp root: $tmp_root"
 cleanup() {
   if [ "$keep_tmp" -eq 0 ]; then
     rm -rf "$tmp_root"
