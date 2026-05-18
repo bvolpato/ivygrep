@@ -60,7 +60,7 @@ install -m 0755 ./target/release/ig ~/.local/bin/ig
 ./build.sh          # release binary
 ./test.sh --quick   # fast local check
 ./test.sh           # fmt, clippy, unit/integration tests
-./bench.sh          # critical Criterion benchmark
+./bench.sh          # critical Criterion benchmark, no stale local baseline comparison
 ```
 
 **Your first search:**
@@ -246,7 +246,7 @@ ig --mcp                           # start MCP server (stdio)
 ```bash
 ./test.sh           # fmt, ShellCheck, clippy, unit/integration tests
 ./build.sh --locked # release binary, Cargo.lock unchanged
-./bench.sh          # critical Criterion benchmark
+./bench.sh          # critical Criterion benchmark, no stale local baseline comparison
 ```
 The test suite covers unit tests, CLI snapshots, concurrency, golden queries, labeled relevance metrics, incremental CRUD, MCP, daemon recovery, git/worktree behavior, property-based Merkle invariants, and benchmark guards.
 

@@ -9,16 +9,18 @@ usage() {
 Run ivygrep benchmarks.
 
 Usage:
-  ./bench.sh [options] [-- cargo-bench-args...]
+  ./bench.sh [options] [-- criterion-args...]
 
 Default:
-  Runs the critical Criterion benchmark:
-  cargo bench --bench indexer_bench indexer/incremental_reindex_no_change -- --noplot
+  Runs the critical Criterion benchmark without comparing against the local
+  Criterion baseline:
+  cargo bench --bench indexer_bench indexer/incremental_reindex_no_change -- --noplot --save-baseline ivygrep-smoke
 
 Options:
   --quick                  Run critical benchmark only (default)
   --full                   Run all Criterion benchmarks in benches/indexer_bench.rs
   --name NAME              Criterion benchmark name/filter
+  --keep-baseline          Compare/save Criterion's local target/criterion baseline
   --guard BASELINE_REF     Compare NAME against git ref using scripts/benchmark_guard.py
   --threshold FLOAT        Regression threshold for --guard (default: 1.15)
   --linux-kernel PATH      Run large Linux checkout latency/index benchmark
@@ -49,8 +51,16 @@ run() {
   "$@"
 }
 
+cleanup_criterion_baseline() {
+  local baseline="$1"
+  [[ -d target/criterion ]] || return 0
+  find target/criterion -type d -name "$baseline" -prune -exec rm -rf {} +
+}
+
 mode="quick"
 bench_name="indexer/incremental_reindex_no_change"
+keep_baseline=0
+smoke_baseline="ivygrep-smoke"
 guard_ref=""
 threshold="1.15"
 linux_kernel=""
@@ -72,6 +82,9 @@ while (($#)); do
       [[ $# -ge 2 ]] || { echo "--name needs value" >&2; exit 2; }
       bench_name="$2"
       shift
+      ;;
+    --keep-baseline)
+      keep_baseline=1
       ;;
     --guard)
       [[ $# -ge 2 ]] || { echo "--guard needs baseline ref" >&2; exit 2; }
@@ -128,12 +141,25 @@ done
 export IVYGREP_NO_AUTOSPAWN="${IVYGREP_NO_AUTOSPAWN:-1}"
 export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
 
+criterion_args=(--noplot)
+if ((keep_baseline == 0)); then
+  cleanup_criterion_baseline "$smoke_baseline"
+  criterion_args+=(--save-baseline "$smoke_baseline")
+fi
+
+cleanup_smoke_baseline_on_exit() {
+  if ((keep_baseline == 0)); then
+    cleanup_criterion_baseline "$smoke_baseline"
+  fi
+}
+trap cleanup_smoke_baseline_on_exit EXIT
+
 case "$mode" in
   quick)
-    run cargo bench --bench indexer_bench "$bench_name" "${extra_args[@]}" -- --noplot
+    run cargo bench --bench indexer_bench "$bench_name" -- "${criterion_args[@]}" "${extra_args[@]}"
     ;;
   full)
-    run cargo bench --bench indexer_bench "${extra_args[@]}" -- --noplot
+    run cargo bench --bench indexer_bench -- "${criterion_args[@]}" "${extra_args[@]}"
     ;;
   guard)
     [[ -n "$guard_ref" ]] || { echo "--guard needs baseline ref" >&2; exit 2; }

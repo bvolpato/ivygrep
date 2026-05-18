@@ -26,6 +26,8 @@
 ./bench.sh --help
 ```
 
+`./bench.sh` uses a temporary Criterion baseline by default so smoke runs do not report stale `target/criterion` regressions. Use `./bench.sh --keep-baseline` only when comparing against local Criterion history.
+
 ## End-to-End Procedures
 
 ```bash
