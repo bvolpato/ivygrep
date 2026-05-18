@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779134484324,
+  "lastUpdate": 1779136340917,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -13464,6 +13464,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "indexer/incremental_reindex_no_change",
             "value": 3620.53,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "0f1fdc56a42d6b70172a7c2230dde818ec1f8c5f",
+          "message": "docs: fix Homebrew monitoring setup",
+          "timestamp": "2026-05-18T16:10:51-04:00",
+          "tree_id": "5d9fdf48253fc6d8c6abe56dc841519be5f80518",
+          "url": "https://github.com/bvolpato/ivygrep/commit/0f1fdc56a42d6b70172a7c2230dde818ec1f8c5f"
+        },
+        "date": 1779136340634,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 3758.85,
             "unit": "µs"
           }
         ]
