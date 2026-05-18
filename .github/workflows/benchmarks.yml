@@ -54,40 +54,36 @@ jobs:
         run: cargo install cargo-criterion
 
       - name: Run benchmarks
-        run: cargo criterion --message-format=json > criterion-output.json
+        run: cargo criterion
 
-      - name: Convert Criterion JSON to Custom Benchmark Format
+      - name: Convert Criterion Estimates to Custom Benchmark Format
         run: |
           python3 - <<'PY'
           import json
           import sys
+          from pathlib import Path
 
           data = []
-          parse_errors = 0
+          criterion_root = Path("target/criterion")
 
-          with open("criterion-output.json", encoding="utf-8") as f:
-            for line_no, line in enumerate(f, 1):
-              if not line.strip():
-                continue
-              try:
-                obj = json.loads(line)
-              except json.JSONDecodeError as exc:
-                parse_errors += 1
-                print(f"criterion-output.json:{line_no}: invalid JSON: {exc}", file=sys.stderr)
-                continue
-              if obj.get("reason") == "benchmark-complete":
-                name = obj.get("id")
-                ns = obj.get("mean", {}).get("estimate")
-                if not name or ns is None:
-                  print(f"criterion-output.json:{line_no}: incomplete benchmark-complete event", file=sys.stderr)
-                  parse_errors += 1
-                  continue
-                data.append({"name": name, "value": round(float(ns) / 1000, 2), "unit": "µs"})
+          for estimates_path in sorted(criterion_root.glob("**/new/estimates.json")):
+            name = "/".join(estimates_path.relative_to(criterion_root).parts[:-2])
+            if not name:
+              print(f"{estimates_path}: could not derive benchmark name", file=sys.stderr)
+              sys.exit(1)
 
-          if parse_errors:
-            sys.exit(1)
+            estimates = json.loads(estimates_path.read_text(encoding="utf-8"))
+            median = estimates.get("median", {}).get("point_estimate")
+            if median is None:
+              print(f"{estimates_path}: missing median.point_estimate", file=sys.stderr)
+              sys.exit(1)
+
+            # Criterion medians are less sensitive to scheduler/VM tail spikes than
+            # means, especially for microbenchmarks that complete in microseconds.
+            data.append({"name": name, "value": round(float(median) / 1000, 2), "unit": "µs"})
+
           if not data:
-            print("no benchmark-complete events found in criterion output", file=sys.stderr)
+            print("no Criterion estimates found under target/criterion", file=sys.stderr)
             sys.exit(1)
 
           with open("benchmark-data.json", "w", encoding="utf-8") as f:

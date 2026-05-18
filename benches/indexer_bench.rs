@@ -1,4 +1,4 @@
-use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, SamplingMode, criterion_group, criterion_main};
 use ivygrep::EMBEDDING_DIMENSIONS;
 use ivygrep::chunking::chunk_source;
 use ivygrep::embedding::{EmbeddingModel, HashEmbeddingModel};
@@ -8,8 +8,29 @@ use ivygrep::search::{SearchOptions, hybrid_search, literal_search};
 use ivygrep::workspace::Workspace;
 use std::fmt::Write as _;
 use std::fs;
+use std::hint::black_box;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+const CHUNK_REPETITIONS: u32 = 8;
+const HASH_EMBED_SINGLE_REPETITIONS: u32 = 1_024;
+const HASH_EMBED_BATCH_REPETITIONS: u32 = 32;
+const HYBRID_SEARCH_REPETITIONS: u32 = 4;
+const SIMPLE_SEARCH_REPETITIONS: u32 = 16;
+const VECTOR_SEARCH_REPETITIONS: u32 = 128;
+
+fn repeated_per_op<F>(iters: u64, repetitions: u32, mut f: F) -> Duration
+where
+    F: FnMut(u32),
+{
+    let start = Instant::now();
+    for _ in 0..iters {
+        for rep in 0..repetitions {
+            f(rep);
+        }
+    }
+    start.elapsed() / repetitions
+}
 
 /// Create a temp workspace with `n` small Rust files and return handles.
 fn setup_workspace(
@@ -114,9 +135,10 @@ fn setup_bulk_indexed_workspace(
 fn bench_indexer(c: &mut Criterion) {
     let mut group = c.benchmark_group("indexer");
     group
-        .sample_size(20)
+        .sample_size(30)
+        .sampling_mode(SamplingMode::Flat)
         .warm_up_time(Duration::from_secs(5))
-        .measurement_time(Duration::from_secs(15));
+        .measurement_time(Duration::from_secs(20));
 
     group.bench_function("index_small_workspace", |b| {
         b.iter_batched(
@@ -168,6 +190,7 @@ fn bench_chunking(c: &mut Criterion) {
     let mut group = c.benchmark_group("chunking");
     group
         .sample_size(30)
+        .sampling_mode(SamplingMode::Flat)
         .warm_up_time(Duration::from_secs(3))
         .measurement_time(Duration::from_secs(10));
 
@@ -192,11 +215,25 @@ fn bench_chunking(c: &mut Criterion) {
         .collect::<String>();
 
     group.bench_function("chunk_rust_100_fns", |b| {
-        b.iter(|| chunk_source(Path::new("bench.rs"), &rust_source))
+        b.iter_custom(|iters| {
+            repeated_per_op(iters, CHUNK_REPETITIONS, |_| {
+                black_box(chunk_source(
+                    black_box(Path::new("bench.rs")),
+                    black_box(&rust_source),
+                ));
+            })
+        })
     });
 
     group.bench_function("chunk_python_100_fns", |b| {
-        b.iter(|| chunk_source(Path::new("bench.py"), &py_source))
+        b.iter_custom(|iters| {
+            repeated_per_op(iters, CHUNK_REPETITIONS, |_| {
+                black_box(chunk_source(
+                    black_box(Path::new("bench.py")),
+                    black_box(&py_source),
+                ));
+            })
+        })
     });
 
     group.finish();
@@ -258,6 +295,7 @@ fn bench_merkle(c: &mut Criterion) {
 fn bench_embedding(c: &mut Criterion) {
     let mut group = c.benchmark_group("embedding");
     group
+        .sampling_mode(SamplingMode::Flat)
         .warm_up_time(Duration::from_secs(3))
         .measurement_time(Duration::from_secs(10));
 
@@ -269,11 +307,22 @@ fn bench_embedding(c: &mut Criterion) {
         "public class UserService { public User getUser(int id) { return null; } }",
     ];
 
-    group.bench_function("hash_embed_single", |b| b.iter(|| model.embed(texts[0])));
+    group.bench_function("hash_embed_single", |b| {
+        b.iter_custom(|iters| {
+            repeated_per_op(iters, HASH_EMBED_SINGLE_REPETITIONS, |rep| {
+                let text = texts[rep as usize % texts.len()];
+                black_box(model.embed(black_box(text)));
+            })
+        })
+    });
 
     group.bench_function("hash_embed_batch_100", |b| {
         let batch: Vec<&str> = texts.iter().cycle().take(100).copied().collect();
-        b.iter(|| model.embed_batch(&batch))
+        b.iter_custom(|iters| {
+            repeated_per_op(iters, HASH_EMBED_BATCH_REPETITIONS, |_| {
+                black_box(model.embed_batch(black_box(batch.as_slice())));
+            })
+        })
     });
 
     group.finish();
@@ -351,9 +400,10 @@ fn bench_regex_search(c: &mut Criterion) {
 fn bench_base_search_patterns(c: &mut Criterion) {
     let mut group = c.benchmark_group("base_search_patterns");
     group
-        .sample_size(10)
-        .warm_up_time(Duration::from_secs(2))
-        .measurement_time(Duration::from_secs(8));
+        .sample_size(20)
+        .sampling_mode(SamplingMode::Flat)
+        .warm_up_time(Duration::from_secs(5))
+        .measurement_time(Duration::from_secs(15));
 
     let (_staging, _home, workspace, model) = setup_bulk_indexed_workspace(1_000, 8);
     let options = SearchOptions {
@@ -362,51 +412,68 @@ fn bench_base_search_patterns(c: &mut Criterion) {
     };
 
     group.bench_function("hybrid_simple_symbol_1000_files", |b| {
-        b.iter(|| {
-            let hits = hybrid_search(
-                &workspace,
-                "calculate_bulk_250_3",
-                Some(&model as &dyn ivygrep::embedding::EmbeddingModel),
-                &options,
-            )
-            .unwrap();
-            assert!(!hits.is_empty());
+        b.iter_custom(|iters| {
+            repeated_per_op(iters, HYBRID_SEARCH_REPETITIONS, |_| {
+                let hits = hybrid_search(
+                    black_box(&workspace),
+                    black_box("calculate_bulk_250_3"),
+                    Some(&model as &dyn ivygrep::embedding::EmbeddingModel),
+                    black_box(&options),
+                )
+                .unwrap();
+                assert!(!hits.is_empty());
+                black_box(hits);
+            })
         })
     });
 
     group.bench_function("hybrid_complex_phrase_1000_files", |b| {
-        b.iter(|| {
-            let hits = hybrid_search(
-                &workspace,
-                "calculate bulk amount",
-                Some(&model as &dyn ivygrep::embedding::EmbeddingModel),
-                &options,
-            )
-            .unwrap();
-            assert!(!hits.is_empty());
+        b.iter_custom(|iters| {
+            repeated_per_op(iters, HYBRID_SEARCH_REPETITIONS, |_| {
+                let hits = hybrid_search(
+                    black_box(&workspace),
+                    black_box("calculate bulk amount"),
+                    Some(&model as &dyn ivygrep::embedding::EmbeddingModel),
+                    black_box(&options),
+                )
+                .unwrap();
+                assert!(!hits.is_empty());
+                black_box(hits);
+            })
         })
     });
 
     group.bench_function("literal_simple_symbol_1000_files", |b| {
-        b.iter(|| {
-            let hits = literal_search(&workspace, "calculate_bulk_250_3", &options).unwrap();
-            assert!(!hits.is_empty());
+        b.iter_custom(|iters| {
+            repeated_per_op(iters, SIMPLE_SEARCH_REPETITIONS, |_| {
+                let hits = literal_search(
+                    black_box(&workspace),
+                    black_box("calculate_bulk_250_3"),
+                    black_box(&options),
+                )
+                .unwrap();
+                assert!(!hits.is_empty());
+                black_box(hits);
+            })
         })
     });
 
     group.bench_function("regex_symbol_1000_files", |b| {
-        b.iter(|| {
-            let hits = ivygrep::regex_search::regex_search(
-                &workspace,
-                r"calculate_bulk_250_\d+",
-                Some(20),
-                None,
-                &[],
-                &[],
-                false,
-            )
-            .unwrap();
-            assert!(!hits.is_empty());
+        b.iter_custom(|iters| {
+            repeated_per_op(iters, SIMPLE_SEARCH_REPETITIONS, |_| {
+                let hits = ivygrep::regex_search::regex_search(
+                    black_box(&workspace),
+                    black_box(r"calculate_bulk_250_\d+"),
+                    Some(20),
+                    None,
+                    &[],
+                    &[],
+                    false,
+                )
+                .unwrap();
+                assert!(!hits.is_empty());
+                black_box(hits);
+            })
         })
     });
 
@@ -416,7 +483,8 @@ fn bench_base_search_patterns(c: &mut Criterion) {
 fn bench_vector_store(c: &mut Criterion) {
     let mut group = c.benchmark_group("vector_store");
     group
-        .sample_size(20)
+        .sample_size(30)
+        .sampling_mode(SamplingMode::Flat)
         .warm_up_time(Duration::from_secs(5))
         .measurement_time(Duration::from_secs(15));
 
@@ -449,39 +517,38 @@ fn bench_vector_store(c: &mut Criterion) {
         )
     });
 
-    group.bench_function("search_in_1000_vectors", |b| {
-        b.iter_batched(
-            || {
-                let dir = tempfile::tempdir().unwrap();
-                let mut store = ivygrep::vector_store::VectorStore::open(
-                    &dir.path().join("bench.usearch"),
-                    EMBEDDING_DIMENSIONS,
-                    ivygrep::vector_store::ScalarKind::F32,
-                )
-                .unwrap();
-                for i in 0..1000u64 {
-                    let mut v = vec![0.0f32; EMBEDDING_DIMENSIONS];
-                    v[(i as usize) % EMBEDDING_DIMENSIONS] = 1.0;
-                    store.upsert(i, v);
-                }
-                store.save().unwrap();
+    let search_dir = tempfile::tempdir().unwrap();
+    let mut search_store = ivygrep::vector_store::VectorStore::open(
+        &search_dir.path().join("bench.usearch"),
+        EMBEDDING_DIMENSIONS,
+        ivygrep::vector_store::ScalarKind::F32,
+    )
+    .unwrap();
+    for i in 0..1000u64 {
+        let mut v = vec![0.0f32; EMBEDDING_DIMENSIONS];
+        v[(i as usize) % EMBEDDING_DIMENSIONS] = 1.0;
+        search_store.upsert(i, v);
+    }
+    search_store.save().unwrap();
+    drop(search_store);
+    let search_path = search_dir.path().join("bench.usearch");
+    let mut query = vec![0.0f32; EMBEDDING_DIMENSIONS];
+    query[0] = 1.0;
 
-                let mut query = vec![0.0f32; EMBEDDING_DIMENSIONS];
-                query[0] = 1.0;
-                (dir, query)
-            },
-            |(dir, query)| {
+    group.bench_function("search_in_1000_vectors", |b| {
+        b.iter_custom(|iters| {
+            repeated_per_op(iters, VECTOR_SEARCH_REPETITIONS, |_| {
                 let store = ivygrep::vector_store::VectorStore::open_readonly(
-                    &dir.path().join("bench.usearch"),
+                    black_box(&search_path),
                     EMBEDDING_DIMENSIONS,
                     ivygrep::vector_store::ScalarKind::F32,
                 )
                 .unwrap();
-                let results = store.search(&query, 10);
+                let results = store.search(black_box(&query), 10);
                 assert!(!results.is_empty());
-            },
-            BatchSize::LargeInput,
-        )
+                black_box(results);
+            })
+        })
     });
 
     group.finish();
