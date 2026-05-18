@@ -37,6 +37,7 @@ EOF
   echo "Available sessions:"
   echo "  ./build.sh      Build ivygrep binary with selected profile/features."
   echo "  ./test.sh       Run ivygrep validation suite."
+  echo "  ./bench.sh      Run performance benchmarks and benchmark guards."
 }
 
 run() {
@@ -141,7 +142,7 @@ if ((do_shellcheck)); then
     echo "shellcheck not found; install it or pass --no-shellcheck" >&2
     exit 127
   fi
-  run shellcheck build.sh test.sh bench.sh scripts/bootstrap_stress_fixtures.sh
+  run shellcheck build.sh test.sh bench.sh scripts/bootstrap_stress_fixtures.sh scripts/e2e_procedures.sh
 fi
 
 if ((do_clippy)); then

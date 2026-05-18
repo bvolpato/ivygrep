@@ -2,6 +2,19 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.6.19] — 2026-05-18
+
+### Changed
+- **Generic relevance scoring shipped from data-driven aliases.** Query expansion now comes from the generated alias dictionary instead of hardcoded codebase-specific rules.
+- **Docs and site now match the source language registry.** Language/file-type claims are aligned with the 44 registered handlers, including Thrift, Markdown, XML, config, JSON, and text buckets.
+- **Onboarding scripts are the documented default path.** README and testing docs now point contributors to `./build.sh`, `./test.sh`, `./bench.sh`, and the documented procedure E2E smoke.
+
+### Testing
+- **Documented CLI procedures now run end-to-end in CI, release, and cross-platform E2E.** The shared smoke covers help/version/status, first-run auto-indexing, explicit add/remove, scoped search, include/exclude filters, literal search, compact output modes, and doctor checks against an isolated fixture project.
+- **Workflow smoke tests now use `ig --status`, not a search query for `status`.** This closes a false-positive E2E gap in CI, release, and cross-platform workflows.
+- **Benchmark CI now fails on benchmark execution errors and malformed/empty Criterion JSON.** Critical benchmark regressions remain enforced by the dedicated 15% guard, while dashboard alerts still comment on broader benchmark movement.
+- **Release workflow now refuses empty release notes.** Tags without a matching changelog section fail before publishing a weak release.
+
 ## [0.6.18] — 2026-05-14
 
 ### Performance

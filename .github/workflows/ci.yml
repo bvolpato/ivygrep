@@ -36,7 +36,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
 
       - name: ShellCheck scripts
-        run: shellcheck build.sh test.sh bench.sh scripts/bootstrap_stress_fixtures.sh
+        run: shellcheck build.sh test.sh bench.sh scripts/bootstrap_stress_fixtures.sh scripts/e2e_procedures.sh
 
       - name: Clippy lints
         run: cargo clippy --all-targets -- -D warnings
@@ -140,17 +140,5 @@ jobs:
           echo "==== Version ===="
           $IG_BIN --version
           
-          echo "==== Status ===="
-          $IG_BIN status
-          
-          echo "==== End-to-end Index & Search ===="
-          # Create a dummy project
-          mkdir -p /tmp/smoketest && cd /tmp/smoketest
-          echo 'fn smoke_test_marker() { println!("Found smoke test"); }' > main.rs
-          
-          # Search with literal mode (positional query, not -e)
-          $IG_BIN --literal "smoke_test_marker" main.rs
-          if ! $IG_BIN --literal "smoke_test_marker" main.rs | grep -q "smoke_test_marker"; then
-            echo "Smoke test string not found!"
-            exit 1
-          fi
+          echo "==== Documented procedure smoke ===="
+          ./scripts/e2e_procedures.sh --binary "$IG_BIN"

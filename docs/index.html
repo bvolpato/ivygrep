@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ivygrep — Semantic code search that never phones home</title>
-    <meta name="description" content="Local-first semantic code search combining BM25 lexical search with neural vector embeddings. Single-digit-ms warm daemon queries, zero telemetry, 44 languages, built-in MCP server for AI agents.">
+    <meta name="description" content="Local-first semantic code search combining BM25 lexical search with neural vector embeddings. Single-digit-ms warm daemon queries, zero telemetry, 44 language/file types, built-in MCP server for AI agents.">
     <meta name="theme-color" content="#06070a">
 
     <!-- Open Graph -->
@@ -63,7 +63,7 @@
         <div class="container hero-content">
             <div class="hero-badge slide-up">
                 <span class="badge-dot"></span>
-                v0.6.18 — daemon hot queries under 6 ms, Linux kernel indexing 10.6% faster
+                v0.6.19 — daemon hot queries under 6 ms, Linux kernel indexing 10.6% faster
             </div>
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" onerror="this.src='assets/logo.png'"/>
@@ -119,7 +119,7 @@
             <div class="proof-strip">
                 <div class="proof-item">
                     <span class="proof-value">44</span>
-                    <span class="proof-label">Languages</span>
+                    <span class="proof-label">Language/file types</span>
                 </div>
                 <div class="proof-divider"></div>
                 <div class="proof-item">
@@ -349,6 +349,7 @@
             </div>
             <p class="benchmark-note">grep and rg scan every file at query time. ivygrep queries a pre-built index. Latest retained runs measured 20 daemon hits and 20 local hits, preserving query behavior while cutting warm daemon p95 from ~455 ms to single-digit milliseconds.</p>
             <p class="benchmark-note"><a href="benchmarks/daemon-hot-query-cache.html">Daemon hot-query benchmark</a> · <a href="benchmarks/linux-kernel-autoresearch-2026-05-13.html">Linux kernel indexing benchmark</a> · <a href="dev/bench/">CI benchmark dashboard</a></p>
+            <p class="benchmark-note">Validation is automated: CI runs fmt, ShellCheck, clippy, unit/integration tests, documented procedure E2E, labeled relevance checks, and benchmark regression gates.</p>
         </div>
 
         <!-- Stats + Concurrent Search -->
@@ -400,7 +401,7 @@
     <section id="languages" class="container relative z-10 section-spacing">
         <div class="section-header">
             <span class="section-tag">Language Support</span>
-            <h2 class="section-title text-center">44 Languages, 20 Tree-sitter ASTs</h2>
+            <h2 class="section-title text-center">44 Language/File Types, 20 Tree-sitter ASTs</h2>
             <p class="text-center subtitle-small">Tree-sitter languages get function/class-level structural chunking. All others get intelligent heuristic chunking with full index coverage.</p>
         </div>
 
@@ -433,9 +434,9 @@
             <div class="lang-category">
                 <h4>📐 Heuristic Chunking <span class="lang-badge lang-badge-muted">24 more</span></h4>
                 <div class="lang-tags">
-                    <span class="lang-tag">Kotlin</span>
                     <span class="lang-tag">Zig</span>
                     <span class="lang-tag">Nim</span>
+                    <span class="lang-tag">Kotlin</span>
                     <span class="lang-tag">Groovy</span>
                     <span class="lang-tag">Elixir</span>
                     <span class="lang-tag">Erlang</span>
@@ -444,17 +445,19 @@
                     <span class="lang-tag">Julia</span>
                     <span class="lang-tag">PowerShell</span>
                     <span class="lang-tag">SQL</span>
-                    <span class="lang-tag">GraphQL</span>
-                    <span class="lang-tag">HTML</span>
-                    <span class="lang-tag">CSS</span>
                     <span class="lang-tag">Protobuf</span>
+                    <span class="lang-tag">Thrift</span>
+                    <span class="lang-tag">GraphQL</span>
                     <span class="lang-tag">Terraform</span>
-                    <span class="lang-tag">TOML</span>
-                    <span class="lang-tag">YAML</span>
-                    <span class="lang-tag">JSON</span>
                     <span class="lang-tag">Dockerfile</span>
                     <span class="lang-tag">Makefile</span>
-                    <span class="lang-tag">+ unknown exts</span>
+                    <span class="lang-tag">Markdown</span>
+                    <span class="lang-tag">HTML</span>
+                    <span class="lang-tag">CSS</span>
+                    <span class="lang-tag">XML</span>
+                    <span class="lang-tag">Config</span>
+                    <span class="lang-tag">JSON</span>
+                    <span class="lang-tag">Text</span>
                 </div>
             </div>
         </div>
@@ -496,8 +499,8 @@
                         Gemini CLI
                     </h4>
                     <div class="agent-cmd">
-                        <code>gemini mcp add --transport stdio ig ig --mcp</code>
-                        <button class="agent-copy-btn" data-copy="gemini mcp add --transport stdio ig ig --mcp" onclick="copyAgentCmd(this)">Copy</button>
+                        <code>gemini mcp add --scope user --transport stdio ig ig --mcp</code>
+                        <button class="agent-copy-btn" data-copy="gemini mcp add --scope user --transport stdio ig ig --mcp" onclick="copyAgentCmd(this)">Copy</button>
                     </div>
                 </div>
                 <div class="agent-card glass-card fade-in-scroll">
@@ -640,7 +643,7 @@ esac
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md" class="footer-link">Changelog</a>
                 </div>
                 <div class="footer-copy">
-                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v0.6.18</p>
+                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v0.6.19</p>
                 </div>
             </div>
         </div>

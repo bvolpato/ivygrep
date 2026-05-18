@@ -77,33 +77,10 @@ jobs:
         env:
           RUSTFLAGS: "-D warnings -C target-cpu=x86-64-v3"
 
-      - name: E2E smoke test
+      - name: E2E documented procedures
         run: |
           IG_BIN="$PWD/target/release/ig"
-          E2E_DIR=$(mktemp -d)
-
-          echo "::group::Version & Status"
-          $IG_BIN --version
-          $IG_BIN status
-          echo "::endgroup::"
-
-          echo "::group::Index & Search"
-          cd "$E2E_DIR"
-          echo 'fn linux_e2e_marker() { println!("hello"); }' > main.rs
-          echo 'fn helper_function() { }' > helper.rs
-
-          # Test: explicit index first, then search
-          $IG_BIN --add .
-          $IG_BIN status
-
-          # Test: literal search against indexed workspace
-          $IG_BIN --literal "linux_e2e_marker" main.rs | grep -q "linux_e2e_marker" || { echo "FAIL: literal search"; exit 1; }
-
-          # Test: cleanup
-          $IG_BIN --rm .
-          echo "::endgroup::"
-
-          echo "✅ All E2E checks passed on $(uname -m)"
+          ./scripts/e2e_procedures.sh --binary "$IG_BIN"
 
   native-macos-arm64:
     name: "E2E: macOS ARM64 (native)"
@@ -141,29 +118,10 @@ jobs:
         env:
           RUSTFLAGS: "-D warnings"
 
-      - name: E2E smoke test
+      - name: E2E documented procedures
         run: |
           IG_BIN="$PWD/target/release/ig"
-          E2E_DIR=$(mktemp -d)
-
-          echo "::group::Version & Status"
-          $IG_BIN --version
-          $IG_BIN status
-          echo "::endgroup::"
-
-          echo "::group::Index & Search"
-          cd "$E2E_DIR"
-          echo 'pub fn macos_arm64_marker() -> &str { "verified" }' > lib.rs
-
-          # Index first, then search
-          $IG_BIN --add .
-          $IG_BIN status
-          $IG_BIN --literal "macos_arm64_marker" lib.rs | grep -q "macos_arm64_marker" || { echo "FAIL: literal search"; exit 1; }
-
-          $IG_BIN --rm .
-          echo "::endgroup::"
-
-          echo "✅ All E2E checks passed on $(uname -m)"
+          ./scripts/e2e_procedures.sh --binary "$IG_BIN"
 
   native-macos-intel:
     name: "E2E: macOS x86_64 (native)"
@@ -201,20 +159,10 @@ jobs:
         env:
           RUSTFLAGS: "-D warnings"
 
-      - name: E2E smoke test
+      - name: E2E documented procedures
         run: |
           IG_BIN="$PWD/target/release/ig"
-          E2E_DIR=$(mktemp -d)
-          $IG_BIN --version
-
-          cd "$E2E_DIR"
-          echo 'fn intel_marker() { }' > test.rs
-          $IG_BIN --literal "intel_marker" test.rs | grep -q "intel_marker" || { echo "FAIL"; exit 1; }
-          $IG_BIN --add .
-          $IG_BIN status
-          $IG_BIN --rm .
-
-          echo "✅ All E2E checks passed on $(uname -m)"
+          ./scripts/e2e_procedures.sh --binary "$IG_BIN"
 
   # ── Cross-architecture via QEMU (slower but covers aarch64 on Linux) ─
   cross-linux-aarch64:
@@ -274,25 +222,7 @@ jobs:
               echo "=== Architecture ==="
               uname -m
 
-              echo "=== Version ==="
-              $IG --version
-
-              echo "=== Status ==="
-              $IG status
-
-              echo "=== Literal Search ==="
-              mkdir -p /tmp/e2e
-              echo "fn aarch64_e2e_marker() { }" > /tmp/e2e/test.rs
-              $IG --literal "aarch64_e2e_marker" /tmp/e2e/test.rs
-              $IG --literal "aarch64_e2e_marker" /tmp/e2e/test.rs | grep -q "aarch64_e2e_marker"
-
-              echo "=== Index & Search ==="
-              cd /tmp/e2e
-              $IG --add .
-              $IG status
-              $IG --rm .
-
-              echo "✅ All E2E checks passed on $(uname -m)"
+              sh scripts/e2e_procedures.sh --binary "$IG"
             '
 
   # ── Hash-only mode (no neural/ONNX — tests portability) ─────────────
@@ -326,21 +256,10 @@ jobs:
         env:
           RUSTFLAGS: "-D warnings"
 
-      - name: E2E smoke test (hash-only)
+      - name: E2E documented procedures (hash-only)
         run: |
           IG_BIN="$PWD/target/release/ig"
-          E2E_DIR=$(mktemp -d)
-          $IG_BIN --version
-
-          cd "$E2E_DIR"
-          echo 'fn hash_only_marker() { }' > test.rs
-          $IG_BIN --literal "hash_only_marker" test.rs | grep -q "hash_only_marker" || { echo "FAIL"; exit 1; }
-
-          $IG_BIN --add .
-          $IG_BIN status
-          $IG_BIN --rm .
-
-          echo "✅ Hash-only E2E passed"
+          ./scripts/e2e_procedures.sh --binary "$IG_BIN"
 
   # ── Summary ─────────────────────────────────────────────────────────
   summary:

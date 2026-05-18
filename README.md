@@ -162,8 +162,8 @@ Traditional tools require you to know _exactly_ what you're looking for. ivygrep
 | Incremental indexing | ❌ | ❌ | ✅ |
 | MCP server for AI agents | ❌ | ❌ | ✅ |
 
-### 🌍 44 Languages Supported
-ivygrep indexes and structurally chunks 44 languages today:
+### 🌍 44 Language/File Types Supported
+ivygrep indexes and structurally chunks 44 language/file types today:
 
 - **Tree-sitter AST chunking (20 languages):** Rust, Python, Go, JavaScript, TypeScript, Java, C, C++, C#, Scala, PHP, Ruby, Swift, Bash, Haskell, OCaml, Lua, Dart, Objective-C, Perl
 - **Heuristic structural chunking:** the remaining supported languages below
@@ -172,7 +172,7 @@ ivygrep indexes and structurally chunks 44 languages today:
 - **Backend:** Python, Go, Java, Kotlin, Scala, C#, Ruby, PHP, Perl, Groovy
 - **Web & Mobile:** JavaScript, TypeScript, HTML, CSS, GraphQL, Swift, Dart, Objective-C
 - **Functional:** Haskell, OCaml, Elixir, Erlang, Clojure
-- **Data, Scripting & Config:** R, Julia, Bash, PowerShell, Lua, SQL, Protobuf, Terraform, TOML, YAML, JSON, Dockerfile, Makefile
+- **Data, Scripting & Config:** R, Julia, Bash/Shell, PowerShell, Lua, SQL, Protobuf, Thrift, Terraform, Dockerfile, Makefile, Markdown, XML, TOML/YAML/INI/env config, JSON, plain text
 
 Unknown extensions are auto-detected and indexed as text.
 
@@ -244,14 +244,23 @@ ig --mcp                           # start MCP server (stdio)
 ## 🧪 Development
 
 ```bash
-cargo fmt && cargo clippy --all-targets -- -D warnings && cargo test
+./test.sh           # fmt, ShellCheck, clippy, unit/integration tests
+./build.sh --locked # release binary, Cargo.lock unchanged
+./bench.sh          # critical Criterion benchmark
 ```
-The test suite covers unit tests, CLI snapshots, concurrency, golden queries, labeled relevance metrics, incremental CRUD, property-based Merkle invariants, and stress/benchmarks.
+The test suite covers unit tests, CLI snapshots, concurrency, golden queries, labeled relevance metrics, incremental CRUD, MCP, daemon recovery, git/worktree behavior, property-based Merkle invariants, and benchmark guards.
+
+### End-to-end procedures
+```bash
+./build.sh
+./scripts/e2e_procedures.sh --binary ./target/release/ig
+```
+This smoke test runs the documented CLI setup/search procedures against a throwaway project and isolated `IVYGREP_HOME`.
 
 ### Stress testing
 ```bash
 ./scripts/bootstrap_stress_fixtures.sh
-cargo test --test stress_harness -- --ignored --nocapture
+./test.sh --stress
 ```
 
 ## Roadmap

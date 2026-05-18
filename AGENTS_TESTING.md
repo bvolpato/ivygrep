@@ -26,6 +26,13 @@
 ./bench.sh --help
 ```
 
+## End-to-End Procedures
+
+```bash
+./build.sh
+./scripts/e2e_procedures.sh --binary ./target/release/ig
+```
+
 ## Stress Tests (requires fixture download)
 
 ```bash

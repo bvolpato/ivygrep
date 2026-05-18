@@ -100,19 +100,13 @@ jobs:
             $IG_BIN --help > /dev/null
           fi
 
-          # For native runners, do a full index+search smoke test.
-          # Cross-compiled aarch64 binaries can't run natively on x86 runners,
-          # so we skip the heavy test for those (covered by e2e-cross-platform.yml).
-          if [[ "${{ matrix.use_cross }}" != "true" ]]; then
-            mkdir -p /tmp/release-smoke && cd /tmp/release-smoke
-            echo 'fn release_smoke_test_marker() { println!("works"); }' > main.rs
-            $IG_BIN --literal "release_smoke_test_marker" main.rs | grep -q "release_smoke_test_marker" || { echo "FAIL: literal search"; exit 1; }
-            $IG_BIN --add .
-            $IG_BIN status
-            $IG_BIN --rm .
-            echo "✅ Release smoke test passed on $(uname -m)"
+          # Cross-compiled Linux aarch64 binaries are tested under QEMU in
+          # e2e-cross-platform.yml. Every runnable release binary must pass the
+          # documented CLI procedure smoke test here.
+          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-musl" ]]; then
+            echo "⏭️ Skipping index test for Linux aarch64 release binary (tested under QEMU in e2e-cross-platform.yml)"
           else
-            echo "⏭️ Skipping index test for cross-compiled binary (tested in e2e-cross-platform.yml)"
+            ./scripts/e2e_procedures.sh --binary "$IG_BIN"
           fi
 
       - name: Package archive
@@ -192,6 +186,10 @@ jobs:
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
           awk -v ver="\\[${VERSION}\\]" '/^## / { if (p) { exit }; if (index($2, ver)) { p=1; next } } p' CHANGELOG.md > release_notes.md
+          if [ ! -s release_notes.md ]; then
+            echo "No CHANGELOG.md section found for ${VERSION}" >&2
+            exit 1
+          fi
           echo "notes_file=release_notes.md" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release

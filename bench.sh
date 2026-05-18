@@ -35,6 +35,11 @@ Examples:
   ./bench.sh --linux-kernel /home/bruno/githubworkspace/linux --skip-index
   ./bench.sh --linux-relevance /home/bruno/githubworkspace/linux --skip-build --skip-index
 EOF
+  echo
+  echo "Available sessions:"
+  echo "  ./build.sh      Build ivygrep binary with selected profile/features."
+  echo "  ./test.sh       Run ivygrep validation suite."
+  echo "  ./bench.sh      Run performance benchmarks and benchmark guards."
 }
 
 run() {
