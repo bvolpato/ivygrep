@@ -11,6 +11,7 @@
 
 ```bash
 brew update
+brew tap bvolpato/tap
 brew info bvolpato/tap/ivygrep
 ```
 
