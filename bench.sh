@@ -38,6 +38,10 @@ Examples:
   ./bench.sh --linux-relevance /home/bruno/githubworkspace/linux --skip-build --skip-index
 EOF
   echo
+  echo "Note:"
+  echo "  Criterion reports per-operation latency. Microbenchmarks run repeated"
+  echo "  logical operations so timed samples last long enough to be stable."
+  echo
   echo "Available sessions:"
   echo "  ./build.sh      Build ivygrep binary with selected profile/features."
   echo "  ./test.sh       Run ivygrep validation suite."

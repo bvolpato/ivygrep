@@ -249,6 +249,7 @@ ig --mcp                           # start MCP server (stdio)
 ./bench.sh          # critical Criterion benchmark, no stale local baseline comparison
 ```
 The test suite covers unit tests, CLI snapshots, concurrency, golden queries, labeled relevance metrics, incremental CRUD, MCP, daemon recovery, git/worktree behavior, property-based Merkle invariants, and benchmark guards.
+Benchmark output reports per-operation latency; short-looking numbers are repeated inside Criterion so actual timed samples remain long enough to be stable.
 
 ### End-to-end procedures
 ```bash

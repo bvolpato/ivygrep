@@ -28,6 +28,8 @@
 
 `./bench.sh` uses a temporary Criterion baseline by default so smoke runs do not report stale `target/criterion` regressions. Use `./bench.sh --keep-baseline` only when comparing against local Criterion history.
 
+Benchmark output reports per-operation latency. Microbenchmarks run repeated logical operations so actual timed samples last long enough to be stable.
+
 ## End-to-End Procedures
 
 ```bash

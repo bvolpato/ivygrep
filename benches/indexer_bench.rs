@@ -12,9 +12,13 @@ use std::hint::black_box;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+// Criterion reports per-operation latency. These repetitions keep actual timed
+// sample windows long enough for stable measurements without changing units.
 const CHUNK_REPETITIONS: u32 = 8;
 const HASH_EMBED_SINGLE_REPETITIONS: u32 = 1_024;
 const HASH_EMBED_BATCH_REPETITIONS: u32 = 32;
+const INCREMENTAL_REINDEX_REPETITIONS: u32 = 4;
+const SEARCH_200_REPETITIONS: u32 = 8;
 const HYBRID_SEARCH_REPETITIONS: u32 = 4;
 const SIMPLE_SEARCH_REPETITIONS: u32 = 16;
 const VECTOR_SEARCH_REPETITIONS: u32 = 128;
@@ -150,15 +154,15 @@ fn bench_indexer(c: &mut Criterion) {
         )
     });
 
+    let (_staging, home, workspace, model) = setup_indexed_workspace(200);
     group.bench_function("incremental_reindex_no_change", |b| {
-        b.iter_batched(
-            || setup_indexed_workspace(200),
-            |(_staging, _home, workspace, model)| {
+        b.iter_custom(|iters| {
+            unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+            repeated_per_op(iters, INCREMENTAL_REINDEX_REPETITIONS, |_| {
                 let summary = index_workspace(&workspace, &model).unwrap();
                 assert_eq!(summary.indexed_files, 0);
-            },
-            BatchSize::LargeInput,
-        )
+            })
+        })
     });
 
     group.finish();
@@ -335,33 +339,38 @@ fn bench_search(c: &mut Criterion) {
         .warm_up_time(Duration::from_secs(5))
         .measurement_time(Duration::from_secs(15));
 
+    let (_staging, _home, workspace, model) = setup_indexed_workspace(200);
+    let options = SearchOptions::default();
+
     group.bench_function("hybrid_search_200_files", |b| {
-        b.iter_batched(
-            || setup_indexed_workspace(200),
-            |(_staging, _home, workspace, model)| {
+        b.iter_custom(|iters| {
+            repeated_per_op(iters, SEARCH_200_REPETITIONS, |_| {
                 let hits = hybrid_search(
-                    &workspace,
-                    "calculate tax",
+                    black_box(&workspace),
+                    black_box("calculate tax"),
                     Some(&model as &dyn ivygrep::embedding::EmbeddingModel),
-                    &SearchOptions::default(),
+                    black_box(&options),
                 )
                 .unwrap();
                 assert!(!hits.is_empty());
-            },
-            BatchSize::LargeInput,
-        )
+                black_box(hits);
+            })
+        })
     });
 
     group.bench_function("literal_search_200_files", |b| {
-        b.iter_batched(
-            || setup_indexed_workspace(200),
-            |(_staging, _home, workspace, _model)| {
-                let hits =
-                    literal_search(&workspace, "calculate_tax", &SearchOptions::default()).unwrap();
+        b.iter_custom(|iters| {
+            repeated_per_op(iters, SEARCH_200_REPETITIONS, |_| {
+                let hits = literal_search(
+                    black_box(&workspace),
+                    black_box("calculate_tax"),
+                    black_box(&options),
+                )
+                .unwrap();
                 assert!(!hits.is_empty());
-            },
-            BatchSize::LargeInput,
-        )
+                black_box(hits);
+            })
+        })
     });
 
     group.finish();
@@ -374,13 +383,14 @@ fn bench_regex_search(c: &mut Criterion) {
         .warm_up_time(Duration::from_secs(5))
         .measurement_time(Duration::from_secs(15));
 
+    let (_staging, _home, workspace, _model) = setup_indexed_workspace(200);
+
     group.bench_function("regex_200_files", |b| {
-        b.iter_batched(
-            || setup_indexed_workspace(200),
-            |(_staging, _home, workspace, _model)| {
+        b.iter_custom(|iters| {
+            repeated_per_op(iters, SEARCH_200_REPETITIONS, |_| {
                 let hits = ivygrep::regex_search::regex_search(
-                    &workspace,
-                    r"calculate_tax",
+                    black_box(&workspace),
+                    black_box(r"calculate_tax"),
                     Some(50),
                     None,
                     &[],
@@ -389,9 +399,9 @@ fn bench_regex_search(c: &mut Criterion) {
                 )
                 .unwrap();
                 assert!(!hits.is_empty());
-            },
-            BatchSize::LargeInput,
-        )
+                black_box(hits);
+            })
+        })
     });
 
     group.finish();
