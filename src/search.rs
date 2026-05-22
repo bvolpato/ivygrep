@@ -798,18 +798,22 @@ pub fn hybrid_search_with_context(
         || ctx.base_neural_vectors.as_ref().map_or(0, |v| v.size()) > 0;
 
     // Neural (MiniLM, 384-dim) embeddings are far higher quality than the
-    // 256-bucket hash embeddings. When neural vectors are available for this
-    // query, use them exclusively — searching the hash store as well only
-    // pollutes the candidate pool with low-quality token-overlap matches.
-    // The hash store is a fallback for when neural enhancement hasn't run.
+    // 256-bucket hash embeddings, so when neural vectors exist they should
+    // dominate. But neural enhancement is incremental/resumable, so a partial
+    // neural store is a normal state: dropping hash entirely would lose
+    // semantic coverage for chunks not yet neural-embedded. Instead, keep hash
+    // as a low-weight fallback whenever neural is present (the per-chunk merge
+    // takes the max, so neural wins wherever it covers a chunk), and use hash
+    // at full weight only when there is no neural store at all.
     let neural_available =
         embedding_model.is_some_and(|m| m.dimensions() == 384) && has_neural_vectors;
+    let hash_weight = if neural_available { 0.3 } else { 1.0 };
 
     if embedding_model.is_some() && (has_hash_vectors || has_neural_vectors) {
         let mut semantic_by_id = HashMap::<String, (IndexedChunk, f32)>::new();
         let semantic_query_text = build_semantic_query_text(trimmed);
 
-        if has_hash_vectors && !neural_available {
+        if has_hash_vectors {
             // Reuse the caller's embedding_model to embed the query for hash
             // vector search — avoids rebuilding a HashEmbeddingModel per search.
             static SEARCH_HASH_MODEL: std::sync::OnceLock<crate::embedding::HashEmbeddingModel> =
@@ -826,7 +830,7 @@ pub fn hybrid_search_with_context(
                 ctx.hash_vectors.as_ref(),
                 ctx.base_hash_vectors.as_ref(),
             )?;
-            merge_semantic_candidates(&mut semantic_by_id, hash_hits, 1.0);
+            merge_semantic_candidates(&mut semantic_by_id, hash_hits, hash_weight);
         }
 
         if let Some(model) = embedding_model
