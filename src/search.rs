@@ -1602,7 +1602,14 @@ fn fuse_rrf(
     const FILE_STEM_WEIGHT: f32 = 0.50;
     const DEFINITION_NAME_BONUS: f32 = 0.25;
     const LOCATION_INTENT_WEIGHT: f32 = 0.20;
-    const PATH_EXACT_MATCH_WEIGHT: f32 = 3.0;
+    // Path-exact matches now also feed their own ranked RRF list (see the
+    // `path` pass above), so this additive boost no longer needs to be large
+    // enough to single-handedly win — it was 3.0, ~60x the base RRF score.
+    const PATH_EXACT_MATCH_WEIGHT: f32 = 0.8;
+    // Bound the total additive boost relative to the fused base score so
+    // boosts perturb the RRF ranking rather than replace it.
+    const MAX_BOOST_RATIO: f32 = 3.0;
+    const MAX_BOOST_FLOOR: f32 = 0.25;
 
     let query_tokens = expanded_query_tokens(query_text);
     let location_intent = has_location_intent(query_text);
@@ -1696,32 +1703,43 @@ fn fuse_rrf(
             // redundantly in every boost function.
             let bctx = ChunkBoostContext::new(&chunk);
 
-            let mut score = base_score + literal_match_boost(query_text, &bctx);
+            // Accumulate signal boosts separately from the RRF base so they can
+            // be bounded. Previously these were added directly and several were
+            // 10-60x the base RRF score (~0.05), so a single boost could
+            // override the fused rank signal entirely.
+            let mut additive_boost = literal_match_boost(query_text, &bctx);
 
             let coverage = if !query_tokens.is_empty() {
                 term_coverage_boost(&query_tokens, &bctx)
             } else {
                 0.0
             };
-            score += coverage * TERM_COVERAGE_WEIGHT;
+            additive_boost += coverage * TERM_COVERAGE_WEIGHT;
 
             if !query_tokens.is_empty() {
-                score += path_segment_boost(&query_tokens, &bctx) * PATH_SEGMENT_WEIGHT;
+                additive_boost += path_segment_boost(&query_tokens, &bctx) * PATH_SEGMENT_WEIGHT;
             }
 
-            score += path_exact_match_boost(query_text, &bctx) * PATH_EXACT_MATCH_WEIGHT;
+            additive_boost += path_exact_match_boost(query_text, &bctx) * PATH_EXACT_MATCH_WEIGHT;
 
             if !query_tokens.is_empty() {
-                score += file_stem_boost(&query_tokens, &bctx) * FILE_STEM_WEIGHT;
+                additive_boost += file_stem_boost(&query_tokens, &bctx) * FILE_STEM_WEIGHT;
             }
 
             if !query_tokens.is_empty() {
-                score += definition_name_boost(&query_tokens, &bctx) * DEFINITION_NAME_BONUS;
+                additive_boost += definition_name_boost(&query_tokens, &bctx) * DEFINITION_NAME_BONUS;
             }
 
             if location_intent {
-                score += location_intent_boost(&chunk, &bctx) * LOCATION_INTENT_WEIGHT;
+                additive_boost += location_intent_boost(&chunk, &bctx) * LOCATION_INTENT_WEIGHT;
             }
+
+            // Keep RRF as the primary ranking signal: cap the total additive
+            // boost so it perturbs the fused base score rather than dominating
+            // it. The cap scales with the base (with a small floor so even
+            // weak-base candidates get a meaningful, bounded lift).
+            let boost_cap = (base_score * MAX_BOOST_RATIO).max(MAX_BOOST_FLOOR);
+            let mut score = base_score + additive_boost.min(boost_cap);
 
             if !source_set.contains("lexical") && !source_set.contains("literal") {
                 score *= SEMANTIC_ONLY_PENALTY;
