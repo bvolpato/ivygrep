@@ -29,6 +29,14 @@ pub struct Workspace {
     pub base_index_dir: Option<PathBuf>,
 }
 
+/// On-disk index format version. Bump when a stored-layout change makes an
+/// existing index incompatible with the current code so it must be rebuilt.
+///
+/// History:
+///   1 — vector keys derived from content hash (implicit; pre-versioning)
+///   2 — vector keys derived from the unique chunk id (#27)
+pub const INDEX_FORMAT_VERSION: u32 = 2;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceMetadata {
     pub id: String,
@@ -206,6 +214,31 @@ impl Workspace {
 
     pub fn vector_neural_path(&self) -> PathBuf {
         self.index_dir.join("vectors_neural.usearch")
+    }
+
+    /// Sentinel recording the on-disk index format version. Bumped when the
+    /// stored layout changes incompatibly so that an upgraded-but-not-rebuilt
+    /// index is detected as stale and rebuilt before being served.
+    pub fn index_format_version_path(&self) -> PathBuf {
+        self.index_dir.join("index_format_version")
+    }
+
+    /// Returns the index format version recorded on disk, or 0 if the sentinel
+    /// is missing/unreadable (i.e. an index written before versioning existed).
+    pub fn read_index_format_version(&self) -> u32 {
+        std::fs::read_to_string(self.index_format_version_path())
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    /// Records the current index format version. Call after a successful index
+    /// commit so the index is marked as written with the current layout.
+    pub fn write_index_format_version(&self) -> std::io::Result<()> {
+        std::fs::write(
+            self.index_format_version_path(),
+            INDEX_FORMAT_VERSION.to_string(),
+        )
     }
 
     // ── Overlay paths (worktree-only, thin per-worktree stores) ──────────
@@ -492,6 +525,17 @@ impl Workspace {
         let (chunk_count, file_count) = read_sqlite_counts(&self.index_dir);
 
         if chunk_count > 0 {
+            // Force a rebuild if the index was written in an older on-disk
+            // format. Without this, an upgraded-but-not-rebuilt index keeps
+            // serving queries with an incompatible layout (e.g. vector keys
+            // derived differently), silently degrading results.
+            let format_version = self.read_index_format_version();
+            if format_version < INDEX_FORMAT_VERSION {
+                issues.push(format!(
+                    "index format outdated (v{format_version} < v{INDEX_FORMAT_VERSION}); rebuild required"
+                ));
+            }
+
             if !dir_has_entries(&self.tantivy_dir()) {
                 issues.push("Tantivy index directory is empty despite indexed chunks".to_string());
             }

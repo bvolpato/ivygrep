@@ -448,3 +448,38 @@ fn rewrite_with_same_content_is_noop() {
     );
     assert_eq!(s.deleted_files, 0);
 }
+
+// ---------------------------------------------------------------------------
+// INDEX FORMAT VERSION: an outdated on-disk format forces a rebuild
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn outdated_index_format_forces_rebuild() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    fs::write(root.path().join("file.rs"), "fn a() -> usize { 1 }\n").unwrap();
+    setup_and_index(root.path(), home.path());
+
+    let ws = workspace_for(root.path());
+    assert!(
+        !ws.quick_index_health().needs_rebuild(),
+        "freshly indexed workspace should be healthy"
+    );
+
+    // Simulate an index written by an older version (pre-versioning): drop the
+    // format sentinel. Health must now flag it for rebuild.
+    fs::remove_file(ws.index_format_version_path()).unwrap();
+    assert!(
+        ws.quick_index_health().needs_rebuild(),
+        "index missing the format sentinel must be rebuilt"
+    );
+
+    // Re-indexing restores the sentinel and clears the rebuild flag.
+    setup_and_index(root.path(), home.path());
+    assert!(
+        !ws.quick_index_health().needs_rebuild(),
+        "re-index should restore the current format and health"
+    );
+}

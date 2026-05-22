@@ -766,6 +766,9 @@ fn index_workspace_inner(
         },
     };
     workspace.write_metadata(&metadata)?;
+    // Mark the index as written in the current on-disk format so an upgrade
+    // that changes the layout forces a rebuild (see INDEX_FORMAT_VERSION).
+    workspace.write_index_format_version()?;
 
     // Persist the Merkle snapshot AFTER all stores are committed and metadata
     // is written. This ensures the snapshot is a high-water mark: if we crash
