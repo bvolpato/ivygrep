@@ -161,8 +161,7 @@ impl MerkleSnapshot {
 
                 // Content-hash when explicitly requested, or (in mtime mode)
                 // for small files where size+mtime would miss content edits.
-                let use_content_hash =
-                    content_based || metadata.len() <= CONTENT_HASH_MAX_BYTES;
+                let use_content_hash = content_based || metadata.len() <= CONTENT_HASH_MAX_BYTES;
                 let file_hash = if use_content_hash {
                     let content = match fs::read(path) {
                         Ok(c) => c,

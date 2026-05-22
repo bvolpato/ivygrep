@@ -22,6 +22,8 @@ pub fn acquire_daemon_lock() -> anyhow::Result<Option<std::fs::File>> {
         .create(true)
         .read(true)
         .write(true)
+        // The lock file is a pure flock anchor; never truncate its contents.
+        .truncate(false)
         .open(&path)?;
     for _ in 0..20 {
         match fs2::FileExt::try_lock_exclusive(&file) {

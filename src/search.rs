@@ -802,7 +802,8 @@ pub fn hybrid_search_with_context(
     // query, use them exclusively — searching the hash store as well only
     // pollutes the candidate pool with low-quality token-overlap matches.
     // The hash store is a fallback for when neural enhancement hasn't run.
-    let neural_available = embedding_model.is_some_and(|m| m.dimensions() == 384) && has_neural_vectors;
+    let neural_available =
+        embedding_model.is_some_and(|m| m.dimensions() == 384) && has_neural_vectors;
 
     if embedding_model.is_some() && (has_hash_vectors || has_neural_vectors) {
         let mut semantic_by_id = HashMap::<String, (IndexedChunk, f32)>::new();
@@ -1727,7 +1728,8 @@ fn fuse_rrf(
             }
 
             if !query_tokens.is_empty() {
-                additive_boost += definition_name_boost(&query_tokens, &bctx) * DEFINITION_NAME_BONUS;
+                additive_boost +=
+                    definition_name_boost(&query_tokens, &bctx) * DEFINITION_NAME_BONUS;
             }
 
             if location_intent {
