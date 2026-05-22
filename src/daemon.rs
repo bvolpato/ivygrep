@@ -342,6 +342,18 @@ impl DaemonState {
 pub async fn run_daemon() -> Result<()> {
     config::ensure_app_dirs()?;
 
+    // Single-instance guard: acquire an exclusive lock before binding the
+    // socket so two daemons can't both bind and steal it from each other
+    // (which would leave the loser a zombie still holding file watchers).
+    // Held for the daemon's lifetime.
+    let _daemon_lock = match crate::ipc::acquire_daemon_lock()? {
+        Some(file) => file,
+        None => {
+            daemon_log("another ivygrep daemon is already running; exiting");
+            return Ok(());
+        }
+    };
+
     let (listener, socket_path) = crate::ipc::bind().await?;
     daemon_log(&format!(
         "ivygrep daemon listening on {}",
