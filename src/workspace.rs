@@ -522,6 +522,24 @@ impl Workspace {
             issues.push("index metadata never recorded a completed run".to_string());
         }
 
+        // For worktree overlays, queries also read chunks/vectors from the
+        // base index. If the base predates the current format, the overlay
+        // serves incompatible base data even when its own sentinel is current,
+        // so force a rebuild (the overlay-index path migrates the base too).
+        if let Some(base_dir) = &self.base_index_dir
+            && base_dir.join("metadata.sqlite3").exists()
+        {
+            let base_format = std::fs::read_to_string(base_dir.join("index_format_version"))
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .unwrap_or(0);
+            if base_format < INDEX_FORMAT_VERSION {
+                issues.push(format!(
+                    "base index format outdated (v{base_format} < v{INDEX_FORMAT_VERSION}); rebuild required"
+                ));
+            }
+        }
+
         let (chunk_count, file_count) = read_sqlite_counts(&self.index_dir);
 
         if chunk_count > 0 {
