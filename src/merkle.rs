@@ -10,6 +10,14 @@ use std::io::IsTerminal;
 
 const MAX_INDEXABLE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
+/// In the default (mtime) build mode, files at or below this size are also
+/// content-hashed. Size+mtime alone misses content edits that preserve both
+/// (git checkout of same-size content, `cp -p`, `touch -r`, formatters,
+/// coarse network-FS mtime granularity), leaving stale chunks indexed. Reading
+/// small files is cheap relative to the cost of serving stale results; larger
+/// files keep the cheap size+mtime path.
+const CONTENT_HASH_MAX_BYTES: u64 = 1024 * 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MerkleSnapshot {
     pub root_hash: String,
@@ -151,7 +159,11 @@ impl MerkleSnapshot {
                     eprint!("\r\x1b[K  scanning files... {}", n);
                 }
 
-                let file_hash = if content_based {
+                // Content-hash when explicitly requested, or (in mtime mode)
+                // for small files where size+mtime would miss content edits.
+                let use_content_hash =
+                    content_based || metadata.len() <= CONTENT_HASH_MAX_BYTES;
+                let file_hash = if use_content_hash {
                     let content = match fs::read(path) {
                         Ok(c) => c,
                         Err(_) => return ignore::WalkState::Continue,
@@ -248,6 +260,47 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[cfg(unix)]
+    fn set_mtime(path: &Path, secs: i64) {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        let tv = libc::timeval {
+            tv_sec: secs as libc::time_t,
+            tv_usec: 0,
+        };
+        let times = [tv, tv];
+        let rc = unsafe { libc::utimes(c.as_ptr(), times.as_ptr()) };
+        assert_eq!(rc, 0, "utimes failed");
+    }
+
+    /// The default (mtime) build must still detect a content edit that
+    /// preserves both file size and mtime — the size+mtime-only class of
+    /// silently-stale files. Small files are content-hashed for this reason.
+    #[cfg(unix)]
+    #[test]
+    fn detects_same_size_content_change_with_preserved_mtime() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("same.rs");
+
+        fs::write(&file, b"fn aaaa() {}\n").unwrap();
+        set_mtime(&file, 1_600_000_000);
+        let first = MerkleSnapshot::build(root, false).unwrap();
+
+        // Same byte length, different content, identical mtime restored.
+        fs::write(&file, b"fn bbbb() {}\n").unwrap();
+        set_mtime(&file, 1_600_000_000);
+        let second = MerkleSnapshot::build(root, false).unwrap();
+
+        let diff = first.diff(&second);
+        assert!(
+            diff.added_or_modified
+                .iter()
+                .any(|(p, _)| p == Path::new("same.rs")),
+            "same-size, same-mtime content edit was not detected"
+        );
+    }
 
     #[test]
     fn merkle_diff_detects_add_modify_delete() {
