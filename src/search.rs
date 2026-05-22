@@ -795,11 +795,18 @@ pub fn hybrid_search_with_context(
     let has_neural_vectors = ctx.neural_vectors.as_ref().map_or(0, |v| v.size()) > 0
         || ctx.base_neural_vectors.as_ref().map_or(0, |v| v.size()) > 0;
 
+    // Neural (MiniLM, 384-dim) embeddings are far higher quality than the
+    // 256-bucket hash embeddings. When neural vectors are available for this
+    // query, use them exclusively — searching the hash store as well only
+    // pollutes the candidate pool with low-quality token-overlap matches.
+    // The hash store is a fallback for when neural enhancement hasn't run.
+    let neural_available = embedding_model.is_some_and(|m| m.dimensions() == 384) && has_neural_vectors;
+
     if embedding_model.is_some() && (has_hash_vectors || has_neural_vectors) {
         let mut semantic_by_id = HashMap::<String, (IndexedChunk, f32)>::new();
         let semantic_query_text = build_semantic_query_text(trimmed);
 
-        if has_hash_vectors {
+        if has_hash_vectors && !neural_available {
             // Reuse the caller's embedding_model to embed the query for hash
             // vector search — avoids rebuilding a HashEmbeddingModel per search.
             static SEARCH_HASH_MODEL: std::sync::OnceLock<crate::embedding::HashEmbeddingModel> =
