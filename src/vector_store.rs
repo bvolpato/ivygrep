@@ -177,7 +177,12 @@ impl VectorStore {
                 .zip(matches.distances.iter())
                 .map(|(key, distance)| VectorMatch {
                     key: *key,
-                    score: -distance,
+                    // usearch uses MetricKind::Cos where distance = 1 - cosine,
+                    // so recover the true cosine similarity in [-1, 1]. This is
+                    // monotonic with -distance (ranking is unchanged) but keeps
+                    // the magnitude usable by downstream score normalization,
+                    // which clamps to [0, 1].
+                    score: 1.0 - distance,
                 })
                 .collect(),
             Err(_) => vec![],
