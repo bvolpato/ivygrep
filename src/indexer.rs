@@ -1057,11 +1057,17 @@ pub fn enhance_workspace_neural(
 }
 
 fn build_indexed_chunk(chunk: Chunk, is_ignored: bool) -> IndexedChunk {
-    let vector_key = vector_key_from_content_hash(&chunk.content_hash);
+    // Key the vector by the unique chunk id, not the content hash. Content-hash
+    // keys collide whenever two chunks share identical content (license
+    // headers, boilerplate, empty files): the colliding chunks map to one
+    // usearch vector, and deleting one file removes the shared key, silently
+    // dropping a still-live chunk's vector from another file.
+    let chunk_id = chunk.id.to_string();
+    let vector_key = vector_key_from_chunk_id(&chunk_id);
     let kind = format!("{:?}", chunk.kind);
 
     IndexedChunk {
-        chunk_id: chunk.id.to_string(),
+        chunk_id,
         file_path: chunk.file_path,
         start_line: chunk.start_line,
         end_line: chunk.end_line,
@@ -1074,13 +1080,17 @@ fn build_indexed_chunk(chunk: Chunk, is_ignored: bool) -> IndexedChunk {
     }
 }
 
-fn vector_key_from_content_hash(content_hash: &str) -> u64 {
-    let digest = xxhash_rust::xxh3::xxh3_128(content_hash.as_bytes()).to_le_bytes();
+fn vector_key_from_chunk_id(chunk_id: &str) -> u64 {
+    // The chunk id is a v4 UUID string (unique per chunk), so the derived key
+    // is collision-free across chunks/files. Both the indexer and the search
+    // path (fetch_chunk_by_id) derive the key from this same string, so they
+    // agree. Mask to the positive i64 range since vector_key is stored as
+    // INTEGER (i64) in SQLite.
+    let digest = xxhash_rust::xxh3::xxh3_128(chunk_id.as_bytes()).to_le_bytes();
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&digest[..8]);
-    let mut value = u64::from_le_bytes(bytes);
-    value &= i64::MAX as u64;
-    value
+    let value = u64::from_le_bytes(bytes);
+    value & i64::MAX as u64
 }
 
 fn create_overlay_tables(conn: &Connection) -> Result<()> {
@@ -1547,7 +1557,7 @@ pub fn fetch_chunk_by_id(
         .unwrap_or(0)
         > 0;
 
-    let vector_key = vector_key_from_content_hash(&content_hash);
+    let vector_key = vector_key_from_chunk_id(&chunk_id);
 
     Some(IndexedChunk {
         chunk_id,
@@ -1581,10 +1591,37 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::EMBEDDING_DIMENSIONS;
+    use crate::chunking::{Chunk, ChunkKind};
     use crate::embedding::HashEmbeddingModel;
     use crate::workspace::Workspace;
 
     use super::*;
+
+    #[test]
+    fn identical_content_chunks_get_distinct_vector_keys() {
+        // Two chunks in different files with byte-identical content share a
+        // content_hash. Keying vectors by content hash would collide them onto
+        // one usearch key, so deleting one file would drop the other's vector.
+        // Keying by the unique chunk id must keep them distinct.
+        let make = |path: &str| Chunk {
+            id: uuid::Uuid::new_v4(),
+            file_path: PathBuf::from(path),
+            start_line: 1,
+            end_line: 1,
+            text: "// SPDX-License-Identifier: MIT\n".to_string(),
+            language: "rust".to_string(),
+            kind: ChunkKind::Module,
+            content_hash: "identical-hash".to_string(),
+        };
+        let a = build_indexed_chunk(make("a.rs"), false);
+        let b = build_indexed_chunk(make("b.rs"), false);
+
+        assert_eq!(a.content_hash, b.content_hash);
+        assert_ne!(
+            a.vector_key, b.vector_key,
+            "identical-content chunks collided on one vector key"
+        );
+    }
 
     #[test]
     #[serial]
