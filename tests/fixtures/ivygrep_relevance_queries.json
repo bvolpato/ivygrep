@@ -1,0 +1,149 @@
+{
+  "version": 1,
+  "description": "Self-contained, intent-style relevance queries against ivygrep's own source tree. Queries deliberately avoid exact symbol/function names and regex syntax so the benchmark measures contextual retrieval and ranking rather than literal grep. Grades: 3 = canonical file for the intent, 2 = strongly related, 1 = related/supporting.",
+  "queries": [
+    {
+      "id": "ranking-fusion",
+      "query": "how are search results ranked and combined from multiple sources",
+      "intent": "Hybrid ranking/fusion lives in the search module.",
+      "judgments": [
+        { "pattern": "src/search.rs", "grade": 3 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "chunking",
+      "query": "how is source code split into chunks for indexing",
+      "intent": "Chunking by tree-sitter / line windows.",
+      "judgments": [
+        { "pattern": "src/chunking.rs", "grade": 3 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "vector-store",
+      "query": "where are vector embeddings stored and queried by similarity",
+      "intent": "usearch-backed vector store.",
+      "judgments": [
+        { "pattern": "src/vector_store.rs", "grade": 3 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "embedding",
+      "query": "how is text turned into an embedding vector",
+      "intent": "Embedding models (hash + neural).",
+      "judgments": [
+        { "pattern": "src/embedding.rs", "grade": 3 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "daemon-watch",
+      "query": "background service that watches the filesystem for changes",
+      "intent": "Daemon + file watching.",
+      "judgments": [
+        { "pattern": "src/daemon.rs", "grade": 3 },
+        { "pattern": "src/walker.rs", "grade": 1 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "incremental-change-detection",
+      "query": "how does incremental indexing detect which files changed",
+      "intent": "Merkle snapshot diff drives incremental reindex.",
+      "judgments": [
+        { "pattern": "src/merkle.rs", "grade": 3 },
+        { "pattern": "src/indexer.rs", "grade": 2 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "ipc-socket",
+      "query": "communication channel between the cli and the background process",
+      "intent": "IPC socket protocol.",
+      "judgments": [
+        { "pattern": "src/ipc.rs", "grade": 3 },
+        { "pattern": "src/protocol.rs", "grade": 2 },
+        { "pattern": "src/daemon.rs", "grade": 1 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "mcp-server",
+      "query": "expose code search as a tool server for ai agents",
+      "intent": "MCP server.",
+      "judgments": [
+        { "pattern": "src/mcp.rs", "grade": 3 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "cli-args",
+      "query": "parsing command line flags and arguments",
+      "intent": "CLI definition.",
+      "judgments": [
+        { "pattern": "src/cli.rs", "grade": 3 },
+        { "pattern": "src/main.rs", "grade": 1 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "doctor-health",
+      "query": "diagnose a broken or corrupt index and report health",
+      "intent": "Doctor / health checks.",
+      "judgments": [
+        { "pattern": "src/doctor.rs", "grade": 3 },
+        { "pattern": "src/workspace.rs", "grade": 1 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "tui",
+      "query": "interactive terminal user interface for searching",
+      "intent": "TUI.",
+      "judgments": [
+        { "pattern": "src/tui.rs", "grade": 3 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "gitignore-walk",
+      "query": "walk the directory tree while respecting ignore rules",
+      "intent": "Source walker.",
+      "judgments": [
+        { "pattern": "src/walker.rs", "grade": 3 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "query-aliases",
+      "query": "expanding a query with synonyms and aliases",
+      "intent": "Query alias expansion.",
+      "judgments": [
+        { "pattern": "src/query_aliases.rs", "grade": 3 },
+        { "pattern": "src/search.rs", "grade": 1 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "regex-mode",
+      "query": "literal regular expression matching mode",
+      "intent": "Regex search path.",
+      "judgments": [
+        { "pattern": "src/regex_search.rs", "grade": 3 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "workspace-config",
+      "query": "how are indexed projects tracked and configured on disk",
+      "intent": "Workspace + config.",
+      "judgments": [
+        { "pattern": "src/workspace.rs", "grade": 3 },
+        { "pattern": "src/config.rs", "grade": 2 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
+    }
+  ]
+}
