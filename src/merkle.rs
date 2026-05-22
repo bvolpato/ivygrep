@@ -130,6 +130,9 @@ impl MerkleSnapshot {
                 buf: Vec::with_capacity(512),
                 target: pairs_ref,
             };
+            // Reused per-thread read buffer so content hashing doesn't
+            // allocate a fresh Vec per file.
+            let mut read_buf: Vec<u8> = Vec::with_capacity(64 * 1024);
 
             Box::new(move |entry| {
                 let entry = match entry {
@@ -163,14 +166,20 @@ impl MerkleSnapshot {
                 // for small files where size+mtime would miss content edits.
                 let use_content_hash = content_based || metadata.len() <= CONTENT_HASH_MAX_BYTES;
                 let file_hash = if use_content_hash {
-                    let content = match fs::read(path) {
-                        Ok(c) => c,
-                        Err(_) => return ignore::WalkState::Continue,
-                    };
-                    let mut data = Vec::with_capacity(rel.to_string_lossy().len() + content.len());
-                    data.extend_from_slice(rel.to_string_lossy().as_bytes());
-                    data.extend_from_slice(&content);
-                    hex::encode(xxhash_rust::xxh3::xxh3_128(&data).to_le_bytes())
+                    use std::io::Read;
+                    read_buf.clear();
+                    let read_ok = fs::File::open(path)
+                        .and_then(|mut f| f.read_to_end(&mut read_buf))
+                        .is_ok();
+                    if !read_ok {
+                        return ignore::WalkState::Continue;
+                    }
+                    // Stream path + content through the hasher to avoid copying
+                    // the file contents into a second buffer.
+                    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+                    hasher.update(rel.to_string_lossy().as_bytes());
+                    hasher.update(&read_buf);
+                    hex::encode(hasher.digest128().to_le_bytes())
                 } else {
                     let mut data = Vec::with_capacity(128);
                     data.extend_from_slice(rel.to_string_lossy().as_bytes());
