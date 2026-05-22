@@ -697,10 +697,13 @@ pub fn hybrid_search_with_context(
     lexical_chunks.sort_by(|a, b| b.1.total_cmp(&a.1));
     lexical_chunks.truncate(candidate_limit);
     // ── Path-match pass ──────────────────────────────────────────────────
-    // Inject chunks whose file_path contains the query as a directory/file
+    // Collect chunks whose file_path contains the query as a directory/file
     // name. This ensures "my-service" finds files under
     // apps/my-service/ even when the code-content BM25 candidates are
-    // dominated by generic single-token matches like "service".
+    // dominated by generic single-token matches like "service". These feed
+    // their own ranked list in fusion (see fuse_rrf) rather than being
+    // injected into the lexical pool with a fake score.
+    let mut path_chunks: Vec<(IndexedChunk, f32)> = Vec::new();
     if let Some(fpt_field) = ctx.fields.file_path_text {
         let mut path_parser = QueryParser::for_index(&ctx.indexes[0], vec![fpt_field]);
         path_parser.set_conjunction_by_default();
@@ -712,14 +715,14 @@ pub fn hybrid_search_with_context(
             .collect();
 
         // Phase 1: collect path-match candidates from Tantivy.
-        let mut path_candidates: Vec<IndexedChunk> = Vec::new();
+        let mut path_candidates: Vec<(IndexedChunk, f32)> = Vec::new();
         for pq in path_query_variants {
             if let Ok(parsed) = path_parser.parse_query(pq) {
                 for (i, searcher) in ctx.searchers.iter().enumerate() {
                     if let Ok(docs) =
                         searcher.search(&parsed, &TopDocs::with_limit(100).order_by_score())
                     {
-                        for (_score, addr) in docs {
+                        for (score, addr) in docs {
                             if let Ok(doc) = searcher.doc::<TantivyDocument>(addr)
                                 && let Some(chunk) = fetch_chunk_by_id(doc, &ctx.fields)
                                     .filter(|c| !ctx.is_shadowed_base_file(i, &c.file_path))
@@ -729,7 +732,7 @@ pub fn hybrid_search_with_context(
                                     .filter(|c| options.skip_gitignore || !c.is_ignored)
                                 && path_ids.insert(chunk.chunk_id.clone())
                             {
-                                path_candidates.push(chunk);
+                                path_candidates.push((chunk, score));
                             }
                         }
                     }
@@ -740,13 +743,13 @@ pub fn hybrid_search_with_context(
         // Phase 2: batch-fetch text for path candidates.
         let empty_keys: Vec<u64> = path_candidates
             .iter()
-            .filter(|c| c.text.is_empty())
-            .map(|c| c.vector_key)
+            .filter(|(c, _)| c.text.is_empty())
+            .map(|(c, _)| c.vector_key)
             .collect();
         if !empty_keys.is_empty()
             && let Ok(batch) = ctx.fetch_chunks_by_vector_keys_batch(&empty_keys)
         {
-            for c in &mut path_candidates {
+            for (c, _) in &mut path_candidates {
                 if c.text.is_empty()
                     && let Some(full) = batch.get(&c.vector_key)
                 {
@@ -755,11 +758,10 @@ pub fn hybrid_search_with_context(
             }
         }
 
-        for chunk in path_candidates {
-            // High BM25 score so path matches rank
-            // above content-only matches after RRF.
-            lexical_chunks.push((chunk, 100.0));
-        }
+        // Rank path matches by their path-field BM25 score; they feed their
+        // own ranked list in fuse_rrf with a bounded weight.
+        path_candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
+        path_chunks = path_candidates;
     }
 
     // Batch-populate text from SQLite for the top chunks where Tantivy
@@ -860,6 +862,7 @@ pub fn hybrid_search_with_context(
         &lexical_chunks,
         &semantic_chunks,
         &literal_chunks,
+        &path_chunks,
         query_text,
         options.limit,
     );
@@ -1577,6 +1580,7 @@ fn fuse_rrf(
     lexical: &[(IndexedChunk, f32)],
     semantic: &[(IndexedChunk, f32)],
     literal: &[(IndexedChunk, f32)],
+    path: &[(IndexedChunk, f32)],
     query_text: &str,
     limit: Option<usize>,
 ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
@@ -1584,6 +1588,12 @@ fn fuse_rrf(
     const LEXICAL_WEIGHT: f32 = 3.2;
     const SEMANTIC_WEIGHT: f32 = 1.0;
     const LITERAL_WEIGHT: f32 = 4.0;
+    // Path matches (file_path contains the query) are a useful but bounded
+    // signal. They get a moderate rank-based weight — enough to surface a
+    // file whose path matches the query when content candidates are weak,
+    // without overriding strong content matches. The path-aware boosts below
+    // (path_exact_match/path_segment/file_stem) still apply on top.
+    const PATH_WEIGHT: f32 = 1.5;
     const LEXICAL_SCORE_WEIGHT: f32 = 0.05;
     const SEMANTIC_SCORE_WEIGHT: f32 = 0.08;
     const SEMANTIC_ONLY_PENALTY: f32 = 0.60;
@@ -1643,6 +1653,21 @@ fn fuse_rrf(
             });
         e.score += LITERAL_WEIGHT / (K + rank as f32 + 1.0);
         e.sources.insert("literal".to_string());
+    }
+
+    // Path pass: chunks whose file path matches the query, ranked by their
+    // path-field BM25 score. Rank-based only — no raw-score magnitude term —
+    // so a path match can't dominate via an out-of-scale score.
+    for (rank, (chunk, _)) in path.iter().enumerate() {
+        let e = entries
+            .entry(chunk.chunk_id.clone())
+            .or_insert_with(|| RrfEntry {
+                score: 0.0,
+                chunk: chunk.clone(),
+                sources: HashSet::new(),
+            });
+        e.score += PATH_WEIGHT / (K + rank as f32 + 1.0);
+        e.sources.insert("path".to_string());
     }
 
     // Chunk-density normalization (IDF-like):
@@ -1863,7 +1888,10 @@ fn filter_semantic_only_scores(
 }
 
 fn has_direct_source(sources: &[String]) -> bool {
-    has_literal_source(sources) || sources.iter().any(|source| source == "lexical")
+    has_literal_source(sources)
+        || sources
+            .iter()
+            .any(|source| source == "lexical" || source == "path")
 }
 
 fn has_literal_source(sources: &[String]) -> bool {
