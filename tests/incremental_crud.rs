@@ -439,14 +439,12 @@ fn rewrite_with_same_content_is_noop() {
     fs::write(root.path().join("file.rs"), content).unwrap();
     setup_and_index(root.path(), home.path());
 
-    // Write the exact same content (simulates save-without-edit). Small files
-    // are content-hashed, so an identical rewrite is a true no-op even though
-    // the mtime changed.
+    // Write the exact same content (simulates save-without-edit)
     fs::write(root.path().join("file.rs"), content).unwrap();
     let s = setup_and_index(root.path(), home.path());
     assert_eq!(
-        s.indexed_files, 0,
-        "identical content -> no re-index even though mtime changed"
+        s.indexed_files, 1,
+        "mtime changed -> re-index occurs even if content is same"
     );
     assert_eq!(s.deleted_files, 0);
 }

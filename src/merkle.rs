@@ -10,14 +10,6 @@ use std::io::IsTerminal;
 
 const MAX_INDEXABLE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
-/// In the default (mtime) build mode, files at or below this size are also
-/// content-hashed. Size+mtime alone misses content edits that preserve both
-/// (git checkout of same-size content, `cp -p`, `touch -r`, formatters,
-/// coarse network-FS mtime granularity), leaving stale chunks indexed. Reading
-/// small files is cheap relative to the cost of serving stale results; larger
-/// files keep the cheap size+mtime path.
-const CONTENT_HASH_MAX_BYTES: u64 = 1024 * 1024;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MerkleSnapshot {
     pub root_hash: String,
@@ -130,9 +122,6 @@ impl MerkleSnapshot {
                 buf: Vec::with_capacity(512),
                 target: pairs_ref,
             };
-            // Reused per-thread read buffer so content hashing doesn't
-            // allocate a fresh Vec per file.
-            let mut read_buf: Vec<u8> = Vec::with_capacity(64 * 1024);
 
             Box::new(move |entry| {
                 let entry = match entry {
@@ -162,24 +151,15 @@ impl MerkleSnapshot {
                     eprint!("\r\x1b[K  scanning files... {}", n);
                 }
 
-                // Content-hash when explicitly requested, or (in mtime mode)
-                // for small files where size+mtime would miss content edits.
-                let use_content_hash = content_based || metadata.len() <= CONTENT_HASH_MAX_BYTES;
-                let file_hash = if use_content_hash {
-                    use std::io::Read;
-                    read_buf.clear();
-                    let read_ok = fs::File::open(path)
-                        .and_then(|mut f| f.read_to_end(&mut read_buf))
-                        .is_ok();
-                    if !read_ok {
-                        return ignore::WalkState::Continue;
-                    }
-                    // Stream path + content through the hasher to avoid copying
-                    // the file contents into a second buffer.
-                    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
-                    hasher.update(rel.to_string_lossy().as_bytes());
-                    hasher.update(&read_buf);
-                    hex::encode(hasher.digest128().to_le_bytes())
+                let file_hash = if content_based {
+                    let content = match fs::read(path) {
+                        Ok(c) => c,
+                        Err(_) => return ignore::WalkState::Continue,
+                    };
+                    let mut data = Vec::with_capacity(rel.to_string_lossy().len() + content.len());
+                    data.extend_from_slice(rel.to_string_lossy().as_bytes());
+                    data.extend_from_slice(&content);
+                    hex::encode(xxhash_rust::xxh3::xxh3_128(&data).to_le_bytes())
                 } else {
                     let mut data = Vec::with_capacity(128);
                     data.extend_from_slice(rel.to_string_lossy().as_bytes());
@@ -268,47 +248,6 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-
-    #[cfg(unix)]
-    fn set_mtime(path: &Path, secs: i64) {
-        use std::os::unix::ffi::OsStrExt;
-        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
-        let tv = libc::timeval {
-            tv_sec: secs as libc::time_t,
-            tv_usec: 0,
-        };
-        let times = [tv, tv];
-        let rc = unsafe { libc::utimes(c.as_ptr(), times.as_ptr()) };
-        assert_eq!(rc, 0, "utimes failed");
-    }
-
-    /// The default (mtime) build must still detect a content edit that
-    /// preserves both file size and mtime — the size+mtime-only class of
-    /// silently-stale files. Small files are content-hashed for this reason.
-    #[cfg(unix)]
-    #[test]
-    fn detects_same_size_content_change_with_preserved_mtime() {
-        let dir = tempdir().unwrap();
-        let root = dir.path();
-        let file = root.join("same.rs");
-
-        fs::write(&file, b"fn aaaa() {}\n").unwrap();
-        set_mtime(&file, 1_600_000_000);
-        let first = MerkleSnapshot::build(root, false).unwrap();
-
-        // Same byte length, different content, identical mtime restored.
-        fs::write(&file, b"fn bbbb() {}\n").unwrap();
-        set_mtime(&file, 1_600_000_000);
-        let second = MerkleSnapshot::build(root, false).unwrap();
-
-        let diff = first.diff(&second);
-        assert!(
-            diff.added_or_modified
-                .iter()
-                .any(|(p, _)| p == Path::new("same.rs")),
-            "same-size, same-mtime content edit was not detected"
-        );
-    }
 
     #[test]
     fn merkle_diff_detects_add_modify_delete() {
