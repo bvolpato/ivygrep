@@ -55,7 +55,21 @@ mod unix {
         }
         let listener = IpcListener::bind(&path)
             .with_context(|| format!("failed to bind socket {}", path.display()))?;
+        // Restrict the socket to the owner so other local users can't connect.
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
         Ok((listener, path))
+    }
+
+    /// Returns true if the connecting peer is the same uid as this process.
+    /// The daemon only ever serves its own user; reject anyone else (the
+    /// socket exposes cross-workspace search/index/delete).
+    pub fn peer_is_owner(stream: &IpcStream) -> bool {
+        match stream.peer_cred() {
+            Ok(cred) => cred.uid() == unsafe { libc::geteuid() },
+            // If we can't verify the peer, fail closed.
+            Err(_) => false,
+        }
     }
 
     pub async fn connect() -> std::io::Result<IpcStream> {
@@ -114,6 +128,11 @@ mod windows {
     pub fn socket_exists() -> bool {
         socket_path().map(|p| p.exists()).unwrap_or(false)
     }
+
+    /// Windows uses a loopback TCP port; peer-uid checks don't apply.
+    pub fn peer_is_owner(_stream: &IpcStream) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -142,6 +161,17 @@ mod tests {
 
         assert!(socket_exists(), "socket/port file should exist after bind");
         assert!(path.exists());
+
+        // The socket and app home must be owner-only so other local users
+        // can't connect to the daemon or read the index.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let sock_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(sock_mode, 0o600, "daemon socket must be mode 0600");
+            let home_mode = std::fs::metadata(tmp.path()).unwrap().permissions().mode() & 0o777;
+            assert_eq!(home_mode, 0o700, "app home must be mode 0700");
+        }
 
         drop(listener);
         cleanup_socket();

@@ -21,7 +21,18 @@ pub fn indexes_root() -> Result<PathBuf> {
 }
 
 pub fn ensure_app_dirs() -> Result<()> {
+    let home = app_home()?;
+    std::fs::create_dir_all(&home)?;
     std::fs::create_dir_all(indexes_root()?)?;
+    // Restrict the app home to its owner. It holds the daemon socket and the
+    // index (which stores decompressed source of every indexed repo, possibly
+    // including secrets). 0700 prevents other local users on a shared host from
+    // reading indexed content off disk or reaching the daemon socket.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700));
+    }
     Ok(())
 }
 
