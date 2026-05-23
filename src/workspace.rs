@@ -446,7 +446,13 @@ impl Workspace {
 
     pub fn write_metadata(&self, metadata: &WorkspaceMetadata) -> Result<()> {
         let data = serde_json::to_vec_pretty(metadata)?;
-        fs::write(self.metadata_path(), data)?;
+        // Atomic write (tmp + rename) so a crash/disk-full mid-write can't
+        // truncate workspace.json — a partial file would make the workspace
+        // look un-indexed and silently drop its watcher on restore.
+        let path = self.metadata_path();
+        let tmp = path.with_extension("json.tmp");
+        fs::write(&tmp, data)?;
+        fs::rename(&tmp, &path)?;
         Ok(())
     }
 

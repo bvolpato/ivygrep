@@ -34,9 +34,17 @@ impl MerkleSnapshot {
         if !path.exists() {
             return Ok(Self::empty());
         }
-        let data = fs::read(path)?;
-        let snapshot = serde_json::from_slice(&data)?;
-        Ok(snapshot)
+        // A missing or corrupt snapshot must not permanently wedge incremental
+        // indexing. Fall back to an empty snapshot, which makes the next diff
+        // treat everything as new (a clean full reindex) rather than erroring
+        // on every reindex/watcher tick forever.
+        let Ok(data) = fs::read(path) else {
+            return Ok(Self::empty());
+        };
+        match serde_json::from_slice(&data) {
+            Ok(snapshot) => Ok(snapshot),
+            Err(_) => Ok(Self::empty()),
+        }
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -248,6 +256,18 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn load_corrupt_snapshot_falls_back_to_empty() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("merkle_snapshot.json");
+        fs::write(&path, b"{ this is not valid json").unwrap();
+        // Must not error (which would wedge incremental indexing forever) —
+        // fall back to empty so the next diff does a clean full reindex.
+        let snap = MerkleSnapshot::load(&path).unwrap();
+        assert!(snap.files.is_empty());
+        assert_eq!(snap.root_hash, MerkleSnapshot::empty().root_hash);
+    }
 
     #[test]
     fn merkle_diff_detects_add_modify_delete() {
