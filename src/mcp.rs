@@ -1,6 +1,11 @@
 use std::env;
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
+
+/// Upper bound on a single JSON-RPC message / header line. Prevents a
+/// malformed or malicious client (or `Content-Length` header) from triggering
+/// an unbounded allocation or read.
+const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
@@ -104,7 +109,25 @@ pub fn serve_stdio() -> Result<()> {
             }
         };
 
-        if let Some(response) = handle_request(request) {
+        // Isolate handler panics: a panic deep in search must not crash the
+        // whole MCP session. Capture it and return a JSON-RPC error instead.
+        let request_id = request.id.clone();
+        let response = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            handle_request(request)
+        })) {
+            Ok(response) => response,
+            Err(_) => request_id.map(|id| JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION,
+                id: Some(id),
+                result: None,
+                error: Some(JsonRpcError {
+                    code: -32603,
+                    message: "internal error: request handler panicked".to_string(),
+                }),
+            }),
+        };
+
+        if let Some(response) = response {
             write_message(&mut writer, &response, mode)?;
         }
     }
@@ -426,11 +449,26 @@ enum FramingMode {
     ContentLength,
 }
 
+/// Read a single line, bounded to MAX_MESSAGE_BYTES so a client that never
+/// sends a newline can't grow memory without limit. Returns bytes read (0 = EOF).
+fn read_line_capped<R: BufRead>(reader: &mut R, line: &mut String) -> Result<usize> {
+    line.clear();
+    let mut buf = Vec::new();
+    let n = reader
+        .take((MAX_MESSAGE_BYTES as u64) + 1)
+        .read_until(b'\n', &mut buf)?;
+    if buf.len() > MAX_MESSAGE_BYTES {
+        bail!("request line exceeds maximum of {MAX_MESSAGE_BYTES} bytes");
+    }
+    line.push_str(&String::from_utf8_lossy(&buf));
+    Ok(n)
+}
+
 fn read_message<R: BufRead>(reader: &mut R, mode: &mut FramingMode) -> Result<Option<Vec<u8>>> {
     // Read first non-empty line (skip blank lines between messages).
     let first_line = loop {
         let mut line = String::new();
-        let bytes = reader.read_line(&mut line)?;
+        let bytes = read_line_capped(reader, &mut line)?;
         if bytes == 0 {
             return Ok(None);
         }
@@ -466,7 +504,7 @@ fn read_message<R: BufRead>(reader: &mut R, mode: &mut FramingMode) -> Result<Op
             // Read remaining headers until empty line.
             loop {
                 let mut line = String::new();
-                let bytes = reader.read_line(&mut line)?;
+                let bytes = read_line_capped(reader, &mut line)?;
                 if bytes == 0 {
                     return Ok(None);
                 }
@@ -481,6 +519,9 @@ fn read_message<R: BufRead>(reader: &mut R, mode: &mut FramingMode) -> Result<Op
             }
 
             let len = content_length.context("missing Content-Length header")?;
+            if len > MAX_MESSAGE_BYTES {
+                bail!("Content-Length {len} exceeds maximum of {MAX_MESSAGE_BYTES} bytes");
+            }
             let mut payload = vec![0u8; len];
             reader.read_exact(&mut payload)?;
             Ok(Some(payload))
@@ -514,6 +555,26 @@ mod tests {
     use serial_test::serial;
 
     use super::*;
+
+    #[test]
+    fn read_message_rejects_oversized_content_length() {
+        // A huge Content-Length must be rejected, not allocated.
+        let msg = format!("Content-Length: {}\r\n\r\n", MAX_MESSAGE_BYTES as u64 + 1);
+        let mut reader = std::io::BufReader::new(msg.as_bytes());
+        let mut mode = FramingMode::Unknown;
+        let result = read_message(&mut reader, &mut mode);
+        assert!(result.is_err(), "oversized Content-Length must be rejected");
+    }
+
+    #[test]
+    fn read_message_accepts_normal_content_length() {
+        let body = "{\"jsonrpc\":\"2.0\"}";
+        let msg = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+        let mut reader = std::io::BufReader::new(msg.as_bytes());
+        let mut mode = FramingMode::Unknown;
+        let payload = read_message(&mut reader, &mut mode).unwrap().unwrap();
+        assert_eq!(payload, body.as_bytes());
+    }
 
     #[test]
     #[serial]
