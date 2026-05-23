@@ -335,9 +335,12 @@ pub fn literal_search_with_context(
         let lines: Vec<&str> = content.lines().collect();
 
         for chunk in chunks {
-            // Scan lines within this chunk's range for the literal text
-            let start = chunk.start_line.saturating_sub(1);
+            // Scan lines within this chunk's range for the literal text.
+            // Chunk bounds come from the index but the file is read live, so a
+            // file truncated since indexing can make start exceed end — clamp
+            // start to end to avoid an out-of-range slice panic.
             let end = chunk.end_line.min(lines.len());
+            let start = chunk.start_line.saturating_sub(1).min(end);
 
             for (i, line) in lines[start..end].iter().enumerate() {
                 let line_num = start + i + 1;
@@ -484,6 +487,13 @@ pub fn hybrid_search_with_context(
     embedding_model: Option<&dyn EmbeddingModel>,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
+    // An empty/whitespace query has no lexical or literal terms; without this
+    // guard the semantic pass would still embed "" and return arbitrary
+    // nearest-neighbour noise. Match literal_search and return nothing.
+    if query_text.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
     let t0 = std::time::Instant::now();
     let output_limit = options.limit.unwrap_or(50);
     // Tantivy lexical candidates: enough headroom for post-hoc filters
@@ -3086,6 +3096,35 @@ mod tests {
 
     #[test]
     #[serial]
+    fn literal_search_does_not_panic_when_file_truncated_after_indexing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        // Index a file whose chunk spans many lines.
+        let mut big = String::new();
+        for i in 0..60 {
+            big.push_str(&format!("fn line_{i}() {{ let needle_marker = {i}; }}\n"));
+        }
+        std::fs::write(tmp.path().join("big.rs"), &big).unwrap();
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        // Truncate the file on disk WITHOUT reindexing, so the stored chunk
+        // bounds (start_line ~1..60) exceed the live line count.
+        std::fs::write(tmp.path().join("big.rs"), "fn only() {}\n").unwrap();
+
+        // Must not panic on the out-of-range chunk bounds.
+        let hits = literal_search(&workspace, "needle_marker", &SearchOptions::default()).unwrap();
+        assert!(
+            hits.iter().all(|h| !h.preview.contains("needle_marker")),
+            "truncated file no longer contains the literal"
+        );
+    }
+
+    #[test]
+    #[serial]
     fn search_context_loads_vectors_only_when_needed() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
@@ -3153,6 +3192,17 @@ mod tests {
 
         let result = hybrid_search(&workspace, "", Some(&model), &SearchOptions::default());
         assert!(result.is_ok());
+        assert!(
+            result.unwrap().is_empty(),
+            "empty query must return no results, not semantic noise"
+        );
+        for blank in ["   ", "\t\n", "  \t "] {
+            let r = hybrid_search(&workspace, blank, Some(&model), &SearchOptions::default());
+            assert!(
+                r.is_ok() && r.unwrap().is_empty(),
+                "whitespace query must be empty"
+            );
+        }
     }
 
     #[test]

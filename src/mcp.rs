@@ -301,9 +301,10 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
 
     let mut hits = Vec::new();
 
+    let all_indices = args.all_indices.unwrap_or(false);
     for workspace in workspaces {
         let _ = workspace.cleanup_stale_legacy_runtime_files();
-        let ws_hits = if args.literal.unwrap_or(false) {
+        let mut ws_hits = if args.literal.unwrap_or(false) {
             literal_search(
                 &workspace,
                 query,
@@ -348,6 +349,15 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
                 },
             )?
         };
+        // In --all mode, results come from multiple workspaces but the payload
+        // reports a single workspace_root, so workspace-relative paths would be
+        // ambiguous/wrong. Rewrite each hit to an absolute path (mirroring the
+        // daemon's all-indices handling).
+        if all_indices {
+            for hit in &mut ws_hits {
+                hit.file_path = workspace.root.join(&hit.file_path);
+            }
+        }
         hits.extend(ws_hits);
     }
 

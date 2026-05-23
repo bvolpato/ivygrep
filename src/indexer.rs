@@ -612,16 +612,33 @@ fn index_workspace_inner(
             let file_chunks: Vec<_> = batch_paths
                 .par_iter()
                 .filter_map(|(rel_path, is_ignored)| {
+                    // For a modified file that now yields no chunks (vanished,
+                    // unreadable, empty, binary/non-text, or chunks to nothing)
+                    // emit an empty entry on an incremental index so the
+                    // consumer still runs remove_file_chunks and clears the
+                    // stale chunks + orphaned vectors. On a fresh index there is
+                    // nothing to remove, so skip the file entirely.
+                    let nothing = |rel: &std::path::Path| {
+                        if is_fresh_index {
+                            None
+                        } else {
+                            Some((rel.to_path_buf(), Vec::new()))
+                        }
+                    };
+
                     let abs_path = root_clone.join(rel_path);
                     if !abs_path.exists() {
                         progress_counter_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        return None;
+                        return nothing(rel_path);
                     }
 
-                    let content_bytes = fs::read(&abs_path).ok()?;
+                    let content_bytes = match fs::read(&abs_path) {
+                        Ok(b) => b,
+                        Err(_) => return nothing(rel_path),
+                    };
                     if !is_indexable_file(rel_path, &content_bytes) {
                         progress_counter_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        return None;
+                        return nothing(rel_path);
                     }
 
                     let content = match String::from_utf8(content_bytes) {
@@ -646,7 +663,7 @@ fn index_workspace_inner(
                     }
 
                     if indexed.is_empty() {
-                        return None;
+                        return nothing(rel_path);
                     }
                     Some((rel_path.clone(), indexed))
                 })

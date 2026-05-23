@@ -18,7 +18,17 @@ use ivygrep::EMBEDDING_DIMENSIONS;
 use ivygrep::embedding::HashEmbeddingModel;
 use ivygrep::indexer::{index_workspace, open_sqlite};
 use ivygrep::merkle::MerkleSnapshot;
+use ivygrep::search::{SearchOptions, hybrid_search};
 use ivygrep::workspace::Workspace;
+
+/// Helper: search and return the file paths in the results.
+fn search_file_paths(workspace: &Workspace, query: &str) -> Vec<String> {
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+    let hits = hybrid_search(workspace, query, Some(&model), &SearchOptions::default()).unwrap();
+    hits.iter()
+        .map(|h| h.file_path.to_string_lossy().to_string())
+        .collect()
+}
 
 /// Helper: set IVYGREP_HOME, resolve workspace, index, return summary.
 fn setup_and_index(
@@ -481,5 +491,82 @@ fn outdated_index_format_forces_rebuild() {
     assert!(
         !ws.quick_index_health().needs_rebuild(),
         "re-index should restore the current format and health"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// MODIFY-TO-EMPTY / MODIFY-TO-BINARY: stale chunks must be removed
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn modify_file_to_empty_removes_stale_chunks() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    fs::write(
+        root.path().join("a.rs"),
+        "pub fn alpha_marker() -> usize { 1 }\npub fn beta_marker() -> usize { 2 }\n",
+    )
+    .unwrap();
+    fs::write(root.path().join("keep.rs"), "pub fn keep_me() {}\n").unwrap();
+    setup_and_index(root.path(), home.path());
+
+    let ws = workspace_for(root.path());
+    assert!(
+        indexed_files(&ws).contains("a.rs"),
+        "a.rs indexed initially"
+    );
+    assert!(chunk_count(&ws) >= 3);
+
+    // Truncate a.rs to empty — it is no longer indexable, so its old chunks
+    // must be removed (not left stale).
+    fs::write(root.path().join("a.rs"), "").unwrap();
+    setup_and_index(root.path(), home.path());
+
+    let ws = workspace_for(root.path());
+    let files = indexed_files(&ws);
+    assert!(
+        !files.contains("a.rs"),
+        "emptied file's chunks must be removed, got files={files:?}"
+    );
+    assert!(files.contains("keep.rs"), "untouched file remains indexed");
+
+    // Searching the old content must not return the emptied file.
+    let hits = search_file_paths(&ws, "alpha_marker");
+    assert!(
+        !hits.iter().any(|p| p.contains("a.rs")),
+        "stale content of emptied file must not be searchable, got {hits:?}"
+    );
+}
+
+#[test]
+#[serial]
+fn modify_file_to_binary_removes_stale_chunks() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    fs::write(
+        root.path().join("doc.txt"),
+        "searchable_textual_marker appears here\n",
+    )
+    .unwrap();
+    setup_and_index(root.path(), home.path());
+    let ws = workspace_for(root.path());
+    assert!(indexed_files(&ws).contains("doc.txt"));
+
+    // Overwrite with binary (NUL bytes) — no longer indexable as text.
+    fs::write(root.path().join("doc.txt"), [0u8, 1, 2, 0, 255, 0, 7]).unwrap();
+    setup_and_index(root.path(), home.path());
+
+    let ws = workspace_for(root.path());
+    assert!(
+        !indexed_files(&ws).contains("doc.txt"),
+        "file turned binary must have its chunks removed"
+    );
+    let hits = search_file_paths(&ws, "searchable_textual_marker");
+    assert!(
+        !hits.iter().any(|p| p.contains("doc.txt")),
+        "stale content of binary-ified file must not be searchable"
     );
 }
