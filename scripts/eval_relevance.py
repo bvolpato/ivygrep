@@ -170,7 +170,10 @@ def main() -> int:
     env["IVYGREP_NO_AUTOSPAWN"] = "1"
     env.setdefault("RUST_BACKTRACE", "1")
 
-    if not args.skip_build and not binary.exists():
+    # Always build unless explicitly skipped, so the eval never runs against a
+    # stale binary from an older commit. Cargo makes this a no-op when the
+    # binary is already up to date.
+    if not args.skip_build:
         run(["cargo", "build", "--release", "--locked", "--bin", "ig"], cwd=REPO_ROOT, env=env)
     if not binary.exists():
         raise SystemExit(f"missing binary at {binary} (build first or pass --binary)")
