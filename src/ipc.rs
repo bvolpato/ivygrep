@@ -56,8 +56,17 @@ mod unix {
         let listener = IpcListener::bind(&path)
             .with_context(|| format!("failed to bind socket {}", path.display()))?;
         // Restrict the socket to the owner so other local users can't connect.
+        // Fail closed: refuse to serve rather than expose an unprotected
+        // control socket if the chmod can't be applied.
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).with_context(
+            || {
+                format!(
+                    "failed to restrict socket permissions to 0600: {}",
+                    path.display()
+                )
+            },
+        )?;
         Ok((listener, path))
     }
 

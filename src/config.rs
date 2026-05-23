@@ -31,7 +31,17 @@ pub fn ensure_app_dirs() -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700));
+        // Fail closed: if we can't tighten the app home, the index/socket would
+        // be left readable by other local users, so surface the error rather
+        // than silently continuing with weak permissions.
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).with_context(
+            || {
+                format!(
+                    "failed to restrict app home permissions to 0700: {}",
+                    home.display()
+                )
+            },
+        )?;
     }
     Ok(())
 }
