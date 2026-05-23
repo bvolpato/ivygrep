@@ -466,6 +466,18 @@ fn index_workspace_inner(
         let _ = fs::write(workspace.indexing_progress_path(), "scanning");
         let new = MerkleSnapshot::build(&workspace.root, skip_gitignore)?;
         let d = old.diff(&new);
+        // True no-op: with no worktree changes, return without rewriting the
+        // overlay stores. Rewriting them on every reindex/watcher tick also
+        // busts the daemon's SearchContext/query caches via file-stamp changes.
+        if d.added_or_modified.is_empty() && d.deleted.is_empty() && workspace_is_indexed(workspace)
+        {
+            return Ok(IndexingSummary {
+                workspace_id: workspace.id.clone(),
+                indexed_files: 0,
+                deleted_files: 0,
+                total_chunks: count_workspace_chunks(workspace).unwrap_or(0),
+            });
+        }
         (d, Some(new))
     } else {
         // Standard full-index path (non-worktree or base not available)

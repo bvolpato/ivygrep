@@ -471,10 +471,33 @@ impl Workspace {
     fn index_health_with_options(&self, verify_stores: bool) -> WorkspaceIndexHealth {
         let mut issues = Vec::new();
         let metadata = self.read_metadata().ok().flatten();
+
+        // Worktree overlays keep their own stores under overlay.* names and
+        // reference the base index by path. Health must inspect the overlay
+        // stores, not the base-named paths (which don't exist for an overlay),
+        // otherwise a healthy overlay is wrongly flagged and rebuilt on every
+        // reindex.
+        let is_overlay = self.has_overlay() || self.base_ref_path().exists();
+        let sqlite_p = if is_overlay {
+            self.overlay_sqlite_path()
+        } else {
+            self.sqlite_path()
+        };
+        let tantivy_p = if is_overlay {
+            self.overlay_tantivy_dir()
+        } else {
+            self.tantivy_dir()
+        };
+        let vector_p = if is_overlay {
+            self.overlay_vector_path()
+        } else {
+            self.vector_path()
+        };
+
         let has_any_index_artifacts = self.metadata_path().exists()
-            || self.sqlite_path().exists()
-            || self.tantivy_dir().exists()
-            || self.vector_path().exists();
+            || sqlite_p.exists()
+            || tantivy_p.exists()
+            || vector_p.exists();
 
         if !has_any_index_artifacts {
             return WorkspaceIndexHealth {
@@ -506,13 +529,13 @@ impl Workspace {
 
         let skip_gitignore = metadata.as_ref().is_some_and(|m| m.skip_gitignore);
 
-        if !self.sqlite_path().exists() {
+        if !sqlite_p.exists() {
             issues.push("missing metadata.sqlite3".to_string());
         }
-        if !self.tantivy_dir().exists() {
+        if !tantivy_p.exists() {
             issues.push("missing Tantivy index".to_string());
         }
-        if !self.vector_path().exists() {
+        if !vector_p.exists() {
             issues.push("missing hash vector store".to_string());
         }
         if metadata
@@ -554,12 +577,11 @@ impl Workspace {
                 ));
             }
 
-            if !dir_has_entries(&self.tantivy_dir()) {
+            if !dir_has_entries(&tantivy_p) {
                 issues.push("Tantivy index directory is empty despite indexed chunks".to_string());
             }
 
-            if self
-                .vector_path()
+            if vector_p
                 .metadata()
                 .map(|metadata| metadata.len() == 0)
                 .unwrap_or(false)
@@ -568,12 +590,12 @@ impl Workspace {
             }
 
             if verify_stores {
-                if let Err(err) = crate::indexer::open_tantivy_index(&self.tantivy_dir()) {
+                if let Err(err) = crate::indexer::open_tantivy_index(&tantivy_p) {
                     issues.push(format!("failed to open Tantivy index: {err:#}"));
                 }
 
                 match crate::vector_store::VectorStore::open_readonly(
-                    &self.vector_path(),
+                    &vector_p,
                     256,
                     crate::vector_store::ScalarKind::F16,
                 ) {
@@ -593,7 +615,10 @@ impl Workspace {
             false
         };
 
-        if chunk_count == 0 && has_indexable_files {
+        // For an overlay, zero chunks just means the worktree has no files
+        // diverging from the base — the base index still serves content, so
+        // this is not an unhealthy state.
+        if chunk_count == 0 && has_indexable_files && !is_overlay {
             issues.push(
                 "index contains zero chunks but the workspace has indexable files".to_string(),
             );

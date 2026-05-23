@@ -1213,6 +1213,72 @@ fn worktree_rebuilds_outdated_base_index_format() {
 }
 
 // ===========================================================================
+// WORKTREE OVERLAY: healthy after indexing; no-change reindex is a true no-op
+// ===========================================================================
+
+#[test]
+#[serial]
+fn worktree_overlay_is_healthy_and_noop_on_no_change() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    git(root.path(), &["init", "-b", "main"]);
+    fs::write(root.path().join("base.rs"), "pub fn base() {}\n").unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base"]);
+
+    git(root.path(), &["checkout", "-b", "wt"]);
+    fs::write(
+        root.path().join("wt_only.rs"),
+        "pub fn worktree_only_fn() {}\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "wt file"]);
+    git(root.path(), &["checkout", "main"]);
+
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt");
+    git(
+        root.path(),
+        &["worktree", "add", wt_path.to_str().unwrap(), "wt"],
+    );
+
+    setup_and_index(root.path(), home.path()); // base
+    setup_and_index(&wt_path, home.path()); // overlay
+
+    // A freshly-indexed overlay must be healthy (not flagged for rebuild).
+    let wt_ws = workspace_for(&wt_path);
+    assert!(
+        !wt_ws.quick_index_health().needs_rebuild(),
+        "freshly indexed worktree overlay should be healthy, issues={:?}",
+        wt_ws.quick_index_health().issues
+    );
+
+    // And a no-change reindex must be a true no-op: stores untouched.
+    let vec_path = wt_ws.overlay_vector_path();
+    assert!(vec_path.exists(), "overlay vector store should exist");
+    let mtime_before = fs::metadata(&vec_path).unwrap().modified().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+
+    let s = setup_and_index(&wt_path, home.path());
+    assert_eq!(
+        s.indexed_files, 0,
+        "no-change overlay reindex indexes nothing"
+    );
+    let mtime_after = fs::metadata(&vec_path).unwrap().modified().unwrap();
+    assert_eq!(
+        mtime_before, mtime_after,
+        "a no-change overlay reindex must not rewrite the vector store"
+    );
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+// ===========================================================================
 // WORKTREE OVERLAY: Incremental update — further changes to overlay
 // ===========================================================================
 
