@@ -709,13 +709,19 @@ pub fn hybrid_search_with_context(
         path_parser.set_conjunction_by_default();
         // Reuse the lexical_queries computed at the start of hybrid_search.
         let path_query_variants = &lexical_queries;
-        let mut path_ids: HashSet<String> = lexical_chunks
+        // Chunks already in the lexical pool are excluded from the path list
+        // (they are ranked there); path-only candidates feed the path pass.
+        let lexical_ids: HashSet<String> = lexical_chunks
             .iter()
             .map(|(c, _)| c.chunk_id.clone())
             .collect();
 
-        // Phase 1: collect path-match candidates from Tantivy.
-        let mut path_candidates: Vec<(IndexedChunk, f32)> = Vec::new();
+        // Phase 1: collect path-match candidates from Tantivy. The same chunk
+        // can match across multiple query variants/searchers with different
+        // path-field BM25 scores; dedupe by chunk_id and keep the *highest*
+        // score, since path ranking (the path RRF pass) depends on it. Keeping
+        // the first-seen score would mis-rank depending on iteration order.
+        let mut path_by_id: HashMap<String, (IndexedChunk, f32)> = HashMap::new();
         for pq in path_query_variants {
             if let Ok(parsed) = path_parser.parse_query(pq) {
                 for (i, searcher) in ctx.searchers.iter().enumerate() {
@@ -730,15 +736,23 @@ pub fn hybrid_search_with_context(
                                     .filter(|c| scope_matches(c, options.scope_filter.as_ref()))
                                     .filter(|c| path_matches(c, &path_matcher))
                                     .filter(|c| options.skip_gitignore || !c.is_ignored)
-                                && path_ids.insert(chunk.chunk_id.clone())
+                                && !lexical_ids.contains(&chunk.chunk_id)
                             {
-                                path_candidates.push((chunk, score));
+                                path_by_id
+                                    .entry(chunk.chunk_id.clone())
+                                    .and_modify(|(_, s)| {
+                                        if score > *s {
+                                            *s = score;
+                                        }
+                                    })
+                                    .or_insert((chunk, score));
                             }
                         }
                     }
                 }
             }
         }
+        let mut path_candidates: Vec<(IndexedChunk, f32)> = path_by_id.into_values().collect();
 
         // Phase 2: batch-fetch text for path candidates.
         let empty_keys: Vec<u64> = path_candidates
@@ -2921,6 +2935,58 @@ mod tests {
         .unwrap();
         assert!(!hits_after.is_empty());
         assert!(hits_after[0].preview.contains("authenticate_user"));
+    }
+
+    #[test]
+    #[serial]
+    fn hash_fallback_covers_chunks_without_neural_vectors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        // File A: indexed and neural-enhanced (gets a neural vector).
+        std::fs::write(
+            tmp.path().join("auth.rs"),
+            "pub fn authenticate_user(token: &str) -> bool { !token.is_empty() }\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let hash_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        let neural_model = TestEmbeddingModel384;
+        index_workspace(&workspace, &hash_model).unwrap();
+        crate::indexer::enhance_workspace_neural(&workspace, &neural_model).unwrap();
+        assert!(workspace.vector_neural_path().exists());
+
+        // File B added AFTER enhancement: it has hash vectors but no neural
+        // vector yet — a normal partial-coverage state during incremental
+        // background enhancement.
+        std::fs::write(
+            tmp.path().join("payment.rs"),
+            "pub fn process_payment_refund(amount: u64) -> u64 { amount }\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        index_workspace(&workspace, &hash_model).unwrap();
+
+        // Searching B's content with the neural model must still yield a
+        // semantic candidate for B via the hash fallback, even though neural
+        // coverage is partial. Without the fallback, B would have no semantic
+        // source until enhancement completes.
+        let hits = hybrid_search(
+            &workspace,
+            "process payment refund",
+            Some(&neural_model),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        let b_hit = hits
+            .iter()
+            .find(|h| h.preview.contains("process_payment_refund"));
+        assert!(b_hit.is_some(), "payment.rs should be found");
+        assert!(
+            b_hit.unwrap().sources.iter().any(|s| s == "semantic"),
+            "a chunk without a neural vector should still get a semantic candidate via the hash fallback"
+        );
     }
 
     #[test]

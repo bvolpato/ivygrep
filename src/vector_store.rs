@@ -242,6 +242,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn search_score_is_cosine_similarity_not_clamped_to_zero() {
+        // Regression: search() used to return -distance (range [-2, 0]) which
+        // downstream normalization clamped to 0, discarding semantic magnitude.
+        // It must now return the true cosine similarity in [0, 1].
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]); // identical to query
+        store.upsert(2, vec![0.0, 1.0, 0.0, 0.0]); // orthogonal to query
+
+        let hits = store.search(&[1.0, 0.0, 0.0, 0.0], 2);
+        let by_key: std::collections::HashMap<u64, f32> =
+            hits.iter().map(|h| (h.key, h.score)).collect();
+
+        assert!(
+            by_key[&1] > 0.9,
+            "identical vector should score ~1.0 (cosine), got {}",
+            by_key[&1]
+        );
+        assert!(
+            by_key[&2].abs() < 0.1,
+            "orthogonal vector should score ~0.0 (cosine), got {}",
+            by_key[&2]
+        );
+        assert!(by_key[&1] > by_key[&2]);
+    }
+
+    #[test]
     fn vector_store_roundtrip() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("vectors.bin");

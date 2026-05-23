@@ -1127,6 +1127,92 @@ fn worktree_auto_indexes_base_when_missing() {
 }
 
 // ===========================================================================
+// WORKTREE OVERLAY: an outdated base index format forces a base rebuild
+// ===========================================================================
+
+#[test]
+#[serial]
+fn worktree_rebuilds_outdated_base_index_format() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    git(root.path(), &["init", "-b", "main"]);
+    for i in 0..5 {
+        fs::write(
+            root.path().join(format!("base_{i}.rs")),
+            format!("pub fn base_fn_{i}() -> usize {{ {i} }}\n"),
+        )
+        .unwrap();
+    }
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base files"]);
+
+    git(root.path(), &["checkout", "-b", "wt-fmt"]);
+    fs::write(
+        root.path().join("wt_only.rs"),
+        "pub fn worktree_marker() -> bool { true }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "worktree file"]);
+    git(root.path(), &["checkout", "main"]);
+
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_fmt");
+    git(
+        root.path(),
+        &["worktree", "add", wt_path.to_str().unwrap(), "wt-fmt"],
+    );
+
+    // Index base, then the worktree overlay referencing it.
+    setup_and_index(root.path(), home.path());
+    setup_and_index(&wt_path, home.path());
+
+    let base_ws = workspace_for(root.path());
+    let wt_ws = workspace_for(&wt_path);
+    assert!(wt_ws.is_worktree(), "should detect as worktree");
+    assert_eq!(
+        base_ws.read_index_format_version(),
+        ivygrep::workspace::INDEX_FORMAT_VERSION,
+        "base should be indexed at the current format"
+    );
+    // Worktree finds inherited base content.
+    assert!(
+        search_file_paths(&wt_ws, "base_fn_2")
+            .iter()
+            .any(|p| p.contains("base_2.rs")),
+        "worktree should find inherited base content before migration"
+    );
+
+    // Simulate a base index written by an older format version. The worktree
+    // serves base chunks/vectors, so its index path must migrate the base
+    // before referencing it (the base self-heals via its own health check).
+    fs::write(base_ws.index_format_version_path(), "1").unwrap();
+    assert_eq!(base_ws.read_index_format_version(), 1);
+
+    // Re-indexing the worktree rebuilds the outdated base back to the current
+    // format and the inherited content remains searchable.
+    setup_and_index(&wt_path, home.path());
+    assert_eq!(
+        base_ws.read_index_format_version(),
+        ivygrep::workspace::INDEX_FORMAT_VERSION,
+        "outdated base index should be migrated during worktree indexing"
+    );
+    let wt_ws = workspace_for(&wt_path);
+    assert!(
+        search_file_paths(&wt_ws, "base_fn_2")
+            .iter()
+            .any(|p| p.contains("base_2.rs")),
+        "worktree should still find inherited base content after base migration"
+    );
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+// ===========================================================================
 // WORKTREE OVERLAY: Incremental update — further changes to overlay
 // ===========================================================================
 
