@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779551687842,
+  "lastUpdate": 1779556917718,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -13580,6 +13580,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "indexer/incremental_reindex_no_change",
             "value": 3632.5,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gh@brunovolpato.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b327eb128b4e28ec56f81c11a59d60ece9f232f4",
+          "message": "Merge pull request #46: remove MCP --all + overlay-aware index health\n\nRemove MCP --all (sandbox risk) + overlay-aware index health",
+          "timestamp": "2026-05-23T13:04:55-04:00",
+          "tree_id": "629dd9d15230ab222a41c496922b5c4be5daa3fe",
+          "url": "https://github.com/bvolpato/ivygrep/commit/b327eb128b4e28ec56f81c11a59d60ece9f232f4"
+        },
+        "date": 1779556917077,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 3617.27,
             "unit": "µs"
           }
         ]
