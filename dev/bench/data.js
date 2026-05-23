@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779513998752,
+  "lastUpdate": 1779514002960,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -13522,6 +13522,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "indexer/incremental_reindex_no_change",
             "value": 3562.31,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gh@brunovolpato.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6485ddcd1dd7f6ca25d389e3fb9d8ef20b5d23b1",
+          "message": "Merge pull request #36: relevance + stability fixes (v0.7.0)\n\nFix noisy search relevance + two stability bugs (P0/P1)",
+          "timestamp": "2026-05-23T01:11:22-04:00",
+          "tree_id": "9c9c03d05192d6563120f3dcf9f1a8bcacefcc56",
+          "url": "https://github.com/bvolpato/ivygrep/commit/6485ddcd1dd7f6ca25d389e3fb9d8ef20b5d23b1"
+        },
+        "date": 1779514002670,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 3538.26,
             "unit": "µs"
           }
         ]
