@@ -2,6 +2,26 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [0.7.0] — 2026-05-23
+
+### Changed
+- **Index format bumped to v2 — upgrading triggers a one-time full reindex.** An `index_format_version` sentinel is recorded on each successful index; an older-format index is detected as unhealthy and rebuilt before serving queries. Worktree overlays also migrate an outdated base index before referencing it.
+
+### Fixed
+- **Semantic similarity is no longer discarded.** Vector search returned `-distance` (range `[-2, 0]`), which downstream normalization clamped to `0`, so the semantic magnitude signal was lost and search degenerated toward lexical-only. Search now returns the true cosine similarity.
+- **Neural results are no longer diluted by hash embeddings.** When neural vectors exist they are used as the primary semantic signal; the low-quality 256-bucket hash store is kept only as a low-weight fallback so chunks not yet neural-embedded (partial/incremental enhancement) still get a semantic candidate.
+- **Path matches no longer override content relevance.** The fake high-BM25 sentinel injected into the lexical pool was removed; path matches now form their own bounded rank-fusion list, deduplicated by chunk id keeping the highest score.
+- **Ranking boosts no longer dominate the fused score.** Coverage/path/file-stem/definition boosts are bounded relative to the RRF base so they perturb rather than replace the fused ranking.
+- **usearch vectors are keyed by the unique chunk id, not the content hash.** Identical-content chunks (license headers, boilerplate) no longer collide onto one vector key, so deleting one file can no longer drop a still-live chunk's vector from another file.
+- **Phrase-alias expansion requires a contiguous token window**, eliminating spurious expansions when alias terms merely co-occur.
+
+### Added
+- **Daemon single-instance lock.** An exclusive lock is acquired before binding the IPC socket, preventing a restart/auto-spawn race from leaving two daemons fighting over the socket (and a zombie holding file watchers).
+- **Self-contained relevance evaluation harness** (`scripts/eval_relevance.py`) with a labeled query→file dataset over ivygrep's own tree, reporting precision@k, recall@k, MRR, and nDCG with a `--check` gate.
+
+### Testing
+- Added regression coverage for cosine-magnitude scoring, the hash fallback under partial neural coverage, vector-key collisions, the index-format migration/rebuild, and worktree base-index migration.
+
 ## [0.6.20] — 2026-05-18
 
 ### Testing
