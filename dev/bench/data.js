@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779136340917,
+  "lastUpdate": 1779513998752,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -13493,6 +13493,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "indexer/incremental_reindex_no_change",
             "value": 3758.85,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "distinct": true,
+          "id": "8bd30cbc3cbf9c08033ca3f48a30d7a16cfbba69",
+          "message": "release: v0.7.0",
+          "timestamp": "2026-05-23T01:12:26-04:00",
+          "tree_id": "d166e0cac0fc47c894286dc113175d9c50ad86eb",
+          "url": "https://github.com/bvolpato/ivygrep/commit/8bd30cbc3cbf9c08033ca3f48a30d7a16cfbba69"
+        },
+        "date": 1779513997994,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 3562.31,
             "unit": "µs"
           }
         ]
