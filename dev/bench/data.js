@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779514002960,
+  "lastUpdate": 1779551687842,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -13551,6 +13551,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "indexer/incremental_reindex_no_change",
             "value": 3538.26,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gh@brunovolpato.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "d0b18ff8eee764f96e3b921256851e6c3b23fc7d",
+          "message": "Merge pull request #45: harden indexing/search correctness + benchmarks\n\nHarden indexing/search: fix stale-chunk, literal panic, regex alternation, MCP --all paths",
+          "timestamp": "2026-05-23T11:30:53-04:00",
+          "tree_id": "11a884865807837484a28ef4689428d50bcd7a7d",
+          "url": "https://github.com/bvolpato/ivygrep/commit/d0b18ff8eee764f96e3b921256851e6c3b23fc7d"
+        },
+        "date": 1779551687224,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 3632.5,
             "unit": "µs"
           }
         ]
