@@ -564,6 +564,81 @@ fn bench_vector_store(c: &mut Criterion) {
     group.finish();
 }
 
+/// Critical-journey performance: incremental update cost on a large index, and
+/// ANN search at a more realistic vector-store scale.
+fn bench_critical_journeys(c: &mut Criterion) {
+    let mut group = c.benchmark_group("critical_journeys");
+    group
+        .sample_size(10)
+        .warm_up_time(Duration::from_secs(1))
+        .measurement_time(Duration::from_secs(10));
+
+    // Incremental update latency: a single changed file in a ~10K-chunk index
+    // should cost ~one file's work, not a function of total index size.
+    let (_staging, _home, workspace, model) = setup_bulk_indexed_workspace(200, 50);
+    let target = workspace.root.join("bulk_0.rs");
+    let mut counter = 0u64;
+    group.bench_function("incremental_one_file_change_10k_chunks", |b| {
+        b.iter_custom(|iters| {
+            let start = Instant::now();
+            for _ in 0..iters {
+                counter += 1;
+                fs::write(
+                    &target,
+                    format!("pub fn changed_{counter}() -> u64 {{ {counter} }}\n"),
+                )
+                .unwrap();
+                let summary = index_workspace(&workspace, &model).unwrap();
+                assert_eq!(summary.indexed_files, 1);
+                black_box(summary);
+            }
+            start.elapsed()
+        })
+    });
+
+    // ANN search at scale: 50K pseudo-random vectors (vs the 1K micro-bench),
+    // enough to exercise usearch HNSW behaviour rather than a trivial set.
+    let ann_dir = tempfile::tempdir().unwrap();
+    let ann_path = ann_dir.path().join("ann.usearch");
+    {
+        let mut store = ivygrep::vector_store::VectorStore::open(
+            &ann_path,
+            EMBEDDING_DIMENSIONS,
+            ivygrep::vector_store::ScalarKind::F32,
+        )
+        .unwrap();
+        for i in 0..50_000u64 {
+            let v: Vec<f32> = (0..EMBEDDING_DIMENSIONS)
+                .map(|j| (((i as usize * 31 + j * 17) % 97) as f32) / 97.0)
+                .collect();
+            store.upsert(i, v);
+        }
+        store.save().unwrap();
+    }
+    let query: Vec<f32> = (0..EMBEDDING_DIMENSIONS)
+        .map(|j| ((j * 13 % 97) as f32) / 97.0)
+        .collect();
+    group.bench_function("vector_search_in_50k", |b| {
+        b.iter_custom(|iters| {
+            let start = Instant::now();
+            for _ in 0..iters {
+                let store = ivygrep::vector_store::VectorStore::open_readonly(
+                    black_box(&ann_path),
+                    EMBEDDING_DIMENSIONS,
+                    ivygrep::vector_store::ScalarKind::F32,
+                )
+                .unwrap();
+                let results = store.search(black_box(&query), 50);
+                assert!(!results.is_empty());
+                black_box(results);
+            }
+            start.elapsed()
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_indexer,
@@ -575,5 +650,6 @@ criterion_group!(
     bench_regex_search,
     bench_base_search_patterns,
     bench_vector_store,
+    bench_critical_journeys,
 );
 criterion_main!(benches);
