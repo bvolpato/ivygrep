@@ -121,6 +121,26 @@ fn extract_literal_fragments(pattern: &str) -> Vec<String> {
     fragments
 }
 
+/// True if the pattern contains regex alternation (`|`) at the top level —
+/// i.e. an unescaped `|` that is not inside a `[...]` character class. Such
+/// patterns match any branch, so the AND-style fragment prefilter is unsafe.
+fn pattern_has_alternation(pattern: &str) -> bool {
+    let mut chars = pattern.chars();
+    let mut in_class = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                chars.next(); // skip the escaped character
+            }
+            '[' => in_class = true,
+            ']' => in_class = false,
+            '|' if !in_class => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Use the Tantivy index to find files containing the literal fragments
 /// extracted from the regex pattern. Returns None if no index or no
 /// usable literals.
@@ -131,6 +151,14 @@ fn index_prefilter_files(
     path_matcher: &PathGlobMatcher,
     _skip_gitignore: bool,
 ) -> Option<Vec<PathBuf>> {
+    // The fragment prefilter intersects literals, treating them as a required
+    // sequence. That is incorrect for alternation: a file matching only one
+    // branch of `(a|b|c)` would be dropped, producing missing results. For any
+    // pattern with top-level alternation, fall back to a full walk (None).
+    if pattern_has_alternation(pattern) {
+        return None;
+    }
+
     let fragments = extract_literal_fragments(pattern);
     if fragments.is_empty() {
         return None;
@@ -253,6 +281,13 @@ fn regex_search_parallel(
     });
 
     let mut hits = results.into_inner().unwrap();
+    // Parallel collection order is nondeterministic; sort by (path, line) so a
+    // limited result set is stable across runs rather than an arbitrary subset.
+    hits.sort_by(|a, b| {
+        a.file_path
+            .cmp(&b.file_path)
+            .then(a.start_line.cmp(&b.start_line))
+    });
     hits.truncate(max_hits);
     Ok(hits)
 }
@@ -469,5 +504,62 @@ mod tests {
         )
         .unwrap();
         assert_eq!(hits.len(), 3);
+    }
+
+    #[test]
+    fn regex_alternation_finds_files_matching_any_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        // Each file contains only ONE branch of the alternation.
+        std::fs::write(
+            tmp.path().join("e.rs"),
+            "fn f() { let error_branch = 1; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("w.rs"),
+            "fn f() { let warning_branch = 2; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("c.rs"),
+            "fn f() { let critical_branch = 3; }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        // The index prefilter must not drop files matching only one branch.
+        let hits = regex_search(
+            &workspace,
+            "error_branch|warning_branch|critical_branch",
+            None,
+            None,
+            &[],
+            &[],
+            false,
+        )
+        .unwrap();
+
+        let files: std::collections::HashSet<String> = hits
+            .iter()
+            .map(|h| h.file_path.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            files.contains("e.rs"),
+            "must find error branch file; got {files:?}"
+        );
+        assert!(
+            files.contains("w.rs"),
+            "must find warning branch file; got {files:?}"
+        );
+        assert!(
+            files.contains("c.rs"),
+            "must find critical branch file; got {files:?}"
+        );
     }
 }
