@@ -64,7 +64,6 @@ struct IvygrepSearchArgs {
     type_filter: Option<String>,
     regex: Option<bool>,
     literal: Option<bool>,
-    all_indices: Option<bool>,
     include: Option<String>,
     exclude: Option<String>,
     first_line_only: Option<bool>,
@@ -179,8 +178,7 @@ fn search_tool_schema() -> Value {
                 "first_line_only": {"type": "boolean", "description": "Return only the first non-empty preview line for each hit."},
                 "file_name_only": {"type": "boolean", "description": "Return only file paths (no hit details)."},
                 "verbose": {"type": "boolean", "description": "Include reason pointers in JSON output."},
-                "skip_gitignore": {"type": "boolean", "description": "Include files ignored by .gitignore."},
-                "all_indices": {"type": "boolean", "description": "Search across all existing workspace indices."}
+                "skip_gitignore": {"type": "boolean", "description": "Include files ignored by .gitignore."}
             },
             "required": ["query"]
         }
@@ -278,88 +276,67 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
         None => env::current_dir()?,
     };
 
-    let (current_workspace, mut scope_filter) =
-        resolve_workspace_and_scope(Path::new(&input_path))?;
+    let (current_workspace, scope_filter) = resolve_workspace_and_scope(Path::new(&input_path))?;
     let model = create_model(false);
 
-    let workspaces = if args.all_indices.unwrap_or(false) {
-        scope_filter = None;
-        crate::workspace::list_workspaces()?
-            .into_iter()
-            .filter(|w| w.last_indexed_at_unix.is_some())
-            .filter_map(|w| crate::workspace::Workspace::resolve(&w.root).ok())
-            .collect()
-    } else {
-        if !workspace_is_indexed(&current_workspace) {
-            let _summary = index_workspace(&current_workspace, model.as_ref())?;
-        }
-        vec![current_workspace.clone()]
-    };
+    // MCP search is intentionally scoped to a single workspace (the provided
+    // `path`). Cross-workspace ("all indices") search is not supported here:
+    // an agent could otherwise read source from unrelated indexed projects
+    // outside its intended working directory.
+    if !workspace_is_indexed(&current_workspace) {
+        let _summary = index_workspace(&current_workspace, model.as_ref())?;
+    }
+    let workspace = current_workspace.clone();
+    let _ = workspace.cleanup_stale_legacy_runtime_files();
 
     let include_globs = parse_glob_csv(args.include.as_deref());
     let exclude_globs = parse_glob_csv(args.exclude.as_deref());
 
-    let mut hits = Vec::new();
-
-    let all_indices = args.all_indices.unwrap_or(false);
-    for workspace in workspaces {
-        let _ = workspace.cleanup_stale_legacy_runtime_files();
-        let mut ws_hits = if args.literal.unwrap_or(false) {
-            literal_search(
-                &workspace,
-                query,
-                &SearchOptions {
-                    limit: args.limit,
-                    context: args.context.unwrap_or(2),
-                    type_filter: args.type_filter.clone(),
-                    include_globs: include_globs.clone(),
-                    exclude_globs: exclude_globs.clone(),
-                    scope_filter: scope_filter.clone(),
-                    skip_gitignore: args.skip_gitignore.unwrap_or(false),
-                    progress_tx: None,
-                    cancel_token: None,
-                },
-            )?
-        } else if args.regex.unwrap_or(false) {
-            regex_search(
-                &workspace,
-                query,
-                args.limit,
-                scope_filter.as_ref(),
-                &include_globs,
-                &exclude_globs,
-                args.skip_gitignore.unwrap_or(false),
-            )?
-        } else {
-            let _ = maybe_complete_neural_for_small_workspace(&workspace);
-            hybrid_search(
-                &workspace,
-                query,
-                Some(model.as_ref()),
-                &SearchOptions {
-                    limit: args.limit,
-                    context: args.context.unwrap_or(2),
-                    type_filter: args.type_filter.clone(),
-                    include_globs: include_globs.clone(),
-                    exclude_globs: exclude_globs.clone(),
-                    scope_filter: scope_filter.clone(),
-                    skip_gitignore: args.skip_gitignore.unwrap_or(false),
-                    progress_tx: None,
-                    cancel_token: None,
-                },
-            )?
-        };
-        // In --all mode, results come from multiple workspaces but the payload
-        // reports a single workspace_root, so workspace-relative paths would be
-        // ambiguous/wrong. Rewrite each hit to an absolute path (mirroring the
-        // daemon's all-indices handling).
-        if all_indices {
-            for hit in &mut ws_hits {
-                hit.file_path = workspace.root.join(&hit.file_path);
-            }
-        }
-        hits.extend(ws_hits);
-    }
+    let mut hits = if args.literal.unwrap_or(false) {
+        literal_search(
+            &workspace,
+            query,
+            &SearchOptions {
+                limit: args.limit,
+                context: args.context.unwrap_or(2),
+                type_filter: args.type_filter.clone(),
+                include_globs: include_globs.clone(),
+                exclude_globs: exclude_globs.clone(),
+                scope_filter: scope_filter.clone(),
+                skip_gitignore: args.skip_gitignore.unwrap_or(false),
+                progress_tx: None,
+                cancel_token: None,
+            },
+        )?
+    } else if args.regex.unwrap_or(false) {
+        regex_search(
+            &workspace,
+            query,
+            args.limit,
+            scope_filter.as_ref(),
+            &include_globs,
+            &exclude_globs,
+            args.skip_gitignore.unwrap_or(false),
+        )?
+    } else {
+        let _ = maybe_complete_neural_for_small_workspace(&workspace);
+        hybrid_search(
+            &workspace,
+            query,
+            Some(model.as_ref()),
+            &SearchOptions {
+                limit: args.limit,
+                context: args.context.unwrap_or(2),
+                type_filter: args.type_filter.clone(),
+                include_globs: include_globs.clone(),
+                exclude_globs: exclude_globs.clone(),
+                scope_filter: scope_filter.clone(),
+                skip_gitignore: args.skip_gitignore.unwrap_or(false),
+                progress_tx: None,
+                cancel_token: None,
+            },
+        )?
+    };
 
     if !args.literal.unwrap_or(false) && !args.regex.unwrap_or(false) {
         hits.sort_by(|a, b| {
@@ -572,7 +549,6 @@ mod tests {
             regex: Some(false),
             literal: None,
             include: None,
-            all_indices: None,
             exclude: None,
             first_line_only: Some(false),
             file_name_only: Some(false),
@@ -618,7 +594,6 @@ mod tests {
             regex: Some(false),
             literal: None,
             include: None,
-            all_indices: None,
             exclude: None,
             first_line_only: Some(false),
             file_name_only: Some(false),
@@ -670,7 +645,6 @@ mod tests {
             regex: Some(false),
             literal: None,
             include: Some("*.md".to_string()),
-            all_indices: None,
             exclude: None,
             first_line_only: Some(false),
             file_name_only: Some(true),
@@ -700,7 +674,6 @@ mod tests {
             regex: Some(false),
             literal: None,
             include: Some("*.md".to_string()),
-            all_indices: None,
             exclude: Some("match.md".to_string()),
             first_line_only: Some(false),
             file_name_only: Some(true),
@@ -780,7 +753,6 @@ mod tests {
             regex: Some(true),
             literal: None,
             include: None,
-            all_indices: None,
             exclude: None,
             first_line_only: Some(false),
             file_name_only: Some(false),
@@ -818,7 +790,6 @@ mod tests {
             type_filter: None,
             regex: None,
             literal: Some(true),
-            all_indices: None,
             include: None,
             exclude: None,
             first_line_only: Some(false),
