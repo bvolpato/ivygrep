@@ -697,29 +697,38 @@ pub fn hybrid_search_with_context(
     lexical_chunks.sort_by(|a, b| b.1.total_cmp(&a.1));
     lexical_chunks.truncate(candidate_limit);
     // ── Path-match pass ──────────────────────────────────────────────────
-    // Inject chunks whose file_path contains the query as a directory/file
+    // Collect chunks whose file_path contains the query as a directory/file
     // name. This ensures "my-service" finds files under
     // apps/my-service/ even when the code-content BM25 candidates are
-    // dominated by generic single-token matches like "service".
+    // dominated by generic single-token matches like "service". These feed
+    // their own ranked list in fusion (see fuse_rrf) rather than being
+    // injected into the lexical pool with a fake score.
+    let mut path_chunks: Vec<(IndexedChunk, f32)> = Vec::new();
     if let Some(fpt_field) = ctx.fields.file_path_text {
         let mut path_parser = QueryParser::for_index(&ctx.indexes[0], vec![fpt_field]);
         path_parser.set_conjunction_by_default();
         // Reuse the lexical_queries computed at the start of hybrid_search.
         let path_query_variants = &lexical_queries;
-        let mut path_ids: HashSet<String> = lexical_chunks
+        // Chunks already in the lexical pool are excluded from the path list
+        // (they are ranked there); path-only candidates feed the path pass.
+        let lexical_ids: HashSet<String> = lexical_chunks
             .iter()
             .map(|(c, _)| c.chunk_id.clone())
             .collect();
 
-        // Phase 1: collect path-match candidates from Tantivy.
-        let mut path_candidates: Vec<IndexedChunk> = Vec::new();
+        // Phase 1: collect path-match candidates from Tantivy. The same chunk
+        // can match across multiple query variants/searchers with different
+        // path-field BM25 scores; dedupe by chunk_id and keep the *highest*
+        // score, since path ranking (the path RRF pass) depends on it. Keeping
+        // the first-seen score would mis-rank depending on iteration order.
+        let mut path_by_id: HashMap<String, (IndexedChunk, f32)> = HashMap::new();
         for pq in path_query_variants {
             if let Ok(parsed) = path_parser.parse_query(pq) {
                 for (i, searcher) in ctx.searchers.iter().enumerate() {
                     if let Ok(docs) =
                         searcher.search(&parsed, &TopDocs::with_limit(100).order_by_score())
                     {
-                        for (_score, addr) in docs {
+                        for (score, addr) in docs {
                             if let Ok(doc) = searcher.doc::<TantivyDocument>(addr)
                                 && let Some(chunk) = fetch_chunk_by_id(doc, &ctx.fields)
                                     .filter(|c| !ctx.is_shadowed_base_file(i, &c.file_path))
@@ -727,26 +736,34 @@ pub fn hybrid_search_with_context(
                                     .filter(|c| scope_matches(c, options.scope_filter.as_ref()))
                                     .filter(|c| path_matches(c, &path_matcher))
                                     .filter(|c| options.skip_gitignore || !c.is_ignored)
-                                && path_ids.insert(chunk.chunk_id.clone())
+                                && !lexical_ids.contains(&chunk.chunk_id)
                             {
-                                path_candidates.push(chunk);
+                                path_by_id
+                                    .entry(chunk.chunk_id.clone())
+                                    .and_modify(|(_, s)| {
+                                        if score > *s {
+                                            *s = score;
+                                        }
+                                    })
+                                    .or_insert((chunk, score));
                             }
                         }
                     }
                 }
             }
         }
+        let mut path_candidates: Vec<(IndexedChunk, f32)> = path_by_id.into_values().collect();
 
         // Phase 2: batch-fetch text for path candidates.
         let empty_keys: Vec<u64> = path_candidates
             .iter()
-            .filter(|c| c.text.is_empty())
-            .map(|c| c.vector_key)
+            .filter(|(c, _)| c.text.is_empty())
+            .map(|(c, _)| c.vector_key)
             .collect();
         if !empty_keys.is_empty()
             && let Ok(batch) = ctx.fetch_chunks_by_vector_keys_batch(&empty_keys)
         {
-            for c in &mut path_candidates {
+            for (c, _) in &mut path_candidates {
                 if c.text.is_empty()
                     && let Some(full) = batch.get(&c.vector_key)
                 {
@@ -755,11 +772,10 @@ pub fn hybrid_search_with_context(
             }
         }
 
-        for chunk in path_candidates {
-            // High BM25 score so path matches rank
-            // above content-only matches after RRF.
-            lexical_chunks.push((chunk, 100.0));
-        }
+        // Rank path matches by their path-field BM25 score; they feed their
+        // own ranked list in fuse_rrf with a bounded weight.
+        path_candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
+        path_chunks = path_candidates;
     }
 
     // Batch-populate text from SQLite for the top chunks where Tantivy
@@ -795,6 +811,18 @@ pub fn hybrid_search_with_context(
     let has_neural_vectors = ctx.neural_vectors.as_ref().map_or(0, |v| v.size()) > 0
         || ctx.base_neural_vectors.as_ref().map_or(0, |v| v.size()) > 0;
 
+    // Neural (MiniLM, 384-dim) embeddings are far higher quality than the
+    // 256-bucket hash embeddings, so when neural vectors exist they should
+    // dominate. But neural enhancement is incremental/resumable, so a partial
+    // neural store is a normal state: dropping hash entirely would lose
+    // semantic coverage for chunks not yet neural-embedded. Instead, keep hash
+    // as a low-weight fallback whenever neural is present (the per-chunk merge
+    // takes the max, so neural wins wherever it covers a chunk), and use hash
+    // at full weight only when there is no neural store at all.
+    let neural_available =
+        embedding_model.is_some_and(|m| m.dimensions() == 384) && has_neural_vectors;
+    let hash_weight = if neural_available { 0.3 } else { 1.0 };
+
     if embedding_model.is_some() && (has_hash_vectors || has_neural_vectors) {
         let mut semantic_by_id = HashMap::<String, (IndexedChunk, f32)>::new();
         let semantic_query_text = build_semantic_query_text(trimmed);
@@ -816,7 +844,7 @@ pub fn hybrid_search_with_context(
                 ctx.hash_vectors.as_ref(),
                 ctx.base_hash_vectors.as_ref(),
             )?;
-            merge_semantic_candidates(&mut semantic_by_id, hash_hits, 1.0);
+            merge_semantic_candidates(&mut semantic_by_id, hash_hits, hash_weight);
         }
 
         if let Some(model) = embedding_model
@@ -853,6 +881,7 @@ pub fn hybrid_search_with_context(
         &lexical_chunks,
         &semantic_chunks,
         &literal_chunks,
+        &path_chunks,
         query_text,
         options.limit,
     );
@@ -1570,6 +1599,7 @@ fn fuse_rrf(
     lexical: &[(IndexedChunk, f32)],
     semantic: &[(IndexedChunk, f32)],
     literal: &[(IndexedChunk, f32)],
+    path: &[(IndexedChunk, f32)],
     query_text: &str,
     limit: Option<usize>,
 ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
@@ -1577,6 +1607,12 @@ fn fuse_rrf(
     const LEXICAL_WEIGHT: f32 = 3.2;
     const SEMANTIC_WEIGHT: f32 = 1.0;
     const LITERAL_WEIGHT: f32 = 4.0;
+    // Path matches (file_path contains the query) are a useful but bounded
+    // signal. They get a moderate rank-based weight — enough to surface a
+    // file whose path matches the query when content candidates are weak,
+    // without overriding strong content matches. The path-aware boosts below
+    // (path_exact_match/path_segment/file_stem) still apply on top.
+    const PATH_WEIGHT: f32 = 1.5;
     const LEXICAL_SCORE_WEIGHT: f32 = 0.05;
     const SEMANTIC_SCORE_WEIGHT: f32 = 0.08;
     const SEMANTIC_ONLY_PENALTY: f32 = 0.60;
@@ -1585,7 +1621,14 @@ fn fuse_rrf(
     const FILE_STEM_WEIGHT: f32 = 0.50;
     const DEFINITION_NAME_BONUS: f32 = 0.25;
     const LOCATION_INTENT_WEIGHT: f32 = 0.20;
-    const PATH_EXACT_MATCH_WEIGHT: f32 = 3.0;
+    // Path-exact matches now also feed their own ranked RRF list (see the
+    // `path` pass above), so this additive boost no longer needs to be large
+    // enough to single-handedly win — it was 3.0, ~60x the base RRF score.
+    const PATH_EXACT_MATCH_WEIGHT: f32 = 0.8;
+    // Bound the total additive boost relative to the fused base score so
+    // boosts perturb the RRF ranking rather than replace it.
+    const MAX_BOOST_RATIO: f32 = 3.0;
+    const MAX_BOOST_FLOOR: f32 = 0.25;
 
     let query_tokens = expanded_query_tokens(query_text);
     let location_intent = has_location_intent(query_text);
@@ -1638,6 +1681,21 @@ fn fuse_rrf(
         e.sources.insert("literal".to_string());
     }
 
+    // Path pass: chunks whose file path matches the query, ranked by their
+    // path-field BM25 score. Rank-based only — no raw-score magnitude term —
+    // so a path match can't dominate via an out-of-scale score.
+    for (rank, (chunk, _)) in path.iter().enumerate() {
+        let e = entries
+            .entry(chunk.chunk_id.clone())
+            .or_insert_with(|| RrfEntry {
+                score: 0.0,
+                chunk: chunk.clone(),
+                sources: HashSet::new(),
+            });
+        e.score += PATH_WEIGHT / (K + rank as f32 + 1.0);
+        e.sources.insert("path".to_string());
+    }
+
     // Chunk-density normalization (IDF-like):
     // Count how many candidate chunks each file contributes. Files with many
     // chunks (large data files, verbose test suites) get a 1/sqrt(n) penalty
@@ -1664,32 +1722,44 @@ fn fuse_rrf(
             // redundantly in every boost function.
             let bctx = ChunkBoostContext::new(&chunk);
 
-            let mut score = base_score + literal_match_boost(query_text, &bctx);
+            // Accumulate signal boosts separately from the RRF base so they can
+            // be bounded. Previously these were added directly and several were
+            // 10-60x the base RRF score (~0.05), so a single boost could
+            // override the fused rank signal entirely.
+            let mut additive_boost = literal_match_boost(query_text, &bctx);
 
             let coverage = if !query_tokens.is_empty() {
                 term_coverage_boost(&query_tokens, &bctx)
             } else {
                 0.0
             };
-            score += coverage * TERM_COVERAGE_WEIGHT;
+            additive_boost += coverage * TERM_COVERAGE_WEIGHT;
 
             if !query_tokens.is_empty() {
-                score += path_segment_boost(&query_tokens, &bctx) * PATH_SEGMENT_WEIGHT;
+                additive_boost += path_segment_boost(&query_tokens, &bctx) * PATH_SEGMENT_WEIGHT;
             }
 
-            score += path_exact_match_boost(query_text, &bctx) * PATH_EXACT_MATCH_WEIGHT;
+            additive_boost += path_exact_match_boost(query_text, &bctx) * PATH_EXACT_MATCH_WEIGHT;
 
             if !query_tokens.is_empty() {
-                score += file_stem_boost(&query_tokens, &bctx) * FILE_STEM_WEIGHT;
+                additive_boost += file_stem_boost(&query_tokens, &bctx) * FILE_STEM_WEIGHT;
             }
 
             if !query_tokens.is_empty() {
-                score += definition_name_boost(&query_tokens, &bctx) * DEFINITION_NAME_BONUS;
+                additive_boost +=
+                    definition_name_boost(&query_tokens, &bctx) * DEFINITION_NAME_BONUS;
             }
 
             if location_intent {
-                score += location_intent_boost(&chunk, &bctx) * LOCATION_INTENT_WEIGHT;
+                additive_boost += location_intent_boost(&chunk, &bctx) * LOCATION_INTENT_WEIGHT;
             }
+
+            // Keep RRF as the primary ranking signal: cap the total additive
+            // boost so it perturbs the fused base score rather than dominating
+            // it. The cap scales with the base (with a small floor so even
+            // weak-base candidates get a meaningful, bounded lift).
+            let boost_cap = (base_score * MAX_BOOST_RATIO).max(MAX_BOOST_FLOOR);
+            let mut score = base_score + additive_boost.min(boost_cap);
 
             if !source_set.contains("lexical") && !source_set.contains("literal") {
                 score *= SEMANTIC_ONLY_PENALTY;
@@ -1856,7 +1926,10 @@ fn filter_semantic_only_scores(
 }
 
 fn has_direct_source(sources: &[String]) -> bool {
-    has_literal_source(sources) || sources.iter().any(|source| source == "lexical")
+    has_literal_source(sources)
+        || sources
+            .iter()
+            .any(|source| source == "lexical" || source == "path")
 }
 
 fn has_literal_source(sources: &[String]) -> bool {
@@ -2862,6 +2935,58 @@ mod tests {
         .unwrap();
         assert!(!hits_after.is_empty());
         assert!(hits_after[0].preview.contains("authenticate_user"));
+    }
+
+    #[test]
+    #[serial]
+    fn hash_fallback_covers_chunks_without_neural_vectors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        // File A: indexed and neural-enhanced (gets a neural vector).
+        std::fs::write(
+            tmp.path().join("auth.rs"),
+            "pub fn authenticate_user(token: &str) -> bool { !token.is_empty() }\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let hash_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        let neural_model = TestEmbeddingModel384;
+        index_workspace(&workspace, &hash_model).unwrap();
+        crate::indexer::enhance_workspace_neural(&workspace, &neural_model).unwrap();
+        assert!(workspace.vector_neural_path().exists());
+
+        // File B added AFTER enhancement: it has hash vectors but no neural
+        // vector yet — a normal partial-coverage state during incremental
+        // background enhancement.
+        std::fs::write(
+            tmp.path().join("payment.rs"),
+            "pub fn process_payment_refund(amount: u64) -> u64 { amount }\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        index_workspace(&workspace, &hash_model).unwrap();
+
+        // Searching B's content with the neural model must still yield a
+        // semantic candidate for B via the hash fallback, even though neural
+        // coverage is partial. Without the fallback, B would have no semantic
+        // source until enhancement completes.
+        let hits = hybrid_search(
+            &workspace,
+            "process payment refund",
+            Some(&neural_model),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        let b_hit = hits
+            .iter()
+            .find(|h| h.preview.contains("process_payment_refund"));
+        assert!(b_hit.is_some(), "payment.rs should be found");
+        assert!(
+            b_hit.unwrap().sources.iter().any(|s| s == "semantic"),
+            "a chunk without a neural vector should still get a semantic candidate via the hash fallback"
+        );
     }
 
     #[test]

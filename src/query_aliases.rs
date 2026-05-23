@@ -17,10 +17,14 @@ pub(crate) fn phrase_aliases(tokens: &[String]) -> Vec<&'static str> {
     let mut aliases = Vec::new();
 
     for entry in PHRASE_ALIASES {
-        if entry
-            .terms
-            .iter()
-            .all(|term| tokens.iter().any(|token| token == term))
+        let terms_len = entry.terms.len();
+        if terms_len > 0
+            && tokens.windows(terms_len).any(|window| {
+                window
+                    .iter()
+                    .zip(entry.terms.iter())
+                    .all(|(token, term)| token == term)
+            })
         {
             aliases.extend_from_slice(entry.aliases);
         }
@@ -51,5 +55,11 @@ mod tests {
     fn phrase_aliases_load_from_generated_table() {
         let tokens = vec!["command".to_string(), "line".to_string()];
         assert_eq!(phrase_aliases(&tokens), vec!["cli"]);
+    }
+
+    #[test]
+    fn phrase_aliases_non_contiguous() {
+        let tokens = vec!["command".to_string(), "run".to_string(), "line".to_string()];
+        assert!(phrase_aliases(&tokens).is_empty());
     }
 }

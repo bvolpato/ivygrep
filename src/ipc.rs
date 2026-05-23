@@ -4,6 +4,39 @@ pub use unix::*;
 #[cfg(not(unix))]
 pub use windows::*;
 
+/// Acquire the daemon single-instance lock for this app home.
+///
+/// Returns `Some(file)` when the lock is acquired — the caller must hold the
+/// returned handle for the daemon's lifetime (dropping it, or process exit,
+/// releases the lock). Returns `None` if another live daemon already holds it,
+/// in which case the caller should exit without binding the socket.
+///
+/// This is what prevents a restart/auto-spawn race from leaving two daemons
+/// both bound to (and stealing) the socket, where the first becomes a zombie
+/// still holding file watchers. We retry briefly so a daemon started during
+/// the restart handover (while the outgoing daemon is still exiting) can take
+/// over instead of giving up.
+pub fn acquire_daemon_lock() -> anyhow::Result<Option<std::fs::File>> {
+    let path = crate::config::app_home()?.join("daemon.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        // The lock file is a pure flock anchor; never truncate its contents.
+        .truncate(false)
+        .open(&path)?;
+    for _ in 0..20 {
+        match fs2::FileExt::try_lock_exclusive(&file) {
+            Ok(()) => return Ok(Some(file)),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(unix)]
 mod unix {
     use crate::config;
