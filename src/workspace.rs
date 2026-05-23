@@ -551,6 +551,14 @@ impl Workspace {
             issues.push("index metadata never recorded a completed run".to_string());
         }
 
+        // A corrupt Merkle snapshot can't drive an incremental diff (diffing
+        // against an empty set would re-add files but never remove chunks for
+        // files deleted before the corruption). Force a full rebuild, which
+        // clears the stores and reindexes from scratch.
+        if crate::merkle::MerkleSnapshot::file_is_corrupt(&self.merkle_snapshot_path()) {
+            issues.push("merkle snapshot is corrupt; rebuild required".to_string());
+        }
+
         // For worktree overlays, queries also read chunks/vectors from the
         // base index. If the base predates the current format, the overlay
         // serves incompatible base data even when its own sentinel is current,

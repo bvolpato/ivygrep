@@ -495,6 +495,48 @@ fn outdated_index_format_forces_rebuild() {
 }
 
 // ---------------------------------------------------------------------------
+// CORRUPT SNAPSHOT: full rebuild must remove chunks for files deleted before
+// the corruption (not just re-add current files)
+// ---------------------------------------------------------------------------
+
+#[test]
+#[serial]
+fn corrupt_snapshot_rebuild_removes_deleted_file_chunks() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    fs::write(root.path().join("keep.rs"), "pub fn keep_marker() {}\n").unwrap();
+    fs::write(root.path().join("gone.rs"), "pub fn gone_marker() {}\n").unwrap();
+    setup_and_index(root.path(), home.path());
+
+    let ws = workspace_for(root.path());
+    assert!(indexed_files(&ws).contains("gone.rs"));
+
+    // Delete a file from disk, then corrupt the snapshot so the old file set is
+    // lost. A naive diff-against-empty would re-add keep.rs but never remove
+    // gone.rs's chunks — the rebuild must clear them.
+    fs::remove_file(root.path().join("gone.rs")).unwrap();
+    fs::write(ws.merkle_snapshot_path(), b"{ this is corrupt").unwrap();
+
+    assert!(
+        ws.quick_index_health().needs_rebuild(),
+        "corrupt snapshot must force a rebuild"
+    );
+
+    setup_and_index(root.path(), home.path());
+    let ws = workspace_for(root.path());
+    let files = indexed_files(&ws);
+    assert!(
+        files.contains("keep.rs"),
+        "current file should remain indexed"
+    );
+    assert!(
+        !files.contains("gone.rs"),
+        "chunks for the deleted file must be removed by the rebuild, got {files:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // MODIFY-TO-EMPTY / MODIFY-TO-BINARY: stale chunks must be removed
 // ---------------------------------------------------------------------------
 

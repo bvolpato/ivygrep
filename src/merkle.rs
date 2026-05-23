@@ -30,6 +30,21 @@ impl MerkleSnapshot {
         }
     }
 
+    /// True if the snapshot file exists but cannot be parsed. Such a file makes
+    /// an incremental diff impossible (we'd diff against an empty old set, which
+    /// re-adds everything but never removes chunks for files deleted before the
+    /// corruption), so the caller should force a full rebuild instead.
+    pub fn file_is_corrupt(path: &Path) -> bool {
+        if !path.exists() {
+            return false;
+        }
+        match fs::read(path) {
+            Ok(data) => serde_json::from_slice::<Self>(&data).is_err(),
+            // Unreadable (not corrupt content) — let normal IO handling deal.
+            Err(_) => false,
+        }
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::empty());
