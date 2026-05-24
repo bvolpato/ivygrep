@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779591675612,
+  "lastUpdate": 1779600148546,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -13638,6 +13638,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "indexer/incremental_reindex_no_change",
             "value": 3522.67,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6d706ae980c2cc4bc5350d998273250e9383ddd0",
+          "message": "Merge pull request #37 from bvolpato/dependabot/cargo/cargo-b5bfc02d2b\n\nchore(deps): bump openssl from 0.10.79 to 0.10.80 in the cargo group across 1 directory",
+          "timestamp": "2026-05-24T01:03:53-04:00",
+          "tree_id": "9345dcdbbad6f4f9ac4b4c158ed6c966939b5fdd",
+          "url": "https://github.com/bvolpato/ivygrep/commit/6d706ae980c2cc4bc5350d998273250e9383ddd0"
+        },
+        "date": 1779600148323,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 3744.18,
             "unit": "µs"
           }
         ]
