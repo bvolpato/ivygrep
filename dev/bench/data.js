@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779556917718,
+  "lastUpdate": 1779591675612,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -13609,6 +13609,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "indexer/incremental_reindex_no_change",
             "value": 3617.27,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gh@brunovolpato.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "f6ad2efc541ebf6725d62625aa6efea4dddbaa48",
+          "message": "Merge pull request #55: harden daemon/IPC/MCP security + robustness\n\nHarden daemon/IPC/MCP: socket auth + permissions, robustness, DoS caps",
+          "timestamp": "2026-05-23T22:43:34-04:00",
+          "tree_id": "457c1f9b2a972fea54972d9cac9e5cd420d4ba72",
+          "url": "https://github.com/bvolpato/ivygrep/commit/f6ad2efc541ebf6725d62625aa6efea4dddbaa48"
+        },
+        "date": 1779591675363,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 3522.67,
             "unit": "µs"
           }
         ]
