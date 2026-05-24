@@ -448,11 +448,16 @@ impl Workspace {
         let data = serde_json::to_vec_pretty(metadata)?;
         // Atomic write (tmp + rename) so a crash/disk-full mid-write can't
         // truncate workspace.json — a partial file would make the workspace
-        // look un-indexed and silently drop its watcher on restore.
+        // look un-indexed and silently drop its watcher on restore. Use a
+        // unique temp name per write so concurrent writers (the daemon handles
+        // requests in parallel) don't race on a shared temp file.
         let path = self.metadata_path();
-        let tmp = path.with_extension("json.tmp");
+        let tmp = path.with_file_name(format!("workspace.json.tmp.{}", uuid::Uuid::new_v4()));
         fs::write(&tmp, data)?;
-        fs::rename(&tmp, &path)?;
+        if let Err(err) = fs::rename(&tmp, &path) {
+            let _ = fs::remove_file(&tmp);
+            return Err(err.into());
+        }
         Ok(())
     }
 
