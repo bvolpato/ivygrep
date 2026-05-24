@@ -21,24 +21,24 @@ pub fn indexes_root() -> Result<PathBuf> {
 }
 
 pub fn ensure_app_dirs() -> Result<()> {
-    let home = app_home()?;
-    std::fs::create_dir_all(&home)?;
-    std::fs::create_dir_all(indexes_root()?)?;
-    // Restrict the app home to its owner. It holds the daemon socket and the
-    // index (which stores decompressed source of every indexed repo, possibly
-    // including secrets). 0700 prevents other local users on a shared host from
-    // reading indexed content off disk or reaching the daemon socket.
+    std::fs::create_dir_all(app_home()?)?;
+    let indexes = indexes_root()?;
+    std::fs::create_dir_all(&indexes)?;
+    // Tighten the ivygrep-owned index directory to 0700 — it stores the
+    // decompressed source of every indexed repo (possibly including secrets),
+    // so other local users on a shared host must not read it. We deliberately
+    // do NOT chmod the app home itself: IVYGREP_HOME may point at a
+    // pre-existing/shared directory the user controls, and the daemon socket is
+    // protected independently (0600 + peer-cred). Fail closed if the chmod of
+    // our own index dir fails rather than leave it world-readable.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        // Fail closed: if we can't tighten the app home, the index/socket would
-        // be left readable by other local users, so surface the error rather
-        // than silently continuing with weak permissions.
-        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).with_context(
+        std::fs::set_permissions(&indexes, std::fs::Permissions::from_mode(0o700)).with_context(
             || {
                 format!(
-                    "failed to restrict app home permissions to 0700: {}",
-                    home.display()
+                    "failed to restrict index directory permissions to 0700: {}",
+                    indexes.display()
                 )
             },
         )?;

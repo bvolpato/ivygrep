@@ -171,15 +171,17 @@ mod tests {
         assert!(socket_exists(), "socket/port file should exist after bind");
         assert!(path.exists());
 
-        // The socket and app home must be owner-only so other local users
-        // can't connect to the daemon or read the index.
+        // The socket must be owner-only (0600), and the ivygrep-owned index
+        // dir must be 0700, so other local users can't connect to the daemon
+        // or read indexed source.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let sock_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
             assert_eq!(sock_mode, 0o600, "daemon socket must be mode 0600");
-            let home_mode = std::fs::metadata(tmp.path()).unwrap().permissions().mode() & 0o777;
-            assert_eq!(home_mode, 0o700, "app home must be mode 0700");
+            let idx = crate::config::indexes_root().unwrap();
+            let idx_mode = std::fs::metadata(&idx).unwrap().permissions().mode() & 0o777;
+            assert_eq!(idx_mode, 0o700, "index dir must be mode 0700");
         }
 
         drop(listener);

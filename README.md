@@ -211,7 +211,7 @@ ivygrep deeply understands git. This is a core design decision, not an afterthou
 
 ivygrep is 100% local — it never sends your code anywhere. A few things worth knowing:
 
-- **Where data lives:** the index (which stores the *decompressed source text* of every indexed file) and the daemon socket live under `~/.local/share/ivygrep` (or `$XDG_DATA_HOME`/`$IVYGREP_HOME`). This directory is created `0700` and the daemon socket `0600`, so other local users on a shared host can't read your indexed code or reach the daemon. The daemon also verifies the connecting peer's uid.
+- **Where data lives:** the index (which stores the *decompressed source text* of every indexed file) and the daemon socket live under `~/.local/share/ivygrep` (or `$XDG_DATA_HOME`/`$IVYGREP_HOME`). The index directory is `0700` and the daemon socket `0600`, and the daemon verifies the connecting peer's uid — so other local users on a shared host can't read your indexed code or reach the daemon.
 - **Secrets in your repo:** ivygrep indexes file *contents*, including config/dotfiles (e.g. `.env`) unless they're gitignored. Those contents are stored in the local index and can appear in search snippets. Keep secrets out of the workspace or in `.gitignore`.
 - **MCP scope:** the `ig_search` MCP tool only searches the workspace at the provided `path` — it cannot search across other indexed projects.
 
