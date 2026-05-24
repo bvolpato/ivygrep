@@ -446,7 +446,18 @@ impl Workspace {
 
     pub fn write_metadata(&self, metadata: &WorkspaceMetadata) -> Result<()> {
         let data = serde_json::to_vec_pretty(metadata)?;
-        fs::write(self.metadata_path(), data)?;
+        // Atomic write (tmp + rename) so a crash/disk-full mid-write can't
+        // truncate workspace.json — a partial file would make the workspace
+        // look un-indexed and silently drop its watcher on restore. Use a
+        // unique temp name per write so concurrent writers (the daemon handles
+        // requests in parallel) don't race on a shared temp file.
+        let path = self.metadata_path();
+        let tmp = path.with_file_name(format!("workspace.json.tmp.{}", uuid::Uuid::new_v4()));
+        fs::write(&tmp, data)?;
+        if let Err(err) = fs::rename(&tmp, &path) {
+            let _ = fs::remove_file(&tmp);
+            return Err(err.into());
+        }
         Ok(())
     }
 
@@ -543,6 +554,14 @@ impl Workspace {
             .is_some_and(|m| m.last_indexed_at_unix.is_none())
         {
             issues.push("index metadata never recorded a completed run".to_string());
+        }
+
+        // A corrupt Merkle snapshot can't drive an incremental diff (diffing
+        // against an empty set would re-add files but never remove chunks for
+        // files deleted before the corruption). Force a full rebuild, which
+        // clears the stores and reindexes from scratch.
+        if crate::merkle::MerkleSnapshot::file_is_corrupt(&self.merkle_snapshot_path()) {
+            issues.push("merkle snapshot is corrupt; rebuild required".to_string());
         }
 
         // For worktree overlays, queries also read chunks/vectors from the

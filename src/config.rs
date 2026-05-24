@@ -21,7 +21,28 @@ pub fn indexes_root() -> Result<PathBuf> {
 }
 
 pub fn ensure_app_dirs() -> Result<()> {
-    std::fs::create_dir_all(indexes_root()?)?;
+    std::fs::create_dir_all(app_home()?)?;
+    let indexes = indexes_root()?;
+    std::fs::create_dir_all(&indexes)?;
+    // Tighten the ivygrep-owned index directory to 0700 — it stores the
+    // decompressed source of every indexed repo (possibly including secrets),
+    // so other local users on a shared host must not read it. We deliberately
+    // do NOT chmod the app home itself: IVYGREP_HOME may point at a
+    // pre-existing/shared directory the user controls, and the daemon socket is
+    // protected independently (0600 + peer-cred). Fail closed if the chmod of
+    // our own index dir fails rather than leave it world-readable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&indexes, std::fs::Permissions::from_mode(0o700)).with_context(
+            || {
+                format!(
+                    "failed to restrict index directory permissions to 0700: {}",
+                    indexes.display()
+                )
+            },
+        )?;
+    }
     Ok(())
 }
 

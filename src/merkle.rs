@@ -30,13 +30,36 @@ impl MerkleSnapshot {
         }
     }
 
+    /// True if the snapshot file exists but cannot be parsed. Such a file makes
+    /// an incremental diff impossible (we'd diff against an empty old set, which
+    /// re-adds everything but never removes chunks for files deleted before the
+    /// corruption), so the caller should force a full rebuild instead.
+    pub fn file_is_corrupt(path: &Path) -> bool {
+        if !path.exists() {
+            return false;
+        }
+        match fs::read(path) {
+            Ok(data) => serde_json::from_slice::<Self>(&data).is_err(),
+            // Unreadable (not corrupt content) — let normal IO handling deal.
+            Err(_) => false,
+        }
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::empty());
         }
+        // Propagate genuine IO errors (permissions, disk) rather than masking
+        // them as an empty snapshot. Only *corrupt content* (a truncated/garbage
+        // file, typically from a crash mid-write) falls back to empty; that case
+        // is also flagged by quick_index_health (file_is_corrupt), which forces
+        // a full rebuild that clears orphaned chunks — so we don't wedge
+        // incremental indexing forever on every reindex/watcher tick.
         let data = fs::read(path)?;
-        let snapshot = serde_json::from_slice(&data)?;
-        Ok(snapshot)
+        match serde_json::from_slice(&data) {
+            Ok(snapshot) => Ok(snapshot),
+            Err(_) => Ok(Self::empty()),
+        }
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
@@ -248,6 +271,18 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn load_corrupt_snapshot_falls_back_to_empty() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("merkle_snapshot.json");
+        fs::write(&path, b"{ this is not valid json").unwrap();
+        // Must not error (which would wedge incremental indexing forever) —
+        // fall back to empty so the next diff does a clean full reindex.
+        let snap = MerkleSnapshot::load(&path).unwrap();
+        assert!(snap.files.is_empty());
+        assert_eq!(snap.root_hash, MerkleSnapshot::empty().root_hash);
+    }
 
     #[test]
     fn merkle_diff_detects_add_modify_delete() {

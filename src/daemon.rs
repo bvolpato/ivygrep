@@ -32,6 +32,14 @@ const WATCH_QUIET_PERIOD: Duration = Duration::from_secs(2);
 const WATCH_MAX_DEBOUNCE: Duration = Duration::from_secs(30);
 const MAX_DAEMON_LOG_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_QUERY_CACHE_ENTRIES: usize = 128;
+/// Cap on cached SearchContexts. Each holds an open SQLite connection, Tantivy
+/// searchers, and mmapped vector stores (several fds + memory), so an unbounded
+/// cache leaks fds/memory in the long-running daemon (e.g. after `--all`
+/// searches touch every workspace).
+const MAX_SEARCH_CONTEXTS: usize = 32;
+/// Don't cache result sets larger than this (each hit carries preview/reason
+/// strings; large `--no-limit` results would bloat the query cache).
+const MAX_CACHEABLE_HITS: usize = 2_000;
 
 struct WatchRegistration {
     _watcher: RecommendedWatcher,
@@ -313,13 +321,24 @@ impl DaemonState {
         }
 
         let context = Arc::new(Mutex::new(SearchContext::load(workspace, emb_dim)?));
-        self.search_contexts.lock().insert(
-            key,
-            CachedSearchContext {
-                signature,
-                context: context.clone(),
-            },
-        );
+        {
+            let mut cache = self.search_contexts.lock();
+            // Bound the cache: if full and this is a new key, evict another
+            // entry so open fds / mmaps don't grow without limit.
+            if cache.len() >= MAX_SEARCH_CONTEXTS
+                && !cache.contains_key(&key)
+                && let Some(victim) = cache.keys().find(|k| **k != key).cloned()
+            {
+                cache.remove(&victim);
+            }
+            cache.insert(
+                key,
+                CachedSearchContext {
+                    signature,
+                    context: context.clone(),
+                },
+            );
+        }
         Ok(context)
     }
 
@@ -335,6 +354,12 @@ impl DaemonState {
     }
 
     fn store_query_results(&self, key: QueryCacheKey, hits: &[crate::protocol::SearchHit]) {
+        // Don't cache very large result sets (e.g. --no-limit / file_name_only
+        // on a big repo): with up to MAX_QUERY_CACHE_ENTRIES of them, each
+        // carrying preview/reason strings, this would bloat daemon memory.
+        if hits.len() > MAX_CACHEABLE_HITS {
+            return;
+        }
         self.query_results.lock().insert(key, hits.to_vec());
     }
 }
@@ -374,12 +399,54 @@ pub async fn run_daemon() -> Result<()> {
 
     restore_configured_watchers(&state);
 
+    // Graceful shutdown on SIGTERM/SIGINT (e.g. service stop): stop watchers
+    // and remove the socket before exiting, instead of leaving them dangling.
+    #[cfg(unix)]
+    {
+        let shutdown_state = state.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{SignalKind, signal};
+            let mut term = match signal(SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let mut int = match signal(SignalKind::interrupt()) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            tokio::select! {
+                _ = term.recv() => {}
+                _ = int.recv() => {}
+            }
+            daemon_log("received shutdown signal; stopping watchers and cleaning up");
+            stop_all_watchers(&shutdown_state);
+            crate::ipc::cleanup_socket();
+            std::process::exit(0);
+        });
+    }
+
     info!("ivygrep daemon listening on {}", socket_path.display());
 
     loop {
-        let (stream, _addr) = listener.accept().await?;
-        let state = state.clone();
+        let (stream, _addr) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(err) => {
+                // Don't tear down the whole daemon on a transient accept error
+                // (e.g. EMFILE under fd pressure); log, back off, and continue.
+                warn!("daemon accept error: {err:#}; backing off");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+        };
 
+        // The socket exposes cross-workspace search/index/delete; only serve
+        // connections from the daemon's own user.
+        if !crate::ipc::peer_is_owner(&stream) {
+            warn!("rejected daemon connection from a different uid");
+            continue;
+        }
+
+        let state = state.clone();
         tokio::spawn(async move {
             if let Err(err) = handle_connection(stream, state).await {
                 error!("daemon connection error: {err:#}");

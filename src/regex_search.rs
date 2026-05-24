@@ -507,6 +507,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn regex_alternation_finds_files_matching_any_branch() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();

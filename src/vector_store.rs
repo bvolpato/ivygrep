@@ -153,7 +153,11 @@ impl VectorStore {
     /// guarantees the key does not already exist (e.g., fresh enhancement).
     pub fn add_unchecked(&mut self, key: u64, vector: Vec<f32>) {
         self.ensure_capacity_for_insert();
-        let _ = self.index.add(key, &vector);
+        // Surface failures: a dropped add means a chunk with no vector, which
+        // silently degrades semantic recall otherwise.
+        if let Err(err) = self.index.add(key, &vector) {
+            tracing::warn!("vector store add failed for key {key}: {err:?}");
+        }
     }
 
     pub fn upsert(&mut self, key: u64, vector: Vec<f32>) {
@@ -162,7 +166,9 @@ impl VectorStore {
         if self.index.contains(key) {
             let _ = self.index.remove(key);
         }
-        let _ = self.index.add(key, &vector);
+        if let Err(err) = self.index.add(key, &vector) {
+            tracing::warn!("vector store upsert add failed for key {key}: {err:?}");
+        }
     }
 
     pub fn size(&self) -> usize {
