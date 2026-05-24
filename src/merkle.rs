@@ -49,13 +49,13 @@ impl MerkleSnapshot {
         if !path.exists() {
             return Ok(Self::empty());
         }
-        // A missing or corrupt snapshot must not permanently wedge incremental
-        // indexing. Fall back to an empty snapshot, which makes the next diff
-        // treat everything as new (a clean full reindex) rather than erroring
-        // on every reindex/watcher tick forever.
-        let Ok(data) = fs::read(path) else {
-            return Ok(Self::empty());
-        };
+        // Propagate genuine IO errors (permissions, disk) rather than masking
+        // them as an empty snapshot. Only *corrupt content* (a truncated/garbage
+        // file, typically from a crash mid-write) falls back to empty; that case
+        // is also flagged by quick_index_health (file_is_corrupt), which forces
+        // a full rebuild that clears orphaned chunks — so we don't wedge
+        // incremental indexing forever on every reindex/watcher tick.
+        let data = fs::read(path)?;
         match serde_json::from_slice(&data) {
             Ok(snapshot) => Ok(snapshot),
             Err(_) => Ok(Self::empty()),
