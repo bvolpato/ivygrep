@@ -11,8 +11,11 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use std::sync::Arc;
+use std::sync::OnceLock;
+
 use crate::config;
-use crate::embedding::create_model;
+use crate::embedding::{EmbeddingModel, create_hash_model, create_neural_model};
 use crate::indexer::{
     index_workspace, maybe_complete_neural_for_small_workspace, workspace_is_indexed,
 };
@@ -288,6 +291,38 @@ fn execute_ivygrep_status() -> Result<Value> {
     }))
 }
 
+/// The neural query model for this MCP process, loaded once and reused across
+/// requests.
+///
+/// `serve_stdio` is a long-lived server, so reconstructing the ONNX/Candle model
+/// per request reloads the weights every search — hundreds of ms of avoidable
+/// latency and memory churn. Cache it here, mirroring the daemon's
+/// `DaemonState.lazy_model` / `cached_hash_model()`.
+///
+/// Only a *successfully initialized neural* model is cached. If neural init
+/// fails (transient model download/load error, or the `neural` feature is not
+/// compiled in) we return a fresh hash model for this call and leave the cache
+/// empty so the next request retries neural — otherwise a single startup
+/// failure would silently pin every future search to hash embeddings until the
+/// process restarts. Hash-model construction is cheap (no I/O), so retrying it
+/// per call costs nothing meaningful.
+fn mcp_query_model() -> Arc<dyn EmbeddingModel> {
+    static MODEL: OnceLock<Arc<dyn EmbeddingModel>> = OnceLock::new();
+    if let Some(model) = MODEL.get() {
+        return model.clone();
+    }
+    match create_neural_model() {
+        Ok(model) => {
+            let model: Arc<dyn EmbeddingModel> = Arc::from(model);
+            // First successful neural init wins; the MCP stdio loop is serial,
+            // so a lost race here is not a concern.
+            let _ = MODEL.set(model.clone());
+            model
+        }
+        Err(_) => Arc::from(create_hash_model()),
+    }
+}
+
 fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
     let query = args
         .query
@@ -300,14 +335,20 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
     };
 
     let (current_workspace, scope_filter) = resolve_workspace_and_scope(Path::new(&input_path))?;
-    let model = create_model(false);
 
     // MCP search is intentionally scoped to a single workspace (the provided
     // `path`). Cross-workspace ("all indices") search is not supported here:
     // an agent could otherwise read source from unrelated indexed projects
     // outside its intended working directory.
     if !workspace_is_indexed(&current_workspace) {
-        let _summary = index_workspace(&current_workspace, model.as_ref())?;
+        // Auto-index with the fast HASH model (mirrors the daemon's Index
+        // handler). Neural embeddings are built later by a background
+        // subprocess, so the first query returns quickly even on very large
+        // repos instead of blocking on inline ONNX inference across the whole
+        // tree — which on big repos never completes in any usable time and,
+        // run by several MCP clients at once, saturates the host. See #56.
+        let index_model = create_hash_model();
+        let _summary = index_workspace(&current_workspace, index_model.as_ref())?;
     }
     let workspace = current_workspace.clone();
     let _ = workspace.cleanup_stale_legacy_runtime_files();
@@ -342,7 +383,18 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
             args.skip_gitignore.unwrap_or(false),
         )?
     } else {
+        // Neural model is loaded once per process and only needed to embed the
+        // query (literal/regex modes skip it entirely). See #57.
+        let model = mcp_query_model();
         let _ = maybe_complete_neural_for_small_workspace(&workspace);
+        // Build neural vectors for larger workspaces in the background (a niced
+        // subprocess) so search quality improves over time without blocking
+        // this request. Small workspaces are completed inline above.
+        if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
+            && workspace.needs_neural_enhancement()
+        {
+            let _ = workspace.trigger_background_enhancement();
+        }
         hybrid_search(
             &workspace,
             query,
@@ -864,6 +916,83 @@ mod tests {
         assert_eq!(result["mode"], "literal");
         let count = result["result_count"].as_u64().unwrap();
         assert!(count > 0, "literal search should find results");
+    }
+
+    #[test]
+    #[serial]
+    fn mcp_auto_index_builds_hash_vectors_not_neural() {
+        // Regression guard for #56: the MCP auto-index must use the fast HASH
+        // model (256-dim `vectors.usearch`), not the neural model (384-dim)
+        // inline. Building neural inline blocks the first query for minutes on
+        // large repos and melts the host when several MCP clients do it at once.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        for i in 0..6 {
+            std::fs::write(
+                root.join(format!("file_{i}.rs")),
+                format!("pub fn calculate_tax_{i}(amount: f64) -> f64 {{ amount * 0.2 }}\n"),
+            )
+            .unwrap();
+        }
+
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        // Don't spawn the background neural enhancement subprocess during tests.
+        unsafe { std::env::set_var("IVYGREP_NO_AUTOSPAWN", "1") };
+
+        let _ = execute_ivygrep_search(IvygrepSearchArgs {
+            query: Some("calculate tax".to_string()),
+            path: Some(root.to_string_lossy().to_string()),
+            limit: Some(5),
+            context: Some(2),
+            type_filter: None,
+            regex: Some(false),
+            literal: None,
+            include: None,
+            exclude: None,
+            first_line_only: Some(false),
+            file_name_only: Some(false),
+            verbose: Some(false),
+            skip_gitignore: None,
+        })
+        .unwrap();
+
+        let workspace = crate::workspace::Workspace::resolve(&root).unwrap();
+        let store = crate::vector_store::VectorStore::open_readonly(
+            &workspace.vector_path(),
+            256,
+            crate::vector_store::ScalarKind::F16,
+        )
+        .expect("hash vector store (vectors.usearch) should open at 256 dims");
+        assert_eq!(
+            store.dimensions(),
+            256,
+            "MCP auto-index must build 256-dim hash vectors, not 384-dim neural inline"
+        );
+
+        unsafe { std::env::remove_var("IVYGREP_NO_AUTOSPAWN") };
+    }
+
+    #[test]
+    fn mcp_query_model_caches_neural_but_not_hash_fallback() {
+        // #57: a successfully-loaded neural model is cached once per process.
+        // The hash fallback is intentionally NOT cached, so a transient neural
+        // failure can't pin the process to hash embeddings forever.
+        let a = mcp_query_model();
+        let b = mcp_query_model();
+        if a.dimensions() == 384 {
+            // Neural model available — must be the same cached instance.
+            assert!(
+                Arc::ptr_eq(&a, &b),
+                "neural query model should be cached, not reloaded per call"
+            );
+        } else {
+            // Neural unavailable (not compiled in / load failed): hash fallback
+            // is rebuilt each call so neural can be retried later. Just ensure a
+            // usable model comes back.
+            assert_eq!(a.dimensions(), b.dimensions());
+        }
     }
 
     fn tool_json_payload(response: &Value) -> Value {

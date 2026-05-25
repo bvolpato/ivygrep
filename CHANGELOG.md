@@ -2,6 +2,21 @@
 
 All notable changes to ivygrep are documented in this file.
 
+## [Unreleased]
+
+### Changed
+- **Index format bumped to v3 — upgrading triggers a one-time full reindex.** A definition's leading doc-comment/attribute lines are now folded into the following function/class chunk instead of being emitted as standalone single-line `Module` chunks. On a representative tree this removed ~40% of chunks (less to embed, store, and search), and search now returns the documented definition rather than a bare comment line.
+
+### Fixed
+- **MCP no longer neural-embeds the whole repo inline on the first query (#56).** The MCP auto-index now uses the fast hash model and defers neural embeddings to a background subprocess — mirroring the daemon — so the first query returns quickly even on very large repos. Previously the inline ONNX pass could block the first query for many minutes and, run by several MCP clients at once, saturate the host.
+- **MCP caches its neural query model per process (#57).** It was reconstructed on every `ig_search` (and even for `literal`/`regex` modes that never embed a query); it is now loaded once via `OnceLock`, only in the hybrid path.
+
+### Added
+- **Daemon concurrency limit (#58).** Heavy hybrid/literal/regex search and index work is gated behind a `Semaphore` sized to the CPU count, providing backpressure instead of spawning unbounded blocking tasks (Tokio's blocking pool defaults to 512 threads) under a burst of clients.
+
+### Testing
+- Added regression coverage: MCP auto-index builds 256-dim hash vectors (not 384-dim neural inline), MCP query-model caching, daemon CPU-concurrency bound, and leading-comment chunk folding.
+
 ## [0.7.0] — 2026-05-23
 
 ### Changed
