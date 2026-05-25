@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779718665160,
+  "lastUpdate": 1779728046992,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -13696,6 +13696,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "indexer/incremental_reindex_no_change",
             "value": 3813.07,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gh@brunovolpato.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "b8238eead73877b4800d98a36f5db4cb3fb2a9ca",
+          "message": "Merge pull request #61 from bvolpato/fix/large-repo-file-size-cap\n\nSkip minified bundles / single-line blobs when indexing",
+          "timestamp": "2026-05-25T12:36:22-04:00",
+          "tree_id": "2f2a9149b4aa4ab49a858be6e22471f686a6b291",
+          "url": "https://github.com/bvolpato/ivygrep/commit/b8238eead73877b4800d98a36f5db4cb3fb2a9ca"
+        },
+        "date": 1779728046601,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 3713.99,
             "unit": "µs"
           }
         ]
