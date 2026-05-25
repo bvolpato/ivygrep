@@ -175,6 +175,13 @@ impl VectorStore {
         self.index.size()
     }
 
+    /// Dimensionality of the vectors stored in this index. Useful for asserting
+    /// that an index was built with the expected embedding model (e.g. 256-dim
+    /// hash vs 384-dim neural).
+    pub fn dimensions(&self) -> usize {
+        self.index.dimensions()
+    }
+
     pub fn search(&self, query: &[f32], count: usize) -> Vec<VectorMatch> {
         match self.index.search(query, count) {
             Ok(matches) => matches
