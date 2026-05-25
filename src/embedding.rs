@@ -325,18 +325,23 @@ impl EmbeddingModel for CandleEmbeddingModel {
                 .collect();
         }
 
-        // Embed in parallel: each rayon worker uses its own embedder from the
-        // pool (indexed by worker id), so forwards run concurrently with no
-        // mutex contention. `par_iter().map().collect()` preserves input order.
+        // Embed in parallel with one contiguous slice per embedder: exactly
+        // `n` parallel tasks, each holding its own instance's lock, so there is
+        // no mutex contention regardless of the global rayon pool size. This
+        // matters when the pool degraded (fewer instances than rayon threads):
+        // concurrency tracks the embedder count rather than oversubscribing a
+        // few instances. `par_chunks` + `flat_map` preserves input order.
         use rayon::prelude::*;
+        let chunk_size = texts.len().div_ceil(n);
         texts
-            .par_iter()
-            .map(|t| {
-                let idx = rayon::current_thread_index().unwrap_or(0) % n;
-                self.pool[idx]
-                    .lock()
-                    .embed_one(t)
-                    .unwrap_or_else(|_| vec![0.0; 384])
+            .par_chunks(chunk_size)
+            .enumerate()
+            .flat_map(|(slice_idx, slice)| {
+                let embedder = self.pool[slice_idx].lock();
+                slice
+                    .iter()
+                    .map(|t| embedder.embed_one(t).unwrap_or_else(|_| vec![0.0; 384]))
+                    .collect::<Vec<_>>()
             })
             .collect()
     }
