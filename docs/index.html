@@ -24,6 +24,12 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Outfit:wght@300;400;600;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
+    <noscript>
+        <!-- Below-the-fold content uses .fade-in-scroll, which an
+             IntersectionObserver reveals on scroll. Without JS that never runs,
+             so reveal everything up front. -->
+        <style>.fade-in-scroll { opacity: 1 !important; transform: none !important; }</style>
+    </noscript>
     <link rel="icon" type="image/svg+xml" href="assets/icon.svg">
 </head>
 <body>
@@ -63,7 +69,7 @@
         <div class="container hero-content">
             <div class="hero-badge slide-up">
                 <span class="badge-dot"></span>
-                v0.6.19 — daemon hot queries under 6 ms, Linux kernel indexing 10.6% faster
+                v0.7.0 — daemon hot queries under 6 ms, Linux kernel indexing 10.6% faster
             </div>
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" onerror="this.src='assets/logo.png'"/>
@@ -643,7 +649,7 @@ esac
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md" class="footer-link">Changelog</a>
                 </div>
                 <div class="footer-copy">
-                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v0.6.19</p>
+                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v0.7.0</p>
                 </div>
             </div>
         </div>
