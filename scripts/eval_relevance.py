@@ -188,6 +188,34 @@ def main() -> int:
             env=env,
         )
 
+        if args.neural:
+            # Build neural vectors up front (foreground, no daemon) so the query
+            # path actually exercises them. Without this the queries run before
+            # background enhancement exists, silently measuring the hash
+            # fallback instead of the neural relevance we intend to gate on.
+            run(
+                [str(binary), "--enhance-internal", str(repo)],
+                cwd=REPO_ROOT,
+                env=env,
+            )
+            # `--enhance-internal` exits 0 even when neural model init fails
+            # (a hash-only binary, or a missing/broken model download), so the
+            # exit code can't be trusted. Confirm neural vectors actually exist;
+            # otherwise we'd report the hash fallback as "neural". Fail loudly.
+            status = run(
+                [str(binary), "--status", "--json"], cwd=REPO_ROOT, env=env
+            )
+            try:
+                workspaces = json.loads(status)
+            except json.JSONDecodeError:
+                workspaces = []
+            if not any(ws.get("has_neural_vectors") for ws in workspaces):
+                raise SystemExit(
+                    "--neural requested but no neural vectors were built for "
+                    f"{repo} (neural model unavailable?). Refusing to report the "
+                    "hash fallback as 'neural'."
+                )
+
         rows: list[dict[str, Any]] = []
         t0 = time.perf_counter()
         for case in cases:
