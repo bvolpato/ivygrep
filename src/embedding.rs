@@ -268,8 +268,25 @@ impl CandleEmbeddingModel {
         };
 
         let mut pool = Vec::with_capacity(pool_size);
-        for _ in 0..pool_size {
-            pool.push(parking_lot::Mutex::new(build_one()?));
+        for i in 0..pool_size {
+            match build_one() {
+                Ok(embedder) => pool.push(parking_lot::Mutex::new(embedder)),
+                // Already have at least one working embedder: degrade to fewer
+                // workers rather than disabling neural enhancement entirely if a
+                // later copy can't be allocated (e.g. OOM / limited VRAM loading
+                // the Nth instance).
+                Err(e) if i > 0 => {
+                    tracing::warn!(
+                        "neural embedder pool: loaded {} of {} instances; continuing with fewer ({e:#})",
+                        pool.len(),
+                        pool_size
+                    );
+                    break;
+                }
+                // Couldn't build even one — a real failure; surface it so the
+                // caller falls back to hash.
+                Err(e) => return Err(e),
+            }
         }
 
         Ok(Self { pool })
