@@ -19,6 +19,9 @@ All notable changes to ivygrep are documented in this file.
 - **Daemon concurrency limit (#58).** Heavy hybrid/literal/regex search and index work is gated behind a `Semaphore` sized to the CPU count, providing backpressure instead of spawning unbounded blocking tasks (Tokio's blocking pool defaults to 512 threads) under a burst of clients.
 - **Relevance eval gate wired into CI (#20).** A new opt-in `Relevance` workflow runs `scripts/eval_relevance.py` as a deterministic hash-path gate on PRs touching ranking/indexing/eval code, catching regressions in fusion/boosting/chunking. The harness also now reliably measures the **neural** path locally (`--neural`): it previously set `IVYGREP_NO_AUTOSPAWN` and never built neural vectors, so it silently scored the hash fallback while labeling it "neural"; it now builds neural vectors up front. The labeled query set grew from 15 to 23 intent-style queries over ivygrep's own tree.
 
+### Performance
+- **Background neural embedding now uses the full background core budget.** `candle_embed`'s `embed_batch` runs single-text forward passes sequentially behind one mutex, so embedding pinned ~1 core no matter the thread budget — building neural vectors for a repo with millions of chunks took many hours. The embedder is now a small pool (one instance per background worker thread) and forwards run in parallel via rayon, so the enhancement pass uses its allotted ~25%-core budget (measured ~3–4× CPU utilization, i.e. proportionally faster wall time when cores are free) **without capping which chunks get neural vectors**. The foreground query model stays a single instance.
+
 ### Testing
 - Added regression coverage: MCP auto-index builds 256-dim hash vectors (not 384-dim neural inline), MCP query-model caching, daemon CPU-concurrency bound, and leading-comment chunk folding.
 

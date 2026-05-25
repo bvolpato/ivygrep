@@ -196,7 +196,13 @@ impl EmbeddingModel for HashEmbeddingModel {
 
 #[cfg(feature = "neural")]
 pub struct CandleEmbeddingModel {
-    model: parking_lot::Mutex<candle_embed::BasedBertEmbedder>,
+    /// Pool of independent embedder instances. `candle_embed`'s `embed_batch`
+    /// is a sequential `for text in texts` loop of single-text, single-threaded
+    /// forward passes, so a lone instance behind a mutex uses ~1 core regardless
+    /// of the thread budget. To actually use the allotted cores we run forwards
+    /// in parallel — one embedder per worker thread, so there is no mutex
+    /// contention. Foreground (query) embedding only ever needs one.
+    pool: Vec<parking_lot::Mutex<candle_embed::BasedBertEmbedder>>,
 }
 
 #[cfg(feature = "neural")]
@@ -228,31 +234,42 @@ impl CandleEmbeddingModel {
         // global thread pool to 25% of cores (min 1) so the system stays
         // responsive. This affects both the Candle BLAS work-stealing and
         // any par_iter calls in the enhancement pipeline.
-        if is_background {
+        let pool_size = if is_background {
             let bg_threads = (num_cpus::get() / 4).max(1);
             let _ = rayon::ThreadPoolBuilder::new()
                 .num_threads(bg_threads)
                 .build_global();
             tracing::info!("background mode: rayon global pool limited to {bg_threads} thread(s)");
-        }
+            // One embedder per worker thread so parallel forwards never contend
+            // on a shared mutex. Capped so very high core counts don't load an
+            // unbounded number of model copies (~tens of MB each).
+            bg_threads.min(8)
+        } else {
+            // Foreground/query model embeds one text at a time — a pool of one.
+            1
+        };
 
         use candle_embed::{CandleEmbedBuilder, WithModel};
 
-        let mut builder =
-            CandleEmbedBuilder::new().set_model_from_presets(WithModel::AllMinilmL6V2);
+        let build_one = || -> anyhow::Result<candle_embed::BasedBertEmbedder> {
+            let mut builder =
+                CandleEmbedBuilder::new().set_model_from_presets(WithModel::AllMinilmL6V2);
+            if !candle_core::utils::cuda_is_available() && !candle_core::utils::metal_is_available()
+            {
+                builder = builder.with_device_cpu();
+            }
+            let embedder = builder.build()?;
+            embedder.load_tokenizer()?;
+            embedder.load_model()?;
+            Ok(embedder)
+        };
 
-        if !candle_core::utils::cuda_is_available() && !candle_core::utils::metal_is_available() {
-            builder = builder.with_device_cpu();
+        let mut pool = Vec::with_capacity(pool_size);
+        for _ in 0..pool_size {
+            pool.push(parking_lot::Mutex::new(build_one()?));
         }
 
-        let embedder = builder.build()?;
-
-        embedder.load_tokenizer()?;
-        embedder.load_model()?;
-
-        Ok(Self {
-            model: parking_lot::Mutex::new(embedder),
-        })
+        Ok(Self { pool })
     }
 }
 
@@ -264,7 +281,7 @@ impl EmbeddingModel for CandleEmbeddingModel {
 
     fn embed(&self, text: &str) -> Vec<f32> {
         // BasedBertEmbedder returns Result<Vec<f32>>
-        self.model
+        self.pool[0]
             .lock()
             .embed_one(text)
             .unwrap_or_else(|_| vec![0.0; 384])
@@ -275,16 +292,33 @@ impl EmbeddingModel for CandleEmbeddingModel {
             return vec![];
         }
 
-        let mut all_results = Vec::with_capacity(texts.len());
-        for chunk in texts.chunks(256) {
-            let mut results = self
-                .model
-                .lock()
-                .embed_batch(chunk)
-                .unwrap_or_else(|_| chunk.iter().map(|_| vec![0.0; 384]).collect());
-            all_results.append(&mut results);
+        let n = self.pool.len();
+        if n <= 1 {
+            return texts
+                .iter()
+                .map(|t| {
+                    self.pool[0]
+                        .lock()
+                        .embed_one(t)
+                        .unwrap_or_else(|_| vec![0.0; 384])
+                })
+                .collect();
         }
-        all_results
+
+        // Embed in parallel: each rayon worker uses its own embedder from the
+        // pool (indexed by worker id), so forwards run concurrently with no
+        // mutex contention. `par_iter().map().collect()` preserves input order.
+        use rayon::prelude::*;
+        texts
+            .par_iter()
+            .map(|t| {
+                let idx = rayon::current_thread_index().unwrap_or(0) % n;
+                self.pool[idx]
+                    .lock()
+                    .embed_one(t)
+                    .unwrap_or_else(|_| vec![0.0; 384])
+            })
+            .collect()
     }
 }
 
