@@ -439,6 +439,41 @@ pub fn is_indexable_file(path: &Path, bytes: &[u8]) -> bool {
     true
 }
 
+/// Maximum number of immediately-preceding comment/attribute lines folded into
+/// the following definition chunk (#59). Caps pathological merges of huge banner
+/// comments while still absorbing normal doc-comments.
+const MAX_LEADING_COMMENT_LINES: usize = 20;
+
+/// Heuristic: does a *trimmed* line look like a doc-comment, attribute, or
+/// decorator that conventionally sits directly above a definition (for the given
+/// `language`)?
+///
+/// Tree-sitter function/class nodes exclude a definition's leading doc-comment,
+/// so without folding them in, each comment line lands in its own 1-line gap and
+/// becomes a standalone `Module` chunk — large index bloat and bare-comment
+/// search hits. We fold such lines into the following definition chunk instead.
+fn is_leading_doc_line(trimmed: &str, language: &str) -> bool {
+    // Covers //, ///, //! (C/Rust/Go/Java/JS/TS/Swift/Scala/Dart…), block comment
+    // bodies (/* * */), decorators/annotations (@), -- (SQL/Haskell/Lua),
+    // ; (Lisp/asm), and triple-quoted docstrings.
+    const PREFIXES: &[&str] = &["//", "/*", "*", "@", "--", ";", "\"\"\"", "'''"];
+    if PREFIXES.iter().any(|p| trimmed.starts_with(p)) {
+        return true;
+    }
+    // Rust attributes attach to the item directly below, so fold them in.
+    if trimmed.starts_with("#[") || trimmed.starts_with("#!") {
+        return true;
+    }
+    // A bare `#` is a line comment only in languages that use it as one. In
+    // C/C++/Obj-C/C# a leading `#` is a preprocessor directive (#include,
+    // #define, #pragma, #region) — real, independently-retrievable code that
+    // must NOT be folded into the following definition.
+    if trimmed.starts_with('#') {
+        return matches!(language, "python" | "ruby" | "php" | "perl" | "shell");
+    }
+    false
+}
+
 pub fn chunk_source(rel_path: &Path, text: &str) -> Vec<Chunk> {
     let lang_def = find_language_def(rel_path);
     let language = lang_def.map(|d| d.name).unwrap_or("text").to_string();
@@ -721,7 +756,7 @@ fn try_tree_sitter_chunk_source(
     let mut covered = vec![false; lines.len() + 1]; // index 0 unused
 
     for (start, end, kind) in &ranges {
-        let start = *start;
+        let mut start = *start;
         let end = *end;
         if start == 0 || start > lines.len() {
             continue;
@@ -729,6 +764,25 @@ fn try_tree_sitter_chunk_source(
         let safe_end = end.min(lines.len());
         if safe_end < start {
             continue;
+        }
+
+        // Fold a contiguous block of immediately-preceding comment/attribute
+        // lines (a definition's doc-comment) into this chunk so it enriches the
+        // definition's embedding instead of becoming its own 1-line `Module`
+        // chunk. See #59. Lines already covered by an enclosing chunk (e.g. an
+        // impl block) are left alone.
+        let mut absorbed = 0usize;
+        while start > 1 && absorbed < MAX_LEADING_COMMENT_LINES {
+            let prev = start - 1; // 1-indexed line directly above
+            if covered[prev] {
+                break;
+            }
+            let line = lines[prev - 1].trim();
+            if line.is_empty() || !is_leading_doc_line(line, language) {
+                break;
+            }
+            start = prev;
+            absorbed += 1;
         }
 
         for flag in covered.iter_mut().take(safe_end + 1).skip(start) {
@@ -1612,6 +1666,71 @@ pub fn calculate_total(amount: f64) -> f64 {
         let chunks = chunk_source(Path::new("math.ex"), src);
         assert!(chunks.iter().any(|c| c.kind == ChunkKind::Module));
         assert!(chunks.iter().any(|c| c.kind == ChunkKind::Function));
+    }
+
+    #[test]
+    fn leading_doc_comment_folds_into_following_definition() {
+        // #59: a doc-comment directly above a function must be folded into the
+        // function chunk, not emitted as its own standalone single-line chunk.
+        let src = "package demo\n\n// CalculateTax computes the tax for an amount.\nfunc CalculateTax(amount int) int {\n\treturn amount * 2\n}\n";
+        let chunks = chunk_source(Path::new("tax.go"), src);
+
+        let func = chunks
+            .iter()
+            .find(|c| c.kind == ChunkKind::Function)
+            .expect("function chunk should exist");
+        assert!(
+            func.text.contains("CalculateTax computes the tax"),
+            "doc-comment should be folded into the function chunk, got: {:?}",
+            func.text
+        );
+        // The comment must not survive as its own standalone 1-line Module chunk.
+        let standalone_comment = chunks.iter().any(|c| {
+            c.kind == ChunkKind::Module
+                && c.start_line == c.end_line
+                && c.text.contains("CalculateTax computes the tax")
+        });
+        assert!(
+            !standalone_comment,
+            "doc-comment must not be a standalone Module chunk"
+        );
+    }
+
+    #[test]
+    fn is_leading_doc_line_excludes_c_family_preprocessor() {
+        // #59 review: a leading `#` is a comment in some languages but a
+        // preprocessor directive in C/C++/Obj-C/C# — those must NOT be folded.
+        assert!(!is_leading_doc_line("#include <stdio.h>", "c"));
+        assert!(!is_leading_doc_line("#define SCALE 2", "cpp"));
+        assert!(!is_leading_doc_line("#region Helpers", "csharp"));
+        assert!(!is_leading_doc_line("#import <Foo.h>", "objc"));
+        // `//` and block comments fold regardless of language.
+        assert!(is_leading_doc_line("// doc", "c"));
+        assert!(is_leading_doc_line("/// rustdoc", "rust"));
+        // Rust attributes attach to the item below — fold them.
+        assert!(is_leading_doc_line("#[derive(Debug)]", "rust"));
+        // `#` is a genuine line comment in these languages — fold it.
+        assert!(is_leading_doc_line("# explain the function", "python"));
+        assert!(is_leading_doc_line("# explain the method", "ruby"));
+    }
+
+    #[test]
+    fn c_preprocessor_not_folded_into_definition() {
+        // End-to-end: #include/#define stay independently retrievable and are
+        // not pulled into the following function chunk.
+        let src = "#include <stdio.h>\n#define SCALE 2\n// doc: compute value\nint compute_value(int x) {\n    return x * SCALE;\n}\n";
+        let chunks = chunk_source(Path::new("calc.c"), src);
+        if let Some(func) = chunks.iter().find(|c| c.text.contains("compute_value")) {
+            assert!(
+                !func.text.contains("#include") && !func.text.contains("#define"),
+                "preprocessor must not be folded into the function chunk: {:?}",
+                func.text
+            );
+        }
+        assert!(
+            chunks.iter().any(|c| c.text.contains("#include")),
+            "preprocessor directives must remain indexed somewhere"
+        );
     }
 
     #[test]

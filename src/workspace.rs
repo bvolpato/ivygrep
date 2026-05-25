@@ -35,7 +35,8 @@ pub struct Workspace {
 /// History:
 ///   1 — vector keys derived from content hash (implicit; pre-versioning)
 ///   2 — vector keys derived from the unique chunk id (#27)
-pub const INDEX_FORMAT_VERSION: u32 = 2;
+///   3 — leading doc-comments folded into the following definition chunk (#59)
+pub const INDEX_FORMAT_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceMetadata {
