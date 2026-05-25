@@ -144,6 +144,81 @@
         { "pattern": "src/config.rs", "grade": 2 }
       ],
       "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "job-progress",
+      "query": "track progress and status of a long running background job",
+      "intent": "Job status/heartbeat tracking.",
+      "judgments": [
+        { "pattern": "src/jobs.rs", "grade": 3 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "identifier-tokenization",
+      "query": "split camelCase and snake_case identifiers into separate words",
+      "intent": "Identifier/token splitting helpers.",
+      "judgments": [
+        { "pattern": "src/text.rs", "grade": 3 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "glob-filtering",
+      "query": "match file paths against include and exclude glob patterns",
+      "intent": "Glob parsing/matching.",
+      "judgments": [
+        { "pattern": "src/path_glob.rs", "grade": 3 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "literal-exact-search",
+      "query": "fast exact substring matching backed by the index",
+      "intent": "Literal search fast path lives in the search module.",
+      "judgments": [
+        { "pattern": "src/search.rs", "grade": 3 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "request-response-format",
+      "query": "data structures for requests and responses exchanged with the daemon",
+      "intent": "Protocol message types.",
+      "judgments": [
+        { "pattern": "src/protocol.rs", "grade": 3 },
+        { "pattern": "src/daemon.rs", "grade": 1 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "indexing-pipeline",
+      "query": "the pipeline that reads files chunks them and writes them to storage",
+      "intent": "Indexing pipeline.",
+      "judgments": [
+        { "pattern": "src/indexer.rs", "grade": 3 },
+        { "pattern": "src/chunking.rs", "grade": 1 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "concurrent-search-limit",
+      "query": "limit how many searches run at the same time to avoid overload",
+      "intent": "Daemon concurrency bound.",
+      "judgments": [
+        { "pattern": "src/daemon.rs", "grade": 3 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
+    },
+    {
+      "id": "skip-generated-files",
+      "query": "avoid indexing minified bundles or oversized generated files",
+      "intent": "Indexability filters (size/minified).",
+      "judgments": [
+        { "pattern": "src/chunking.rs", "grade": 3 },
+        { "pattern": "src/walker.rs", "grade": 2 }
+      ],
+      "spam_patterns": ["tests/**", "benches/**"]
     }
   ]
 }
