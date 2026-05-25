@@ -235,15 +235,18 @@ impl CandleEmbeddingModel {
         // responsive. This affects both the Candle BLAS work-stealing and
         // any par_iter calls in the enhancement pipeline.
         let pool_size = if is_background {
-            let bg_threads = (num_cpus::get() / 4).max(1);
+            // Cap the background budget to at most 8. The cap applies to BOTH
+            // the rayon pool and the embedder pool so worker count == embedder
+            // count: in embed_batch each worker maps to its own embedder, so if
+            // there were more workers than embedders the extras would collide on
+            // a shared mutex and serialize (wasting budget on high-core hosts).
+            // It also bounds model-copy memory (~tens of MB per instance).
+            let bg_threads = (num_cpus::get() / 4).clamp(1, 8);
             let _ = rayon::ThreadPoolBuilder::new()
                 .num_threads(bg_threads)
                 .build_global();
             tracing::info!("background mode: rayon global pool limited to {bg_threads} thread(s)");
-            // One embedder per worker thread so parallel forwards never contend
-            // on a shared mutex. Capped so very high core counts don't load an
-            // unbounded number of model copies (~tens of MB each).
-            bg_threads.min(8)
+            bg_threads
         } else {
             // Foreground/query model embeds one text at a time — a pool of one.
             1
