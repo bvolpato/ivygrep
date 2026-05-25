@@ -617,6 +617,19 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
 }
 .fade-in-scroll.visible { opacity: 1; transform: translateY(0); }
 
+/* Respect prefers-reduced-motion: show all reveal content immediately with no
+   animation/transition (and don't leave .fade-in-scroll stuck hidden). */
+@media (prefers-reduced-motion: reduce) {
+    .slide-up,
+    .fade-in,
+    .fade-in-scroll {
+        opacity: 1 !important;
+        transform: none !important;
+        animation: none !important;
+        transition: none !important;
+    }
+}
+
 /* ─── Responsive ─── */
 @media (max-width: 768px) {
     h1 { font-size: 2.5rem; }
