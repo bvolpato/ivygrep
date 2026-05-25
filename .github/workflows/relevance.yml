@@ -1,0 +1,58 @@
+name: Relevance
+
+# Opt-in relevance gate (#20). Runs on PRs that touch ranking/indexing/eval
+# code or the labeled query set, plus manual dispatch. Uses the deterministic
+# hash path so the gate is stable across runs and runners (no model download,
+# no SIMD float variance); it still catches regressions in the shared fusion /
+# boosting / chunking logic. Neural relevance can be measured locally with
+# `scripts/eval_relevance.py --neural`.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/search.rs"
+      - "src/chunking.rs"
+      - "src/embedding.rs"
+      - "src/indexer.rs"
+      - "src/vector_store.rs"
+      - "src/query_aliases.rs"
+      - "src/text.rs"
+      - "src/walker.rs"
+      - "scripts/eval_relevance.py"
+      - "tests/fixtures/ivygrep_relevance_queries.json"
+      - ".github/workflows/relevance.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  relevance-gate:
+    name: Relevance gate (hash, deterministic)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "relevance"
+          cache-bin: "false"
+
+      # Hash-only build: faster (no ONNX/candle) and all the gate needs, since
+      # it evaluates the deterministic hash path.
+      - name: Build ig (hash-only)
+        run: cargo build --release --locked --no-default-features --bin ig
+
+      # Thresholds sit a margin below the current hash baseline over the labeled
+      # query set (MRR ~0.58, p@1 ~0.44, recall@5 ~0.76), so the gate catches
+      # real regressions without flaking. Raise them as relevance improves.
+      - name: Relevance gate
+        run: |
+          python3 scripts/eval_relevance.py \
+            --skip-build \
+            --binary target/release/ig \
+            --check --min-mrr 0.52 --min-p1 0.38 --min-recall5 0.70

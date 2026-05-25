@@ -188,6 +188,17 @@ def main() -> int:
             env=env,
         )
 
+        if args.neural:
+            # Build neural vectors up front (foreground, no daemon) so the query
+            # path actually exercises them. Without this the queries run before
+            # background enhancement exists, silently measuring the hash
+            # fallback instead of the neural relevance we intend to gate on.
+            run(
+                [str(binary), "--enhance-internal", str(repo)],
+                cwd=REPO_ROOT,
+                env=env,
+            )
+
         rows: list[dict[str, Any]] = []
         t0 = time.perf_counter()
         for case in cases:
