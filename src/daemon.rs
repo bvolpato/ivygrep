@@ -273,6 +273,11 @@ struct DaemonState {
     watchers: Arc<Mutex<HashMap<String, WatchRegistration>>>,
     search_contexts: Arc<Mutex<HashMap<SearchContextCacheKey, CachedSearchContext>>>,
     query_results: Arc<Mutex<QueryResultCache>>,
+    /// Bounds concurrent CPU-heavy work (hybrid/literal/regex search + index).
+    /// Without this, a burst of clients each spawn a `spawn_blocking` task on
+    /// Tokio's blocking pool (default cap 512), oversubscribing CPU and memory
+    /// with no backpressure. See #58.
+    cpu_permits: Arc<tokio::sync::Semaphore>,
 }
 
 impl DaemonState {
@@ -395,6 +400,7 @@ pub async fn run_daemon() -> Result<()> {
         watchers: Arc::new(Mutex::new(HashMap::new())),
         search_contexts: Arc::new(Mutex::new(HashMap::new())),
         query_results: Arc::new(Mutex::new(QueryResultCache::default())),
+        cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
     };
 
     restore_configured_watchers(&state);
@@ -561,8 +567,11 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             meta.watch_enabled = watch;
             let _ = workspace.write_metadata(&meta);
 
+            // Bound concurrent heavy index work (see #58).
+            let permit = state.cpu_permits.clone().acquire_owned().await.ok();
             let index_workspace_target = workspace.clone();
             let index_result = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
                 let hash_model = cached_hash_model();
                 index_workspace(&index_workspace_target, hash_model.as_ref())
             })
@@ -649,7 +658,11 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 state_clone.maybe_start_model_load();
             }
 
+            // Bound concurrent heavy search work (see #58). The permit is held
+            // for the whole blocking task and released when it completes.
+            let permit = state_clone.cpu_permits.clone().acquire_owned().await.ok();
             let result = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
                 let model = state_clone.get_model_or_fallback();
                 let mut all_hits = Vec::new();
                 let mut all_errors: Vec<String> = Vec::new();
@@ -795,7 +808,10 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             };
 
             let scope_filter = scope_from_request(scope_path, scope_is_file);
+            // Bound concurrent heavy regex work (see #58).
+            let permit = state.cpu_permits.clone().acquire_owned().await.ok();
             let result = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
                 let mut all_hits = Vec::new();
                 for workspace in &workspaces {
                     match regex_search(
@@ -888,7 +904,10 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             };
 
             let state_clone = state.clone();
+            // Bound concurrent heavy literal work (see #58).
+            let permit = state_clone.cpu_permits.clone().acquire_owned().await.ok();
             let result = tokio::task::spawn_blocking(move || {
+                let _permit = permit;
                 let mut all_hits = Vec::new();
                 let mut all_errors: Vec<String> = Vec::new();
                 for workspace in &workspaces {
@@ -1628,7 +1647,20 @@ mod tests {
             watchers: Arc::new(Mutex::new(HashMap::new())),
             search_contexts: Arc::new(Mutex::new(HashMap::new())),
             query_results: Arc::new(Mutex::new(QueryResultCache::default())),
+            cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
         }
+    }
+
+    #[test]
+    fn daemon_bounds_concurrent_cpu_work() {
+        // #58: heavy search/index work must be gated by a bounded semaphore so a
+        // burst of clients can't spawn hundreds of simultaneous blocking tasks.
+        let state = test_state();
+        assert_eq!(
+            state.cpu_permits.available_permits(),
+            num_cpus::get().max(1),
+            "cpu_permits should be sized to the CPU count"
+        );
     }
 
     #[tokio::test]
