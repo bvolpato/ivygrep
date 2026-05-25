@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1779600148546,
+  "lastUpdate": 1779718665160,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -13667,6 +13667,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "indexer/incremental_reindex_no_change",
             "value": 3744.18,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gh@brunovolpato.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "3717622a908d2510f8de8fe8ca4586991a027773",
+          "message": "Merge pull request #60 from bvolpato/fix/parallel-mcp-meltdown\n\nHarden MCP & daemon for large repos and parallel use (P0 inline-neural index + 3 fixes)",
+          "timestamp": "2026-05-25T09:59:38-04:00",
+          "tree_id": "d727e4266569f62cf8462fa9d96111d2168b17e1",
+          "url": "https://github.com/bvolpato/ivygrep/commit/3717622a908d2510f8de8fe8ca4586991a027773"
+        },
+        "date": 1779718664878,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 3813.07,
             "unit": "µs"
           }
         ]
