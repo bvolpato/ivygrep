@@ -6,7 +6,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::chunking::is_indexable_file;
+use crate::chunking::is_indexable_file_reader;
 use crate::config;
 use crate::jobs::{
     self, ENHANCEMENT_HEARTBEAT_TTL_SECS, INDEXING_HEARTBEAT_TTL_SECS, JobKind,
@@ -1048,18 +1048,20 @@ fn read_sqlite_counts(index_dir: &Path) -> (u64, u64) {
 }
 
 fn workspace_has_indexable_files(root: &Path, skip_gitignore: bool) -> bool {
-    const SAMPLE_BYTES: usize = 8 * 1024;
-
     for entry in source_walker(root, skip_gitignore).build().flatten() {
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
 
-        let Ok(bytes) = fs::read(entry.path()) else {
+        let Ok(mut file) = fs::File::open(entry.path()) else {
             continue;
         };
-        let sample_len = bytes.len().min(SAMPLE_BYTES);
-        if is_indexable_file(entry.path(), &bytes[..sample_len]) {
+        // Stream the full file so minified-blob detection matches indexing
+        // without allocating whole bundles during health checks.
+        let Ok(indexable) = is_indexable_file_reader(entry.path(), &mut file) else {
+            continue;
+        };
+        if indexable {
             return true;
         }
     }
@@ -1396,6 +1398,19 @@ mod tests {
         let health = ws.index_health();
         assert_eq!(health.state, WorkspaceIndexState::Unhealthy);
         assert!(health.has_indexable_files);
+    }
+
+    #[test]
+    fn workspace_has_indexable_files_skips_minified_only_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut banner_then_blob = b"// Copyright 2026 Example Inc.\n".to_vec();
+        banner_then_blob.extend(std::iter::repeat_n(b'a', 60_000));
+
+        std::fs::write(tmp.path().join("bundle.min.js"), banner_then_blob).unwrap();
+        assert!(!workspace_has_indexable_files(tmp.path(), false));
+
+        std::fs::write(tmp.path().join("app.js"), "const answer = 42;\n").unwrap();
+        assert!(workspace_has_indexable_files(tmp.path(), false));
     }
 
     #[test]

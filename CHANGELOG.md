@@ -7,6 +7,9 @@ All notable changes to ivygrep are documented in this file.
 ### Changed
 - **Index format bumped to v3 — upgrading triggers a one-time full reindex.** A definition's leading doc-comment/attribute lines are now folded into the following function/class chunk instead of being emitted as standalone single-line `Module` chunks. On a representative tree this removed ~40% of chunks (less to embed, store, and search), and search now returns the documented definition rather than a bare comment line.
 
+### Added
+- **Skip minified bundles / single-line blobs when indexing.** A file with a 50 KB+ run and no line break (minified JS/CSS, packed data) is skipped during indexing — it would otherwise become one enormous, low-value chunk that dilutes relevance on large monorepos. Complements the existing 16 MB file-size cap, catching minified files that fall under it. Large hand-written docs (normal line lengths) are unaffected.
+
 ### Fixed
 - **MCP no longer neural-embeds the whole repo inline on the first query (#56).** The MCP auto-index now uses the fast hash model and defers neural embeddings to a background subprocess — mirroring the daemon — so the first query returns quickly even on very large repos. Previously the inline ONNX pass could block the first query for many minutes and, run by several MCP clients at once, saturate the host.
 - **MCP caches its neural query model per process (#57).** It was reconstructed on every `ig_search` (and even for `literal`/`regex` modes that never embed a query); it is now loaded once via `OnceLock`, only in the hybrid path.

@@ -8,6 +8,7 @@
 //!    or use [`detect_text_only`] for languages without structural boundaries.
 //! 4. Done — indexing, search, and MCP pick it up automatically.
 
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -425,6 +426,12 @@ pub fn is_indexable_path(path: &Path) -> bool {
     language_for_path(path).is_some()
 }
 
+/// A single line (run with no `\n`) this long marks a file as minified or a
+/// packed blob. No hand-written source has a 50 KB line; minified JS/CSS bundles
+/// and packed data do. Such files produce one enormous, low-value chunk, so we
+/// skip them regardless of total size.
+const MAX_SOURCE_LINE_BYTES: usize = 50_000;
+
 pub fn is_indexable_file(path: &Path, bytes: &[u8]) -> bool {
     if bytes.is_empty() {
         return false;
@@ -432,11 +439,75 @@ pub fn is_indexable_file(path: &Path, bytes: &[u8]) -> bool {
     if !is_probably_text(bytes) {
         return false;
     }
+    if is_minified_blob(bytes) {
+        return false;
+    }
     if is_indexable_path(path) {
         return true;
     }
     // Unknown extension but content looks like text — index it anyway.
     true
+}
+
+pub fn is_indexable_file_reader<R: Read>(_path: &Path, reader: &mut R) -> io::Result<bool> {
+    let mut sample = Vec::with_capacity(TEXT_SNIFF_BYTES);
+    let mut buf = [0u8; TEXT_SNIFF_BYTES];
+    let mut no_newline_run = 0usize;
+
+    loop {
+        let read = reader.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+
+        let bytes = &buf[..read];
+        if sample.len() < TEXT_SNIFF_BYTES {
+            let needed = TEXT_SNIFF_BYTES - sample.len();
+            sample.extend_from_slice(&bytes[..bytes.len().min(needed)]);
+            if sample.len() == TEXT_SNIFF_BYTES && !is_probably_text(&sample) {
+                return Ok(false);
+            }
+        }
+
+        if scan_minified_run(&mut no_newline_run, bytes) {
+            return Ok(false);
+        }
+    }
+
+    if !is_probably_text(&sample) {
+        return Ok(false);
+    }
+
+    // Unknown extension but content looks like text: same behavior as
+    // is_indexable_file.
+    Ok(true)
+}
+
+/// Detects minified bundles / packed blobs: any run of at least
+/// [`MAX_SOURCE_LINE_BYTES`] bytes with no `\n`, anywhere in the file.
+///
+/// Scanning the longest no-newline run (rather than only a fixed prefix) catches
+/// bundles that keep a short license banner before a giant minified body, and
+/// gives the same answer whether called on a full file (indexing) or a small
+/// sample (health-check probes) — as long as the run is present in the bytes
+/// provided. Short-circuits as soon as the threshold is hit.
+fn is_minified_blob(bytes: &[u8]) -> bool {
+    let mut no_newline_run = 0usize;
+    scan_minified_run(&mut no_newline_run, bytes)
+}
+
+fn scan_minified_run(no_newline_run: &mut usize, bytes: &[u8]) -> bool {
+    for &b in bytes {
+        if b == b'\n' {
+            *no_newline_run = 0;
+        } else {
+            *no_newline_run += 1;
+            if *no_newline_run >= MAX_SOURCE_LINE_BYTES {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Maximum number of immediately-preceding comment/attribute lines folded into
@@ -1731,6 +1802,36 @@ pub fn calculate_total(amount: f64) -> f64 {
             chunks.iter().any(|c| c.text.contains("#include")),
             "preprocessor directives must remain indexed somewhere"
         );
+    }
+
+    #[test]
+    fn skips_minified_single_line_blobs() {
+        // A large single-line blob (minified bundle) is not indexable.
+        let minified = vec![b'a'; 60_000];
+        assert!(!is_indexable_file(Path::new("bundle.min.js"), &minified));
+        // A bundle with a short license banner before a giant minified body is
+        // still detected (the long run is found beyond the prefix).
+        let mut banner_then_blob = b"// Copyright 2026 Example Inc.\n// MIT License\n".to_vec();
+        banner_then_blob.extend(std::iter::repeat_n(b'a', 60_000));
+        assert!(!is_indexable_file(
+            Path::new("vendor.min.js"),
+            &banner_then_blob
+        ));
+        let mut streamed = std::io::Cursor::new(&banner_then_blob);
+        assert!(!is_indexable_file_reader(Path::new("vendor.min.js"), &mut streamed).unwrap());
+        // Normal multi-line source of similar size IS indexable.
+        let mut normal = Vec::new();
+        for _ in 0..3000 {
+            normal.extend_from_slice(b"let x = computeValue(input);\n");
+        }
+        assert!(is_indexable_file(Path::new("app.js"), &normal));
+        let mut streamed = std::io::Cursor::new(&normal);
+        assert!(is_indexable_file_reader(Path::new("app.js"), &mut streamed).unwrap());
+        // A short single-line file (under the threshold) stays indexable.
+        assert!(is_indexable_file(
+            Path::new("oneliner.js"),
+            b"const x = 1;\n"
+        ));
     }
 
     #[test]
