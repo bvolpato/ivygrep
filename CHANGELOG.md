@@ -13,6 +13,7 @@ All notable changes to ivygrep are documented in this file.
 ### Fixed
 - **MCP no longer neural-embeds the whole repo inline on the first query (#56).** The MCP auto-index now uses the fast hash model and defers neural embeddings to a background subprocess — mirroring the daemon — so the first query returns quickly even on very large repos. Previously the inline ONNX pass could block the first query for many minutes and, run by several MCP clients at once, saturate the host.
 - **MCP caches its neural query model per process (#57).** It was reconstructed on every `ig_search` (and even for `literal`/`regex` modes that never embed a query); it is now loaded once via `OnceLock`, only in the hybrid path.
+- **Background neural enhancement no longer stalls on busy machines (#62).** It paused whenever the 1-minute load average exceeded ~0.75–0.8× the CPU count, so on a routinely-busy host (a dev box mid-build, a shared machine) neural vectors were never built and search stayed on the lower-quality hash path. The subprocess is already `nice(10)` and capped at ~25% of cores, so the threshold is now a more lenient 2.0× and configurable via `IVYGREP_ENHANCE_MAX_LOAD_RATIO` (≤ 0 disables the load check). Battery, thermal, and low-memory pauses are unchanged.
 
 ### Added
 - **Daemon concurrency limit (#58).** Heavy hybrid/literal/regex search and index work is gated behind a `Semaphore` sized to the CPU count, providing backpressure instead of spawning unbounded blocking tasks (Tokio's blocking pool defaults to 512 threads) under a burst of clients.

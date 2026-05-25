@@ -877,17 +877,33 @@ fn parse_pmset_therm(stdout: &str) -> Option<String> {
     }
 }
 
-#[cfg(target_os = "macos")]
+/// Load-average multiple of the CPU count above which background neural
+/// enhancement pauses. Configurable via `IVYGREP_ENHANCE_MAX_LOAD_RATIO`.
+///
+/// The enhancement subprocess is already `nice(10)` and capped at ~25% of
+/// cores, so it yields to interactive work. The previous 0.75–0.8× threshold
+/// paused it on routinely-busy machines (a dev box mid-build, a shared host),
+/// so neural vectors were never built and search stayed on the lower-quality
+/// hash path. Default 2.0× pauses only under genuine sustained oversubscription;
+/// a value <= 0 disables the load check entirely.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn enhance_max_load_ratio() -> f64 {
+    std::env::var("IVYGREP_ENHANCE_MAX_LOAD_RATIO")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| v.is_finite())
+        .unwrap_or(2.0)
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn parse_system_load(load1: f64, cpus: f64) -> Option<String> {
-    // High system load is defined as the 1-minute load average exceeding
-    // 80% of the total available logical CPU cores.
-    // Example: On an 8-core machine, a 1-minute load average > 6.4 triggers pausing.
-    if load1 > cpus * 0.8 {
-        Some(format!(
-            "High System Load ({:.1} > {:.1} max)",
-            load1,
-            cpus * 0.8
-        ))
+    let ratio = enhance_max_load_ratio();
+    if ratio <= 0.0 {
+        return None; // load check disabled
+    }
+    let max_load = cpus * ratio;
+    if load1 > max_load {
+        Some(format!("High System Load ({load1:.1} > {max_load:.1} max)"))
     } else {
         None
     }
@@ -942,9 +958,8 @@ fn check_system_constraints() -> Option<String> {
     if has_load > 0 {
         let load1 = loadavg[0];
         let cpus = num_cpus::get() as f64;
-        let max_load = cpus * 0.75;
-        if load1 > max_load {
-            return Some(format!("High System Load ({load1:.1} > {max_load:.1} max)"));
+        if let Some(reason) = parse_system_load(load1, cpus) {
+            return Some(reason);
         }
     }
 
@@ -1654,6 +1669,28 @@ mod tests {
     use crate::workspace::Workspace;
 
     use super::*;
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    #[serial]
+    fn enhance_load_throttle_is_lenient_and_configurable() {
+        // #62: the load throttle was too aggressive (paused enhancement at
+        // ~0.75-0.8x CPUs despite nice(10)+25%-core capping), so neural never
+        // built on busy machines. Default is now 2.0x and env-configurable.
+        // SAFETY: test is #[serial]; no other thread mutates this env var.
+        unsafe { std::env::remove_var("IVYGREP_ENHANCE_MAX_LOAD_RATIO") };
+        // A fully-loaded machine (load == cpus) does NOT pause at the default.
+        assert!(parse_system_load(8.0, 8.0).is_none());
+        // Genuine sustained oversubscription (load > 2x cpus) does pause.
+        assert!(parse_system_load(20.0, 8.0).is_some());
+        // Configurable: a stricter ratio pauses earlier.
+        unsafe { std::env::set_var("IVYGREP_ENHANCE_MAX_LOAD_RATIO", "0.5") };
+        assert!(parse_system_load(8.0, 8.0).is_some());
+        // A non-positive ratio disables the load check entirely.
+        unsafe { std::env::set_var("IVYGREP_ENHANCE_MAX_LOAD_RATIO", "0") };
+        assert!(parse_system_load(100.0, 8.0).is_none());
+        unsafe { std::env::remove_var("IVYGREP_ENHANCE_MAX_LOAD_RATIO") };
+    }
 
     #[test]
     fn identical_content_chunks_get_distinct_vector_keys() {
