@@ -1048,8 +1048,6 @@ fn read_sqlite_counts(index_dir: &Path) -> (u64, u64) {
 }
 
 fn workspace_has_indexable_files(root: &Path, skip_gitignore: bool) -> bool {
-    const SAMPLE_BYTES: usize = 8 * 1024;
-
     for entry in source_walker(root, skip_gitignore).build().flatten() {
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
@@ -1058,8 +1056,13 @@ fn workspace_has_indexable_files(root: &Path, skip_gitignore: bool) -> bool {
         let Ok(bytes) = fs::read(entry.path()) else {
             continue;
         };
-        let sample_len = bytes.len().min(SAMPLE_BYTES);
-        if is_indexable_file(entry.path(), &bytes[..sample_len]) {
+        // Pass the full bytes (not a truncated sample) so minified-blob
+        // detection here matches full indexing. Otherwise a repo of only
+        // minified bundles would pass this probe but index to zero chunks,
+        // leaving the index looking perpetually unhealthy. is_probably_text
+        // samples internally and is_minified_blob short-circuits, so this stays
+        // cheap (and we return on the first indexable file regardless).
+        if is_indexable_file(entry.path(), &bytes) {
             return true;
         }
     }

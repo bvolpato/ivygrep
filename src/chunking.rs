@@ -425,6 +425,12 @@ pub fn is_indexable_path(path: &Path) -> bool {
     language_for_path(path).is_some()
 }
 
+/// A single line (run with no `\n`) this long marks a file as minified or a
+/// packed blob. No hand-written source has a 50 KB line; minified JS/CSS bundles
+/// and packed data do. Such files produce one enormous, low-value chunk, so we
+/// skip them regardless of total size.
+const MAX_SOURCE_LINE_BYTES: usize = 50_000;
+
 pub fn is_indexable_file(path: &Path, bytes: &[u8]) -> bool {
     if bytes.is_empty() {
         return false;
@@ -432,11 +438,37 @@ pub fn is_indexable_file(path: &Path, bytes: &[u8]) -> bool {
     if !is_probably_text(bytes) {
         return false;
     }
+    if is_minified_blob(bytes) {
+        return false;
+    }
     if is_indexable_path(path) {
         return true;
     }
     // Unknown extension but content looks like text — index it anyway.
     true
+}
+
+/// Detects minified bundles / packed blobs: any run of at least
+/// [`MAX_SOURCE_LINE_BYTES`] bytes with no `\n`, anywhere in the file.
+///
+/// Scanning the longest no-newline run (rather than only a fixed prefix) catches
+/// bundles that keep a short license banner before a giant minified body, and
+/// gives the same answer whether called on a full file (indexing) or a small
+/// sample (health-check probes) — as long as the run is present in the bytes
+/// provided. Short-circuits as soon as the threshold is hit.
+fn is_minified_blob(bytes: &[u8]) -> bool {
+    let mut run = 0usize;
+    for &b in bytes {
+        if b == b'\n' {
+            run = 0;
+        } else {
+            run += 1;
+            if run >= MAX_SOURCE_LINE_BYTES {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// Maximum number of immediately-preceding comment/attribute lines folded into
@@ -1731,6 +1763,32 @@ pub fn calculate_total(amount: f64) -> f64 {
             chunks.iter().any(|c| c.text.contains("#include")),
             "preprocessor directives must remain indexed somewhere"
         );
+    }
+
+    #[test]
+    fn skips_minified_single_line_blobs() {
+        // A large single-line blob (minified bundle) is not indexable.
+        let minified = vec![b'a'; 60_000];
+        assert!(!is_indexable_file(Path::new("bundle.min.js"), &minified));
+        // A bundle with a short license banner before a giant minified body is
+        // still detected (the long run is found beyond the prefix).
+        let mut banner_then_blob = b"// Copyright 2026 Example Inc.\n// MIT License\n".to_vec();
+        banner_then_blob.extend(std::iter::repeat_n(b'a', 60_000));
+        assert!(!is_indexable_file(
+            Path::new("vendor.min.js"),
+            &banner_then_blob
+        ));
+        // Normal multi-line source of similar size IS indexable.
+        let mut normal = Vec::new();
+        for _ in 0..3000 {
+            normal.extend_from_slice(b"let x = computeValue(input);\n");
+        }
+        assert!(is_indexable_file(Path::new("app.js"), &normal));
+        // A short single-line file (under the threshold) stays indexable.
+        assert!(is_indexable_file(
+            Path::new("oneliner.js"),
+            b"const x = 1;\n"
+        ));
     }
 
     #[test]
