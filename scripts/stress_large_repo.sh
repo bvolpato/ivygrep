@@ -8,10 +8,12 @@
 # that exceeds its time budget, so a hang/deadlock surfaces as a clear failure
 # instead of an indefinite stall.
 #
-# PRIVACY: this script prints ONLY metrics (counts, seconds, megabytes) and the
-# query *strings you pass in*. It never prints file paths, file contents, or any
-# matched code, so it is safe to run on private/internal repositories and paste
-# the output. (Pass only generic query strings if even those are sensitive.)
+# PRIVACY: STDOUT (the report) carries ONLY metrics (counts, seconds, megabytes)
+# and the query *strings you pass in* — never file paths, file contents, or
+# matched code — so it is safe to paste from private/internal repos. Identifying
+# local context (repo path, binary path, IVYGREP_HOME) is written to STDERR
+# only; capture stdout (e.g. `... > report.txt`) to keep a paste-safe report.
+# (Pass only generic query strings if even those are sensitive.)
 #
 # Usage:
 #   scripts/stress_large_repo.sh /path/to/repo [options]
@@ -91,12 +93,17 @@ export IVYGREP_NO_AUTOSPAWN=1
 export CI=1
 
 NCPU="$( (command -v nproc >/dev/null && nproc) || sysctl -n hw.ncpu 2>/dev/null || echo '?')"
+IG_VER="$("$BIN" --version 2>/dev/null | head -1)"
+# Identifying paths (repo name, binary path, home) go to STDERR only — they are
+# local context, not part of the metrics-only stdout report that users paste.
+# Capturing stdout (the report) is therefore safe even on private repos.
+{
+  echo "running on: $REPO"
+  echo "binary:     $BIN"
+  echo "home:       $HOME_DIR"
+} >&2
 echo "════════════════════════════════════════════════════════════════"
-echo " ivygrep large-repo stress"
-echo "   repo:   $REPO"
-echo "   bin:    $BIN  ($("$BIN" --version 2>/dev/null | head -1))"
-echo "   home:   $HOME_DIR"
-echo "   cores:  $NCPU"
+echo " large-repo stress    ($IG_VER · $NCPU cores)"
 echo "════════════════════════════════════════════════════════════════"
 
 OVERALL_RC=0
