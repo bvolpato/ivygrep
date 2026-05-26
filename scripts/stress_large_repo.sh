@@ -59,6 +59,17 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# The timeout flags drive numeric watchdog comparisons (e.g. `[ "$waited" -ge
+# "$QUERY_TIMEOUT" ]`). A non-numeric value (easy via env/templating) makes those
+# tests error out and evaluate false, silently disabling the watchdog so a hung
+# phase would run forever. Reject non-integers up front.
+for pair in "--enhance-timeout=$ENH_TIMEOUT" "--index-timeout=$IDX_TIMEOUT" "--query-timeout=$QUERY_TIMEOUT"; do
+  flag="${pair%%=*}"; val="${pair#*=}"
+  case "$val" in
+    '' | *[!0-9]*) echo "error: $flag must be a non-negative integer (got '$val')" >&2; exit 2 ;;
+  esac
+done
+
 if [ -z "$REPO" ] || [ ! -d "$REPO" ]; then
   echo "usage: $0 /path/to/repo [options]   (see --help)" >&2
   exit 2
