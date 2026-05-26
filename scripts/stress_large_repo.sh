@@ -185,6 +185,14 @@ if [ "$SKIP_ENHANCE" -eq 0 ]; then
   fi
   HASNEURAL="$(status_json | jq_get has_neural_vectors)"
   echo "  has_neural_vectors=$HASNEURAL  time=${ENH_SECS}s  peakRSS=${ENH_RSS}MB"
+  # `--enhance-internal` can exit 0 even when neural model init fails (it falls
+  # back silently), leaving no neural vectors — see eval_relevance.py's post-check.
+  # Treat that as a phase failure so the run can't report success while really
+  # measuring the hash fallback.
+  if [ "$RC" -eq 0 ] && [ "$HASNEURAL" != "True" ] && [ "$HASNEURAL" != "true" ]; then
+    echo "  ❌ enhance exited 0 but built NO neural vectors (has_neural_vectors=$HASNEURAL) — neural init likely failed; this run would measure hash fallback, not neural."
+    OVERALL_RC=1
+  fi
 else
   echo
   echo "▶ Phase 2/3: neural enhance — SKIPPED (--skip-enhance)"
