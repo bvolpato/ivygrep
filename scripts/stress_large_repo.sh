@@ -22,6 +22,7 @@
 #   --keep-home             do not delete the temp IVYGREP_HOME on exit
 #   --enhance-timeout SECS  watchdog for the neural enhance phase (default: 3600)
 #   --index-timeout SECS    watchdog for the index phase (default: 3600)
+#   --query-timeout SECS    watchdog for each individual query (default: 120)
 #   --queries "a|b|c"       pipe-separated query strings (default: a generic code set)
 #   --skip-enhance          index + query only (skip the neural enhance phase)
 #
@@ -35,6 +36,7 @@ HOME_DIR=""
 KEEP_HOME=0
 ENH_TIMEOUT=3600
 IDX_TIMEOUT=3600
+QUERY_TIMEOUT=120
 SKIP_ENHANCE=0
 QUERIES='error handling and recovery|retry with exponential backoff|parse configuration file|user authentication and login|database connection pool|rate limiting middleware|structured logging setup|http request timeout'
 
@@ -46,6 +48,7 @@ while [ $# -gt 0 ]; do
     --keep-home) KEEP_HOME=1; shift ;;
     --enhance-timeout) ENH_TIMEOUT="$2"; shift 2 ;;
     --index-timeout) IDX_TIMEOUT="$2"; shift 2 ;;
+    --query-timeout) QUERY_TIMEOUT="$2"; shift 2 ;;
     --queries) QUERIES="$2"; shift 2 ;;
     --skip-enhance) SKIP_ENHANCE=1; shift ;;
     -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
@@ -128,8 +131,10 @@ run_phase() {
   wait "$pid"; local rc=$?
   PHASE_SECS=$(( $(date +%s) - start )); PHASE_RSS_MB=$(( peak / 1024 ))
   if [ "$rc" -ne 0 ]; then
-    echo "  ⚠️  '$label' exited $rc. Last output:"
-    tail -3 "$logf" | sed 's/^/      /'
+    # Deliberately do NOT echo captured stdout/stderr: it can contain repo
+    # paths or code snippets, and this report is documented as metrics-only.
+    # Re-run the phase manually if you need the diagnostic output.
+    echo "  ⚠️  '$label' exited $rc (output suppressed to keep this report metrics-only)"
   fi
   rm -f "$logf"
   return $rc
@@ -187,12 +192,26 @@ LAT_SUM=0; LAT_N=0; LAT_MAX=0; LAT_MIN=999999
 for q in "${QARR[@]}"; do
   [ -z "$q" ] && continue
   t0=$(python3 -c 'import time;print(time.time())')
-  "$BIN" --no-watch -n 20 "$q" "$REPO" >/dev/null 2>&1
+  # Run under a watchdog so a hung query produces a failure signal instead of
+  # blocking the run forever, and treat a non-zero exit as a phase failure.
+  "$BIN" --no-watch -n 20 "$q" "$REPO" >/dev/null 2>&1 &
+  qpid=$!; waited=0; qrc=0
+  while kill -0 "$qpid" 2>/dev/null; do
+    if [ "$waited" -ge "$QUERY_TIMEOUT" ]; then kill -KILL "$qpid" 2>/dev/null; qrc=124; break; fi
+    sleep 1; waited=$((waited+1))
+  done
+  [ "$qrc" -ne 124 ] && { wait "$qpid"; qrc=$?; }
   ms=$(python3 -c "import time;print(int((time.time()-$t0)*1000))")
-  printf '  %6dms  «%s»\n' "$ms" "$q"
-  LAT_SUM=$((LAT_SUM+ms)); LAT_N=$((LAT_N+1))
-  [ "$ms" -gt "$LAT_MAX" ] && LAT_MAX=$ms
-  [ "$ms" -lt "$LAT_MIN" ] && LAT_MIN=$ms
+  if [ "$qrc" -eq 124 ]; then
+    printf '  %6s  «%s»  ⚠️ HANG — killed at %ds\n' "TIMEOUT" "$q" "$QUERY_TIMEOUT"; OVERALL_RC=1
+  elif [ "$qrc" -ne 0 ]; then
+    printf '  %6dms  «%s»  ⚠️ query exited %d\n' "$ms" "$q" "$qrc"; OVERALL_RC=1
+  else
+    printf '  %6dms  «%s»\n' "$ms" "$q"
+    LAT_SUM=$((LAT_SUM+ms)); LAT_N=$((LAT_N+1))
+    [ "$ms" -gt "$LAT_MAX" ] && LAT_MAX=$ms
+    [ "$ms" -lt "$LAT_MIN" ] && LAT_MIN=$ms
+  fi
 done
 [ "$LAT_N" -gt 0 ] && echo "  queries=$LAT_N  min=${LAT_MIN}ms  avg=$((LAT_SUM/LAT_N))ms  max=${LAT_MAX}ms"
 
