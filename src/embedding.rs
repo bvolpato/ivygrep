@@ -219,6 +219,44 @@ pub fn hardware_acceleration_info() -> &'static str {
     "Disabled"
 }
 
+/// Embed `texts` across up to `workers` OS threads, preserving input order.
+///
+/// Uses `std::thread`, **not** rayon, deliberately. candle's CPU kernels
+/// parallelize via rayon's GLOBAL pool internally (see
+/// `candle_core::cpu_backend`), so fanning out our batch on rayon too nests on
+/// that same pool: every worker ends up parked in `collect()`/`Sleep::sleep`
+/// waiting for nested jobs that can never be scheduled, and background neural
+/// enhancement hangs at ~0% CPU after an initial burst (it never completes).
+/// Plain threads aren't rayon workers, so candle's global-pool work always has
+/// free workers and runs to completion.
+///
+/// `embed_slice(worker_idx, slice)` returns one vector per text in `slice`.
+#[cfg(feature = "neural")]
+fn parallel_embed<F>(texts: &[&str], workers: usize, embed_slice: F) -> Vec<Vec<f32>>
+where
+    F: Fn(usize, &[&str]) -> Vec<Vec<f32>> + Sync,
+{
+    if texts.is_empty() {
+        return Vec::new();
+    }
+    if workers <= 1 || texts.len() <= 1 {
+        return embed_slice(0, texts);
+    }
+    let chunk = texts.len().div_ceil(workers);
+    let embed_slice = &embed_slice;
+    std::thread::scope(|s| {
+        let handles: Vec<_> = texts
+            .chunks(chunk)
+            .enumerate()
+            .map(|(i, slice)| s.spawn(move || embed_slice(i, slice)))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("embed worker thread panicked"))
+            .collect()
+    })
+}
+
 #[cfg(feature = "neural")]
 impl CandleEmbeddingModel {
     pub fn new() -> anyhow::Result<Self> {
@@ -308,37 +346,24 @@ impl EmbeddingModel for CandleEmbeddingModel {
     }
 
     fn embed_batch(&self, texts: &[&str]) -> Vec<Vec<f32>> {
-        if texts.is_empty() {
-            return vec![];
-        }
-
+        // Fan out across OS threads, one contiguous slice per embedder, so each
+        // embedder is touched by exactly one thread (no mutex contention) and
+        // input order is preserved. Deliberately NOT rayon: candle's matmul
+        // uses rayon's global pool internally, so a rayon fan-out nests on the
+        // same pool and deadlocks — see `parallel_embed`.
         let n = self.pool.len();
-        if n <= 1 {
-            return texts
+        parallel_embed(texts, n, |i, slice| {
+            let embedder = &self.pool[i % n];
+            slice
                 .iter()
                 .map(|t| {
-                    self.pool[0]
+                    embedder
                         .lock()
                         .embed_one(t)
                         .unwrap_or_else(|_| vec![0.0; 384])
                 })
-                .collect();
-        }
-
-        // Embed in parallel: each rayon worker uses its own embedder from the
-        // pool (indexed by worker id), so forwards run concurrently with no
-        // mutex contention. `par_iter().map().collect()` preserves input order.
-        use rayon::prelude::*;
-        texts
-            .par_iter()
-            .map(|t| {
-                let idx = rayon::current_thread_index().unwrap_or(0) % n;
-                self.pool[idx]
-                    .lock()
-                    .embed_one(t)
-                    .unwrap_or_else(|_| vec![0.0; 384])
-            })
-            .collect()
+                .collect()
+        })
     }
 }
 
@@ -372,6 +397,33 @@ fn semantic_token_variants(raw_token: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `parallel_embed` must return vectors in input order no matter how the
+    /// texts are split across worker threads (regression guard for the
+    /// std::thread fan-out that replaced the deadlocking rayon version).
+    #[cfg(feature = "neural")]
+    #[test]
+    fn parallel_embed_preserves_order_across_workers() {
+        let texts: Vec<String> = (0..50).map(|i| format!("t{i}")).collect();
+        let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
+        for workers in [1usize, 2, 3, 8, 64] {
+            let out = parallel_embed(&refs, workers, |_i, slice| {
+                slice
+                    .iter()
+                    .map(|t| vec![t.trim_start_matches('t').parse::<f32>().unwrap()])
+                    .collect()
+            });
+            assert_eq!(out.len(), 50, "count wrong for workers={workers}");
+            for (i, v) in out.iter().enumerate() {
+                assert_eq!(v[0], i as f32, "order broken at {i} (workers={workers})");
+            }
+        }
+        // Edge cases: empty input, and a single text with many workers.
+        let empty = parallel_embed(&[], 4, |_, s| s.iter().map(|_| vec![0.0]).collect());
+        assert!(empty.is_empty());
+        let one = parallel_embed(&["a"], 8, |_, s| s.iter().map(|_| vec![1.0]).collect());
+        assert_eq!(one, vec![vec![1.0]]);
+    }
 
     #[test]
     fn hash_embeddings_are_stable() {
