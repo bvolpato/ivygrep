@@ -1168,7 +1168,15 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                 let _ = jobs::heartbeat_job(&control.workspace, JobKind::Watcher, update);
 
                 let workspace = control.workspace.clone();
+                // Gate watcher-triggered indexing behind the same CPU semaphore
+                // as client requests (#58). A multi-repo branch switch / build
+                // can dirty many watched workspaces at once; without this, each
+                // watcher's indexing spawn_blocking runs unbounded (saturating
+                // the rayon chunking pool + the blocking pool), oversubscribing
+                // CPU/memory exactly like the client burst #58 fixed.
+                let permit = state.cpu_permits.clone().acquire_owned().await.ok();
                 let result = tokio::task::spawn_blocking(move || {
+                    let _permit = permit;
                     let hash_model = cached_hash_model();
                     let _ = index_workspace_for_watcher(&workspace, hash_model.as_ref())?;
                     Result::<(), anyhow::Error>::Ok(())
