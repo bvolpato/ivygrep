@@ -25,6 +25,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Testing
 - Added regression coverage: MCP auto-index builds 256-dim hash vectors (not 384-dim neural inline), MCP query-model caching, daemon CPU-concurrency bound, and leading-comment chunk folding.
+- **Large-repo stress harness (`scripts/stress_large_repo.sh`).** Drives index → neural-enhance → query on a target repo and reports per-phase wall time, peak RSS, chunk/file counts, and query latency, with a per-phase watchdog that flags hangs (e.g. the enhancement deadlock class). Emits metrics only — never file paths or contents — so it is safe to run on private repositories.
 
 ## [0.7.0] — 2026-05-23
 
