@@ -142,7 +142,7 @@ if ((do_shellcheck)); then
     echo "shellcheck not found; install it or pass --no-shellcheck" >&2
     exit 127
   fi
-  run shellcheck build.sh test.sh bench.sh scripts/bootstrap_stress_fixtures.sh scripts/e2e_procedures.sh
+  run shellcheck build.sh test.sh bench.sh scripts/bootstrap_stress_fixtures.sh scripts/e2e_procedures.sh scripts/stress_large_repo.sh
 fi
 
 if ((do_clippy)); then

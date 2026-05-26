@@ -82,8 +82,7 @@ if [ -z "$HOME_DIR" ]; then
   [ "$KEEP_HOME" -eq 0 ] && CLEAN_HOME=1
 fi
 mkdir -p "$HOME_DIR"
-cleanup() { [ "$CLEAN_HOME" -eq 1 ] && rm -rf "$HOME_DIR"; }
-trap cleanup EXIT
+trap '[ "$CLEAN_HOME" -eq 1 ] && rm -rf "$HOME_DIR"' EXIT
 
 # No daemon/auto-spawn: we drive each phase explicitly and measure it in
 # isolation. CI=1 disables the background load/thermal throttle so timings are
