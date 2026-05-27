@@ -64,6 +64,52 @@ pub struct IndexedChunk {
     pub is_ignored: bool,
 }
 
+type IndexedFileBatch = Vec<(PathBuf, Vec<IndexedChunk>)>;
+
+struct IndexBatchProducer {
+    receiver: Option<std::sync::mpsc::Receiver<IndexedFileBatch>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl IndexBatchProducer {
+    fn new(
+        receiver: std::sync::mpsc::Receiver<IndexedFileBatch>,
+        handle: std::thread::JoinHandle<()>,
+    ) -> Self {
+        Self {
+            receiver: Some(receiver),
+            handle: Some(handle),
+        }
+    }
+
+    fn recv(&self) -> Option<IndexedFileBatch> {
+        self.receiver.as_ref()?.recv().ok()
+    }
+
+    fn stop(&mut self) {
+        drop(self.receiver.take());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+
+    fn finish(mut self) -> Result<()> {
+        drop(self.receiver.take());
+        if let Some(handle) = self.handle.take() {
+            handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("index batch producer thread panicked"))?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for IndexBatchProducer {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct TantivyFields {
     pub chunk_id: Field,
@@ -569,7 +615,7 @@ fn index_workspace_inner(
             }
         }
     }
-    let mut writer = writer.expect("writer must be acquired after retries");
+    let mut writer = writer.context("writer must be acquired after retries")?;
 
     let mut vector_index =
         VectorStore::open(&vector_path, embedding_model.dimensions(), ScalarKind::F16)?;
@@ -609,8 +655,7 @@ fn index_workspace_inner(
 
     // Stream through batches to rigidly bound memory footprints.
     // 4096 files is highly parallelizable while capping memory overhead effectively.
-    let (tx_batch, rx_batch) =
-        std::sync::mpsc::sync_channel::<Vec<(std::path::PathBuf, Vec<IndexedChunk>)>>(2);
+    let (tx_batch, rx_batch) = std::sync::mpsc::sync_channel::<IndexedFileBatch>(2);
 
     let progress_counter_clone = progress_counter.clone();
     let root_clone = workspace.root.clone();
@@ -619,7 +664,7 @@ fn index_workspace_inner(
 
     let _ = fs::write(&progress_path_clone, format!("0/{total}"));
 
-    std::thread::spawn(move || {
+    let producer_handle = std::thread::spawn(move || {
         for batch_paths in diff_paths.chunks(128) {
             let file_chunks: Vec<_> = batch_paths
                 .par_iter()
@@ -686,8 +731,24 @@ fn index_workspace_inner(
             }
         }
     });
+    let mut producer = IndexBatchProducer::new(rx_batch, producer_handle);
 
-    while let Ok(file_chunks) = rx_batch.recv() {
+    macro_rules! persist_or_stop {
+        ($result:expr) => {
+            match $result {
+                Ok(value) => value,
+                Err(err) => {
+                    // Dropping the receiver is the producer cancellation signal.
+                    // Join before returning so a failed ingest cannot leave a
+                    // scanner running in the background.
+                    producer.stop();
+                    return Err(err.into());
+                }
+            }
+        };
+    }
+
+    while let Some(file_chunks) = producer.recv() {
         // Phase 2: Batch embed (very fast hashing model).
         let all_texts: Vec<&str> = file_chunks
             .iter()
@@ -707,17 +768,23 @@ fn index_workspace_inner(
             chunks_since_commit += indexed_chunks.len();
 
             if !is_fresh_index {
-                remove_file_chunks(&tx, &mut writer, &fields, &mut vector_index, rel_path)?;
+                persist_or_stop!(remove_file_chunks(
+                    &tx,
+                    &mut writer,
+                    &fields,
+                    &mut vector_index,
+                    rel_path,
+                ));
             }
 
             // In overlay mode, tombstone the base version so search suppresses
             // the stale base chunks for this file path.
             if use_overlay {
                 let rel_str = rel_path.to_string_lossy().to_string();
-                tx.execute(
+                persist_or_stop!(tx.execute(
                     "INSERT OR IGNORE INTO tombstones (file_path) VALUES (?1)",
                     params![rel_str],
-                )?;
+                ));
             }
 
             // Batch the timestamp syscall per file, not per chunk.
@@ -734,25 +801,27 @@ fn index_workspace_inner(
                 } else {
                     vector_index.upsert(indexed.vector_key, embedding);
                 }
-                insert_chunk(&tx, indexed, is_fresh_index, now_unix)?;
-                add_chunk_doc(&mut writer, &fields, indexed)?;
+                persist_or_stop!(insert_chunk(&tx, indexed, is_fresh_index, now_unix));
+                persist_or_stop!(add_chunk_doc(&mut writer, &fields, indexed));
             }
         }
 
         // Prevent memory/WAL ballooning on massive repositories
         if chunks_since_commit >= 25_000 {
-            tx.commit()?;
-            writer.commit()?;
+            persist_or_stop!(tx.commit());
+            persist_or_stop!(writer.commit());
             // Fresh full indexes are not queryable until the final metadata and
             // Merkle snapshot write, so avoid repeatedly rewriting the whole
             // vector file during initial bulk ingest.
             if !is_fresh_index {
-                vector_index.save()?;
+                persist_or_stop!(vector_index.save());
             }
-            tx = sqlite.transaction()?;
+            tx = persist_or_stop!(sqlite.transaction());
             chunks_since_commit = 0;
         }
     }
+
+    producer.finish()?;
 
     let t1 = std::time::Instant::now();
     if show_progress && total > 0 {
@@ -1743,6 +1812,33 @@ mod tests {
         assert_ne!(
             a.vector_key, b.vector_key,
             "identical-content chunks collided on one vector key"
+        );
+    }
+
+    #[test]
+    fn dropping_index_batch_producer_cancels_blocked_sender() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<IndexedFileBatch>(0);
+        let handle = std::thread::spawn(move || {
+            assert!(
+                sender.send(Vec::new()).is_err(),
+                "receiver drop must cancel blocked producer send"
+            );
+        });
+
+        drop(IndexBatchProducer::new(receiver, handle));
+    }
+
+    #[test]
+    fn index_batch_producer_propagates_worker_panic() {
+        let (_sender, receiver) = std::sync::mpsc::sync_channel::<IndexedFileBatch>(0);
+        let handle = std::thread::spawn(|| panic!("test producer panic"));
+
+        let err = IndexBatchProducer::new(receiver, handle)
+            .finish()
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("producer thread panicked"),
+            "unexpected producer error: {err:#}"
         );
     }
 
