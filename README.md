@@ -192,7 +192,7 @@ Benchmarked on the **Linux kernel** (93,493 indexed files, 4,666,431 chunks) and
 
 The latest benchmark loop reduced Linux kernel fresh-index primary score by 10.6% and daemon hot-query p95 from ~455 ms to single-digit milliseconds. Benchmark writeups and charts live under [`docs/benchmarks/`](docs/benchmarks/).
 
-Indexing is sub-second for most small projects. Large repos return hash/BM25 results immediately and upgrade in the background via the locally cached Candle model (`AllMiniLML6V2`). macOS release builds use Accelerate-backed CPU math; Metal is available as an opt-in local build while its background throughput is tuned.
+Indexing is sub-second for most small projects. Queries return hash/BM25 results immediately while neural vectors are unavailable, then upgrade in the background via the locally cached Candle model (`AllMiniLML6V2`). macOS release builds use Accelerate-backed CPU math; Metal is available as an opt-in local build while its background throughput is tuned.
 
 ---
 

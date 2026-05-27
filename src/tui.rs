@@ -444,7 +444,6 @@ fn local_search_detached(
     progress_tx: &std::sync::mpsc::Sender<TuiSearchProgress>,
     cancel_token: &std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<Vec<SearchHit>> {
-    let model = crate::embedding::create_model(cli.hash);
     let options = build_search_options(cli, scope_filter);
     let mut all_hits = Vec::new();
 
@@ -456,6 +455,11 @@ fn local_search_detached(
             .collect::<Vec<_>>()
     } else {
         vec![workspace.clone()]
+    };
+    let model = if cli.hash || !workspaces.iter().any(Workspace::has_neural_vectors) {
+        crate::embedding::create_hash_model()
+    } else {
+        crate::embedding::create_model(false)
     };
 
     let (std_tx, std_rx) = std::sync::mpsc::channel();
@@ -482,6 +486,14 @@ fn local_search_detached(
 
     if let Some(limit) = tui_limit(cli) {
         all_hits.truncate(limit);
+    }
+
+    if !cli.all_indices
+        && !cli.hash
+        && std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
+        && workspace.needs_neural_enhancement()
+    {
+        let _ = workspace.trigger_background_enhancement();
     }
 
     Ok(all_hits)

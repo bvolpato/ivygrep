@@ -11,10 +11,7 @@ use tracing_subscriber::EnvFilter;
 use crate::config;
 use crate::daemon;
 use crate::embedding::create_model;
-use crate::indexer::{
-    index_workspace, maybe_complete_neural_for_small_workspace, remove_workspace_index,
-    workspace_is_indexed,
-};
+use crate::indexer::{index_workspace, remove_workspace_index, workspace_is_indexed};
 use crate::jobs::{self, JobKind, JobUpdate};
 use crate::mcp;
 use crate::protocol::{
@@ -993,23 +990,12 @@ async fn run_query(cli: Cli) -> Result<()> {
                     let _ =
                         crate::daemon::request::<fn(String, usize, usize)>(&req, false, None).await;
                 } else {
-                    let model = crate::embedding::create_model(cli.hash);
+                    let model = crate::embedding::create_hash_model();
                     let _ = crate::indexer::index_workspace(&workspace, model.as_ref());
                 }
             }
         }
     }
-
-    let search_model: Option<Box<dyn crate::embedding::EmbeddingModel>> =
-        if !search_via_daemon && !cli.regex && !cli.literal {
-            if is_single_word_symbol_query(query) {
-                None
-            } else {
-                Some(create_model(cli.hash))
-            }
-        } else {
-            None
-        };
 
     let hits = if cli.literal {
         let request = DaemonRequest::LiteralSearch {
@@ -1178,11 +1164,9 @@ async fn run_query(cli: Cli) -> Result<()> {
             } else {
                 vec![workspace.clone()]
             };
+            let search_model = local_hybrid_search_model(&workspaces, query, cli.hash);
             for ws in workspaces {
                 let _ = ws.cleanup_stale_legacy_runtime_files();
-                if !cli.hash {
-                    let _ = maybe_complete_neural_for_small_workspace(&ws);
-                }
                 let _t_search = std::time::Instant::now();
                 match hybrid_search(
                     &ws,
@@ -1466,17 +1450,9 @@ fn local_fallback_search(
         vec![workspace.clone()]
     };
 
-    let model: Option<Box<dyn crate::embedding::EmbeddingModel>> =
-        if is_single_word_symbol_query(query) {
-            None
-        } else {
-            Some(create_model(use_hash))
-        };
+    let model = local_hybrid_search_model(&workspaces, query, use_hash);
 
     for ws in workspaces {
-        if !use_hash {
-            let _ = maybe_complete_neural_for_small_workspace(&ws);
-        }
         match hybrid_search(&ws, query, model.as_deref(), options) {
             Ok(mut hits) => {
                 if all_indices {
@@ -1596,6 +1572,22 @@ fn is_single_word_symbol_query(query: &str) -> bool {
             .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
 }
 
+fn local_hybrid_search_model(
+    workspaces: &[Workspace],
+    query: &str,
+    use_hash: bool,
+) -> Option<Box<dyn crate::embedding::EmbeddingModel>> {
+    if is_single_word_symbol_query(query) {
+        return None;
+    }
+
+    if use_hash || !workspaces.iter().any(Workspace::has_neural_vectors) {
+        Some(crate::embedding::create_hash_model())
+    } else {
+        Some(create_model(false))
+    }
+}
+
 fn initial_query_index_state(workspace: &Workspace) -> WorkspaceIndexState {
     workspace.index_health().state
 }
@@ -1700,6 +1692,22 @@ mod tests {
             initial_query_index_state(&workspace),
             WorkspaceIndexState::Healthy
         );
+    }
+
+    #[test]
+    #[serial]
+    fn local_search_uses_hash_model_until_neural_vectors_exist() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn marker() {}\n").unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let hash_model = create_hash_model();
+        index_workspace(&workspace, hash_model.as_ref()).unwrap();
+
+        let model = local_hybrid_search_model(&[workspace], "semantic query", false).unwrap();
+        assert_eq!(model.dimensions(), 256);
     }
 
     #[test]

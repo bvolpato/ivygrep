@@ -16,14 +16,12 @@ use std::sync::OnceLock;
 
 use crate::config;
 use crate::embedding::{EmbeddingModel, create_hash_model, create_neural_model};
-use crate::indexer::{
-    index_workspace, maybe_complete_neural_for_small_workspace, workspace_is_indexed,
-};
+use crate::indexer::{index_workspace, workspace_is_indexed};
 use crate::path_glob::parse_glob_csv;
 use crate::protocol::group_hits_by_file;
 use crate::regex_search::regex_search;
 use crate::search::{SearchOptions, hybrid_search, literal_search};
-use crate::workspace::resolve_workspace_and_scope;
+use crate::workspace::{Workspace, resolve_workspace_and_scope};
 
 const JSONRPC_VERSION: &str = "2.0";
 const TOOL_IG_SEARCH: &str = "ig_search";
@@ -323,6 +321,14 @@ fn mcp_query_model() -> Arc<dyn EmbeddingModel> {
     }
 }
 
+fn mcp_search_model(workspace: &Workspace) -> Arc<dyn EmbeddingModel> {
+    if workspace.has_neural_vectors() {
+        mcp_query_model()
+    } else {
+        Arc::from(create_hash_model())
+    }
+}
+
 fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
     let query = args
         .query
@@ -383,19 +389,10 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
             args.skip_gitignore.unwrap_or(false),
         )?
     } else {
-        // Neural model is loaded once per process and only needed to embed the
-        // query (literal/regex modes skip it entirely). See #57.
-        let model = mcp_query_model();
-        let _ = maybe_complete_neural_for_small_workspace(&workspace);
-        // Build neural vectors for larger workspaces in the background (a niced
-        // subprocess) so search quality improves over time without blocking
-        // this request. Small workspaces are completed inline above.
-        if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
-            && workspace.needs_neural_enhancement()
-        {
-            let _ = workspace.trigger_background_enhancement();
-        }
-        hybrid_search(
+        // Load a neural query model only after neural vectors exist; a new
+        // index returns hash results without downloading/loading model assets.
+        let model = mcp_search_model(&workspace);
+        let hits = hybrid_search(
             &workspace,
             query,
             Some(model.as_ref()),
@@ -410,7 +407,15 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
                 progress_tx: None,
                 cancel_token: None,
             },
-        )?
+        )?;
+        // Upgrade neural vectors in a niced subprocess after the hash-first
+        // response is computed.
+        if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
+            && workspace.needs_neural_enhancement()
+        {
+            let _ = workspace.trigger_background_enhancement();
+        }
+        hits
     };
 
     if !args.literal.unwrap_or(false) && !args.regex.unwrap_or(false) {
@@ -993,6 +998,22 @@ mod tests {
             // usable model comes back.
             assert_eq!(a.dimensions(), b.dimensions());
         }
+    }
+
+    #[test]
+    #[serial]
+    fn mcp_search_uses_hash_model_until_neural_vectors_exist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(tmp.path().join("lib.rs"), "pub fn marker() {}\n").unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let index_model = create_hash_model();
+        index_workspace(&workspace, index_model.as_ref()).unwrap();
+
+        assert!(workspace.needs_neural_enhancement());
+        assert_eq!(mcp_search_model(&workspace).dimensions(), 256);
     }
 
     fn tool_json_payload(response: &Value) -> Value {

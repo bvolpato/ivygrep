@@ -16,10 +16,7 @@ use tracing::{error, info, warn};
 
 use crate::config;
 use crate::embedding::{EmbeddingModel, create_model};
-use crate::indexer::{
-    index_workspace, index_workspace_for_watcher, maybe_complete_neural_for_small_workspace,
-    remove_workspace_index,
-};
+use crate::indexer::{index_workspace, index_workspace_for_watcher, remove_workspace_index};
 use crate::jobs::{self, JobKind, JobUpdate};
 use crate::protocol::{BUILD_VERSION, DaemonRequest, DaemonResponse};
 use crate::regex_search::regex_search;
@@ -733,7 +730,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             };
             let all_indices = path.is_none();
 
-            if workspaces.iter().any(workspace_has_neural_vectors) {
+            if workspaces.iter().any(Workspace::has_neural_vectors) {
                 state_clone.maybe_start_model_load();
             }
 
@@ -750,10 +747,6 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     .filter(|w| w.needs_neural_enhancement())
                     .map(|w| w.root.clone())
                     .collect();
-
-                for workspace in &workspaces {
-                    let _ = maybe_complete_neural_for_small_workspace(workspace);
-                }
 
                 let cache_key = query_cache_key(
                     &workspaces,
@@ -1517,14 +1510,6 @@ fn is_common_build_output_path(rel: &Path) -> bool {
     })
 }
 
-fn workspace_has_neural_vectors(workspace: &Workspace) -> bool {
-    workspace.vector_neural_path().exists()
-        || workspace
-            .base_index_dir
-            .as_ref()
-            .is_some_and(|base| base.join("vectors_neural.usearch").exists())
-}
-
 fn daemon_log(message: &str) {
     eprintln!("{} {}", daemon_timestamp(), message);
 }
@@ -2061,6 +2046,10 @@ mod tests {
         assert!(
             lazy_model.get().is_none(),
             "daemon should not block-load neural model when only hash vectors exist"
+        );
+        assert!(
+            !workspace.has_neural_vectors(),
+            "daemon search must leave neural vector generation to background work"
         );
     }
 
