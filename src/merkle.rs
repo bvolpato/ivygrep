@@ -84,6 +84,19 @@ impl MerkleSnapshot {
         Self::build_inner(root, true, skip_gitignore)
     }
 
+    pub(crate) fn path_matches_metadata_snapshot(path: &Path, snapshot_hash: &str) -> bool {
+        let Some(expected_hash) = snapshot_hash
+            .strip_suffix("-0")
+            .or_else(|| snapshot_hash.strip_suffix("-1"))
+        else {
+            return false;
+        };
+        fs::metadata(path).ok().is_some_and(|metadata| {
+            metadata.len() <= MAX_INDEXABLE_FILE_BYTES
+                && metadata_file_hash(&metadata) == expected_hash
+        })
+    }
+
     fn build_inner(root: &Path, content_based: bool, skip_gitignore: bool) -> Result<Self> {
         // If skip_gitignore is true, do a fast standard walk first to record which files WOULD have been included properly.
         let unignored_paths: std::collections::HashSet<String> = if skip_gitignore {
@@ -184,30 +197,7 @@ impl MerkleSnapshot {
                     data.extend_from_slice(&content);
                     hex::encode(xxhash_rust::xxh3::xxh3_128(&data).to_le_bytes())
                 } else {
-                    // The relative path is already the map key and participates
-                    // in root_hash(), so the per-file value only needs metadata.
-                    let mut data = [0_u8; 40];
-                    let mut len = 0;
-                    data[len..len + 8].copy_from_slice(&metadata.len().to_le_bytes());
-                    len += 8;
-                    if let Ok(mtime) = metadata.modified()
-                        && let Ok(duration) = mtime.duration_since(std::time::UNIX_EPOCH)
-                    {
-                        data[len..len + 16].copy_from_slice(&duration.as_nanos().to_le_bytes());
-                        len += 16;
-                    }
-                    // On macOS and Linux, ctime changes when contents or inode
-                    // metadata change even when a caller restores mtime. This
-                    // closes stale-index gaps without reading file contents.
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::MetadataExt;
-                        data[len..len + 8].copy_from_slice(&metadata.ctime().to_le_bytes());
-                        data[len + 8..len + 16]
-                            .copy_from_slice(&metadata.ctime_nsec().to_le_bytes());
-                        len += 16;
-                    }
-                    hex::encode(xxhash_rust::xxh3::xxh3_128(&data[..len]).to_le_bytes())
+                    metadata_file_hash(&metadata)
                 };
 
                 let rel_str = rel.to_string_lossy().to_string();
@@ -268,6 +258,31 @@ impl MerkleSnapshot {
             deleted,
         }
     }
+}
+
+fn metadata_file_hash(metadata: &fs::Metadata) -> String {
+    // The relative path is already the map key and participates in root_hash(),
+    // so the per-file value only needs metadata.
+    let mut data = [0_u8; 40];
+    let mut len = 0;
+    data[len..len + 8].copy_from_slice(&metadata.len().to_le_bytes());
+    len += 8;
+    if let Ok(mtime) = metadata.modified()
+        && let Ok(duration) = mtime.duration_since(std::time::UNIX_EPOCH)
+    {
+        data[len..len + 16].copy_from_slice(&duration.as_nanos().to_le_bytes());
+        len += 16;
+    }
+    // On macOS and Linux, ctime changes when contents or inode metadata change
+    // even when a caller restores mtime.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        data[len..len + 8].copy_from_slice(&metadata.ctime().to_le_bytes());
+        data[len + 8..len + 16].copy_from_slice(&metadata.ctime_nsec().to_le_bytes());
+        len += 16;
+    }
+    hex::encode(xxhash_rust::xxh3::xxh3_128(&data[..len]).to_le_bytes())
 }
 
 fn root_hash(files: &BTreeMap<String, String>) -> String {

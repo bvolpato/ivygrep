@@ -124,6 +124,17 @@ fn overlay_counts(workspace: &Workspace) -> (i64, i64) {
     (files, tombstones)
 }
 
+fn stored_chunk_text(workspace: &Workspace, file_path: &str) -> Option<String> {
+    let conn = open_sqlite(&workspace.sqlite_path()).unwrap();
+    conn.query_row(
+        "SELECT text FROM chunks WHERE file_path = ?1 LIMIT 1",
+        [file_path],
+        |row| row.get::<_, Vec<u8>>(0),
+    )
+    .map(ivygrep::indexer::decompress_text)
+    .ok()
+}
+
 /// Helper: search for a query and return file paths in the results.
 fn search_file_paths(workspace: &Workspace, query: &str) -> Vec<String> {
     let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
@@ -1189,6 +1200,155 @@ fn worktree_moved_directory_checkout_restores_base_without_materializing_it() {
             .iter()
             .all(|path| !path.contains("src/moved/edit.rs")),
         "restored checkout must not serve removed overlay documents"
+    );
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+#[test]
+#[serial]
+fn worktree_incremental_overlay_keeps_edit_when_live_base_is_unindexed() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    git(root.path(), &["init", "-b", "main"]);
+    fs::write(root.path().join(".gitignore"), ".git\n").unwrap();
+    fs::write(
+        root.path().join("shared.rs"),
+        "pub fn indexed_base_marker() -> bool { true }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base content"]);
+    setup_and_index(root.path(), home.path());
+
+    git(root.path(), &["branch", "wt-stale-incremental", "main"]);
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_stale_incremental");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            wt_path.to_str().unwrap(),
+            "wt-stale-incremental",
+        ],
+    );
+    setup_and_index(&wt_path, home.path());
+
+    fs::write(
+        root.path().join("shared.rs"),
+        "pub fn unindexed_live_base_marker() -> bool { true }\n",
+    )
+    .unwrap();
+    fs::write(
+        wt_path.join("shared.rs"),
+        "pub fn unindexed_live_base_marker() -> bool { true }\n",
+    )
+    .unwrap();
+
+    let updated = setup_and_index(&wt_path, home.path());
+    let wt_ws = workspace_for(&wt_path);
+    assert_eq!(
+        updated.indexed_files, 1,
+        "worktree edit must not delegate to stale base index"
+    );
+    assert_eq!(
+        overlay_counts(&wt_ws),
+        (1, 1),
+        "worktree must shadow stale indexed base content"
+    );
+    let base_ws = workspace_for(root.path());
+    let base_text = stored_chunk_text(&base_ws, "shared.rs").expect("base chunk must exist");
+    assert!(
+        base_text.contains("indexed_base_marker"),
+        "worktree indexing must not implicitly rewrite an established base index"
+    );
+    assert!(
+        !base_text.contains("unindexed_live_base_marker"),
+        "base storage must remain at its indexed content"
+    );
+    assert!(
+        search_file_paths(&wt_ws, "unindexed_live_base_marker")
+            .iter()
+            .any(|path| path.contains("shared.rs")),
+        "worktree search must return current worktree content"
+    );
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+#[test]
+#[serial]
+fn worktree_first_overlay_refreshes_stale_base_before_inheriting_content() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    git(root.path(), &["init", "-b", "main"]);
+    fs::write(root.path().join(".gitignore"), ".git\n").unwrap();
+    fs::write(
+        root.path().join("shared.rs"),
+        "pub fn original_indexed_marker() -> bool { true }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base content"]);
+    setup_and_index(root.path(), home.path());
+
+    git(root.path(), &["branch", "wt-stale-initial", "main"]);
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_stale_initial");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            wt_path.to_str().unwrap(),
+            "wt-stale-initial",
+        ],
+    );
+
+    fs::write(
+        root.path().join("shared.rs"),
+        "pub fn refreshed_base_marker() -> bool { true }\n",
+    )
+    .unwrap();
+    fs::write(
+        wt_path.join("shared.rs"),
+        "pub fn refreshed_base_marker() -> bool { true }\n",
+    )
+    .unwrap();
+
+    setup_and_index(&wt_path, home.path());
+    let wt_ws = workspace_for(&wt_path);
+    assert_eq!(
+        overlay_counts(&wt_ws),
+        (0, 0),
+        "matching content should be inherited after refreshing stale base"
+    );
+    let base_ws = workspace_for(root.path());
+    assert!(
+        stored_chunk_text(&base_ws, "shared.rs")
+            .is_some_and(|text| text.contains("refreshed_base_marker")),
+        "base storage must be refreshed before an initial overlay inherits it"
+    );
+    assert!(
+        search_file_paths(&wt_ws, "refreshed_base_marker")
+            .iter()
+            .any(|path| path.contains("shared.rs")),
+        "worktree search must inherit refreshed base content"
+    );
+    assert!(
+        search_file_paths(&base_ws, "refreshed_base_marker")
+            .iter()
+            .any(|path| path.contains("shared.rs")),
+        "first overlay indexing refreshes stale base content it will inherit"
     );
 
     git(
