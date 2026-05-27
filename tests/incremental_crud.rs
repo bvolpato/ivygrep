@@ -9,7 +9,11 @@
 //!   - Untouched files are NOT re-indexed (zero cost for unchanged files).
 
 use std::collections::HashSet;
+#[cfg(unix)]
+use std::ffi::CString;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
 
 use serial_test::serial;
 use tempfile::tempdir;
@@ -43,6 +47,23 @@ fn setup_and_index(
 
 fn workspace_for(root: &std::path::Path) -> Workspace {
     Workspace::resolve(root).unwrap()
+}
+
+#[cfg(unix)]
+fn restore_file_times(path: &std::path::Path, metadata: &std::fs::Metadata) {
+    let path_c = CString::new(path.as_os_str().as_bytes()).unwrap();
+    let times = [
+        libc::timespec {
+            tv_sec: metadata.atime(),
+            tv_nsec: metadata.atime_nsec() as libc::c_long,
+        },
+        libc::timespec {
+            tv_sec: metadata.mtime(),
+            tv_nsec: metadata.mtime_nsec() as libc::c_long,
+        },
+    ];
+    let rc = unsafe { libc::utimensat(libc::AT_FDCWD, path_c.as_ptr(), times.as_ptr(), 0) };
+    assert_eq!(rc, 0, "failed to restore source timestamps");
 }
 
 /// Helper: get all indexed file paths from SQLite.
@@ -234,6 +255,58 @@ fn update_preserves_unmodified_chunks() {
         chunk_count(&ws),
         initial_chunks,
         "chunk count should not grow"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn same_size_edit_with_restored_mtime_is_reindexed() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    let file = root.path().join("mutable.rs");
+
+    fs::write(&file, "pub fn old_marker() -> u32 { 1 }\n").unwrap();
+    setup_and_index(root.path(), home.path());
+    let before = fs::metadata(&file).unwrap();
+
+    fs::write(&file, "pub fn new_marker() -> u32 { 2 }\n").unwrap();
+    restore_file_times(&file, &before);
+    let after = fs::metadata(&file).unwrap();
+    assert_eq!(
+        after.len(),
+        before.len(),
+        "test edit must preserve file size"
+    );
+    assert_eq!(
+        (after.mtime(), after.mtime_nsec()),
+        (before.mtime(), before.mtime_nsec()),
+        "test edit must preserve mtime"
+    );
+
+    let summary = setup_and_index(root.path(), home.path());
+    assert_eq!(
+        summary.indexed_files, 1,
+        "ctime must reveal content edits even when size and mtime are unchanged"
+    );
+
+    let ws = workspace_for(root.path());
+    let conn = open_sqlite(&ws.sqlite_path()).unwrap();
+    let raw: Vec<u8> = conn
+        .query_row(
+            "SELECT text FROM chunks WHERE file_path = 'mutable.rs' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let text = ivygrep::indexer::decompress_text(raw);
+    assert!(
+        text.contains("new_marker"),
+        "updated content must be indexed"
+    );
+    assert!(
+        !text.contains("old_marker"),
+        "stale content must be removed"
     );
 }
 

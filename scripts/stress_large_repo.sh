@@ -170,7 +170,7 @@ except Exception: print('')"; }
 # ── Phase 1: index (hash) ────────────────────────────────────────────────────
 echo
 echo "▶ Phase 1/3: index (hash vectors)"
-run_phase "index" "$IDX_TIMEOUT" "$BIN" --add "$REPO" --no-watch
+run_phase "index" "$IDX_TIMEOUT" "$BIN" --add "$REPO" --no-watch --hash
 RC=$?; IDX_SECS=$PHASE_SECS; IDX_RSS=$PHASE_RSS_MB
 [ "$RC" -ne 0 ] && OVERALL_RC=1
 ST="$(status_json)"
@@ -210,8 +210,14 @@ else
 fi
 
 # ── Phase 3: query latency ───────────────────────────────────────────────────
+QUERY_MODE=()
+QUERY_LABEL="neural vectors"
+if [ "$SKIP_ENHANCE" -eq 1 ]; then
+  QUERY_MODE=(--hash)
+  QUERY_LABEL="hash vectors"
+fi
 echo
-echo "▶ Phase 3/3: query latency (no daemon — each is a cold index load)"
+echo "▶ Phase 3/3: query latency ($QUERY_LABEL, no daemon — each is a cold index load)"
 IFS='|' read -r -a QARR <<< "$QUERIES"
 LAT_SUM=0; LAT_N=0; LAT_MAX=0; LAT_MIN=999999
 for q in "${QARR[@]}"; do
@@ -219,7 +225,7 @@ for q in "${QARR[@]}"; do
   t0=$(python3 -c 'import time;print(time.time())')
   # Run under a watchdog so a hung query produces a failure signal instead of
   # blocking the run forever, and treat a non-zero exit as a phase failure.
-  "$BIN" --no-watch -n 20 "$q" "$REPO" >/dev/null 2>&1 &
+  "$BIN" --no-watch "${QUERY_MODE[@]}" -n 20 "$q" "$REPO" >/dev/null 2>&1 &
   qpid=$!; waited=0; qrc=0
   while kill -0 "$qpid" 2>/dev/null; do
     if [ "$waited" -ge "$QUERY_TIMEOUT" ]; then kill -KILL "$qpid" 2>/dev/null; qrc=124; break; fi

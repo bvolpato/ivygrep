@@ -1009,7 +1009,7 @@ fn check_system_constraints() -> Option<String> {
     None
 }
 
-/// Compute neural (ONNX) embeddings for all chunks and save as a separate
+/// Compute neural Candle embeddings for all chunks and save as a separate
 /// vector store. This is designed to run in a background thread after the
 /// fast hash-based index returns results to the user.
 pub fn enhance_workspace_neural(
@@ -1044,7 +1044,7 @@ pub fn enhance_workspace_neural(
     let paused_path = workspace.enhancing_paused_path();
 
     // Phase 2: Stream rows and skip already-embedded keys without decompressing text.
-    // Use a larger batch (512) to amortize ONNX session overhead.
+    // Use a larger batch (512) to amortize neural embedding overhead.
     const BATCH_SIZE: usize = 512;
     let mut batch: Vec<(u64, String)> = Vec::with_capacity(BATCH_SIZE);
 
@@ -1854,7 +1854,7 @@ mod tests {
         assert!(summary.total_chunks >= 2);
         assert!(!workspace.vector_neural_path().exists());
 
-        // Phase 2: enhance with neural (using hash as stand-in for ONNX in tests)
+        // Phase 2: enhance with neural (using hash as a deterministic test stand-in)
         let neural_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         let enhanced = enhance_workspace_neural(&workspace, &neural_model).unwrap();
         assert_eq!(enhanced, summary.total_chunks);

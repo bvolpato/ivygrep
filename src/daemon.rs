@@ -281,7 +281,7 @@ struct DaemonState {
 }
 
 impl DaemonState {
-    /// Try to get the ONNX model without blocking. If it's not loaded yet,
+    /// Try to get the neural model without blocking. If it is not loaded yet,
     /// return a fast hash-based model so searches don't stall during startup.
     fn get_model_or_fallback(&self) -> Arc<dyn EmbeddingModel> {
         match self.lazy_model.get() {
@@ -390,7 +390,7 @@ pub async fn run_daemon() -> Result<()> {
         socket_path.display()
     ));
 
-    // Defer model creation — the ONNX download happens on first use.
+    // Defer model creation; model artifact download happens on first neural use.
     let lazy_model: Arc<std::sync::OnceLock<Arc<dyn EmbeddingModel>>> =
         Arc::new(std::sync::OnceLock::new());
 

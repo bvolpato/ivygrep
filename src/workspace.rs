@@ -36,7 +36,8 @@ pub struct Workspace {
 ///   1 — vector keys derived from content hash (implicit; pre-versioning)
 ///   2 — vector keys derived from the unique chunk id (#27)
 ///   3 — leading doc-comments folded into the following definition chunk (#59)
-pub const INDEX_FORMAT_VERSION: u32 = 3;
+///   4 — Merkle metadata fingerprints include Unix ctime (#21)
+pub const INDEX_FORMAT_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceMetadata {

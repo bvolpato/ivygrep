@@ -6,6 +6,11 @@ use usearch::{Index, IndexOptions, MetricKind};
 
 pub use usearch::ScalarKind;
 
+const HASH_VECTOR_DIMENSIONS: usize = 256;
+const HASH_CONNECTIVITY: usize = 8;
+const HASH_EXPANSION_ADD: usize = 32;
+const HASH_EXPANSION_SEARCH: usize = 64;
+
 #[derive(Debug, Clone)]
 pub struct VectorMatch {
     pub key: u64,
@@ -17,19 +22,28 @@ pub struct VectorStore {
     index: Index,
 }
 
+fn create_index(dimensions: usize, quantization: ScalarKind) -> Result<Index> {
+    let mut options = IndexOptions {
+        dimensions,
+        metric: MetricKind::Cos,
+        quantization,
+        ..IndexOptions::default()
+    };
+
+    // Hash vectors provide first results before neural enhancement. A smaller
+    // graph reduces foreground build cost; neural vectors retain quality defaults.
+    if dimensions == HASH_VECTOR_DIMENSIONS && matches!(quantization, ScalarKind::F16) {
+        options.connectivity = HASH_CONNECTIVITY;
+        options.expansion_add = HASH_EXPANSION_ADD;
+        options.expansion_search = HASH_EXPANSION_SEARCH;
+    }
+
+    Ok(Index::new(&options)?)
+}
+
 impl VectorStore {
     pub fn open(path: &Path, dimensions: usize, quantization: ScalarKind) -> Result<Self> {
-        let make_index = |q: ScalarKind| -> Result<Index> {
-            let options = IndexOptions {
-                dimensions,
-                metric: MetricKind::Cos,
-                quantization: q,
-                ..IndexOptions::default()
-            };
-            Ok(Index::new(&options)?)
-        };
-
-        let index = make_index(quantization)?;
+        let index = create_index(dimensions, quantization)?;
         if path.exists() {
             let path_str = path
                 .to_str()
@@ -44,7 +58,7 @@ impl VectorStore {
                         return Err(err.into());
                     }
                     // Old index may use different quantization; retry with F32
-                    let fallback = make_index(ScalarKind::F32)?;
+                    let fallback = create_index(dimensions, ScalarKind::F32)?;
                     fallback.load(path_str)?;
                     return Ok(Self {
                         path: path.to_path_buf(),
@@ -67,17 +81,7 @@ impl VectorStore {
     ///
     /// The returned store must NOT be used for writes (upsert/remove/save).
     pub fn open_readonly(path: &Path, dimensions: usize, quantization: ScalarKind) -> Result<Self> {
-        let make_index = |q: ScalarKind| -> Result<Index> {
-            let options = IndexOptions {
-                dimensions,
-                metric: MetricKind::Cos,
-                quantization: q,
-                ..IndexOptions::default()
-            };
-            Ok(Index::new(&options)?)
-        };
-
-        let index = make_index(quantization)?;
+        let index = create_index(dimensions, quantization)?;
         if path.exists() {
             let path_str = path
                 .to_str()
@@ -89,7 +93,7 @@ impl VectorStore {
                         return Err(err.into());
                     }
                     // Old index may use different quantization; retry with F32
-                    let fallback = make_index(ScalarKind::F32)?;
+                    let fallback = create_index(dimensions, ScalarKind::F32)?;
                     fallback.view(path_str)?;
                     return Ok(Self {
                         path: path.to_path_buf(),
@@ -380,5 +384,28 @@ mod tests {
             store.upsert(i, vec![i as f32, 0.0, 0.0, 0.0]);
         }
         assert_eq!(store.size(), 1100);
+    }
+
+    #[test]
+    fn hash_first_tier_uses_lower_build_expansion_only_for_f16_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hash = VectorStore::open(
+            &tmp.path().join("hash.bin"),
+            HASH_VECTOR_DIMENSIONS,
+            ScalarKind::F16,
+        )
+        .unwrap();
+        let neural = VectorStore::open(
+            &tmp.path().join("neural.bin"),
+            HASH_VECTOR_DIMENSIONS,
+            ScalarKind::F32,
+        )
+        .unwrap();
+
+        assert_eq!(hash.index.connectivity(), HASH_CONNECTIVITY);
+        assert_eq!(hash.index.expansion_add(), HASH_EXPANSION_ADD);
+        assert_eq!(hash.index.expansion_search(), HASH_EXPANSION_SEARCH);
+        assert_ne!(neural.index.connectivity(), HASH_CONNECTIVITY);
+        assert_ne!(neural.index.expansion_add(), HASH_EXPANSION_ADD);
     }
 }

@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  <strong>Semantic code search that never phones home.</strong><br/>
-  Ask questions in English. Get answers in code. 100% local.
+  <strong>Semantic code search that never uploads your code.</strong><br/>
+  Ask questions in English. Get answers in code. Local inference.
 </p>
 
 <p align="center">
@@ -70,7 +70,7 @@ ig "error handling" src/api/         # scope to a directory
 ig --all "database migrations"      # search across all indexed projects
 ```
 
-That's it. No config files, no setup wizards, no prompts, no API keys. On first run, `ig` auto-indexes the workspace and spawns a background daemon for incremental updates.
+That's it. No config files, no setup wizards, no prompts, no API keys. On first run, `ig` auto-indexes the workspace and spawns a background daemon for incremental updates. Neural mode downloads its model artifacts into the Hugging Face cache on first use; `--hash` and hash-only builds require no model download.
 
 <p>
   <img src="assets/ig-demo.gif" alt="ivygrep demo — searching the opencode repo" width="700" />
@@ -191,7 +191,7 @@ Benchmarked on the **Linux kernel** (93,493 indexed files, 4,666,431 chunks) and
 
 The latest benchmark loop reduced Linux kernel fresh-index primary score by 10.6% and daemon hot-query p95 from ~455 ms to single-digit milliseconds. Benchmark writeups and charts live under [`docs/benchmarks/`](docs/benchmarks/).
 
-Indexing is sub-second for most small projects. Large repos return hash/BM25 results immediately and upgrade in the background via the bundled ONNX model (`AllMiniLML6V2Q`).
+Indexing is sub-second for most small projects. Large repos return hash/BM25 results immediately and upgrade in the background via the locally cached Candle model (`AllMiniLML6V2`).
 
 ---
 
@@ -203,15 +203,16 @@ ivygrep deeply understands git. This is a core design decision, not an afterthou
 - **Content-based deduplication:** Byte-identical files are never re-indexed across branches.
 - **`.gitignore` native:** Respects rules automatically at every level.
 
-**Tech stack:** `tantivy` (BM25), `usearch` (vector store), `tree-sitter` (AST), `fastembed` (embeddings), `xxh3` (SIMD hashes).
+**Tech stack:** `tantivy` (BM25), `usearch` (vector store), `tree-sitter` (AST), `candle_embed` / `candle-core` (local neural embeddings), `xxh3` (SIMD hashes).
 
 ---
 
 ## 🔒 Security & Privacy
 
-ivygrep is 100% local — it never sends your code anywhere. A few things worth knowing:
+ivygrep runs search and embedding inference locally and never sends your code, queries, or index data to an external service. A few things worth knowing:
 
 - **Where data lives:** the index (which stores the *decompressed source text* of every indexed file) and the daemon socket live under `~/.local/share/ivygrep` (or `$XDG_DATA_HOME`/`$IVYGREP_HOME`). The index directory is `0700` and the daemon socket `0600`, and the daemon verifies the connecting peer's uid — so other local users on a shared host can't read your indexed code or reach the daemon.
+- **Model download:** neural mode uses `hf-hub` to download AllMiniLM-L6-v2 model assets on first use and caches them under `$HF_HOME` or `~/.cache/huggingface`. Use `--hash` or a `--no-default-features` build when no model-network access is permitted.
 - **Secrets in your repo:** ivygrep indexes file *contents*, including config/dotfiles (e.g. `.env`) unless they're gitignored. Those contents are stored in the local index and can appear in search snippets. Keep secrets out of the workspace or in `.gitignore`.
 - **MCP scope:** the `ig_search` MCP tool only searches the workspace at the provided `path` — it cannot search across other indexed projects.
 

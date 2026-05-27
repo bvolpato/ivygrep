@@ -5,7 +5,7 @@
 //! | Model | Feature | Dimensions | Quality | Binary size |
 //! |-------|---------|------------|---------|-------------|
 //! | [`HashEmbeddingModel`] | *(always)* | 256 | Moderate — token overlap heuristic | Tiny |
-//! | [`OnnxEmbeddingModel`] | `neural` | 384 | High — true semantic similarity | ~23 MB model download |
+//! | [`CandleEmbeddingModel`] | `neural` | 384 | High — true semantic similarity | Model download on first use |
 //!
 //! Use [`create_model`] to build the right model based on the `neural` flag.
 
@@ -17,8 +17,8 @@ pub trait EmbeddingModel: Send + Sync {
     fn dimensions(&self) -> usize;
     fn embed(&self, text: &str) -> Vec<f32>;
 
-    /// Embed multiple texts in a single call. Backends that support batch
-    /// inference (e.g. ONNX) override this for significant speedup.
+    /// Embed multiple texts in a single call. Backends that support efficient
+    /// parallel inference override this for significant speedup.
     fn embed_batch(&self, texts: &[&str]) -> Vec<Vec<f32>> {
         texts.iter().map(|t| self.embed(t)).collect()
     }
@@ -42,8 +42,8 @@ pub fn model_dimensions(hash: bool) -> usize {
 
 /// Create the appropriate embedding model.
 ///
-/// By default (when `hash` is `false`), returns an [`OnnxEmbeddingModel`]
-/// backed by `all-MiniLM-L6-v2` (quantized) for high-quality semantic search.
+/// By default (when `hash` is `false`), returns a [`CandleEmbeddingModel`]
+/// backed by `all-MiniLM-L6-v2` for high-quality semantic search.
 /// Pass `hash = true` to use the lightweight [`HashEmbeddingModel`] instead.
 ///
 /// If the `neural` feature is not compiled in, always falls back to hash.
@@ -63,12 +63,12 @@ pub fn create_model(hash: bool) -> Box<dyn EmbeddingModel> {
     Box::new(HashEmbeddingModel::new(256))
 }
 
-/// Create a hash-only embedding model (instant, no ONNX).
+/// Create a hash-only embedding model (instant, no model download).
 pub fn create_hash_model() -> Box<dyn EmbeddingModel> {
     Box::new(HashEmbeddingModel::new(256))
 }
 
-/// Create a neural (ONNX) embedding model. Returns Err if the neural
+/// Create a neural Candle embedding model. Returns Err if the neural
 /// feature is not compiled in or the model fails to load.
 pub fn create_neural_model() -> anyhow::Result<Box<dyn EmbeddingModel>> {
     #[cfg(feature = "neural")]
@@ -208,9 +208,9 @@ pub struct CandleEmbeddingModel {
 #[cfg(feature = "neural")]
 pub fn hardware_acceleration_info() -> &'static str {
     if cfg!(feature = "accelerate") {
-        "AllMiniLML6V2 via Candle (Accelerate)"
+        "AllMiniLML6V2 via Candle CPU (Accelerate)"
     } else {
-        "AllMiniLML6V2 via Candle"
+        "AllMiniLML6V2 via Candle CPU"
     }
 }
 
