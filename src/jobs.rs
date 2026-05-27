@@ -71,6 +71,10 @@ impl JobLedger {
         self.jobs.iter().find(|job| job.kind == kind)
     }
 
+    pub(crate) fn contains(&self, kind: JobKind) -> bool {
+        self.get(kind).is_some()
+    }
+
     fn upsert(&mut self, record: JobRecord) {
         if let Some(existing) = self.jobs.iter_mut().find(|job| job.kind == record.kind) {
             *existing = record;
@@ -224,6 +228,16 @@ pub fn finish_job(
 
 pub fn job_status(workspace: &Workspace, kind: JobKind, ttl_secs: u64) -> JobStatus {
     let ledger = read_job_ledger(workspace);
+    job_status_at(&ledger, kind, ttl_secs, now_unix())
+}
+
+/// Derive status from one caller-owned ledger snapshot and observation time.
+pub(crate) fn job_status_at(
+    ledger: &JobLedger,
+    kind: JobKind,
+    ttl_secs: u64,
+    observed_at_unix: u64,
+) -> JobStatus {
     let Some(record) = ledger.get(kind).cloned() else {
         return JobStatus {
             record: None,
@@ -238,7 +252,7 @@ pub fn job_status(workspace: &Workspace, kind: JobKind, ttl_secs: u64) -> JobSta
         .is_some_and(|pid| process_is_alive(pid, record.pid_start_time.as_deref()));
     let heartbeat_stale = record
         .heartbeat_at_unix
-        .is_some_and(|ts| now_unix().saturating_sub(ts) > ttl_secs);
+        .is_some_and(|ts| observed_at_unix.saturating_sub(ts) > ttl_secs);
     let stalled = record.active && (!process_alive || heartbeat_stale);
 
     JobStatus {
@@ -368,5 +382,23 @@ mod tests {
         let finished = finish_job(&workspace, JobKind::Indexing, "completed", None).unwrap();
         assert!(!finished.active);
         assert_eq!(finished.phase, "completed");
+    }
+
+    #[test]
+    #[serial]
+    fn status_snapshot_is_stable_after_ledger_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+
+        start_job(&workspace, JobKind::Indexing, "scanning", 1).unwrap();
+        let snapshot = read_job_ledger(&workspace);
+        assert!(snapshot.contains(JobKind::Indexing));
+
+        finish_job(&workspace, JobKind::Indexing, "completed", None).unwrap();
+
+        assert!(job_status_at(&snapshot, JobKind::Indexing, 20, now_unix()).active());
+        assert!(!job_status(&workspace, JobKind::Indexing, 20).active());
     }
 }

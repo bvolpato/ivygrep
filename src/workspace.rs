@@ -857,18 +857,25 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
             base_index_dir: None,
         };
 
-        let watcher_status =
-            jobs::job_status(&workspace, JobKind::Watcher, WATCHER_HEARTBEAT_TTL_SECS);
+        let ledger = jobs::read_job_ledger(&workspace);
+        let observed_at_unix = jobs::now_unix();
+        let watcher_status = jobs::job_status_at(
+            &ledger,
+            JobKind::Watcher,
+            WATCHER_HEARTBEAT_TTL_SECS,
+            observed_at_unix,
+        );
         let watcher_alive = if watcher_status.record.is_some() {
             watcher_status.active()
         } else {
             is_active_pid_alive(&index_dir.join(".watcher.pid"))
         };
 
-        let enhancement_status = jobs::job_status(
-            &workspace,
+        let enhancement_status = jobs::job_status_at(
+            &ledger,
             JobKind::Enhancement,
             ENHANCEMENT_HEARTBEAT_TTL_SECS,
+            observed_at_unix,
         );
         let enhancing_in_progress = if enhancement_status.record.is_some() {
             enhancement_status.active()
@@ -876,8 +883,12 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
             is_active_pid_alive(&index_dir.join(".enhancing.pid"))
         };
 
-        let indexing_status =
-            jobs::job_status(&workspace, JobKind::Indexing, INDEXING_HEARTBEAT_TTL_SECS);
+        let indexing_status = jobs::job_status_at(
+            &ledger,
+            JobKind::Indexing,
+            INDEXING_HEARTBEAT_TTL_SECS,
+            observed_at_unix,
+        );
         let indexing_in_progress = if indexing_status.record.is_some() {
             indexing_status.active()
         } else {
@@ -1194,10 +1205,9 @@ fn legacy_pid_status(pid_path: &Path, cleanup_stale: bool) -> LegacyPidStatus {
 impl Workspace {
     pub fn stale_legacy_runtime_findings(&self) -> Vec<String> {
         let mut findings = Vec::new();
+        let ledger = jobs::read_job_ledger(self);
 
-        if jobs::job_status(self, JobKind::Watcher, WATCHER_HEARTBEAT_TTL_SECS)
-            .record
-            .is_none()
+        if !ledger.contains(JobKind::Watcher)
             && matches!(
                 legacy_pid_status(&self.watcher_pid_path(), false),
                 LegacyPidStatus::Stale
@@ -1206,9 +1216,7 @@ impl Workspace {
             findings.push("legacy watcher pid file is stale".to_string());
         }
 
-        if jobs::job_status(self, JobKind::Indexing, INDEXING_HEARTBEAT_TTL_SECS)
-            .record
-            .is_none()
+        if !ledger.contains(JobKind::Indexing)
             && matches!(
                 legacy_pid_status(&self.indexing_pid_path(), false),
                 LegacyPidStatus::Stale
@@ -1217,9 +1225,7 @@ impl Workspace {
             findings.push("legacy indexing pid file is stale".to_string());
         }
 
-        if jobs::job_status(self, JobKind::Enhancement, ENHANCEMENT_HEARTBEAT_TTL_SECS)
-            .record
-            .is_none()
+        if !ledger.contains(JobKind::Enhancement)
             && matches!(
                 legacy_pid_status(&self.enhancing_pid_path(), false),
                 LegacyPidStatus::Stale
@@ -1233,10 +1239,9 @@ impl Workspace {
 
     pub fn cleanup_stale_legacy_runtime_files(&self) -> Vec<String> {
         let mut cleaned = Vec::new();
+        let ledger = jobs::read_job_ledger(self);
 
-        if jobs::job_status(self, JobKind::Watcher, WATCHER_HEARTBEAT_TTL_SECS)
-            .record
-            .is_none()
+        if !ledger.contains(JobKind::Watcher)
             && matches!(
                 legacy_pid_status(&self.watcher_pid_path(), true),
                 LegacyPidStatus::Stale
@@ -1245,9 +1250,7 @@ impl Workspace {
             cleaned.push("removed stale legacy watcher pid file".to_string());
         }
 
-        if jobs::job_status(self, JobKind::Indexing, INDEXING_HEARTBEAT_TTL_SECS)
-            .record
-            .is_none()
+        if !ledger.contains(JobKind::Indexing)
             && matches!(
                 legacy_pid_status(&self.indexing_pid_path(), true),
                 LegacyPidStatus::Stale
@@ -1256,9 +1259,7 @@ impl Workspace {
             cleaned.push("removed stale legacy indexing pid file".to_string());
         }
 
-        if jobs::job_status(self, JobKind::Enhancement, ENHANCEMENT_HEARTBEAT_TTL_SECS)
-            .record
-            .is_none()
+        if !ledger.contains(JobKind::Enhancement)
             && matches!(
                 legacy_pid_status(&self.enhancing_pid_path(), true),
                 LegacyPidStatus::Stale
