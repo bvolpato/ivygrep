@@ -353,6 +353,7 @@ fn index_workspace_inner(
     let overlay_mode = if let Some(ref base_dir) = workspace.base_index_dir {
         let base_sqlite = base_dir.join("metadata.sqlite3");
         let base_merkle = base_dir.join("merkle_snapshot.json");
+        let mut base_refreshed = false;
 
         // Ignored files shared with a worktree belong in the base index. Keep
         // the base as a superset and let query options filter ignored chunks;
@@ -385,6 +386,7 @@ fn index_workspace_inner(
                         let _ = base_ws.write_metadata(&base_meta);
                         return Err(err);
                     }
+                    base_refreshed = true;
                     if workspace.has_overlay() {
                         let _ = fs::remove_file(workspace.overlay_sqlite_path());
                         let _ = fs::remove_dir_all(workspace.overlay_tantivy_dir());
@@ -416,6 +418,7 @@ fn index_workspace_inner(
         {
             eprintln!("  ⚡ base index format outdated — rebuilding base before overlay...");
             let _ = index_workspace(&base_ws, embedding_model)?;
+            base_refreshed = true;
             if workspace.has_overlay() {
                 // Existing overlay references the now-migrated base; rebuild it.
                 let _ = fs::remove_file(workspace.overlay_sqlite_path());
@@ -436,6 +439,7 @@ fn index_workspace_inner(
             // We recursively call index_workspace on the base. It will acquire its
             // own safe lock and index natively.
             let _ = index_workspace(&base_workspace, embedding_model)?;
+            base_refreshed = true;
             eprintln!("  ⚡ base indexing complete, proceeding with overlay...");
         }
 
@@ -449,6 +453,12 @@ fn index_workspace_inner(
                 .main_worktree_root()
                 .context("cannot find main worktree root")?;
             let base_ws = crate::workspace::Workspace::resolve(&main_root)?;
+            // The overlay may inherit base paths only after the base index
+            // reflects its current files. This is incremental and avoids
+            // silently inheriting stale chunks from an unindexed base edit.
+            if !base_refreshed {
+                let _ = index_workspace_for_watcher(&base_ws, embedding_model)?;
+            }
             let base_generation = base_ws
                 .read_metadata()?
                 .map(|m| m.index_generation)
@@ -564,7 +574,17 @@ fn index_workspace_inner(
         if let Some(main_root) = workspace.main_worktree_root() {
             let mut divergent = Vec::with_capacity(d.added_or_modified.len());
             for (rel_path, is_ignored) in d.added_or_modified {
-                let returns_to_base = base_ignored_status(&rel_path) == Some(is_ignored)
+                let base_snapshot_is_current = overlay_base_snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.files.get(rel_path.to_string_lossy().as_ref()))
+                    .is_some_and(|hash| {
+                        MerkleSnapshot::path_matches_metadata_snapshot(
+                            &main_root.join(&rel_path),
+                            hash,
+                        )
+                    });
+                let returns_to_base = base_snapshot_is_current
+                    && base_ignored_status(&rel_path) == Some(is_ignored)
                     && files_have_same_contents(
                         &workspace.root.join(&rel_path),
                         &main_root.join(&rel_path),
