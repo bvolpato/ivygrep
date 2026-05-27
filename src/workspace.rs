@@ -586,18 +586,19 @@ impl Workspace {
 
         let (chunk_count, file_count) = read_sqlite_counts(&self.index_dir);
 
-        if chunk_count > 0 {
-            // Force a rebuild if the index was written in an older on-disk
-            // format. Without this, an upgraded-but-not-rebuilt index keeps
-            // serving queries with an incompatible layout (e.g. vector keys
-            // derived differently), silently degrading results.
+        // Empty standalone indexes carry no queryable data to migrate. Empty
+        // overlays still persist a Merkle snapshot and serve the base index,
+        // so their format must be validated before incremental comparison.
+        if chunk_count > 0 || is_overlay {
             let format_version = self.read_index_format_version();
             if format_version < INDEX_FORMAT_VERSION {
                 issues.push(format!(
                     "index format outdated (v{format_version} < v{INDEX_FORMAT_VERSION}); rebuild required"
                 ));
             }
+        }
 
+        if chunk_count > 0 {
             if !dir_has_entries(&tantivy_p) {
                 issues.push("Tantivy index directory is empty despite indexed chunks".to_string());
             }
