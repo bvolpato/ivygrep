@@ -294,7 +294,7 @@ fn execute_ivygrep_status() -> Result<Value> {
 /// The neural query model for this MCP process, loaded once and reused across
 /// requests.
 ///
-/// `serve_stdio` is a long-lived server, so reconstructing the ONNX/Candle model
+/// `serve_stdio` is a long-lived server, so reconstructing the Candle model
 /// per request reloads the weights every search — hundreds of ms of avoidable
 /// latency and memory churn. Cache it here, mirroring the daemon's
 /// `DaemonState.lazy_model` / `cached_hash_model()`.
@@ -344,7 +344,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
         // Auto-index with the fast HASH model (mirrors the daemon's Index
         // handler). Neural embeddings are built later by a background
         // subprocess, so the first query returns quickly even on very large
-        // repos instead of blocking on inline ONNX inference across the whole
+        // repos instead of blocking on inline neural inference across the whole
         // tree — which on big repos never completes in any usable time and,
         // run by several MCP clients at once, saturates the host. See #56.
         let index_model = create_hash_model();

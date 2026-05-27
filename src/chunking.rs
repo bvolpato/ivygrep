@@ -609,128 +609,9 @@ fn try_tree_sitter_chunk_source(
     lines: &[&str],
 ) -> Option<Vec<Chunk>> {
     use streaming_iterator::StreamingIterator;
-    use tree_sitter::{Parser, Query, QueryCursor};
+    use tree_sitter::QueryCursor;
 
-    let mut parser = Parser::new();
-    let query_str = match language {
-        "rust" => {
-            parser
-                .set_language(&tree_sitter_rust::LANGUAGE.into())
-                .ok()?;
-            "(function_item) @fn (impl_item) @class (trait_item) @class"
-        }
-        "python" => {
-            parser
-                .set_language(&tree_sitter_python::LANGUAGE.into())
-                .ok()?;
-            "(function_definition) @fn (class_definition) @class"
-        }
-        "go" => {
-            parser.set_language(&tree_sitter_go::LANGUAGE.into()).ok()?;
-            "(function_declaration) @fn (method_declaration) @fn (type_declaration) @class"
-        }
-        "javascript" => {
-            parser
-                .set_language(&tree_sitter_javascript::LANGUAGE.into())
-                .ok()?;
-            "(function_declaration) @fn (method_definition) @fn (class_declaration) @class"
-        }
-        "typescript" => {
-            parser
-                .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
-                .ok()?;
-            "(function_declaration) @fn (method_definition) @fn (class_declaration) @class (interface_declaration) @class"
-        }
-        "java" => {
-            parser
-                .set_language(&tree_sitter_java::LANGUAGE.into())
-                .ok()?;
-            "(class_declaration) @class (interface_declaration) @class (enum_declaration) @class (annotation_type_declaration) @class (method_declaration) @fn (constructor_declaration) @fn"
-        }
-        "csharp" => {
-            parser
-                .set_language(&tree_sitter_c_sharp::LANGUAGE.into())
-                .ok()?;
-            "(class_declaration) @class (interface_declaration) @class (struct_declaration) @class (record_declaration) @class (enum_declaration) @class (method_declaration) @fn (constructor_declaration) @fn"
-        }
-        "php" => {
-            parser
-                .set_language(&tree_sitter_php::LANGUAGE_PHP.into())
-                .ok()?;
-            "(class_declaration) @class (interface_declaration) @class (trait_declaration) @class (enum_declaration) @class (function_definition) @fn (method_declaration) @fn"
-        }
-        "ruby" => {
-            parser
-                .set_language(&tree_sitter_ruby::LANGUAGE.into())
-                .ok()?;
-            "(class) @class (module) @class (method) @fn (singleton_method) @fn"
-        }
-        "swift" => {
-            parser
-                .set_language(&tree_sitter_swift::LANGUAGE.into())
-                .ok()?;
-            "(class_declaration) @class (struct_declaration) @class (protocol_declaration) @class (extension_declaration) @class (function_declaration) @fn (initializer_declaration) @fn"
-        }
-        "c" => {
-            parser.set_language(&tree_sitter_c::LANGUAGE.into()).ok()?;
-            "(function_definition) @fn (struct_specifier) @class (enum_specifier) @class (union_specifier) @class"
-        }
-        "cpp" => {
-            parser
-                .set_language(&tree_sitter_cpp::LANGUAGE.into())
-                .ok()?;
-            "(function_definition) @fn (class_specifier) @class (struct_specifier) @class (enum_specifier) @class (namespace_definition) @class"
-        }
-        "scala" => {
-            parser
-                .set_language(&tree_sitter_scala::LANGUAGE.into())
-                .ok()?;
-            "(class_definition) @class (trait_definition) @class (object_definition) @class (function_definition) @fn (val_definition) @fn"
-        }
-        "bash" | "shell" => {
-            parser
-                .set_language(&tree_sitter_bash::LANGUAGE.into())
-                .ok()?;
-            "(function_definition) @fn"
-        }
-        "haskell" => {
-            parser
-                .set_language(&tree_sitter_haskell::LANGUAGE.into())
-                .ok()?;
-            "(function) @fn (signature) @fn (data_type) @class (class) @class (instance) @class"
-        }
-        "ocaml" => {
-            parser
-                .set_language(&tree_sitter_ocaml::LANGUAGE_OCAML.into())
-                .ok()?;
-            "(value_definition) @fn (type_definition) @class (module_definition) @class"
-        }
-        "lua" => {
-            parser
-                .set_language(&tree_sitter_lua::LANGUAGE.into())
-                .ok()?;
-            "(function_declaration) @fn (function_definition) @fn"
-        }
-        "dart" => {
-            parser
-                .set_language(&tree_sitter_dart::LANGUAGE.into())
-                .ok()?;
-            "(class_declaration) @class (function_signature) @fn (method_signature) @fn"
-        }
-        "objc" => {
-            parser
-                .set_language(&tree_sitter_objc::LANGUAGE.into())
-                .ok()?;
-            "(class_interface) @class (class_implementation) @class (protocol_declaration) @class (category_interface) @class (category_implementation) @class"
-        }
-        "perl" => {
-            parser
-                .set_language(&tree_sitter_perl::LANGUAGE.into())
-                .ok()?;
-            "(function_definition) @fn (package_statement) @class"
-        }
-        _ => return None,
-    };
+    let (grammar, query) = tree_sitter_query(language)?;
 
     // 100ms timeout to prevent infinite loops/hangs on massive minified JS files.
     // We use ParseOptions to cancel long-running parses since timeout_micros was removed in 0.26
@@ -746,22 +627,25 @@ fn try_tree_sitter_chunk_source(
 
     let bytes = text.as_bytes();
     let len = bytes.len();
-    let tree = parser.parse_with_options(
-        &mut |i, _| {
-            if i < len {
-                &bytes[i..]
-            } else {
-                Default::default()
-            }
-        },
-        None,
-        Some(options),
-    )?;
-    let query = Query::new(&parser.language().unwrap(), query_str).ok()?;
+    let tree = TREE_SITTER_PARSER.with(|slot| {
+        let mut parser = slot.borrow_mut();
+        parser.set_language(&grammar).ok()?;
+        parser.parse_with_options(
+            &mut |i, _| {
+                if i < len {
+                    &bytes[i..]
+                } else {
+                    Default::default()
+                }
+            },
+            None,
+            Some(options),
+        )
+    })?;
     let mut cursor = QueryCursor::new();
 
     let mut ranges = Vec::new();
-    let mut matches = cursor.matches(&query, tree.root_node(), text.as_bytes());
+    let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
 
     while let Some(m) = matches.next() {
         for capture in m.captures {
@@ -928,6 +812,136 @@ fn try_tree_sitter_chunk_source(
     chunks.sort_by_key(|c| c.start_line);
 
     Some(chunks)
+}
+
+thread_local! {
+    /// Indexing already distributes files over worker threads. Reusing one
+    /// parser on each worker avoids constructing a parser for every file.
+    static TREE_SITTER_PARSER: std::cell::RefCell<tree_sitter::Parser> =
+        std::cell::RefCell::new(tree_sitter::Parser::new());
+}
+
+/// Compiled queries are immutable and grammar-specific, so compile each one
+/// once rather than once per file on large initial indexes.
+fn tree_sitter_query(
+    language: &str,
+) -> Option<(tree_sitter::Language, &'static tree_sitter::Query)> {
+    use std::sync::OnceLock;
+
+    macro_rules! cached_query {
+        ($cell:ident, $grammar:expr, $query:expr) => {{
+            static $cell: OnceLock<Option<tree_sitter::Query>> = OnceLock::new();
+            let grammar: tree_sitter::Language = $grammar.into();
+            let query = $cell
+                .get_or_init(|| tree_sitter::Query::new(&grammar, $query).ok())
+                .as_ref()?;
+            Some((grammar, query))
+        }};
+    }
+
+    match language {
+        "rust" => cached_query!(
+            RUST_QUERY,
+            tree_sitter_rust::LANGUAGE,
+            "(function_item) @fn (impl_item) @class (trait_item) @class"
+        ),
+        "python" => cached_query!(
+            PYTHON_QUERY,
+            tree_sitter_python::LANGUAGE,
+            "(function_definition) @fn (class_definition) @class"
+        ),
+        "go" => cached_query!(
+            GO_QUERY,
+            tree_sitter_go::LANGUAGE,
+            "(function_declaration) @fn (method_declaration) @fn (type_declaration) @class"
+        ),
+        "javascript" => cached_query!(
+            JAVASCRIPT_QUERY,
+            tree_sitter_javascript::LANGUAGE,
+            "(function_declaration) @fn (method_definition) @fn (class_declaration) @class"
+        ),
+        "typescript" => cached_query!(
+            TYPESCRIPT_QUERY,
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
+            "(function_declaration) @fn (method_definition) @fn (class_declaration) @class (interface_declaration) @class"
+        ),
+        "java" => cached_query!(
+            JAVA_QUERY,
+            tree_sitter_java::LANGUAGE,
+            "(class_declaration) @class (interface_declaration) @class (enum_declaration) @class (annotation_type_declaration) @class (method_declaration) @fn (constructor_declaration) @fn"
+        ),
+        "csharp" => cached_query!(
+            CSHARP_QUERY,
+            tree_sitter_c_sharp::LANGUAGE,
+            "(class_declaration) @class (interface_declaration) @class (struct_declaration) @class (record_declaration) @class (enum_declaration) @class (method_declaration) @fn (constructor_declaration) @fn"
+        ),
+        "php" => cached_query!(
+            PHP_QUERY,
+            tree_sitter_php::LANGUAGE_PHP,
+            "(class_declaration) @class (interface_declaration) @class (trait_declaration) @class (enum_declaration) @class (function_definition) @fn (method_declaration) @fn"
+        ),
+        "ruby" => cached_query!(
+            RUBY_QUERY,
+            tree_sitter_ruby::LANGUAGE,
+            "(class) @class (module) @class (method) @fn (singleton_method) @fn"
+        ),
+        "swift" => cached_query!(
+            SWIFT_QUERY,
+            tree_sitter_swift::LANGUAGE,
+            "(class_declaration) @class (struct_declaration) @class (protocol_declaration) @class (extension_declaration) @class (function_declaration) @fn (initializer_declaration) @fn"
+        ),
+        "c" => cached_query!(
+            C_QUERY,
+            tree_sitter_c::LANGUAGE,
+            "(function_definition) @fn (struct_specifier) @class (enum_specifier) @class (union_specifier) @class"
+        ),
+        "cpp" => cached_query!(
+            CPP_QUERY,
+            tree_sitter_cpp::LANGUAGE,
+            "(function_definition) @fn (class_specifier) @class (struct_specifier) @class (enum_specifier) @class (namespace_definition) @class"
+        ),
+        "scala" => cached_query!(
+            SCALA_QUERY,
+            tree_sitter_scala::LANGUAGE,
+            "(class_definition) @class (trait_definition) @class (object_definition) @class (function_definition) @fn (val_definition) @fn"
+        ),
+        "bash" | "shell" => cached_query!(
+            BASH_QUERY,
+            tree_sitter_bash::LANGUAGE,
+            "(function_definition) @fn"
+        ),
+        "haskell" => cached_query!(
+            HASKELL_QUERY,
+            tree_sitter_haskell::LANGUAGE,
+            "(function) @fn (signature) @fn (data_type) @class (class) @class (instance) @class"
+        ),
+        "ocaml" => cached_query!(
+            OCAML_QUERY,
+            tree_sitter_ocaml::LANGUAGE_OCAML,
+            "(value_definition) @fn (type_definition) @class (module_definition) @class"
+        ),
+        "lua" => cached_query!(
+            LUA_QUERY,
+            tree_sitter_lua::LANGUAGE,
+            "(function_declaration) @fn (function_definition) @fn"
+        ),
+        "dart" => cached_query!(
+            DART_QUERY,
+            tree_sitter_dart::LANGUAGE,
+            "(class_declaration) @class (function_signature) @fn (method_signature) @fn"
+        ),
+        "objc" => cached_query!(
+            OBJC_QUERY,
+            tree_sitter_objc::LANGUAGE,
+            "(class_interface) @class (class_implementation) @class (protocol_declaration) @class (category_interface) @class (category_implementation) @class"
+        ),
+        "perl" => cached_query!(
+            PERL_QUERY,
+            tree_sitter_perl::LANGUAGE,
+            "(function_definition) @fn (package_statement) @class"
+        ),
+        _ => None,
+    }
 }
 
 // ── Signature Detection ────────────────────────────────────────────────────
@@ -1916,6 +1930,26 @@ pub fn calculate_total(amount: f64) -> f64 {
             chunks.iter().any(|c| c.text.contains("greet")),
             "TS chunker should detect greet function"
         );
+    }
+
+    #[test]
+    fn tree_sitter_parser_reuse_switches_grammars() {
+        let go = chunk_source(
+            Path::new("main.go"),
+            "package main\n\nfunc LoadConfig() string { return \"go\" }\n",
+        );
+        let typescript = chunk_source(
+            Path::new("service.ts"),
+            "export function loadConfig(): string { return \"ts\"; }\n",
+        );
+        let rust = chunk_source(
+            Path::new("lib.rs"),
+            "pub fn load_config() -> &'static str { \"rust\" }\n",
+        );
+
+        assert!(go.iter().any(|c| c.text.contains("LoadConfig")));
+        assert!(typescript.iter().any(|c| c.text.contains("loadConfig")));
+        assert!(rust.iter().any(|c| c.text.contains("load_config")));
     }
 
     #[test]

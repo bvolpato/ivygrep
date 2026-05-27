@@ -3,21 +3,21 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ivygrep — Semantic code search that never phones home</title>
+    <title>ivygrep - Semantic code search that never uploads your code</title>
     <meta name="description" content="Local-first semantic code search combining BM25 lexical search with neural vector embeddings. Single-digit-ms warm daemon queries, zero telemetry, 44 language/file types, built-in MCP server for AI agents.">
     <meta name="theme-color" content="#06070a">
 
     <!-- Open Graph -->
-    <meta property="og:title" content="ivygrep — Semantic code search that never phones home">
-    <meta property="og:description" content="Ask questions in English, get answers in code. 100% local, single-digit-ms warm daemon queries, zero telemetry.">
+    <meta property="og:title" content="ivygrep - Semantic code search that never uploads your code">
+    <meta property="og:description" content="Ask questions in English, get answers in code. Local inference, single-digit-ms warm daemon queries, zero telemetry.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://bvolpato.github.io/ivygrep">
     <meta property="og:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner.png">
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="ivygrep — Semantic code search that never phones home">
-    <meta name="twitter:description" content="Ask questions in English, get answers in code. 100% local, single-digit-ms warm daemon queries, zero telemetry.">
+    <meta name="twitter:title" content="ivygrep - Semantic code search that never uploads your code">
+    <meta name="twitter:description" content="Ask questions in English, get answers in code. Local inference, single-digit-ms warm daemon queries, zero telemetry.">
     <meta name="twitter:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner.png">
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -74,8 +74,8 @@
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" onerror="this.src='assets/logo.png'"/>
             </div>
-            <h1 class="slide-up delay-1">Semantic code search that <br/><span class="highlight-gradient">never phones home.</span></h1>
-            <p class="subtitle slide-up delay-2">Ask questions in English. Get answers in code.<br>100% local, lightning fast, zero telemetry.</p>
+            <h1 class="slide-up delay-1">Semantic code search that <br/><span class="highlight-gradient">never uploads your code.</span></h1>
+            <p class="subtitle slide-up delay-2">Ask questions in English. Get answers in code.<br>Local inference, lightning fast, zero telemetry.</p>
 
             <div class="cta-row slide-up delay-3">
                 <a href="#install" class="btn btn-primary">
@@ -162,13 +162,13 @@
             </div>
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">🔒</span></div>
-                <h3>100% Local Privacy</h3>
-                <p>No API keys. No cloud backend. No telemetry. Your proprietary codebase never leaves your machine — ever.</p>
+                <h3>Local Privacy</h3>
+                <p>No hosted inference. No telemetry. Your source code, queries, and index data never leave your machine. Neural mode downloads model assets once on first use.</p>
             </div>
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">🧠</span></div>
                 <h3>Natural Language</h3>
-                <p>Combines classic BM25 text matching with 384-dimensional quantized ONNX neural embeddings. Ask "where is the tax calculated?" and get the right function.</p>
+                <p>Combines classic BM25 text matching with 384-dimensional local Candle neural embeddings. Ask "where is the tax calculated?" and get the right function.</p>
             </div>
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">🌿</span></div>
@@ -299,7 +299,7 @@
             <div class="flow-step">
                 <div class="flow-icon pulse-glow">3</div>
                 <h4>Neural Enhancement</h4>
-                <p>Background daemon silently upgrades to quantized ONNX (AllMiniLML6V2Q) with Apple CoreML / CUDA acceleration.</p>
+                <p>Background daemon upgrades to a locally cached Candle model (AllMiniLML6V2). macOS releases use Accelerate-backed CPU math.</p>
             </div>
         </div>
 
@@ -639,7 +639,7 @@ esac
             <div class="footer-content">
                 <div class="footer-brand">
                     <img src="assets/icon.svg" alt="ivygrep" height="28" onerror="this.style.display='none'"/>
-                    <span class="footer-tagline">Semantic code search that never phones home.</span>
+                    <span class="footer-tagline">Semantic code search that never uploads your code.</span>
                 </div>
                 <div class="footer-links">
                     <a href="https://github.com/bvolpato/ivygrep" class="footer-link">GitHub</a>

@@ -120,8 +120,8 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub skip_gitignore: bool,
 
-    /// Use lightweight hash-based embeddings instead of the default ONNX
-    /// neural model. Faster startup, no model download, lower quality.
+    /// Use lightweight hash-based embeddings instead of the default neural
+    /// model. Faster startup, no model download, lower quality.
     #[arg(long, global = true)]
     pub hash: bool,
 
@@ -270,7 +270,7 @@ pub async fn run() -> Result<()> {
             }
         };
 
-        // ONNX clean teardown can sometimes segfault in multithreaded handlers.
+        // Neural model teardown can fail in multithreaded enhancement handlers.
         // We'll intentionally skip proper Rust panic runtime teardown and forcefully exit.
         if let Err(e) = result {
             stop_heartbeat.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -465,7 +465,7 @@ async fn run_status(json: bool) -> Result<()> {
                             "{prefix}  Search: \x1b[33m◆ hash\x1b[0m (neural not available in this build)"
                         );
                     } else {
-                        // Real ONNX failure
+                        // Real neural-model failure
                         println!(
                             "{prefix}  Search: \x1b[1;31m⚠️ neural upgrade failed\x1b[0m (run `ig query` to retry, or check .enhancing.error)"
                         );
@@ -875,7 +875,7 @@ async fn run_query(cli: Cli) -> Result<()> {
     }
 
     // Indexing always uses hash embeddings (instant, ~0.1s).
-    // Search uses ONNX model for query embedding (single text, still fast).
+    // Search uses the neural model for query embedding (single text, still fast).
     // Background thread enhances the vector store with neural embeddings
     // after results are returned, silently upgrading quality.
 
@@ -1236,7 +1236,7 @@ async fn run_query(cli: Cli) -> Result<()> {
     // Kick off background neural enhancement if not already done.
     // This runs after results are returned so the user is never blocked.
     // We launch it as a separate hidden CLI process to prevent segmentation faults
-    // that occur perfectly cleanly tearing down `onnxruntime` when the main process exits.
+    // observed while tearing down neural-model state when the main process exits.
     // Skipped in CI/test environments (IVYGREP_NO_AUTOSPAWN=1).
     let no_autospawn = env::var("IVYGREP_NO_AUTOSPAWN").is_ok();
     if !cli.all_indices

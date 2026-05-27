@@ -1213,6 +1213,94 @@ fn worktree_rebuilds_outdated_base_index_format() {
 }
 
 // ===========================================================================
+// WORKTREE OVERLAY: an outdated empty overlay format forces a thin rebuild
+// ===========================================================================
+
+#[test]
+#[serial]
+fn worktree_rebuilds_outdated_zero_delta_overlay_format() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    git(root.path(), &["init", "-b", "main"]);
+    fs::write(root.path().join(".gitignore"), ".git\n").unwrap();
+    fs::write(root.path().join("base.rs"), "pub fn base_marker() {}\n").unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base"]);
+
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_empty");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "wt-empty",
+            wt_path.to_str().unwrap(),
+            "main",
+        ],
+    );
+
+    setup_and_index(root.path(), home.path());
+    setup_and_index(&wt_path, home.path());
+
+    let wt_ws = workspace_for(&wt_path);
+    let overlay_chunk_count = {
+        let conn = open_sqlite(&wt_ws.overlay_sqlite_path()).unwrap();
+        conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap()
+    };
+    assert_eq!(overlay_chunk_count, 0, "test requires a zero-delta overlay");
+
+    fs::write(
+        wt_ws.index_format_version_path(),
+        (ivygrep::workspace::INDEX_FORMAT_VERSION - 1).to_string(),
+    )
+    .unwrap();
+    assert!(
+        wt_ws.quick_index_health().needs_rebuild(),
+        "old-format zero-delta overlay must be rebuilt, issues={:?}",
+        wt_ws.quick_index_health().issues
+    );
+
+    let summary = setup_and_index(&wt_path, home.path());
+    assert_eq!(
+        summary.indexed_files, 0,
+        "rebuilding an unchanged overlay must not materialize base files"
+    );
+    let rebuilt_chunk_count = {
+        let conn = open_sqlite(&wt_ws.overlay_sqlite_path()).unwrap();
+        conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap()
+    };
+    assert_eq!(
+        rebuilt_chunk_count, 0,
+        "upgraded zero-delta overlay must remain thin"
+    );
+    assert_eq!(
+        wt_ws.read_index_format_version(),
+        ivygrep::workspace::INDEX_FORMAT_VERSION,
+        "rebuilt overlay must carry current format"
+    );
+    assert!(
+        search_file_paths(&wt_ws, "base_marker")
+            .iter()
+            .any(|path| path.contains("base.rs")),
+        "rebuilt overlay must still query inherited base content"
+    );
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+// ===========================================================================
 // WORKTREE OVERLAY: healthy after indexing; no-change reindex is a true no-op
 // ===========================================================================
 

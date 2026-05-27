@@ -184,15 +184,30 @@ impl MerkleSnapshot {
                     data.extend_from_slice(&content);
                     hex::encode(xxhash_rust::xxh3::xxh3_128(&data).to_le_bytes())
                 } else {
-                    let mut data = Vec::with_capacity(128);
-                    data.extend_from_slice(rel.to_string_lossy().as_bytes());
-                    data.extend_from_slice(&metadata.len().to_le_bytes());
+                    // The relative path is already the map key and participates
+                    // in root_hash(), so the per-file value only needs metadata.
+                    let mut data = [0_u8; 40];
+                    let mut len = 0;
+                    data[len..len + 8].copy_from_slice(&metadata.len().to_le_bytes());
+                    len += 8;
                     if let Ok(mtime) = metadata.modified()
                         && let Ok(duration) = mtime.duration_since(std::time::UNIX_EPOCH)
                     {
-                        data.extend_from_slice(&duration.as_nanos().to_le_bytes());
+                        data[len..len + 16].copy_from_slice(&duration.as_nanos().to_le_bytes());
+                        len += 16;
                     }
-                    hex::encode(xxhash_rust::xxh3::xxh3_128(&data).to_le_bytes())
+                    // On macOS and Linux, ctime changes when contents or inode
+                    // metadata change even when a caller restores mtime. This
+                    // closes stale-index gaps without reading file contents.
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::MetadataExt;
+                        data[len..len + 8].copy_from_slice(&metadata.ctime().to_le_bytes());
+                        data[len + 8..len + 16]
+                            .copy_from_slice(&metadata.ctime_nsec().to_le_bytes());
+                        len += 16;
+                    }
+                    hex::encode(xxhash_rust::xxh3::xxh3_128(&data[..len]).to_le_bytes())
                 };
 
                 let rel_str = rel.to_string_lossy().to_string();

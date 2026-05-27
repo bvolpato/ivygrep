@@ -1,7 +1,7 @@
 # Architecture
 
 > How ivygrep turns natural-language queries into instant, relevant code
-> results — entirely offline, entirely local.
+> results -- with local inference and no source-code upload.
 
 ---
 
@@ -9,8 +9,9 @@
 
 ivygrep is a **local-first semantic code search engine** built in Rust. You ask
 a question in plain English — *"where is tax calculated"* — and it returns the
-exact lines of code across your entire codebase. No cloud, no API keys, no
-telemetry.
+exact lines of code across your entire codebase. No hosted inference, no API
+keys, no telemetry. Neural mode downloads model assets once through `hf-hub`;
+source text and queries are never sent to that service.
 
 Under the hood it fuses two fundamentally different search strategies into a
 single ranked result set:
@@ -71,7 +72,7 @@ approximate nearest-neighbor (ANN) search library. It implements HNSW
 - **Two-tier vector stores:**
   - `vectors.usearch` — 256-dimensional hash embeddings, built instantly during
     indexing. Always present.
-  - `vectors_neural.usearch` — 384-dimensional ONNX neural embeddings
+  - `vectors_neural.usearch` — 384-dimensional Candle neural embeddings
     (AllMiniLM-L6-v2), built asynchronously by a background subprocess. Higher
     quality, used when available.
 - **Memory-mapped reads** — search opens the vector index with `view()` (mmap)
@@ -112,33 +113,32 @@ The entire index is a single file.
 **Why SQLite and not Postgres/RocksDB:** single-file, zero-config, bundled in
 the binary. A code search tool should not require a database server.
 
-### fastembed + ort — Neural Embedding Model
+### candle_embed + Candle -- Neural Embedding Model
 
-[fastembed](https://github.com/Anush008/fastembed-rs) provides high-level model
-loading. [ort](https://github.com/pykeio/ort) is the Rust binding for ONNX
-Runtime.
+[`candle_embed`](https://crates.io/crates/candle_embed) provides model loading
+and embedding over [`candle-core`](https://github.com/huggingface/candle).
 
 **What we use them for:**
 
-- **AllMiniLM-L6-v2 (quantized INT8)** — the neural embedding model. Converts
+- **AllMiniLM-L6-v2** -- the neural embedding model. Converts
   code chunks and search queries into 384-dimensional dense vectors that capture
-  semantic meaning. Downloaded once (~23 MB) on first use, cached in
-  `~/.local/share/ivygrep/models/`.
-- **Batch embedding** — `embed_batch()` sends multiple chunks through the model
-  in a single ONNX inference call, dramatically faster than one-at-a-time during
-  the background enhancement pass.
-- **CoreML acceleration** — on macOS, `ort` is compiled with the CoreML
-  execution provider, offloading inference to Apple's Neural Engine / GPU.
-  Registered automatically at startup via `ort::init().with_execution_providers()`.
-- **Background thread budget** — when running as a background enhancement
-  subprocess, `ORT_NUM_THREADS` is set to half the CPU count (min 2) so the
-  system stays responsive.
-- **Graceful fallback** — if the neural model fails to load (missing download,
+  semantic meaning. Downloaded on first neural use through `hf-hub`, cached in
+  `$HF_HOME` or `~/.cache/huggingface`.
+- **Parallel background embedding** -- `embed_batch()` distributes slices over
+  a bounded pool of Candle embedders in OS threads. The query path keeps one
+  model instance.
+- **Current acceleration** -- macOS release builds enable Candle's
+  `accelerate` feature for Accelerate-backed CPU math. Current portable Linux
+  builds use Candle CPU execution. Metal and CUDA execution are tracked
+  separately and are not claimed by current releases.
+- **Background thread budget** -- neural enhancement uses at most 25% of CPU
+  cores, capped at eight worker/model instances, so the system stays responsive.
+- **Graceful fallback** -- if the neural model fails to load (missing download,
   corrupt cache, unsupported platform), the system silently falls back to hash
   embeddings. No search ever fails because of a model problem.
 
-**Why fastembed and not sentence-transformers:** fastembed is pure Rust/ONNX with
-no Python dependency. The model runs in the same process as the search engine.
+**Why Candle and not a hosted embedding API:** model inference runs in-process
+with no Python service and no source-code upload.
 
 ### Tree-sitter — AST-Aware Chunking For 10 Core Languages
 
@@ -250,7 +250,7 @@ plus a single root hash derived from all of them:
 MerkleSnapshot {
     root_hash: "a8b3...",         // xxh3_128 over all (path, hash) pairs
     files: {
-        "src/main.rs":   "f1c2...",   // xxh3_128(path + file_size + mtime)
+        "src/main.rs":   "f1c2...",   // xxh3_128(size + mtime + ctime)
         "src/lib.rs":    "d4e5...",
         "Cargo.toml":    "7a8b...",
         ...
@@ -261,11 +261,16 @@ MerkleSnapshot {
 Each file fingerprint is computed from metadata only — **no file contents are
 read**. The inputs are:
 
-1. **Relative path** (byte representation)
-2. **File size** (8 bytes, little-endian)
-3. **Modification time** (16 bytes, nanoseconds since epoch)
+1. **File size** (8 bytes, little-endian)
+2. **Modification time** (16 bytes, nanoseconds since epoch)
+3. **Change time on macOS/Linux** (`ctime`, seconds and nanoseconds)
 
-These three values are concatenated and hashed with `xxh3_128`. This means
+These values are packed into a fixed-size stack buffer and hashed with
+`xxh3_128`. The relative path is already the snapshot map key and is included
+in the root hash, so hashing it again per file would be redundant work. `ctime` advances
+when contents or inode metadata change, including writes followed by mtime
+restoration (`touch -r` or `cp -p`). This closes stale-index misses without
+reading repository content during verification. This means
 detecting whether 93K files have changed requires only 93K `stat()` calls and
 93K hashes — no disk reads. On a modern SSD, this is parallelized via rayon.
 
@@ -309,7 +314,7 @@ starts (first search after a reboot, or when the daemon was killed).
 
 **Why "Merkle" and not just timestamps:**
 
-Comparing file paths + sizes + mtimes via hash rather than storing raw triples
+Comparing file paths + sizes + timestamps via hash rather than storing raw values
 has two advantages:
 
 1. **O(1) workspace-level check** — a single root hash comparison short-circuits
@@ -318,7 +323,7 @@ has two advantages:
    (`merkle_snapshot.json`) with sorted keys. It can be compared, diffed, and
    debugged with standard tools.
 
-The tradeoff is that mtime-based fingerprinting can produce false positives
+The tradeoff is that metadata-based fingerprinting can produce false positives
 (e.g., `touch` changes mtime without changing content). A false positive triggers
 an unnecessary re-chunk and re-embed for that file, but the chunk's
 `content_hash` is based on actual content, so the storage layer handles
@@ -379,7 +384,7 @@ forbidden low-authority leakage, and unrelated-query suppression.
 The daemon (`ig --daemon`) is a Tokio-based async server on a Unix domain
 socket. It provides:
 
-- **Shared model loading** — the ONNX model loads once in a background thread
+- **Shared model loading** — the Candle model loads once in a background thread
   (`OnceLock`). All CLI invocations share it.
 - **File watching** — `notify` watchers per workspace, triggering incremental
   re-index on file changes.
@@ -396,8 +401,6 @@ socket. It provides:
 ~/.local/share/ivygrep/
 ├── daemon.log                          # Daemon stderr output
 ├── daemon.sock                         # Unix domain socket (IPC)
-├── models/                             # ONNX model cache (~23 MB)
-│   └── AllMiniLML6V2Q/
 └── indexes/
     └── <workspace-id>/                 # hex(xxh3(canonical_path))
         ├── workspace.json              # Workspace metadata
@@ -405,10 +408,13 @@ socket. It provides:
         ├── metadata.sqlite3            # SQLite — chunk text + metadata
         ├── tantivy/                    # Tantivy BM25 index segments
         ├── vectors.usearch             # Hash embeddings (256-dim)
-        ├── vectors_neural.usearch      # Neural ONNX embeddings (384-dim)
+        ├── vectors_neural.usearch      # Neural Candle embeddings (384-dim)
         ├── .enhancing.pid              # PID of neural enhancement subprocess
         └── .watcher.pid                # PID of daemon watcher
 ```
+
+Neural model assets are cached outside this tree by `hf-hub`, under `$HF_HOME`
+or `~/.cache/huggingface`.
 
 ---
 
@@ -416,16 +422,17 @@ socket. It provides:
 
 | Feature | Default | Effect |
 |---------|---------|--------|
-| `neural` | ✅ | Enables ONNX neural embeddings (fastembed + ort). Adds ~23MB model download. |
-| *(none)* | — | Hash-only mode. Smaller binary, no ONNX, lower search quality. |
+| `neural` | default | Enables Candle neural embeddings. Downloads model assets on first neural use. |
+| `accelerate` | opt-in | Uses Apple's Accelerate framework for Candle CPU math on macOS. |
+| *(none)* | - | Hash-only mode. Smaller binary, no model download, lower search quality. |
 
 ```bash
-# Full build (default — includes ONNX neural embeddings)
+# Full build (default -- includes Candle neural embeddings)
 cargo build --release
 
 # Minimal build (hash embeddings only, no model download)
 cargo build --release --no-default-features
 ```
 
-On macOS, the `neural` feature automatically links CoreML for GPU/ANE
-acceleration. On Linux, ONNX runs on CPU.
+Release binaries for macOS are built with `accelerate`; portable Linux release
+binaries currently use Candle CPU execution.
