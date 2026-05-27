@@ -5,7 +5,7 @@ use ignore::WalkBuilder;
 /// Builds a standard file walker for the given root directory.
 ///
 /// Configuration:
-/// - Shows hidden files (but skips `.git/`)
+/// - Shows hidden files (but skips `.git` repository/worktree metadata)
 /// - Respects `.gitignore`, `.git/info/exclude`, global gitignore, and `.ignore` (unless skip_gitignore is true)
 /// - Does not require a git repository
 /// - Does not follow symlinks
@@ -18,9 +18,7 @@ pub fn source_walker(root: &Path, skip_gitignore: bool) -> WalkBuilder {
     walker.ignore(!skip_gitignore);
     walker.require_git(false);
     walker.follow_links(false);
-    walker.filter_entry(|entry| {
-        !(entry.file_type().is_some_and(|ft| ft.is_dir()) && entry.file_name() == ".git")
-    });
+    walker.filter_entry(|entry| entry.file_name() != ".git");
     walker
 }
 
@@ -54,6 +52,21 @@ mod tests {
         let files = collect_files(tmp.path(), false);
         assert!(files.contains("main.rs"));
         assert!(!files.iter().any(|f| f.starts_with(".git/")));
+    }
+
+    #[test]
+    fn excludes_dot_git_worktree_file_when_skipping_gitignore() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(".git"),
+            "gitdir: /tmp/repo/.git/worktrees/example\n",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("main.rs"), "fn main() {}\n").unwrap();
+
+        let files = collect_files(tmp.path(), true);
+        assert!(files.contains("main.rs"));
+        assert!(!files.contains(".git"));
     }
 
     #[test]
