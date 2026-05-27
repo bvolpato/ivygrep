@@ -344,6 +344,8 @@ fn index_workspace_inner(
         });
     }
 
+    let skip_gitignore = workspace.read_metadata()?.is_some_and(|m| m.skip_gitignore);
+
     // ── Worktree overlay ─────────────────────────────────────────────────
     // If this is a git worktree and the base has a fresh index, create a
     // thin overlay containing only divergent files instead of copying the
@@ -351,6 +353,53 @@ fn index_workspace_inner(
     let overlay_mode = if let Some(ref base_dir) = workspace.base_index_dir {
         let base_sqlite = base_dir.join("metadata.sqlite3");
         let base_merkle = base_dir.join("merkle_snapshot.json");
+
+        // Ignored files shared with a worktree belong in the base index. Keep
+        // the base as a superset and let query options filter ignored chunks;
+        // otherwise an unchanged ignored file cannot be inherited by a
+        // worktree indexed with --skip-gitignore.
+        if skip_gitignore && let Some(main_root) = workspace.main_worktree_root() {
+            let base_ws = crate::workspace::Workspace::resolve(&main_root)?;
+            let mut base_meta = base_ws
+                .read_metadata()?
+                .unwrap_or_else(|| WorkspaceMetadata {
+                    id: base_ws.id.clone(),
+                    root: base_ws.root.clone(),
+                    created_at_unix: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs(),
+                    last_indexed_at_unix: None,
+                    watch_enabled: false,
+                    skip_gitignore: false,
+                    index_generation: 0,
+                });
+            if !base_meta.skip_gitignore {
+                base_meta.skip_gitignore = true;
+                base_ws.ensure_dirs()?;
+                base_ws.write_metadata(&base_meta)?;
+                if base_sqlite.exists() {
+                    eprintln!("  ⚡ enabling ignored files in base index before overlay...");
+                    if let Err(err) = index_workspace_for_watcher(&base_ws, embedding_model) {
+                        base_meta.skip_gitignore = false;
+                        let _ = base_ws.write_metadata(&base_meta);
+                        return Err(err);
+                    }
+                    if workspace.has_overlay() {
+                        let _ = fs::remove_file(workspace.overlay_sqlite_path());
+                        let _ = fs::remove_dir_all(workspace.overlay_tantivy_dir());
+                        let _ = fs::remove_file(workspace.overlay_vector_path());
+                        let _ = fs::remove_file(workspace.base_ref_path());
+                        let _ = fs::remove_file(workspace.merkle_snapshot_path());
+                        return index_workspace_inner(
+                            workspace,
+                            embedding_model,
+                            trust_live_watcher,
+                        );
+                    }
+                }
+            }
+        }
 
         // If the base index predates the current on-disk format, migrate it
         // before referencing it: an overlay serves chunks/vectors from the
@@ -418,7 +467,6 @@ fn index_workspace_inner(
                 serde_json::to_vec_pretty(&base_ref)?,
             )?;
 
-            let skip_gitignore = workspace.read_metadata()?.is_some_and(|m| m.skip_gitignore);
             let _ = fs::write(
                 workspace.indexing_progress_path(),
                 "scanning (content-based)",
@@ -477,24 +525,75 @@ fn index_workspace_inner(
         None
     };
 
-    let skip_gitignore = workspace.read_metadata()?.is_some_and(|m| m.skip_gitignore);
+    let overlay_base_snapshot = if (workspace.has_overlay() || workspace.base_ref_path().exists())
+        && let Some(base_dir) = &workspace.base_index_dir
+    {
+        Some(MerkleSnapshot::load(
+            &base_dir.join("merkle_snapshot.json"),
+        )?)
+    } else {
+        None
+    };
+    let base_ignored_status = |rel_path: &Path| {
+        overlay_base_snapshot.as_ref().and_then(|snapshot| {
+            snapshot
+                .files
+                .get(rel_path.to_string_lossy().as_ref())
+                .map(|hash| hash.ends_with("-1"))
+        })
+    };
+    let path_exists_in_base = |rel_path: &Path| base_ignored_status(rel_path).is_some();
     // When not in overlay creation mode, use the standard Merkle diff path.
     // IMPORTANT: The snapshot is NOT saved here — it is deferred to after all
     // store commits complete. Saving it earlier creates a crash window where
     // the snapshot claims files are indexed but the actual stores are empty/partial.
     // See: snapshot must be a high-water mark of persisted state, not of intent.
-    let (diff, pending_snapshot) = if let Some(overlay_diff) = overlay_mode {
-        (overlay_diff, None)
+    let (diff, pending_snapshot, clear_overlay_paths) = if let Some(overlay_diff) = overlay_mode {
+        (overlay_diff, None, Vec::new())
     } else if workspace.has_overlay() {
         // Incremental update to existing overlay
         let old = MerkleSnapshot::load(&workspace.merkle_snapshot_path())?;
         let _ = fs::write(workspace.indexing_progress_path(), "scanning");
         let new = MerkleSnapshot::build(&workspace.root, skip_gitignore)?;
-        let d = old.diff(&new);
+        let mut d = old.diff(&new);
+        let mut clear_overlay_paths = Vec::new();
+
+        // Keep the overlay relative to the base after branch switches or local
+        // restores. Reappearing base-identical paths should delegate to the
+        // base index, while removed overlay-only paths need no tombstone.
+        if let Some(main_root) = workspace.main_worktree_root() {
+            let mut divergent = Vec::with_capacity(d.added_or_modified.len());
+            for (rel_path, is_ignored) in d.added_or_modified {
+                let returns_to_base = base_ignored_status(&rel_path) == Some(is_ignored)
+                    && files_have_same_contents(
+                        &workspace.root.join(&rel_path),
+                        &main_root.join(&rel_path),
+                    );
+                if returns_to_base {
+                    clear_overlay_paths.push(rel_path);
+                } else {
+                    divergent.push((rel_path, is_ignored));
+                }
+            }
+            d.added_or_modified = divergent;
+
+            let mut base_deletions = Vec::with_capacity(d.deleted.len());
+            for rel_path in d.deleted {
+                if path_exists_in_base(&rel_path) {
+                    base_deletions.push(rel_path);
+                } else {
+                    clear_overlay_paths.push(rel_path);
+                }
+            }
+            d.deleted = base_deletions;
+        }
         // True no-op: with no worktree changes, return without rewriting the
         // overlay stores. Rewriting them on every reindex/watcher tick also
         // busts the daemon's SearchContext/query caches via file-stamp changes.
-        if d.added_or_modified.is_empty() && d.deleted.is_empty() && workspace_is_indexed(workspace)
+        if d.added_or_modified.is_empty()
+            && d.deleted.is_empty()
+            && clear_overlay_paths.is_empty()
+            && workspace_is_indexed(workspace)
         {
             return Ok(IndexingSummary {
                 workspace_id: workspace.id.clone(),
@@ -503,7 +602,7 @@ fn index_workspace_inner(
                 total_chunks: count_workspace_chunks(workspace).unwrap_or(0),
             });
         }
-        (d, Some(new))
+        (d, Some(new), clear_overlay_paths)
     } else {
         // Standard full-index path (non-worktree or base not available)
         let old = MerkleSnapshot::load(&workspace.merkle_snapshot_path())?;
@@ -519,7 +618,7 @@ fn index_workspace_inner(
                 total_chunks: count_workspace_chunks(workspace).unwrap_or(0),
             });
         }
-        (d, Some(new))
+        (d, Some(new), Vec::new())
     };
 
     // Determine which stores to write to: overlay or main
@@ -603,16 +702,42 @@ fn index_workspace_inner(
     // Mutable so we can periodically commit and avert massive WAL files.
     let mut tx = sqlite.transaction()?;
 
-    // In overlay mode, tombstone deleted files instead of removing from base
+    // Overlay state shadows only paths backed by the base index. Clear paths
+    // that have returned to base content or were removed after being overlay-only.
     if use_overlay {
+        for rel_path in &clear_overlay_paths {
+            remove_file_chunks(&tx, &mut writer, &fields, &mut vector_index, rel_path)?;
+            tx.execute(
+                "DELETE FROM tombstones WHERE file_path = ?1",
+                params![rel_path.to_string_lossy().to_string()],
+            )?;
+        }
+
         for rel_path in &diff.deleted {
             let rel_str = rel_path.to_string_lossy().to_string();
-            tx.execute(
-                "INSERT OR IGNORE INTO tombstones (file_path) VALUES (?1)",
-                params![rel_str],
-            )?;
-            // Also remove from overlay if it was previously added there
-            tx.execute("DELETE FROM chunks WHERE file_path = ?1", params![rel_str])?;
+            remove_file_chunks(&tx, &mut writer, &fields, &mut vector_index, rel_path)?;
+            if path_exists_in_base(rel_path) {
+                tx.execute(
+                    "INSERT OR IGNORE INTO tombstones (file_path) VALUES (?1)",
+                    params![rel_str],
+                )?;
+            } else {
+                tx.execute(
+                    "DELETE FROM tombstones WHERE file_path = ?1",
+                    params![rel_str],
+                )?;
+            }
+        }
+
+        // Insert before chunking so a base file replaced by empty/binary
+        // content is still hidden even though it produces no overlay chunks.
+        for (rel_path, _) in &diff.added_or_modified {
+            if path_exists_in_base(rel_path) {
+                tx.execute(
+                    "INSERT OR IGNORE INTO tombstones (file_path) VALUES (?1)",
+                    params![rel_path.to_string_lossy().to_string()],
+                )?;
+            }
         }
     } else {
         apply_deletions(&tx, &mut writer, &fields, &mut vector_index, &diff.deleted)?;
@@ -756,16 +881,6 @@ fn index_workspace_inner(
                 ));
             }
 
-            // In overlay mode, tombstone the base version so search suppresses
-            // the stale base chunks for this file path.
-            if use_overlay {
-                let rel_str = rel_path.to_string_lossy().to_string();
-                persist_or_stop!(tx.execute(
-                    "INSERT OR IGNORE INTO tombstones (file_path) VALUES (?1)",
-                    params![rel_str],
-                ));
-            }
-
             // Batch the timestamp syscall per file, not per chunk.
             let now_unix = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -887,6 +1002,13 @@ fn index_workspace_inner(
         deleted_files: diff.deleted.len(),
         total_chunks: count_workspace_chunks(workspace).unwrap_or(0),
     })
+}
+
+fn files_have_same_contents(left: &Path, right: &Path) -> bool {
+    match (fs::read(left), fs::read(right)) {
+        (Ok(left_bytes), Ok(right_bytes)) => left_bytes == right_bytes,
+        _ => false,
+    }
 }
 
 fn rebuild_index_storage(

@@ -111,6 +111,19 @@ fn indexed_files(workspace: &Workspace) -> HashSet<String> {
     files
 }
 
+fn overlay_counts(workspace: &Workspace) -> (i64, i64) {
+    let conn = open_sqlite(&workspace.overlay_sqlite_path()).unwrap();
+    let files = conn
+        .query_row("SELECT COUNT(DISTINCT file_path) FROM chunks", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let tombstones = conn
+        .query_row("SELECT COUNT(*) FROM tombstones", [], |row| row.get(0))
+        .unwrap();
+    (files, tombstones)
+}
+
 /// Helper: search for a query and return file paths in the results.
 fn search_file_paths(workspace: &Workspace, query: &str) -> Vec<String> {
     let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
@@ -1039,6 +1052,294 @@ fn worktree_modified_file_shows_overlay_content_not_base() {
             "base must NOT serve worktree content — got preview: {preview}"
         );
     }
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+// ===========================================================================
+// WORKTREE OVERLAY: Directory move and checkout keep overlay thin
+// ===========================================================================
+
+#[test]
+#[serial]
+fn worktree_moved_directory_checkout_restores_base_without_materializing_it() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    git(root.path(), &["init", "-b", "main"]);
+    fs::write(root.path().join(".gitignore"), ".git\n").unwrap();
+    fs::create_dir_all(root.path().join("src/legacy")).unwrap();
+    fs::create_dir_all(root.path().join("src/stable")).unwrap();
+    fs::write(
+        root.path().join("src/legacy/keep.rs"),
+        "pub fn legacy_keep_marker() -> bool { true }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("src/legacy/edit.rs"),
+        "pub fn legacy_edit_marker() -> bool { true }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("src/legacy/remove.rs"),
+        "pub fn legacy_remove_marker() -> bool { true }\n",
+    )
+    .unwrap();
+    for i in 0..30 {
+        fs::write(
+            root.path().join(format!("src/stable/file_{i}.rs")),
+            format!("pub fn stable_marker_{i}() -> usize {{ {i} }}\n"),
+        )
+        .unwrap();
+    }
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base layout"]);
+    setup_and_index(root.path(), home.path());
+
+    git(root.path(), &["checkout", "-b", "wt-moved-layout"]);
+    git(root.path(), &["mv", "src/legacy", "src/moved"]);
+    fs::write(
+        root.path().join("src/moved/edit.rs"),
+        "pub fn moved_edit_marker() -> bool { true }\n",
+    )
+    .unwrap();
+    fs::remove_file(root.path().join("src/moved/remove.rs")).unwrap();
+    fs::write(
+        root.path().join("src/moved/add.rs"),
+        "pub fn moved_add_marker() -> bool { true }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "-A"]);
+    git(
+        root.path(),
+        &["commit", "-m", "move layout with mixed delta"],
+    );
+    git(root.path(), &["checkout", "main"]);
+    git(root.path(), &["branch", "wt-base-layout", "main"]);
+
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_move");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            wt_path.to_str().unwrap(),
+            "wt-moved-layout",
+        ],
+    );
+
+    let moved = setup_and_index(&wt_path, home.path());
+    let wt_ws = workspace_for(&wt_path);
+    assert_eq!(
+        moved.indexed_files, 3,
+        "only moved/add/edited files indexed"
+    );
+    assert_eq!(moved.deleted_files, 3, "old directory paths tombstoned");
+    assert_eq!(
+        overlay_counts(&wt_ws),
+        (3, 3),
+        "overlay stores only divergence"
+    );
+
+    let files = indexed_files(&wt_ws);
+    assert!(files.contains("src/moved/keep.rs"));
+    assert!(files.contains("src/moved/edit.rs"));
+    assert!(files.contains("src/moved/add.rs"));
+    assert!(!files.contains("src/legacy/keep.rs"));
+    assert!(!files.contains("src/legacy/remove.rs"));
+    assert!(files.contains("src/stable/file_17.rs"));
+    assert!(
+        search_file_paths(&wt_ws, "moved_edit_marker")
+            .iter()
+            .any(|path| path.contains("src/moved/edit.rs"))
+    );
+    assert!(
+        search_file_paths(&wt_ws, "legacy_remove_marker")
+            .iter()
+            .all(|path| !path.contains("src/legacy/remove.rs"))
+    );
+
+    git(&wt_path, &["checkout", "wt-base-layout"]);
+    let restored = setup_and_index(&wt_path, home.path());
+    assert_eq!(
+        restored.indexed_files, 0,
+        "base-equivalent checkout should reuse base instead of reindexing restored files"
+    );
+    assert_eq!(
+        overlay_counts(&wt_ws),
+        (0, 0),
+        "base-equivalent checkout should leave an empty overlay"
+    );
+
+    let restored_files = indexed_files(&wt_ws);
+    assert!(restored_files.contains("src/legacy/keep.rs"));
+    assert!(restored_files.contains("src/legacy/remove.rs"));
+    assert!(!restored_files.contains("src/moved/keep.rs"));
+    assert!(
+        search_file_paths(&wt_ws, "legacy_remove_marker")
+            .iter()
+            .any(|path| path.contains("src/legacy/remove.rs"))
+    );
+    assert!(
+        search_file_paths(&wt_ws, "moved_edit_marker")
+            .iter()
+            .all(|path| !path.contains("src/moved/edit.rs")),
+        "restored checkout must not serve removed overlay documents"
+    );
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+#[test]
+#[serial]
+fn worktree_empty_edit_hides_base_content_on_first_overlay_index() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    git(root.path(), &["init", "-b", "main"]);
+    fs::write(root.path().join(".gitignore"), ".git\n").unwrap();
+    fs::write(
+        root.path().join("mutable.rs"),
+        "pub fn base_content_that_must_be_hidden() -> bool { true }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base content"]);
+    setup_and_index(root.path(), home.path());
+
+    git(root.path(), &["checkout", "-b", "wt-empty"]);
+    fs::write(root.path().join("mutable.rs"), "").unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "empty mutable file"]);
+    git(root.path(), &["checkout", "main"]);
+
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_empty_edit");
+    git(
+        root.path(),
+        &["worktree", "add", wt_path.to_str().unwrap(), "wt-empty"],
+    );
+
+    setup_and_index(&wt_path, home.path());
+    let wt_ws = workspace_for(&wt_path);
+    assert_eq!(
+        overlay_counts(&wt_ws),
+        (0, 1),
+        "empty replacement must tombstone base without storing chunks"
+    );
+    assert!(
+        search_file_paths(&wt_ws, "base_content_that_must_be_hidden")
+            .iter()
+            .all(|path| !path.contains("mutable.rs")),
+        "worktree must not serve base content after file becomes empty"
+    );
+
+    let base_ws = workspace_for(root.path());
+    assert!(
+        search_file_paths(&base_ws, "base_content_that_must_be_hidden")
+            .iter()
+            .any(|path| path.contains("mutable.rs")),
+        "base remains searchable"
+    );
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+#[test]
+#[serial]
+fn worktree_skip_gitignore_indexes_inherited_ignored_content_via_base() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    git(root.path(), &["init", "-b", "main"]);
+    fs::write(root.path().join(".gitignore"), ".git\nignored.rs\n").unwrap();
+    fs::write(
+        root.path().join("visible.rs"),
+        "pub fn visible_marker() -> bool { true }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("ignored.rs"),
+        "pub fn inherited_ignored_marker() -> bool { true }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", ".gitignore", "visible.rs"]);
+    git(root.path(), &["add", "-f", "ignored.rs"]);
+    git(
+        root.path(),
+        &["commit", "-m", "base with ignored tracked file"],
+    );
+    setup_and_index(root.path(), home.path());
+
+    git(root.path(), &["branch", "wt-ignore", "main"]);
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_ignore");
+    git(
+        root.path(),
+        &["worktree", "add", wt_path.to_str().unwrap(), "wt-ignore"],
+    );
+    setup_and_index(&wt_path, home.path());
+    let base_ws = workspace_for(root.path());
+    assert!(
+        !indexed_files(&base_ws).contains("ignored.rs"),
+        "default base index must initially omit ignored content"
+    );
+    // A watcher cannot observe an indexing-mode change; promotion must force a scan.
+    fs::write(base_ws.watcher_pid_path(), std::process::id().to_string()).unwrap();
+
+    use assert_cmd::Command;
+    let mut index_including_ignored = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    index_including_ignored
+        .current_dir(&wt_path)
+        .env("IVYGREP_HOME", home.path())
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--add", ".", "--hash", "--skip-gitignore", "--no-watch"])
+        .assert()
+        .success();
+
+    let wt_ws = workspace_for(&wt_path);
+    assert!(
+        indexed_files(&base_ws).contains("ignored.rs"),
+        "base must be upgraded to supply inherited ignored content"
+    );
+    assert_eq!(
+        overlay_counts(&wt_ws),
+        (0, 0),
+        "base-identical ignored content should not be materialized in overlay"
+    );
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+    let included_hits = hybrid_search(
+        &wt_ws,
+        "inherited_ignored_marker",
+        Some(&model),
+        &SearchOptions {
+            skip_gitignore: true,
+            ..SearchOptions::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        included_hits
+            .iter()
+            .any(|hit| hit.file_path.to_string_lossy().contains("ignored.rs")),
+        "worktree search including ignored files must find inherited base content"
+    );
+    assert!(
+        search_file_paths(&wt_ws, "inherited_ignored_marker")
+            .iter()
+            .all(|path| !path.contains("ignored.rs")),
+        "default worktree search must still exclude ignored base content"
+    );
 
     git(
         root.path(),
