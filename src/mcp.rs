@@ -195,7 +195,7 @@ fn search_tool_schema() -> Value {
                 "limit": {"type": "integer", "minimum": 1, "description": "Max number of returned files."},
                 "context": {"type": "integer", "minimum": 0, "description": "Context lines around focused line."},
                 "type": {"type": "string", "description": "Language filter - accepts names (rust, python), extensions (rs, py, md), or aliases (c++, bash, js)."},
-                "regex": {"type": "boolean", "description": "Use regex mode (walks raw files, no index — slow on large repos). Prefer 'literal' for exact matches."},
+                "regex": {"type": "boolean", "description": "Use regex mode (index-prefiltered when possible; otherwise walks raw files). Prefer 'literal' for exact matches."},
                 "literal": {"type": "boolean", "description": "Fast exact-match search backed by the index. Deterministic, orders of magnitude faster than regex."},
                 "include": {"type": "string", "description": "Comma-separated include globs, e.g. \"*.md,src/**/*.rs\"."},
                 "exclude": {"type": "string", "description": "Comma-separated exclude globs, e.g. \"target/**,*.lock\"."},

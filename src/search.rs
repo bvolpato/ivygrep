@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{MAIN_SEPARATOR, Path, PathBuf};
 
@@ -318,12 +318,20 @@ pub fn literal_search_with_context(
 
     // Now scan only the candidate chunks' source lines for precise matches and snippet extraction.
     // Group by file to read each file only once.
-    let mut chunks_by_file: HashMap<PathBuf, Vec<IndexedChunk>> = HashMap::new();
+    let mut chunks_by_file: BTreeMap<PathBuf, Vec<IndexedChunk>> = BTreeMap::new();
     for chunk in candidate_chunks {
         chunks_by_file
             .entry(workspace.root.join(&chunk.file_path))
             .or_default()
             .push(chunk);
+    }
+    for chunks in chunks_by_file.values_mut() {
+        chunks.sort_by(|a, b| {
+            a.start_line
+                .cmp(&b.start_line)
+                .then_with(|| a.end_line.cmp(&b.end_line))
+                .then_with(|| a.chunk_id.cmp(&b.chunk_id))
+        });
     }
 
     let mut hits = Vec::new();
@@ -3092,6 +3100,43 @@ mod tests {
         let hits = literal_search(&workspace, "calculate_tax", &SearchOptions::default()).unwrap();
         assert!(!hits.is_empty());
         assert!(hits[0].preview.contains("calculate_tax"));
+    }
+
+    #[test]
+    #[serial]
+    fn literal_search_limit_returns_deterministic_equal_score_subset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        for i in 0..40 {
+            std::fs::write(
+                tmp.path().join(format!("file_{i:03}.rs")),
+                "pub fn common_literal_marker() -> bool { true }\n",
+            )
+            .unwrap();
+        }
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        let options = SearchOptions {
+            limit: Some(5),
+            context: 0,
+            ..SearchOptions::default()
+        };
+
+        let first = literal_search(&workspace, "common_literal_marker", &options).unwrap();
+        let first_paths: Vec<_> = first.iter().map(|hit| hit.file_path.clone()).collect();
+        let mut sorted_paths = first_paths.clone();
+        sorted_paths.sort();
+        assert_eq!(first_paths, sorted_paths);
+
+        for _ in 0..5 {
+            let repeated = literal_search(&workspace, "common_literal_marker", &options).unwrap();
+            let repeated_paths: Vec<_> = repeated.iter().map(|hit| hit.file_path.clone()).collect();
+            assert_eq!(repeated_paths, first_paths);
+        }
     }
 
     #[test]
