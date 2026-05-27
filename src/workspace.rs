@@ -220,6 +220,16 @@ impl Workspace {
         self.index_dir.join("vectors_neural.usearch")
     }
 
+    /// Returns whether a neural vector store is available for query-time use.
+    /// Worktree searches can use their base workspace's neural store.
+    pub fn has_neural_vectors(&self) -> bool {
+        neural_store_has_vectors(&self.vector_neural_path())
+            || self
+                .base_index_dir
+                .as_ref()
+                .is_some_and(|base| neural_store_has_vectors(&base.join("vectors_neural.usearch")))
+    }
+
     pub fn neural_backend_path(&self) -> PathBuf {
         self.index_dir.join("neural_backend")
     }
@@ -366,15 +376,6 @@ impl Workspace {
 
         // If we can't open it but it exists and we have chunks, assume we need a rebuild/upgrade
         true
-    }
-
-    pub fn should_block_on_neural_enhancement(&self, cutoff_bytes: u64) -> Result<bool> {
-        if !self.needs_neural_enhancement() {
-            return Ok(false);
-        }
-
-        let skip_gitignore = self.read_metadata()?.is_some_and(|m| m.skip_gitignore);
-        workspace_fits_within_byte_cutoff(&self.root, skip_gitignore, cutoff_bytes)
     }
 
     /// Triggers an atomic background spawn of the neural enhancement process.
@@ -1089,26 +1090,9 @@ fn dir_has_entries(path: &Path) -> bool {
         .is_some()
 }
 
-fn workspace_fits_within_byte_cutoff(
-    root: &Path,
-    skip_gitignore: bool,
-    cutoff_bytes: u64,
-) -> Result<bool> {
-    let mut total_bytes = 0u64;
-
-    for entry in source_walker(root, skip_gitignore).build() {
-        let entry = entry?;
-        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-            continue;
-        }
-
-        total_bytes = total_bytes.saturating_add(entry.metadata()?.len());
-        if total_bytes > cutoff_bytes {
-            return Ok(false);
-        }
-    }
-
-    Ok(true)
+fn neural_store_has_vectors(path: &Path) -> bool {
+    crate::vector_store::VectorStore::open_readonly(path, 384, crate::vector_store::ScalarKind::F32)
+        .is_ok_and(|store| store.size() > 0)
 }
 
 /// Fast index size estimate by stat-ing known index files instead of
@@ -1349,6 +1333,7 @@ mod tests {
 
         // 2 chunks, no neural vectors → true
         assert!(ws.needs_neural_enhancement());
+        assert!(!ws.has_neural_vectors());
 
         {
             let mut store = crate::vector_store::VectorStore::open(
@@ -1363,6 +1348,7 @@ mod tests {
 
         // 1 vector < 2 chunks → true
         assert!(ws.needs_neural_enhancement());
+        assert!(ws.has_neural_vectors());
 
         {
             let mut store = crate::vector_store::VectorStore::open(
@@ -1427,24 +1413,33 @@ mod tests {
     }
 
     #[test]
-    #[serial]
-    fn small_workspace_can_block_on_neural_enhancement() {
+    fn worktree_detects_base_neural_vector_store() {
         let tmp = tempfile::tempdir().unwrap();
-        let home = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let base_index_dir = tmp.path().join("base");
+        let overlay_index_dir = tmp.path().join("overlay");
+        std::fs::create_dir_all(&base_index_dir).unwrap();
+        std::fs::create_dir_all(&overlay_index_dir).unwrap();
 
-        std::fs::write(
-            tmp.path().join("lib.rs"),
-            "pub fn sample() -> &'static str { \"tiny\" }\n",
+        let ws = Workspace {
+            id: "overlay".to_string(),
+            root: tmp.path().to_path_buf(),
+            index_dir: overlay_index_dir,
+            repo_id: None,
+            base_index_dir: Some(base_index_dir.clone()),
+        };
+        assert!(!ws.has_neural_vectors());
+
+        let mut store = crate::vector_store::VectorStore::open(
+            &base_index_dir.join("vectors_neural.usearch"),
+            384,
+            crate::vector_store::ScalarKind::F32,
         )
         .unwrap();
+        store.save().unwrap();
+        assert!(!ws.has_neural_vectors());
 
-        let ws = Workspace::resolve(tmp.path()).unwrap();
-        let model = crate::embedding::create_hash_model();
-        let _ = crate::indexer::index_workspace(&ws, model.as_ref()).unwrap();
-
-        assert!(ws.needs_neural_enhancement());
-        assert!(ws.should_block_on_neural_enhancement(1_000_000).unwrap());
-        assert!(!ws.should_block_on_neural_enhancement(16).unwrap());
+        store.upsert(1, vec![0.0; 384]);
+        store.save().unwrap();
+        assert!(ws.has_neural_vectors());
     }
 }

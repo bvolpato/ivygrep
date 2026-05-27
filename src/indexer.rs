@@ -24,7 +24,6 @@ use crate::vector_store::{ScalarKind, VectorStore};
 use crate::workspace::{Workspace, WorkspaceMetadata};
 
 const ZSTD_MAGIC: &[u8] = &[0x28, 0xB5, 0x2F, 0xFD];
-pub const BLOCKING_NEURAL_CUTOFF_BYTES: u64 = 1_000_000;
 
 fn compress_text(text: &str) -> Vec<u8> {
     zstd::encode_all(text.as_bytes(), 1).unwrap_or_else(|_| text.as_bytes().to_vec())
@@ -134,26 +133,6 @@ pub struct StorageHandles {
 
 pub fn workspace_is_indexed(workspace: &Workspace) -> bool {
     workspace.quick_index_health().is_queryable()
-}
-
-pub fn maybe_complete_neural_for_small_workspace(workspace: &Workspace) -> Result<bool> {
-    if !workspace.should_block_on_neural_enhancement(BLOCKING_NEURAL_CUTOFF_BYTES)? {
-        return Ok(false);
-    }
-
-    match crate::embedding::create_neural_model() {
-        Ok(model) => {
-            let _ = enhance_workspace_neural(workspace, model.as_ref())?;
-            Ok(true)
-        }
-        Err(err) => {
-            tracing::warn!(
-                "failed to load neural model for blocking enhancement on {}: {err:#}",
-                workspace.root.display()
-            );
-            Ok(false)
-        }
-    }
 }
 
 pub fn remove_workspace_index(workspace: &Workspace) -> Result<()> {
