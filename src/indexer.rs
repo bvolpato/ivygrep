@@ -1125,6 +1125,11 @@ pub fn enhance_workspace_neural(
 
     let _ = std::fs::write(&progress_path, progress_count.to_string());
     vector_index.save()?;
+    if newly_processed > 0
+        && let Some(backend) = neural_model.backend_info()
+    {
+        fs::write(workspace.neural_backend_path(), backend)?;
+    }
 
     Ok(newly_processed)
 }
@@ -1665,10 +1670,33 @@ mod tests {
 
     use crate::EMBEDDING_DIMENSIONS;
     use crate::chunking::{Chunk, ChunkKind};
-    use crate::embedding::HashEmbeddingModel;
+    use crate::embedding::{EmbeddingModel, HashEmbeddingModel};
     use crate::workspace::Workspace;
 
     use super::*;
+
+    struct RecordedTestEmbedding {
+        model: HashEmbeddingModel,
+        backend: &'static str,
+    }
+
+    impl EmbeddingModel for RecordedTestEmbedding {
+        fn dimensions(&self) -> usize {
+            self.model.dimensions()
+        }
+
+        fn embed(&self, text: &str) -> Vec<f32> {
+            self.model.embed(text)
+        }
+
+        fn embed_batch(&self, texts: &[&str]) -> Vec<Vec<f32>> {
+            self.model.embed_batch(texts)
+        }
+
+        fn backend_info(&self) -> Option<&'static str> {
+            Some(self.backend)
+        }
+    }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
@@ -1854,8 +1882,11 @@ mod tests {
         assert!(summary.total_chunks >= 2);
         assert!(!workspace.vector_neural_path().exists());
 
-        // Phase 2: enhance with neural (using hash as a deterministic test stand-in)
-        let neural_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        // Phase 2: enhance with a deterministic stand-in carrying backend attribution.
+        let neural_model = RecordedTestEmbedding {
+            model: HashEmbeddingModel::new(EMBEDDING_DIMENSIONS),
+            backend: "test local neural backend",
+        };
         let enhanced = enhance_workspace_neural(&workspace, &neural_model).unwrap();
         assert_eq!(enhanced, summary.total_chunks);
 
@@ -1870,6 +1901,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(store.size(), enhanced);
+        assert_eq!(
+            fs::read_to_string(workspace.neural_backend_path()).unwrap(),
+            "test local neural backend"
+        );
+        let status = crate::workspace::list_workspaces()
+            .unwrap()
+            .into_iter()
+            .find(|status| status.id == workspace.id)
+            .unwrap();
+        assert_eq!(
+            status.neural_backend.as_deref(),
+            Some("test local neural backend")
+        );
     }
 
     #[test]
@@ -1888,12 +1932,24 @@ mod tests {
         let hash_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         index_workspace(&workspace, &hash_model).unwrap();
 
-        let neural_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        let first_model = RecordedTestEmbedding {
+            model: HashEmbeddingModel::new(EMBEDDING_DIMENSIONS),
+            backend: "first backend",
+        };
+        let second_model = RecordedTestEmbedding {
+            model: HashEmbeddingModel::new(EMBEDDING_DIMENSIONS),
+            backend: "unused backend",
+        };
 
-        let n1 = enhance_workspace_neural(&workspace, &neural_model).unwrap();
+        let n1 = enhance_workspace_neural(&workspace, &first_model).unwrap();
         assert!(n1 > 0, "first enhance should process chunks");
-        let n2 = enhance_workspace_neural(&workspace, &neural_model).unwrap();
+        let n2 = enhance_workspace_neural(&workspace, &second_model).unwrap();
         assert_eq!(n2, 0, "second enhance should skip already-processed chunks");
+        assert_eq!(
+            fs::read_to_string(workspace.neural_backend_path()).unwrap(),
+            "first backend",
+            "no-op enhancement must not rewrite recorded backend"
+        );
     }
 
     #[test]

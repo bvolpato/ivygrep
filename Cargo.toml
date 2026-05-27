@@ -18,6 +18,8 @@ path = "src/main.rs"
 default = ["neural"]
 neural = ["dep:candle_embed", "dep:candle-core"]
 accelerate = ["candle-core/accelerate"]
+metal = ["neural", "candle-core/metal", "candle_embed/metal"]
+cuda = ["neural", "candle-core/cuda", "candle_embed/cuda"]
 
 [dependencies]
 anyhow = "1.0"
@@ -102,3 +104,4 @@ harness = false
 
 [patch.crates-io]
 hf-hub = { path = "vendor/hf-hub" }
+candle_embed = { path = "vendor/candle_embed" }
