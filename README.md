@@ -58,6 +58,7 @@ install -m 0755 ./target/release/ig ~/.local/bin/ig
 ./bench.sh --help
 
 ./build.sh          # release binary
+./build.sh --features accelerate,metal  # opt-in macOS Metal neural inference
 ./test.sh --quick   # fast local check
 ./test.sh           # fmt, clippy, unit/integration tests
 ./bench.sh          # critical Criterion benchmark, no stale local baseline comparison
@@ -191,7 +192,7 @@ Benchmarked on the **Linux kernel** (93,493 indexed files, 4,666,431 chunks) and
 
 The latest benchmark loop reduced Linux kernel fresh-index primary score by 10.6% and daemon hot-query p95 from ~455 ms to single-digit milliseconds. Benchmark writeups and charts live under [`docs/benchmarks/`](docs/benchmarks/).
 
-Indexing is sub-second for most small projects. Large repos return hash/BM25 results immediately and upgrade in the background via the locally cached Candle model (`AllMiniLML6V2`).
+Indexing is sub-second for most small projects. Large repos return hash/BM25 results immediately and upgrade in the background via the locally cached Candle model (`AllMiniLML6V2`). macOS release builds use Accelerate-backed CPU math; Metal is available as an opt-in local build while its background throughput is tuned.
 
 ---
 
@@ -213,6 +214,7 @@ ivygrep runs search and embedding inference locally and never sends your code, q
 
 - **Where data lives:** the index (which stores the *decompressed source text* of every indexed file) and the daemon socket live under `~/.local/share/ivygrep` (or `$XDG_DATA_HOME`/`$IVYGREP_HOME`). The index directory is `0700` and the daemon socket `0600`, and the daemon verifies the connecting peer's uid — so other local users on a shared host can't read your indexed code or reach the daemon.
 - **Model download:** neural mode uses `hf-hub` to download AllMiniLM-L6-v2 model assets on first use and caches them under `$HF_HOME` or `~/.cache/huggingface`. Use `--hash` or a `--no-default-features` build when no model-network access is permitted.
+- **Inference backend:** macOS release binaries execute locally with Accelerate-backed CPU math; portable Linux release binaries execute locally on CPU. Source builds can opt into local Metal with `--features accelerate,metal` or CUDA with `--features cuda` on a compatible installation. `ig --status` reports the recorded backend that last generated neural vectors.
 - **Secrets in your repo:** ivygrep indexes file *contents*, including config/dotfiles (e.g. `.env`) unless they're gitignored. Those contents are stored in the local index and can appear in search snippets. Keep secrets out of the workspace or in `.gitignore`.
 - **MCP scope:** the `ig_search` MCP tool only searches the workspace at the provided `path` — it cannot search across other indexed projects.
 
@@ -257,6 +259,7 @@ ig --mcp                           # start MCP server (stdio)
 ```bash
 ./test.sh           # fmt, ShellCheck, clippy, unit/integration tests
 ./build.sh --locked # release binary, Cargo.lock unchanged
+./build.sh --locked --features accelerate,metal  # opt-in macOS Metal neural binary
 ./bench.sh          # critical Criterion benchmark, no stale local baseline comparison
 ```
 The test suite covers unit tests, CLI snapshots, concurrency, golden queries, labeled relevance metrics, incremental CRUD, MCP, daemon recovery, git/worktree behavior, property-based Merkle invariants, and benchmark guards.
@@ -266,8 +269,12 @@ Benchmark output reports per-operation latency; short-looking numbers are repeat
 ```bash
 ./build.sh
 ./scripts/e2e_procedures.sh --binary ./target/release/ig
+
+# Opt-in macOS Metal backend validation (downloads local model artifacts on first run)
+./build.sh --locked --features accelerate,metal
+./scripts/e2e_neural_backend.sh --binary ./target/release/ig --expect-backend "Candle Metal"
 ```
-This smoke test runs the documented CLI setup/search procedures against a throwaway project and isolated `IVYGREP_HOME`.
+These smoke tests run against throwaway projects and isolated `IVYGREP_HOME` directories; the neural backend check embeds fixture text locally and verifies recorded backend reporting.
 
 ### Stress testing
 ```bash

@@ -22,6 +22,11 @@ pub trait EmbeddingModel: Send + Sync {
     fn embed_batch(&self, texts: &[&str]) -> Vec<Vec<f32>> {
         texts.iter().map(|t| self.embed(t)).collect()
     }
+
+    /// Human-readable backend used to create persisted neural vectors.
+    fn backend_info(&self) -> Option<&'static str> {
+        None
+    }
 }
 
 /// Returns the embedding dimension for the selected mode.
@@ -195,6 +200,54 @@ impl EmbeddingModel for HashEmbeddingModel {
 // ── Candle neural embedding (behind `neural` feature) ───────────────────────
 
 #[cfg(feature = "neural")]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum NeuralBackend {
+    Metal,
+    Cuda,
+    AccelerateCpu,
+    Cpu,
+}
+
+#[cfg(feature = "neural")]
+impl NeuralBackend {
+    fn cpu() -> Self {
+        if cfg!(feature = "accelerate") {
+            Self::AccelerateCpu
+        } else {
+            Self::Cpu
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Metal => "AllMiniLML6V2 via Candle Metal",
+            Self::Cuda => "AllMiniLML6V2 via Candle CUDA",
+            Self::AccelerateCpu => "AllMiniLML6V2 via Candle CPU (Accelerate)",
+            Self::Cpu => "AllMiniLML6V2 via Candle CPU",
+        }
+    }
+
+    fn accelerator(self) -> bool {
+        matches!(self, Self::Metal | Self::Cuda)
+    }
+}
+
+#[cfg(feature = "neural")]
+fn preferred_neural_backend() -> NeuralBackend {
+    #[cfg(feature = "metal")]
+    if candle_core::utils::metal_is_available() {
+        return NeuralBackend::Metal;
+    }
+
+    #[cfg(feature = "cuda")]
+    if candle_core::utils::cuda_is_available() {
+        return NeuralBackend::Cuda;
+    }
+
+    NeuralBackend::cpu()
+}
+
+#[cfg(feature = "neural")]
 pub struct CandleEmbeddingModel {
     /// Pool of independent embedder instances. `candle_embed`'s `embed_batch`
     /// is a sequential `for text in texts` loop of single-text, single-threaded
@@ -203,20 +256,7 @@ pub struct CandleEmbeddingModel {
     /// in parallel — one embedder per worker thread, so there is no mutex
     /// contention. Foreground (query) embedding only ever needs one.
     pool: Vec<parking_lot::Mutex<candle_embed::BasedBertEmbedder>>,
-}
-
-#[cfg(feature = "neural")]
-pub fn hardware_acceleration_info() -> &'static str {
-    if cfg!(feature = "accelerate") {
-        "AllMiniLML6V2 via Candle CPU (Accelerate)"
-    } else {
-        "AllMiniLML6V2 via Candle CPU"
-    }
-}
-
-#[cfg(not(feature = "neural"))]
-pub fn hardware_acceleration_info() -> &'static str {
-    "Disabled"
+    backend: NeuralBackend,
 }
 
 /// Embed `texts` across up to `workers` OS threads, preserving input order.
@@ -272,7 +312,7 @@ impl CandleEmbeddingModel {
         // global thread pool to 25% of cores (min 1) so the system stays
         // responsive. This affects both the Candle BLAS work-stealing and
         // any par_iter calls in the enhancement pipeline.
-        let pool_size = if is_background {
+        let cpu_pool_size = if is_background {
             // Cap the background budget to at most 8. The cap applies to BOTH
             // the rayon pool and the embedder pool so worker count == embedder
             // count: in embed_batch each worker maps to its own embedder, so if
@@ -292,28 +332,71 @@ impl CandleEmbeddingModel {
 
         use candle_embed::{CandleEmbedBuilder, WithModel};
 
-        let build_one = || -> anyhow::Result<candle_embed::BasedBertEmbedder> {
-            let mut builder =
+        let build_one = |requested: NeuralBackend| -> anyhow::Result<(
+            candle_embed::BasedBertEmbedder,
+            NeuralBackend,
+        )> {
+            let builder =
                 CandleEmbedBuilder::new().set_model_from_presets(WithModel::AllMinilmL6V2);
-            if !candle_core::utils::cuda_is_available() && !candle_core::utils::metal_is_available()
-            {
-                builder = builder.with_device_cpu();
-            }
+            let builder = match requested {
+                NeuralBackend::Metal => builder.with_device_metal(),
+                NeuralBackend::Cuda => builder.with_device_any_cuda(),
+                NeuralBackend::AccelerateCpu | NeuralBackend::Cpu => builder.with_device_cpu(),
+            };
             let embedder = builder.build()?;
             embedder.load_tokenizer()?;
             embedder.load_model()?;
-            Ok(embedder)
+            let actual = match embedder.active_device_name() {
+                Some("metal") => NeuralBackend::Metal,
+                Some("cuda") => NeuralBackend::Cuda,
+                _ => NeuralBackend::cpu(),
+            };
+            Ok((embedder, actual))
         };
 
+        let preferred = preferred_neural_backend();
+        let (first, backend) = match build_one(preferred) {
+            Ok(loaded) => loaded,
+            Err(accelerator_error) if preferred.accelerator() => {
+                tracing::warn!(
+                    "failed to initialize {}; falling back to local CPU inference: {accelerator_error:#}",
+                    preferred.label()
+                );
+                build_one(NeuralBackend::cpu())?
+            }
+            Err(error) => return Err(error),
+        };
+        // CPU throughput benefits from independent model instances. For GPU
+        // inference, replicate only after a measured win: each copy uploads
+        // the full model and can needlessly consume unified memory or VRAM.
+        let pool_size = if backend.accelerator() {
+            1
+        } else {
+            cpu_pool_size
+        };
         let mut pool = Vec::with_capacity(pool_size);
-        for i in 0..pool_size {
-            match build_one() {
-                Ok(embedder) => pool.push(parking_lot::Mutex::new(embedder)),
+        pool.push(parking_lot::Mutex::new(first));
+
+        for i in 1..pool_size {
+            match build_one(backend) {
+                Ok((embedder, actual)) if actual == backend => {
+                    pool.push(parking_lot::Mutex::new(embedder));
+                }
+                Ok((_embedder, actual)) => {
+                    tracing::warn!(
+                        "neural embedder pool: worker {} selected {} instead of {}; continuing with {} instance(s)",
+                        i + 1,
+                        actual.label(),
+                        backend.label(),
+                        pool.len()
+                    );
+                    break;
+                }
                 // Already have at least one working embedder: degrade to fewer
                 // workers rather than disabling neural enhancement entirely if a
                 // later copy can't be allocated (e.g. OOM / limited VRAM loading
                 // the Nth instance).
-                Err(e) if i > 0 => {
+                Err(e) => {
                     tracing::warn!(
                         "neural embedder pool: loaded {} of {} instances; continuing with fewer ({e:#})",
                         pool.len(),
@@ -321,13 +404,10 @@ impl CandleEmbeddingModel {
                     );
                     break;
                 }
-                // Couldn't build even one — a real failure; surface it so the
-                // caller falls back to hash.
-                Err(e) => return Err(e),
             }
         }
 
-        Ok(Self { pool })
+        Ok(Self { pool, backend })
     }
 }
 
@@ -364,6 +444,10 @@ impl EmbeddingModel for CandleEmbeddingModel {
                 })
                 .collect()
         })
+    }
+
+    fn backend_info(&self) -> Option<&'static str> {
+        Some(self.backend.label())
     }
 }
 
@@ -533,10 +617,15 @@ mod tests {
         assert!(variants.contains(&"payment".to_string()));
     }
 
+    #[cfg(feature = "neural")]
     #[test]
-    fn hardware_acceleration_info_returns_nonempty() {
-        let info = hardware_acceleration_info();
-        assert!(!info.is_empty());
+    fn cpu_backend_label_reports_accelerate_feature_truthfully() {
+        let expected = if cfg!(feature = "accelerate") {
+            "AllMiniLML6V2 via Candle CPU (Accelerate)"
+        } else {
+            "AllMiniLML6V2 via Candle CPU"
+        };
+        assert_eq!(NeuralBackend::cpu().label(), expected);
     }
 
     #[test]

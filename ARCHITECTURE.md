@@ -127,12 +127,15 @@ and embedding over [`candle-core`](https://github.com/huggingface/candle).
 - **Parallel background embedding** -- `embed_batch()` distributes slices over
   a bounded pool of Candle embedders in OS threads. The query path keeps one
   model instance.
-- **Current acceleration** -- macOS release builds enable Candle's
-  `accelerate` feature for Accelerate-backed CPU math. Current portable Linux
-  builds use Candle CPU execution. Metal and CUDA execution are tracked
-  separately and are not claimed by current releases.
-- **Background thread budget** -- neural enhancement uses at most 25% of CPU
-  cores, capped at eight worker/model instances, so the system stays responsive.
+- **Current acceleration** -- macOS release builds enable Accelerate-backed
+  Candle CPU math; portable Linux release builds use Candle CPU execution.
+  Source builds can opt into local Metal or CUDA inference with `--features
+  metal` or `--features cuda`. Metal is exercised in Apple Silicon CI but is
+  not a release default: its current single-stream enhancement path uses less
+  memory but is slower than the CPU worker pool.
+- **Background thread budget** -- CPU neural enhancement uses at most 25% of
+  CPU cores, capped at eight worker/model instances. Metal currently uses one
+  model instance to avoid multiplying local GPU/unified-memory residency.
 - **Graceful fallback** -- if the neural model fails to load (missing download,
   corrupt cache, unsupported platform), the system silently falls back to hash
   embeddings. No search ever fails because of a model problem.
@@ -424,6 +427,8 @@ or `~/.cache/huggingface`.
 |---------|---------|--------|
 | `neural` | default | Enables Candle neural embeddings. Downloads model assets on first neural use. |
 | `accelerate` | opt-in | Uses Apple's Accelerate framework for Candle CPU math on macOS. |
+| `metal` | opt-in | Executes Candle neural inference through Metal when a local Metal device is available; falls back locally to CPU. |
+| `cuda` | opt-in | Executes Candle neural inference through CUDA when built on a compatible CUDA host; falls back locally to CPU. |
 | *(none)* | - | Hash-only mode. Smaller binary, no model download, lower search quality. |
 
 ```bash
@@ -432,7 +437,15 @@ cargo build --release
 
 # Minimal build (hash embeddings only, no model download)
 cargo build --release --no-default-features
+
+# macOS opt-in Metal build
+cargo build --release --features accelerate,metal
+
+# Linux CUDA build (requires a compatible CUDA installation)
+cargo build --release --features cuda
 ```
 
-Release binaries for macOS are built with `accelerate`; portable Linux release
-binaries currently use Candle CPU execution.
+Release binaries for macOS are built with `accelerate`. A separate Apple
+Silicon CI lane builds `accelerate,metal` and requires actual `Candle Metal`
+reporting, but Metal remains opt-in until enhancement throughput improves.
+Portable Linux release binaries currently use Candle CPU execution.

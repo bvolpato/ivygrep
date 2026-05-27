@@ -67,6 +67,8 @@ pub struct WorkspaceStatus {
     pub index_size_bytes: u64,
     pub has_neural_vectors: bool,
     pub neural_vector_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neural_backend: Option<String>,
     #[serde(default)]
     pub enhancing_in_progress: bool,
     #[serde(default)]
@@ -216,6 +218,10 @@ impl Workspace {
 
     pub fn vector_neural_path(&self) -> PathBuf {
         self.index_dir.join("vectors_neural.usearch")
+    }
+
+    pub fn neural_backend_path(&self) -> PathBuf {
+        self.index_dir.join("neural_backend")
     }
 
     /// Sentinel recording the on-disk index format version. Bumped when the
@@ -837,6 +843,10 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
             0
         };
         let has_neural_vectors = neural_vector_count > 0;
+        let neural_backend = fs::read_to_string(index_dir.join("neural_backend"))
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
 
         let workspace = Workspace {
             id: metadata.id.clone(),
@@ -941,6 +951,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
                 index_size_bytes,
                 has_neural_vectors,
                 neural_vector_count,
+                neural_backend,
                 enhancing_in_progress,
                 enhancing_progress_count,
                 enhancing_paused_reason,

@@ -395,8 +395,6 @@ async fn run_status(json: bool) -> Result<()> {
 
                 // Embedding status
                 if ws.enhancing_in_progress {
-                    let accel = crate::embedding::hardware_acceleration_info();
-
                     let progress_str = if let Some(count) = ws.enhancing_progress_count {
                         let pct = if ws.chunk_count > 0 {
                             (count as f64 / ws.chunk_count as f64 * 100.0).min(100.0) as u64
@@ -414,7 +412,7 @@ async fn run_status(json: bool) -> Result<()> {
                         );
                     } else {
                         println!(
-                            "{prefix}  Search: \x1b[1;33m⟳ enhancing\x1b[0m {progress_str}(computing {accel} in background...)"
+                            "{prefix}  Search: \x1b[1;33m⟳ enhancing\x1b[0m {progress_str}(computing local neural vectors in background...)"
                         );
                     }
                 } else if ws.enhancing_stalled {
@@ -428,9 +426,12 @@ async fn run_status(json: bool) -> Result<()> {
                     } else {
                         "100%".to_string()
                     };
-                    let accel = crate::embedding::hardware_acceleration_info();
+                    let backend = ws
+                        .neural_backend
+                        .as_deref()
+                        .unwrap_or("local backend unrecorded");
                     println!(
-                        "{prefix}  Search: \x1b[1;32m★ neural\x1b[0m ({} enhanced, {pct}, {accel})",
+                        "{prefix}  Search: \x1b[1;32m★ neural\x1b[0m ({} enhanced, {pct}, last enhanced with {backend})",
                         ws.neural_vector_count
                     );
                 } else if ws.indexing_in_progress {
