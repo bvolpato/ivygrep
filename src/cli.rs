@@ -70,7 +70,7 @@ pub struct Cli {
     #[arg(long, short = 'l', global = true)]
     pub literal: bool,
 
-    /// Legacy regex mode (walks all files, no index). Use `rg` directly instead.
+    /// Legacy regex mode. Uses an index prefilter when possible, otherwise walks files.
     #[arg(long, global = true, hide = true)]
     pub regex: bool,
 
