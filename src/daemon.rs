@@ -4,7 +4,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -32,11 +32,16 @@ const WATCH_QUIET_PERIOD: Duration = Duration::from_secs(2);
 const WATCH_MAX_DEBOUNCE: Duration = Duration::from_secs(30);
 const MAX_DAEMON_LOG_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_QUERY_CACHE_ENTRIES: usize = 128;
-/// Cap on cached SearchContexts. Each holds an open SQLite connection, Tantivy
-/// searchers, and mmapped vector stores (several fds + memory), so an unbounded
-/// cache leaks fds/memory in the long-running daemon (e.g. after `--all`
-/// searches touch every workspace).
+/// Cap on cached workspace/dimension keys. Idle contexts additionally share a
+/// global retention cap, keeping open SQLite/Tantivy/vector views bounded when
+/// `--all` searches touch many workspaces.
 const MAX_SEARCH_CONTEXTS: usize = 32;
+/// Retain a small number of read-only contexts per workspace/dimension so
+/// concurrent queries do not serialize on a single SQLite/Tantivy/vector view.
+/// In-flight contexts are additionally bounded by `cpu_permits`.
+const MAX_IDLE_SEARCH_CONTEXTS_PER_KEY: usize = 4;
+/// Preserve the original worst-case retained context bound across all pools.
+const MAX_IDLE_SEARCH_CONTEXTS: usize = 32;
 /// Don't cache result sets larger than this (each hit carries preview/reason
 /// strings; large `--no-limit` results would bloat the query cache).
 const MAX_CACHEABLE_HITS: usize = 2_000;
@@ -132,7 +137,70 @@ struct DirStamp {
 
 struct CachedSearchContext {
     signature: SearchContextSignature,
-    context: Arc<Mutex<SearchContext>>,
+    pool: Arc<SearchContextPool>,
+}
+
+struct SearchContextPool {
+    idle: Mutex<Vec<SearchContext>>,
+    idle_context_count: Arc<AtomicUsize>,
+}
+
+impl SearchContextPool {
+    fn take_idle(&self) -> Option<SearchContext> {
+        let context = self.idle.lock().pop();
+        if context.is_some() {
+            self.idle_context_count.fetch_sub(1, Ordering::Relaxed);
+        }
+        context
+    }
+
+    fn retain_idle(&self, context: SearchContext) {
+        let mut idle = self.idle.lock();
+        if idle.len() >= MAX_IDLE_SEARCH_CONTEXTS_PER_KEY {
+            return;
+        }
+        if self
+            .idle_context_count
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                (count < MAX_IDLE_SEARCH_CONTEXTS).then_some(count + 1)
+            })
+            .is_ok()
+        {
+            idle.push(context);
+        }
+    }
+}
+
+impl Drop for SearchContextPool {
+    fn drop(&mut self) {
+        let retained = self.idle.lock().len();
+        if retained > 0 {
+            self.idle_context_count
+                .fetch_sub(retained, Ordering::Relaxed);
+        }
+    }
+}
+
+struct SearchContextLease {
+    context: Option<SearchContext>,
+    pool: Arc<SearchContextPool>,
+}
+
+impl std::ops::Deref for SearchContextLease {
+    type Target = SearchContext;
+
+    fn deref(&self) -> &Self::Target {
+        self.context.as_ref().expect("search context lease is live")
+    }
+}
+
+impl Drop for SearchContextLease {
+    fn drop(&mut self) {
+        let Some(context) = self.context.take() else {
+            return;
+        };
+        self.pool.retain_idle(context);
+    }
 }
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -272,6 +340,7 @@ struct DaemonState {
     model_loading: Arc<AtomicBool>,
     watchers: Arc<Mutex<HashMap<String, WatchRegistration>>>,
     search_contexts: Arc<Mutex<HashMap<SearchContextCacheKey, CachedSearchContext>>>,
+    idle_search_context_count: Arc<AtomicUsize>,
     query_results: Arc<Mutex<QueryResultCache>>,
     /// Bounds concurrent CPU-heavy work (hybrid/literal/regex search + index).
     /// Without this, a burst of clients each spawn a `spawn_blocking` task on
@@ -309,42 +378,51 @@ impl DaemonState {
         &self,
         workspace: &Workspace,
         emb_dim: Option<usize>,
-    ) -> Result<Arc<Mutex<SearchContext>>> {
+    ) -> Result<SearchContextLease> {
         let key = SearchContextCacheKey {
             workspace_id: workspace.id.clone(),
             emb_dim,
         };
         let signature = search_context_signature(workspace, emb_dim);
 
-        {
-            let cache = self.search_contexts.lock();
+        let pool = {
+            let mut cache = self.search_contexts.lock();
             if let Some(entry) = cache.get(&key)
                 && entry.signature == signature
             {
-                return Ok(entry.context.clone());
+                entry.pool.clone()
+            } else {
+                // Bound cached workspace/dimension keys; each key retains only
+                // MAX_IDLE_SEARCH_CONTEXTS_PER_KEY contexts after a burst.
+                if cache.len() >= MAX_SEARCH_CONTEXTS
+                    && !cache.contains_key(&key)
+                    && let Some(victim) = cache.keys().find(|k| **k != key).cloned()
+                {
+                    cache.remove(&victim);
+                }
+                let pool = Arc::new(SearchContextPool {
+                    idle: Mutex::new(Vec::new()),
+                    idle_context_count: self.idle_search_context_count.clone(),
+                });
+                cache.insert(
+                    key,
+                    CachedSearchContext {
+                        signature,
+                        pool: pool.clone(),
+                    },
+                );
+                pool
             }
-        }
+        };
 
-        let context = Arc::new(Mutex::new(SearchContext::load(workspace, emb_dim)?));
-        {
-            let mut cache = self.search_contexts.lock();
-            // Bound the cache: if full and this is a new key, evict another
-            // entry so open fds / mmaps don't grow without limit.
-            if cache.len() >= MAX_SEARCH_CONTEXTS
-                && !cache.contains_key(&key)
-                && let Some(victim) = cache.keys().find(|k| **k != key).cloned()
-            {
-                cache.remove(&victim);
-            }
-            cache.insert(
-                key,
-                CachedSearchContext {
-                    signature,
-                    context: context.clone(),
-                },
-            );
-        }
-        Ok(context)
+        let context = pool
+            .take_idle()
+            .map(Ok)
+            .unwrap_or_else(|| SearchContext::load(workspace, emb_dim))?;
+        Ok(SearchContextLease {
+            context: Some(context),
+            pool,
+        })
     }
 
     fn clear_workspace_contexts(&self, workspace: &Workspace) {
@@ -399,6 +477,7 @@ pub async fn run_daemon() -> Result<()> {
         model_loading: Arc::new(AtomicBool::new(false)),
         watchers: Arc::new(Mutex::new(HashMap::new())),
         search_contexts: Arc::new(Mutex::new(HashMap::new())),
+        idle_search_context_count: Arc::new(AtomicUsize::new(0)),
         query_results: Arc::new(Mutex::new(QueryResultCache::default())),
         cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
     };
@@ -708,7 +787,6 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                             continue;
                         }
                     };
-                    let context = context.lock();
                     match hybrid_search_with_context(
                         &context,
                         workspace,
@@ -922,7 +1000,6 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                             continue;
                         }
                     };
-                    let context = context.lock();
                     match literal_search_with_context(&context, workspace, &query, &options) {
                         Ok(mut hits) => {
                             if path.is_none() {
@@ -1654,6 +1731,7 @@ mod tests {
             model_loading: Arc::new(AtomicBool::new(false)),
             watchers: Arc::new(Mutex::new(HashMap::new())),
             search_contexts: Arc::new(Mutex::new(HashMap::new())),
+            idle_search_context_count: Arc::new(AtomicUsize::new(0)),
             query_results: Arc::new(Mutex::new(QueryResultCache::default())),
             cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
         }
@@ -1811,7 +1889,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn cached_search_context_reuses_until_index_changes() {
+    fn cached_search_context_pools_concurrent_leases_until_index_changes() {
         let home = tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
 
@@ -1830,8 +1908,20 @@ mod tests {
         let first = state.cached_search_context(&workspace, Some(256)).unwrap();
         let second = state.cached_search_context(&workspace, Some(256)).unwrap();
         assert!(
-            Arc::ptr_eq(&first, &second),
-            "unchanged index should reuse cached SearchContext"
+            Arc::ptr_eq(&first.pool, &second.pool),
+            "unchanged index should use the same SearchContext pool"
+        );
+        let first_pool = first.pool.clone();
+        assert!(
+            first_pool.idle.lock().is_empty(),
+            "concurrent leases must own separate contexts rather than waiting for one idle context"
+        );
+        drop(first);
+        drop(second);
+        assert_eq!(
+            first_pool.idle.lock().len(),
+            2,
+            "released concurrent contexts should be reusable"
         );
 
         std::fs::write(
@@ -1843,8 +1933,78 @@ mod tests {
 
         let third = state.cached_search_context(&workspace, Some(256)).unwrap();
         assert!(
-            !Arc::ptr_eq(&first, &third),
-            "index generation change should reload SearchContext"
+            !Arc::ptr_eq(&first_pool, &third.pool),
+            "index generation change should replace the SearchContext pool"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn cached_search_context_pool_bounds_retained_idle_contexts() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn pooled() {}\n").unwrap();
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+
+        let state = test_state();
+        let leases = (0..MAX_IDLE_SEARCH_CONTEXTS_PER_KEY + 2)
+            .map(|_| state.cached_search_context(&workspace, Some(256)).unwrap())
+            .collect::<Vec<_>>();
+        let pool = leases[0].pool.clone();
+        drop(leases);
+
+        assert_eq!(
+            pool.idle.lock().len(),
+            MAX_IDLE_SEARCH_CONTEXTS_PER_KEY,
+            "idle pool must stay bounded after a concurrent burst"
+        );
+        assert_eq!(
+            state.idle_search_context_count.load(Ordering::Relaxed),
+            MAX_IDLE_SEARCH_CONTEXTS_PER_KEY,
+            "idle global accounting must track retained contexts"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn cached_search_context_pools_share_global_idle_bound() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn globally_bounded() {}\n").unwrap();
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+
+        let state = test_state();
+        for dimension in 0..(MAX_IDLE_SEARCH_CONTEXTS / MAX_IDLE_SEARCH_CONTEXTS_PER_KEY + 2) {
+            let leases = (0..MAX_IDLE_SEARCH_CONTEXTS_PER_KEY)
+                .map(|_| {
+                    state
+                        .cached_search_context(&workspace, Some(dimension))
+                        .unwrap()
+                })
+                .collect::<Vec<_>>();
+            drop(leases);
+        }
+
+        assert_eq!(
+            state.idle_search_context_count.load(Ordering::Relaxed),
+            MAX_IDLE_SEARCH_CONTEXTS,
+            "idle contexts retained across pools must remain globally bounded"
+        );
+        state.search_contexts.lock().clear();
+        assert_eq!(
+            state.idle_search_context_count.load(Ordering::Relaxed),
+            0,
+            "evicted pools must release retained-context accounting"
         );
     }
 
