@@ -5,13 +5,16 @@ All notable changes to ivygrep are documented in this file.
 ## [Unreleased]
 
 ### Changed
+- **Index format bumped to v5 -- upgrading triggers a one-time full reindex.** Bazel/Starlark files now store first-class language metadata and Starlark macro AST chunks, and `.tsx` files use the TSX grammar rather than the plain TypeScript grammar; existing stored chunks must be rebuilt to pick up either behavior.
 - **Index format bumped to v4 -- upgrading triggers a one-time full reindex.** Unix Merkle fingerprints now include inode change time (`ctime`) in addition to size and mtime, so a same-size edit followed by restored mtime cannot leave the index stale. The path remains part of the root hash through the snapshot map key. Verification stays metadata-only: no full-repository content reads were added.
 - **Index format bumped to v3 — upgrading triggers a one-time full reindex.** A definition's leading doc-comment/attribute lines are now folded into the following function/class chunk instead of being emitted as standalone single-line `Module` chunks. On a representative tree this removed ~40% of chunks (less to embed, store, and search), and search now returns the documented definition rather than a bare comment line.
 
 ### Added
+- **Starlark/Bazel coverage.** `BUILD`, `BUILD.bazel`, `WORKSPACE`, `MODULE.bazel`, `.bzl`, `.bazel`, and `.star` files are first-class `starlark` sources; Tree-sitter splits macro definitions in `.bzl`/`.star` files into relevant retrievable units while large BUILD corpora retain bounded text chunks.
 - **Skip minified bundles / single-line blobs when indexing.** A file with a 50 KB+ run and no line break (minified JS/CSS, packed data) is skipped during indexing — it would otherwise become one enormous, low-value chunk that dilutes relevance on large monorepos. Complements the existing 16 MB file-size cap, catching minified files that fall under it. Large hand-written docs (normal line lengths) are unaffected.
 
 ### Fixed
+- **`.tsx` source uses Tree-sitter's TSX grammar.** TypeScript React files were registered as TypeScript but parsed with the non-JSX grammar, allowing parse errors to degrade structural chunks.
 - **MCP no longer neural-embeds the whole repo inline on the first query (#56).** The MCP auto-index now uses the fast hash model and defers neural embeddings to a background subprocess — mirroring the daemon — so the first query returns quickly even on very large repos. Previously the inline neural pass could block the first query for many minutes and, run by several MCP clients at once, saturate the host.
 - **MCP caches its neural query model per process (#57).** It was reconstructed on every `ig_search` (and even for `literal`/`regex` modes that never embed a query); it is now loaded once via `OnceLock`, only in the hybrid path.
 - **Background neural enhancement no longer stalls on busy machines (#62).** It paused whenever the 1-minute load average exceeded ~0.75–0.8× the CPU count, so on a routinely-busy host (a dev box mid-build, a shared machine) neural vectors were never built and search stayed on the lower-quality hash path. The subprocess is already `nice(10)` and capped at ~25% of cores, so the threshold is now a more lenient 2.0× and configurable via `IVYGREP_ENHANCE_MAX_LOAD_RATIO` (≤ 0 disables the load check). Battery, thermal, and low-memory pauses are unchanged.
