@@ -29,15 +29,16 @@ pub struct Workspace {
     pub base_index_dir: Option<PathBuf>,
 }
 
-/// On-disk index format version. Bump when a stored-layout change makes an
-/// existing index incompatible with the current code so it must be rebuilt.
+/// On-disk index format version. Bump when a stored-layout or chunking-semantic
+/// change makes an existing index incompatible with current code.
 ///
 /// History:
 ///   1 — vector keys derived from content hash (implicit; pre-versioning)
 ///   2 — vector keys derived from the unique chunk id (#27)
 ///   3 — leading doc-comments folded into the following definition chunk (#59)
 ///   4 — Merkle metadata fingerprints include Unix ctime (#21)
-pub const INDEX_FORMAT_VERSION: u32 = 4;
+///   5 — Starlark metadata/macro AST chunks and TSX grammar selection
+pub const INDEX_FORMAT_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceMetadata {

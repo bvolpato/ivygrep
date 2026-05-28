@@ -163,17 +163,17 @@ Traditional tools require you to know _exactly_ what you're looking for. ivygrep
 | Incremental indexing | ❌ | ❌ | ✅ |
 | MCP server for AI agents | ❌ | ❌ | ✅ |
 
-### 🌍 44 Language/File Types Supported
-ivygrep indexes and structurally chunks 44 language/file types today:
+### 🌍 45 Language/File Types Supported
+ivygrep indexes and structurally chunks 45 language/file types today:
 
-- **Tree-sitter AST chunking (20 languages):** Rust, Python, Go, JavaScript, TypeScript, Java, C, C++, C#, Scala, PHP, Ruby, Swift, Bash, Haskell, OCaml, Lua, Dart, Objective-C, Perl
+- **Tree-sitter AST chunking (21 languages):** Rust, Python, Go, JavaScript, TypeScript/TSX, Java, C, C++, C#, Scala, PHP, Ruby, Swift, Bash, Haskell, OCaml, Lua, Dart, Objective-C, Perl, Starlark macros
 - **Heuristic structural chunking:** the remaining supported languages below
 
 - **Systems:** Rust, C, C++, Zig, Nim
 - **Backend:** Python, Go, Java, Kotlin, Scala, C#, Ruby, PHP, Perl, Groovy
 - **Web & Mobile:** JavaScript, TypeScript, HTML, CSS, GraphQL, Swift, Dart, Objective-C
 - **Functional:** Haskell, OCaml, Elixir, Erlang, Clojure
-- **Data, Scripting & Config:** R, Julia, Bash/Shell, PowerShell, Lua, SQL, Protobuf, Thrift, Terraform, Dockerfile, Makefile, Markdown, XML, TOML/YAML/INI/env config, JSON, plain text
+- **Data, Scripting & Config:** R, Julia, Bash/Shell, PowerShell, Lua, SQL, Protobuf, Thrift, Terraform, Starlark/Bazel, Dockerfile, Makefile, Markdown, XML, TOML/YAML/INI/env config, JSON, plain text
 
 Unknown extensions are auto-detected and indexed as text.
 

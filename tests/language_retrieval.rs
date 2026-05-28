@@ -66,3 +66,55 @@ fn parser_backed_languages_are_retrievable() {
         );
     }
 }
+
+#[test]
+#[serial]
+fn starlark_and_tsx_ast_languages_are_retrievable_with_type_filters() {
+    let home = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+    let repo = tempfile::tempdir().unwrap();
+    std::fs::write(
+        repo.path().join("BUILD.bazel"),
+        "go_library(\n    name = \"billing_cardinal_target\",\n    srcs = [\"billing.go\"],\n)\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.path().join("defs.bzl"),
+        "def billing_cardinal_macro(name):\n    return [name]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        repo.path().join("BillingCard.tsx"),
+        "export function BillingCardinalPanel() {\n    return <section>billing cardinal panel</section>;\n}\n",
+    )
+    .unwrap();
+
+    let workspace = Workspace::resolve(repo.path()).unwrap();
+    let model = create_hash_model();
+    index_workspace(&workspace, model.as_ref()).unwrap();
+
+    for (query, language, expected_file) in [
+        ("billing cardinal target", "starlark", "BUILD.bazel"),
+        ("billing cardinal macro", "starlark", "defs.bzl"),
+        ("billing cardinal panel", "typescript", "BillingCard.tsx"),
+    ] {
+        let hits = hybrid_search(
+            &workspace,
+            query,
+            Some(model.as_ref()),
+            &SearchOptions {
+                limit: Some(5),
+                type_filter: Some(language.to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(
+            hits.iter()
+                .any(|hit| hit.file_path.to_string_lossy() == expected_file),
+            "query {query:?} with type {language:?} should return {expected_file}, got {hits:#?}"
+        );
+    }
+}

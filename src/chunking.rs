@@ -48,8 +48,8 @@ pub struct LanguageDef {
     pub name: &'static str,
     /// File extensions without leading dot. Matched case-insensitively.
     pub extensions: &'static [&'static str],
-    /// Exact filename matches (e.g. `"Dockerfile"`). Also matches
-    /// `Dockerfile.prod` (filename starts with pattern + `.`).
+    /// Filename matches (e.g. `"Dockerfile"`). A plain pattern also matches
+    /// variants such as `Dockerfile.prod`; a leading `=` requires exact match.
     pub filenames: &'static [&'static str],
     /// Inspects a **trimmed** source line; returns `Some(kind)` when the
     /// line opens a structural boundary, `None` otherwise.
@@ -280,6 +280,12 @@ static LANGUAGES: &[LanguageDef] = &[
         detect_signature: detect_terraform,
     },
     LanguageDef {
+        name: "starlark",
+        extensions: &["bzl", "bazel", "star"],
+        filenames: &["=BUILD", "=WORKSPACE", "=MODULE"],
+        detect_signature: detect_starlark,
+    },
+    LanguageDef {
         name: "dockerfile",
         extensions: &[],
         filenames: &["Dockerfile"],
@@ -341,14 +347,17 @@ static LANGUAGES: &[LanguageDef] = &[
 
 /// Resolve a file path to its language definition from the registry.
 fn find_language_def(path: &Path) -> Option<&'static LanguageDef> {
-    // Filename matches first (Dockerfile, Makefile, Rakefile, …).
+    // Filename matches first (Dockerfile, Makefile, Rakefile, etc.).
     if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
         for lang in LANGUAGES {
             for pattern in lang.filenames {
-                if filename == *pattern
-                    || (filename.len() > pattern.len()
-                        && filename.starts_with(pattern)
-                        && filename.as_bytes()[pattern.len()] == b'.')
+                let exact_only = pattern.strip_prefix('=');
+                if exact_only.is_some_and(|pattern| filename == pattern)
+                    || (exact_only.is_none()
+                        && (filename == *pattern
+                            || (filename.len() > pattern.len()
+                                && filename.starts_with(pattern)
+                                && filename.as_bytes()[pattern.len()] == b'.')))
                 {
                     return Some(lang);
                 }
@@ -600,8 +609,9 @@ pub fn chunk_source(rel_path: &Path, text: &str) -> Vec<Chunk> {
 }
 
 /// Uses Tree-sitter to reliably extract accurately bounded functions and classes
-/// for supported languages (Rust, Python, Go, JS, TS, Java, C#, PHP, Ruby, Swift,
-/// C, C++, Scala, Bash, Haskell, OCaml, Lua, Dart, Objective-C, Perl).
+/// for supported languages (Rust, Python, Go, JS, TS/TSX, Java, C#, PHP, Ruby,
+/// Swift, C, C++, Scala, Bash, Haskell, OCaml, Lua, Dart, Objective-C, Perl,
+/// and Starlark macro sources).
 fn try_tree_sitter_chunk_source(
     rel_path: &Path,
     text: &str,
@@ -611,7 +621,7 @@ fn try_tree_sitter_chunk_source(
     use streaming_iterator::StreamingIterator;
     use tree_sitter::QueryCursor;
 
-    let (grammar, query) = tree_sitter_query(language)?;
+    let (grammar, query) = tree_sitter_query(rel_path, language)?;
 
     // 100ms timeout to prevent infinite loops/hangs on massive minified JS files.
     // We use ParseOptions to cancel long-running parses since timeout_micros was removed in 0.26
@@ -824,6 +834,7 @@ thread_local! {
 /// Compiled queries are immutable and grammar-specific, so compile each one
 /// once rather than once per file on large initial indexes.
 fn tree_sitter_query(
+    rel_path: &Path,
     language: &str,
 ) -> Option<(tree_sitter::Language, &'static tree_sitter::Query)> {
     use std::sync::OnceLock;
@@ -860,6 +871,18 @@ fn tree_sitter_query(
             tree_sitter_javascript::LANGUAGE,
             "(function_declaration) @fn (method_definition) @fn (class_declaration) @class"
         ),
+        "typescript"
+            if rel_path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("tsx")) =>
+        {
+            cached_query!(
+                TSX_QUERY,
+                tree_sitter_typescript::LANGUAGE_TSX,
+                "(function_declaration) @fn (method_definition) @fn (class_declaration) @class (interface_declaration) @class"
+            )
+        }
         "typescript" => cached_query!(
             TYPESCRIPT_QUERY,
             tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
@@ -940,6 +963,20 @@ fn tree_sitter_query(
             tree_sitter_perl::LANGUAGE,
             "(function_definition) @fn (package_statement) @class"
         ),
+        "starlark"
+            if rel_path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    extension.eq_ignore_ascii_case("bzl") || extension.eq_ignore_ascii_case("star")
+                }) =>
+        {
+            cached_query!(
+                STARLARK_QUERY,
+                tree_sitter_starlark::LANGUAGE,
+                "(function_definition) @fn"
+            )
+        }
         _ => None,
     }
 }
@@ -1548,6 +1585,14 @@ fn detect_terraform(trimmed: &str) -> Option<ChunkKind> {
     }
 }
 
+fn detect_starlark(trimmed: &str) -> Option<ChunkKind> {
+    if trimmed.starts_with("def ") {
+        Some(ChunkKind::Function)
+    } else {
+        None
+    }
+}
+
 // ── Internal helpers ───────────────────────────────────────────────────
 
 fn is_probably_text(bytes: &[u8]) -> bool {
@@ -1743,6 +1788,28 @@ pub fn calculate_total(amount: f64) -> f64 {
         let chunks = chunk_source(Path::new("User.kt"), src);
         assert!(chunks.iter().any(|c| c.kind == ChunkKind::Class));
         assert!(chunks.iter().any(|c| c.kind == ChunkKind::Function));
+    }
+
+    #[test]
+    fn starlark_registry_recognizes_bazel_paths() {
+        for path in [
+            "BUILD",
+            "BUILD.bazel",
+            "WORKSPACE",
+            "MODULE.bazel",
+            "defs.bzl",
+            "rules.star",
+        ] {
+            assert_eq!(
+                language_for_path(Path::new(path)),
+                Some("starlark"),
+                "{path} should be indexed as Starlark"
+            );
+        }
+        assert_eq!(resolve_type_alias("bazel"), Some("starlark"));
+        assert_eq!(resolve_type_alias("bzl"), Some("starlark"));
+        assert_eq!(language_for_path(Path::new("BUILD.md")), Some("markdown"));
+        assert_eq!(language_for_path(Path::new("MODULE.md")), Some("markdown"));
     }
 
     #[test]
@@ -1950,6 +2017,34 @@ pub fn calculate_total(amount: f64) -> f64 {
         assert!(go.iter().any(|c| c.text.contains("LoadConfig")));
         assert!(typescript.iter().any(|c| c.text.contains("loadConfig")));
         assert!(rust.iter().any(|c| c.text.contains("load_config")));
+    }
+
+    #[test]
+    fn tsx_paths_use_the_tsx_grammar() {
+        let src = "interface Props { title: string }\nexport function Card(props: Props) {\n  return <section>{props.title}</section>;\n}\n";
+        let (tsx_grammar, _) = tree_sitter_query(Path::new("Card.tsx"), "typescript").unwrap();
+        let (typescript_grammar, _) =
+            tree_sitter_query(Path::new("card.ts"), "typescript").unwrap();
+        let mut parser = tree_sitter::Parser::new();
+
+        parser.set_language(&tsx_grammar).unwrap();
+        let tsx_tree = parser.parse(src, None).unwrap();
+        assert!(
+            !tsx_tree.root_node().has_error(),
+            "TSX syntax should parse without errors through the TSX grammar"
+        );
+
+        parser.set_language(&typescript_grammar).unwrap();
+        let typescript_tree = parser.parse(src, None).unwrap();
+        assert!(
+            typescript_tree.root_node().has_error(),
+            "fixture should require TSX rather than plain TypeScript grammar"
+        );
+
+        let chunks = chunk_source(Path::new("Card.tsx"), src);
+        assert!(chunks.iter().any(|chunk| {
+            chunk.kind == ChunkKind::Function && chunk.text.contains("<section>")
+        }));
     }
 
     #[test]
@@ -2211,6 +2306,24 @@ export function register(p: Plugin) {
                 .iter()
                 .any(|c| c.kind == ChunkKind::Function && c.text.contains("add"))
         );
+    }
+
+    #[test]
+    fn starlark_tree_sitter_chunks_macro_definitions() {
+        let src = "def checkout_targets(name):\n    return [name]\n\ndef payment_targets(name):\n    return [name]\n";
+        let chunks = chunk_source(Path::new("defs.bzl"), src);
+
+        assert!(chunks.iter().all(|c| c.language == "starlark"));
+        assert!(chunks.iter().any(|c| {
+            c.kind == ChunkKind::Function
+                && c.text.contains("checkout_targets")
+                && !c.text.contains("payment_targets")
+        }));
+        assert!(chunks.iter().any(|c| {
+            c.kind == ChunkKind::Function
+                && c.text.contains("payment_targets")
+                && !c.text.contains("checkout_targets")
+        }));
     }
 
     #[test]
