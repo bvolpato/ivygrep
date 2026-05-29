@@ -166,7 +166,7 @@ Traditional tools require you to know _exactly_ what you're looking for. ivygrep
 ### 🌍 45 Language/File Types Supported
 ivygrep indexes and structurally chunks 45 language/file types today:
 
-- **Tree-sitter AST chunking (21 languages):** Rust, Python, Go, JavaScript, TypeScript/TSX, Java, C, C++, C#, Scala, PHP, Ruby, Swift, Bash, Haskell, OCaml, Lua, Dart, Objective-C, Perl, Starlark macros
+- **Tree-sitter AST chunking (21 languages):** Rust, Python, Go, JavaScript, TypeScript/TSX, Java, C, C++, C#, Scala, PHP, Ruby, Swift, Bash, Haskell, OCaml, Lua, Dart, Objective-C, Perl, Starlark macros and targets in very large BUILD-like sources
 - **Heuristic structural chunking:** the remaining supported languages below
 
 - **Systems:** Rust, C, C++, Zig, Nim

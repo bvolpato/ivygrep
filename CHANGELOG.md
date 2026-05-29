@@ -5,15 +5,16 @@ All notable changes to ivygrep are documented in this file.
 ## [Unreleased]
 
 ### Changed
-- **Index format bumped to v5 -- upgrading triggers a one-time full reindex.** Bazel/Starlark files now store first-class language metadata and Starlark macro AST chunks, and `.tsx` files use the TSX grammar rather than the plain TypeScript grammar; existing stored chunks must be rebuilt to pick up either behavior.
+- **Index format bumped to v6 -- upgrading triggers a one-time full reindex.** Bazel/Starlark files now store first-class language metadata and Starlark macro AST chunks, very large BUILD-like sources split top-level target calls into AST chunks, and `.tsx` files use the TSX grammar rather than the plain TypeScript grammar; existing stored chunks must be rebuilt to pick up these behaviors.
 - **Index format bumped to v4 -- upgrading triggers a one-time full reindex.** Unix Merkle fingerprints now include inode change time (`ctime`) in addition to size and mtime, so a same-size edit followed by restored mtime cannot leave the index stale. The path remains part of the root hash through the snapshot map key. Verification stays metadata-only: no full-repository content reads were added.
 - **Index format bumped to v3 — upgrading triggers a one-time full reindex.** A definition's leading doc-comment/attribute lines are now folded into the following function/class chunk instead of being emitted as standalone single-line `Module` chunks. On a representative tree this removed ~40% of chunks (less to embed, store, and search), and search now returns the documented definition rather than a bare comment line.
 
 ### Added
-- **Starlark/Bazel coverage.** `BUILD`, `BUILD.bazel`, `WORKSPACE`, `MODULE.bazel`, `.bzl`, `.bazel`, and `.star` files are first-class `starlark` sources; Tree-sitter splits macro definitions in `.bzl`/`.star` files into relevant retrievable units while large BUILD corpora retain bounded text chunks.
+- **Starlark/Bazel coverage.** `BUILD`, `BUILD.bazel`, `WORKSPACE`, `MODULE.bazel`, `.bzl`, `.bazel`, and `.star` files are first-class `starlark` sources; Tree-sitter splits macro definitions in `.bzl`/`.star` files and target calls in very large BUILD-like sources into retrievable units while ordinary BUILD files retain bounded text chunks.
 - **Skip minified bundles / single-line blobs when indexing.** A file with a 50 KB+ run and no line break (minified JS/CSS, packed data) is skipped during indexing — it would otherwise become one enormous, low-value chunk that dilutes relevance on large monorepos. Complements the existing 16 MB file-size cap, catching minified files that fall under it. Large hand-written docs (normal line lengths) are unaffected.
 
 ### Fixed
+- **Cancelled Tree-sitter parses no longer persist partial chunks.** When structural parsing exceeds its time budget, indexing follows the normal fallback chunking path instead of using an incomplete partial syntax tree.
 - **`.tsx` source uses Tree-sitter's TSX grammar.** TypeScript React files were registered as TypeScript but parsed with the non-JSX grammar, allowing parse errors to degrade structural chunks.
 - **MCP no longer neural-embeds the whole repo inline on the first query (#56).** The MCP auto-index now uses the fast hash model and defers neural embeddings to a background subprocess — mirroring the daemon — so the first query returns quickly even on very large repos. Previously the inline neural pass could block the first query for many minutes and, run by several MCP clients at once, saturate the host.
 - **MCP caches its neural query model per process (#57).** It was reconstructed on every `ig_search` (and even for `literal`/`regex` modes that never embed a query); it is now loaded once via `OnceLock`, only in the hybrid path.

@@ -524,6 +524,10 @@ fn scan_minified_run(no_newline_run: &mut usize, bytes: &[u8]) -> bool {
 /// comments while still absorbing normal doc-comments.
 const MAX_LEADING_COMMENT_LINES: usize = 20;
 
+/// Only very large BUILD-like sources benefit from per-target AST chunks.
+/// Smaller sources keep bounded text chunks to avoid diluting retrieval scores.
+const STARLARK_TARGET_AST_LINE_THRESHOLD: usize = 500;
+
 /// Heuristic: does a *trimmed* line look like a doc-comment, attribute, or
 /// decorator that conventionally sits directly above a definition (for the given
 /// `language`)?
@@ -618,16 +622,34 @@ fn try_tree_sitter_chunk_source(
     language: &str,
     lines: &[&str],
 ) -> Option<Vec<Chunk>> {
+    try_tree_sitter_chunk_source_with_timeout(
+        rel_path,
+        text,
+        language,
+        lines,
+        std::time::Duration::from_millis(100),
+    )
+}
+
+fn try_tree_sitter_chunk_source_with_timeout(
+    rel_path: &Path,
+    text: &str,
+    language: &str,
+    lines: &[&str],
+    parse_timeout: std::time::Duration,
+) -> Option<Vec<Chunk>> {
     use streaming_iterator::StreamingIterator;
     use tree_sitter::QueryCursor;
 
-    let (grammar, query) = tree_sitter_query(rel_path, language)?;
+    let (grammar, query) = tree_sitter_query(rel_path, language, lines.len())?;
 
-    // 100ms timeout to prevent infinite loops/hangs on massive minified JS files.
-    // We use ParseOptions to cancel long-running parses since timeout_micros was removed in 0.26
+    // The production caller uses a 100ms budget to prevent hangs on massive
+    // minified files. ParseOptions replaces timeout_micros in tree-sitter 0.26.
     let start_time = std::time::Instant::now();
+    let mut parse_cancelled = false;
     let mut cb = |_state: &tree_sitter::ParseState| {
-        if start_time.elapsed().as_millis() > 100 {
+        if start_time.elapsed() >= parse_timeout {
+            parse_cancelled = true;
             std::ops::ControlFlow::Break(())
         } else {
             std::ops::ControlFlow::Continue(())
@@ -652,6 +674,9 @@ fn try_tree_sitter_chunk_source(
             Some(options),
         )
     })?;
+    if parse_cancelled {
+        return None;
+    }
     let mut cursor = QueryCursor::new();
 
     let mut ranges = Vec::new();
@@ -836,6 +861,7 @@ thread_local! {
 fn tree_sitter_query(
     rel_path: &Path,
     language: &str,
+    line_count: usize,
 ) -> Option<(tree_sitter::Language, &'static tree_sitter::Query)> {
     use std::sync::OnceLock;
 
@@ -972,9 +998,16 @@ fn tree_sitter_query(
                 }) =>
         {
             cached_query!(
-                STARLARK_QUERY,
+                STARLARK_DEFINITION_QUERY,
                 tree_sitter_starlark::LANGUAGE,
                 "(function_definition) @fn"
+            )
+        }
+        "starlark" if line_count > STARLARK_TARGET_AST_LINE_THRESHOLD => {
+            cached_query!(
+                STARLARK_TARGET_QUERY,
+                tree_sitter_starlark::LANGUAGE,
+                "(expression_statement (call) @fn)"
             )
         }
         _ => None,
@@ -2022,9 +2055,10 @@ pub fn calculate_total(amount: f64) -> f64 {
     #[test]
     fn tsx_paths_use_the_tsx_grammar() {
         let src = "interface Props { title: string }\nexport function Card(props: Props) {\n  return <section>{props.title}</section>;\n}\n";
-        let (tsx_grammar, _) = tree_sitter_query(Path::new("Card.tsx"), "typescript").unwrap();
+        let (tsx_grammar, _) =
+            tree_sitter_query(Path::new("Card.tsx"), "typescript", src.lines().count()).unwrap();
         let (typescript_grammar, _) =
-            tree_sitter_query(Path::new("card.ts"), "typescript").unwrap();
+            tree_sitter_query(Path::new("card.ts"), "typescript", src.lines().count()).unwrap();
         let mut parser = tree_sitter::Parser::new();
 
         parser.set_language(&tsx_grammar).unwrap();
@@ -2323,6 +2357,54 @@ export function register(p: Plugin) {
             c.kind == ChunkKind::Function
                 && c.text.contains("payment_targets")
                 && !c.text.contains("checkout_targets")
+        }));
+    }
+
+    #[test]
+    fn starlark_cancelled_tree_sitter_parse_uses_fallback_path() {
+        let src = "def target(name):\n    return name\n".repeat(2_000);
+        let lines: Vec<&str> = src.lines().collect();
+
+        assert!(
+            try_tree_sitter_chunk_source_with_timeout(
+                Path::new("defs.bzl"),
+                &src,
+                "starlark",
+                &lines,
+                std::time::Duration::ZERO,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn starlark_small_build_files_retain_text_chunks() {
+        let src = "go_library(\n    name = \"checkout_target\",\n)\n\ngo_library(\n    name = \"payment_target\",\n)\n";
+        let chunks = chunk_source(Path::new("BUILD.bazel"), src);
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].kind, ChunkKind::Text);
+        assert!(chunks[0].text.contains("checkout_target"));
+        assert!(chunks[0].text.contains("payment_target"));
+    }
+
+    #[test]
+    fn starlark_very_large_build_files_chunk_individual_targets() {
+        let padding = "# generated target metadata\n".repeat(STARLARK_TARGET_AST_LINE_THRESHOLD);
+        let src = format!(
+            "go_library(\n    name = \"checkout_target\",\n)\n{padding}\ngo_library(\n    name = \"payment_target\",\n)\n"
+        );
+        let chunks = chunk_source(Path::new("BUILD.bazel"), &src);
+
+        assert!(chunks.iter().any(|c| {
+            c.kind == ChunkKind::Function
+                && c.text.contains("checkout_target")
+                && !c.text.contains("payment_target")
+        }));
+        assert!(chunks.iter().any(|c| {
+            c.kind == ChunkKind::Function
+                && c.text.contains("payment_target")
+                && !c.text.contains("checkout_target")
         }));
     }
 
