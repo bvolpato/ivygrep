@@ -38,7 +38,8 @@ pub struct Workspace {
 ///   3 — leading doc-comments folded into the following definition chunk (#59)
 ///   4 — Merkle metadata fingerprints include Unix ctime (#21)
 ///   5 — Starlark metadata/macro AST chunks and TSX grammar selection
-pub const INDEX_FORMAT_VERSION: u32 = 5;
+///   6 — Very large BUILD-like sources split target-call AST chunks
+pub const INDEX_FORMAT_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceMetadata {
