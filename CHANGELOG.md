@@ -4,6 +4,8 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-05-30
+
 ### Changed
 - **Index format bumped to v6 -- upgrading triggers a one-time full reindex.** Bazel/Starlark files now store first-class language metadata and Starlark macro AST chunks, very large BUILD-like sources split top-level target calls into AST chunks, and `.tsx` files use the TSX grammar rather than the plain TypeScript grammar; existing stored chunks must be rebuilt to pick up these behaviors.
 - **Index format bumped to v4 -- upgrading triggers a one-time full reindex.** Unix Merkle fingerprints now include inode change time (`ctime`) in addition to size and mtime, so a same-size edit followed by restored mtime cannot leave the index stale. The path remains part of the root hash through the snapshot map key. Verification stays metadata-only: no full-repository content reads were added.
