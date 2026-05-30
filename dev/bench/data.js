@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1780038392257,
+  "lastUpdate": 1780114582608,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -16325,6 +16325,140 @@ window.BENCHMARK_DATA = {
           {
             "name": "critical_journeys/vector_search_in_50k",
             "value": 1550.03,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "gh@brunovolpato.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "937128e26f6fa40ffcf32329332aaf6cd586d639",
+          "message": "release: v0.8.0 (#91)",
+          "timestamp": "2026-05-30T00:01:51-04:00",
+          "tree_id": "5aabae7bbb327cd7211a005843649eaa46fe12da",
+          "url": "https://github.com/bvolpato/ivygrep/commit/937128e26f6fa40ffcf32329332aaf6cd586d639"
+        },
+        "date": 1780114582190,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 140380.59,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 3821.52,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer_bulk/fresh_index_30k_chunks",
+            "value": 5267552.22,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_small_file",
+            "value": 14.44,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 2093.92,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 1750.14,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11095.03,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 10821.57,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 11.24,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 728.98,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 16584.96,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 3979.06,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 1432.8,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_simple_symbol_1000_files",
+            "value": 18772.11,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_complex_phrase_1000_files",
+            "value": 13086.23,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/literal_simple_symbol_1000_files",
+            "value": 3011.31,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/regex_symbol_1000_files",
+            "value": 2216.34,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 451374.5,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 176.38,
+            "unit": "µs"
+          },
+          {
+            "name": "hash_vector_build/ingest_5k_hash_vectors",
+            "value": 389889.17,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_one_file_change_10k_chunks",
+            "value": 40261.65,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k",
+            "value": 2125.65,
             "unit": "µs"
           }
         ]
