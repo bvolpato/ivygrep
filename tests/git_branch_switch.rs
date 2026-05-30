@@ -41,6 +41,11 @@ fn git(dir: &std::path::Path, args: &[&str]) {
     );
 }
 
+fn init_git_repo(dir: &std::path::Path) {
+    git(dir, &["init"]);
+    git(dir, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+}
+
 /// Helper: set IVYGREP_HOME, resolve workspace, index, return summary.
 fn setup_and_index(
     root: &std::path::Path,
@@ -170,7 +175,7 @@ fn git_branch_switch_updates_index_and_search_results() {
 
     // ── Phase 1: Create a git repo with initial content on main ──
 
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
 
     fs::write(
         root.path().join("core.rs"),
@@ -315,7 +320,7 @@ fn git_branch_switch_rapid_toggle_is_stable() {
     let home = tempdir().unwrap();
 
     // Create repo with two branches, each with distinct content
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
 
     fs::write(
         root.path().join("main_only.rs"),
@@ -378,7 +383,7 @@ fn git_branch_with_modified_content_same_filename() {
     let home = tempdir().unwrap();
 
     // Create repo where the same file has DIFFERENT content on different branches
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
 
     fs::write(
         root.path().join("config.rs"),
@@ -458,7 +463,7 @@ fn git_branch_renames_file_old_path_gone_new_path_indexed() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
 
     fs::write(
         root.path().join("old_name.rs"),
@@ -532,7 +537,7 @@ fn git_branch_adds_entire_subdirectory() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
 
     fs::write(
         root.path().join("main.rs"),
@@ -622,7 +627,7 @@ fn git_worktree_seeds_from_base_and_applies_delta() {
     let home = tempdir().unwrap();
 
     // Create a repo with 50 files to make the seed benefit obvious
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
 
     for i in 0..50 {
         fs::write(
@@ -768,7 +773,7 @@ fn git_worktree_repo_id_matches_main() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
     fs::write(root.path().join("main.rs"), "fn main() {}\n").unwrap();
     git(root.path(), &["add", "."]);
     git(root.path(), &["commit", "-m", "initial"]);
@@ -826,7 +831,7 @@ fn worktree_tombstone_hides_deleted_file_from_search() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
 
     fs::write(
         root.path().join("keep.rs"),
@@ -922,7 +927,7 @@ fn worktree_new_file_invisible_to_base_search() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
     fs::write(
         root.path().join("base.rs"),
         "pub fn base_func() -> bool { true }\n",
@@ -996,7 +1001,7 @@ fn worktree_modified_file_shows_overlay_content_not_base() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
     fs::write(
         root.path().join("divergent.rs"),
         "pub fn production_cardinal_zebra() -> i32 { 42 }\n",
@@ -1080,7 +1085,7 @@ fn worktree_moved_directory_checkout_restores_base_without_materializing_it() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
     fs::write(root.path().join(".gitignore"), ".git\n").unwrap();
     fs::create_dir_all(root.path().join("src/legacy")).unwrap();
     fs::create_dir_all(root.path().join("src/stable")).unwrap();
@@ -1214,7 +1219,7 @@ fn worktree_incremental_overlay_keeps_edit_when_live_base_is_unindexed() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
     fs::write(root.path().join(".gitignore"), ".git\n").unwrap();
     fs::write(
         root.path().join("shared.rs"),
@@ -1290,7 +1295,7 @@ fn worktree_first_overlay_refreshes_stale_base_before_inheriting_content() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
     fs::write(root.path().join(".gitignore"), ".git\n").unwrap();
     fs::write(
         root.path().join("shared.rs"),
@@ -1363,7 +1368,7 @@ fn worktree_empty_edit_hides_base_content_on_first_overlay_index() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
     fs::write(root.path().join(".gitignore"), ".git\n").unwrap();
     fs::write(
         root.path().join("mutable.rs"),
@@ -1421,7 +1426,7 @@ fn worktree_skip_gitignore_indexes_inherited_ignored_content_via_base() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
     fs::write(root.path().join(".gitignore"), ".git\nignored.rs\n").unwrap();
     fs::write(
         root.path().join("visible.rs"),
@@ -1517,7 +1522,7 @@ fn worktree_auto_indexes_base_when_missing() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
 
     for i in 0..10 {
         fs::write(
@@ -1597,7 +1602,7 @@ fn worktree_rebuilds_outdated_base_index_format() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
     for i in 0..5 {
         fs::write(
             root.path().join(format!("base_{i}.rs")),
@@ -1683,7 +1688,7 @@ fn worktree_rebuilds_outdated_zero_delta_overlay_format() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
     fs::write(root.path().join(".gitignore"), ".git\n").unwrap();
     fs::write(root.path().join("base.rs"), "pub fn base_marker() {}\n").unwrap();
     git(root.path(), &["add", "."]);
@@ -1771,7 +1776,7 @@ fn worktree_overlay_is_healthy_and_noop_on_no_change() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
     fs::write(root.path().join("base.rs"), "pub fn base() {}\n").unwrap();
     git(root.path(), &["add", "."]);
     git(root.path(), &["commit", "-m", "base"]);
@@ -1837,7 +1842,7 @@ fn worktree_incremental_overlay_update() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
     fs::write(
         root.path().join("stable.rs"),
         "pub fn stable_func() -> bool { true }\n",
@@ -1924,7 +1929,7 @@ fn multiple_worktrees_are_independent() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
     fs::write(
         root.path().join("shared.rs"),
         "pub fn shared_func() -> bool { true }\n",
@@ -2055,7 +2060,7 @@ fn worktree_delete_then_readd_shows_new_content() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
     fs::write(
         root.path().join("mutable.rs"),
         "pub fn mercury_astronaut_launch() -> i32 { 7 }\n",
@@ -2131,7 +2136,7 @@ fn worktree_overlay_staleness_invalidation() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
     fs::write(root.path().join("base.rs"), "pub fn base_v1() {}\n").unwrap();
     git(root.path(), &["add", "."]);
     git(root.path(), &["commit", "-m", "base v1"]);
@@ -2202,7 +2207,7 @@ fn worktree_overlay_auto_reindex_via_cli_e2e() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
-    git(root.path(), &["init", "-b", "main"]);
+    init_git_repo(root.path());
     fs::write(root.path().join("base.rs"), "pub fn base_v1() {}\n").unwrap();
     git(root.path(), &["add", "."]);
     git(root.path(), &["commit", "-m", "base v1"]);

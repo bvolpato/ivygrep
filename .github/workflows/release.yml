@@ -80,6 +80,8 @@ jobs:
       - name: Set up QEMU
         if: "contains(matrix.target, 'aarch64') && contains(matrix.runner, 'ubuntu-latest')"
         uses: docker/setup-qemu-action@v4
+        with:
+          cache-image: false
 
       - name: Smoke test
         shell: bash
