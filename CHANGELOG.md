@@ -4,6 +4,14 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-05-30
+
+### Fixed
+- **Dependency security updates.** Updated the TUI dependency stack to remove vulnerable `lru@0.12.5` and updated `rand` to `0.9.3`; release artifacts now contain the patched resolutions.
+
+### Maintenance
+- **Release workflows use supported GitHub Actions runtimes.** Updated QEMU and release-publishing actions to their Node 24 generations, removing Node 20 deprecation annotations from release and cross-platform E2E workflows.
+
 ## [0.8.0] — 2026-05-30
 
 ### Changed
