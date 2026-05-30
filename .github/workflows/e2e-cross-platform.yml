@@ -179,6 +179,7 @@ jobs:
         uses: docker/setup-qemu-action@v4
         with:
           platforms: arm64
+          cache-image: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -197,10 +198,13 @@ jobs:
       - name: Build with cross
         run: cross build --release --target aarch64-unknown-linux-musl
 
-      - name: Run tests with cross
+      # Match the shipped ARM binary profile; Candle's debug build emits
+      # fullfp16-only assembly for a baseline aarch64 target. Daemon autospawn
+      # uses current_exe(), which identifies QEMU under emulation; native jobs
+      # cover its recovery test.
+      - name: Run release-profile tests with cross
         if: github.event.inputs.test_scope != 'smoke'
-        run: cross test --lib --bins --tests --target aarch64-unknown-linux-musl
-        continue-on-error: true  # QEMU tests may flake under emulation
+        run: cross test --release --lib --bins --tests --target aarch64-unknown-linux-musl -- --skip query_revives_watcher_after_daemon_goes_offline
 
       - name: E2E smoke test (QEMU)
         run: |

@@ -5,6 +5,7 @@
 
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 use ivygrep::protocol::{BUILD_VERSION, DaemonRequest, DaemonResponse};
 use serial_test::serial;
@@ -44,6 +45,19 @@ async fn bind_for_test() -> Option<(ivygrep::ipc::IpcListener, std::path::PathBu
     }
 }
 
+fn git(dir: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run git {args:?}: {err}"));
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn create_test_repo(root: &Path) {
     fs::create_dir_all(root).unwrap();
     fs::write(
@@ -51,18 +65,12 @@ fn create_test_repo(root: &Path) {
         "pub fn daemon_roundtrip_marker() -> &'static str { \"pass\" }\n",
     )
     .unwrap();
-    std::process::Command::new("git")
-        .args(["init", "-b", "main"])
-        .current_dir(root)
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args(["add", "."])
-        .current_dir(root)
-        .output()
-        .unwrap();
-    std::process::Command::new("git")
-        .args([
+    git(root, &["init"]);
+    git(root, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    git(root, &["add", "."]);
+    git(
+        root,
+        &[
             "-c",
             "user.name=test",
             "-c",
@@ -70,10 +78,8 @@ fn create_test_repo(root: &Path) {
             "commit",
             "-m",
             "init",
-        ])
-        .current_dir(root)
-        .output()
-        .unwrap();
+        ],
+    );
 }
 
 /// Mini daemon: accept one connection, dispatch the request, reply.
