@@ -4,6 +4,25 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-05-31
+
+### Changed
+- **Index format bumped to v8 -- upgrading triggers a one-time full reindex.** Foreground indexing commits SQLite and Tantivy before ANN construction. Hash ANN and neural tiers now enrich asynchronously with stable vector keys, generation tracking, and tombstone journals.
+
+### Performance
+- **Fresh indexing becomes queryable before ANN construction.** Hash graph mutation moved out of foreground indexing into resumable background enhancement, so first lexical results no longer wait for HNSW ingest or persistence.
+- **Watcher updates use targeted Merkle deltas.** Safe changed-file updates avoid full-tree snapshot walks while preserving full-rebuild fallbacks for broad or ambiguous filesystem events.
+- **Focused searches filter before candidate caps.** Workspace scope and include/exclude globs now reduce lexical, semantic, and regex candidate pools before truncation, improving speed and recall for narrow searches.
+
+### Fixed
+- **Regex scope searches fall back after truncated prefilter results.** Regex search no longer misses valid scoped matches when Tantivy prefilter caps omit later files.
+- **Background vector enrichment remains correct across edits.** Hash and neural tombstone journals remove stale keys after lexical updates, while generation markers schedule repair when indexing races enrichment.
+- **Provisional hash evidence no longer overpowers lexical and literal matches.** Hash fusion weights now keep the first-tier ANN signal useful without displacing stronger direct evidence.
+
+### Tooling
+- **Daemon benchmarks distinguish cache replay from distinct warm misses.** Hot-query measurement now reports both cases explicitly.
+- **Relevance evaluation reports foreground and hash-enriched tiers separately.** Explicit enrichment checks bypass production background throttling so CI and local gates complete deterministically.
+
 ## [0.8.1] — 2026-05-30
 
 ### Fixed
