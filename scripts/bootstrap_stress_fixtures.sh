@@ -39,8 +39,13 @@ clone_repo_once() {
   local destination="$2"
 
   if [[ -d "${destination}/.git" ]]; then
-    echo "[skip] repo exists: ${destination}"
-    return
+    if git -C "${destination}" rev-parse --is-inside-work-tree >/dev/null 2>&1 &&
+      git -C "${destination}" status --short --untracked-files=no >/dev/null 2>&1; then
+      echo "[skip] repo exists: ${destination}"
+      return
+    fi
+    echo "[repair] removing unhealthy repo fixture: ${destination}"
+    rm -rf "${destination}"
   fi
 
   echo "[clone] ${url} -> ${destination}"

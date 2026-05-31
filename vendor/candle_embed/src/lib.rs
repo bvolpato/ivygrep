@@ -329,7 +329,7 @@ impl BasedBertEmbedder {
         let token_ids = Tensor::new(&tokens[..], device)?.unsqueeze(0)?;
         let token_type_ids = token_ids.zeros_like()?;
 
-        let outputs = model.forward(&token_ids, &token_type_ids)?;
+        let outputs = model.forward(&token_ids, &token_type_ids, None)?;
 
         let embedding = if self.mean_pooling {
             // Mean pooling

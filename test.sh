@@ -30,6 +30,7 @@ Examples:
   ./test.sh
   ./test.sh --quick
   ./test.sh --hash-only
+  ./test.sh --features cuda
   ./test.sh --filter query_aliases --nocapture
   ./scripts/bootstrap_stress_fixtures.sh && ./test.sh --stress
 EOF
@@ -56,6 +57,37 @@ scope_flags=(--lib --bins --tests)
 filter=()
 test_args=()
 extra_args=()
+wants_cuda=0
+
+features_include_cuda() {
+  local features=$1
+  [[ ",$features," == *",cuda,"* ]]
+}
+
+configure_cuda_compute_cap() {
+  ((wants_cuda)) || return 0
+  [[ -z "${CUDA_COMPUTE_CAP:-}" ]] || return 0
+
+  local cap=""
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits 2>/dev/null | head -n1 | tr -d '[:space:].')" || cap=""
+  fi
+
+  if [[ -n "$cap" ]]; then
+    export CUDA_COMPUTE_CAP="$cap"
+    echo "CUDA_COMPUTE_CAP=$CUDA_COMPUTE_CAP (from nvidia-smi)"
+    return 0
+  fi
+
+  local pci_devices=""
+  if command -v lspci >/dev/null 2>&1; then
+    pci_devices="$(lspci 2>/dev/null || true)"
+  fi
+  if grep -Eiq 'NVIDIA.*(GB20|RTX 50|Blackwell)' <<<"$pci_devices"; then
+    export CUDA_COMPUTE_CAP=120
+    echo "CUDA_COMPUTE_CAP=120 (inferred from NVIDIA Blackwell GPU)"
+  fi
+}
 
 while (($#)); do
   case "$1" in
@@ -88,6 +120,9 @@ while (($#)); do
     --features)
       [[ $# -ge 2 ]] || { echo "--features needs value" >&2; exit 2; }
       cargo_flags+=(--features "$2")
+      if features_include_cuda "$2"; then
+        wants_cuda=1
+      fi
       shift
       ;;
     --no-fmt)
@@ -132,6 +167,7 @@ done
 
 export IVYGREP_NO_AUTOSPAWN="${IVYGREP_NO_AUTOSPAWN:-1}"
 export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
+configure_cuda_compute_cap
 
 if ((do_fmt)); then
   run cargo fmt -- --check

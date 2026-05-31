@@ -59,6 +59,7 @@ install -m 0755 ./target/release/ig ~/.local/bin/ig
 
 ./build.sh          # release binary
 ./build.sh --features accelerate,metal  # opt-in macOS Metal neural inference
+./build.sh --features cuda  # opt-in Linux CUDA neural inference
 ./test.sh --quick   # fast local check
 ./test.sh           # fmt, clippy, unit/integration tests
 ./bench.sh          # critical Criterion benchmark, no stale local baseline comparison
@@ -228,7 +229,7 @@ ivygrep runs search and embedding inference locally and never sends your code, q
 
 - **Where data lives:** the index (which stores compressed source chunks in SQLite) and the daemon socket live under `~/.local/share/ivygrep` (or `$XDG_DATA_HOME`/`$IVYGREP_HOME`). The index directory is `0700` and the daemon socket `0600`, and the daemon verifies the connecting peer's uid — so other local users on a shared host can't read your indexed code or reach the daemon.
 - **Model download:** neural mode uses `hf-hub` to download AllMiniLM-L6-v2 model assets on first use and caches them under `$HF_HOME` or `~/.cache/huggingface`. Use `--hash` or a `--no-default-features` build when no model-network access is permitted.
-- **Inference backend:** macOS release binaries execute locally with Accelerate-backed CPU math; portable Linux release binaries execute locally on CPU. Source builds can opt into local Metal with `--features accelerate,metal` or CUDA with `--features cuda` on a compatible installation. `ig --status` reports the recorded backend that last generated neural vectors.
+- **Inference backend:** macOS release binaries execute locally with Accelerate-backed CPU math; portable Linux release binaries execute locally on CPU. Source builds can opt into local Metal with `--features accelerate,metal` or CUDA with `--features cuda` on a compatible installation. The CUDA build does not require cuDNN. If `nvidia-smi` cannot report compute capability, `build.sh` and `test.sh` infer `CUDA_COMPUTE_CAP=120` for RTX 50/Blackwell hosts; set `CUDA_COMPUTE_CAP` explicitly for other affected GPUs. `ig --status` reports the recorded backend that last generated neural vectors.
 - **Secrets in your repo:** ivygrep indexes file *contents*, including config/dotfiles (e.g. `.env`) unless they're gitignored. Those contents are stored in the local index and can appear in search snippets. Keep secrets out of the workspace or in `.gitignore`.
 - **MCP scope:** the `ig_search` MCP tool only searches the workspace at the provided `path` — it cannot search across other indexed projects.
 
@@ -274,6 +275,7 @@ ig --mcp                           # start MCP server (stdio)
 ./test.sh           # fmt, ShellCheck, clippy, unit/integration tests
 ./build.sh --locked # release binary, Cargo.lock unchanged
 ./build.sh --locked --features accelerate,metal  # opt-in macOS Metal neural binary
+./build.sh --locked --features cuda  # opt-in Linux CUDA neural binary
 ./bench.sh          # critical Criterion benchmark, no stale local baseline comparison
 ```
 The test suite covers unit tests, CLI snapshots, concurrency, golden queries, labeled relevance metrics, incremental CRUD, MCP, daemon recovery, git/worktree behavior, property-based Merkle invariants, and benchmark guards.
@@ -287,6 +289,10 @@ Benchmark output reports per-operation latency; short-looking numbers are repeat
 # Opt-in macOS Metal backend validation (downloads local model artifacts on first run)
 ./build.sh --locked --features accelerate,metal
 ./scripts/e2e_neural_backend.sh --binary ./target/release/ig --expect-backend "Candle Metal"
+
+# Opt-in Linux CUDA backend validation (downloads local model artifacts on first run)
+./build.sh --locked --features cuda
+./scripts/e2e_neural_backend.sh --binary ./target/release/ig --expect-backend "Candle CUDA"
 ```
 These smoke tests run against throwaway projects and isolated `IVYGREP_HOME` directories; the neural backend check embeds fixture text locally and verifies recorded backend reporting.
 

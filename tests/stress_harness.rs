@@ -156,7 +156,7 @@ fn run_index_and_query(
 fn stress_shakespeare_index_and_query() {
     let fixture = stress_root().join("workspaces/shakespeare");
     require_fixture(&fixture);
-    run_index_and_query(&fixture, "to be or not to be", "to be", 1);
+    run_index_and_query(&fixture, "HAMLET", "HAMLET", 1);
 }
 
 #[test]
@@ -600,7 +600,7 @@ fn stress_multi_workspace_concurrent_index() {
     require_fixture(&ripgrep);
     require_fixture(&alice);
 
-    // Stage each into separate temp dirs with separate IVYGREP_HOME
+    // Stage each into separate temp dirs with separate IVYGREP_HOME.
     let staging_rg = tempfile::tempdir().unwrap();
     let staging_alice = tempfile::tempdir().unwrap();
     let home_rg = tempfile::tempdir().unwrap();
@@ -623,35 +623,37 @@ fn stress_multi_workspace_concurrent_index() {
 
     let home_rg_path = home_rg.path().to_path_buf();
     let home_alice_path = home_alice.path().to_path_buf();
-    let rg_root_clone = rg_root.clone();
-    let alice_root_clone = alice_root.clone();
+    let ws_rg = {
+        unsafe { std::env::set_var("IVYGREP_HOME", &home_rg_path) };
+        Workspace::resolve(&rg_root).unwrap()
+    };
+    let ws_alice = {
+        unsafe { std::env::set_var("IVYGREP_HOME", &home_alice_path) };
+        Workspace::resolve(&alice_root).unwrap()
+    };
 
     let h1 = thread::spawn(move || {
         b1.wait();
-        unsafe { std::env::set_var("IVYGREP_HOME", &home_rg_path) };
-        let ws = Workspace::resolve(&rg_root_clone).unwrap();
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
-        let summary = index_workspace(&ws, &model).unwrap();
+        let summary = index_workspace(&ws_rg, &model).unwrap();
         eprintln!(
             "[multi-ws] ripgrep: files={} chunks={}",
             summary.indexed_files, summary.total_chunks
         );
         assert!(summary.indexed_files > 100);
-        (ws, model)
+        (ws_rg, model)
     });
 
     let h2 = thread::spawn(move || {
         b2.wait();
-        unsafe { std::env::set_var("IVYGREP_HOME", &home_alice_path) };
-        let ws = Workspace::resolve(&alice_root_clone).unwrap();
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
-        let summary = index_workspace(&ws, &model).unwrap();
+        let summary = index_workspace(&ws_alice, &model).unwrap();
         eprintln!(
             "[multi-ws] alice: files={} chunks={}",
             summary.indexed_files, summary.total_chunks
         );
         assert!(summary.indexed_files >= 1);
-        (ws, model)
+        (ws_alice, model)
     });
 
     let (ws_rg, model_rg) = h1.join().expect("ripgrep index thread panicked");
@@ -687,7 +689,7 @@ fn stress_multi_workspace_concurrent_index() {
         b2.wait();
         let hits = hybrid_search(
             &ws_a,
-            "down the rabbit hole",
+            "rabbit-hole",
             Some(m_a.as_ref()),
             &SearchOptions::default(),
         )

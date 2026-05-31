@@ -131,9 +131,11 @@ and embedding over [`candle-core`](https://github.com/huggingface/candle).
 - **Current acceleration** -- macOS release builds enable Accelerate-backed
   Candle CPU math; portable Linux release builds use Candle CPU execution.
   Source builds can opt into local Metal or CUDA inference with `--features
-  metal` or `--features cuda`. Metal is exercised in Apple Silicon CI but is
-  not a release default: its current single-stream enhancement path uses less
-  memory but is slower than the CPU worker pool.
+  metal` or `--features cuda`. CUDA builds do not require cuDNN. `build.sh`
+  and `test.sh` infer `CUDA_COMPUTE_CAP=120` for RTX 50/Blackwell hosts when
+  `nvidia-smi` cannot report compute capability. Metal is exercised in Apple
+  Silicon CI but is not a release default: its current single-stream
+  enhancement path uses less memory but is slower than the CPU worker pool.
 - **Background thread budget** -- CPU neural enhancement uses at most 25% of
   CPU cores, capped at eight worker/model instances. Metal currently uses one
   model instance to avoid multiplying local GPU/unified-memory residency.
@@ -443,7 +445,7 @@ or `~/.cache/huggingface`.
 | `neural` | default | Enables Candle neural embeddings. Downloads model assets on first neural use. |
 | `accelerate` | opt-in | Uses Apple's Accelerate framework for Candle CPU math on macOS. |
 | `metal` | opt-in | Executes Candle neural inference through Metal when a local Metal device is available; falls back locally to CPU. |
-| `cuda` | opt-in | Executes Candle neural inference through CUDA when built on a compatible CUDA host; falls back locally to CPU. |
+| `cuda` | opt-in | Executes Candle neural inference through CUDA when built on a compatible CUDA host; falls back locally to CPU. Does not require cuDNN. |
 | *(none)* | - | Hash-only mode. Smaller binary, no model download, lower search quality. |
 
 ```bash
@@ -457,7 +459,7 @@ cargo build --release --no-default-features
 cargo build --release --features accelerate,metal
 
 # Linux CUDA build (requires a compatible CUDA installation)
-cargo build --release --features cuda
+./build.sh --features cuda
 ```
 
 Release binaries for macOS are built with `accelerate`. A separate Apple
