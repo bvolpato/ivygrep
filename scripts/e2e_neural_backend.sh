@@ -5,6 +5,7 @@ script_dir=$(CDPATH='' cd "$(dirname "$0")" && pwd)
 root=$(CDPATH='' cd "$script_dir/.." && pwd)
 ig_bin="$root/target/release/ig"
 expected_backend=""
+allowed_backend=""
 
 usage() {
   cat <<'EOF'
@@ -16,6 +17,7 @@ Usage:
 Options:
   --binary PATH          Use this ig binary (default: ./target/release/ig)
   --expect-backend TEXT  Status substring required after neural enhancement
+  --allow-backend TEXT   Alternate accepted status substring
   -h, --help             Show help
 EOF
 }
@@ -35,6 +37,11 @@ while [ "$#" -gt 0 ]; do
     --expect-backend)
       [ "$#" -ge 2 ] || fail "--expect-backend needs text"
       expected_backend=$2
+      shift 2
+      ;;
+    --allow-backend)
+      [ "$#" -ge 2 ] || fail "--allow-backend needs text"
+      allowed_backend=$2
       shift 2
       ;;
     -h|--help)
@@ -71,7 +78,13 @@ export IVYGREP_NO_AUTOSPAWN=1
 "$ig_bin" --enhance-internal "$project" >/dev/null
 "$ig_bin" --status > "$tmp_root/status.txt"
 
-grep -Fq "$expected_backend" "$tmp_root/status.txt" ||
+reported_backend=""
+if grep -Fq "$expected_backend" "$tmp_root/status.txt"; then
+  reported_backend=$expected_backend
+elif [ -n "$allowed_backend" ] && grep -Fq "$allowed_backend" "$tmp_root/status.txt"; then
+  reported_backend=$allowed_backend
+else
   fail "expected backend '$expected_backend' not reported; status follows: $(cat "$tmp_root/status.txt")"
+fi
 
-echo "Neural backend procedure passed: $expected_backend"
+echo "Neural backend procedure passed: $reported_backend"

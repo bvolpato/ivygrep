@@ -14,6 +14,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Testing
 - **Linux CUDA backend smoke is documented and verified.** README and architecture docs now include `./build.sh --features cuda` plus `e2e_neural_backend.sh --expect-backend "Candle CUDA"`.
+- **Metal opt-in smoke accepts safe CPU fallback.** CI now treats `Candle CPU (Accelerate)` as valid when the Metal self-test rejects the accelerator backend.
 - **Large text stress queries avoid low-confidence phrase filtering.** Shakespeare and Alice stress checks use deterministic indexed terms, and multi-workspace stress no longer mutates `IVYGREP_HOME` from worker threads.
 
 ## [0.9.0] — 2026-05-31

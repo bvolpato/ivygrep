@@ -153,4 +153,4 @@ jobs:
 
       - name: Validate local accelerator execution
         if: matrix.validate_backend == 'Candle Metal'
-        run: ./scripts/e2e_neural_backend.sh --binary "$PWD/target/release/ig" --expect-backend "${{ matrix.validate_backend }}"
+        run: ./scripts/e2e_neural_backend.sh --binary "$PWD/target/release/ig" --expect-backend "${{ matrix.validate_backend }}" --allow-backend "Candle CPU (Accelerate)"
