@@ -9,6 +9,7 @@ All notable changes to ivygrep are documented in this file.
 ### Fixed
 - **Linux CUDA source builds work on current Candle.** Updated the Candle dependency stack and CUDA forward-call integration so `--features cuda` builds and runs on Linux without requiring cuDNN.
 - **RTX 50/Blackwell CUDA builds infer compute capability when NVML is unavailable.** `build.sh` and `test.sh` now set `CUDA_COMPUTE_CAP=120` on detected RTX 50/Blackwell hosts when `nvidia-smi` cannot report compute capability, while still honoring an explicit `CUDA_COMPUTE_CAP`.
+- **Accelerator backends self-test before use.** Metal or CUDA initialization now falls back to local CPU inference if the loaded backend returns invalid validation embeddings, avoiding broken persisted neural vectors on backend/runtime regressions.
 - **Stress fixture bootstrap repairs corrupt shallow clones.** `scripts/bootstrap_stress_fixtures.sh` now reclones unhealthy repo fixtures instead of reusing a corrupt `.git/index`.
 
 ### Testing

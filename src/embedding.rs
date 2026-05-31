@@ -304,6 +304,32 @@ where
 }
 
 #[cfg(feature = "neural")]
+fn validate_accelerator_embedder(
+    embedder: &candle_embed::BasedBertEmbedder,
+    backend: NeuralBackend,
+) -> anyhow::Result<()> {
+    let vector = embedder.embed_one("ivygrep neural backend validation probe")?;
+    if vector.len() != embedder.model_dimensions {
+        anyhow::bail!(
+            "{} produced {} dimensions, expected {}",
+            backend.label(),
+            vector.len(),
+            embedder.model_dimensions
+        );
+    }
+    if vector.iter().any(|value| !value.is_finite()) {
+        anyhow::bail!(
+            "{} produced a non-finite validation vector",
+            backend.label()
+        );
+    }
+    if vector.iter().all(|value| value.abs() <= f32::EPSILON) {
+        anyhow::bail!("{} produced a zero validation vector", backend.label());
+    }
+    Ok(())
+}
+
+#[cfg(feature = "neural")]
 impl CandleEmbeddingModel {
     pub fn new() -> anyhow::Result<Self> {
         Self::new_internal(false)
@@ -357,6 +383,9 @@ impl CandleEmbeddingModel {
                 Some("cuda") => NeuralBackend::Cuda,
                 _ => NeuralBackend::cpu(),
             };
+            if actual.accelerator() {
+                validate_accelerator_embedder(&embedder, actual)?;
+            }
             Ok((embedder, actual))
         };
 
