@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure process-cold CLI search against warm daemon search on Linux."""
+"""Measure process-cold, warm distinct-query, and cache-replay search latency."""
 
 from __future__ import annotations
 
@@ -19,6 +19,15 @@ from typing import Any
 DEFAULT_KERNEL = Path("/home/bruno/githubworkspace/linux")
 DEFAULT_HOME = Path("/tmp/ivygrep-daemon-hot-bench-home")
 DEFAULT_QUERY = "kernel memory allocation"
+DEFAULT_DISTINCT_QUERIES = [
+    "scheduler task wakeup",
+    "virtual memory page fault",
+    "network socket receive buffer",
+    "filesystem inode lookup",
+    "device driver interrupt handler",
+    "process signal delivery",
+    "mutex lock contention",
+]
 TMP_ROOT = Path("/tmp").resolve()
 
 
@@ -137,6 +146,12 @@ def main() -> int:
     parser.add_argument("--kernel", type=Path, default=DEFAULT_KERNEL)
     parser.add_argument("--bench-home", type=Path, default=DEFAULT_HOME)
     parser.add_argument("--query", default=DEFAULT_QUERY)
+    parser.add_argument(
+        "--distinct-query",
+        action="append",
+        dest="distinct_queries",
+        help="warm daemon cache-miss query; repeat for multiple samples",
+    )
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--samples", type=int, default=7)
     parser.add_argument("--warmups", type=int, default=1)
@@ -195,9 +210,16 @@ def main() -> int:
             env=env,
         )
 
-    query_args = ["--hash", "--json", "-n", str(args.limit), args.query, str(kernel)]
-    local_cmd = [str(binary), *query_args[:2], "--no-watch", *query_args[2:]]
-    daemon_cmd = [str(binary), *query_args]
+    def query_cmd(query: str, *, no_watch: bool = False) -> list[str]:
+        query_args = ["--hash", "--json"]
+        if no_watch:
+            query_args.append("--no-watch")
+        query_args.extend(["-n", str(args.limit), query, str(kernel)])
+        return [str(binary), *query_args]
+
+    local_cmd = query_cmd(args.query, no_watch=True)
+    daemon_cmd = query_cmd(args.query)
+    distinct_queries = args.distinct_queries or DEFAULT_DISTINCT_QUERIES
 
     local_ms: list[float] = []
     local_hits = 0
@@ -214,33 +236,54 @@ def main() -> int:
             _, stdout = timed(daemon_cmd, cwd=repo, env=env)
             daemon_hits = max(daemon_hits, hit_count(stdout))
 
-        daemon_ms: list[float] = []
+        daemon_cache_replay_ms: list[float] = []
         for _ in range(args.samples):
             seconds, stdout = timed(daemon_cmd, cwd=repo, env=env)
-            daemon_ms.append(seconds * 1000.0)
+            daemon_cache_replay_ms.append(seconds * 1000.0)
             daemon_hits = max(daemon_hits, hit_count(stdout))
+
+        daemon_warm_distinct_ms: list[float] = []
+        distinct_hits = 0
+        for i in range(args.samples):
+            seconds, stdout = timed(
+                query_cmd(distinct_queries[i % len(distinct_queries)]),
+                cwd=repo,
+                env=env,
+            )
+            daemon_warm_distinct_ms.append(seconds * 1000.0)
+            distinct_hits += hit_count(stdout)
     finally:
         daemon.stop()
 
     local_p95_ms = percentile(local_ms, 0.95)
-    daemon_p95_ms = percentile(daemon_ms, 0.95)
+    daemon_cache_replay_p95_ms = percentile(daemon_cache_replay_ms, 0.95)
+    daemon_warm_distinct_p95_ms = percentile(daemon_warm_distinct_ms, 0.95)
     local_median_ms = statistics.median(local_ms)
-    daemon_median_ms = statistics.median(daemon_ms)
+    daemon_cache_replay_median_ms = statistics.median(daemon_cache_replay_ms)
+    daemon_warm_distinct_median_ms = statistics.median(daemon_warm_distinct_ms)
     metrics = {
-        "primary_score_ms": daemon_p95_ms,
-        "daemon_hot_p95_ms": daemon_p95_ms,
-        "daemon_hot_median_ms": daemon_median_ms,
+        "primary_score_ms": daemon_warm_distinct_p95_ms,
+        "daemon_warm_distinct_p95_ms": daemon_warm_distinct_p95_ms,
+        "daemon_warm_distinct_median_ms": daemon_warm_distinct_median_ms,
+        "daemon_cache_replay_p95_ms": daemon_cache_replay_p95_ms,
+        "daemon_cache_replay_median_ms": daemon_cache_replay_median_ms,
+        # Backward-compatible aliases for historical benchmark consumers.
+        "daemon_hot_p95_ms": daemon_cache_replay_p95_ms,
+        "daemon_hot_median_ms": daemon_cache_replay_median_ms,
         "daemon_first_query_ms": first_seconds * 1000.0,
         "local_process_cold_p95_ms": local_p95_ms,
         "local_process_cold_median_ms": local_median_ms,
         "daemon_speedup_vs_local_median": (
-            local_median_ms / daemon_median_ms if daemon_median_ms > 0 else 0.0
+            local_median_ms / daemon_warm_distinct_median_ms
+            if daemon_warm_distinct_median_ms > 0
+            else 0.0
         ),
-        "daemon_speedup_vs_local_p95": local_p95_ms / daemon_p95_ms
-        if daemon_p95_ms > 0
+        "daemon_speedup_vs_local_p95": local_p95_ms / daemon_warm_distinct_p95_ms
+        if daemon_warm_distinct_p95_ms > 0
         else 0.0,
         "local_hits": local_hits,
         "daemon_hits": daemon_hits,
+        "distinct_hits": distinct_hits,
         "samples": args.samples,
         "warmups": args.warmups,
         "build_seconds": build_seconds,

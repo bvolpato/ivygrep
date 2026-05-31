@@ -549,7 +549,7 @@ fn bench_vector_store(c: &mut Criterion) {
                 )
                 .unwrap();
                 for (key, vec) in vectors {
-                    store.upsert(key, vec);
+                    store.upsert(key, vec).unwrap();
                 }
                 store.save().unwrap();
             },
@@ -570,7 +570,7 @@ fn bench_vector_store(c: &mut Criterion) {
             for i in 0..1000u64 {
                 let mut v = vec![0.0f32; EMBEDDING_DIMENSIONS];
                 v[(i as usize) % EMBEDDING_DIMENSIONS] = 1.0;
-                search_store.upsert(i, v);
+                search_store.upsert(i, v).unwrap();
             }
             search_store.save().unwrap();
             drop(search_store);
@@ -626,9 +626,9 @@ fn bench_hash_vector_build(c: &mut Criterion) {
                     ivygrep::vector_store::ScalarKind::F16,
                 )
                 .unwrap();
-                store.reserve_additional(vectors.len());
+                store.reserve_additional(vectors.len()).unwrap();
                 for (key, vector) in vectors {
-                    store.add_unchecked(key, vector);
+                    store.add_unchecked(key, vector).unwrap();
                 }
                 assert_eq!(store.size(), HASH_VECTOR_BUILD_COUNT);
                 black_box(store);
@@ -692,7 +692,7 @@ fn bench_critical_journeys(c: &mut Criterion) {
                     let v: Vec<f32> = (0..EMBEDDING_DIMENSIONS)
                         .map(|j| (((i as usize * 31 + j * 17) % 97) as f32) / 97.0)
                         .collect();
-                    store.upsert(i, v);
+                    store.upsert(i, v).unwrap();
                 }
                 store.save().unwrap();
             }

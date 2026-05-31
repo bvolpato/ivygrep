@@ -70,8 +70,9 @@ approximate nearest-neighbor (ANN) search library. It implements HNSW
   *"retry logic for payments"* finds `fn handle_payment_retry()` even though
   the terms don't overlap.
 - **Two-tier vector stores:**
-  - `vectors.usearch` — 256-dimensional hash embeddings, built instantly during
-    indexing. Always present.
+  - `vectors.usearch` — 256-dimensional hash embeddings, built asynchronously
+    after lexical indexing. The store exists immediately but can be empty while
+    BM25/literal search is already queryable.
   - `vectors_neural.usearch` — 384-dimensional Candle neural embeddings
     (AllMiniLM-L6-v2), built asynchronously by a background subprocess. Higher
     quality, used when available.
@@ -136,12 +137,23 @@ and embedding over [`candle-core`](https://github.com/huggingface/candle).
 - **Background thread budget** -- CPU neural enhancement uses at most 25% of
   CPU cores, capped at eight worker/model instances. Metal currently uses one
   model instance to avoid multiplying local GPU/unified-memory residency.
-- **Graceful fallback** -- if the neural model fails to load (missing download,
-  corrupt cache, unsupported platform), the system silently falls back to hash
-  embeddings. No search ever fails because of a model problem.
+- **Graceful fallback** -- if neural enhancement fails (missing download,
+  corrupt cache, unsupported platform), lexical/hash search stays available and
+  status reports the failed background job.
 
 **Why Candle and not a hosted embedding API:** model inference runs in-process
 with no Python service and no source-code upload.
+
+### Model Evaluation Roadmap
+
+Keep `AllMiniLM-L6-v2` as default until a replacement wins relevance and laptop
+throughput gates on macOS and Linux.
+
+| Candidate | Fit | Required work before experiment |
+|---|---|---|
+| [`BAAI/bge-small-en-v1.5`](https://huggingface.co/BAAI/bge-small-en-v1.5) | Closest low-cost candidate: 384 dimensions and 512-token sequence length | Add BGE pooling and query-prefix behavior; compare CPU, Metal, and CUDA throughput |
+| [`jinaai/jina-embeddings-v2-base-code`](https://huggingface.co/jinaai/jina-embeddings-v2-base-code) | Code-aware 768-dimensional model with 8192-token context | Add JinaBERT adapter; measure larger vector-store memory and ANN cost |
+| [`nomic-ai/nomic-embed-text-v1.5`](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5) | 768-dimensional model with 8192-token context and Matryoshka dimensions | Add custom model adapter and task prefixes; evaluate reduced dimensions before increasing index footprint |
 
 ### Tree-sitter — AST-Aware Chunking For 10 Core Languages
 
@@ -340,10 +352,10 @@ re-inserted at the same vector key.
 ### 1. Indexing Pipeline
 
 When a workspace is indexed (first search, `--add`, or file watcher trigger),
-the pipeline processes files through four stages:
+the pipeline commits a lexical index first, then enriches vectors in background:
 
 ```
-① Scan  →  ② Chunk  →  ③ Embed  →  ④ Store
+① Scan  →  ② Chunk  →  ③ Store lexical index  →  ④ Enrich vectors
 ```
 
 1. **Scan** — the `ignore`-crate walker traverses the workspace respecting
@@ -356,13 +368,12 @@ the pipeline processes files through four stages:
    - Regex-based signature detection for 35+ other languages
    - Fixed-window fallback for text/config/markup
 
-3. **Embed** — each chunk's text is embedded:
-   - Hash embeddings (256-dim) are computed inline, instantly
-   - Neural embeddings (384-dim, AllMiniLM-L6-v2) are computed later by a
-     background subprocess (`--enhance-internal`)
+3. **Store lexical index** — chunks commit to SQLite and Tantivy. Queries can
+   return BM25/literal results as soon as this commit completes.
 
-4. **Store** — chunks are written to three storage backends in a single
-   transaction: SQLite (metadata), Tantivy (full-text index), USearch (vectors).
+4. **Enrich vectors** — a niced, load-aware background subprocess
+   (`--enhance-internal`) builds resumable 256-dim hash ANN vectors, then
+   384-dim AllMiniLM-L6-v2 neural vectors.
 
 ### 2. Search Pipeline
 
@@ -407,12 +418,16 @@ socket. It provides:
 └── indexes/
     └── <workspace-id>/                 # hex(xxh3(canonical_path))
         ├── workspace.json              # Workspace metadata
-        ├── merkle.json                 # File fingerprint snapshot
+        ├── merkle_snapshot.json        # File fingerprint snapshot
         ├── metadata.sqlite3            # SQLite — chunk text + metadata
         ├── tantivy/                    # Tantivy BM25 index segments
-        ├── vectors.usearch             # Hash embeddings (256-dim)
+        ├── vectors.usearch             # Async hash embeddings (256-dim)
         ├── vectors_neural.usearch      # Neural Candle embeddings (384-dim)
-        ├── .enhancing.pid              # PID of neural enhancement subprocess
+        ├── .hash_tombstones            # Stale hash keys queued after foreground edits
+        ├── .hash_enhanced_generation   # Last lexical generation covered by hash vectors
+        ├── .neural_tombstones          # Stale neural keys queued after foreground edits
+        ├── .enhancing.pid              # PID of hash + neural enrichment process
+        ├── .enhancing.phase            # Current hash or neural enrichment phase
         └── .watcher.pid                # PID of daemon watcher
 ```
 

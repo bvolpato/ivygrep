@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -178,8 +178,7 @@ pub fn open_storage(workspace: &Workspace, embedding_dimensions: usize) -> Resul
     let _ = open_tantivy_index(&tantivy_dir)?;
 
     let vector_path = workspace.vector_path();
-    let vectors = VectorStore::open(&vector_path, embedding_dimensions, ScalarKind::F16)?;
-    vectors.save()?;
+    ensure_hash_vector_store(&vector_path, embedding_dimensions)?;
 
     Ok(StorageHandles {
         sqlite_path,
@@ -188,24 +187,42 @@ pub fn open_storage(workspace: &Workspace, embedding_dimensions: usize) -> Resul
     })
 }
 
+fn ensure_hash_vector_store(path: &Path, embedding_dimensions: usize) -> Result<()> {
+    if path.exists() {
+        let _ = VectorStore::open_readonly(path, embedding_dimensions, ScalarKind::F16)?;
+    } else {
+        VectorStore::open(path, embedding_dimensions, ScalarKind::F16)?.save()?;
+    }
+    Ok(())
+}
+
 pub fn index_workspace(
     workspace: &Workspace,
     embedding_model: &dyn EmbeddingModel,
 ) -> Result<IndexingSummary> {
-    index_workspace_with_options(workspace, embedding_model, true)
+    index_workspace_with_options(workspace, embedding_model, true, None)
 }
 
 pub fn index_workspace_for_watcher(
     workspace: &Workspace,
     embedding_model: &dyn EmbeddingModel,
 ) -> Result<IndexingSummary> {
-    index_workspace_with_options(workspace, embedding_model, false)
+    index_workspace_with_options(workspace, embedding_model, false, None)
+}
+
+pub fn index_workspace_paths_for_watcher(
+    workspace: &Workspace,
+    embedding_model: &dyn EmbeddingModel,
+    changed_paths: &[PathBuf],
+) -> Result<IndexingSummary> {
+    index_workspace_with_options(workspace, embedding_model, false, Some(changed_paths))
 }
 
 fn index_workspace_with_options(
     workspace: &Workspace,
     embedding_model: &dyn EmbeddingModel,
     trust_live_watcher: bool,
+    watcher_paths: Option<&[PathBuf]>,
 ) -> Result<IndexingSummary> {
     workspace.ensure_dirs()?;
 
@@ -283,7 +300,12 @@ fn index_workspace_with_options(
         }
     });
 
-    let result = index_workspace_inner(workspace, embedding_model, trust_live_watcher);
+    let result = index_workspace_inner(
+        workspace,
+        embedding_model,
+        trust_live_watcher,
+        watcher_paths,
+    );
 
     // Run a checkpoint to reclaim WAL space after bulk writes, then
     // truncate the WAL file so it doesn't keep consuming disk.
@@ -313,6 +335,7 @@ fn index_workspace_inner(
     workspace: &Workspace,
     embedding_model: &dyn EmbeddingModel,
     trust_live_watcher: bool,
+    watcher_paths: Option<&[PathBuf]>,
 ) -> Result<IndexingSummary> {
     // Write metadata early so the workspace appears in `ig --status` during indexing.
     // The final write after completion updates last_indexed_at_unix.
@@ -397,6 +420,7 @@ fn index_workspace_inner(
                             workspace,
                             embedding_model,
                             trust_live_watcher,
+                            None,
                         );
                     }
                 }
@@ -426,7 +450,7 @@ fn index_workspace_inner(
                 let _ = fs::remove_file(workspace.overlay_vector_path());
                 let _ = fs::remove_file(workspace.base_ref_path());
                 let _ = fs::remove_file(workspace.merkle_snapshot_path());
-                return index_workspace_inner(workspace, embedding_model, trust_live_watcher);
+                return index_workspace_inner(workspace, embedding_model, trust_live_watcher, None);
             }
         }
 
@@ -524,7 +548,7 @@ fn index_workspace_inner(
                 let _ = fs::remove_file(workspace.base_ref_path());
                 let _ = fs::remove_file(workspace.merkle_snapshot_path());
                 // Re-enter this function to take the fresh overlay creation path
-                return index_workspace_inner(workspace, embedding_model, trust_live_watcher);
+                return index_workspace_inner(workspace, embedding_model, trust_live_watcher, None);
             }
             None
         } else {
@@ -624,11 +648,26 @@ fn index_workspace_inner(
         }
         (d, Some(new), clear_overlay_paths)
     } else {
-        // Standard full-index path (non-worktree or base not available)
         let old = MerkleSnapshot::load(&workspace.merkle_snapshot_path())?;
-        let _ = fs::write(workspace.indexing_progress_path(), "scanning");
-        let new = MerkleSnapshot::build(&workspace.root, skip_gitignore)?;
-        let d = old.diff(&new);
+        // Watcher events already identify changed files. Apply those directly
+        // when safe, keeping full scans as reconciliation fallback for ignore
+        // edits, directories, overlays, and uncertain state.
+        let targeted = if let Some(paths) = watcher_paths.filter(|paths| !paths.is_empty())
+            && workspace.merkle_snapshot_path().exists()
+        {
+            old.refresh_paths(&workspace.root, paths, skip_gitignore)?
+        } else {
+            None
+        };
+        let (new, d) = if let Some((new, diff)) = targeted {
+            let _ = fs::write(workspace.indexing_progress_path(), "applying watcher delta");
+            (new, diff)
+        } else {
+            let _ = fs::write(workspace.indexing_progress_path(), "scanning");
+            let new = MerkleSnapshot::build(&workspace.root, skip_gitignore)?;
+            let diff = old.diff(&new);
+            (new, diff)
+        };
         if d.added_or_modified.is_empty() && d.deleted.is_empty() && workspace_is_indexed(workspace)
         {
             return Ok(IndexingSummary {
@@ -659,13 +698,13 @@ fn index_workspace_inner(
 
     if !use_overlay {
         let preserved_metadata = workspace.read_metadata().ok().flatten();
-        if let Err(err) = open_storage(workspace, embedding_model.dimensions()) {
+        if let Err(err) = open_storage(workspace, crate::EMBEDDING_DIMENSIONS) {
             tracing::warn!(
                 "storage verification failed for {}: {err:#}; rebuilding index storage",
                 workspace.root.display()
             );
             rebuild_index_storage(workspace, preserved_metadata.as_ref())?;
-            let _ = open_storage(workspace, embedding_model.dimensions()).with_context(|| {
+            let _ = open_storage(workspace, crate::EMBEDDING_DIMENSIONS).with_context(|| {
                 format!(
                     "failed to reopen index storage after rebuild for {}",
                     workspace.root.display()
@@ -715,8 +754,9 @@ fn index_workspace_inner(
     }
     let mut writer = writer.context("writer must be acquired after retries")?;
 
-    let mut vector_index =
-        VectorStore::open(&vector_path, embedding_model.dimensions(), ScalarKind::F16)?;
+    ensure_hash_vector_store(&vector_path, crate::EMBEDDING_DIMENSIONS)?;
+    let hash_tombstones_path = workspace.hash_tombstones_path();
+    let neural_tombstones_path = (!use_overlay).then(|| workspace.neural_tombstones_path());
 
     // Batch SQLite writes in a transaction for ~10-50x speedup.
     // Mutable so we can periodically commit and avert massive WAL files.
@@ -726,7 +766,14 @@ fn index_workspace_inner(
     // that have returned to base content or were removed after being overlay-only.
     if use_overlay {
         for rel_path in &clear_overlay_paths {
-            remove_file_chunks(&tx, &mut writer, &fields, &mut vector_index, rel_path)?;
+            remove_file_chunks(
+                &tx,
+                &mut writer,
+                &fields,
+                &hash_tombstones_path,
+                neural_tombstones_path.as_deref(),
+                rel_path,
+            )?;
             tx.execute(
                 "DELETE FROM tombstones WHERE file_path = ?1",
                 params![rel_path.to_string_lossy().to_string()],
@@ -735,7 +782,14 @@ fn index_workspace_inner(
 
         for rel_path in &diff.deleted {
             let rel_str = rel_path.to_string_lossy().to_string();
-            remove_file_chunks(&tx, &mut writer, &fields, &mut vector_index, rel_path)?;
+            remove_file_chunks(
+                &tx,
+                &mut writer,
+                &fields,
+                &hash_tombstones_path,
+                neural_tombstones_path.as_deref(),
+                rel_path,
+            )?;
             if path_exists_in_base(rel_path) {
                 tx.execute(
                     "INSERT OR IGNORE INTO tombstones (file_path) VALUES (?1)",
@@ -760,7 +814,14 @@ fn index_workspace_inner(
             }
         }
     } else {
-        apply_deletions(&tx, &mut writer, &fields, &mut vector_index, &diff.deleted)?;
+        apply_deletions(
+            &tx,
+            &mut writer,
+            &fields,
+            &hash_tombstones_path,
+            neural_tombstones_path.as_deref(),
+            &diff.deleted,
+        )?;
     }
 
     let total = diff.added_or_modified.len();
@@ -873,19 +934,10 @@ fn index_workspace_inner(
     }
 
     while let Some(file_chunks) = producer.recv() {
-        // Phase 2: Batch embed (very fast hashing model).
-        let all_texts: Vec<&str> = file_chunks
-            .iter()
-            .flat_map(|(_, chunks)| chunks.iter().map(|c| c.text.as_str()))
-            .collect();
-
-        let all_embeddings = embedding_model.embed_batch(&all_texts);
-        if is_fresh_index {
-            vector_index.reserve_additional(all_embeddings.len());
-        }
-
-        // Phase 3: Sequential sync to persistence layers.
-        let mut embed_idx = 0;
+        // Persist lexical metadata first. Hash ANN construction is intentionally
+        // deferred to background enhancement: on multi-million chunk repos the
+        // provisional graph dominated first-index latency and delayed usable
+        // BM25/literal results by minutes.
         for (rel_path, indexed_chunks) in &file_chunks {
             touched_files.insert(rel_path.to_string_lossy().to_string());
             total_chunks_processed += indexed_chunks.len();
@@ -896,7 +948,8 @@ fn index_workspace_inner(
                     &tx,
                     &mut writer,
                     &fields,
-                    &mut vector_index,
+                    &hash_tombstones_path,
+                    neural_tombstones_path.as_deref(),
                     rel_path,
                 ));
             }
@@ -908,13 +961,6 @@ fn index_workspace_inner(
                 .as_secs() as i64;
 
             for indexed in indexed_chunks {
-                let embedding = all_embeddings[embed_idx].clone();
-                embed_idx += 1;
-                if is_fresh_index {
-                    vector_index.add_unchecked(indexed.vector_key, embedding);
-                } else {
-                    vector_index.upsert(indexed.vector_key, embedding);
-                }
                 persist_or_stop!(insert_chunk(&tx, indexed, is_fresh_index, now_unix));
                 persist_or_stop!(add_chunk_doc(&mut writer, &fields, indexed));
             }
@@ -924,12 +970,6 @@ fn index_workspace_inner(
         if chunks_since_commit >= 25_000 {
             persist_or_stop!(tx.commit());
             persist_or_stop!(writer.commit());
-            // Fresh full indexes are not queryable until the final metadata and
-            // Merkle snapshot write, so avoid repeatedly rewriting the whole
-            // vector file during initial bulk ingest.
-            if !is_fresh_index {
-                persist_or_stop!(vector_index.save());
-            }
             tx = persist_or_stop!(sqlite.transaction());
             chunks_since_commit = 0;
         }
@@ -970,7 +1010,6 @@ fn index_workspace_inner(
     writer.commit()?;
     writer.wait_merging_threads()?;
 
-    vector_index.save()?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -994,14 +1033,9 @@ fn index_workspace_inner(
         last_indexed_at_unix: Some(now),
         watch_enabled: existing_meta.watch_enabled,
         skip_gitignore: existing_meta.skip_gitignore,
-        // Bump generation only for non-overlay (base) workspaces.
-        // Overlay workspaces inherit the base generation; bumping here
-        // would create a false positive on the staleness check.
-        index_generation: if use_overlay {
-            existing_meta.index_generation
-        } else {
-            existing_meta.index_generation + 1
-        },
+        // Tracks lexical commits so background vector enhancement can detect
+        // concurrent edits and resume from the latest generation.
+        index_generation: existing_meta.index_generation + 1,
     };
     workspace.write_metadata(&metadata)?;
     // Mark the index as written in the current on-disk format so an upgrade
@@ -1199,13 +1233,148 @@ fn check_system_constraints() -> Option<String> {
     None
 }
 
+/// Compute lightweight hash embeddings for all chunks and save as the first
+/// background vector tier.
+pub fn enhance_workspace_hash(
+    workspace: &Workspace,
+    hash_model: &dyn EmbeddingModel,
+) -> Result<usize> {
+    let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
+    let sqlite_path = if use_overlay {
+        workspace.overlay_sqlite_path()
+    } else {
+        workspace.sqlite_path()
+    };
+    let vector_path = if use_overlay {
+        workspace.overlay_vector_path()
+    } else {
+        workspace.vector_path()
+    };
+    if !sqlite_path.exists() {
+        return Ok(0);
+    }
+
+    let index_generation = workspace
+        .read_metadata()?
+        .map(|metadata| metadata.index_generation)
+        .unwrap_or(0);
+    let sqlite = open_sqlite(&sqlite_path)?;
+    let total_chunks = sqlite
+        .query_row("SELECT COUNT(*) FROM chunks", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap_or(0) as usize;
+    let mut vector_index =
+        VectorStore::open(&vector_path, hash_model.dimensions(), ScalarKind::F16)?;
+    let claimed_tombstones = claim_vector_tombstones(
+        &workspace.hash_tombstones_path(),
+        &workspace.hash_tombstones_processing_path(),
+    )?;
+    if let Some((_, keys)) = &claimed_tombstones {
+        for key in keys {
+            vector_index.remove(*key);
+        }
+    }
+    vector_index.reserve_additional(total_chunks.saturating_sub(vector_index.size()))?;
+
+    const BATCH_SIZE: usize = 2048;
+    let mut batch = Vec::<(u64, String)>::with_capacity(BATCH_SIZE);
+    let mut newly_processed = 0usize;
+    let mut progress_count = vector_index.size();
+    let progress_path = workspace.enhancing_progress_path();
+    let phase_path = workspace.enhancing_phase_path();
+    let paused_path = workspace.enhancing_paused_path();
+    let _ = fs::write(&phase_path, "hash");
+    let _ = fs::write(&progress_path, progress_count.to_string());
+
+    let process_batch = |batch: &mut Vec<(u64, String)>,
+                         count: &mut usize,
+                         store: &mut VectorStore|
+     -> Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let texts = batch
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>();
+        let embeddings = hash_model.embed_batch(&texts);
+        for ((key, _), embedding) in batch.iter().zip(embeddings) {
+            store.add_unchecked(*key, embedding)?;
+        }
+        *count += batch.len();
+        batch.clear();
+        Ok(())
+    };
+
+    let mut stmt = sqlite.prepare("SELECT vector_key, text FROM chunks ORDER BY vector_key")?;
+    let rows = stmt.query_map([], |row| {
+        let key = row.get::<_, i64>(0)? as u64;
+        let raw: Vec<u8> = row.get(1)?;
+        Ok((key, raw))
+    })?;
+
+    for row in rows {
+        let (key, raw) = row?;
+        if vector_index.contains(key) {
+            continue;
+        }
+
+        batch.push((key, decompress_text(raw)));
+        if batch.len() >= BATCH_SIZE {
+            while let Some(reason) = check_system_constraints() {
+                let _ = fs::write(&paused_path, &reason);
+                std::thread::sleep(std::time::Duration::from_secs(10));
+            }
+            let _ = fs::remove_file(&paused_path);
+
+            process_batch(&mut batch, &mut newly_processed, &mut vector_index)?;
+            progress_count += BATCH_SIZE;
+            let _ = fs::write(&progress_path, progress_count.to_string());
+            if newly_processed.is_multiple_of(16_384) {
+                vector_index.save()?;
+            }
+        }
+    }
+
+    let tail_len = batch.len();
+    while !batch.is_empty()
+        && let Some(reason) = check_system_constraints()
+    {
+        let _ = fs::write(&paused_path, &reason);
+        std::thread::sleep(std::time::Duration::from_secs(10));
+    }
+    let _ = fs::remove_file(&paused_path);
+    process_batch(&mut batch, &mut newly_processed, &mut vector_index)?;
+    progress_count += tail_len;
+    let _ = fs::write(&progress_path, progress_count.to_string());
+    vector_index.save()?;
+    if let Some((path, _)) = claimed_tombstones {
+        fs::remove_file(path)?;
+    }
+    if workspace
+        .read_metadata()?
+        .is_some_and(|metadata| metadata.index_generation == index_generation)
+    {
+        fs::write(
+            workspace.hash_enhanced_generation_path(),
+            index_generation.to_string(),
+        )?;
+    }
+    Ok(newly_processed)
+}
+
 /// Compute neural Candle embeddings for all chunks and save as a separate
-/// vector store. This is designed to run in a background thread after the
-/// fast hash-based index returns results to the user.
+/// vector store. This is designed to run in a background process after the
+/// lexical index already returns results to the user.
 pub fn enhance_workspace_neural(
     workspace: &Workspace,
     neural_model: &dyn EmbeddingModel,
 ) -> Result<usize> {
+    if workspace.has_overlay() || workspace.base_ref_path().exists() {
+        return Ok(0);
+    }
+
     let sqlite = open_sqlite(&workspace.sqlite_path())?;
 
     // Phase 1: Collect all vector_keys to determine which still need embedding.
@@ -1221,21 +1390,33 @@ pub fn enhance_workspace_neural(
         neural_model.dimensions(),
         ScalarKind::F32,
     )?;
+    let claimed_tombstones = claim_vector_tombstones(
+        &workspace.neural_tombstones_path(),
+        &workspace.neural_tombstones_processing_path(),
+    )?;
+    if let Some((_, keys)) = &claimed_tombstones {
+        for key in keys {
+            vector_index.remove(*key);
+        }
+    }
 
     // Pre-reserve capacity so the index doesn't need to grow repeatedly
     let existing = vector_index.size();
     let remaining = total_chunks.saturating_sub(existing);
-    vector_index.reserve_additional(remaining);
+    vector_index.reserve_additional(remaining)?;
 
     let mut newly_processed = 0;
     let mut progress_count = existing;
 
     let progress_path = workspace.enhancing_progress_path();
+    let phase_path = workspace.enhancing_phase_path();
     let paused_path = workspace.enhancing_paused_path();
+    let _ = fs::write(&phase_path, "neural");
+    let _ = fs::write(&progress_path, progress_count.to_string());
 
     // Phase 2: Stream rows and skip already-embedded keys without decompressing text.
-    // Use a larger batch (512) to amortize neural embedding overhead.
-    const BATCH_SIZE: usize = 512;
+    // Keep batches small so load and battery checks run frequently on laptops.
+    const BATCH_SIZE: usize = 64;
     let mut batch: Vec<(u64, String)> = Vec::with_capacity(BATCH_SIZE);
 
     let mut stmt = sqlite.prepare("SELECT vector_key, text FROM chunks ORDER BY vector_key")?;
@@ -1245,42 +1426,47 @@ pub fn enhance_workspace_neural(
         Ok((key, raw))
     })?;
 
-    let process_batch =
-        |batch: &mut Vec<(u64, String)>, count: &mut usize, v_index: &mut VectorStore| {
-            if batch.is_empty() {
-                return;
-            }
+    let process_batch = |batch: &mut Vec<(u64, String)>,
+                         count: &mut usize,
+                         v_index: &mut VectorStore|
+     -> Result<()> {
+        if batch.is_empty() {
+            return Ok(());
+        }
 
-            let texts: Vec<&str> = batch
-                .iter()
-                .map(|(_, t)| {
-                    if t.len() > 1024 {
-                        let mut end = 1024;
-                        while !t.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        &t[..end]
-                    } else {
-                        t.as_str()
+        let texts: Vec<&str> = batch
+            .iter()
+            .map(|(_, t)| {
+                if t.len() > 1024 {
+                    let mut end = 1024;
+                    while !t.is_char_boundary(end) {
+                        end -= 1;
                     }
-                })
-                .collect();
+                    &t[..end]
+                } else {
+                    t.as_str()
+                }
+            })
+            .collect();
 
-            let embeddings = neural_model.embed_batch(&texts);
+        let embeddings = neural_model.embed_batch(&texts);
 
-            for ((key, _), embedding) in batch.iter().zip(embeddings) {
-                v_index.add_unchecked(*key, embedding);
+        for ((key, _), embedding) in batch.iter().zip(embeddings) {
+            if embedding.iter().all(|value| value.abs() <= f32::EPSILON) {
+                anyhow::bail!("neural embedding produced a zero vector for key {key}");
             }
-            *count += batch.len();
-            batch.clear();
-        };
+            v_index.add_unchecked(*key, embedding)?;
+        }
+        *count += batch.len();
+        batch.clear();
+        Ok(())
+    };
 
-    for row in rows.flatten() {
-        let (key, raw) = row;
+    for row in rows {
+        let (key, raw) = row?;
 
         // Skip without decompressing if already embedded
         if vector_index.contains(key) {
-            progress_count += 1;
             continue;
         }
 
@@ -1289,32 +1475,42 @@ pub fn enhance_workspace_neural(
         batch.push((key, text));
 
         if batch.len() >= BATCH_SIZE {
-            while let Some(reason) = check_system_constraints() {
+            while neural_model.respects_system_constraints()
+                && let Some(reason) = check_system_constraints()
+            {
                 let _ = std::fs::write(&paused_path, &reason);
                 std::thread::sleep(std::time::Duration::from_secs(10));
             }
             let _ = std::fs::remove_file(&paused_path);
 
-            process_batch(&mut batch, &mut newly_processed, &mut vector_index);
+            process_batch(&mut batch, &mut newly_processed, &mut vector_index)?;
             progress_count += BATCH_SIZE;
+            let _ = std::fs::write(&progress_path, progress_count.to_string());
 
-            if progress_count % 2048 == 0 {
-                let _ = std::fs::write(&progress_path, progress_count.to_string());
-            }
-
-            if newly_processed % 16384 == 0 {
-                let _ = vector_index.save();
+            if newly_processed.is_multiple_of(16_384) {
+                vector_index.save()?;
             }
         }
     }
 
     // Process any remaining tail
     let tail_len = batch.len();
-    process_batch(&mut batch, &mut newly_processed, &mut vector_index);
+    while neural_model.respects_system_constraints()
+        && !batch.is_empty()
+        && let Some(reason) = check_system_constraints()
+    {
+        let _ = std::fs::write(&paused_path, &reason);
+        std::thread::sleep(std::time::Duration::from_secs(10));
+    }
+    let _ = std::fs::remove_file(&paused_path);
+    process_batch(&mut batch, &mut newly_processed, &mut vector_index)?;
     progress_count += tail_len;
 
     let _ = std::fs::write(&progress_path, progress_count.to_string());
     vector_index.save()?;
+    if let Some((path, _)) = claimed_tombstones {
+        fs::remove_file(path)?;
+    }
     if newly_processed > 0
         && let Some(backend) = neural_model.backend_info()
     {
@@ -1325,13 +1521,16 @@ pub fn enhance_workspace_neural(
 }
 
 fn build_indexed_chunk(chunk: Chunk, is_ignored: bool) -> IndexedChunk {
-    // Key the vector by the unique chunk id, not the content hash. Content-hash
-    // keys collide whenever two chunks share identical content (license
-    // headers, boilerplate, empty files): the colliding chunks map to one
-    // usearch vector, and deleting one file removes the shared key, silently
-    // dropping a still-live chunk's vector from another file.
+    // Stable logical keys let background vector enrichment resume across an
+    // unchanged reindex. Path and bounds keep identical boilerplate chunks in
+    // different files distinct.
     let chunk_id = chunk.id.to_string();
-    let vector_key = vector_key_from_chunk_id(&chunk_id);
+    let vector_key = vector_key_for_chunk(
+        &chunk.file_path,
+        chunk.start_line,
+        chunk.end_line,
+        &chunk.content_hash,
+    );
     let kind = format!("{:?}", chunk.kind);
 
     IndexedChunk {
@@ -1348,13 +1547,18 @@ fn build_indexed_chunk(chunk: Chunk, is_ignored: bool) -> IndexedChunk {
     }
 }
 
-fn vector_key_from_chunk_id(chunk_id: &str) -> u64 {
-    // The chunk id is a v4 UUID string (unique per chunk), so the derived key
-    // is collision-free across chunks/files. Both the indexer and the search
-    // path (fetch_chunk_by_id) derive the key from this same string, so they
-    // agree. Mask to the positive i64 range since vector_key is stored as
-    // INTEGER (i64) in SQLite.
-    let digest = xxhash_rust::xxh3::xxh3_128(chunk_id.as_bytes()).to_le_bytes();
+fn vector_key_for_chunk(
+    file_path: &Path,
+    start_line: usize,
+    end_line: usize,
+    content_hash: &str,
+) -> u64 {
+    let mut key_data = Vec::with_capacity(content_hash.len() + 64);
+    key_data.extend_from_slice(file_path.to_string_lossy().as_bytes());
+    key_data.extend_from_slice(&start_line.to_le_bytes());
+    key_data.extend_from_slice(&end_line.to_le_bytes());
+    key_data.extend_from_slice(content_hash.as_bytes());
+    let digest = xxhash_rust::xxh3::xxh3_128(&key_data).to_le_bytes();
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&digest[..8]);
     let value = u64::from_le_bytes(bytes);
@@ -1382,11 +1586,19 @@ fn apply_deletions(
     sqlite: &Connection,
     writer: &mut tantivy::IndexWriter,
     fields: &TantivyFields,
-    vector_index: &mut VectorStore,
+    hash_tombstones_path: &Path,
+    neural_tombstones_path: Option<&Path>,
     deleted: &[PathBuf],
 ) -> Result<()> {
     for rel_path in deleted {
-        remove_file_chunks(sqlite, writer, fields, vector_index, rel_path)?;
+        remove_file_chunks(
+            sqlite,
+            writer,
+            fields,
+            hash_tombstones_path,
+            neural_tombstones_path,
+            rel_path,
+        )?;
     }
     Ok(())
 }
@@ -1395,7 +1607,8 @@ fn remove_file_chunks(
     sqlite: &Connection,
     writer: &mut tantivy::IndexWriter,
     fields: &TantivyFields,
-    vector_index: &mut VectorStore,
+    hash_tombstones_path: &Path,
+    neural_tombstones_path: Option<&Path>,
     rel_path: &Path,
 ) -> Result<()> {
     let rel_str = rel_path.to_string_lossy().to_string();
@@ -1403,12 +1616,48 @@ fn remove_file_chunks(
 
     writer.delete_term(Term::from_field_text(fields.file_path, &rel_str));
 
-    for key in keys {
-        vector_index.remove(key);
+    append_vector_tombstones(hash_tombstones_path, &keys)?;
+    if let Some(path) = neural_tombstones_path {
+        append_vector_tombstones(path, &keys)?;
     }
 
     sqlite.execute("DELETE FROM chunks WHERE file_path = ?1", params![rel_str])?;
     Ok(())
+}
+
+fn append_vector_tombstones(path: &Path, keys: &[u64]) -> Result<()> {
+    if keys.is_empty() {
+        return Ok(());
+    }
+
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    for key in keys {
+        writeln!(file, "{key}")?;
+    }
+    file.sync_data()?;
+    Ok(())
+}
+
+fn claim_vector_tombstones(
+    pending: &Path,
+    processing: &Path,
+) -> Result<Option<(PathBuf, Vec<u64>)>> {
+    if !processing.exists() {
+        match fs::rename(pending, processing) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err.into()),
+        }
+    }
+
+    let keys = fs::read_to_string(processing)?
+        .lines()
+        .map(str::parse::<u64>)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(Some((processing.to_path_buf(), keys)))
 }
 
 fn extract_signature(chunk: &IndexedChunk) -> String {
@@ -1825,7 +2074,7 @@ pub fn fetch_chunk_by_id(
         .unwrap_or(0)
         > 0;
 
-    let vector_key = vector_key_from_chunk_id(&chunk_id);
+    let vector_key = vector_key_for_chunk(&file_path, start_line, end_line, &content_hash);
 
     Some(IndexedChunk {
         chunk_id,
@@ -1912,10 +2161,8 @@ mod tests {
 
     #[test]
     fn identical_content_chunks_get_distinct_vector_keys() {
-        // Two chunks in different files with byte-identical content share a
-        // content_hash. Keying vectors by content hash would collide them onto
-        // one usearch key, so deleting one file would drop the other's vector.
-        // Keying by the unique chunk id must keep them distinct.
+        // Path and bounds are part of stable vector identity, so identical
+        // boilerplate in different files cannot share one usearch key.
         let make = |path: &str| Chunk {
             id: uuid::Uuid::new_v4(),
             file_path: PathBuf::from(path),
@@ -1933,6 +2180,26 @@ mod tests {
         assert_ne!(
             a.vector_key, b.vector_key,
             "identical-content chunks collided on one vector key"
+        );
+    }
+
+    #[test]
+    fn unchanged_chunk_gets_stable_vector_key() {
+        let make = || Chunk {
+            id: uuid::Uuid::new_v4(),
+            file_path: PathBuf::from("src/lib.rs"),
+            start_line: 10,
+            end_line: 14,
+            text: "pub fn stable() {}\n".to_string(),
+            language: "rust".to_string(),
+            kind: ChunkKind::Function,
+            content_hash: "stable-content-hash".to_string(),
+        };
+
+        assert_eq!(
+            build_indexed_chunk(make(), false).vector_key,
+            build_indexed_chunk(make(), false).vector_key,
+            "unchanged chunks must keep background enrichment keys across reindex"
         );
     }
 
@@ -1983,6 +2250,67 @@ mod tests {
         assert!(summary.total_chunks >= 1);
         assert!(workspace_is_indexed(&workspace));
         assert!(workspace.vector_path().metadata().unwrap().len() > 0);
+    }
+
+    #[test]
+    #[serial]
+    fn foreground_index_is_queryable_before_hash_enrichment() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        fs::write(
+            root.path().join("lib.rs"),
+            "pub fn calculate_tax(amount: f64) -> f64 { amount * 0.2 }\n",
+        )
+        .unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        let summary = index_workspace(&workspace, &model).unwrap();
+
+        assert!(workspace_is_indexed(&workspace));
+        let foreground = VectorStore::open_readonly(
+            &workspace.vector_path(),
+            EMBEDDING_DIMENSIONS,
+            ScalarKind::F16,
+        )
+        .unwrap();
+        assert_eq!(
+            foreground.size(),
+            0,
+            "foreground index must not block on hash HNSW construction"
+        );
+
+        assert_eq!(
+            enhance_workspace_hash(&workspace, &model).unwrap(),
+            summary.total_chunks
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.enhancing_phase_path()).unwrap(),
+            "hash"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.hash_enhanced_generation_path()).unwrap(),
+            workspace
+                .read_metadata()
+                .unwrap()
+                .unwrap()
+                .index_generation
+                .to_string()
+        );
+        let enriched = VectorStore::open_readonly(
+            &workspace.vector_path(),
+            EMBEDDING_DIMENSIONS,
+            ScalarKind::F16,
+        )
+        .unwrap();
+        assert_eq!(enriched.size(), summary.total_chunks);
+        assert_eq!(enhance_workspace_hash(&workspace, &model).unwrap(), 0);
+        assert_eq!(
+            fs::read_to_string(workspace.enhancing_progress_path()).unwrap(),
+            summary.total_chunks.to_string(),
+            "resumed enhancement progress must not count persisted vectors twice"
+        );
     }
 
     #[test]
@@ -2106,6 +2434,10 @@ mod tests {
         };
         let enhanced = enhance_workspace_neural(&workspace, &neural_model).unwrap();
         assert_eq!(enhanced, summary.total_chunks);
+        assert_eq!(
+            fs::read_to_string(workspace.enhancing_phase_path()).unwrap(),
+            "neural"
+        );
 
         // Verify neural vector store was created
         assert!(workspace.vector_neural_path().exists());
@@ -2204,6 +2536,63 @@ mod tests {
             n2 > n1,
             "neural enhancement should cover new chunks: before={n1} after={n2}"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn foreground_reindex_journals_stale_neural_vectors() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        fs::write(
+            root.path().join("mod.rs"),
+            "pub fn original() -> i32 { 1 }\n",
+        )
+        .unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let hash_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        let neural_model = HashEmbeddingModel::new(384);
+        index_workspace(&workspace, &hash_model).unwrap();
+        enhance_workspace_hash(&workspace, &hash_model).unwrap();
+        enhance_workspace_neural(&workspace, &neural_model).unwrap();
+        assert!(!workspace.needs_neural_enhancement());
+
+        fs::write(
+            root.path().join("mod.rs"),
+            "pub fn replacement() -> i32 { 2 }\n",
+        )
+        .unwrap();
+        index_workspace(&workspace, &hash_model).unwrap();
+        assert!(
+            workspace.hash_tombstones_path().exists(),
+            "foreground edit must journal stale hash keys without loading hash graph"
+        );
+        assert!(
+            workspace.neural_tombstones_path().exists(),
+            "foreground edit must journal stale neural keys without loading neural graph"
+        );
+
+        enhance_workspace_hash(&workspace, &hash_model).unwrap();
+        assert!(!workspace.hash_tombstones_path().exists());
+        assert!(!workspace.hash_tombstones_processing_path().exists());
+        assert_eq!(
+            fs::read_to_string(workspace.hash_enhanced_generation_path()).unwrap(),
+            workspace
+                .read_metadata()
+                .unwrap()
+                .unwrap()
+                .index_generation
+                .to_string()
+        );
+        assert!(workspace.needs_neural_enhancement());
+        assert_eq!(
+            enhance_workspace_neural(&workspace, &neural_model).unwrap(),
+            1
+        );
+        assert!(!workspace.neural_tombstones_path().exists());
+        assert!(!workspace.neural_tombstones_processing_path().exists());
+        assert!(!workspace.needs_neural_enhancement());
     }
 
     #[test]

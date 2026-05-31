@@ -39,7 +39,9 @@ pub struct Workspace {
 ///   4 — Merkle metadata fingerprints include Unix ctime (#21)
 ///   5 — Starlark metadata/macro AST chunks and TSX grammar selection
 ///   6 — Very large BUILD-like sources split target-call AST chunks
-pub const INDEX_FORMAT_VERSION: u32 = 6;
+///   7 — Lexical index commits before background hash ANN enrichment
+///   8 — Stable vector keys and tombstone journals preserve resumable background enrichment
+pub const INDEX_FORMAT_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceMetadata {
@@ -75,6 +77,8 @@ pub struct WorkspaceStatus {
     pub enhancing_in_progress: bool,
     #[serde(default)]
     pub enhancing_progress_count: Option<u64>,
+    #[serde(default)]
+    pub enhancing_phase: Option<String>,
     #[serde(default)]
     pub enhancing_paused_reason: Option<String>,
     #[serde(default)]
@@ -298,8 +302,32 @@ impl Workspace {
         self.index_dir.join(".enhancing.progress")
     }
 
+    pub fn enhancing_phase_path(&self) -> PathBuf {
+        self.index_dir.join(".enhancing.phase")
+    }
+
     pub fn enhancing_paused_path(&self) -> PathBuf {
         self.index_dir.join(".enhancing.paused")
+    }
+
+    pub fn neural_tombstones_path(&self) -> PathBuf {
+        self.index_dir.join(".neural_tombstones")
+    }
+
+    pub fn neural_tombstones_processing_path(&self) -> PathBuf {
+        self.index_dir.join(".neural_tombstones.processing")
+    }
+
+    pub fn hash_tombstones_path(&self) -> PathBuf {
+        self.index_dir.join(".hash_tombstones")
+    }
+
+    pub fn hash_tombstones_processing_path(&self) -> PathBuf {
+        self.index_dir.join(".hash_tombstones.processing")
+    }
+
+    pub fn hash_enhanced_generation_path(&self) -> PathBuf {
+        self.index_dir.join(".hash_enhanced_generation")
     }
 
     pub fn indexing_pid_path(&self) -> PathBuf {
@@ -337,12 +365,61 @@ impl Workspace {
         }
     }
 
-    /// Checks if we need to trigger neural enhancement (e.g. if we have un-enhanced chunks).
+    /// Checks if background hash or neural enhancement still has work to do.
     pub fn needs_neural_enhancement(&self) -> bool {
         let enhancement_status =
             jobs::job_status(self, JobKind::Enhancement, ENHANCEMENT_HEARTBEAT_TTL_SECS);
         if enhancement_status.active() {
             return false;
+        }
+
+        let use_overlay = self.has_overlay() || self.base_ref_path().exists();
+        let (chunk_count, _) = read_sqlite_counts(&self.index_dir);
+        if chunk_count == 0 {
+            return false;
+        }
+
+        let hash_path = if use_overlay {
+            self.overlay_vector_path()
+        } else {
+            self.vector_path()
+        };
+        let index_generation = self
+            .read_metadata()
+            .ok()
+            .flatten()
+            .map(|metadata| metadata.index_generation)
+            .unwrap_or(0);
+        let hash_enhanced_generation =
+            std::fs::read_to_string(self.hash_enhanced_generation_path())
+                .ok()
+                .and_then(|value| value.trim().parse::<u64>().ok());
+        if hash_enhanced_generation != Some(index_generation)
+            || self.hash_tombstones_path().exists()
+            || self.hash_tombstones_processing_path().exists()
+        {
+            return true;
+        }
+        if vector_store_size(
+            &hash_path,
+            crate::EMBEDDING_DIMENSIONS,
+            crate::vector_store::ScalarKind::F16,
+        )
+        .is_none_or(|enhanced| enhanced < chunk_count)
+        {
+            return true;
+        }
+
+        // Worktree-specific chunks use their overlay hash store. Neural search
+        // falls through to the base workspace's shared neural store.
+        if use_overlay {
+            return false;
+        }
+
+        if self.neural_tombstones_path().exists()
+            || self.neural_tombstones_processing_path().exists()
+        {
+            return true;
         }
 
         if enhancement_status
@@ -351,11 +428,6 @@ impl Workspace {
             .and_then(|record| record.last_error.as_deref())
             .is_some_and(|err| err.contains("neural feature not compiled"))
         {
-            return false;
-        }
-
-        let (chunk_count, _) = read_sqlite_counts(&self.index_dir);
-        if chunk_count == 0 {
             return false;
         }
 
@@ -380,7 +452,7 @@ impl Workspace {
         true
     }
 
-    /// Triggers an atomic background spawn of the neural enhancement process.
+    /// Triggers an atomic background spawn of the hash and neural enhancement process.
     /// Uses O_EXCL file lock mechanics to mathematically prevent race conditions
     /// even if multiple threads or processes try to spawn this simultaneously.
     pub fn trigger_background_enhancement(&self) -> Result<()> {
@@ -435,7 +507,7 @@ impl Workspace {
         }
 
         // If this is a worktree overlay, its hybrid search strongly relies on the
-        // base repository's vectors. We explicitly cascade the neural enhancement
+        // base repository's vectors. We explicitly cascade the background enhancement
         // trigger so the base index receives upgrades in the background too.
         if let Some(main_root) = self.main_worktree_root()
             && let Ok(base_ws) = Workspace::resolve(&main_root)
@@ -612,14 +684,6 @@ impl Workspace {
                 issues.push("Tantivy index directory is empty despite indexed chunks".to_string());
             }
 
-            if vector_p
-                .metadata()
-                .map(|metadata| metadata.len() == 0)
-                .unwrap_or(false)
-            {
-                issues.push("hash vector store file is empty despite indexed chunks".to_string());
-            }
-
             if verify_stores {
                 if let Err(err) = crate::indexer::open_tantivy_index(&tantivy_p) {
                     issues.push(format!("failed to open Tantivy index: {err:#}"));
@@ -630,10 +694,6 @@ impl Workspace {
                     256,
                     crate::vector_store::ScalarKind::F16,
                 ) {
-                    Ok(store) if store.size() == 0 => {
-                        issues
-                            .push("hash vector store is empty despite indexed chunks".to_string());
-                    }
                     Ok(_) => {}
                     Err(err) => issues.push(format!("failed to open hash vector store: {err:#}")),
                 }
@@ -906,6 +966,16 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
             None
         };
 
+        let enhancing_phase = if enhancing_in_progress {
+            let phase_path = index_dir.join(".enhancing.phase");
+            std::fs::read_to_string(&phase_path)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        } else {
+            None
+        };
+
         let enhancing_paused_reason = if enhancing_in_progress {
             let paused_path = index_dir.join(".enhancing.paused");
             std::fs::read_to_string(&paused_path)
@@ -968,6 +1038,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
                 neural_backend,
                 enhancing_in_progress,
                 enhancing_progress_count,
+                enhancing_phase,
                 enhancing_paused_reason,
                 enhancing_error,
                 enhancing_stalled,
@@ -1106,6 +1177,16 @@ fn dir_has_entries(path: &Path) -> bool {
 fn neural_store_has_vectors(path: &Path) -> bool {
     crate::vector_store::VectorStore::open_readonly(path, 384, crate::vector_store::ScalarKind::F32)
         .is_ok_and(|store| store.size() > 0)
+}
+
+fn vector_store_size(
+    path: &Path,
+    dimensions: usize,
+    scalar_kind: crate::vector_store::ScalarKind,
+) -> Option<u64> {
+    crate::vector_store::VectorStore::open_readonly(path, dimensions, scalar_kind)
+        .ok()
+        .map(|store| store.size() as u64)
 }
 
 /// Fast index size estimate by stat-ing known index files instead of
@@ -1334,9 +1415,29 @@ mod tests {
         conn.execute("INSERT INTO chunks (chunk_id, file_path, start_line, end_line, language, kind, text, content_hash, vector_key, modified_unix) VALUES ('1', '', 0, 0, '', '', x'', '0', 1, 0)", []).unwrap();
         conn.execute("INSERT INTO chunks (chunk_id, file_path, start_line, end_line, language, kind, text, content_hash, vector_key, modified_unix) VALUES ('2', '', 0, 0, '', '', x'', '0', 2, 0)", []).unwrap();
 
-        // 2 chunks, no neural vectors → true
+        // 2 chunks, no hash vectors -> true
         assert!(ws.needs_neural_enhancement());
         assert!(!ws.has_neural_vectors());
+
+        {
+            let mut store = crate::vector_store::VectorStore::open(
+                &ws.vector_path(),
+                crate::EMBEDDING_DIMENSIONS,
+                crate::vector_store::ScalarKind::F16,
+            )
+            .unwrap();
+            store
+                .upsert(1, vec![0.0; crate::EMBEDDING_DIMENSIONS])
+                .unwrap();
+            store
+                .upsert(2, vec![0.0; crate::EMBEDDING_DIMENSIONS])
+                .unwrap();
+            store.save().unwrap();
+        }
+        std::fs::write(ws.hash_enhanced_generation_path(), "0").unwrap();
+
+        // Hash vectors are complete, but neural vectors are missing -> true
+        assert!(ws.needs_neural_enhancement());
 
         {
             let mut store = crate::vector_store::VectorStore::open(
@@ -1345,7 +1446,7 @@ mod tests {
                 crate::vector_store::ScalarKind::F32,
             )
             .unwrap();
-            store.upsert(1, vec![0.0; 384]);
+            store.upsert(1, vec![0.0; 384]).unwrap();
             store.save().unwrap();
         }
 
@@ -1360,11 +1461,45 @@ mod tests {
                 crate::vector_store::ScalarKind::F32,
             )
             .unwrap();
-            store.upsert(2, vec![0.0; 384]);
+            store.upsert(2, vec![0.0; 384]).unwrap();
             store.save().unwrap();
         }
 
         // 2 vectors == 2 chunks → false
+        assert!(!ws.needs_neural_enhancement());
+    }
+
+    #[test]
+    fn worktree_overlay_only_requires_hash_enrichment() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index_dir = tmp.path().join("index");
+        std::fs::create_dir_all(&index_dir).unwrap();
+
+        let ws = Workspace {
+            id: "overlay".to_string(),
+            root: tmp.path().to_path_buf(),
+            index_dir: index_dir.clone(),
+            repo_id: Some("repo".to_string()),
+            base_index_dir: Some(tmp.path().join("base-index")),
+        };
+
+        let conn = crate::indexer::open_sqlite(&ws.overlay_sqlite_path()).unwrap();
+        conn.execute("INSERT INTO chunks (chunk_id, file_path, start_line, end_line, language, kind, text, content_hash, vector_key, modified_unix) VALUES ('1', '', 0, 0, '', '', x'', '0', 1, 0)", []).unwrap();
+
+        assert!(ws.needs_neural_enhancement());
+
+        let mut store = crate::vector_store::VectorStore::open(
+            &ws.overlay_vector_path(),
+            crate::EMBEDDING_DIMENSIONS,
+            crate::vector_store::ScalarKind::F16,
+        )
+        .unwrap();
+        store
+            .upsert(1, vec![0.0; crate::EMBEDDING_DIMENSIONS])
+            .unwrap();
+        store.save().unwrap();
+        std::fs::write(ws.hash_enhanced_generation_path(), "0").unwrap();
+
         assert!(!ws.needs_neural_enhancement());
     }
 
@@ -1441,7 +1576,7 @@ mod tests {
         store.save().unwrap();
         assert!(!ws.has_neural_vectors());
 
-        store.upsert(1, vec![0.0; 384]);
+        store.upsert(1, vec![0.0; 384]).unwrap();
         store.save().unwrap();
         assert!(ws.has_neural_vectors());
     }

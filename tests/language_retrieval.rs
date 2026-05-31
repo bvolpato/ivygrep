@@ -1,5 +1,5 @@
 use ivygrep::embedding::create_hash_model;
-use ivygrep::indexer::index_workspace;
+use ivygrep::indexer::{enhance_workspace_hash, index_workspace};
 use ivygrep::search::{SearchOptions, hybrid_search};
 use ivygrep::workspace::Workspace;
 use serial_test::serial;
@@ -93,6 +93,7 @@ fn starlark_and_tsx_ast_languages_are_retrievable_with_type_filters() {
     let workspace = Workspace::resolve(repo.path()).unwrap();
     let model = create_hash_model();
     index_workspace(&workspace, model.as_ref()).unwrap();
+    enhance_workspace_hash(&workspace, model.as_ref()).unwrap();
 
     for (query, language, expected_file) in [
         ("billing cardinal target", "starlark", "BUILD.bazel"),

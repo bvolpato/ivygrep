@@ -140,14 +140,14 @@ fn runtime_findings(workspace: &Workspace) -> Vec<String> {
         ENHANCEMENT_HEARTBEAT_TTL_SECS,
     );
     if enhancement_status.stalled {
-        findings.push("background neural enhancement heartbeat is stale".to_string());
+        findings.push("background enhancement heartbeat is stale".to_string());
     }
     if let Ok(meta) = std::fs::metadata(workspace.enhancing_paused_path())
         && let Ok(modified) = meta.modified()
         && let Ok(age) = modified.elapsed()
         && age.as_secs() > ENHANCEMENT_PAUSE_WARN_SECS
     {
-        findings.push("neural enhancement has been paused for a long time".to_string());
+        findings.push("background enhancement has been paused for a long time".to_string());
     }
 
     findings

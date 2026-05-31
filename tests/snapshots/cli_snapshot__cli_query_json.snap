@@ -12,6 +12,5 @@ expression: value
       score: "<score>"
       sources:
         - lexical
-        - semantic
       start_line: 1
   total_score: "<score>"

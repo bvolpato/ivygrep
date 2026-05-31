@@ -17,15 +17,19 @@ impl PathGlobMatcher {
     }
 
     pub fn matches(&self, rel_path: &Path) -> bool {
-        let include_ok = self
-            .include
+        self.is_included(rel_path) && !self.is_excluded(rel_path)
+    }
+
+    pub fn is_included(&self, rel_path: &Path) -> bool {
+        self.include
             .as_ref()
-            .is_none_or(|glob_set| glob_set.is_match(rel_path));
-        let exclude_hit = self
-            .exclude
+            .is_none_or(|glob_set| glob_set.is_match(rel_path))
+    }
+
+    pub fn is_excluded(&self, rel_path: &Path) -> bool {
+        self.exclude
             .as_ref()
-            .is_some_and(|glob_set| glob_set.is_match(rel_path));
-        include_ok && !exclude_hit
+            .is_some_and(|glob_set| glob_set.is_match(rel_path))
     }
 }
 

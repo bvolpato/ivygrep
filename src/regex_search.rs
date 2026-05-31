@@ -10,7 +10,8 @@ use grep_searcher::{Searcher, SearcherBuilder};
 use rayon::prelude::*;
 use tantivy::TantivyDocument;
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
+use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, RegexQuery, TermQuery};
+use tantivy::schema::IndexRecordOption;
 use tantivy::schema::Value;
 
 use crate::indexer::open_tantivy_index;
@@ -178,11 +179,15 @@ fn index_prefilter_files(
 
     let search_term = &fragments[0];
     let query = parser.parse_query(search_term).ok()?;
+    let query = constrain_query_to_scope(query, fields.file_path, scope_filter)?;
 
     // Get up to 10K candidate chunks — we only need their file_path
     let docs = searcher
         .search(&query, &TopDocs::with_limit(10_000).order_by_score())
         .ok()?;
+    if docs.len() == 10_000 {
+        return None;
+    }
 
     let mut candidate_files = HashSet::new();
     for (_score, addr) in docs {
@@ -204,8 +209,12 @@ fn index_prefilter_files(
             break; // Already small enough
         }
         if let Ok(q2) = parser.parse_query(frag)
+            && let Some(q2) = constrain_query_to_scope(q2, fields.file_path, scope_filter)
             && let Ok(docs2) = searcher.search(&q2, &TopDocs::with_limit(10_000).order_by_score())
         {
+            if docs2.len() == 10_000 {
+                return None;
+            }
             let mut frag_files = HashSet::new();
             for (_score, addr) in docs2 {
                 if let Ok(doc) = searcher.doc::<TantivyDocument>(addr)
@@ -222,6 +231,32 @@ fn index_prefilter_files(
     let mut paths: Vec<PathBuf> = candidate_files.into_iter().collect();
     paths.sort();
     Some(paths)
+}
+
+fn constrain_query_to_scope(
+    query: Box<dyn Query>,
+    file_path_field: tantivy::schema::Field,
+    scope_filter: Option<&WorkspaceScope>,
+) -> Option<Box<dyn Query>> {
+    let Some(scope) = scope_filter else {
+        return Some(query);
+    };
+
+    let scope_path = scope.rel_path.to_string_lossy();
+    let path_query: Box<dyn Query> = if scope.is_file {
+        Box::new(TermQuery::new(
+            tantivy::Term::from_field_text(file_path_field, &scope_path),
+            IndexRecordOption::Basic,
+        ))
+    } else {
+        let prefix = format!("{}/", regex::escape(&scope_path));
+        Box::new(RegexQuery::from_pattern(&format!("{prefix}.*"), file_path_field).ok()?)
+    };
+
+    Some(Box::new(BooleanQuery::new(vec![
+        (Occur::Must, query),
+        (Occur::Must, path_query),
+    ])))
 }
 
 /// Parallel regex search over a known set of file paths.
@@ -504,6 +539,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(hits.len(), 3);
+    }
+
+    #[test]
+    #[serial]
+    fn indexed_regex_scope_survives_global_candidate_cap() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::create_dir_all(tmp.path().join("scoped")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("other")).unwrap();
+        for i in 0..10_050 {
+            std::fs::write(
+                tmp.path().join("other").join(format!("noise_{i:05}.txt")),
+                "targettoken targettoken targettoken targettoken\n",
+            )
+            .unwrap();
+        }
+        std::fs::write(tmp.path().join("scoped/match.txt"), "targettoken\n").unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = regex_search(
+            &workspace,
+            "targettoken",
+            Some(1),
+            Some(&WorkspaceScope {
+                rel_path: PathBuf::from("scoped"),
+                is_file: false,
+            }),
+            &[],
+            &[],
+            false,
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].file_path, PathBuf::from("scoped/match.txt"));
     }
 
     #[test]

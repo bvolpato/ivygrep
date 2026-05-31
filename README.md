@@ -185,14 +185,28 @@ Benchmarked on the **Linux kernel** (93,493 indexed files, 4,666,431 chunks) and
 
 | Scenario | Metric | Result |
 |------|------|-----:|
-| Fresh Linux kernel index | full rebuild | ~27.3 min |
+| Historical eager-vector Linux kernel index | full rebuild | ~27.3 min |
+| Lexical-first scoped stress probe | 10,501 files | ~3 sec |
 | Cold semantic query | process-cold CLI | ~402 ms |
-| Warm daemon semantic query | p95 latency | ~4.9 ms |
+| Warm daemon identical-query cache replay | p95 latency | ~4.9 ms |
 | Warm daemon correctness guard | daemon/local hits | 20 / 20 |
 
-The latest benchmark loop reduced Linux kernel fresh-index primary score by 10.6% and daemon hot-query p95 from ~455 ms to single-digit milliseconds. Benchmark writeups and charts live under [`docs/benchmarks/`](docs/benchmarks/).
+The daemon benchmark now reports warmed distinct-query latency separately from
+identical-query cache replay. Benchmark writeups and charts live under
+[`docs/benchmarks/`](docs/benchmarks/).
 
-Indexing is sub-second for most small projects. Queries return hash/BM25 results immediately while neural vectors are unavailable, then upgrade in the background via the locally cached Candle model (`AllMiniLML6V2`). macOS release builds use Accelerate-backed CPU math; Metal is available as an opt-in local build while its background throughput is tuned.
+Indexing commits BM25/literal search first. A load-aware background subprocess
+builds hash ANN vectors, then upgrades to local neural vectors with Candle
+(`AllMiniLML6V2`). macOS release builds use Accelerate-backed CPU math; Metal
+is available as an opt-in local build while its background throughput is tuned.
+
+Relevance evaluation separates foreground readiness from post-background hash
+quality:
+
+```bash
+uv run scripts/eval_relevance.py
+uv run scripts/eval_relevance.py --enhance-hash
+```
 
 ---
 
@@ -212,7 +226,7 @@ ivygrep deeply understands git. This is a core design decision, not an afterthou
 
 ivygrep runs search and embedding inference locally and never sends your code, queries, or index data to an external service. A few things worth knowing:
 
-- **Where data lives:** the index (which stores the *decompressed source text* of every indexed file) and the daemon socket live under `~/.local/share/ivygrep` (or `$XDG_DATA_HOME`/`$IVYGREP_HOME`). The index directory is `0700` and the daemon socket `0600`, and the daemon verifies the connecting peer's uid — so other local users on a shared host can't read your indexed code or reach the daemon.
+- **Where data lives:** the index (which stores compressed source chunks in SQLite) and the daemon socket live under `~/.local/share/ivygrep` (or `$XDG_DATA_HOME`/`$IVYGREP_HOME`). The index directory is `0700` and the daemon socket `0600`, and the daemon verifies the connecting peer's uid — so other local users on a shared host can't read your indexed code or reach the daemon.
 - **Model download:** neural mode uses `hf-hub` to download AllMiniLM-L6-v2 model assets on first use and caches them under `$HF_HOME` or `~/.cache/huggingface`. Use `--hash` or a `--no-default-features` build when no model-network access is permitted.
 - **Inference backend:** macOS release binaries execute locally with Accelerate-backed CPU math; portable Linux release binaries execute locally on CPU. Source builds can opt into local Metal with `--features accelerate,metal` or CUDA with `--features cuda` on a compatible installation. `ig --status` reports the recorded backend that last generated neural vectors.
 - **Secrets in your repo:** ivygrep indexes file *contents*, including config/dotfiles (e.g. `.env`) unless they're gitignored. Those contents are stored in the local index and can appear in search snippets. Keep secrets out of the workspace or in `.gitignore`.

@@ -124,6 +124,9 @@ pub struct Cli {
 
     #[arg(long, hide = true, value_name = "PATH")]
     pub enhance_internal: Option<PathBuf>,
+
+    #[arg(long, hide = true, value_name = "PATH")]
+    pub enhance_hash_internal: Option<PathBuf>,
 }
 
 pub async fn run() -> Result<()> {
@@ -194,6 +197,16 @@ pub async fn run() -> Result<()> {
         return run_remove(path, cli.json).await;
     }
 
+    if let Some(path) = &cli.enhance_hash_internal {
+        let workspace = Workspace::resolve(path)?;
+        workspace.ensure_dirs()?;
+        let hash_model = crate::embedding::create_hash_model();
+        crate::indexer::enhance_workspace_hash(&workspace, hash_model.as_ref())?;
+        let _ = std::fs::remove_file(workspace.enhancing_progress_path());
+        let _ = std::fs::remove_file(workspace.enhancing_phase_path());
+        return Ok(());
+    }
+
     if let Some(path) = &cli.enhance_internal {
         let workspace = Workspace::resolve(path)?;
         workspace.ensure_dirs()?;
@@ -217,6 +230,10 @@ pub async fn run() -> Result<()> {
                         .ok()
                         .map(|value| value.trim().to_string())
                         .filter(|value| !value.is_empty());
+                let stage = std::fs::read_to_string(heartbeat_workspace.enhancing_phase_path())
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty());
                 let paused_reason =
                     std::fs::read_to_string(heartbeat_workspace.enhancing_paused_path())
                         .ok()
@@ -235,6 +252,9 @@ pub async fn run() -> Result<()> {
                 if let Some(progress) = progress {
                     update.details.insert("progress".to_string(), progress);
                 }
+                if let Some(stage) = stage {
+                    update.details.insert("stage".to_string(), stage);
+                }
                 if let Some(reason) = paused_reason {
                     update.details.insert("paused_reason".to_string(), reason);
                 }
@@ -242,30 +262,25 @@ pub async fn run() -> Result<()> {
             }
         });
 
-        let result = {
-            match crate::embedding::create_neural_model_background() {
-                Ok(model) => {
-                    let enhance_res =
-                        crate::indexer::enhance_workspace_neural(&workspace, model.as_ref());
-                    if let Err(e) = &enhance_res {
-                        let _ = std::fs::write(
-                            workspace.index_dir.join(".enhancing.error"),
-                            format!("Enhancement error: {:?}", e),
-                        );
-                    } else {
-                        let _ = std::fs::remove_file(workspace.index_dir.join(".enhancing.error"));
-                    }
-                    enhance_res
-                }
-                Err(e) => {
-                    let _ = std::fs::write(
-                        workspace.index_dir.join(".enhancing.error"),
-                        format!("Model init error: {:?}", e),
-                    );
-                    Ok(0)
-                }
+        let result = (|| {
+            let hash_model = crate::embedding::create_hash_model();
+            crate::indexer::enhance_workspace_hash(&workspace, hash_model.as_ref())?;
+
+            if workspace.has_overlay() || workspace.base_ref_path().exists() {
+                return Ok(0);
             }
-        };
+
+            let model = crate::embedding::create_neural_model_background()?;
+            crate::indexer::enhance_workspace_neural(&workspace, model.as_ref())
+        })();
+        if let Err(e) = &result {
+            let _ = std::fs::write(
+                workspace.index_dir.join(".enhancing.error"),
+                format!("Enhancement error: {:?}", e),
+            );
+        } else {
+            let _ = std::fs::remove_file(workspace.index_dir.join(".enhancing.error"));
+        }
 
         // Neural model teardown can fail in multithreaded enhancement handlers.
         // We'll intentionally skip proper Rust panic runtime teardown and forcefully exit.
@@ -279,6 +294,7 @@ pub async fn run() -> Result<()> {
             );
             let _ = std::fs::remove_file(&pid_path);
             let _ = std::fs::remove_file(workspace.enhancing_progress_path());
+            let _ = std::fs::remove_file(workspace.enhancing_phase_path());
             eprintln!("Background enhancement failed: {:?}", e);
             std::process::exit(1);
         }
@@ -286,6 +302,7 @@ pub async fn run() -> Result<()> {
         let _ = jobs::finish_job(&workspace, JobKind::Enhancement, "completed", None);
         let _ = std::fs::remove_file(&pid_path);
         let _ = std::fs::remove_file(workspace.enhancing_progress_path());
+        let _ = std::fs::remove_file(workspace.enhancing_phase_path());
         std::process::exit(0);
     }
 
@@ -392,6 +409,7 @@ async fn run_status(json: bool) -> Result<()> {
 
                 // Embedding status
                 if ws.enhancing_in_progress {
+                    let phase = ws.enhancing_phase.as_deref().unwrap_or("background");
                     let progress_str = if let Some(count) = ws.enhancing_progress_count {
                         let pct = if ws.chunk_count > 0 {
                             (count as f64 / ws.chunk_count as f64 * 100.0).min(100.0) as u64
@@ -405,11 +423,11 @@ async fn run_status(json: bool) -> Result<()> {
 
                     if let Some(reason) = &ws.enhancing_paused_reason {
                         println!(
-                            "{prefix}  Search: \x1b[1;33m⟳ enhancing [PAUSED]\x1b[0m {progress_str}(Paused: {reason})"
+                            "{prefix}  Search: \x1b[1;33m⟳ enhancing {phase} [PAUSED]\x1b[0m {progress_str}(Paused: {reason})"
                         );
                     } else {
                         println!(
-                            "{prefix}  Search: \x1b[1;33m⟳ enhancing\x1b[0m {progress_str}(computing local neural vectors in background...)"
+                            "{prefix}  Search: \x1b[1;33m⟳ enhancing {phase}\x1b[0m {progress_str}(computing local vectors in background...)"
                         );
                     }
                 } else if ws.enhancing_stalled {
@@ -872,10 +890,9 @@ async fn run_query(cli: Cli) -> Result<()> {
         search_via_daemon = true;
     }
 
-    // Indexing always uses hash embeddings (instant, ~0.1s).
-    // Search uses the neural model for query embedding (single text, still fast).
-    // Background thread enhances the vector store with neural embeddings
-    // after results are returned, silently upgrading quality.
+    // Indexing commits SQLite + Tantivy first so BM25/literal search becomes
+    // available quickly. Background enhancement builds hash ANN, then neural
+    // vectors, without blocking first results.
 
     if !search_via_daemon && !cli.all_indices {
         let first_run = matches!(initial_index_state, Some(WorkspaceIndexState::NotIndexed));
@@ -940,6 +957,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                 }
 
                 if std::io::stderr().is_terminal() {
+                    let phase = status.enhancing_phase.as_deref().unwrap_or("background");
                     let progress_str = if let Some(count) = status.enhancing_progress_count {
                         let pct = if status.chunk_count > 0 {
                             (count as f64 / status.chunk_count as f64 * 100.0).min(100.0) as u64
@@ -951,8 +969,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                         String::new()
                     };
                     eprint!(
-                        "\r\x1b[K  waiting for background neural enhancement{}...",
-                        progress_str
+                        "\r\x1b[K  waiting for background {phase} enhancement{progress_str}..."
                     );
                 }
             } else {
@@ -965,9 +982,9 @@ async fn run_query(cli: Cli) -> Result<()> {
             && let Some(status) = ws_map.iter().find(|ws| ws.id == workspace.id)
         {
             if status.enhancing_stalled {
-                eprintln!("\r\x1b[K  ⚠ neural enhancement stalled");
+                eprintln!("\r\x1b[K  ⚠ background enhancement stalled");
             } else {
-                eprintln!("\r\x1b[K  ✓ neural enhancement complete");
+                eprintln!("\r\x1b[K  ✓ background enhancement complete");
             }
         }
     }
@@ -1218,7 +1235,7 @@ async fn run_query(cli: Cli) -> Result<()> {
         cli.verbose,
     )?;
 
-    // Kick off background neural enhancement if not already done.
+    // Kick off background hash and neural enhancement if not already done.
     // This runs after results are returned so the user is never blocked.
     // We launch it as a separate hidden CLI process to prevent segmentation faults
     // observed while tearing down neural-model state when the main process exits.

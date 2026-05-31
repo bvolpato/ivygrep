@@ -241,9 +241,9 @@ fn execute_ivygrep_status() -> Result<Value> {
         let ready_to_query = ws.chunk_count > 0 && ws.last_indexed_at_unix.is_some();
         let status_msg = if ready_to_query {
             if ws.enhancing_in_progress {
-                "Ready to query (Neural enhancement in progress)"
+                "Ready to query (Background enhancement in progress)"
             } else if ws.enhancing_stalled {
-                "Ready to query (Neural enhancement stalled)"
+                "Ready to query (Background enhancement stalled)"
             } else if !ws.has_neural_vectors {
                 "Ready to query (Lexical only)"
             } else {
@@ -408,8 +408,8 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
                 cancel_token: None,
             },
         )?;
-        // Upgrade neural vectors in a niced subprocess after the hash-first
-        // response is computed.
+        // Build hash ANN, then neural vectors, in a niced subprocess after the
+        // lexical-first response is computed.
         if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
             && workspace.needs_neural_enhancement()
         {
@@ -925,11 +925,10 @@ mod tests {
 
     #[test]
     #[serial]
-    fn mcp_auto_index_builds_hash_vectors_not_neural() {
-        // Regression guard for #56: the MCP auto-index must use the fast HASH
-        // model (256-dim `vectors.usearch`), not the neural model (384-dim)
-        // inline. Building neural inline blocks the first query for minutes on
-        // large repos and melts the host when several MCP clients do it at once.
+    fn mcp_auto_index_defers_vector_enrichment() {
+        // MCP auto-index must commit lexical stores without building ANN
+        // vectors inline. Multi-million chunk hash HNSW construction takes
+        // minutes and must run in background enhancement.
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("repo");
         std::fs::create_dir_all(root.join(".git")).unwrap();
@@ -973,8 +972,9 @@ mod tests {
         assert_eq!(
             store.dimensions(),
             256,
-            "MCP auto-index must build 256-dim hash vectors, not 384-dim neural inline"
+            "MCP auto-index must initialize hash store at 256 dimensions"
         );
+        assert_eq!(store.size(), 0, "MCP auto-index must defer hash ANN build");
 
         unsafe { std::env::remove_var("IVYGREP_NO_AUTOSPAWN") };
     }

@@ -31,7 +31,7 @@ fn create_index(dimensions: usize, quantization: ScalarKind) -> Result<Index> {
     };
 
     // Hash vectors provide first results before neural enhancement. A smaller
-    // graph reduces foreground build cost; neural vectors retain quality defaults.
+    // graph reduces background build cost; neural vectors retain quality defaults.
     if dimensions == HASH_VECTOR_DIMENSIONS && matches!(quantization, ScalarKind::F16) {
         options.connectivity = HASH_CONNECTIVITY;
         options.expansion_add = HASH_EXPANSION_ADD;
@@ -143,36 +143,33 @@ impl VectorStore {
 
     /// Reserve space for `additional` entries upfront, avoiding repeated
     /// capacity doublings during bulk enhancement.
-    pub fn reserve_additional(&mut self, additional: usize) {
+    pub fn reserve_additional(&mut self, additional: usize) -> Result<()> {
         if additional == 0 {
-            return;
+            return Ok(());
         }
         let needed = self.index.size() + additional;
         if needed > self.index.capacity() {
-            let _ = self.index.reserve(needed);
+            self.index.reserve(needed)?;
         }
+        Ok(())
     }
 
     /// Add a vector without checking for duplicates. Use only when the caller
     /// guarantees the key does not already exist (e.g., fresh enhancement).
-    pub fn add_unchecked(&mut self, key: u64, vector: Vec<f32>) {
-        self.ensure_capacity_for_insert();
-        // Surface failures: a dropped add means a chunk with no vector, which
-        // silently degrades semantic recall otherwise.
-        if let Err(err) = self.index.add(key, &vector) {
-            tracing::warn!("vector store add failed for key {key}: {err:?}");
-        }
+    pub fn add_unchecked(&mut self, key: u64, vector: Vec<f32>) -> Result<()> {
+        self.ensure_capacity_for_insert()?;
+        self.index.add(key, &vector)?;
+        Ok(())
     }
 
-    pub fn upsert(&mut self, key: u64, vector: Vec<f32>) {
-        self.ensure_capacity_for_insert();
+    pub fn upsert(&mut self, key: u64, vector: Vec<f32>) -> Result<()> {
+        self.ensure_capacity_for_insert()?;
 
         if self.index.contains(key) {
             let _ = self.index.remove(key);
         }
-        if let Err(err) = self.index.add(key, &vector) {
-            tracing::warn!("vector store upsert add failed for key {key}: {err:?}");
-        }
+        self.index.add(key, &vector)?;
+        Ok(())
     }
 
     pub fn size(&self) -> usize {
@@ -232,12 +229,12 @@ impl VectorStore {
         }
     }
 
-    fn ensure_capacity_for_insert(&mut self) {
+    fn ensure_capacity_for_insert(&mut self) -> Result<()> {
         let size = self.index.size();
         let capacity = self.index.capacity();
 
         if size < capacity {
-            return;
+            return Ok(());
         }
 
         // Cap growth to avoid unbounded memory allocation. Each vector
@@ -250,7 +247,8 @@ impl VectorStore {
             n => n.saturating_add(n.min(MAX_GROWTH)),
         };
 
-        let _ = self.index.reserve(next_capacity);
+        self.index.reserve(next_capacity)?;
+        Ok(())
     }
 }
 
@@ -266,8 +264,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("vectors.bin");
         let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
-        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]); // identical to query
-        store.upsert(2, vec![0.0, 1.0, 0.0, 0.0]); // orthogonal to query
+        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]).unwrap(); // identical to query
+        store.upsert(2, vec![0.0, 1.0, 0.0, 0.0]).unwrap(); // orthogonal to query
 
         let hits = store.search(&[1.0, 0.0, 0.0, 0.0], 2);
         let by_key: std::collections::HashMap<u64, f32> =
@@ -292,8 +290,8 @@ mod tests {
         let path = tmp.path().join("vectors.bin");
 
         let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
-        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]);
-        store.upsert(2, vec![0.0, 1.0, 0.0, 0.0]);
+        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
+        store.upsert(2, vec![0.0, 1.0, 0.0, 0.0]).unwrap();
         store.save().unwrap();
 
         let store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
@@ -308,7 +306,7 @@ mod tests {
         let path = tmp.path().join("vectors.bin");
 
         let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
-        store.upsert(42, vec![1.0, 0.0, 0.0, 0.0]);
+        store.upsert(42, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
         assert!(store.contains(42));
         assert!(!store.contains(99));
 
@@ -323,9 +321,9 @@ mod tests {
 
         let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
         assert_eq!(store.size(), 0);
-        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]);
+        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
         assert_eq!(store.size(), 1);
-        store.upsert(2, vec![0.0, 1.0, 0.0, 0.0]);
+        store.upsert(2, vec![0.0, 1.0, 0.0, 0.0]).unwrap();
         assert_eq!(store.size(), 2);
     }
 
@@ -335,8 +333,8 @@ mod tests {
         let path = tmp.path().join("vectors.bin");
 
         let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
-        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]);
-        store.upsert(1, vec![0.0, 1.0, 0.0, 0.0]);
+        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
+        store.upsert(1, vec![0.0, 1.0, 0.0, 0.0]).unwrap();
 
         assert_eq!(store.size(), 1);
         let hits = store.search(&[0.0, 1.0, 0.0, 0.0], 1);
@@ -349,7 +347,7 @@ mod tests {
         let path = tmp.path().join("vectors.bin");
 
         let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
-        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]);
+        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
 
         let score = store.score(1, &[1.0, 0.0, 0.0, 0.0]);
         assert!(score.is_some());
@@ -364,8 +362,8 @@ mod tests {
         let path = tmp.path().join("vectors.bin");
 
         let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
-        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]);
-        store.upsert(2, vec![0.0, 1.0, 0.0, 0.0]);
+        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
+        store.upsert(2, vec![0.0, 1.0, 0.0, 0.0]).unwrap();
         store.save().unwrap();
 
         let ro = VectorStore::open_readonly(&path, 4, ScalarKind::F32).unwrap();
@@ -381,7 +379,7 @@ mod tests {
 
         let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
         for i in 0..1100 {
-            store.upsert(i, vec![i as f32, 0.0, 0.0, 0.0]);
+            store.upsert(i, vec![i as f32, 0.0, 0.0, 0.0]).unwrap();
         }
         assert_eq!(store.size(), 1100);
     }

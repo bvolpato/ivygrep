@@ -16,6 +16,9 @@ Use as a measurement:
 Use as a gate (non-zero exit if below thresholds):
     scripts/eval_relevance.py --check --min-mrr 0.55 --min-p1 0.50
 
+Measure post-background hash relevance:
+    scripts/eval_relevance.py --enhance-hash
+
 Each query lists judgments (path glob -> grade). grade>=2 counts as a
 "relevant" result for precision/MRR; grade>=1 contributes to nDCG.
 """
@@ -152,7 +155,17 @@ def main() -> int:
     ap.add_argument("--queries", type=Path, default=DEFAULT_QUERIES)
     ap.add_argument("--binary", type=Path, default=REPO_ROOT / "target" / "release" / "ig")
     ap.add_argument("--limit", type=int, default=20)
-    ap.add_argument("--neural", action="store_true", help="use neural embeddings (default: hash)")
+    tier = ap.add_mutually_exclusive_group()
+    tier.add_argument(
+        "--enhance-hash",
+        action="store_true",
+        help="build background hash ANN vectors before queries",
+    )
+    tier.add_argument(
+        "--neural",
+        action="store_true",
+        help="use neural embeddings (default: foreground lexical/hash)",
+    )
     ap.add_argument("--skip-build", action="store_true")
     ap.add_argument("--details", action="store_true")
     ap.add_argument("--json", action="store_true", help="emit aggregate metrics as JSON only")
@@ -168,6 +181,9 @@ def main() -> int:
 
     env = os.environ.copy()
     env["IVYGREP_NO_AUTOSPAWN"] = "1"
+    # Explicit relevance tiers must finish deterministically even when the
+    # production background enhancer would pause under machine load.
+    env.setdefault("IVYGREP_ENHANCE_MAX_LOAD_RATIO", "0")
     env.setdefault("RUST_BACKTRACE", "1")
 
     # Always build unless explicitly skipped, so the eval never runs against a
@@ -188,7 +204,13 @@ def main() -> int:
             env=env,
         )
 
-        if args.neural:
+        if args.enhance_hash:
+            run(
+                [str(binary), "--enhance-hash-internal", str(repo)],
+                cwd=REPO_ROOT,
+                env=env,
+            )
+        elif args.neural:
             # Build neural vectors up front (foreground, no daemon) so the query
             # path actually exercises them. Without this the queries run before
             # background enhancement exists, silently measuring the hash
@@ -198,10 +220,8 @@ def main() -> int:
                 cwd=REPO_ROOT,
                 env=env,
             )
-            # `--enhance-internal` exits 0 even when neural model init fails
-            # (a hash-only binary, or a missing/broken model download), so the
-            # exit code can't be trusted. Confirm neural vectors actually exist;
-            # otherwise we'd report the hash fallback as "neural". Fail loudly.
+            # Confirm neural vectors actually exist so a future fallback cannot
+            # be reported as neural relevance. Fail loudly.
             status = run(
                 [str(binary), "--status", "--json"], cwd=REPO_ROOT, env=env
             )
@@ -247,7 +267,13 @@ def main() -> int:
                 )
 
         agg = {
-            "mode": "neural" if args.neural else "hash",
+            "mode": (
+                "neural"
+                if args.neural
+                else "hash-enriched"
+                if args.enhance_hash
+                else "foreground"
+            ),
             "queries": len(rows),
             "mean_p1": mean([r["p1"] for r in rows]),
             "mean_p5": mean([r["p5"] for r in rows]),

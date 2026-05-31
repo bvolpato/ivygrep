@@ -27,6 +27,12 @@ pub trait EmbeddingModel: Send + Sync {
     fn backend_info(&self) -> Option<&'static str> {
         None
     }
+
+    /// Whether background embedding should pause under load, thermal, or
+    /// battery pressure. Lightweight and test models stay deterministic.
+    fn respects_system_constraints(&self) -> bool {
+        false
+    }
 }
 
 /// Returns the embedding dimension for the selected mode.
@@ -448,6 +454,10 @@ impl EmbeddingModel for CandleEmbeddingModel {
 
     fn backend_info(&self) -> Option<&'static str> {
         Some(self.backend.label())
+    }
+
+    fn respects_system_constraints(&self) -> bool {
+        true
     }
 }
 

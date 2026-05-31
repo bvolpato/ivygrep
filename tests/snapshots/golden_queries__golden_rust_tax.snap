@@ -8,4 +8,3 @@ expression: snap
   preview: "pub fn calculate_tax(amount: f64, rate: f64) -> f64 {\n    amount * rate\n}"
   sources:
     - lexical
-    - semantic

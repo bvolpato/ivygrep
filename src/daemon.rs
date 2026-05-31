@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -16,7 +16,10 @@ use tracing::{error, info, warn};
 
 use crate::config;
 use crate::embedding::{EmbeddingModel, create_model};
-use crate::indexer::{index_workspace, index_workspace_for_watcher, remove_workspace_index};
+use crate::indexer::{
+    index_workspace, index_workspace_for_watcher, index_workspace_paths_for_watcher,
+    remove_workspace_index,
+};
 use crate::jobs::{self, JobKind, JobUpdate};
 use crate::protocol::{BUILD_VERSION, DaemonRequest, DaemonResponse};
 use crate::regex_search::regex_search;
@@ -63,6 +66,7 @@ struct WatchControl {
     active: AtomicBool,
     pending_events: AtomicU64,
     coalesced_events: AtomicU64,
+    dirty_paths: Mutex<HashSet<PathBuf>>,
 }
 
 impl WatchControl {
@@ -75,13 +79,19 @@ impl WatchControl {
             active: AtomicBool::new(true),
             pending_events: AtomicU64::new(0),
             coalesced_events: AtomicU64::new(0),
+            dirty_paths: Mutex::new(HashSet::new()),
         }
     }
 
-    fn mark_dirty(&self) {
+    fn mark_dirty(&self, paths: impl IntoIterator<Item = PathBuf>) {
+        self.dirty_paths.lock().extend(paths);
         self.dirty.store(true, Ordering::Relaxed);
         self.pending_events.fetch_add(1, Ordering::Relaxed);
         self.notify.notify_one();
+    }
+
+    fn take_dirty_paths(&self) -> Vec<PathBuf> {
+        self.dirty_paths.lock().drain().collect()
     }
 
     fn snapshot_phase(&self) -> (&'static str, bool, bool, u64, u64) {
@@ -265,11 +275,13 @@ impl WatchEventFilter {
         }
     }
 
-    fn should_reindex(&self, event: &notify::Event) -> bool {
+    fn paths_to_reindex(&self, event: &notify::Event) -> Vec<PathBuf> {
         event
             .paths
             .iter()
-            .any(|path| self.path_should_reindex(path))
+            .filter(|path| self.path_should_reindex(path))
+            .filter_map(|path| self.normalize_watch_path(path).map(|(_, rel)| rel))
+            .collect()
     }
 
     fn path_should_reindex(&self, path: &Path) -> bool {
@@ -815,7 +827,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 if all_errors.is_empty() {
                     state_clone.store_query_results(cache_key, &all_hits);
                 }
-                // Spawn background neural enhancement for workspaces that need it
+                // Spawn background hash and neural enhancement for workspaces that need it.
                 if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none() {
                     for root in ws_neural_missing {
                         if let Ok(ws) = Workspace::resolve(&root) {
@@ -1112,10 +1124,11 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
     let event_filter = WatchEventFilter::new(&workspace);
 
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        if let Ok(event) = event
-            && event_filter.should_reindex(&event)
-        {
-            callback_control.mark_dirty();
+        if let Ok(event) = event {
+            let paths = event_filter.paths_to_reindex(&event);
+            if !paths.is_empty() {
+                callback_control.mark_dirty(paths);
+            }
         }
     })?;
 
@@ -1238,6 +1251,7 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                 let _ = jobs::heartbeat_job(&control.workspace, JobKind::Watcher, update);
 
                 let workspace = control.workspace.clone();
+                let changed_paths = control.take_dirty_paths();
                 // Gate watcher-triggered indexing behind the same CPU semaphore
                 // as client requests (#58). A multi-repo branch switch / build
                 // can dirty many watched workspaces at once; without this, each
@@ -1248,7 +1262,15 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                 let result = tokio::task::spawn_blocking(move || {
                     let _permit = permit;
                     let hash_model = cached_hash_model();
-                    let _ = index_workspace_for_watcher(&workspace, hash_model.as_ref())?;
+                    let _ = if changed_paths.is_empty() {
+                        index_workspace_for_watcher(&workspace, hash_model.as_ref())?
+                    } else {
+                        index_workspace_paths_for_watcher(
+                            &workspace,
+                            hash_model.as_ref(),
+                            &changed_paths,
+                        )?
+                    };
                     Result::<(), anyhow::Error>::Ok(())
                 })
                 .await
@@ -1257,6 +1279,11 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                 match result {
                     Ok(()) => {
                         state.clear_workspace_contexts(&control.workspace);
+                        if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
+                            && control.workspace.needs_neural_enhancement()
+                        {
+                            let _ = control.workspace.trigger_background_enhancement();
+                        }
                         daemon_log(&format!(
                             "watch update indexed {}",
                             control.workspace.root.display()
@@ -2012,6 +2039,7 @@ mod tests {
         let workspace = Workspace::resolve(repo.path()).unwrap();
         let model = create_hash_model();
         index_workspace(&workspace, model.as_ref()).unwrap();
+        crate::indexer::enhance_workspace_hash(&workspace, model.as_ref()).unwrap();
 
         let state = test_state();
         let lazy_model = state.lazy_model.clone();

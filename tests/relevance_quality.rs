@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use ivygrep::EMBEDDING_DIMENSIONS;
 use ivygrep::embedding::HashEmbeddingModel;
-use ivygrep::indexer::index_workspace;
+use ivygrep::indexer::{enhance_workspace_hash, index_workspace};
 use ivygrep::protocol::SearchHit;
 use ivygrep::search::{SearchOptions, hybrid_search};
 use ivygrep::workspace::Workspace;
@@ -279,6 +279,7 @@ fn doc_or_test_intent_can_surface_secondary_sources() {
     let (_tmp, workspace) = stage_relevance_corpus();
     let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
     index_workspace(&workspace, &model).unwrap();
+    enhance_workspace_hash(&workspace, &model).unwrap();
 
     let doc_hits = hybrid_search(
         &workspace,

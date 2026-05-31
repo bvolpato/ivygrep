@@ -258,6 +258,90 @@ impl MerkleSnapshot {
             deleted,
         }
     }
+
+    /// Refresh a known set of changed files without walking the workspace.
+    ///
+    /// Returns `None` when a targeted refresh is unsafe and the caller should
+    /// fall back to a full snapshot rebuild. Directory changes, new files, and
+    /// ignore-rule edits require the full walker to classify affected paths.
+    pub fn refresh_paths(
+        &self,
+        root: &Path,
+        rel_paths: &[PathBuf],
+        skip_gitignore: bool,
+    ) -> Result<Option<(Self, MerkleDiff)>> {
+        if skip_gitignore {
+            return Ok(None);
+        }
+
+        let mut newer = self.clone();
+        let mut changed = false;
+        for rel_path in rel_paths {
+            if rel_path.as_os_str().is_empty()
+                || rel_path
+                    .file_name()
+                    .is_some_and(|name| name == ".gitignore" || name == ".ignore")
+            {
+                return Ok(None);
+            }
+
+            let path = root.join(rel_path);
+            if path.is_dir() {
+                return Ok(None);
+            }
+
+            let key = rel_path.to_string_lossy().to_string();
+            let next_hash = match fs::metadata(&path) {
+                Ok(metadata)
+                    if metadata.is_file() && metadata.len() <= MAX_INDEXABLE_FILE_BYTES =>
+                {
+                    let is_ignored = newer
+                        .files
+                        .get(&key)
+                        .is_some_and(|hash| hash.ends_with("-1"));
+                    Some(format!(
+                        "{}-{}",
+                        metadata_file_hash(&metadata),
+                        u8::from(is_ignored)
+                    ))
+                }
+                Ok(metadata) if metadata.is_dir() => return Ok(None),
+                _ => None,
+            };
+
+            match next_hash {
+                Some(hash) => {
+                    // New files must pass through the full ignore-aware walker.
+                    // Existing files already have a visibility classification
+                    // in this snapshot, so metadata-only refresh is safe.
+                    if !newer.files.contains_key(&key) {
+                        return Ok(None);
+                    }
+                    if newer.files.get(&key) != Some(&hash) {
+                        newer.files.insert(key, hash);
+                        changed = true;
+                    }
+                }
+                None => {
+                    let dir_prefix = format!("{key}/");
+                    if newer
+                        .files
+                        .keys()
+                        .any(|existing| existing.starts_with(&dir_prefix))
+                    {
+                        return Ok(None);
+                    }
+                    changed |= newer.files.remove(&key).is_some();
+                }
+            }
+        }
+
+        if changed {
+            newer.root_hash = root_hash(&newer.files);
+        }
+        let diff = self.diff(&newer);
+        Ok(Some((newer, diff)))
+    }
 }
 
 fn metadata_file_hash(metadata: &fs::Metadata) -> String {
@@ -339,6 +423,95 @@ mod tests {
         assert!(
             diff.added_or_modified
                 .contains(&(PathBuf::from("c.ts"), false))
+        );
+    }
+
+    #[test]
+    fn targeted_refresh_detects_file_modify_delete() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
+        let first = MerkleSnapshot::build(root, false).unwrap();
+
+        fs::write(root.join("a.rs"), "fn a() { println!(\"changed\"); }\n").unwrap();
+        let (second, diff) = first
+            .refresh_paths(root, &[PathBuf::from("a.rs")], false)
+            .unwrap()
+            .unwrap();
+        assert!(
+            diff.added_or_modified
+                .contains(&(PathBuf::from("a.rs"), false))
+        );
+
+        fs::remove_file(root.join("a.rs")).unwrap();
+        let (_, diff) = second
+            .refresh_paths(root, &[PathBuf::from("a.rs")], false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(diff.deleted, vec![PathBuf::from("a.rs")]);
+    }
+
+    #[test]
+    fn targeted_refresh_preserves_existing_visibility_marker() {
+        let dir = tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
+        let mut snapshot = MerkleSnapshot::build(root, false).unwrap();
+        let hash = snapshot.files["a.rs"].trim_end_matches("-0").to_string();
+        snapshot
+            .files
+            .insert("a.rs".to_string(), format!("{hash}-1"));
+        snapshot.root_hash = root_hash(&snapshot.files);
+
+        fs::write(root.join("a.rs"), "fn a() { println!(\"changed\"); }\n").unwrap();
+        let (_, diff) = snapshot
+            .refresh_paths(root, &[PathBuf::from("a.rs")], false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(diff.added_or_modified, vec![(PathBuf::from("a.rs"), true)]);
+    }
+
+    #[test]
+    fn targeted_refresh_falls_back_for_new_file_classification() {
+        let dir = tempdir().unwrap();
+        let snapshot = MerkleSnapshot::empty();
+        fs::write(dir.path().join("new.rs"), "fn new() {}\n").unwrap();
+
+        assert!(
+            snapshot
+                .refresh_paths(dir.path(), &[PathBuf::from("new.rs")], false)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn targeted_refresh_falls_back_for_deleted_directory() {
+        let dir = tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("nested")).unwrap();
+        fs::write(dir.path().join("nested/file.rs"), "fn nested() {}\n").unwrap();
+        let snapshot = MerkleSnapshot::build(dir.path(), false).unwrap();
+        fs::remove_dir_all(dir.path().join("nested")).unwrap();
+
+        assert!(
+            snapshot
+                .refresh_paths(dir.path(), &[PathBuf::from("nested")], false)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn targeted_refresh_falls_back_for_ignore_rule_changes() {
+        let dir = tempdir().unwrap();
+        let snapshot = MerkleSnapshot::empty();
+        fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+
+        assert!(
+            snapshot
+                .refresh_paths(dir.path(), &[PathBuf::from(".gitignore")], false)
+                .unwrap()
+                .is_none()
         );
     }
 

@@ -6,7 +6,10 @@ use anyhow::Result;
 use rusqlite::Connection;
 use tantivy::TantivyDocument;
 use tantivy::collector::TopDocs;
-use tantivy::query::QueryParser;
+use tantivy::query::{
+    BooleanQuery, Occur, Query, QueryParser, RegexQuery, TermQuery, TermSetQuery,
+};
+use tantivy::schema::IndexRecordOption;
 
 use crate::embedding::EmbeddingModel;
 use crate::indexer::{
@@ -300,6 +303,7 @@ pub fn literal_search_with_context(
     let query_lower = query.to_ascii_lowercase();
     let max_hits = options.limit.unwrap_or(500);
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
+    let glob_path_filter = build_glob_path_query_filter(ctx, &path_matcher, options)?;
 
     let matcher = regex::RegexBuilder::new(&regex::escape(query))
         .case_insensitive(true)
@@ -307,8 +311,14 @@ pub fn literal_search_with_context(
 
     // Use Tantivy index as a pre-filter: find candidate chunk IDs via the
     // inverted index, then only decompress those to verify the exact match.
-    let candidate_chunks =
-        collect_literal_candidates(ctx, query, &matcher, &path_matcher, options)?;
+    let candidate_chunks = collect_literal_candidates(
+        ctx,
+        query,
+        &matcher,
+        &path_matcher,
+        &glob_path_filter,
+        options,
+    )?;
 
     tracing::trace!(
         "literal_scan={:?} candidates={}",
@@ -389,6 +399,7 @@ fn collect_literal_candidates(
     query: &str,
     matcher: &regex::Regex,
     path_matcher: &PathGlobMatcher,
+    glob_path_filter: &GlobPathQueryFilter,
     options: &SearchOptions,
 ) -> Result<Vec<IndexedChunk>> {
     let candidate_limit = if let Some(limit) = options.limit {
@@ -420,6 +431,10 @@ fn collect_literal_candidates(
             Ok(q) => q,
             Err(_) => continue,
         };
+        let parsed_query =
+            constrain_query_to_scope(parsed_query, &ctx.fields, options.scope_filter.as_ref())?;
+        let parsed_query =
+            constrain_query_to_glob_paths(parsed_query, &ctx.fields, glob_path_filter);
 
         for (i, searcher) in ctx.searchers.iter().enumerate() {
             let docs = searcher.search(
@@ -528,6 +543,7 @@ pub fn hybrid_search_with_context(
         output_limit.clamp(50, 2_000)
     };
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
+    let glob_path_filter = build_glob_path_query_filter(ctx, &path_matcher, options)?;
 
     tracing::trace!("open_tantivy={:?}", t0.elapsed());
 
@@ -564,8 +580,14 @@ pub fn hybrid_search_with_context(
                 .case_insensitive(true)
                 .build();
             if let Ok(ref vm) = variant_matcher
-                && let Ok(mut candidates) =
-                    collect_literal_candidates(ctx, variant, vm, &path_matcher, options)
+                && let Ok(mut candidates) = collect_literal_candidates(
+                    ctx,
+                    variant,
+                    vm,
+                    &path_matcher,
+                    &glob_path_filter,
+                    options,
+                )
             {
                 candidates.truncate(literal_limit);
                 for c in candidates {
@@ -655,6 +677,9 @@ pub fn hybrid_search_with_context(
             Ok(query) => query,
             Err(_) => continue,
         };
+        parsed_query =
+            constrain_query_to_scope(parsed_query, &ctx.fields, options.scope_filter.as_ref())?;
+        parsed_query = constrain_query_to_glob_paths(parsed_query, &ctx.fields, &glob_path_filter);
 
         if can_pushdown_languages && !allowed_languages.is_empty() {
             let mut lang_queries: Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)> =
@@ -741,7 +766,11 @@ pub fn hybrid_search_with_context(
         // the first-seen score would mis-rank depending on iteration order.
         let mut path_by_id: HashMap<String, (IndexedChunk, f32)> = HashMap::new();
         for pq in path_query_variants {
-            if let Ok(parsed) = path_parser.parse_query(pq) {
+            if let Ok(parsed) = path_parser.parse_query(pq)
+                && let Ok(parsed) =
+                    constrain_query_to_scope(parsed, &ctx.fields, options.scope_filter.as_ref())
+            {
+                let parsed = constrain_query_to_glob_paths(parsed, &ctx.fields, &glob_path_filter);
                 for (i, searcher) in ctx.searchers.iter().enumerate() {
                     if let Ok(docs) =
                         searcher.search(&parsed, &TopDocs::with_limit(100).order_by_score())
@@ -900,6 +929,11 @@ pub fn hybrid_search_with_context(
         &semantic_chunks,
         &literal_chunks,
         &path_chunks,
+        if neural_available || query_targets_secondary_sources(query_text) {
+            1.0
+        } else {
+            0.25
+        },
         query_text,
         options.limit,
     );
@@ -1373,7 +1407,149 @@ fn path_matches(chunk: &IndexedChunk, path_matcher: &PathGlobMatcher) -> bool {
     path_matcher.matches(&chunk.file_path)
 }
 
-#[allow(dead_code)]
+fn constrain_query_to_scope(
+    query: Box<dyn Query>,
+    fields: &TantivyFields,
+    scope_filter: Option<&WorkspaceScope>,
+) -> Result<Box<dyn Query>> {
+    let Some(scope) = scope_filter else {
+        return Ok(query);
+    };
+
+    let scope_path = scope.rel_path.to_string_lossy();
+    let path_query: Box<dyn Query> = if scope.is_file {
+        Box::new(TermQuery::new(
+            tantivy::Term::from_field_text(fields.file_path, &scope_path),
+            IndexRecordOption::Basic,
+        ))
+    } else {
+        let prefix = format!("{}{MAIN_SEPARATOR}", regex::escape(&scope_path));
+        Box::new(RegexQuery::from_pattern(
+            &format!("{prefix}.*"),
+            fields.file_path,
+        )?)
+    };
+
+    Ok(Box::new(BooleanQuery::new(vec![
+        (Occur::Must, query),
+        (Occur::Must, path_query),
+    ])))
+}
+
+const MAX_GLOB_PATH_TERMS: usize = 10_000;
+
+#[derive(Debug, Default)]
+struct GlobPathQueryFilter {
+    included_paths: Option<Vec<String>>,
+    excluded_paths: Option<Vec<String>>,
+}
+
+/// Build an exact-path Tantivy filter for focused globs before TopDocs ranking.
+///
+/// Globset supports patterns richer than Tantivy regexes. Streaming distinct
+/// indexed paths keeps matching semantics identical to the final Rust filter.
+/// Broad globs fall back to post-filtering once the bounded term set overflows.
+fn build_glob_path_query_filter(
+    ctx: &SearchContext,
+    path_matcher: &PathGlobMatcher,
+    options: &SearchOptions,
+) -> Result<GlobPathQueryFilter> {
+    let mut filter = GlobPathQueryFilter {
+        included_paths: (!options.include_globs.is_empty()).then(Vec::new),
+        excluded_paths: (!options.exclude_globs.is_empty()).then(Vec::new),
+    };
+    if filter.included_paths.is_none() && filter.excluded_paths.is_none() {
+        return Ok(filter);
+    }
+
+    let mut seen_paths = HashSet::new();
+    let mut collect_path = |path: String, searcher_idx: usize| {
+        if searcher_idx == 1 && ctx.is_shadowed_base_file(searcher_idx, Path::new(&path)) {
+            return true;
+        }
+        if !seen_paths.insert(path.clone())
+            || !scope_path_matches(Path::new(&path), options.scope_filter.as_ref())
+        {
+            return true;
+        }
+
+        if let Some(paths) = &mut filter.included_paths
+            && path_matcher.matches(Path::new(&path))
+        {
+            if paths.len() == MAX_GLOB_PATH_TERMS {
+                filter.included_paths = None;
+            } else {
+                paths.push(path.clone());
+            }
+        }
+
+        if let Some(paths) = &mut filter.excluded_paths
+            && path_matcher.is_excluded(Path::new(&path))
+        {
+            if paths.len() == MAX_GLOB_PATH_TERMS {
+                filter.excluded_paths = None;
+            } else {
+                paths.push(path);
+            }
+        }
+
+        filter.included_paths.is_some() || filter.excluded_paths.is_some()
+    };
+
+    let should_continue = visit_distinct_file_paths(&ctx.sqlite, |path| collect_path(path, 0))?;
+    if should_continue && let Some(base_sqlite) = &ctx.base_sqlite {
+        visit_distinct_file_paths(base_sqlite, |path| collect_path(path, 1))?;
+    }
+
+    Ok(filter)
+}
+
+fn visit_distinct_file_paths(
+    conn: &Connection,
+    mut visit: impl FnMut(String) -> bool,
+) -> Result<bool> {
+    let mut stmt = conn.prepare("SELECT DISTINCT file_path FROM chunks")?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        if !visit(row.get(0)?) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn constrain_query_to_glob_paths(
+    query: Box<dyn Query>,
+    fields: &TantivyFields,
+    filter: &GlobPathQueryFilter,
+) -> Box<dyn Query> {
+    let mut clauses = vec![(Occur::Must, query)];
+    if let Some(paths) = &filter.included_paths {
+        clauses.push((
+            Occur::Must,
+            Box::new(TermSetQuery::new(paths.iter().map(|path| {
+                tantivy::Term::from_field_text(fields.file_path, path)
+            }))),
+        ));
+    }
+    if let Some(paths) = &filter.excluded_paths
+        && !paths.is_empty()
+    {
+        clauses.push((
+            Occur::MustNot,
+            Box::new(TermSetQuery::new(paths.iter().map(|path| {
+                tantivy::Term::from_field_text(fields.file_path, path)
+            }))),
+        ));
+    }
+
+    if clauses.len() == 1 {
+        clauses.pop().unwrap().1
+    } else {
+        Box::new(BooleanQuery::new(clauses))
+    }
+}
+
 fn escape_like_pattern(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for ch in value.chars() {
@@ -1409,7 +1585,6 @@ fn is_definition_kind(kind: &str) -> bool {
 
 /// Pre-collect chunks from SQLite that match glob/scope/type filters.
 /// Used to avoid full-corpus vector scan when targeted filters are set.
-#[allow(dead_code)]
 fn collect_filtered_chunks(
     ctx: &SearchContext,
     path_matcher: &PathGlobMatcher,
@@ -1441,7 +1616,6 @@ fn collect_filtered_chunks(
     chunks
 }
 
-#[allow(dead_code)]
 fn query_filtered_chunks(
     conn: &Connection,
     path_matcher: &PathGlobMatcher,
@@ -1452,7 +1626,7 @@ fn query_filtered_chunks(
 ) -> Vec<RawIndexedChunk> {
     // Build a SQL query that pushes as much filtering as possible into SQLite.
     let mut sql = String::from(
-        "SELECT chunk_id, file_path, start_line, end_line, language, kind, text, content_hash, vector_key, is_ignored FROM chunks WHERE 1=1",
+        "SELECT chunk_id, file_path, start_line, end_line, language, kind, x'', content_hash, vector_key, is_ignored FROM chunks WHERE 1=1",
     );
     let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
@@ -1542,11 +1716,38 @@ fn collect_semantic_candidates(
     primary_store: Option<&VectorStore>,
     base_store: Option<&VectorStore>,
 ) -> Result<Vec<(IndexedChunk, f32)>> {
-    let mut semantic_chunks = Vec::new();
+    const MAX_EXACT_FILTERED_CANDIDATES: usize = 50_000;
+
     let has_filters = !options.include_globs.is_empty()
         || !options.exclude_globs.is_empty()
         || options.scope_filter.is_some()
         || options.type_filter.is_some();
+
+    // ANN cannot push path filters into the graph. For focused searches, exact
+    // scoring over the filtered subset is both complete and cheap. This avoids
+    // losing the best scoped result behind globally-nearer out-of-scope chunks.
+    if has_filters {
+        let filtered = collect_filtered_chunks(
+            ctx,
+            path_matcher,
+            options.scope_filter.as_ref(),
+            options.type_filter.as_deref(),
+            &options.include_globs,
+            options.skip_gitignore,
+        );
+        if filtered.len() <= MAX_EXACT_FILTERED_CANDIDATES {
+            return score_filtered_semantic_candidates(
+                ctx,
+                filtered,
+                query_vector,
+                candidate_limit,
+                primary_store,
+                base_store,
+            );
+        }
+    }
+
+    let mut semantic_chunks = Vec::new();
 
     // Always use the ANN index for initial candidates — even when filters are
     // active. Over-fetch then post-filter is orders of magnitude faster than
@@ -1599,6 +1800,36 @@ fn collect_semantic_candidates(
     Ok(semantic_chunks)
 }
 
+fn score_filtered_semantic_candidates(
+    ctx: &SearchContext,
+    filtered: Vec<RawIndexedChunk>,
+    query_vector: &[f32],
+    candidate_limit: usize,
+    primary_store: Option<&VectorStore>,
+    base_store: Option<&VectorStore>,
+) -> Result<Vec<(IndexedChunk, f32)>> {
+    let mut scored = filtered
+        .into_iter()
+        .filter_map(|chunk| {
+            let score = primary_store
+                .and_then(|store| store.score(chunk.vector_key, query_vector))
+                .into_iter()
+                .chain(base_store.and_then(|store| store.score(chunk.vector_key, query_vector)))
+                .max_by(|a, b| a.total_cmp(b))?;
+            Some((chunk.vector_key, score))
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    scored.truncate(candidate_limit);
+
+    let keys = scored.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+    let chunks = ctx.fetch_chunks_by_vector_keys_batch(&keys)?;
+    Ok(scored
+        .into_iter()
+        .filter_map(|(key, score)| chunks.get(&key).cloned().map(|chunk| (chunk, score)))
+        .collect())
+}
+
 fn merge_semantic_candidates(
     semantic_by_id: &mut HashMap<String, (IndexedChunk, f32)>,
     hits: Vec<(IndexedChunk, f32)>,
@@ -1618,6 +1849,7 @@ fn fuse_rrf(
     semantic: &[(IndexedChunk, f32)],
     literal: &[(IndexedChunk, f32)],
     path: &[(IndexedChunk, f32)],
+    semantic_direct_weight: f32,
     query_text: &str,
     limit: Option<usize>,
 ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
@@ -1650,6 +1882,12 @@ fn fuse_rrf(
 
     let query_tokens = expanded_query_tokens(query_text);
     let location_intent = has_location_intent(query_text);
+    let direct_ids = lexical
+        .iter()
+        .map(|(chunk, _)| chunk.chunk_id.as_str())
+        .chain(literal.iter().map(|(chunk, _)| chunk.chunk_id.as_str()))
+        .chain(path.iter().map(|(chunk, _)| chunk.chunk_id.as_str()))
+        .collect::<HashSet<_>>();
 
     struct RrfEntry {
         score: f32,
@@ -1673,6 +1911,14 @@ fn fuse_rrf(
     }
 
     for (rank, (chunk, semantic_score)) in semantic.iter().enumerate() {
+        // Hash vectors are a cheap provisional recall tier. Keep full strength
+        // for semantic-only discovery, but do not let hash collisions overrule
+        // direct evidence. Neural vectors use semantic_direct_weight=1.0.
+        let direct_weight = if direct_ids.contains(chunk.chunk_id.as_str()) {
+            semantic_direct_weight
+        } else {
+            1.0
+        };
         let e = entries
             .entry(chunk.chunk_id.clone())
             .or_insert_with(|| RrfEntry {
@@ -1680,9 +1926,10 @@ fn fuse_rrf(
                 chunk: chunk.clone(),
                 sources: HashSet::new(),
             });
-        e.score += SEMANTIC_WEIGHT / (K + rank as f32 + 1.0);
+        e.score += direct_weight * SEMANTIC_WEIGHT / (K + rank as f32 + 1.0);
         // Use the actual cosine similarity score, not just rank position
-        e.score += normalize_semantic_score(*semantic_score) * SEMANTIC_SCORE_WEIGHT;
+        e.score +=
+            direct_weight * normalize_semantic_score(*semantic_score) * SEMANTIC_SCORE_WEIGHT;
         e.sources.insert("semantic".to_string());
     }
 
@@ -2569,7 +2816,7 @@ mod tests {
 
     use crate::EMBEDDING_DIMENSIONS;
     use crate::embedding::{EmbeddingModel, HashEmbeddingModel};
-    use crate::indexer::index_workspace;
+    use crate::indexer::{enhance_workspace_hash, index_workspace};
     use crate::workspace::{Workspace, WorkspaceScope};
 
     use super::*;
@@ -2616,6 +2863,7 @@ mod tests {
         let workspace = Workspace::resolve(tmp.path()).unwrap();
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         index_workspace(&workspace, &model).unwrap();
+        enhance_workspace_hash(&workspace, &model).unwrap();
 
         let hits = hybrid_search(
             &workspace,
@@ -2681,6 +2929,7 @@ mod tests {
         let workspace = Workspace::resolve(tmp.path()).unwrap();
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         index_workspace(&workspace, &model).unwrap();
+        enhance_workspace_hash(&workspace, &model).unwrap();
 
         let hits = hybrid_search(
             &workspace,
@@ -2844,6 +3093,7 @@ mod tests {
         let workspace = Workspace::resolve(tmp.path()).unwrap();
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         index_workspace(&workspace, &model).unwrap();
+        enhance_workspace_hash(&workspace, &model).unwrap();
 
         // No neural store — should fall back to hash vectors
         assert!(!workspace.vector_neural_path().exists());
@@ -2881,6 +3131,7 @@ mod tests {
         let hash_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         let neural_model = TestEmbeddingModel384;
         index_workspace(&workspace, &hash_model).unwrap();
+        enhance_workspace_hash(&workspace, &hash_model).unwrap();
         assert!(!workspace.vector_neural_path().exists());
 
         let hits_before = hybrid_search(
@@ -2972,6 +3223,7 @@ mod tests {
         let hash_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         let neural_model = TestEmbeddingModel384;
         index_workspace(&workspace, &hash_model).unwrap();
+        enhance_workspace_hash(&workspace, &hash_model).unwrap();
         crate::indexer::enhance_workspace_neural(&workspace, &neural_model).unwrap();
         assert!(workspace.vector_neural_path().exists());
 
@@ -2985,6 +3237,7 @@ mod tests {
         .unwrap();
         let workspace = Workspace::resolve(tmp.path()).unwrap();
         index_workspace(&workspace, &hash_model).unwrap();
+        enhance_workspace_hash(&workspace, &hash_model).unwrap();
 
         // Searching B's content with the neural model must still yield a
         // semantic candidate for B via the hash fallback, even though neural
@@ -3136,6 +3389,59 @@ mod tests {
             let repeated = literal_search(&workspace, "common_literal_marker", &options).unwrap();
             let repeated_paths: Vec<_> = repeated.iter().map(|hit| hit.file_path.clone()).collect();
             assert_eq!(repeated_paths, first_paths);
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn glob_filters_survive_global_candidate_caps() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let scoped = tmp.path().join("scoped");
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(&scoped).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        for i in 0..700 {
+            std::fs::write(
+                other.join(format!("targettoken_noise_{i:03}.rs")),
+                format!(
+                    "pub fn noisy_{i}() {{\n    // {}\n}}\n",
+                    "targettoken ".repeat(80)
+                ),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            scoped.join("match.rs"),
+            "pub fn scoped_match() -> &'static str { \"targettoken\" }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        for options in [
+            SearchOptions {
+                limit: Some(1),
+                include_globs: vec!["scoped/**".to_string()],
+                ..SearchOptions::default()
+            },
+            SearchOptions {
+                limit: Some(1),
+                exclude_globs: vec!["other/**".to_string()],
+                ..SearchOptions::default()
+            },
+        ] {
+            let literal_hits = literal_search(&workspace, "targettoken", &options).unwrap();
+            assert_eq!(literal_hits.len(), 1);
+            assert_eq!(literal_hits[0].file_path, PathBuf::from("scoped/match.rs"));
+
+            let hybrid_hits = hybrid_search(&workspace, "targettoken", None, &options).unwrap();
+            assert_eq!(hybrid_hits.len(), 1);
+            assert_eq!(hybrid_hits[0].file_path, PathBuf::from("scoped/match.rs"));
         }
     }
 
