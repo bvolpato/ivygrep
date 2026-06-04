@@ -41,6 +41,14 @@ jobs:
             echo "ref=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Fetch benchmark base
+        if: steps.benchmark-base.outputs.ref != ''
+        env:
+          BENCHMARK_BASE_REF: ${{ steps.benchmark-base.outputs.ref }}
+        run: |
+          git cat-file -e "${BENCHMARK_BASE_REF}^{commit}" 2>/dev/null ||
+            git fetch --no-tags --depth=1 origin "${BENCHMARK_BASE_REF}"
+
       - name: Guard critical benchmark regressions
         if: steps.benchmark-base.outputs.ref != ''
         run: |
