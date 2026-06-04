@@ -71,8 +71,12 @@ jobs:
         env:
           RUSTFLAGS: "-D warnings -C target-cpu=x86-64-v3"
 
+      - name: Bootstrap stress fixtures
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.test_scope == 'stress'
+        run: ./scripts/bootstrap_stress_fixtures.sh
+
       - name: Run stress tests
-        if: github.event.inputs.test_scope == 'stress'
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.test_scope == 'stress'
         run: cargo test --test stress_harness -- --ignored
         env:
           RUSTFLAGS: "-D warnings -C target-cpu=x86-64-v3"
