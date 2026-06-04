@@ -4,6 +4,14 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.9.2] — 2026-06-04
+
+### Fixed
+- **Benchmark regression guards survive force-pushed baselines.** Benchmark CI now fetches the push or pull-request baseline commit when it is missing locally, so valid history rewrites no longer fail before the comparison runs.
+
+### Testing
+- **Cross-platform stress coverage is runnable and recurring.** Linux x86_64 E2E bootstraps its required stress fixtures before ignored stress tests and runs that coverage on scheduled and tagged workflows, while manual dispatch can still opt into stress explicitly.
+
 ## [0.9.1] — 2026-05-31
 
 ### Fixed
