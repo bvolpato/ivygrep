@@ -143,6 +143,7 @@ while (($#)); do
 done
 
 export IVYGREP_NO_AUTOSPAWN="${IVYGREP_NO_AUTOSPAWN:-1}"
+export IVYGREP_ENHANCE_MAX_LOAD_RATIO="${IVYGREP_ENHANCE_MAX_LOAD_RATIO:-0}"
 export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
 
 criterion_args=(--noplot)

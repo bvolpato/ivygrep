@@ -4,6 +4,24 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.9.3] — 2026-06-04
+
+### Fixed
+- **Doctor detects cross-store index drift before it becomes silent search loss.** Full health checks now compare live SQLite and Tantivy chunk counts, verify completed hash-vector cardinality, validate optional neural stores, and flag SQLite paths missing from the Merkle snapshot.
+- **Missing Merkle snapshots force a rebuild.** Quick health checks no longer treat an index without its incremental-diff snapshot as healthy, preventing stale chunks from surviving deleted source files.
+- **Malformed vector stores fail safely before native loading.** Serialized dimensions, length, and header magic are validated before USearch mmap/load calls, avoiding native crashes on truncated or malformed-header index files.
+- **Benchmark guards preserve developer checkouts.** Regression comparisons reject dirty worktrees and restore the original branch or detached commit after measuring both revisions.
+
+### Performance
+- **Hybrid benchmarks now measure semantic search.** Indexed Criterion fixtures complete hash-vector enhancement and assert semantic evidence reaches representative phrase-query results instead of accidentally measuring empty-vector lexical-only queries.
+- **Hot ANN latency has dedicated 50K-vector coverage.** Critical-journey benchmarks now separate mmap/open overhead from repeated in-process vector search.
+
+### Testing
+- **Daemon/local search equivalence runs in CI and release builds.** Representative hybrid, literal, regex, type, glob, scope, and multi-workspace queries must return equivalent results through both execution paths.
+- **Python harness tests run in local full validation and CI.** Benchmark and conversion helper regressions are no longer outside the default gate.
+- **Documented E2E procedures cover regex search.** Release and cross-platform CLI smoke tests now validate the regex path alongside literal, scoped, filtered, status, doctor, add, and remove workflows.
+- **Test and benchmark harnesses disable production load throttling.** Explicit enhancement runs finish deterministically on busy development and CI hosts.
+
 ## [0.9.2] — 2026-06-04
 
 ### Fixed

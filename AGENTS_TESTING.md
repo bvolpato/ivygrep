@@ -12,6 +12,9 @@
 ./test.sh
 ```
 
+Full validation also runs Python harness tests. Use `./test.sh --no-python`
+only when iterating on Rust-only changes.
+
 ## Build
 
 ```bash
@@ -35,7 +38,15 @@ Benchmark output reports per-operation latency. Microbenchmarks run repeated log
 ```bash
 ./build.sh
 ./scripts/e2e_procedures.sh --binary ./target/release/ig
+python3 scripts/check_daemon_equivalence.py \
+  --skip-build \
+  --binary ./target/release/ig \
+  --bench-home /tmp/ivygrep-daemon-equivalence
 ```
+
+The procedure smoke covers documented CLI workflows. The equivalence check
+compares daemon and local results across hybrid, literal, regex, type, glob,
+scope, and multi-workspace searches.
 
 ## Stress Tests (requires fixture download)
 

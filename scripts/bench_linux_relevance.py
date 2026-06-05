@@ -306,6 +306,7 @@ def main() -> int:
     env = os.environ.copy()
     env["IVYGREP_HOME"] = str(bench_home)
     env["IVYGREP_NO_AUTOSPAWN"] = "1"
+    env.setdefault("IVYGREP_ENHANCE_MAX_LOAD_RATIO", "0")
     env["RUST_BACKTRACE"] = env.get("RUST_BACKTRACE", "1")
 
     if not args.skip_build and args.binary is None:

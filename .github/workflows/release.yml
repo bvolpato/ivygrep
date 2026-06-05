@@ -109,6 +109,10 @@ jobs:
             echo "⏭️ Skipping index test for Linux aarch64 release binary (tested under QEMU in e2e-cross-platform.yml)"
           else
             ./scripts/e2e_procedures.sh --binary "$IG_BIN"
+            python3 scripts/check_daemon_equivalence.py \
+              --skip-build \
+              --binary "$IG_BIN" \
+              --bench-home /tmp/ivygrep-release-daemon-equivalence
           fi
 
       - name: Package archive

@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -10,6 +11,9 @@ const HASH_VECTOR_DIMENSIONS: usize = 256;
 const HASH_CONNECTIVITY: usize = 8;
 const HASH_EXPANSION_ADD: usize = 16;
 const HASH_EXPANSION_SEARCH: usize = 64;
+const SERIALIZED_DIMENSIONS_BYTES: u64 = 8;
+const SERIALIZED_HEADER_BYTES: u64 = 64;
+const SERIALIZED_MAGIC: &[u8] = b"usearch";
 
 #[derive(Debug, Clone)]
 pub struct VectorMatch {
@@ -41,10 +45,49 @@ fn create_index(dimensions: usize, quantization: ScalarKind) -> Result<Index> {
     Ok(Index::new(&options)?)
 }
 
+// USearch mmap/load trusts serialized matrix dimensions before validating its
+// header, so reject malformed offsets here instead of risking a native crash.
+fn validate_existing_index_file(path: &Path) -> Result<()> {
+    let mut file = fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    anyhow::ensure!(
+        len >= SERIALIZED_DIMENSIONS_BYTES + SERIALIZED_HEADER_BYTES,
+        "vector store is truncated ({len} bytes)"
+    );
+
+    let mut dimensions = [0u8; SERIALIZED_DIMENSIONS_BYTES as usize];
+    file.read_exact(&mut dimensions)?;
+    let rows = u32::from_le_bytes(dimensions[..4].try_into().unwrap()) as u64;
+    let bytes_per_vector = u32::from_le_bytes(dimensions[4..].try_into().unwrap()) as u64;
+    let vectors_bytes = rows
+        .checked_mul(bytes_per_vector)
+        .context("vector store dimensions overflow")?;
+    let header_offset = SERIALIZED_DIMENSIONS_BYTES
+        .checked_add(vectors_bytes)
+        .context("vector store header offset overflow")?;
+    let required_len = header_offset
+        .checked_add(SERIALIZED_HEADER_BYTES)
+        .context("vector store length overflow")?;
+    anyhow::ensure!(
+        required_len <= len,
+        "vector store is truncated ({len} bytes, header requires {required_len})"
+    );
+
+    file.seek(SeekFrom::Start(header_offset))?;
+    let mut magic = [0u8; SERIALIZED_MAGIC.len()];
+    file.read_exact(&mut magic)?;
+    anyhow::ensure!(
+        magic == SERIALIZED_MAGIC,
+        "invalid vector store header magic"
+    );
+    Ok(())
+}
+
 impl VectorStore {
     pub fn open(path: &Path, dimensions: usize, quantization: ScalarKind) -> Result<Self> {
         let index = create_index(dimensions, quantization)?;
         if path.exists() {
+            validate_existing_index_file(path)?;
             let path_str = path
                 .to_str()
                 .context("vector path contains invalid UTF-8")?;
@@ -83,6 +126,7 @@ impl VectorStore {
     pub fn open_readonly(path: &Path, dimensions: usize, quantization: ScalarKind) -> Result<Self> {
         let index = create_index(dimensions, quantization)?;
         if path.exists() {
+            validate_existing_index_file(path)?;
             let path_str = path
                 .to_str()
                 .context("vector path contains invalid UTF-8")?;
@@ -370,6 +414,33 @@ mod tests {
         assert_eq!(ro.size(), 2);
         assert!(ro.contains(1));
         assert!(ro.contains(2));
+    }
+
+    #[test]
+    fn open_rejects_truncated_file_before_native_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+        fs::write(&path, b"truncated").unwrap();
+
+        let err = VectorStore::open_readonly(&path, 4, ScalarKind::F32)
+            .err()
+            .expect("truncated vector store should fail");
+        assert!(err.to_string().contains("vector store is truncated"));
+    }
+
+    #[test]
+    fn open_rejects_invalid_header_before_native_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+        fs::write(&path, vec![0; 80]).unwrap();
+
+        let err = VectorStore::open_readonly(&path, 4, ScalarKind::F32)
+            .err()
+            .expect("invalid vector store should fail");
+        assert!(
+            err.to_string()
+                .contains("invalid vector store header magic")
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -665,7 +665,21 @@ impl Workspace {
             }
         }
 
-        let (chunk_count, file_count) = read_sqlite_counts(&self.index_dir);
+        let (chunk_count, file_count) = if verify_stores && sqlite_p.exists() {
+            match read_sqlite_counts_live(&sqlite_p) {
+                Ok(counts) => counts,
+                Err(err) => {
+                    issues.push(format!("failed to read SQLite index: {err:#}"));
+                    read_sqlite_counts(&self.index_dir)
+                }
+            }
+        } else {
+            read_sqlite_counts(&self.index_dir)
+        };
+
+        if chunk_count > 0 && !self.merkle_snapshot_path().exists() {
+            issues.push("missing merkle snapshot; rebuild required".to_string());
+        }
 
         // Empty standalone indexes carry no queryable data to migrate. Empty
         // overlays still persist a Merkle snapshot and serve the base index,
@@ -685,8 +699,19 @@ impl Workspace {
             }
 
             if verify_stores {
-                if let Err(err) = crate::indexer::open_tantivy_index(&tantivy_p) {
-                    issues.push(format!("failed to open Tantivy index: {err:#}"));
+                match crate::indexer::open_tantivy_index(&tantivy_p) {
+                    Ok((index, _)) => match index.reader() {
+                        Ok(reader) => {
+                            let tantivy_count = reader.searcher().num_docs();
+                            if tantivy_count != chunk_count {
+                                issues.push(format!(
+                                    "Tantivy/SQLite chunk count mismatch ({tantivy_count} != {chunk_count})"
+                                ));
+                            }
+                        }
+                        Err(err) => issues.push(format!("failed to read Tantivy index: {err:#}")),
+                    },
+                    Err(err) => issues.push(format!("failed to open Tantivy index: {err:#}")),
                 }
 
                 match crate::vector_store::VectorStore::open_readonly(
@@ -694,8 +719,61 @@ impl Workspace {
                     256,
                     crate::vector_store::ScalarKind::F16,
                 ) {
-                    Ok(_) => {}
+                    Ok(store) => {
+                        let generation = metadata.as_ref().map(|meta| meta.index_generation);
+                        let enhanced_generation =
+                            std::fs::read_to_string(self.hash_enhanced_generation_path())
+                                .ok()
+                                .and_then(|value| value.trim().parse::<u64>().ok());
+                        let has_pending_tombstones = self.hash_tombstones_path().exists()
+                            || self.hash_tombstones_processing_path().exists();
+                        if enhanced_generation == generation
+                            && !has_pending_tombstones
+                            && store.size() as u64 != chunk_count
+                        {
+                            issues.push(format!(
+                                "hash vector/SQLite chunk count mismatch ({} != {chunk_count})",
+                                store.size()
+                            ));
+                        }
+                    }
                     Err(err) => issues.push(format!("failed to open hash vector store: {err:#}")),
+                }
+
+                if !is_overlay
+                    && self.vector_neural_path().exists()
+                    && let Err(err) = crate::vector_store::VectorStore::open_readonly(
+                        &self.vector_neural_path(),
+                        384,
+                        crate::vector_store::ScalarKind::F32,
+                    )
+                {
+                    issues.push(format!("failed to open neural vector store: {err:#}"));
+                }
+
+                if let Ok(snapshot) =
+                    crate::merkle::MerkleSnapshot::load(&self.merkle_snapshot_path())
+                {
+                    match read_sqlite_file_paths(&sqlite_p) {
+                        Ok(paths) => {
+                            let snapshot_paths =
+                                snapshot.files.keys().cloned().collect::<BTreeSet<_>>();
+                            let orphaned = paths
+                                .difference(&snapshot_paths)
+                                .take(5)
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            if !orphaned.is_empty() {
+                                issues.push(format!(
+                                    "SQLite contains paths absent from merkle snapshot: {}",
+                                    orphaned.join(", ")
+                                ));
+                            }
+                        }
+                        Err(err) => {
+                            issues.push(format!("failed to read SQLite file paths: {err:#}"))
+                        }
+                    }
                 }
             }
         }
@@ -1145,6 +1223,30 @@ fn read_sqlite_counts(index_dir: &Path) -> (u64, u64) {
     (chunks as u64, files as u64)
 }
 
+fn read_sqlite_counts_live(sqlite_path: &Path) -> Result<(u64, u64)> {
+    let conn = rusqlite::Connection::open_with_flags(
+        sqlite_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let chunks: i64 = conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
+    let files: i64 = conn.query_row("SELECT COUNT(DISTINCT file_path) FROM chunks", [], |row| {
+        row.get(0)
+    })?;
+    Ok((chunks as u64, files as u64))
+}
+
+fn read_sqlite_file_paths(sqlite_path: &Path) -> Result<BTreeSet<String>> {
+    let conn = rusqlite::Connection::open_with_flags(
+        sqlite_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let mut stmt = conn.prepare("SELECT DISTINCT file_path FROM chunks")?;
+    let paths = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<BTreeSet<_>>>()?;
+    Ok(paths)
+}
+
 fn workspace_has_indexable_files(root: &Path, skip_gitignore: bool) -> bool {
     for entry in source_walker(root, skip_gitignore).build().flatten() {
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
@@ -1535,6 +1637,176 @@ mod tests {
         let health = ws.index_health();
         assert_eq!(health.state, WorkspaceIndexState::Unhealthy);
         assert!(health.has_indexable_files);
+    }
+
+    #[test]
+    #[serial]
+    fn quick_index_health_flags_missing_merkle_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            tmp.path().join("lib.rs"),
+            "pub fn sample() -> bool { true }\n",
+        )
+        .unwrap();
+        let ws = Workspace::resolve(tmp.path()).unwrap();
+        let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        crate::indexer::index_workspace(&ws, &model).unwrap();
+        std::fs::remove_file(ws.merkle_snapshot_path()).unwrap();
+
+        let health = ws.quick_index_health();
+        assert_eq!(health.state, WorkspaceIndexState::Unhealthy);
+        assert!(
+            health
+                .issues
+                .iter()
+                .any(|issue| issue.contains("missing merkle snapshot"))
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn index_health_flags_tantivy_sqlite_cardinality_drift() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            tmp.path().join("lib.rs"),
+            "pub fn sample() -> bool { true }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("other.rs"),
+            "pub fn other() -> bool { false }\n",
+        )
+        .unwrap();
+
+        let ws = Workspace::resolve(tmp.path()).unwrap();
+        let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        crate::indexer::index_workspace(&ws, &model).unwrap();
+        let sqlite = rusqlite::Connection::open(ws.sqlite_path()).unwrap();
+        sqlite
+            .execute(
+                "DELETE FROM chunks WHERE rowid = (SELECT rowid FROM chunks LIMIT 1)",
+                [],
+            )
+            .unwrap();
+        drop(sqlite);
+
+        let health = ws.index_health();
+        assert_eq!(health.state, WorkspaceIndexState::Unhealthy);
+        assert!(
+            health
+                .issues
+                .iter()
+                .any(|issue| issue.contains("Tantivy/SQLite chunk count mismatch")),
+            "{:#?}",
+            health.issues
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn index_health_flags_hash_sqlite_cardinality_drift() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            tmp.path().join("lib.rs"),
+            "pub fn sample() -> bool { true }\n",
+        )
+        .unwrap();
+
+        let ws = Workspace::resolve(tmp.path()).unwrap();
+        let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        crate::indexer::index_workspace(&ws, &model).unwrap();
+        crate::indexer::enhance_workspace_hash(&ws, &model).unwrap();
+        let sqlite = rusqlite::Connection::open(ws.sqlite_path()).unwrap();
+        let vector_key = sqlite
+            .query_row("SELECT vector_key FROM chunks LIMIT 1", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap() as u64;
+        let mut vectors = crate::vector_store::VectorStore::open(
+            &ws.vector_path(),
+            crate::EMBEDDING_DIMENSIONS,
+            crate::vector_store::ScalarKind::F16,
+        )
+        .unwrap();
+        vectors.remove(vector_key);
+        vectors.save().unwrap();
+
+        let health = ws.index_health();
+        assert_eq!(health.state, WorkspaceIndexState::Unhealthy);
+        assert!(
+            health
+                .issues
+                .iter()
+                .any(|issue| issue.contains("hash vector/SQLite chunk count mismatch")),
+            "{:#?}",
+            health.issues
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn index_health_flags_sqlite_path_missing_from_merkle_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            tmp.path().join("lib.rs"),
+            "pub fn sample() -> bool { true }\n",
+        )
+        .unwrap();
+
+        let ws = Workspace::resolve(tmp.path()).unwrap();
+        let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        crate::indexer::index_workspace(&ws, &model).unwrap();
+        let mut snapshot = crate::merkle::MerkleSnapshot::load(&ws.merkle_snapshot_path()).unwrap();
+        snapshot.files.clear();
+        snapshot.save(&ws.merkle_snapshot_path()).unwrap();
+
+        let health = ws.index_health();
+        assert_eq!(health.state, WorkspaceIndexState::Unhealthy);
+        assert!(
+            health
+                .issues
+                .iter()
+                .any(|issue| issue.contains("absent from merkle snapshot")),
+            "{:#?}",
+            health.issues
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn index_health_flags_corrupt_optional_neural_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            tmp.path().join("lib.rs"),
+            "pub fn sample() -> bool { true }\n",
+        )
+        .unwrap();
+
+        let ws = Workspace::resolve(tmp.path()).unwrap();
+        let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        crate::indexer::index_workspace(&ws, &model).unwrap();
+        std::fs::write(ws.vector_neural_path(), vec![0; 80]).unwrap();
+
+        let health = ws.index_health();
+        assert_eq!(health.state, WorkspaceIndexState::Unhealthy);
+        assert!(
+            health
+                .issues
+                .iter()
+                .any(|issue| issue.contains("failed to open neural vector store")),
+            "{:#?}",
+            health.issues
+        );
     }
 
     #[test]

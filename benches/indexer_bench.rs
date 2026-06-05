@@ -2,9 +2,10 @@ use criterion::{BatchSize, Criterion, SamplingMode, criterion_group, criterion_m
 use ivygrep::EMBEDDING_DIMENSIONS;
 use ivygrep::chunking::chunk_source;
 use ivygrep::embedding::{EmbeddingModel, HashEmbeddingModel};
-use ivygrep::indexer::index_workspace;
+use ivygrep::indexer::{enhance_workspace_hash, index_workspace};
 use ivygrep::merkle::MerkleSnapshot;
 use ivygrep::search::{SearchOptions, hybrid_search, literal_search};
+use ivygrep::vector_store::{ScalarKind, VectorStore};
 use ivygrep::workspace::Workspace;
 use std::cell::OnceCell;
 use std::fmt::Write as _;
@@ -25,6 +26,14 @@ const HYBRID_SEARCH_REPETITIONS: u32 = 4;
 const SIMPLE_SEARCH_REPETITIONS: u32 = 16;
 const VECTOR_SEARCH_REPETITIONS: u32 = 128;
 const HASH_VECTOR_BUILD_COUNT: usize = 5_000;
+
+fn configure_benchmark_env(home: &Path) {
+    unsafe {
+        std::env::set_var("IVYGREP_HOME", home);
+        std::env::set_var("IVYGREP_ENHANCE_MAX_LOAD_RATIO", "0");
+        std::env::set_var("IVYGREP_NO_AUTOSPAWN", "1");
+    }
+}
 
 fn repeated_per_op<F>(iters: u64, repetitions: u32, mut f: F) -> Duration
 where
@@ -69,7 +78,7 @@ fn setup_workspace(
     }
 
     let home = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    configure_benchmark_env(home.path());
 
     let workspace = Workspace::resolve(&ws_path).unwrap();
     let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
@@ -86,7 +95,16 @@ fn setup_indexed_workspace(
     HashEmbeddingModel,
 ) {
     let (staging, home, workspace, model) = setup_workspace(n);
-    index_workspace(&workspace, &model).unwrap();
+    let summary = index_workspace(&workspace, &model).unwrap();
+    let enhanced = enhance_workspace_hash(&workspace, &model).unwrap();
+    assert_eq!(enhanced, summary.total_chunks);
+    let store = VectorStore::open_readonly(
+        &workspace.vector_path(),
+        EMBEDDING_DIMENSIONS,
+        ScalarKind::F16,
+    )
+    .unwrap();
+    assert_eq!(store.size(), summary.total_chunks);
     (staging, home, workspace, model)
 }
 
@@ -118,7 +136,7 @@ fn setup_bulk_workspace(
     }
 
     let home = tempfile::tempdir().unwrap();
-    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    configure_benchmark_env(home.path());
 
     let workspace = Workspace::resolve(&ws_path).unwrap();
     let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
@@ -135,7 +153,16 @@ fn setup_bulk_indexed_workspace(
     HashEmbeddingModel,
 ) {
     let (staging, home, workspace, model) = setup_bulk_workspace(files, functions_per_file);
-    index_workspace(&workspace, &model).unwrap();
+    let summary = index_workspace(&workspace, &model).unwrap();
+    let enhanced = enhance_workspace_hash(&workspace, &model).unwrap();
+    assert_eq!(enhanced, summary.total_chunks);
+    let store = VectorStore::open_readonly(
+        &workspace.vector_path(),
+        EMBEDDING_DIMENSIONS,
+        ScalarKind::F16,
+    )
+    .unwrap();
+    assert_eq!(store.size(), summary.total_chunks);
     (staging, home, workspace, model)
 }
 
@@ -162,7 +189,7 @@ fn bench_indexer(c: &mut Criterion) {
         let (_staging, home, workspace, model) =
             incremental_fixture.get_or_init(|| setup_indexed_workspace(200));
         b.iter_custom(|iters| {
-            unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+            configure_benchmark_env(home.path());
             repeated_per_op(iters, INCREMENTAL_REINDEX_REPETITIONS, |_| {
                 let summary = index_workspace(workspace, model).unwrap();
                 assert_eq!(summary.indexed_files, 0);
@@ -372,6 +399,10 @@ fn bench_search(c: &mut Criterion) {
                 )
                 .unwrap();
                 assert!(!hits.is_empty());
+                assert!(
+                    hits.iter()
+                        .any(|hit| hit.sources.iter().any(|s| s == "semantic"))
+                );
                 black_box(hits);
             })
         })
@@ -716,6 +747,38 @@ fn bench_critical_journeys(c: &mut Criterion) {
                 black_box(results);
             }
             start.elapsed()
+        })
+    });
+
+    group.bench_function("vector_search_in_50k_hot", |b| {
+        let (_ann_dir, ann_path, query) = ann_fixture.get_or_init(|| {
+            let ann_dir = tempfile::tempdir().unwrap();
+            let ann_path = ann_dir.path().join("ann.usearch");
+            {
+                let mut store =
+                    VectorStore::open(&ann_path, EMBEDDING_DIMENSIONS, ScalarKind::F32).unwrap();
+                for i in 0..50_000u64 {
+                    let v: Vec<f32> = (0..EMBEDDING_DIMENSIONS)
+                        .map(|j| (((i as usize * 31 + j * 17) % 97) as f32) / 97.0)
+                        .collect();
+                    store.upsert(i, v).unwrap();
+                }
+                store.save().unwrap();
+            }
+            let query: Vec<f32> = (0..EMBEDDING_DIMENSIONS)
+                .map(|j| ((j * 13 % 97) as f32) / 97.0)
+                .collect();
+            (ann_dir, ann_path, query)
+        });
+        let store =
+            VectorStore::open_readonly(ann_path, EMBEDDING_DIMENSIONS, ScalarKind::F32).unwrap();
+
+        b.iter_custom(|iters| {
+            repeated_per_op(iters, VECTOR_SEARCH_REPETITIONS, |_| {
+                let results = store.search(black_box(query), 50);
+                assert!(!results.is_empty());
+                black_box(results);
+            })
         })
     });
 

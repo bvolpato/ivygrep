@@ -38,6 +38,9 @@ jobs:
       - name: ShellCheck scripts
         run: shellcheck build.sh test.sh bench.sh scripts/bootstrap_stress_fixtures.sh scripts/e2e_procedures.sh scripts/e2e_neural_backend.sh scripts/stress_large_repo.sh
 
+      - name: Test Python harnesses
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
       - name: Clippy lints
         run: cargo clippy --all-targets -- -D warnings
 
@@ -150,6 +153,12 @@ jobs:
           
           echo "==== Documented procedure smoke ===="
           ./scripts/e2e_procedures.sh --binary "$IG_BIN"
+
+          echo "==== Daemon/local equivalence ===="
+          python3 scripts/check_daemon_equivalence.py \
+            --skip-build \
+            --binary "$IG_BIN" \
+            --bench-home /tmp/ivygrep-daemon-equivalence
 
       - name: Validate local accelerator execution
         if: matrix.validate_backend == 'Candle Metal'

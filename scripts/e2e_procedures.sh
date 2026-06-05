@@ -20,7 +20,7 @@ Options:
 
 Covered procedures:
   --help, --version, --status --json, first-run auto-index search,
-  --add, scoped search, --include, --exclude, --literal,
+  --add, scoped search, --include, --exclude, --literal, --regex,
   --file-name-only, --first-line-only, --doctor, and --rm.
 EOF
 }
@@ -163,6 +163,9 @@ contains "$out_dir/exclude.json" "[]" "exclude glob removes vendor-only hit"
 
 run "$ig_bin" --literal --json -n 5 "calculate_sales_tax" "$project" > "$out_dir/literal.json"
 contains "$out_dir/literal.json" "src/payments/tax.rs" "literal search"
+
+run "$ig_bin" --regex --json -n 5 'calculate_[a-z_]+tax' "$project" > "$out_dir/regex.json"
+contains "$out_dir/regex.json" "src/payments/tax.rs" "regex search"
 
 run "$ig_bin" --file-name-only --literal "calculate_sales_tax" "$project" > "$out_dir/file-name-only.txt"
 contains "$out_dir/file-name-only.txt" "src/payments/tax.rs" "file-name-only output"

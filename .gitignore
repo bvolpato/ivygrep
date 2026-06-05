@@ -4,6 +4,10 @@
 # Rustfmt backups
 **/*.rs.bk
 
+# Python caches
+__pycache__/
+*.py[cod]
+
 # OS artifacts
 .DS_Store
 

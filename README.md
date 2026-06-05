@@ -272,7 +272,7 @@ ig --mcp                           # start MCP server (stdio)
 ## 🧪 Development
 
 ```bash
-./test.sh           # fmt, ShellCheck, clippy, unit/integration tests
+./test.sh           # fmt, ShellCheck, clippy, Rust and Python harness tests
 ./build.sh --locked # release binary, Cargo.lock unchanged
 ./build.sh --locked --features accelerate,metal  # opt-in macOS Metal neural binary
 ./build.sh --locked --features cuda  # opt-in Linux CUDA neural binary
@@ -285,6 +285,10 @@ Benchmark output reports per-operation latency; short-looking numbers are repeat
 ```bash
 ./build.sh
 ./scripts/e2e_procedures.sh --binary ./target/release/ig
+python3 scripts/check_daemon_equivalence.py \
+  --skip-build \
+  --binary ./target/release/ig \
+  --bench-home /tmp/ivygrep-daemon-equivalence
 
 # Opt-in macOS Metal backend validation (downloads local model artifacts on first run)
 ./build.sh --locked --features accelerate,metal

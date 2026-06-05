@@ -21,6 +21,7 @@ Options:
   --no-fmt              Skip cargo fmt -- --check
   --no-shellcheck       Skip ShellCheck
   --no-clippy           Skip cargo clippy
+  --no-python           Skip Python harness tests
   --filter NAME         Pass Cargo test filter
   --nocapture           Pass --nocapture to test harness
   --test-threads N      Pass --test-threads to test harness
@@ -52,6 +53,7 @@ mode="ci"
 do_fmt=1
 do_shellcheck=1
 do_clippy=1
+do_python_tests=1
 cargo_flags=()
 scope_flags=(--lib --bins --tests)
 filter=()
@@ -96,6 +98,7 @@ while (($#)); do
       do_fmt=1
       do_shellcheck=1
       do_clippy=1
+      do_python_tests=1
       scope_flags=(--lib --bins --tests)
       ;;
     --quick)
@@ -103,6 +106,7 @@ while (($#)); do
       do_fmt=0
       do_shellcheck=0
       do_clippy=0
+      do_python_tests=0
       scope_flags=(--lib)
       ;;
     --all-targets)
@@ -113,6 +117,7 @@ while (($#)); do
       do_fmt=0
       do_shellcheck=0
       do_clippy=0
+      do_python_tests=0
       ;;
     --hash-only)
       cargo_flags+=(--no-default-features)
@@ -133,6 +138,9 @@ while (($#)); do
       ;;
     --no-clippy)
       do_clippy=0
+      ;;
+    --no-python)
+      do_python_tests=0
       ;;
     --filter)
       [[ $# -ge 2 ]] || { echo "--filter needs value" >&2; exit 2; }
@@ -166,6 +174,7 @@ while (($#)); do
 done
 
 export IVYGREP_NO_AUTOSPAWN="${IVYGREP_NO_AUTOSPAWN:-1}"
+export IVYGREP_ENHANCE_MAX_LOAD_RATIO="${IVYGREP_ENHANCE_MAX_LOAD_RATIO:-0}"
 export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
 configure_cuda_compute_cap
 
@@ -195,3 +204,7 @@ else
 fi
 
 run "${cmd[@]}"
+
+if ((do_python_tests)); then
+  run python3 -m unittest discover -s tests -p 'test_*.py' -v
+fi
