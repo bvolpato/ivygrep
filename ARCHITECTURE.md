@@ -382,8 +382,9 @@ the pipeline commits a lexical index first, then enriches vectors in background:
 Every query runs through a hybrid fusion pipeline:
 
 1. **Lexical** — Tantivy BM25 search with tokenized, singularized,
-   and compacted query variants
-2. **Semantic** — USearch ANN search using the query's embedding vector
+   compacted, and repository-neutral alias query variants
+2. **Semantic** — USearch ANN search using the raw query plus
+   identifier-normalized terms, without lexical alias injection
 3. **Fusion** — Reciprocal Rank Fusion (k=60) merges both ranked lists
 4. **Boosting** — literal match bonus, term coverage, path segment matching,
    normalized identifier matching, file authority, and per-file diversity
@@ -404,8 +405,11 @@ socket. It provides:
   (`OnceLock`). All CLI invocations share it.
 - **File watching** — `notify` watchers per workspace, triggering incremental
   re-index on file changes.
-- **Version-gated restart** — each response includes `BUILD_VERSION`. On
+- **Version-gated restart** — each status response includes `BUILD_VERSION`. On
   mismatch, the CLI sends `Restart` and auto-spawns the new binary.
+- **Bounded protocol framing** — each request carries an explicit protocol
+  version and is capped at 1 MiB. Malformed, oversized, or incompatible
+  requests receive a structured JSON error.
 - **Connection resilience** — 2-second timeouts on connect/write, stale socket
   cleanup, automatic local fallback.
 

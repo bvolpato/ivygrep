@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use tantivy::schema::{
     Field, IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing, TextOptions, Value,
 };
-use tantivy::{Index as TantivyIndex, TantivyDocument, Term, doc};
+use tantivy::{Index as TantivyIndex, TantivyDocument, Term};
 
 use crate::text::{CODE_TOKENIZER_NAME, build_code_analyzer};
 
@@ -939,7 +939,8 @@ fn index_workspace_inner(
         // provisional graph dominated first-index latency and delayed usable
         // BM25/literal results by minutes.
         for (rel_path, indexed_chunks) in &file_chunks {
-            touched_files.insert(rel_path.to_string_lossy().to_string());
+            let rel_path_string = rel_path.to_string_lossy();
+            touched_files.insert(rel_path_string.to_string());
             total_chunks_processed += indexed_chunks.len();
             chunks_since_commit += indexed_chunks.len();
 
@@ -961,8 +962,19 @@ fn index_workspace_inner(
                 .as_secs() as i64;
 
             for indexed in indexed_chunks {
-                persist_or_stop!(insert_chunk(&tx, indexed, is_fresh_index, now_unix));
-                persist_or_stop!(add_chunk_doc(&mut writer, &fields, indexed));
+                persist_or_stop!(insert_chunk(
+                    &tx,
+                    indexed,
+                    rel_path_string.as_ref(),
+                    is_fresh_index,
+                    now_unix
+                ));
+                persist_or_stop!(add_chunk_doc(
+                    &mut writer,
+                    &fields,
+                    indexed,
+                    rel_path_string.as_ref()
+                ));
             }
         }
 
@@ -1696,22 +1708,22 @@ fn add_chunk_doc(
     writer: &mut tantivy::IndexWriter,
     fields: &TantivyFields,
     chunk: &IndexedChunk,
+    file_path: &str,
 ) -> Result<()> {
-    let mut doc = doc!(
-        fields.chunk_id => chunk.chunk_id.clone(),
-        fields.file_path => chunk.file_path.to_string_lossy().to_string(),
-        fields.start_line => chunk.start_line as u64,
-        fields.end_line => chunk.end_line as u64,
-        fields.language => chunk.language.clone(),
-        fields.kind => chunk.kind.clone(),
-        fields.text => chunk.text.clone(),
-        fields.content_hash => chunk.content_hash.clone()
-    );
+    let mut doc = TantivyDocument::default();
+    doc.add_text(fields.chunk_id, &chunk.chunk_id);
+    doc.add_text(fields.file_path, file_path);
+    doc.add_u64(fields.start_line, chunk.start_line as u64);
+    doc.add_u64(fields.end_line, chunk.end_line as u64);
+    doc.add_text(fields.language, &chunk.language);
+    doc.add_text(fields.kind, &chunk.kind);
+    doc.add_text(fields.text, &chunk.text);
+    doc.add_text(fields.content_hash, &chunk.content_hash);
     if let Some(f) = fields.is_ignored {
         doc.add_u64(f, if chunk.is_ignored { 1u64 } else { 0u64 });
     }
     if let Some(f) = fields.file_path_text {
-        doc.add_text(f, chunk.file_path.to_string_lossy());
+        doc.add_text(f, file_path);
     }
     if let Some(f) = fields.signature {
         let sig = extract_signature(chunk);
@@ -1723,7 +1735,13 @@ fn add_chunk_doc(
     Ok(())
 }
 
-fn insert_chunk(conn: &Connection, chunk: &IndexedChunk, fresh: bool, now_unix: i64) -> Result<()> {
+fn insert_chunk(
+    conn: &Connection,
+    chunk: &IndexedChunk,
+    file_path: &str,
+    fresh: bool,
+    now_unix: i64,
+) -> Result<()> {
     let sql = if fresh {
         "INSERT INTO chunks (
             chunk_id,
@@ -1757,7 +1775,7 @@ fn insert_chunk(conn: &Connection, chunk: &IndexedChunk, fresh: bool, now_unix: 
     let is_ignored_int = if chunk.is_ignored { 1i64 } else { 0i64 };
     stmt.execute(params![
         chunk.chunk_id,
-        chunk.file_path.to_string_lossy().to_string(),
+        file_path,
         chunk.start_line as i64,
         chunk.end_line as i64,
         chunk.language,

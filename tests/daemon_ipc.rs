@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use ivygrep::protocol::{BUILD_VERSION, DaemonRequest, DaemonResponse};
+use ivygrep::protocol::{BUILD_VERSION, DaemonRequest, DaemonRequestEnvelope, DaemonResponse};
 use serial_test::serial;
 use tempfile::tempdir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -20,7 +20,7 @@ fn isolate_home(home: &Path) {
 async fn roundtrip(request: &DaemonRequest) -> DaemonResponse {
     let mut stream = ivygrep::ipc::connect().await.expect("connect failed");
 
-    let payload = serde_json::to_vec(request).unwrap();
+    let payload = serde_json::to_vec(&DaemonRequestEnvelope::new(request.clone())).unwrap();
     stream.write_all(&payload).await.unwrap();
     stream.write_all(b"\n").await.unwrap();
 
@@ -92,8 +92,8 @@ async fn serve_one(
     let mut line = String::new();
     reader.read_line(&mut line).await.unwrap();
 
-    let request: DaemonRequest = serde_json::from_str(&line).unwrap();
-    let response = handler(request);
+    let envelope: DaemonRequestEnvelope = serde_json::from_str(&line).unwrap();
+    let response = handler(envelope.request);
 
     let payload = serde_json::to_vec(&response).unwrap();
     let mut stream = reader.into_inner();
@@ -171,8 +171,8 @@ async fn daemon_ipc_index_and_search_roundtrip() {
             let mut line = String::new();
             reader.read_line(&mut line).await.unwrap();
 
-            let request: DaemonRequest = serde_json::from_str(&line).unwrap();
-            let response = match request {
+            let envelope: DaemonRequestEnvelope = serde_json::from_str(&line).unwrap();
+            let response = match envelope.request {
                 DaemonRequest::Index { ref path, .. } => {
                     let workspace = ivygrep::workspace::Workspace::resolve(path).unwrap();
                     let model = ivygrep::embedding::create_model(true);
@@ -286,7 +286,9 @@ async fn daemon_ipc_multiple_concurrent_connections() {
                 let mut line = String::new();
                 reader.read_line(&mut line).await.unwrap();
 
-                let _request: DaemonRequest = serde_json::from_str(&line).unwrap();
+                let _request: DaemonRequest = serde_json::from_str::<DaemonRequestEnvelope>(&line)
+                    .unwrap()
+                    .request;
                 let response = DaemonResponse::Status {
                     workspaces: vec![],
                     version: Some(BUILD_VERSION.to_string()),

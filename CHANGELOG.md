@@ -4,6 +4,20 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.9.4] — 2026-06-05
+
+### Fixed
+- **Daemon IPC rejects malformed, oversized, and incompatible requests clearly.** Requests now carry an explicit protocol version, the daemon caps request lines at 1 MiB, and malformed or mismatched input receives a structured JSON error instead of dropping the connection.
+- **Default query expansion is repository-neutral.** Removed ripgrep-specific aliases and stopped injecting lexical aliases into semantic query text; the deterministic relevance suite improved MRR from 0.620 to 0.627 and recall@5 from 0.761 to 0.804.
+
+### Performance
+- **Hybrid search moves candidates through the hot path without full-chunk clones.** ANN collection, RRF fusion, score filtering, per-file grouping, and hit materialization now transfer owned chunks and source lists instead of cloning decompressed text per stage.
+- **Foreground indexing reuses one path string per file.** SQLite and Tantivy ingestion share the same borrowed path, and Tantivy documents copy fields directly instead of cloning them before insertion.
+
+### Testing
+- **Real-repository stress relevance remains intact.** All ignored stress tests pass, including all 10 ripgrep deep-relevance queries after removing corpus-specific aliases.
+- **IPC tests cover missing/mismatched protocol versions and oversized/malformed requests.**
+
 ## [0.9.3] — 2026-06-04
 
 ### Fixed

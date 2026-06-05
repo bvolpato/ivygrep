@@ -47,7 +47,9 @@ mod tests {
     #[test]
     fn token_aliases_load_from_generated_table() {
         assert_eq!(token_aliases("scoring"), &["score", "rank"]);
-        assert_eq!(token_aliases("flags"), &["cli", "arg", "option"]);
+        assert!(token_aliases("flags").is_empty());
+        assert!(token_aliases("output").is_empty());
+        assert!(token_aliases("walker").is_empty());
         assert!(token_aliases("unknown").is_empty());
     }
 

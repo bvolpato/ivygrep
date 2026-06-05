@@ -10,7 +10,7 @@ use std::time::{Duration, UNIX_EPOCH};
 use anyhow::Result;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
@@ -21,7 +21,9 @@ use crate::indexer::{
     remove_workspace_index,
 };
 use crate::jobs::{self, JobKind, JobUpdate};
-use crate::protocol::{BUILD_VERSION, DaemonRequest, DaemonResponse};
+use crate::protocol::{
+    BUILD_VERSION, DAEMON_PROTOCOL_VERSION, DaemonRequest, DaemonRequestEnvelope, DaemonResponse,
+};
 use crate::regex_search::regex_search;
 use crate::search::{
     SearchContext, SearchOptions, hybrid_search_with_context, literal_search_with_context,
@@ -31,6 +33,7 @@ use crate::workspace::{Workspace, WorkspaceScope, list_workspaces};
 const WATCH_QUIET_PERIOD: Duration = Duration::from_secs(2);
 const WATCH_MAX_DEBOUNCE: Duration = Duration::from_secs(30);
 const MAX_DAEMON_LOG_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_DAEMON_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_QUERY_CACHE_ENTRIES: usize = 128;
 /// Cap on cached workspace/dimension keys. Idle contexts additionally share a
 /// global retention cap, keeping open SQLite/Tantivy/vector views bounded when
@@ -589,14 +592,11 @@ fn stop_all_watchers(state: &DaemonState) {
 
 async fn handle_connection(stream: crate::ipc::IpcStream, state: DaemonState) -> Result<()> {
     let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    let bytes = reader.read_line(&mut line).await?;
-    if bytes == 0 {
-        return Ok(());
-    }
-
-    let request: DaemonRequest = serde_json::from_str(&line)?;
-    let response = handle_request(state, request).await;
+    let response = match read_daemon_request(&mut reader).await {
+        Ok(Some(request)) => handle_request(state, request).await,
+        Ok(None) => return Ok(()),
+        Err(response) => response,
+    };
 
     let payload = serde_json::to_vec(&response)?;
     let mut stream = reader.into_inner();
@@ -604,6 +604,53 @@ async fn handle_connection(stream: crate::ipc::IpcStream, state: DaemonState) ->
     stream.write_all(b"\n").await?;
 
     Ok(())
+}
+
+async fn read_daemon_request<R>(
+    reader: &mut R,
+) -> std::result::Result<Option<DaemonRequest>, DaemonResponse>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut line = Vec::new();
+    let bytes = match (&mut *reader)
+        .take((MAX_DAEMON_REQUEST_BYTES as u64) + 1)
+        .read_until(b'\n', &mut line)
+        .await
+    {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            return Err(DaemonResponse::Error {
+                message: format!("failed to read daemon request: {err}"),
+            });
+        }
+    };
+    if bytes == 0 {
+        return Ok(None);
+    }
+    if line.len() > MAX_DAEMON_REQUEST_BYTES {
+        return Err(DaemonResponse::Error {
+            message: format!("daemon request exceeds maximum of {MAX_DAEMON_REQUEST_BYTES} bytes"),
+        });
+    }
+
+    parse_daemon_request(&line).map(Some)
+}
+
+fn parse_daemon_request(line: &[u8]) -> std::result::Result<DaemonRequest, DaemonResponse> {
+    let envelope: DaemonRequestEnvelope =
+        serde_json::from_slice(line).map_err(|err| DaemonResponse::Error {
+            message: format!("invalid daemon request: {err}"),
+        })?;
+    if envelope.protocol_version != DAEMON_PROTOCOL_VERSION {
+        return Err(DaemonResponse::Error {
+            message: format!(
+                "unsupported daemon protocol version {}; expected {DAEMON_PROTOCOL_VERSION}",
+                envelope.protocol_version
+            ),
+        });
+    }
+    Ok(envelope.request)
 }
 
 async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonResponse {
@@ -1663,7 +1710,10 @@ where
         }
     };
 
-    let payload = serde_json::to_vec(request)?;
+    let payload = serde_json::to_vec(&DaemonRequestEnvelope::new(request.clone()))?;
+    if payload.len() > MAX_DAEMON_REQUEST_BYTES {
+        anyhow::bail!("daemon request exceeds maximum of {MAX_DAEMON_REQUEST_BYTES} bytes");
+    }
     // Timeout writes too — a zombie daemon may accept the connection
     // but never read from it, causing writes to eventually block.
     if tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -1759,6 +1809,52 @@ mod tests {
             num_cpus::get().max(1),
             "cpu_permits should be sized to the CPU count"
         );
+    }
+
+    #[test]
+    fn daemon_rejects_malformed_and_mismatched_protocol_requests() {
+        let malformed = parse_daemon_request(b"{not-json}\n").unwrap_err();
+        assert!(matches!(
+            malformed,
+            DaemonResponse::Error { message } if message.contains("invalid daemon request")
+        ));
+
+        let missing = parse_daemon_request(br#"{"type":"status"}"#).unwrap_err();
+        assert!(matches!(
+            missing,
+            DaemonResponse::Error { message } if message.contains("protocol_version")
+        ));
+
+        let mismatched = serde_json::to_vec(&serde_json::json!({
+            "protocol_version": DAEMON_PROTOCOL_VERSION + 1,
+            "type": "status"
+        }))
+        .unwrap();
+        let response = parse_daemon_request(&mismatched).unwrap_err();
+        assert!(matches!(
+            response,
+            DaemonResponse::Error { message } if message.contains("unsupported daemon protocol version")
+        ));
+
+        let versioned =
+            serde_json::to_vec(&DaemonRequestEnvelope::new(DaemonRequest::Status)).unwrap();
+        assert!(matches!(
+            serde_json::from_slice::<DaemonRequest>(&versioned).unwrap(),
+            DaemonRequest::Status
+        ));
+    }
+
+    #[tokio::test]
+    async fn daemon_rejects_oversized_request_without_unbounded_read() {
+        let mut payload = vec![b'x'; MAX_DAEMON_REQUEST_BYTES + 1];
+        payload.push(b'\n');
+        let mut reader = BufReader::new(payload.as_slice());
+
+        let response = read_daemon_request(&mut reader).await.unwrap_err();
+        assert!(matches!(
+            response,
+            DaemonResponse::Error { message } if message.contains("exceeds maximum")
+        ));
     }
 
     #[tokio::test]
