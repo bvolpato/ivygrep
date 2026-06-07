@@ -4,6 +4,17 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.9.5] — 2026-06-07
+
+### Fixed
+- **Query repair still recovers corrupt stores after faster preflight.** Local hybrid, literal, regex, and daemon-fallback searches now retry after rebuilding an unhealthy index when a corrupt store causes an error or empty result, preserving hash search while neural vectors are unavailable.
+
+### Performance
+- **Local query startup skips full index audits.** Query preflight now uses quick health checks instead of opening and cross-validating SQLite, Tantivy, and vector stores on every invocation. On the Linux kernel index, complex hot query p95 dropped from roughly 300 ms to about 53 ms while result counts and relevance stayed stable.
+
+### Testing
+- **Corrupt Tantivy repair is covered end to end.** CLI snapshot coverage now corrupts Tantivy metadata, verifies full health detects the issue, and confirms the next query repairs the index and returns expected results.
+
 ## [0.9.4] — 2026-06-05
 
 ### Fixed

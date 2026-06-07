@@ -734,6 +734,52 @@ fn cli_query_auto_repairs_unhealthy_index() {
 
 #[test]
 #[serial]
+fn cli_query_repairs_corrupt_tantivy_after_search_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::write(root.join("lib.rs"), "pub fn answer() -> usize { 42 }\n").unwrap();
+
+    let home = tmp.path().join("ivygrep_home");
+    unsafe { std::env::set_var("IVYGREP_HOME", &home) };
+    let workspace = Workspace::resolve(&root).unwrap();
+    let model = create_hash_model();
+    index_workspace(&workspace, model.as_ref()).unwrap();
+    std::fs::write(workspace.tantivy_dir().join("meta.json"), b"not valid json").unwrap();
+    assert_eq!(
+        workspace.index_health().state,
+        ivygrep::workspace::WorkspaceIndexState::Unhealthy
+    );
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    let output = cmd
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--json", "--hash", "-f", "answer"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let files = value
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry.get("file_path").and_then(|v| v.as_str()))
+        .collect::<Vec<_>>();
+
+    assert!(
+        files.iter().any(|path| path.ends_with("lib.rs")),
+        "search should repair corrupt Tantivy and return lib.rs: {:?}",
+        files
+    );
+}
+
+#[test]
+#[serial]
 fn cli_query_cleans_stale_legacy_watcher_pid() {
     let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
     unsafe { std::env::set_var("IVYGREP_HOME", &home) };

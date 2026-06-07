@@ -1108,6 +1108,17 @@ async fn run_query(cli: Cli) -> Result<()> {
             scope_is_file,
             skip_gitignore: cli.skip_gitignore,
         };
+        let local_options = SearchOptions {
+            limit: backend_limit,
+            context: cli.context,
+            type_filter: cli.type_filter.clone(),
+            include_globs: cli.include.clone(),
+            exclude_globs: cli.exclude.clone(),
+            scope_filter: scope_filter.clone(),
+            skip_gitignore: cli.skip_gitignore,
+            progress_tx: None,
+            cancel_token: None,
+        };
 
         if search_via_daemon {
             let show_spinner = std::io::stderr().is_terminal();
@@ -1141,33 +1152,23 @@ async fn run_query(cli: Cli) -> Result<()> {
                     // Daemon search failed — fall back to local search instead
                     // of showing "No results." to the user.
                     tracing::warn!("daemon search failed ({message}), falling back to local");
-                    let options = SearchOptions {
-                        limit: backend_limit,
-                        context: cli.context,
-                        type_filter: cli.type_filter.clone(),
-                        include_globs: cli.include.clone(),
-                        exclude_globs: cli.exclude.clone(),
-                        scope_filter: scope_filter.clone(),
-                        skip_gitignore: cli.skip_gitignore,
-                        progress_tx: None,
-                        cancel_token: None,
-                    };
-                    local_fallback_search(&workspace, cli.all_indices, query, &options, cli.hash)
+                    local_fallback_search(
+                        &workspace,
+                        cli.all_indices,
+                        query,
+                        &local_options,
+                        cli.hash,
+                    )?
                 }
                 other => {
                     tracing::warn!("daemon search unavailable ({other:?}), falling back to local");
-                    let options = SearchOptions {
-                        limit: backend_limit,
-                        context: cli.context,
-                        type_filter: cli.type_filter.clone(),
-                        include_globs: cli.include.clone(),
-                        exclude_globs: cli.exclude.clone(),
-                        scope_filter: scope_filter.clone(),
-                        skip_gitignore: cli.skip_gitignore,
-                        progress_tx: None,
-                        cancel_token: None,
-                    };
-                    local_fallback_search(&workspace, cli.all_indices, query, &options, cli.hash)
+                    local_fallback_search(
+                        &workspace,
+                        cli.all_indices,
+                        query,
+                        &local_options,
+                        cli.hash,
+                    )?
                 }
             }
         } else {
@@ -1185,23 +1186,22 @@ async fn run_query(cli: Cli) -> Result<()> {
             for ws in workspaces {
                 let _ = ws.cleanup_stale_legacy_runtime_files();
                 let _t_search = std::time::Instant::now();
-                match hybrid_search(
-                    &ws,
-                    query,
-                    search_model.as_deref(),
-                    &SearchOptions {
-                        limit: backend_limit,
-                        context: cli.context,
-                        type_filter: cli.type_filter.clone(),
-                        include_globs: cli.include.clone(),
-                        exclude_globs: cli.exclude.clone(),
-                        scope_filter: scope_filter.clone(),
-                        skip_gitignore: cli.skip_gitignore,
-                        progress_tx: None,
-                        cancel_token: None,
-                    },
-                ) {
+                match hybrid_search(&ws, query, search_model.as_deref(), &local_options) {
                     Ok(mut hits) => {
+                        if hits.is_empty()
+                            && !cli.all_indices
+                            && let Some(retry_hits) =
+                                retry_after_query_repair(&ws, cli.skip_gitignore, || {
+                                    hybrid_search(
+                                        &ws,
+                                        query,
+                                        search_model.as_deref(),
+                                        &local_options,
+                                    )
+                                })?
+                        {
+                            hits = retry_hits;
+                        }
                         if cli.all_indices {
                             for hit in &mut hits {
                                 hit.file_path = ws.root.join(&hit.file_path);
@@ -1210,6 +1210,20 @@ async fn run_query(cli: Cli) -> Result<()> {
                         all_hits.append(&mut hits);
                     }
                     Err(err) => {
+                        if !cli.all_indices
+                            && let Some(mut hits) =
+                                retry_after_query_repair(&ws, cli.skip_gitignore, || {
+                                    hybrid_search(
+                                        &ws,
+                                        query,
+                                        search_model.as_deref(),
+                                        &local_options,
+                                    )
+                                })?
+                        {
+                            all_hits.append(&mut hits);
+                            continue;
+                        }
                         tracing::warn!("hybrid_search failed for {}: {err:#}", ws.root.display());
                     }
                 }
@@ -1454,7 +1468,7 @@ fn local_fallback_search(
     query: &str,
     options: &SearchOptions,
     use_hash: bool,
-) -> Vec<SearchHit> {
+) -> Result<Vec<SearchHit>> {
     let mut all_hits = Vec::new();
     let workspaces = if all_indices {
         crate::workspace::list_workspaces()
@@ -1472,6 +1486,15 @@ fn local_fallback_search(
     for ws in workspaces {
         match hybrid_search(&ws, query, model.as_deref(), options) {
             Ok(mut hits) => {
+                if hits.is_empty()
+                    && !all_indices
+                    && let Some(retry_hits) =
+                        retry_after_query_repair(&ws, options.skip_gitignore, || {
+                            hybrid_search(&ws, query, model.as_deref(), options)
+                        })?
+                {
+                    hits = retry_hits;
+                }
                 if all_indices {
                     for hit in &mut hits {
                         hit.file_path = ws.root.join(&hit.file_path);
@@ -1480,8 +1503,17 @@ fn local_fallback_search(
                 all_hits.append(&mut hits);
             }
             Err(err) => {
+                if !all_indices
+                    && let Some(mut hits) =
+                        retry_after_query_repair(&ws, options.skip_gitignore, || {
+                            hybrid_search(&ws, query, model.as_deref(), options)
+                        })?
+                {
+                    all_hits.append(&mut hits);
+                    continue;
+                }
                 tracing::warn!(
-                    "local fallback search also failed for {}: {err:#}",
+                    "local fallback search failed for {}: {err:#}",
                     ws.root.display()
                 );
             }
@@ -1497,7 +1529,55 @@ fn local_fallback_search(
     if let Some(l) = options.limit {
         all_hits.truncate(l);
     }
-    all_hits
+    Ok(all_hits)
+}
+
+fn retry_after_query_repair<F>(
+    workspace: &Workspace,
+    skip_gitignore: bool,
+    retry: F,
+) -> Result<Option<Vec<SearchHit>>>
+where
+    F: FnOnce() -> Result<Vec<SearchHit>>,
+{
+    if repair_unhealthy_index_for_query(workspace, skip_gitignore)? {
+        retry().map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+fn repair_unhealthy_index_for_query(workspace: &Workspace, skip_gitignore: bool) -> Result<bool> {
+    if workspace.index_health().is_queryable() {
+        return Ok(false);
+    }
+
+    ensure_no_nested_workspaces(&workspace.root)?;
+
+    let mut meta =
+        workspace
+            .read_metadata()?
+            .unwrap_or_else(|| crate::workspace::WorkspaceMetadata {
+                id: workspace.id.clone(),
+                root: workspace.root.clone(),
+                created_at_unix: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                last_indexed_at_unix: None,
+                watch_enabled: false,
+                skip_gitignore,
+                index_generation: 0,
+            });
+    meta.skip_gitignore = skip_gitignore;
+
+    remove_workspace_index(workspace)?;
+    workspace.ensure_dirs()?;
+    workspace.write_metadata(&meta)?;
+
+    let hash_model = crate::embedding::create_hash_model();
+    index_workspace(workspace, hash_model.as_ref())?;
+    Ok(true)
 }
 
 fn local_literal_search_hits(
@@ -1520,6 +1600,15 @@ fn local_literal_search_hits(
     for ws in workspaces {
         match literal_search(&ws, query, options) {
             Ok(mut hits) => {
+                if hits.is_empty()
+                    && !all_indices
+                    && let Some(retry_hits) =
+                        retry_after_query_repair(&ws, options.skip_gitignore, || {
+                            literal_search(&ws, query, options)
+                        })?
+                {
+                    hits = retry_hits;
+                }
                 if all_indices {
                     for hit in &mut hits {
                         hit.file_path = ws.root.join(&hit.file_path);
@@ -1527,7 +1616,18 @@ fn local_literal_search_hits(
                 }
                 all_hits.append(&mut hits);
             }
-            Err(err) => tracing::warn!("literal_search failed for {}: {err:#}", ws.root.display()),
+            Err(err) => {
+                if !all_indices
+                    && let Some(mut hits) =
+                        retry_after_query_repair(&ws, options.skip_gitignore, || {
+                            literal_search(&ws, query, options)
+                        })?
+                {
+                    all_hits.append(&mut hits);
+                    continue;
+                }
+                tracing::warn!("literal_search failed for {}: {err:#}", ws.root.display());
+            }
         }
     }
 
@@ -1565,6 +1665,23 @@ fn local_regex_search_hits(
             options.skip_gitignore,
         ) {
             Ok(mut hits) => {
+                if hits.is_empty()
+                    && !all_indices
+                    && let Some(retry_hits) =
+                        retry_after_query_repair(&ws, options.skip_gitignore, || {
+                            regex_search(
+                                &ws,
+                                query,
+                                options.limit,
+                                options.scope_filter.as_ref(),
+                                &options.include_globs,
+                                &options.exclude_globs,
+                                options.skip_gitignore,
+                            )
+                        })?
+                {
+                    hits = retry_hits;
+                }
                 if all_indices {
                     for hit in &mut hits {
                         hit.file_path = ws.root.join(&hit.file_path);
@@ -1572,7 +1689,26 @@ fn local_regex_search_hits(
                 }
                 all_hits.append(&mut hits);
             }
-            Err(err) => tracing::warn!("regex_search failed for {}: {err:#}", ws.root.display()),
+            Err(err) => {
+                if !all_indices
+                    && let Some(mut hits) =
+                        retry_after_query_repair(&ws, options.skip_gitignore, || {
+                            regex_search(
+                                &ws,
+                                query,
+                                options.limit,
+                                options.scope_filter.as_ref(),
+                                &options.include_globs,
+                                &options.exclude_globs,
+                                options.skip_gitignore,
+                            )
+                        })?
+                {
+                    all_hits.append(&mut hits);
+                    continue;
+                }
+                tracing::warn!("regex_search failed for {}: {err:#}", ws.root.display());
+            }
         }
     }
 
@@ -1606,7 +1742,7 @@ fn local_hybrid_search_model(
 }
 
 fn initial_query_index_state(workspace: &Workspace) -> WorkspaceIndexState {
-    workspace.index_health().state
+    workspace.quick_index_health().state
 }
 
 fn should_skip_static_daemon_status(watch_configured: bool) -> bool {
@@ -1729,7 +1865,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn initial_query_index_state_detects_corrupt_tantivy_store() {
+    fn initial_query_index_state_uses_quick_health_for_query_preflight() {
         let home = tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
 
@@ -1747,6 +1883,10 @@ mod tests {
         );
         assert_eq!(
             initial_query_index_state(&workspace),
+            WorkspaceIndexState::Healthy
+        );
+        assert_eq!(
+            workspace.index_health().state,
             WorkspaceIndexState::Unhealthy
         );
     }
