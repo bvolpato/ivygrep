@@ -1,5 +1,16 @@
 # Deployment Instructions
 
+## Docs Site
+
+Docs deploy from `main` through `.github/workflows/docs-pages.yml` whenever
+`assets/**`, `docs/**`, or the workflow itself changes. The workflow syncs
+`docs/` plus `assets/` to `gh-pages` and keeps `dev/bench/` benchmark history.
+
+After pushing docs changes, verify:
+- Docs Pages workflow: `https://github.com/bvolpato/ivygrep/actions/workflows/docs-pages.yml`
+- Pages deployment: `https://github.com/bvolpato/ivygrep/deployments/github-pages`
+- Live site: `https://bvolpato.github.io/ivygrep/`
+
 ## Release Process
 
 ivygrep releases are driven by Git tags. To deploy a new version:

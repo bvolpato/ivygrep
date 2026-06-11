@@ -1,5 +1,21 @@
 # Post-Deployment Monitoring
 
+## Verify Docs Site
+
+After docs/site changes:
+
+```bash
+gh run list --workflow docs-pages.yml --limit 5
+gh run list --limit 10 --json workflowName,headBranch,headSha,status,conclusion,url
+curl -fsSL https://bvolpato.github.io/ivygrep/ >/tmp/ivygrep-site.html
+curl -fsSL https://bvolpato.github.io/ivygrep/benchmarks/ >/tmp/ivygrep-benchmarks.html
+version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+rg -n "v${version}|Performance Evidence|Daemon hot-query" /tmp/ivygrep-site.html /tmp/ivygrep-benchmarks.html
+```
+
+Docs Pages and `pages-build-deployment` should complete successfully. The live
+site should show the current release badge and benchmark index.
+
 ## Verify Release Pipeline
 
 1. **CI checks pass**: `https://github.com/bvolpato/ivygrep/actions/workflows/ci.yml`

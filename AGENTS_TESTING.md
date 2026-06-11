@@ -33,6 +33,19 @@ only when iterating on Rust-only changes.
 
 Benchmark output reports per-operation latency. Microbenchmarks run repeated logical operations so actual timed samples last long enough to be stable.
 
+## Static Docs
+
+For `README.md`, `docs/**`, or `assets/**` changes:
+
+```bash
+rg -n "v0\.9\.0|TODO|FIXME" README.md docs
+python3 -m http.server 8765 --directory docs
+```
+
+Then open `http://127.0.0.1:8765/` and `http://127.0.0.1:8765/benchmarks/`
+with a browser, checking layout, console errors, key links, and benchmark images.
+Stop the server before continuing.
+
 ## End-to-End Procedures
 
 ```bash

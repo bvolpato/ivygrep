@@ -18,6 +18,13 @@
   <img src="assets/hero-banner.png" alt="ivygrep semantic code search" width="600" />
 </p>
 
+<p align="center">
+  <a href="https://bvolpato.github.io/ivygrep/">Website</a> ·
+  <a href="https://bvolpato.github.io/ivygrep/benchmarks/">Benchmarks</a> ·
+  <a href="ARCHITECTURE.md">Architecture</a> ·
+  <a href="CONTRIBUTING.md">Contributing</a>
+</p>
+
 ---
 
 ## ⚡ Quick Start
