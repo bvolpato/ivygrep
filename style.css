@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════
-   ivygrep — State-of-the-art documentation site
+   ivygrep documentation site
    ═══════════════════════════════════════════════════════ */
 
 :root {
@@ -602,13 +602,13 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
 .footer-copy a { color: rgba(255, 255, 255, 0.4); }
 
 /* ─── Animations ─── */
-.slide-up { opacity: 0; transform: translateY(30px); animation: slideUp 0.8s cubic-bezier(0.22, 1, 0.36, 1) forwards; }
-.fade-in { opacity: 0; animation: fadeIn 1s ease forwards; }
+.slide-up { opacity: 1; transform: translateY(18px); animation: slideUp 0.8s cubic-bezier(0.22, 1, 0.36, 1) forwards; }
+.fade-in { opacity: 1; animation: fadeIn 1s ease forwards; }
 .delay-1 { animation-delay: 0.15s; }
 .delay-2 { animation-delay: 0.3s; }
 .delay-3 { animation-delay: 0.45s; }
 
-@keyframes slideUp { to { opacity: 1; transform: translateY(0); } }
+@keyframes slideUp { to { transform: translateY(0); } }
 @keyframes fadeIn { to { opacity: 1; } }
 
 .fade-in-scroll {
