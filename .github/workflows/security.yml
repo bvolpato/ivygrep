@@ -39,10 +39,11 @@ jobs:
           persist-credentials: false
 
       - name: Install gitleaks
-        run: go install github.com/zricethezav/gitleaks/v8@v8.30.1
+        run: GOBIN="$RUNNER_TEMP/bin" go install github.com/zricethezav/gitleaks/v8@v8.30.1
 
       - name: Scan current tree
-        run: gitleaks dir . --no-banner --redact
+        run: |
+          "$RUNNER_TEMP/bin/gitleaks" dir . --no-banner --redact
 
   workflows:
     name: Workflow audit

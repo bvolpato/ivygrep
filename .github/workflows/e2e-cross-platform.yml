@@ -55,7 +55,7 @@ jobs:
       - name: System info
         run: |
           uname -a
-          cat /proc/meminfo | head -5
+          head -5 /proc/meminfo
           cat /proc/sys/fs/inotify/max_user_watches
           nproc
 
