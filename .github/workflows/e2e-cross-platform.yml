@@ -128,7 +128,7 @@ jobs:
       github.event_name != 'workflow_dispatch' ||
       contains(github.event.inputs.architectures, 'macos-x86_64')
     runs-on: macos-15-intel
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
