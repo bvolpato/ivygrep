@@ -17,28 +17,33 @@ jobs:
     name: Run Benchmarks
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: stable
       
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.8.2
         with:
           shared-key: "bench"
           cache-bin: "false"
 
       - name: Determine benchmark base
         id: benchmark-base
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            echo "ref=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
-          elif [ -n "${{ github.event.before }}" ] && [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
-            echo "ref=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            echo "ref=$PR_BASE_SHA" >> "$GITHUB_OUTPUT"
+          elif [ -n "$PUSH_BEFORE_SHA" ] && [ "$PUSH_BEFORE_SHA" != "0000000000000000000000000000000000000000" ]; then
+            echo "ref=$PUSH_BEFORE_SHA" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Fetch benchmark base
@@ -51,9 +56,11 @@ jobs:
 
       - name: Guard critical benchmark regressions
         if: steps.benchmark-base.outputs.ref != ''
+        env:
+          BENCHMARK_BASE_REF: ${{ steps.benchmark-base.outputs.ref }}
         run: |
           python3 scripts/benchmark_guard.py \
-            --baseline-ref "${{ steps.benchmark-base.outputs.ref }}" \
+            --baseline-ref "$BENCHMARK_BASE_REF" \
             --bench-target indexer_bench \
             --bench-name indexer/incremental_reindex_no_change \
             --threshold 1.15
@@ -62,7 +69,7 @@ jobs:
         run: cargo install cargo-criterion
 
       - name: Run benchmarks
-        run: cargo criterion --message-format=json > criterion-output.json
+        run: cargo criterion --locked --message-format=json > criterion-output.json
 
       - name: Convert Criterion JSON to Custom Benchmark Format
         run: |
@@ -74,7 +81,7 @@ jobs:
         run: git restore Cargo.lock || true
 
       - name: Track Benchmarks
-        uses: benchmark-action/github-action-benchmark@v1
+        uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
         with:
           name: Rust Benchmark
           tool: 'customSmallerIsBetter'

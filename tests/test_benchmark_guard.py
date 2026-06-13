@@ -26,7 +26,7 @@ SPEC.loader.exec_module(benchmark_guard)
 
 def git(repo: Path, *args: str) -> str:
     return subprocess.run(
-        ["git", *args],
+        ["git", "-c", "commit.gpgSign=false", *args],
         cwd=repo,
         check=True,
         capture_output=True,

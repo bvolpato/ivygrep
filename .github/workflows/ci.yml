@@ -11,20 +11,25 @@ env:
   RUSTFLAGS: "-D warnings"
   IVYGREP_NO_AUTOSPAWN: "1"
 
+permissions:
+  contents: read
+
 jobs:
   check:
     name: Check & Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           components: clippy, rustfmt
 
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.8.2
         with:
           shared-key: "lint"
           cache-bin: "false"
@@ -42,7 +47,7 @@ jobs:
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
 
       - name: Clippy lints
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
   test:
     name: Test (${{ matrix.os }})
@@ -78,20 +83,25 @@ jobs:
           # Windows excluded: usearch (simsimd) uses AVX-512 FP16 intrinsics
           # that MSVC doesn't support. IPC layer is cross-platform ready.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.8.2
         with:
           shared-key: "test"
           cache-bin: "false"
 
       - name: Run unit & integration tests
-        run: cargo test --lib --bins --tests ${{ matrix.cargo_flags }}
+        run: |
+          read -r -a cargo_flags <<< "$CARGO_FLAGS"
+          cargo test --locked --lib --bins --tests "${cargo_flags[@]}"
         env:
+          CARGO_FLAGS: ${{ matrix.cargo_flags }}
           RUSTFLAGS: ${{ matrix.rust_flags }}
 
   build:
@@ -122,20 +132,25 @@ jobs:
             rust_flags: "-D warnings"
           # Windows excluded: usearch (simsimd) doesn't compile on MSVC.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.8.2
         with:
           shared-key: "release"
           cache-bin: "false"
 
       - name: Build release binary
-        run: cargo build --release ${{ matrix.cargo_flags }}
+        run: |
+          read -r -a cargo_flags <<< "$CARGO_FLAGS"
+          cargo build --locked --release "${cargo_flags[@]}"
         env:
+          CARGO_FLAGS: ${{ matrix.cargo_flags }}
           RUSTFLAGS: ${{ matrix.rust_flags }}
 
       - name: Smoke test

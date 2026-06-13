@@ -4,6 +4,18 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.9.6] - 2026-06-12
+
+### Security
+- **Release and CI dependencies are immutable.** GitHub Actions now use pinned commit SHAs, checkout credentials are disabled by default, and workflow permissions follow least privilege.
+- **Security checks run continuously.** CI audits Rust dependencies, scans the current tree for leaked secrets, and validates workflows with actionlint and zizmor.
+- **Dependency updates are automated.** Dependabot now monitors Cargo and GitHub Actions dependencies weekly.
+- **The lockfile no longer uses a yanked crate release.** `fastrand` is locked to the supported `2.3.0` release.
+
+### Testing
+- **Build, test, benchmark, and release jobs enforce `Cargo.lock`.** Cargo commands now use `--locked` so local validation and published binaries resolve the same dependency graph.
+- **Git-backed tests are isolated from developer signing settings.** Synthetic fixture commits explicitly disable signing, keeping the suite hermetic on Linux and macOS.
+
 ## [0.9.5] — 2026-06-07
 
 ### Fixed

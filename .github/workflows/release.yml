@@ -6,7 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,6 +15,13 @@ jobs:
   build:
     name: Build ${{ matrix.archive_name }}
     runs-on: ${{ matrix.runner }}
+    env:
+      ARCHIVE_FORMAT: ${{ matrix.archive }}
+      ARCHIVE_NAME_SUFFIX: ${{ matrix.archive_name }}
+      EXTRA_FEATURES: ${{ matrix.extra_features }}
+      EXTRA_RUSTFLAGS: ${{ matrix.extra_rustflags }}
+      TARGET: ${{ matrix.target }}
+      USE_CROSS: ${{ matrix.use_cross }}
     strategy:
       fail-fast: false
       matrix:
@@ -44,10 +51,12 @@ jobs:
           # Windows excluded: usearch (simsimd) doesn't compile on MSVC.
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: ${{ matrix.target }}
 
@@ -55,31 +64,25 @@ jobs:
         if: matrix.use_cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
-      - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "release-${{ matrix.target }}"
-          cache-bin: "false"
-
       - name: Build release binary
         run: |
-          FEATURES=""
-          if [ -n "${{ matrix.extra_features }}" ]; then
-            FEATURES="--features ${{ matrix.extra_features }}"
+          build_args=(--locked --release --target "$TARGET")
+          if [ -n "$EXTRA_FEATURES" ]; then
+            build_args+=(--features "$EXTRA_FEATURES")
           fi
-          if [ -n "${{ matrix.extra_rustflags }}" ]; then
-            export RUSTFLAGS="${RUSTFLAGS:-} ${{ matrix.extra_rustflags }}"
+          if [ -n "$EXTRA_RUSTFLAGS" ]; then
+            export RUSTFLAGS="${RUSTFLAGS:-} $EXTRA_RUSTFLAGS"
           fi
-          if [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} $FEATURES
+          if [ "$USE_CROSS" = "true" ]; then
+            cross build "${build_args[@]}"
           else
-            cargo build --release --target ${{ matrix.target }} $FEATURES
+            cargo build "${build_args[@]}"
           fi
         shell: bash
 
       - name: Set up QEMU
         if: "contains(matrix.target, 'aarch64') && contains(matrix.runner, 'ubuntu-latest')"
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4
         with:
           cache-image: false
 
@@ -89,24 +92,24 @@ jobs:
           IVYGREP_NO_AUTOSPAWN: "1"
         run: |
           EXE_SUFFIX=""
-          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+          if [[ "$TARGET" == *"windows"* ]]; then
             EXE_SUFFIX=".exe"
           fi
-          IG_BIN="$PWD/target/${{ matrix.target }}/release/ig${EXE_SUFFIX}"
+          IG_BIN="$PWD/target/${TARGET}/release/ig${EXE_SUFFIX}"
 
           # Basic sanity. Cross-compiled Linux aarch64 binaries are validated by
           # e2e-cross-platform.yml under QEMU, not executed on this x86 runner.
           file "$IG_BIN"
-          if [[ "${{ matrix.target }}" != "aarch64-unknown-linux-musl" ]]; then
-            $IG_BIN --version
-            $IG_BIN --help > /dev/null
+          if [[ "$TARGET" != "aarch64-unknown-linux-musl" ]]; then
+            "$IG_BIN" --version
+            "$IG_BIN" --help > /dev/null
           fi
 
           # Cross-compiled Linux aarch64 binaries are tested under QEMU in
           # e2e-cross-platform.yml. Every runnable release binary must pass the
           # documented CLI procedure smoke test here.
-          if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-musl" ]]; then
-            echo "⏭️ Skipping index test for Linux aarch64 release binary (tested under QEMU in e2e-cross-platform.yml)"
+          if [[ "$TARGET" == "aarch64-unknown-linux-musl" ]]; then
+            echo "Skipping index test for Linux aarch64 release binary (tested under QEMU in e2e-cross-platform.yml)"
           else
             ./scripts/e2e_procedures.sh --binary "$IG_BIN"
             python3 scripts/check_daemon_equivalence.py \
@@ -119,46 +122,46 @@ jobs:
         shell: bash
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          ARCHIVE_NAME="ivygrep-${TAG}-${{ matrix.archive_name }}"
+          ARCHIVE_NAME="ivygrep-${TAG}-${ARCHIVE_NAME_SUFFIX}"
           mkdir -p "dist/${ARCHIVE_NAME}"
           
           EXE_SUFFIX=""
-          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+          if [[ "$TARGET" == *"windows"* ]]; then
             EXE_SUFFIX=".exe"
           fi
           
-          cp "target/${{ matrix.target }}/release/ig${EXE_SUFFIX}" "dist/${ARCHIVE_NAME}/"
+          cp "target/${TARGET}/release/ig${EXE_SUFFIX}" "dist/${ARCHIVE_NAME}/"
           cp README.md LICENSE* 2>/dev/null "dist/${ARCHIVE_NAME}/" || true
           cd dist
           
-          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+          if [[ "$ARCHIVE_FORMAT" == "zip" ]]; then
             zip -r "${ARCHIVE_NAME}.zip" "${ARCHIVE_NAME}"
-            echo "ARCHIVE_PATH=dist/${ARCHIVE_NAME}.zip" >> $GITHUB_ENV
+            echo "ARCHIVE_PATH=dist/${ARCHIVE_NAME}.zip" >> "$GITHUB_ENV"
           else
             tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
-            echo "ARCHIVE_PATH=dist/${ARCHIVE_NAME}.tar.gz" >> $GITHUB_ENV
+            echo "ARCHIVE_PATH=dist/${ARCHIVE_NAME}.tar.gz" >> "$GITHUB_ENV"
           fi
-          echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> $GITHUB_ENV
+          echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> "$GITHUB_ENV"
 
       - name: Compute SHA256
         shell: bash
         run: |
           if [[ "$OSTYPE" == "darwin"* ]]; then
-            SHA=$(shasum -a 256 "${{ env.ARCHIVE_PATH }}" | awk '{print $1}')
+            SHA=$(shasum -a 256 "$ARCHIVE_PATH" | awk '{print $1}')
           else
-            SHA=$(sha256sum "${{ env.ARCHIVE_PATH }}" | awk '{print $1}')
+            SHA=$(sha256sum "$ARCHIVE_PATH" | awk '{print $1}')
           fi
-          echo "SHA256=${SHA}" >> $GITHUB_ENV
+          echo "SHA256=${SHA}" >> "$GITHUB_ENV"
           
           # Use proper file extension depending on the generated archive format
           ARCHIVE_EXT="tar.gz"
-          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+          if [[ "$ARCHIVE_FORMAT" == "zip" ]]; then
             ARCHIVE_EXT="zip"
           fi
-          echo "${SHA}  ${{ env.ARCHIVE_NAME }}.${ARCHIVE_EXT}" > "${{ env.ARCHIVE_PATH }}.sha256"
+          echo "${SHA}  ${ARCHIVE_NAME}.${ARCHIVE_EXT}" > "${ARCHIVE_PATH}.sha256"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ env.ARCHIVE_NAME }}
           path: |
@@ -170,11 +173,15 @@ jobs:
     name: Create GitHub Release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: artifacts
           merge-multiple: false
@@ -196,10 +203,10 @@ jobs:
             echo "No CHANGELOG.md section found for ${VERSION}" >&2
             exit 1
           fi
-          echo "notes_file=release_notes.md" >> $GITHUB_OUTPUT
+          echo "notes_file=release_notes.md" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
         with:
           body_path: ${{ steps.extract_notes.outputs.notes_file }}
           files: release-assets/*
@@ -211,7 +218,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: artifacts
           merge-multiple: false
@@ -225,34 +232,46 @@ jobs:
 
           get_sha() {
             local pattern=$1
-            local file=$(find artifacts -name "${pattern}" -path '*.sha256' | head -1)
+            local file
+            file=$(find artifacts -name "${pattern}" -path '*.sha256' | head -1)
             if [ -f "$file" ]; then
               awk '{print $1}' "$file"
             else
               # Fallback: compute from the archive
-              local archive=$(find artifacts -name "${pattern%.sha256}" | head -1)
+              local archive
+              archive=$(find artifacts -name "${pattern%.sha256}" | head -1)
               sha256sum "$archive" | awk '{print $1}'
             fi
           }
 
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "tag=${TAG}" >> $GITHUB_OUTPUT
-          echo "sha_linux_amd64_musl=$(get_sha "ivygrep-${TAG}-linux-x86_64-musl.tar.gz.sha256")" >> $GITHUB_OUTPUT
-          echo "sha_linux_arm64_musl=$(get_sha "ivygrep-${TAG}-linux-aarch64-musl.tar.gz.sha256")" >> $GITHUB_OUTPUT
-          echo "sha_macos_amd64=$(get_sha "ivygrep-${TAG}-macos-x86_64.tar.gz.sha256")" >> $GITHUB_OUTPUT
-          echo "sha_macos_arm64=$(get_sha "ivygrep-${TAG}-macos-aarch64.tar.gz.sha256")" >> $GITHUB_OUTPUT
+          {
+            echo "version=${VERSION}"
+            echo "tag=${TAG}"
+            echo "sha_linux_amd64_musl=$(get_sha "ivygrep-${TAG}-linux-x86_64-musl.tar.gz.sha256")"
+            echo "sha_linux_arm64_musl=$(get_sha "ivygrep-${TAG}-linux-aarch64-musl.tar.gz.sha256")"
+            echo "sha_macos_amd64=$(get_sha "ivygrep-${TAG}-macos-x86_64.tar.gz.sha256")"
+            echo "sha_macos_arm64=$(get_sha "ivygrep-${TAG}-macos-aarch64.tar.gz.sha256")"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Checkout homebrew-tap
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           repository: bvolpato/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: homebrew-tap
+          persist-credentials: false
 
       - name: Generate formula (default — static/musl on Linux)
         shell: bash
+        env:
+          FORMULA_TAG: ${{ steps.sha.outputs.tag }}
+          FORMULA_VERSION: ${{ steps.sha.outputs.version }}
+          SHA_LINUX_AMD64: ${{ steps.sha.outputs.sha_linux_amd64_musl }}
+          SHA_LINUX_ARM64: ${{ steps.sha.outputs.sha_linux_arm64_musl }}
+          SHA_MACOS_AMD64: ${{ steps.sha.outputs.sha_macos_amd64 }}
+          SHA_MACOS_ARM64: ${{ steps.sha.outputs.sha_macos_arm64 }}
         run: |
-          cat > homebrew-tap/Formula/ivygrep.rb << 'FORMULA_EOF'
+          cat > homebrew-tap/Formula/ivygrep.rb << FORMULA_EOF
           # typed: false
           # frozen_string_literal: true
 
@@ -260,28 +279,28 @@ jobs:
           class Ivygrep < Formula
             desc "Semantic grep for codebases — hybrid lexical + vector search, local-only"
             homepage "https://github.com/bvolpato/ivygrep"
-            version "${{ steps.sha.outputs.version }}"
+            version "${FORMULA_VERSION}"
             license "MIT"
 
             on_macos do
               if Hardware::CPU.intel?
-                url "https://github.com/bvolpato/ivygrep/releases/download/${{ steps.sha.outputs.tag }}/ivygrep-${{ steps.sha.outputs.tag }}-macos-x86_64.tar.gz"
-                sha256 "${{ steps.sha.outputs.sha_macos_amd64 }}"
+                url "https://github.com/bvolpato/ivygrep/releases/download/${FORMULA_TAG}/ivygrep-${FORMULA_TAG}-macos-x86_64.tar.gz"
+                sha256 "${SHA_MACOS_AMD64}"
               end
               if Hardware::CPU.arm?
-                url "https://github.com/bvolpato/ivygrep/releases/download/${{ steps.sha.outputs.tag }}/ivygrep-${{ steps.sha.outputs.tag }}-macos-aarch64.tar.gz"
-                sha256 "${{ steps.sha.outputs.sha_macos_arm64 }}"
+                url "https://github.com/bvolpato/ivygrep/releases/download/${FORMULA_TAG}/ivygrep-${FORMULA_TAG}-macos-aarch64.tar.gz"
+                sha256 "${SHA_MACOS_ARM64}"
               end
             end
 
             on_linux do
               if Hardware::CPU.intel?
-                url "https://github.com/bvolpato/ivygrep/releases/download/${{ steps.sha.outputs.tag }}/ivygrep-${{ steps.sha.outputs.tag }}-linux-x86_64-musl.tar.gz"
-                sha256 "${{ steps.sha.outputs.sha_linux_amd64_musl }}"
+                url "https://github.com/bvolpato/ivygrep/releases/download/${FORMULA_TAG}/ivygrep-${FORMULA_TAG}-linux-x86_64-musl.tar.gz"
+                sha256 "${SHA_LINUX_AMD64}"
               end
               if Hardware::CPU.arm?
-                url "https://github.com/bvolpato/ivygrep/releases/download/${{ steps.sha.outputs.tag }}/ivygrep-${{ steps.sha.outputs.tag }}-linux-aarch64-musl.tar.gz"
-                sha256 "${{ steps.sha.outputs.sha_linux_arm64_musl }}"
+                url "https://github.com/bvolpato/ivygrep/releases/download/${FORMULA_TAG}/ivygrep-${FORMULA_TAG}-linux-aarch64-musl.tar.gz"
+                sha256 "${SHA_LINUX_ARM64}"
               end
             end
 
@@ -298,6 +317,9 @@ jobs:
 
       - name: Commit & push formulas
         working-directory: homebrew-tap
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          RELEASE_TAG: ${{ steps.sha.outputs.tag }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -306,6 +328,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "Formulas already up to date, nothing to commit"
           else
-            git commit -m "ivygrep ${{ steps.sha.outputs.tag }}: update formulas"
-            git push
+            git commit -m "ivygrep ${RELEASE_TAG}: update formulas"
+            git push "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/bvolpato/homebrew-tap.git" HEAD:main
           fi

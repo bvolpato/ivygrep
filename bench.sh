@@ -161,10 +161,10 @@ trap cleanup_smoke_baseline_on_exit EXIT
 
 case "$mode" in
   quick)
-    run cargo bench --bench indexer_bench "$bench_name" -- "${criterion_args[@]}" "${extra_args[@]}"
+    run cargo bench --locked --bench indexer_bench "$bench_name" -- "${criterion_args[@]}" "${extra_args[@]}"
     ;;
   full)
-    run cargo bench --bench indexer_bench -- "${criterion_args[@]}" "${extra_args[@]}"
+    run cargo bench --locked --bench indexer_bench -- "${criterion_args[@]}" "${extra_args[@]}"
     ;;
   guard)
     [[ -n "$guard_ref" ]] || { echo "--guard needs baseline ref" >&2; exit 2; }

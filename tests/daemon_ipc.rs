@@ -47,6 +47,7 @@ async fn bind_for_test() -> Option<(ivygrep::ipc::IpcListener, std::path::PathBu
 
 fn git(dir: &Path, args: &[&str]) {
     let output = Command::new("git")
+        .args(["-c", "commit.gpgSign=false"])
         .args(args)
         .current_dir(dir)
         .output()

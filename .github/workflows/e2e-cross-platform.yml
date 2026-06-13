@@ -32,6 +32,9 @@ env:
   CARGO_TERM_COLOR: always
   IVYGREP_NO_AUTOSPAWN: "1"
 
+permissions:
+  contents: read
+
 jobs:
   # ── Native runners (fast, no emulation) ─────────────────────────────
   native-linux-x86_64:
@@ -42,16 +45,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "e2e-linux-x86_64"
-          cache-bin: "false"
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: System info
         run: |
@@ -61,13 +60,13 @@ jobs:
           nproc
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --locked --release
         env:
           RUSTFLAGS: "-D warnings -C target-cpu=x86-64-v3"
 
       - name: Run full test suite
         if: github.event.inputs.test_scope != 'smoke'
-        run: cargo test --lib --bins --tests
+        run: cargo test --locked --lib --bins --tests
         env:
           RUSTFLAGS: "-D warnings -C target-cpu=x86-64-v3"
 
@@ -77,7 +76,7 @@ jobs:
 
       - name: Run stress tests
         if: github.event_name != 'workflow_dispatch' || github.event.inputs.test_scope == 'stress'
-        run: cargo test --test stress_harness -- --ignored
+        run: cargo test --locked --test stress_harness -- --ignored
         env:
           RUSTFLAGS: "-D warnings -C target-cpu=x86-64-v3"
 
@@ -94,16 +93,12 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "e2e-macos-arm64"
-          cache-bin: "false"
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: System info
         run: |
@@ -112,13 +107,13 @@ jobs:
           arch
 
       - name: Build
-        run: cargo build --release --features accelerate
+        run: cargo build --locked --release --features accelerate
         env:
           RUSTFLAGS: "-D warnings"
 
       - name: Run full test suite
         if: github.event.inputs.test_scope != 'smoke'
-        run: cargo test --lib --bins --tests --features accelerate
+        run: cargo test --locked --lib --bins --tests --features accelerate
         env:
           RUSTFLAGS: "-D warnings"
 
@@ -135,16 +130,12 @@ jobs:
     runs-on: macos-15-intel
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "e2e-macos-intel"
-          cache-bin: "false"
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: System info
         run: |
@@ -153,13 +144,13 @@ jobs:
           arch
 
       - name: Build
-        run: cargo build --release --features accelerate
+        run: cargo build --locked --release --features accelerate
         env:
           RUSTFLAGS: "-D warnings"
 
       - name: Run full test suite
         if: github.event.inputs.test_scope != 'smoke'
-        run: cargo test --lib --bins --tests --features accelerate
+        run: cargo test --locked --lib --bins --tests --features accelerate
         env:
           RUSTFLAGS: "-D warnings"
 
@@ -177,30 +168,26 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
+        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4
         with:
           platforms: arm64
           cache-image: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           targets: aarch64-unknown-linux-musl
 
       - name: Install cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
-      - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "e2e-linux-aarch64"
-          cache-bin: "false"
-
       - name: Build with cross
-        run: cross build --release --target aarch64-unknown-linux-musl
+        run: cross build --locked --release --target aarch64-unknown-linux-musl
 
       # Match the shipped ARM binary profile; Candle's debug build emits
       # fullfp16-only assembly for a baseline aarch64 target. Daemon autospawn
@@ -208,7 +195,7 @@ jobs:
       # cover its recovery test.
       - name: Run release-profile tests with cross
         if: github.event.inputs.test_scope != 'smoke'
-        run: cross test --release --lib --bins --tests --target aarch64-unknown-linux-musl -- --skip query_revives_watcher_after_daemon_goes_offline
+        run: cross test --locked --release --lib --bins --tests --target aarch64-unknown-linux-musl -- --skip query_revives_watcher_after_daemon_goes_offline
 
       - name: E2E smoke test (QEMU)
         run: |
@@ -242,25 +229,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "e2e-hash-only"
-          cache-bin: "false"
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Build (no default features)
-        run: cargo build --release --no-default-features
+        run: cargo build --locked --release --no-default-features
         env:
           RUSTFLAGS: "-D warnings"
 
       - name: Run full test suite (hash-only)
         if: github.event.inputs.test_scope != 'smoke'
-        run: cargo test --lib --bins --tests --no-default-features
+        run: cargo test --locked --lib --bins --tests --no-default-features
         env:
           RUSTFLAGS: "-D warnings"
 
@@ -282,16 +265,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Report
+        env:
+          LINUX_X86_RESULT: ${{ needs.native-linux-x86_64.result }}
+          MACOS_ARM_RESULT: ${{ needs.native-macos-arm64.result }}
+          MACOS_X86_RESULT: ${{ needs.native-macos-intel.result }}
+          LINUX_ARM_RESULT: ${{ needs.cross-linux-aarch64.result }}
+          HASH_ONLY_RESULT: ${{ needs.hash-only-linux.result }}
         run: |
-          echo "## Cross-Platform E2E Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Platform | Result |" >> $GITHUB_STEP_SUMMARY
-          echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Linux x86_64 (native) | ${{ needs.native-linux-x86_64.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| macOS ARM64 (native) | ${{ needs.native-macos-arm64.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| macOS x86_64 (native) | ${{ needs.native-macos-intel.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Linux aarch64 (QEMU) | ${{ needs.cross-linux-aarch64.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Linux x86_64 (hash-only) | ${{ needs.hash-only-linux.result }} |" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Cross-Platform E2E Results"
+            echo ""
+            echo "| Platform | Result |"
+            echo "|----------|--------|"
+            echo "| Linux x86_64 (native) | $LINUX_X86_RESULT |"
+            echo "| macOS ARM64 (native) | $MACOS_ARM_RESULT |"
+            echo "| macOS x86_64 (native) | $MACOS_X86_RESULT |"
+            echo "| Linux aarch64 (QEMU) | $LINUX_ARM_RESULT |"
+            echo "| Linux x86_64 (hash-only) | $HASH_ONLY_RESULT |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check for failures
         if: >-

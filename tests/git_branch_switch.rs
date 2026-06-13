@@ -25,6 +25,7 @@ use ivygrep::workspace::Workspace;
 /// Run a git command in the given directory, panicking on failure.
 fn git(dir: &std::path::Path, args: &[&str]) {
     let output = Command::new("git")
+        .args(["-c", "commit.gpgSign=false"])
         .args(args)
         .current_dir(dir)
         .env("GIT_AUTHOR_NAME", "Test")
