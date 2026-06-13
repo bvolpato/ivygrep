@@ -6,10 +6,18 @@ All notable changes to ivygrep are documented in this file.
 
 ## [0.9.6] - 2026-06-12
 
+### Fixed
+- **Natural-language ranking no longer penalizes large implementation files for having many relevant chunks.** File-level evidence now aggregates query coverage before per-file result diversity is applied.
+- **Stopwords are removed before singularization.** Words such as `does` no longer become bogus search terms such as `doe`.
+- **Code-search query expansion covers common implementation vocabulary.** Portable aliases connect intent terms such as choosing, validation, queues, allocation, receiving, and tracking to common code identifiers without repository-specific paths.
+
+### Performance
+- **Large-repository relevance improved without material daemon regression.** On a 93,502-file, 4.42-million-chunk Linux checkout, the portable intent-query score improved from `6.33` to `41.20`; MRR@10 improved from `0.059` to `0.490`, nDCG@10 from `0.055` to `0.416`, and recall@20 from `0.205` to `0.603`. Fresh shared x86 validation measured `79 ms` warm daemon cache-replay p95 and `137 ms` process-cold p95.
+
 ### Security
 - **Release and CI dependencies are immutable.** GitHub Actions now use pinned commit SHAs, checkout credentials are disabled by default, and workflow permissions follow least privilege.
 - **Security checks run continuously.** CI audits Rust dependencies, scans the current tree for leaked secrets, and validates workflows with actionlint and zizmor.
-- **Dependency updates are automated.** Dependabot now monitors Cargo and GitHub Actions dependencies weekly.
+- **Dependency updates are automated without PR floods.** Dependabot monitors Cargo and GitHub Actions dependencies weekly and groups each ecosystem into one update.
 - **The lockfile no longer uses a yanked crate release.** `fastrand` is locked to the supported `2.3.0` release.
 
 ### Testing

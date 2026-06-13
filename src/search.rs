@@ -419,7 +419,8 @@ fn collect_literal_candidates(
     if let Some(f) = ctx.fields.signature {
         search_fields.push(f);
     }
-    let parser = QueryParser::for_index(&ctx.indexes[0], search_fields);
+    let mut parser = QueryParser::for_index(&ctx.indexes[0], search_fields);
+    parser.set_conjunction_by_default();
 
     let mut found_ids = HashSet::<String>::new();
     let target_hits = options.limit.unwrap_or(100).min(500);
@@ -559,8 +560,9 @@ pub fn hybrid_search_with_context(
     let trimmed = query_text.trim();
     // Compute once — used by literal pass, lexical pass, and path-match pass.
     let lexical_queries = build_lexical_queries(trimmed);
-    let literal_matcher = if should_run_literal_pass(trimmed) {
-        let literal_pattern = lexical_queries
+    let literal_queries = build_literal_queries(trimmed, &lexical_queries);
+    let literal_matcher = if !literal_queries.is_empty() {
+        let literal_pattern = literal_queries
             .iter()
             .map(|v| regex::escape(v))
             .collect::<Vec<_>>()
@@ -575,7 +577,7 @@ pub fn hybrid_search_with_context(
     let literal_chunks: Vec<(IndexedChunk, f32)> = if let Some(ref matcher) = literal_matcher {
         let mut all_candidates = Vec::new();
         let mut seen = std::collections::HashSet::new();
-        for variant in &lexical_queries {
+        for variant in &literal_queries {
             let variant_matcher = regex::RegexBuilder::new(&regex::escape(variant))
                 .case_insensitive(true)
                 .build();
@@ -1166,10 +1168,22 @@ fn build_lexical_queries(query_text: &str) -> Vec<String> {
         }
     }
 
-    for token in expanded_query_tokens(query) {
-        if !normalized_tokens.contains(&token) {
-            queries.push(token);
-        }
+    let mut token_aliases = Vec::new();
+    for token in &normalized_tokens {
+        token_aliases.extend(
+            crate::query_aliases::token_aliases(token)
+                .iter()
+                .map(|alias| (*alias).to_string()),
+        );
+    }
+    token_aliases.sort();
+    token_aliases.dedup();
+    if !token_aliases.is_empty() {
+        queries.push(token_aliases.join(" "));
+    }
+
+    for alias in crate::query_aliases::phrase_aliases(&normalized_tokens) {
+        queries.push(alias.to_string());
     }
 
     queries.sort();
@@ -1190,6 +1204,22 @@ fn should_run_literal_pass(query_text: &str) -> bool {
             .any(|c| c == '_' || c == '-' || c == '/' || c == ':' || c.is_ascii_uppercase())
 }
 
+fn build_literal_queries(query_text: &str, lexical_queries: &[String]) -> Vec<String> {
+    if should_run_literal_pass(query_text) {
+        return lexical_queries.to_vec();
+    }
+
+    let primary = tokenize_query(query_text);
+    let mut aliases = crate::query_aliases::phrase_aliases(&primary)
+        .into_iter()
+        .filter(|alias| alias.len() >= 5 || alias.contains('_'))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    aliases.sort();
+    aliases.dedup();
+    aliases
+}
+
 fn tokenize_query(query: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut seen = HashSet::new();
@@ -1198,7 +1228,11 @@ fn tokenize_query(query: &str) -> Vec<String> {
         .filter(|token| !token.is_empty())
     {
         for segment in split_identifier_segments(raw) {
-            let normalized = singularize_token(&segment.to_ascii_lowercase());
+            let lower = segment.to_ascii_lowercase();
+            if is_query_stopword(&lower) {
+                continue;
+            }
+            let normalized = singularize_token(&lower);
             if normalized.len() >= 2
                 && !is_query_stopword(&normalized)
                 && seen.insert(normalized.clone())
@@ -1879,6 +1913,9 @@ fn fuse_rrf(
     // `path` pass above), so this additive boost no longer needs to be large
     // enough to single-handedly win — it was 3.0, ~60x the base RRF score.
     const PATH_EXACT_MATCH_WEIGHT: f32 = 0.8;
+    const FILE_COVERAGE_WEIGHT: f32 = 3.0;
+    const EXACT_LITERAL_MULTIPLIER: f32 = 1.8;
+    const ALIAS_LITERAL_MULTIPLIER: f32 = 1.35;
     // Bound the total additive boost relative to the fused base score so
     // boosts perturb the RRF ranking rather than replace it.
     const MAX_BOOST_RATIO: f32 = 3.0;
@@ -1950,10 +1987,29 @@ fn fuse_rrf(
         add_entry(chunk, PATH_WEIGHT / (K + rank as f32 + 1.0), "path");
     }
 
-    // Chunk-density normalization (IDF-like):
-    // Count how many candidate chunks each file contributes. Files with many
-    // chunks (large data files, verbose test suites) get a 1/sqrt(n) penalty
-    // so they can't dominate the results just by having more "lottery tickets".
+    let primary_query_tokens = tokenize_query(query_text);
+    let mut file_query_matches: HashMap<PathBuf, HashSet<usize>> = HashMap::new();
+    let mut boost_contexts = HashMap::with_capacity(entries.len());
+    for (chunk_id, entry) in &entries {
+        let bctx = ChunkBoostContext::new(&entry.chunk);
+        if primary_query_tokens.len() >= 3 {
+            let matches = file_query_matches
+                .entry(entry.chunk.file_path.clone())
+                .or_default();
+            for (idx, token) in primary_query_tokens.iter().enumerate() {
+                if bctx.text_lower.contains(token.as_str())
+                    || bctx.path_lower.contains(token.as_str())
+                {
+                    matches.insert(idx);
+                }
+            }
+        }
+        boost_contexts.insert(chunk_id.clone(), bctx);
+    }
+
+    // Count how many candidate chunks each file contributes. Secondary-source
+    // files with many chunks get a density penalty so they cannot dominate by
+    // contributing more candidates; primary implementation files are exempt.
     let mut file_chunk_counts: HashMap<PathBuf, usize> = HashMap::new();
     for e in entries.values() {
         *file_chunk_counts
@@ -1977,7 +2033,9 @@ fn fuse_rrf(
 
             // Precompute lowercased text/path once per candidate instead of
             // redundantly in every boost function.
-            let bctx = ChunkBoostContext::new(&chunk);
+            let bctx = boost_contexts
+                .remove(&chunk.chunk_id)
+                .unwrap_or_else(|| ChunkBoostContext::new(&chunk));
 
             // Accumulate signal boosts separately from the RRF base so they can
             // be bounded. Previously these were added directly and several were
@@ -2018,6 +2076,21 @@ fn fuse_rrf(
             let boost_cap = (base_score * MAX_BOOST_RATIO).max(MAX_BOOST_FLOOR);
             let mut score = base_score + additive_boost.min(boost_cap);
 
+            if let Some(matches) = file_query_matches.get(&chunk.file_path)
+                && matches.len() >= 2
+            {
+                let file_coverage = matches.len() as f32 / primary_query_tokens.len() as f32;
+                score *= 1.0 + file_coverage * file_coverage * FILE_COVERAGE_WEIGHT;
+            }
+
+            if source_set.contains("literal") {
+                score *= if should_run_literal_pass(query_text) {
+                    EXACT_LITERAL_MULTIPLIER
+                } else {
+                    ALIAS_LITERAL_MULTIPLIER
+                };
+            }
+
             if !source_set.contains("lexical") && !source_set.contains("literal") {
                 score *= SEMANTIC_ONLY_PENALTY;
             }
@@ -2034,8 +2107,8 @@ fn fuse_rrf(
             score *= effective_authority_score(query_text, &query_tokens, &bctx);
 
             // Apply chunk-density normalization: 1/n^x where n is the number
-            // of chunks this file has in the candidate set. Single-chunk files
-            // are unaffected; large implementation files get a softer penalty.
+            // of chunks this file has in the candidate set. Primary
+            // implementation files use x=0 and are unaffected.
             let n_file_chunks = file_chunk_counts
                 .get(&chunk.file_path)
                 .copied()
@@ -2718,25 +2791,32 @@ fn path_depth(path: &str) -> usize {
 }
 
 fn path_query_overlap(query_tokens: &[String], bctx: &ChunkBoostContext) -> usize {
-    query_tokens
-        .iter()
-        .filter(|token| {
-            bctx.path_segments
+    let mut matched_tokens = Vec::<&str>::new();
+    for token in query_tokens {
+        let matches_path = bctx
+            .path_segments
+            .iter()
+            .any(|segment| segment.contains(token.as_str()))
+            || bctx
+                .file_stem
+                .as_ref()
+                .is_some_and(|stem| stem.contains(token.as_str()));
+        if matches_path
+            && !matched_tokens
                 .iter()
-                .any(|segment| segment.contains(token.as_str()))
-                || bctx
-                    .file_stem
-                    .as_ref()
-                    .is_some_and(|stem| stem.contains(token.as_str()))
-        })
-        .count()
+                .any(|matched| matched.contains(token.as_str()) || token.contains(matched))
+        {
+            matched_tokens.push(token);
+        }
+    }
+    matched_tokens.len()
 }
 
 fn chunk_density_exponent(bctx: &ChunkBoostContext) -> f32 {
     if path_role(&bctx.path_lower) == PathRole::PrimarySource
         && !is_header_like_path(&bctx.path_lower)
     {
-        0.16
+        0.0
     } else {
         0.3
     }
@@ -3558,6 +3638,21 @@ mod tests {
                 "whitespace query must be empty"
             );
         }
+    }
+
+    #[test]
+    fn query_tokenization_filters_stopwords_before_singularizing() {
+        let tokens = tokenize_query("where does packet processing enter the stack");
+        assert!(!tokens.iter().any(|token| token == "doe"));
+        assert_eq!(tokens, ["packet", "processing", "enter", "stack"]);
+    }
+
+    #[test]
+    fn natural_language_literal_queries_use_canonical_phrase_aliases() {
+        let query = "where does packet receive processing enter network stack";
+        let literals = build_literal_queries(query, &build_lexical_queries(query));
+        assert!(literals.iter().any(|literal| literal == "ingress"));
+        assert!(!literals.iter().any(|literal| literal == "rx"));
     }
 
     #[test]

@@ -9,7 +9,7 @@
 
     <!-- Open Graph -->
     <meta property="og:title" content="ivygrep - Semantic code search that never uploads your code">
-    <meta property="og:description" content="Ask questions in English, get answers in code. Local inference, single-digit-ms warm daemon queries, zero telemetry.">
+    <meta property="og:description" content="Ask questions in English, get answers in code. Local inference, sub-100-ms warm daemon replay in fresh Linux validation, zero telemetry.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://bvolpato.github.io/ivygrep">
     <meta property="og:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner.png">
@@ -17,7 +17,7 @@
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="ivygrep - Semantic code search that never uploads your code">
-    <meta name="twitter:description" content="Ask questions in English, get answers in code. Local inference, single-digit-ms warm daemon queries, zero telemetry.">
+    <meta name="twitter:description" content="Ask questions in English, get answers in code. Local inference, sub-100-ms warm daemon replay in fresh Linux validation, zero telemetry.">
     <meta name="twitter:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner.png">
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -129,8 +129,8 @@
                 </div>
                 <div class="proof-divider"></div>
                 <div class="proof-item">
-                    <span class="proof-value">&lt;6ms</span>
-                    <span class="proof-label">Hot daemon p95</span>
+                    <span class="proof-value">&lt;80ms</span>
+                    <span class="proof-label">Fresh Linux daemon p95</span>
                 </div>
                 <div class="proof-divider"></div>
                 <div class="proof-item">
@@ -328,7 +328,7 @@
         <div class="section-header">
             <span class="section-tag">Benchmarks</span>
             <h2 class="section-title text-center">Speed That Scales</h2>
-            <p class="text-center subtitle-small">Benchmarked on the <strong>Linux kernel</strong> (93,493 indexed files, 4,666,431 chunks) and <strong>2GB+ monorepos</strong> (289K files, 3.8M chunks)</p>
+            <p class="text-center subtitle-small">Fresh validation on the <strong>Linux kernel</strong>: 93,502 indexed files and 4,419,660 chunks on a shared x86 workspace</p>
         </div>
 
         <!-- Benchmark bars -->
@@ -344,16 +344,16 @@
                 <div class="benchmark-speed">3×</div>
             </div>
             <div class="benchmark-row benchmark-row-highlight">
-                <div class="benchmark-tool"><code>ig</code><span class="benchmark-mode">process-cold semantic query</span></div>
+                <div class="benchmark-tool"><code>ig</code><span class="benchmark-mode">historical dedicated-host process-cold query</span></div>
                 <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig-semantic" data-width="5%"><span class="benchmark-time">~402 ms</span></div></div>
                 <div class="benchmark-speed benchmark-speed-hero">22×</div>
             </div>
             <div class="benchmark-row benchmark-row-highlight">
-                <div class="benchmark-tool"><code>ig</code><span class="benchmark-mode">warm daemon p95</span></div>
+                <div class="benchmark-tool"><code>ig</code><span class="benchmark-mode">best retained dedicated-host daemon p95</span></div>
                 <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig" data-width="1%"><span class="benchmark-time">~4.9 ms</span></div></div>
                 <div class="benchmark-speed benchmark-speed-hero">1837×</div>
             </div>
-            <p class="benchmark-note">grep and rg scan every file at query time. ivygrep queries a pre-built index. Latest retained runs measured 20 daemon hits and 20 local hits, preserving query behavior while cutting warm daemon p95 from ~455 ms to single-digit milliseconds.</p>
+            <p class="benchmark-note">grep and rg scan every file at query time. ivygrep queries a pre-built index. The chart shows retained dedicated-host results. Fresh June 2026 shared x86 validation measured ~137 ms process-cold p95, ~79 ms warm daemon cache-replay p95, and ~116 ms warm distinct-query p95. Hardware and storage matter.</p>
             <p class="benchmark-note"><a href="benchmarks/daemon-hot-query-cache.html">Daemon hot-query benchmark</a> · <a href="benchmarks/linux-kernel-autoresearch-2026-05-13.html">Linux kernel indexing benchmark</a> · <a href="dev/bench/">CI benchmark dashboard</a></p>
             <p class="benchmark-note">Validation is automated: CI runs fmt, ShellCheck, clippy, unit/integration tests, documented procedure E2E, labeled relevance checks, and benchmark regression gates.</p>
         </div>
@@ -363,19 +363,19 @@
             <div class="fade-in-scroll">
                 <div class="stats-grid">
                     <div class="stat-box">
-                        <div class="stat-value counter" data-target="1837">0</div>
-                        <div class="stat-label">× faster than grep</div>
+                        <div class="stat-value">93.5K</div>
+                        <div class="stat-label">Linux kernel files</div>
                     </div>
                     <div class="stat-box">
-                        <div class="stat-value">~4.9ms</div>
-                        <div class="stat-label">Warm daemon p95</div>
+                        <div class="stat-value">~79ms</div>
+                        <div class="stat-label">Fresh warm daemon p95</div>
                     </div>
                     <div class="stat-box">
-                        <div class="stat-value">~402ms</div>
-                        <div class="stat-label">Process-cold semantic query</div>
+                        <div class="stat-value">~137ms</div>
+                        <div class="stat-label">Fresh process-cold p95</div>
                     </div>
                     <div class="stat-box">
-                        <div class="stat-value">4.66M</div>
+                        <div class="stat-value">4.42M</div>
                         <div class="stat-label">Linux kernel chunks</div>
                     </div>
                 </div>
@@ -476,7 +476,7 @@
             <div class="section-header">
                 <span class="section-tag">Model Context Protocol</span>
                 <h2 class="section-title text-center">Supercharge Your AI Agents</h2>
-                <p class="text-center subtitle-small">ivygrep ships a built-in MCP server. Instead of stuffing entire repos into context windows, your agent queries your indexed codebase natively — with single-digit-ms warm daemon latency on large indexed repos.</p>
+                <p class="text-center subtitle-small">ivygrep ships a built-in MCP server. Instead of stuffing entire repos into context windows, your agent queries your indexed codebase natively, with sub-100-ms warm daemon replay in fresh shared Linux validation.</p>
             </div>
 
             <div class="grid agent-grid mt-4">

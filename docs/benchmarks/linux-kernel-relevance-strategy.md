@@ -90,6 +90,23 @@ Baseline on May 15, 2026, using Linux commit `1d5dcaa3bd65` and existing index `
 
 This is intentionally low. Current ranking finds some adjacent signals, but spam and subsystem-adjacent files dominate top results.
 
+## v0.9.6 Validation
+
+Fresh validation on June 12, 2026 used Linux commit `062871f13`, 93,502 files,
+and 4,419,660 indexed chunks. The retained implementation keeps query expansion
+portable: no benchmark query IDs, expected paths, or Linux subsystem aliases are
+encoded in ranking logic. The comparison baseline is the `6.3325` score measured
+from `main` immediately before the v0.9.6 relevance work.
+
+| Metric | Baseline | v0.9.6 |
+| --- | ---: | ---: |
+| `linux_relevance_score` | `6.3325` | `41.1951` |
+| `mean_nDCG@10` | `0.0553` | `0.4162` |
+| `mean_MRR@10` | `0.0590` | `0.4897` |
+| `mean_precision@5` | `0.0615` | `0.2615` |
+| `mean_recall@20` | `0.2051` | `0.6026` |
+| `spam_top10_rate` | `0.1231` | `0.0231` |
+
 ## Optimization Strategy
 
 Keep changes only when the benchmark improves by at least 1% without making ranking logic worse or more brittle. Small gains with large complexity should be discarded.

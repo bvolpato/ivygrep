@@ -18,8 +18,8 @@ require_tool() {
 }
 
 download_text_blob() {
-  local url="$1"
-  local destination="$2"
+  local destination="$1"
+  shift
   local tmp_file
   tmp_file="${TMP_DIR}/$(basename "${destination}").download"
 
@@ -28,15 +28,37 @@ download_text_blob() {
     return
   fi
 
-  echo "[download] ${url} -> ${destination}"
-  curl -fsSL "${url}" -o "${tmp_file}"
-  tr -d '\r' < "${tmp_file}" > "${destination}"
+  local url
+  for url in "$@"; do
+    echo "[download] ${url} -> ${destination}"
+    rm -f "${tmp_file}"
+    if curl \
+      --fail \
+      --silent \
+      --show-error \
+      --location \
+      --retry 5 \
+      --retry-delay 2 \
+      --retry-all-errors \
+      --connect-timeout 15 \
+      --max-time 180 \
+      "${url}" \
+      -o "${tmp_file}"; then
+      tr -d '\r' < "${tmp_file}" > "${destination}"
+      rm -f "${tmp_file}"
+      return
+    fi
+  done
+
   rm -f "${tmp_file}"
+  echo "error: failed to download text fixture: ${destination}" >&2
+  return 1
 }
 
 clone_repo_once() {
   local url="$1"
   local destination="$2"
+  local tmp_destination="${destination}.clone-tmp"
 
   if [[ -d "${destination}/.git" ]]; then
     if git -C "${destination}" rev-parse --is-inside-work-tree >/dev/null 2>&1 &&
@@ -46,10 +68,25 @@ clone_repo_once() {
     fi
     echo "[repair] removing unhealthy repo fixture: ${destination}"
     rm -rf "${destination}"
+  elif [[ -e "${destination}" ]]; then
+    echo "[repair] removing incomplete repo fixture: ${destination}"
+    rm -rf "${destination}"
   fi
 
-  echo "[clone] ${url} -> ${destination}"
-  git clone --depth 1 "${url}" "${destination}"
+  local attempt
+  for attempt in 1 2 3; do
+    rm -rf "${tmp_destination}"
+    echo "[clone ${attempt}/3] ${url} -> ${destination}"
+    if git clone --depth 1 "${url}" "${tmp_destination}"; then
+      mv "${tmp_destination}" "${destination}"
+      return
+    fi
+    sleep $((attempt * 2))
+  done
+
+  rm -rf "${tmp_destination}"
+  echo "error: failed to clone repo fixture: ${destination}" >&2
+  return 1
 }
 
 require_tool curl
@@ -60,12 +97,14 @@ mkdir -p "${WORKSPACES_DIR}/alice"
 
 # Public domain text corpora from Project Gutenberg.
 download_text_blob \
+  "${WORKSPACES_DIR}/shakespeare/complete_works.txt" \
   "https://www.gutenberg.org/cache/epub/100/pg100.txt" \
-  "${WORKSPACES_DIR}/shakespeare/complete_works.txt"
+  "https://www.gutenberg.org/files/100/100-0.txt"
 
 download_text_blob \
+  "${WORKSPACES_DIR}/alice/alice_in_wonderland.txt" \
   "https://www.gutenberg.org/cache/epub/11/pg11.txt" \
-  "${WORKSPACES_DIR}/alice/alice_in_wonderland.txt"
+  "https://www.gutenberg.org/files/11/11-0.txt"
 
 # Medium-size, well-known codebases for realistic indexing/search stress.
 clone_repo_once "https://github.com/BurntSushi/ripgrep.git" "${REPOS_DIR}/ripgrep"

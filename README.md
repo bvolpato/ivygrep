@@ -191,18 +191,24 @@ Unknown extensions are auto-detected and indexed as text.
 
 ## 🚀 Performance & Speed
 
-Benchmarked on the **Linux kernel** (93,493 indexed files, 4,666,431 chunks) and **2GB+ monorepos** (289K files, 3.8M chunks):
+Fresh release-readiness validation used a **Linux kernel** checkout with 93,502 indexed files and 4,419,660 chunks:
 
 | Scenario | Metric | Result |
 |------|------|-----:|
+| Fresh lexical-first Linux kernel index | full rebuild | ~270 sec |
+| Large-repo natural query | process-cold p95 | ~137 ms |
+| Warm daemon identical-query replay | end-to-end p95 | ~79 ms |
+| Warm daemon distinct queries | end-to-end p95 | ~116 ms |
+| Portable Linux intent relevance | 13 labeled queries | 41.20 |
+| Best retained dedicated-host daemon run | identical-query p95 | ~4.9 ms |
 | Historical eager-vector Linux kernel index | full rebuild | ~27.3 min |
 | Lexical-first scoped stress probe | 10,501 files | ~3 sec |
-| Cold semantic query | process-cold CLI | ~402 ms |
-| Warm daemon identical-query cache replay | p95 latency | ~4.9 ms |
 | Warm daemon correctness guard | daemon/local hits | 20 / 20 |
 
 The daemon benchmark now reports warmed distinct-query latency separately from
-identical-query cache replay. Benchmark writeups and charts live under
+identical-query cache replay. Latency depends on CPU, storage, and virtualization;
+the single-digit result is a retained dedicated-host benchmark, not a universal
+claim. Benchmark writeups and charts live under
 [`docs/benchmarks/`](docs/benchmarks/).
 
 Indexing commits BM25/literal search first. A load-aware background subprocess

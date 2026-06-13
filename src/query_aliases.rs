@@ -46,6 +46,7 @@ mod tests {
 
     #[test]
     fn token_aliases_load_from_generated_table() {
+        assert_eq!(token_aliases("choose"), &["pick", "select"]);
         assert_eq!(token_aliases("scoring"), &["score", "rank"]);
         assert!(token_aliases("flags").is_empty());
         assert!(token_aliases("output").is_empty());
@@ -57,6 +58,12 @@ mod tests {
     fn phrase_aliases_load_from_generated_table() {
         let tokens = vec!["command".to_string(), "line".to_string()];
         assert_eq!(phrase_aliases(&tokens), vec!["cli"]);
+
+        let tokens = vec!["work".to_string(), "item".to_string()];
+        assert_eq!(
+            phrase_aliases(&tokens),
+            vec!["job", "queue", "worker", "workqueue"]
+        );
     }
 
     #[test]
