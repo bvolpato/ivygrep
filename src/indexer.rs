@@ -889,9 +889,11 @@ fn index_workspace_inner(
                     };
 
                     let chunks = chunk_source(rel_path, &content);
+                    let mut seen_vector_keys = HashSet::new();
                     let indexed: Vec<_> = chunks
                         .into_iter()
                         .map(|c| build_indexed_chunk(c, *is_ignored))
+                        .filter(|chunk| seen_vector_keys.insert(chunk.vector_key))
                         .collect();
 
                     let n = progress_counter_clone
@@ -1008,6 +1010,11 @@ fn index_workspace_inner(
             row.get(0)
         })
         .unwrap_or(0);
+    let vector_key_count: i64 = tx
+        .query_row("SELECT COUNT(DISTINCT vector_key) FROM chunks", [], |row| {
+            row.get(0)
+        })
+        .unwrap_or(0);
     tx.execute(
         "INSERT OR REPLACE INTO _stats (key, value) VALUES ('chunk_count', ?1)",
         params![chunk_count],
@@ -1015,6 +1022,10 @@ fn index_workspace_inner(
     tx.execute(
         "INSERT OR REPLACE INTO _stats (key, value) VALUES ('file_count', ?1)",
         params![file_count],
+    )?;
+    tx.execute(
+        "INSERT OR REPLACE INTO _stats (key, value) VALUES ('vector_key_count', ?1)",
+        params![vector_key_count],
     )?;
 
     tx.commit()?;
@@ -1272,7 +1283,7 @@ pub fn enhance_workspace_hash(
         .unwrap_or(0);
     let sqlite = open_sqlite(&sqlite_path)?;
     let total_chunks = sqlite
-        .query_row("SELECT COUNT(*) FROM chunks", [], |row| {
+        .query_row("SELECT COUNT(DISTINCT vector_key) FROM chunks", [], |row| {
             row.get::<_, i64>(0)
         })
         .unwrap_or(0) as usize;
@@ -1282,6 +1293,7 @@ pub fn enhance_workspace_hash(
         &workspace.hash_tombstones_path(),
         &workspace.hash_tombstones_processing_path(),
     )?;
+    let removed_tombstones = claimed_tombstones.is_some();
     if let Some((_, keys)) = &claimed_tombstones {
         for key in keys {
             vector_index.remove(*key);
@@ -1290,7 +1302,9 @@ pub fn enhance_workspace_hash(
     vector_index.reserve_additional(total_chunks.saturating_sub(vector_index.size()))?;
 
     const BATCH_SIZE: usize = 2048;
+    const CHECKPOINT_INTERVAL: usize = 262_144;
     let mut batch = Vec::<(u64, String)>::with_capacity(BATCH_SIZE);
+    let mut batch_keys = HashSet::with_capacity(BATCH_SIZE);
     let mut newly_processed = 0usize;
     let mut progress_count = vector_index.size();
     let progress_path = workspace.enhancing_progress_path();
@@ -1319,7 +1333,7 @@ pub fn enhance_workspace_hash(
         Ok(())
     };
 
-    let mut stmt = sqlite.prepare("SELECT vector_key, text FROM chunks ORDER BY vector_key")?;
+    let mut stmt = sqlite.prepare("SELECT vector_key, text FROM chunks")?;
     let rows = stmt.query_map([], |row| {
         let key = row.get::<_, i64>(0)? as u64;
         let raw: Vec<u8> = row.get(1)?;
@@ -1328,7 +1342,7 @@ pub fn enhance_workspace_hash(
 
     for row in rows {
         let (key, raw) = row?;
-        if vector_index.contains(key) {
+        if vector_index.contains(key) || !batch_keys.insert(key) {
             continue;
         }
 
@@ -1341,9 +1355,10 @@ pub fn enhance_workspace_hash(
             let _ = fs::remove_file(&paused_path);
 
             process_batch(&mut batch, &mut newly_processed, &mut vector_index)?;
+            batch_keys.clear();
             progress_count += BATCH_SIZE;
             let _ = fs::write(&progress_path, progress_count.to_string());
-            if newly_processed.is_multiple_of(16_384) {
+            if newly_processed.is_multiple_of(CHECKPOINT_INTERVAL) {
                 vector_index.save()?;
             }
         }
@@ -1360,7 +1375,9 @@ pub fn enhance_workspace_hash(
     process_batch(&mut batch, &mut newly_processed, &mut vector_index)?;
     progress_count += tail_len;
     let _ = fs::write(&progress_path, progress_count.to_string());
-    vector_index.save()?;
+    if newly_processed > 0 || removed_tombstones {
+        vector_index.save()?;
+    }
     if let Some((path, _)) = claimed_tombstones {
         fs::remove_file(path)?;
     }
@@ -1392,7 +1409,7 @@ pub fn enhance_workspace_neural(
     // Phase 1: Collect all vector_keys to determine which still need embedding.
     // This avoids decompressing text for the ~31% already done.
     let total_chunks: usize = sqlite
-        .query_row("SELECT COUNT(*) FROM chunks", [], |row| {
+        .query_row("SELECT COUNT(DISTINCT vector_key) FROM chunks", [], |row| {
             row.get::<_, i64>(0)
         })
         .unwrap_or(0) as usize;
@@ -1430,8 +1447,9 @@ pub fn enhance_workspace_neural(
     // Keep batches small so load and battery checks run frequently on laptops.
     const BATCH_SIZE: usize = 64;
     let mut batch: Vec<(u64, String)> = Vec::with_capacity(BATCH_SIZE);
+    let mut batch_keys = HashSet::with_capacity(BATCH_SIZE);
 
-    let mut stmt = sqlite.prepare("SELECT vector_key, text FROM chunks ORDER BY vector_key")?;
+    let mut stmt = sqlite.prepare("SELECT vector_key, text FROM chunks")?;
     let rows = stmt.query_map([], |row| {
         let key = row.get::<_, i64>(0)? as u64;
         let raw: Vec<u8> = row.get(1)?;
@@ -1478,7 +1496,7 @@ pub fn enhance_workspace_neural(
         let (key, raw) = row?;
 
         // Skip without decompressing if already embedded
-        if vector_index.contains(key) {
+        if vector_index.contains(key) || !batch_keys.insert(key) {
             continue;
         }
 
@@ -1496,6 +1514,7 @@ pub fn enhance_workspace_neural(
             let _ = std::fs::remove_file(&paused_path);
 
             process_batch(&mut batch, &mut newly_processed, &mut vector_index)?;
+            batch_keys.clear();
             progress_count += BATCH_SIZE;
             let _ = std::fs::write(&progress_path, progress_count.to_string());
 
@@ -2329,6 +2348,78 @@ mod tests {
             summary.total_chunks.to_string(),
             "resumed enhancement progress must not count persisted vectors twice"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn enhancement_handles_duplicate_stable_vector_keys() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        fs::create_dir(root.path().join(".git")).unwrap();
+        fs::write(
+            root.path().join("lib.rs"),
+            "pub fn calculate_tax(amount: f64) -> f64 { amount * 0.2 }\n",
+        )
+        .unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        let summary = index_workspace(&workspace, &model).unwrap();
+
+        let sqlite = open_sqlite(&workspace.sqlite_path()).unwrap();
+        sqlite
+            .execute(
+                "INSERT INTO chunks (
+                    chunk_id, file_path, start_line, end_line, language, kind,
+                    text, content_hash, vector_key, modified_unix, is_ignored
+                 )
+                 SELECT
+                    'duplicate-' || chunk_id, file_path, start_line, end_line,
+                    language, kind, text, content_hash, vector_key, modified_unix,
+                    is_ignored
+                 FROM chunks
+                 LIMIT 1",
+                [],
+            )
+            .unwrap();
+
+        let row_count = sqlite
+            .query_row("SELECT COUNT(*) FROM chunks", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap() as usize;
+        let vector_key_count = sqlite
+            .query_row("SELECT COUNT(DISTINCT vector_key) FROM chunks", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap() as usize;
+        assert_eq!(row_count, summary.total_chunks + 1);
+        assert_eq!(vector_key_count, summary.total_chunks);
+
+        assert_eq!(
+            enhance_workspace_hash(&workspace, &model).unwrap(),
+            vector_key_count
+        );
+        let hash_store = VectorStore::open_readonly(
+            &workspace.vector_path(),
+            EMBEDDING_DIMENSIONS,
+            ScalarKind::F16,
+        )
+        .unwrap();
+        assert_eq!(hash_store.size(), vector_key_count);
+
+        assert_eq!(
+            enhance_workspace_neural(&workspace, &model).unwrap(),
+            vector_key_count
+        );
+        let neural_store = VectorStore::open_readonly(
+            &workspace.vector_neural_path(),
+            EMBEDDING_DIMENSIONS,
+            ScalarKind::F32,
+        )
+        .unwrap();
+        assert_eq!(neural_store.size(), vector_key_count);
     }
 
     #[test]

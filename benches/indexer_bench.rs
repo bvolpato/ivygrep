@@ -60,6 +60,7 @@ fn setup_workspace(
     let staging = tempfile::tempdir().unwrap();
     let ws_path = staging.path().join("workspace");
     fs::create_dir_all(&ws_path).unwrap();
+    fs::create_dir(ws_path.join(".git")).unwrap();
 
     for i in 0..n {
         fs::write(
@@ -108,6 +109,19 @@ fn setup_indexed_workspace(
     (staging, home, workspace, model)
 }
 
+fn setup_lexical_workspace(
+    n: usize,
+) -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    Workspace,
+    HashEmbeddingModel,
+) {
+    let (staging, home, workspace, model) = setup_workspace(n);
+    index_workspace(&workspace, &model).unwrap();
+    (staging, home, workspace, model)
+}
+
 fn setup_bulk_workspace(
     files: usize,
     functions_per_file: usize,
@@ -120,6 +134,7 @@ fn setup_bulk_workspace(
     let staging = tempfile::tempdir().unwrap();
     let ws_path = staging.path().join("workspace");
     fs::create_dir_all(&ws_path).unwrap();
+    fs::create_dir(ws_path.join(".git")).unwrap();
 
     for file_idx in 0..files {
         let mut source = String::with_capacity(functions_per_file * 96);
@@ -438,7 +453,7 @@ fn bench_regex_search(c: &mut Criterion) {
     let fixture = OnceCell::new();
     group.bench_function("regex_200_files", |b| {
         let (_staging, _home, workspace, _model) =
-            fixture.get_or_init(|| setup_indexed_workspace(200));
+            fixture.get_or_init(|| setup_lexical_workspace(200));
         b.iter_custom(|iters| {
             repeated_per_op(iters, SEARCH_200_REPETITIONS, |_| {
                 let hits = ivygrep::regex_search::regex_search(

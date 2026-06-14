@@ -202,8 +202,19 @@ pub async fn run() -> Result<()> {
         workspace.ensure_dirs()?;
         let hash_model = crate::embedding::create_hash_model();
         crate::indexer::enhance_workspace_hash(&workspace, hash_model.as_ref())?;
-        let _ = std::fs::remove_file(workspace.enhancing_progress_path());
-        let _ = std::fs::remove_file(workspace.enhancing_phase_path());
+        let enhancement_status = jobs::job_status(
+            &workspace,
+            JobKind::Enhancement,
+            jobs::ENHANCEMENT_HEARTBEAT_TTL_SECS,
+        );
+        if !enhancement_status.process_alive {
+            let _ = std::fs::remove_file(workspace.enhancing_pid_path());
+            let _ = std::fs::remove_file(workspace.enhancing_progress_path());
+            let _ = std::fs::remove_file(workspace.enhancing_phase_path());
+            let _ = std::fs::remove_file(workspace.enhancing_paused_path());
+            let _ = std::fs::remove_file(workspace.index_dir.join(".enhancing.error"));
+            let _ = jobs::finish_job(&workspace, JobKind::Enhancement, "hash-completed", None);
+        }
         return Ok(());
     }
 

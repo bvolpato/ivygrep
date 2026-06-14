@@ -378,6 +378,7 @@ impl Workspace {
         if chunk_count == 0 {
             return false;
         }
+        let vector_key_count = read_sqlite_vector_key_count(&self.index_dir);
 
         let hash_path = if use_overlay {
             self.overlay_vector_path()
@@ -405,7 +406,7 @@ impl Workspace {
             crate::EMBEDDING_DIMENSIONS,
             crate::vector_store::ScalarKind::F16,
         )
-        .is_none_or(|enhanced| enhanced < chunk_count)
+        .is_none_or(|enhanced| enhanced < vector_key_count)
         {
             return true;
         }
@@ -445,7 +446,7 @@ impl Workspace {
             crate::vector_store::ScalarKind::F32,
         ) {
             let enhanced = store.size();
-            return (enhanced as u64) < chunk_count;
+            return (enhanced as u64) < vector_key_count;
         }
 
         // If we can't open it but it exists and we have chunks, assume we need a rebuild/upgrade
@@ -676,6 +677,11 @@ impl Workspace {
         } else {
             read_sqlite_counts(&self.index_dir)
         };
+        let vector_key_count = if verify_stores && sqlite_p.exists() {
+            read_sqlite_vector_key_count_live(&sqlite_p).unwrap_or(chunk_count)
+        } else {
+            chunk_count
+        };
 
         if chunk_count > 0 && !self.merkle_snapshot_path().exists() {
             issues.push("missing merkle snapshot; rebuild required".to_string());
@@ -729,10 +735,10 @@ impl Workspace {
                             || self.hash_tombstones_processing_path().exists();
                         if enhanced_generation == generation
                             && !has_pending_tombstones
-                            && store.size() as u64 != chunk_count
+                            && store.size() as u64 != vector_key_count
                         {
                             issues.push(format!(
-                                "hash vector/SQLite chunk count mismatch ({} != {chunk_count})",
+                                "hash vector/SQLite vector-key count mismatch ({} != {vector_key_count})",
                                 store.size()
                             ));
                         }
@@ -1193,6 +1199,11 @@ fn read_sqlite_counts(index_dir: &Path) -> (u64, u64) {
                     row.get(0)
                 })
                 .unwrap_or(0);
+            let vector_keys: i64 = conn
+                .query_row("SELECT COUNT(DISTINCT vector_key) FROM chunks", [], |row| {
+                    row.get(0)
+                })
+                .unwrap_or(0);
             let _ = conn.execute(
                 "INSERT OR REPLACE INTO _stats (key, value) VALUES ('chunk_count', ?1)",
                 rusqlite::params![chunks],
@@ -1200,6 +1211,10 @@ fn read_sqlite_counts(index_dir: &Path) -> (u64, u64) {
             let _ = conn.execute(
                 "INSERT OR REPLACE INTO _stats (key, value) VALUES ('file_count', ?1)",
                 rusqlite::params![files],
+            );
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO _stats (key, value) VALUES ('vector_key_count', ?1)",
+                rusqlite::params![vector_keys],
             );
             return (chunks as u64, files as u64);
         }
@@ -1223,6 +1238,53 @@ fn read_sqlite_counts(index_dir: &Path) -> (u64, u64) {
     (chunks as u64, files as u64)
 }
 
+fn read_sqlite_vector_key_count(index_dir: &Path) -> u64 {
+    let overlay_path = index_dir.join("overlay.sqlite3");
+    let sqlite_path = if overlay_path.exists() {
+        overlay_path
+    } else {
+        index_dir.join("metadata.sqlite3")
+    };
+    if !sqlite_path.exists() {
+        return 0;
+    }
+
+    let cached = rusqlite::Connection::open_with_flags(
+        &sqlite_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()
+    .and_then(|conn| {
+        conn.query_row(
+            "SELECT value FROM _stats WHERE key = 'vector_key_count'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .ok()
+    });
+    if let Some(count) = cached {
+        return count as u64;
+    }
+
+    if let Ok(conn) = rusqlite::Connection::open(&sqlite_path) {
+        conn.busy_timeout(std::time::Duration::from_millis(100))
+            .ok();
+        if let Ok(count) =
+            conn.query_row("SELECT COUNT(DISTINCT vector_key) FROM chunks", [], |row| {
+                row.get::<_, i64>(0)
+            })
+        {
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO _stats (key, value) VALUES ('vector_key_count', ?1)",
+                rusqlite::params![count],
+            );
+            return count as u64;
+        }
+    }
+
+    read_sqlite_vector_key_count_live(&sqlite_path).unwrap_or(0)
+}
+
 fn read_sqlite_counts_live(sqlite_path: &Path) -> Result<(u64, u64)> {
     let conn = rusqlite::Connection::open_with_flags(
         sqlite_path,
@@ -1233,6 +1295,18 @@ fn read_sqlite_counts_live(sqlite_path: &Path) -> Result<(u64, u64)> {
         row.get(0)
     })?;
     Ok((chunks as u64, files as u64))
+}
+
+fn read_sqlite_vector_key_count_live(sqlite_path: &Path) -> Result<u64> {
+    let conn = rusqlite::Connection::open_with_flags(
+        sqlite_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let count: i64 =
+        conn.query_row("SELECT COUNT(DISTINCT vector_key) FROM chunks", [], |row| {
+            row.get(0)
+        })?;
+    Ok(count as u64)
 }
 
 fn read_sqlite_file_paths(sqlite_path: &Path) -> Result<BTreeSet<String>> {
@@ -1743,7 +1817,7 @@ mod tests {
             health
                 .issues
                 .iter()
-                .any(|issue| issue.contains("hash vector/SQLite chunk count mismatch")),
+                .any(|issue| issue.contains("hash vector/SQLite vector-key count mismatch")),
             "{:#?}",
             health.issues
         );
