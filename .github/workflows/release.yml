@@ -198,7 +198,7 @@ jobs:
         id: extract_notes
         run: |
           VERSION="${GITHUB_REF#refs/tags/v}"
-          awk -v ver="\\[${VERSION}\\]" '/^## / { if (p) { exit }; if (index($2, ver)) { p=1; next } } p' CHANGELOG.md > release_notes.md
+          awk -v ver="[${VERSION}]" '/^## / { if (p) { exit }; if (index($2, ver)) { p=1; next } } p' CHANGELOG.md > release_notes.md
           if [ ! -s release_notes.md ]; then
             echo "No CHANGELOG.md section found for ${VERSION}" >&2
             exit 1

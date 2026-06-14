@@ -4,6 +4,20 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.9.7] - 2026-06-14
+
+### Fixed
+- **Duplicate stable vector keys no longer break enhancement.** Indexing and enhancement deduplicate vector keys before graph insertion, while health checks compare vector stores against distinct keys instead of raw chunk rows.
+- **Successful explicit hash enhancement clears stale status safely.** Completed runs remove obsolete error and progress markers without overwriting a concurrently active enhancement job.
+
+### Performance
+- **Large-index vector enhancement scales with sequential reads and fewer graph rewrites.** Hash and neural passes scan SQLite in storage order, suppress duplicate keys per batch, checkpoint less often, and skip no-op hash saves.
+
+### Testing
+- **Duplicate-key and benchmark workspace regressions are covered.** The suite exercises repeated stable keys, isolates temporary benchmark repositories from ancestor Git directories, and keeps regex benchmarks lexical-only.
+- **macOS Intel E2E jobs have enough time for the full release matrix.** The timeout now reflects the slower native Intel runner.
+- **Release-note extraction is portable across `awk` implementations.** Tag builds match changelog version headers without relying on environment-specific backslash handling.
+
 ## [0.9.6] - 2026-06-12
 
 ### Fixed
