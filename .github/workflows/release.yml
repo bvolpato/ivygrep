@@ -31,7 +31,6 @@ jobs:
             archive_name: linux-x86_64-musl
             archive: tar.gz
             use_cross: true
-            extra_rustflags: "-C target-cpu=x86-64-v3"
 
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-latest

@@ -4,6 +4,14 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-06-15
+
+### Fixed
+- **Linux x86 releases run on baseline x86-64 CPUs.** The static musl artifact no longer requires x86-64-v3 instructions, which caused `v0.10.0` to terminate with `Illegal instruction` on older valid x86_64 hosts.
+
+### Testing
+- **Release portability flags are regression-tested.** The workflow test rejects native and elevated x86-64 microarchitecture requirements in distributed Linux artifacts.
+
 ## [0.10.0] - 2026-06-15
 
 ### Added
