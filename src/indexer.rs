@@ -19,7 +19,7 @@ use crate::text::{CODE_TOKENIZER_NAME, build_code_analyzer};
 use crate::chunking::{Chunk, chunk_source, is_indexable_file};
 use crate::embedding::EmbeddingModel;
 use crate::jobs::{self, JobKind, JobUpdate};
-use crate::merkle::{MerkleDiff, MerkleSnapshot};
+use crate::merkle::{MerkleDiff, MerkleSnapshot, normalized_indexable_content};
 use crate::vector_store::{
     HASH_VECTOR_QUANTIZATION, NEURAL_VECTOR_QUANTIZATION, ScalarKind, VectorStore,
 };
@@ -1087,7 +1087,11 @@ fn index_workspace_inner(
 
 fn files_have_same_contents(left: &Path, right: &Path) -> bool {
     match (fs::read(left), fs::read(right)) {
-        (Ok(left_bytes), Ok(right_bytes)) => left_bytes == right_bytes,
+        (Ok(left_bytes), Ok(right_bytes)) => {
+            left_bytes == right_bytes
+                || normalized_indexable_content(left, &left_bytes)
+                    == normalized_indexable_content(right, &right_bytes)
+        }
         _ => false,
     }
 }
