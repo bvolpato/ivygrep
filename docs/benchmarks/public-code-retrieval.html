@@ -3,11 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ivygrep Public Code-Retrieval Evaluation</title>
-    <meta name="description" content="Reproducible ivygrep code-retrieval quality, latency, indexing, and size evaluation.">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Outfit:wght@300;400;600;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <title>ivygrep Public Code-Retrieval Benchmark</title>
+    <meta name="description" content="Pinned public CoIR quality, latency, indexing, memory, and index-size evidence.">
     <link rel="stylesheet" href="../style.css">
     <link rel="stylesheet" href="report.css">
     <link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
@@ -17,44 +14,39 @@
     <div class="bg-fx-glow"></div>
     <main class="report-shell relative z-10">
         <nav class="report-nav">
-            <a class="report-brand" href="../">
-                <img src="../assets/icon.svg" alt="ivygrep">
-                <span>ivygrep benchmarks</span>
-            </a>
-            <div class="report-links">
-                <a href="index.html">Reports</a>
-                <a href="../dev/bench/">CI Dashboard</a>
-                <a href="https://github.com/bvolpato/ivygrep/blob/main/docs/benchmarks/public-code-retrieval.md">Source</a>
-            </div>
+            <a class="report-brand" href="../"><img src="../assets/icon.svg" alt="ivygrep"><span>ivygrep benchmarks</span></a>
+            <div class="report-links"><a href="index.html">Reports</a><a href="public-code-retrieval-results.json">Raw JSON</a><a href="https://github.com/bvolpato/ivygrep/blob/main/docs/benchmarks/public-code-retrieval.md">Source</a></div>
         </nav>
-
         <section class="report-hero">
-            <div class="report-eyebrow">Public Code Retrieval</div>
-            <h1>Quality and speed from one reproducible runner</h1>
-            <p>The BEIR/CoIR-style harness measures retrieval quality, indexing cost, index size, and cold versus warm query latency without requiring an external service.</p>
+            <div class="report-eyebrow">Pinned Public Evidence</div>
+            <h1>Code-retrieval quality and cost</h1>
+            <p>1000 held-out queries across 4 public CoIR tasks, repeated 3 times. No private corpus or local path is included.</p>
         </section>
-
-        <section class="report-grid" aria-label="reported metrics">
-            <div class="report-stat"><strong>nDCG@10</strong><span>graded ranking quality</span></div>
-            <div class="report-stat"><strong>MRR@10</strong><span>first relevant result</span></div>
-            <div class="report-stat"><strong>Recall@20</strong><span>relevant result coverage</span></div>
-            <div class="report-stat"><strong>p50 / p95</strong><span>cold and warm latency</span></div>
+        <section class="report-grid">
+            <div class="report-stat"><strong>1000</strong><span>held-out queries</span></div>
+            <div class="report-stat"><strong>4</strong><span>public tasks</span></div>
+            <div class="report-stat"><strong>50</strong><span>languages</span></div>
+            <div class="report-stat"><strong>3</strong><span>repetitions</span></div>
         </section>
-
         <section class="report-card">
-            <h2>Run the Offline Fixture</h2>
-            <pre><code>./build.sh
-python3 scripts/eval_code_retrieval.py \
-  --dataset tests/fixtures/retrieval \
-  --binary target/release/ig \
-  --mode hash</code></pre>
-            <p>The checked-in multilingual fixture keeps CI deterministic. Modes cover lexical-only, hash, normal hybrid, and verified neural retrieval. Neural measurements wait for daemon model readiness; lexical-only results identify their local-process warm path.</p>
+            <h2>Aggregate results</h2>
+            <div class="report-table-wrap"><table class="report-table">
+                <thead><tr><th>Mode</th><th>nDCG@10</th><th>MRR@10</th><th>P@5</th><th>R@20</th><th>Warm p95</th><th>Index size</th></tr></thead>
+                <tbody><tr><td><code>lexical</code></td><td>0.2278</td><td>0.1875</td><td>0.0496</td><td>0.4640</td><td>129.08 ms</td><td>69.36 MiB</td></tr><tr><td><code>hash</code></td><td>0.2324</td><td>0.1924</td><td>0.0517</td><td>0.4733</td><td>117.38 ms</td><td>101.84 MiB</td></tr><tr><td><code>hybrid</code></td><td>0.2301</td><td>0.1893</td><td>0.0506</td><td>0.4747</td><td>104.20 ms</td><td>101.84 MiB</td></tr></tbody>
+            </table></div>
+            <p>Population variance, phase timings, peak RSS, binary identity, dataset revisions, and checksums are retained in the raw JSON.</p>
         </section>
-
         <section class="report-card">
-            <h2>External Dataset Adapters</h2>
-            <p>CoIR is pinned to commit <code>89d0e769c18f0576a766072ba1071d4e04cca3dd</code>. CodeSearchNet is pinned to commit <code>106e827405c968597da938f6b373d30183918869</code>.</p>
-            <p>Export corpus documents, queries, and graded qrels into the documented three-file layout. Store dataset checksums with each result artifact so comparisons remain reproducible.</p>
+            <h2>Per-task quality</h2>
+            <div class="report-table-wrap"><table class="report-table">
+                <thead><tr><th>Task</th><th>Mode</th><th>nDCG@10</th><th>MRR@10</th><th>R@20</th></tr></thead>
+                <tbody><tr><td><code>codetrans-dl</code></td><td><code>lexical</code></td><td>0.1905</td><td>0.1192</td><td>0.6426</td></tr><tr><td><code>codetrans-dl</code></td><td><code>hash</code></td><td>0.1944</td><td>0.1214</td><td>0.6981</td></tr><tr><td><code>codetrans-dl</code></td><td><code>hybrid</code></td><td>0.1939</td><td>0.1199</td><td>0.6944</td></tr><tr><td><code>codetrans-contest</code></td><td><code>lexical</code></td><td>0.3853</td><td>0.3476</td><td>0.5656</td></tr><tr><td><code>codetrans-contest</code></td><td><code>hash</code></td><td>0.3970</td><td>0.3568</td><td>0.5671</td></tr><tr><td><code>codetrans-contest</code></td><td><code>hybrid</code></td><td>0.3982</td><td>0.3586</td><td>0.5656</td></tr><tr><td><code>cosqa</code></td><td><code>lexical</code></td><td>0.1466</td><td>0.1125</td><td>0.3427</td></tr><tr><td><code>cosqa</code></td><td><code>hash</code></td><td>0.1455</td><td>0.1128</td><td>0.3407</td></tr><tr><td><code>cosqa</code></td><td><code>hybrid</code></td><td>0.1406</td><td>0.1063</td><td>0.3453</td></tr><tr><td><code>codefeedback-st</code></td><td><code>lexical</code></td><td>0.3544</td><td>0.3330</td><td>0.5253</td></tr><tr><td><code>codefeedback-st</code></td><td><code>hash</code></td><td>0.3724</td><td>0.3563</td><td>0.5253</td></tr><tr><td><code>codefeedback-st</code></td><td><code>hybrid</code></td><td>0.3724</td><td>0.3563</td><td>0.5253</td></tr></tbody>
+            </table></div>
+            <p>Every retained task remains visible so aggregate improvements cannot hide regressions.</p>
+        </section>
+        <section class="report-card">
+            <h2>Claim boundary</h2>
+            <p>This is a reproducible baseline, not a state-of-the-art claim. Exact-search tools are only compared on exact-query workloads; this matrix covers held-out natural-language and code-to-code retrieval. Neural and external embedding upper bounds use the same matrix when their profiles are evaluated.</p>
         </section>
     </main>
 </body>

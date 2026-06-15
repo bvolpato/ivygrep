@@ -230,11 +230,18 @@ quality:
 ```bash
 uv run scripts/eval_relevance.py
 uv run scripts/eval_relevance.py --enhance-hash
-python3 scripts/eval_code_retrieval.py \
-  --dataset tests/fixtures/retrieval \
-  --binary target/release/ig \
-  --mode hash
+uv run scripts/run_public_benchmark_matrix.py \
+  --profile public-core \
+  --datasets-root /tmp/ivygrep-public-datasets \
+  --work-root /tmp/ivygrep-public-results \
+  --output public-code-retrieval-results.json
 ```
+
+The public matrix pins 20 CoIR task/language variants and retains a compact
+1,000-query baseline spanning 48 languages, with raw-result checksums, per-task
+quality, run variance, latency, memory, and index size. The current report and
+machine-readable result live under
+[`docs/benchmarks/`](docs/benchmarks/).
 
 ---
 
@@ -346,8 +353,11 @@ These smoke tests run against throwaway projects and isolated `IVYGREP_HOME` dir
 ## Roadmap
 
 - **More Tree-sitter languages:** expand the AST pipeline to Kotlin, SQL, and additional grammars as high-quality tree-sitter parsers mature.
-- **Public benchmark expansion:** run CoIR and CodeSearchNet baselines regularly and publish comparable quality/latency history.
-- **Learned reranking:** evaluate compact local cross-encoders against the bounded deterministic reranker without weakening offline portability.
+- **State-of-the-art search program:** track the evidence-backed quality,
+  latency, footprint, and portability work in
+  [#128](https://github.com/bvolpato/ivygrep/issues/128).
+- **Learned reranking:** evaluate compact local cross-encoders against the
+  bounded deterministic reranker without weakening offline portability.
 - **Editor integrations:** VS Code extension and Neovim telescope plugin for in-editor semantic search.
 - **Background job resilience:** richer queue diagnostics and resumable worker state across daemon restarts.
 

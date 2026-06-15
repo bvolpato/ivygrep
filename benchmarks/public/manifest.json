@@ -1,0 +1,161 @@
+{
+  "schema_version": 1,
+  "sources": {
+    "coir": {
+      "repository": "https://github.com/CoIR-team/coir",
+      "commit": "89d0e769c18f0576a766072ba1071d4e04cca3dd",
+      "paper": "https://aclanthology.org/2025.acl-long.1072/"
+    },
+    "codesearchnet": {
+      "repository": "https://github.com/github/CodeSearchNet",
+      "commit": "106e827405c968597da938f6b373d30183918869"
+    }
+  },
+  "profiles": {
+    "public-core": {
+      "description": "Four compact public CoIR tasks with 1,000 held-out queries across natural-language, code-to-code, and multilingual retrieval.",
+      "minimum_queries": 1000,
+      "tasks": [
+        "codetrans-dl",
+        "codetrans-contest",
+        "cosqa",
+        "codefeedback-st"
+      ],
+      "task_options": {
+        "codefeedback-st": {
+          "sample_queries": 99,
+          "sample_corpus": 5000,
+          "seed": 20260615
+        }
+      }
+    },
+    "full": {
+      "description": "Every CoIR task and language-specific CodeSearchNet/CCR subtask exposed by the pinned CoIR loader.",
+      "minimum_queries": 500,
+      "tasks": [
+        "codetrans-dl",
+        "stackoverflow-qa",
+        "apps",
+        "codefeedback-mt",
+        "codefeedback-st",
+        "codetrans-contest",
+        "synthetic-text2sql",
+        "cosqa",
+        "CodeSearchNet-go",
+        "CodeSearchNet-java",
+        "CodeSearchNet-javascript",
+        "CodeSearchNet-ruby",
+        "CodeSearchNet-python",
+        "CodeSearchNet-php",
+        "CodeSearchNet-ccr-go",
+        "CodeSearchNet-ccr-java",
+        "CodeSearchNet-ccr-javascript",
+        "CodeSearchNet-ccr-ruby",
+        "CodeSearchNet-ccr-python",
+        "CodeSearchNet-ccr-php"
+      ]
+    }
+  },
+  "tasks": {
+    "codetrans-dl": {
+      "query_corpus_revision": "328b6b6870fce952a3d5d49a8672518a0e6f6f58",
+      "qrels_revision": "3c26def7e3903a50c219584fedc85d3ad77fac43",
+      "license": "not-declared-in-dataset-card"
+    },
+    "stackoverflow-qa": {
+      "query_corpus_revision": "c3489d969c2ee1c8dc07dc70566c0f92db99848e",
+      "qrels_revision": "33d4a6f7f40e230708ff418f37444caa1b9767fc",
+      "license": "not-declared-in-dataset-card"
+    },
+    "apps": {
+      "query_corpus_revision": "1ca5257697c7d73e5d178040221d2f0eb4c2989c",
+      "qrels_revision": "a4fb4d92996bcfe1e0b0af9e97ea4b70b80ec9d5",
+      "license": "not-declared-in-dataset-card"
+    },
+    "codefeedback-mt": {
+      "query_corpus_revision": "ef78e2c8858103fccc401e61e2b5864f3f1a3875",
+      "qrels_revision": "a81bd47c248cd842a985a4750ba07f4d1b785097",
+      "license": "not-declared-in-dataset-card"
+    },
+    "codefeedback-st": {
+      "query_corpus_revision": "9ea30d040642f9a77df65e0911c3d5e04bc18ddb",
+      "qrels_revision": "a5f9ffe7f0c6f60fda0e3f06043e1e43df40d4f6",
+      "license": "not-declared-in-dataset-card"
+    },
+    "codetrans-contest": {
+      "query_corpus_revision": "60a64fc853989c538f1d7495514bdd428b641371",
+      "qrels_revision": "981ff059af50f8d336dc17a0e46dc6e4b7bd1ca5",
+      "license": "not-declared-in-dataset-card"
+    },
+    "synthetic-text2sql": {
+      "query_corpus_revision": "9a918a5cc55035350d4525fea38e4a88c6c283f7",
+      "qrels_revision": "14c01767126acab79d2bd80272ba1f908de639e0",
+      "license": "not-declared-in-dataset-card"
+    },
+    "cosqa": {
+      "query_corpus_revision": "d56676dfbe7cd137229c33bd1e7dd96c688d2126",
+      "qrels_revision": "c70cfe89508993ed4707e31be1f83908f1fd6d38",
+      "license": "not-declared-in-dataset-card"
+    },
+    "CodeSearchNet-go": {
+      "query_corpus_revision": "68e7090f1a074ba3430cc004688c59195686d1fe",
+      "qrels_revision": "ab9366c5eece89f96ff150346a5b428dcf9a2e11",
+      "license": "source-snippets-retain-upstream-licenses"
+    },
+    "CodeSearchNet-java": {
+      "query_corpus_revision": "e92b8975ce7f2a8dfe11d2c9d32957017198944c",
+      "qrels_revision": "eda2fcb4b343a5cfef79d425530f668b547d97bf",
+      "license": "source-snippets-retain-upstream-licenses"
+    },
+    "CodeSearchNet-javascript": {
+      "query_corpus_revision": "b653a2b8c9aef1d63afd72f1b69827dc37b1e314",
+      "qrels_revision": "a7e4df8619a0007e5480ba742723ea7b240eae6e",
+      "license": "source-snippets-retain-upstream-licenses"
+    },
+    "CodeSearchNet-ruby": {
+      "query_corpus_revision": "7cc9b8595825c27d3ab5809dd3054b01a3588f68",
+      "qrels_revision": "b38ef68d2f61cc5d490824327dd79812207538a9",
+      "license": "source-snippets-retain-upstream-licenses"
+    },
+    "CodeSearchNet-python": {
+      "query_corpus_revision": "d5885a7edca7bdb202ee4241fed7c8b7d020348e",
+      "qrels_revision": "4d777785ad19c5310faf625f737a6178bf4cc2d0",
+      "license": "source-snippets-retain-upstream-licenses"
+    },
+    "CodeSearchNet-php": {
+      "query_corpus_revision": "555aa0b7ed123e2a05901908cea1f2f0a3171a24",
+      "qrels_revision": "3b6f72e2357586f2c7012bcd6a46de93750cc2c3",
+      "license": "source-snippets-retain-upstream-licenses"
+    },
+    "CodeSearchNet-ccr-go": {
+      "query_corpus_revision": "c67cd40622ba28a2665116ec16ffcf775985896e",
+      "qrels_revision": "66ebd255bcc11e4d350a92ed44ad2d2de3e19828",
+      "license": "source-snippets-retain-upstream-licenses"
+    },
+    "CodeSearchNet-ccr-java": {
+      "query_corpus_revision": "4ff1707d7dbab506d3cb2735b23858d0cdb12dc7",
+      "qrels_revision": "28be88527e55a6d34047cdd0edbbe583fc7f3bfb",
+      "license": "source-snippets-retain-upstream-licenses"
+    },
+    "CodeSearchNet-ccr-javascript": {
+      "query_corpus_revision": "143fc270a8e4f965d108832c821f174eb637cf43",
+      "qrels_revision": "789c422ef193d8459859c91857b10883a1cb1358",
+      "license": "source-snippets-retain-upstream-licenses"
+    },
+    "CodeSearchNet-ccr-ruby": {
+      "query_corpus_revision": "101ff59f65da0787dbafa1da540161d9b58f6727",
+      "qrels_revision": "71969e4adc70440c77283087a7bee3e4b428b4a9",
+      "license": "source-snippets-retain-upstream-licenses"
+    },
+    "CodeSearchNet-ccr-python": {
+      "query_corpus_revision": "56e5c97c3a0c4bf7a12ff8fc0ef77e6c22d001a1",
+      "qrels_revision": "eb05f2e2e7357ffd78bd6b796621741d848aa1e3",
+      "license": "source-snippets-retain-upstream-licenses"
+    },
+    "CodeSearchNet-ccr-php": {
+      "query_corpus_revision": "9ca84367486af41b5eef5cc3d29c7bbc8c5629b2",
+      "qrels_revision": "ed454f220438b4aed615dcaac31600efa65d975d",
+      "license": "source-snippets-retain-upstream-licenses"
+    }
+  }
+}
