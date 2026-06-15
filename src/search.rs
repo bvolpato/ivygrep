@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::path::{MAIN_SEPARATOR, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -19,8 +19,8 @@ use crate::indexer::{
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
 use crate::text::{singularize_token, split_identifier_segments};
-use crate::vector_store::{ScalarKind, VectorStore};
-use crate::workspace::{Workspace, WorkspaceScope};
+use crate::vector_store::{HASH_VECTOR_QUANTIZATION, NEURAL_VECTOR_QUANTIZATION, VectorStore};
+use crate::workspace::{Workspace, WorkspaceScope, index_path_string};
 
 #[derive(Debug, Clone)]
 pub struct RawIndexedChunk {
@@ -107,6 +107,8 @@ pub struct SearchContext {
     pub base_hash_vectors: Option<VectorStore>,
     pub neural_vectors: Option<VectorStore>,
     pub base_neural_vectors: Option<VectorStore>,
+    pub neural_profile: Option<String>,
+    pub base_neural_profile: Option<String>,
 
     pub tombstones: HashSet<String>,
     pub overlay_files: HashSet<String>,
@@ -127,7 +129,7 @@ impl SearchContext {
                     VectorStore::open_readonly(
                         &workspace.overlay_vector_path(),
                         256,
-                        ScalarKind::F16,
+                        HASH_VECTOR_QUANTIZATION,
                     )
                     .ok()
                 })
@@ -146,7 +148,7 @@ impl SearchContext {
                     VectorStore::open_readonly(
                         &base_dir.join("vectors.usearch"),
                         256,
-                        ScalarKind::F16,
+                        HASH_VECTOR_QUANTIZATION,
                     )
                     .ok()
                 })
@@ -156,11 +158,15 @@ impl SearchContext {
                     VectorStore::open_readonly(
                         &base_dir.join("vectors_neural.usearch"),
                         384,
-                        ScalarKind::F32,
+                        NEURAL_VECTOR_QUANTIZATION,
                     )
                     .ok()
                 })
                 .flatten();
+            let base_neural_profile = fs::read_to_string(base_dir.join("neural_profile"))
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
 
             let mut tombstones = HashSet::new();
             let mut overlay_files = HashSet::new();
@@ -188,6 +194,8 @@ impl SearchContext {
                 base_hash_vectors: base_hash_vec,
                 neural_vectors: None,
                 base_neural_vectors: base_neural_vec,
+                neural_profile: None,
+                base_neural_profile,
                 tombstones,
                 overlay_files,
             })
@@ -198,7 +206,12 @@ impl SearchContext {
             let searcher = reader.searcher();
             let hash_vec = wants_hash_vectors
                 .then(|| {
-                    VectorStore::open_readonly(&workspace.vector_path(), 256, ScalarKind::F16).ok()
+                    VectorStore::open_readonly(
+                        &workspace.vector_path(),
+                        256,
+                        HASH_VECTOR_QUANTIZATION,
+                    )
+                    .ok()
                 })
                 .flatten();
             let neural_vec = wants_neural_vectors
@@ -206,11 +219,12 @@ impl SearchContext {
                     VectorStore::open_readonly(
                         &workspace.vector_neural_path(),
                         384,
-                        ScalarKind::F32,
+                        NEURAL_VECTOR_QUANTIZATION,
                     )
                     .ok()
                 })
                 .flatten();
+            let neural_profile = workspace.neural_profile_name();
 
             Ok(Self {
                 sqlite,
@@ -222,6 +236,8 @@ impl SearchContext {
                 base_hash_vectors: None,
                 neural_vectors: neural_vec,
                 base_neural_vectors: None,
+                neural_profile,
+                base_neural_profile: None,
                 tombstones: HashSet::new(),
                 overlay_files: HashSet::new(),
             })
@@ -561,6 +577,7 @@ pub fn hybrid_search_with_context(
     // Compute once — used by literal pass, lexical pass, and path-match pass.
     let lexical_queries = build_lexical_queries(trimmed);
     let literal_queries = build_literal_queries(trimmed, &lexical_queries);
+    let symbol_candidate_limit = output_limit.clamp(20, 100);
     let literal_matcher = if !literal_queries.is_empty() {
         let literal_pattern = literal_queries
             .iter()
@@ -741,6 +758,37 @@ pub fn hybrid_search_with_context(
     let mut lexical_chunks = lexical_by_id.into_values().collect::<Vec<_>>();
     lexical_chunks.sort_by(|a, b| b.1.total_cmp(&a.1));
     lexical_chunks.truncate(candidate_limit);
+
+    // Exact persisted symbol definitions provide a separate bounded rank
+    // signal. This avoids inferring every definition solely from text while
+    // keeping symbol lookup independent from the main candidate volume.
+    let mut symbol_names = lexical_queries.clone();
+    symbol_names.push(trimmed.to_string());
+    let mut symbol_chunks =
+        crate::symbols::definition_candidates(&ctx.sqlite, &symbol_names, symbol_candidate_limit)?;
+    if let Some(base_sqlite) = &ctx.base_sqlite {
+        let remaining = symbol_candidate_limit.saturating_sub(symbol_chunks.len());
+        if remaining > 0 {
+            symbol_chunks.extend(
+                crate::symbols::definition_candidates(base_sqlite, &symbol_names, remaining)?
+                    .into_iter()
+                    .filter(|chunk| !ctx.is_shadowed_base_file(1, &chunk.file_path)),
+            );
+        }
+    }
+    symbol_chunks.retain(|chunk| {
+        type_matches(chunk, options.type_filter.as_deref())
+            && scope_matches(chunk, options.scope_filter.as_ref())
+            && path_matches(chunk, &path_matcher)
+            && (options.skip_gitignore || !chunk.is_ignored)
+    });
+    symbol_chunks.truncate(symbol_candidate_limit);
+    let symbol_chunks = symbol_chunks
+        .into_iter()
+        .enumerate()
+        .map(|(rank, chunk)| (chunk, 1.0 / (rank as f32 + 1.0)))
+        .collect::<Vec<_>>();
+
     // ── Path-match pass ──────────────────────────────────────────────────
     // Collect chunks whose file_path contains the query as a directory/file
     // name. This ensures "my-service" finds files under
@@ -868,9 +916,28 @@ pub fn hybrid_search_with_context(
     // as a low-weight fallback whenever neural is present (the per-chunk merge
     // takes the max, so neural wins wherever it covers a chunk), and use hash
     // at full weight only when there is no neural store at all.
-    let neural_available =
-        embedding_model.is_some_and(|m| m.dimensions() == 384) && has_neural_vectors;
-    let hash_weight = if neural_available { 0.3 } else { 1.0 };
+    let neural_profile_matches = embedding_model.is_none_or(|model| {
+        let Some(active_profile) = model.profile_info() else {
+            return true;
+        };
+        ctx.neural_profile
+            .as_deref()
+            .or(ctx.base_neural_profile.as_deref())
+            .unwrap_or("general")
+            == active_profile
+    });
+    let neural_available = embedding_model.is_some_and(|m| m.dimensions() == 384)
+        && has_neural_vectors
+        && neural_profile_matches;
+    let hash_vector_count = ctx.hash_vectors.as_ref().map_or(0, VectorStore::size)
+        + ctx.base_hash_vectors.as_ref().map_or(0, VectorStore::size);
+    let neural_vector_count = ctx.neural_vectors.as_ref().map_or(0, VectorStore::size)
+        + ctx
+            .base_neural_vectors
+            .as_ref()
+            .map_or(0, VectorStore::size);
+    let hash_weight =
+        semantic_hash_weight(neural_available, neural_vector_count, hash_vector_count);
 
     if embedding_model.is_some() && (has_hash_vectors || has_neural_vectors) {
         let mut semantic_by_id = HashMap::<String, (IndexedChunk, f32)>::new();
@@ -899,6 +966,7 @@ pub fn hybrid_search_with_context(
         if let Some(model) = embedding_model
             && model.dimensions() == 384
             && has_neural_vectors
+            && neural_profile_matches
         {
             let neural_query_vector = model.embed(query_text);
             let neural_hits = collect_semantic_candidates(
@@ -927,10 +995,13 @@ pub fn hybrid_search_with_context(
     }
 
     let merged = fuse_rrf(
-        lexical_chunks,
-        semantic_chunks,
-        literal_chunks,
-        path_chunks,
+        FusionCandidates {
+            lexical: lexical_chunks,
+            semantic: semantic_chunks,
+            literal: literal_chunks,
+            path: path_chunks,
+            symbols: symbol_chunks,
+        },
         if neural_available || query_targets_secondary_sources(query_text) {
             1.0
         } else {
@@ -977,6 +1048,18 @@ pub fn hybrid_search_with_context(
     );
 
     Ok(hits)
+}
+
+fn semantic_hash_weight(
+    neural_available: bool,
+    neural_vector_count: usize,
+    hash_vector_count: usize,
+) -> f32 {
+    if !neural_available || hash_vector_count == 0 {
+        return 1.0;
+    }
+    let coverage = (neural_vector_count as f32 / hash_vector_count as f32).clamp(0.0, 1.0);
+    (1.0 - coverage).clamp(0.3, 1.0)
 }
 
 fn to_hit(
@@ -1452,14 +1535,14 @@ fn constrain_query_to_scope(
         return Ok(query);
     };
 
-    let scope_path = scope.rel_path.to_string_lossy();
+    let scope_path = index_path_string(&scope.rel_path);
     let path_query: Box<dyn Query> = if scope.is_file {
         Box::new(TermQuery::new(
             tantivy::Term::from_field_text(fields.file_path, &scope_path),
             IndexRecordOption::Basic,
         ))
     } else {
-        let prefix = format!("{}{MAIN_SEPARATOR}", regex::escape(&scope_path));
+        let prefix = format!("{}/", regex::escape(&scope_path));
         Box::new(RegexQuery::from_pattern(
             &format!("{prefix}.*"),
             fields.file_path,
@@ -1676,12 +1759,12 @@ fn query_filtered_chunks(
     }
 
     if let Some(scope) = scope_filter {
-        let prefix = scope.rel_path.to_string_lossy().to_string();
+        let prefix = index_path_string(&scope.rel_path);
         if scope.is_file {
             sql.push_str(" AND file_path = ?");
             params_vec.push(Box::new(prefix));
         } else {
-            let dir_prefix = format!("{prefix}{MAIN_SEPARATOR}");
+            let dir_prefix = format!("{prefix}/");
             sql.push_str(" AND file_path LIKE ? ESCAPE '\\'");
             params_vec.push(Box::new(format!("{}%", escape_like_pattern(&dir_prefix))));
         }
@@ -1882,11 +1965,16 @@ fn merge_semantic_candidates(
     }
 }
 
-fn fuse_rrf(
+struct FusionCandidates {
     lexical: Vec<(IndexedChunk, f32)>,
     semantic: Vec<(IndexedChunk, f32)>,
     literal: Vec<(IndexedChunk, f32)>,
     path: Vec<(IndexedChunk, f32)>,
+    symbols: Vec<(IndexedChunk, f32)>,
+}
+
+fn fuse_rrf(
+    candidates: FusionCandidates,
     semantic_direct_weight: f32,
     query_text: &str,
     limit: Option<usize>,
@@ -1901,6 +1989,7 @@ fn fuse_rrf(
     // without overriding strong content matches. The path-aware boosts below
     // (path_exact_match/path_segment/file_stem) still apply on top.
     const PATH_WEIGHT: f32 = 1.5;
+    const SYMBOL_WEIGHT: f32 = 10.0;
     const LEXICAL_SCORE_WEIGHT: f32 = 0.05;
     const SEMANTIC_SCORE_WEIGHT: f32 = 0.08;
     const SEMANTIC_ONLY_PENALTY: f32 = 0.60;
@@ -1921,6 +2010,14 @@ fn fuse_rrf(
     const MAX_BOOST_RATIO: f32 = 3.0;
     const MAX_BOOST_FLOOR: f32 = 0.25;
 
+    let FusionCandidates {
+        lexical,
+        semantic,
+        literal,
+        path,
+        symbols,
+    } = candidates;
+
     let query_tokens = expanded_query_tokens(query_text);
     let location_intent = has_location_intent(query_text);
     let direct_ids = lexical
@@ -1928,6 +2025,7 @@ fn fuse_rrf(
         .map(|(chunk, _)| chunk.chunk_id.clone())
         .chain(literal.iter().map(|(chunk, _)| chunk.chunk_id.clone()))
         .chain(path.iter().map(|(chunk, _)| chunk.chunk_id.clone()))
+        .chain(symbols.iter().map(|(chunk, _)| chunk.chunk_id.clone()))
         .collect::<HashSet<_>>();
 
     struct RrfEntry {
@@ -1987,10 +2085,29 @@ fn fuse_rrf(
         add_entry(chunk, PATH_WEIGHT / (K + rank as f32 + 1.0), "path");
     }
 
+    for (rank, (chunk, _)) in symbols.into_iter().enumerate() {
+        add_entry(chunk, SYMBOL_WEIGHT / (K + rank as f32 + 1.0), "symbol");
+    }
+
+    let rerank_limit = rerank_candidate_limit();
+    let mut rerank_order = entries
+        .iter()
+        .map(|(chunk_id, entry)| (chunk_id.clone(), entry.score))
+        .collect::<Vec<_>>();
+    rerank_order.sort_by(|left, right| right.1.total_cmp(&left.1));
+    let rerank_ids = rerank_order
+        .into_iter()
+        .take(rerank_limit)
+        .map(|(chunk_id, _)| chunk_id)
+        .collect::<HashSet<_>>();
+
     let primary_query_tokens = tokenize_query(query_text);
     let mut file_query_matches: HashMap<PathBuf, HashSet<usize>> = HashMap::new();
     let mut boost_contexts = HashMap::with_capacity(entries.len());
     for (chunk_id, entry) in &entries {
+        if !rerank_ids.contains(chunk_id) {
+            continue;
+        }
         let bctx = ChunkBoostContext::new(&entry.chunk);
         if primary_query_tokens.len() >= 3 {
             let matches = file_query_matches
@@ -2030,6 +2147,10 @@ fn fuse_rrf(
                 .map(|source| (*source).to_string())
                 .collect::<Vec<_>>();
             source_list.sort();
+
+            if !rerank_ids.contains(&chunk.chunk_id) {
+                return (chunk, base_score, source_list);
+            }
 
             // Precompute lowercased text/path once per candidate instead of
             // redundantly in every boost function.
@@ -2145,6 +2266,14 @@ fn fuse_rrf(
     }
 
     filtered
+}
+
+pub fn rerank_candidate_limit() -> usize {
+    std::env::var("IVYGREP_RERANK_LIMIT")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(100)
 }
 
 fn filter_meaningful_scores(
@@ -2430,8 +2559,8 @@ struct ChunkBoostContext {
 impl ChunkBoostContext {
     fn new(chunk: &IndexedChunk) -> Self {
         let text_lower = chunk.text.to_ascii_lowercase();
-        let path_lossy = chunk.file_path.to_string_lossy();
-        let path_lower = path_lossy.to_ascii_lowercase();
+        let path_string = index_path_string(&chunk.file_path);
+        let path_lower = path_string.to_ascii_lowercase();
         let path_segments: Vec<String> = path_lower.split('/').map(String::from).collect();
         let file_stem = chunk
             .file_path
@@ -2450,7 +2579,7 @@ impl ChunkBoostContext {
             .to_ascii_lowercase();
 
         let text_compact = compact_identifier(&chunk.text);
-        let path_compact = compact_identifier(&path_lossy);
+        let path_compact = compact_identifier(&path_string);
 
         Self {
             text_lower,
@@ -2904,6 +3033,15 @@ mod tests {
     use crate::workspace::{Workspace, WorkspaceScope};
 
     use super::*;
+
+    #[test]
+    fn hash_weight_tracks_partial_neural_coverage() {
+        assert_eq!(semantic_hash_weight(false, 0, 100), 1.0);
+        assert_eq!(semantic_hash_weight(true, 0, 100), 1.0);
+        assert!((semantic_hash_weight(true, 1, 100) - 0.99).abs() < 0.001);
+        assert!((semantic_hash_weight(true, 50, 100) - 0.5).abs() < 0.001);
+        assert_eq!(semantic_hash_weight(true, 100, 100), 0.3);
+    }
 
     struct TestEmbeddingModel384;
 
@@ -4165,6 +4303,61 @@ export function registerCommands(p: Plugin) {
             vector_key: 0,
             is_ignored: false,
         }
+    }
+
+    #[test]
+    #[serial]
+    fn exact_symbol_signal_can_promote_the_canonical_definition() {
+        unsafe { std::env::set_var("IVYGREP_RERANK_LIMIT", "1") };
+        let usage = make_chunk_with_path(
+            "usage",
+            "src/wrapper.rs",
+            "pub fn wrapper() { handle_error(); handle_error(); }",
+        );
+        let definition = make_chunk_with_path(
+            "definition",
+            "src/error.rs",
+            "pub fn handle_error(code: i32) { log(code); }",
+        );
+        let without_symbols = fuse_rrf(
+            FusionCandidates {
+                lexical: vec![(usage.clone(), 1.0), (definition.clone(), 1.0)],
+                semantic: vec![],
+                literal: vec![],
+                path: vec![],
+                symbols: vec![],
+            },
+            1.0,
+            "handle_error",
+            Some(10),
+        );
+        let with_symbols = fuse_rrf(
+            FusionCandidates {
+                lexical: vec![(usage, 1.0), (definition.clone(), 1.0)],
+                semantic: vec![],
+                literal: vec![],
+                path: vec![],
+                symbols: vec![(definition, 1.0)],
+            },
+            1.0,
+            "handle_error",
+            Some(10),
+        );
+        unsafe { std::env::remove_var("IVYGREP_RERANK_LIMIT") };
+
+        assert_eq!(without_symbols[0].0.chunk_id, "usage");
+        assert_eq!(with_symbols[0].0.chunk_id, "definition");
+        assert!(with_symbols[0].2.contains(&"symbol".to_string()));
+    }
+
+    #[test]
+    #[serial]
+    fn reranker_candidate_limit_is_configurable_and_bounded() {
+        unsafe { std::env::set_var("IVYGREP_RERANK_LIMIT", "7") };
+        assert_eq!(rerank_candidate_limit(), 7);
+        unsafe { std::env::set_var("IVYGREP_RERANK_LIMIT", "0") };
+        assert_eq!(rerank_candidate_limit(), 100);
+        unsafe { std::env::remove_var("IVYGREP_RERANK_LIMIT") };
     }
 
     fn make_ranked(entries: &[(&str, f32, &[&str])]) -> Vec<(IndexedChunk, f32, Vec<String>)> {

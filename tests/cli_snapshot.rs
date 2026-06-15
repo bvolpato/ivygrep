@@ -63,7 +63,9 @@ fn cli_help_snapshot() {
         .get_output()
         .stdout
         .clone();
-    let text = String::from_utf8(output).unwrap();
+    let text = String::from_utf8(output)
+        .unwrap()
+        .replace("Usage: ig.exe ", "Usage: ig ");
 
     insta::assert_snapshot!("cli_help", text);
 }
@@ -640,7 +642,7 @@ fn cli_doctor_json_reports_unhealthy_zero_chunk_index() {
     let output = cmd
         .current_dir(&root)
         .env("IVYGREP_HOME", &home)
-        .args(["--doctor", "--json"])
+        .args(["--doctor", "--deep", "--json"])
         .assert()
         .success()
         .get_output()

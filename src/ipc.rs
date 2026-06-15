@@ -101,8 +101,38 @@ mod unix {
 mod windows {
     use crate::config;
     use anyhow::{Context, Result};
+    use std::net::SocketAddr;
     use std::path::PathBuf;
-    pub use tokio::net::{TcpListener as IpcListener, TcpStream as IpcStream};
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    pub use tokio::net::TcpStream as IpcStream;
+
+    const TOKEN_LENGTH: usize = 32;
+    const HANDSHAKE_LENGTH: usize = TOKEN_LENGTH + 1;
+
+    pub struct IpcListener {
+        inner: TcpListener,
+        token: [u8; TOKEN_LENGTH],
+    }
+
+    impl IpcListener {
+        pub async fn accept(&self) -> std::io::Result<(IpcStream, SocketAddr)> {
+            loop {
+                let (mut stream, address) = self.inner.accept().await?;
+                let mut handshake = [0u8; HANDSHAKE_LENGTH];
+                let authenticated =
+                    tokio::time::timeout(Duration::from_secs(1), stream.read_exact(&mut handshake))
+                        .await
+                        .is_ok_and(|result| result.is_ok())
+                        && handshake[..TOKEN_LENGTH] == self.token
+                        && handshake[TOKEN_LENGTH] == b'\n';
+                if authenticated {
+                    return Ok((stream, address));
+                }
+            }
+        }
+    }
 
     pub fn socket_path() -> Result<PathBuf> {
         Ok(config::app_home()?.join("daemon.port"))
@@ -110,22 +140,43 @@ mod windows {
 
     pub async fn bind() -> Result<(IpcListener, PathBuf)> {
         let path = socket_path()?;
-        let listener = IpcListener::bind("127.0.0.1:0")
+        let inner = TcpListener::bind("127.0.0.1:0")
             .await
             .context("failed to bind tcp listener")?;
-        let port = listener.local_addr()?.port();
-        std::fs::write(&path, port.to_string()).context("failed to write daemon port file")?;
+        let port = inner.local_addr()?.port();
+        let token_string = uuid::Uuid::new_v4().simple().to_string();
+        let token: [u8; TOKEN_LENGTH] = token_string
+            .as_bytes()
+            .try_into()
+            .expect("UUID simple format has 32 bytes");
+        std::fs::write(&path, format!("{port}\n{token_string}\n"))
+            .context("failed to write daemon endpoint file")?;
+        let listener = IpcListener { inner, token };
         Ok((listener, path))
     }
 
     pub async fn connect() -> std::io::Result<IpcStream> {
         let path = socket_path().map_err(|e| std::io::Error::other(e.to_string()))?;
-        let port_str = std::fs::read_to_string(path)?;
-        let port: u16 = port_str
+        let endpoint = std::fs::read_to_string(path)?;
+        let mut lines = endpoint.lines();
+        let port: u16 = lines
+            .next()
+            .unwrap_or_default()
             .trim()
             .parse()
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid port"))?;
-        IpcStream::connect(("127.0.0.1", port)).await
+        let token = lines.next().unwrap_or_default().trim();
+        if token.len() != TOKEN_LENGTH || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid daemon authentication token",
+            ));
+        }
+        let mut stream = IpcStream::connect(("127.0.0.1", port)).await?;
+        stream.write_all(token.as_bytes()).await?;
+        stream.write_all(b"\n").await?;
+        stream.flush().await?;
+        Ok(stream)
     }
 
     pub fn cleanup_socket() {
@@ -138,7 +189,7 @@ mod windows {
         socket_path().map(|p| p.exists()).unwrap_or(false)
     }
 
-    /// Windows uses a loopback TCP port; peer-uid checks don't apply.
+    /// The listener validates the per-daemon token before returning the stream.
     pub fn peer_is_owner(_stream: &IpcStream) -> bool {
         true
     }

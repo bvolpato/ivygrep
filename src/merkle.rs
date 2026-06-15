@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -6,9 +7,29 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::chunking::is_indexable_file;
+use crate::workspace::index_path_string;
+
 use std::io::IsTerminal;
 
 const MAX_INDEXABLE_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+pub(crate) fn normalized_indexable_content<'a>(path: &Path, bytes: &'a [u8]) -> Cow<'a, [u8]> {
+    if !is_indexable_file(path, bytes) || !bytes.windows(2).any(|window| window == b"\r\n") {
+        return Cow::Borrowed(bytes);
+    }
+
+    let mut normalized = Vec::with_capacity(bytes.len());
+    let mut start = 0;
+    for (index, window) in bytes.windows(2).enumerate() {
+        if window == b"\r\n" {
+            normalized.extend_from_slice(&bytes[start..index]);
+            start = index + 1;
+        }
+    }
+    normalized.extend_from_slice(&bytes[start..]);
+    Cow::Owned(normalized)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MerkleSnapshot {
@@ -111,10 +132,7 @@ impl MerkleSnapshot {
                         && e.file_type().is_some_and(|ft| ft.is_file())
                         && let Ok(rel) = e.path().strip_prefix(root_ref)
                     {
-                        paths_ref
-                            .lock()
-                            .unwrap()
-                            .insert(rel.to_string_lossy().to_string());
+                        paths_ref.lock().unwrap().insert(index_path_string(rel));
                     }
                     ignore::WalkState::Continue
                 })
@@ -192,15 +210,17 @@ impl MerkleSnapshot {
                         Ok(c) => c,
                         Err(_) => return ignore::WalkState::Continue,
                     };
-                    let mut data = Vec::with_capacity(rel.to_string_lossy().len() + content.len());
-                    data.extend_from_slice(rel.to_string_lossy().as_bytes());
-                    data.extend_from_slice(&content);
+                    let rel_str = index_path_string(&rel);
+                    let content = normalized_indexable_content(path, &content);
+                    let mut data = Vec::with_capacity(rel_str.len() + content.len());
+                    data.extend_from_slice(rel_str.as_bytes());
+                    data.extend_from_slice(content.as_ref());
                     hex::encode(xxhash_rust::xxh3::xxh3_128(&data).to_le_bytes())
                 } else {
                     metadata_file_hash(&metadata)
                 };
 
-                let rel_str = rel.to_string_lossy().to_string();
+                let rel_str = index_path_string(&rel);
                 let is_ignored = skip_gitignore && !unignored_paths_clone.contains(&rel_str);
                 let final_hash = if is_ignored {
                     format!("{file_hash}-1")
@@ -290,7 +310,7 @@ impl MerkleSnapshot {
                 return Ok(None);
             }
 
-            let key = rel_path.to_string_lossy().to_string();
+            let key = index_path_string(rel_path);
             let next_hash = match fs::metadata(&path) {
                 Ok(metadata)
                     if metadata.is_file() && metadata.len() <= MAX_INDEXABLE_FILE_BYTES =>
@@ -512,6 +532,27 @@ mod tests {
                 .refresh_paths(dir.path(), &[PathBuf::from(".gitignore")], false)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn content_based_snapshot_ignores_source_line_ending_style() {
+        let left = tempdir().unwrap();
+        let right = tempdir().unwrap();
+        fs::write(
+            left.path().join("lib.rs"),
+            "pub fn answer() -> u8 {\n    42\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            right.path().join("lib.rs"),
+            "pub fn answer() -> u8 {\r\n    42\r\n}\r\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            MerkleSnapshot::build_content_based(left.path(), false).unwrap(),
+            MerkleSnapshot::build_content_based(right.path(), false).unwrap()
         );
     }
 

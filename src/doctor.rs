@@ -9,7 +9,7 @@ use crate::jobs::{
     self, ENHANCEMENT_HEARTBEAT_TTL_SECS, ENHANCEMENT_PAUSE_WARN_SECS, INDEXING_HEARTBEAT_TTL_SECS,
     JobKind, WATCHER_HEARTBEAT_TTL_SECS,
 };
-use crate::workspace::{Workspace, WorkspaceIndexHealth, WorkspaceIndexState};
+use crate::workspace::{IndexComponentSizes, Workspace, WorkspaceIndexHealth, WorkspaceIndexState};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DoctorReport {
@@ -18,6 +18,13 @@ pub struct DoctorReport {
     pub healthy: bool,
     pub chunk_count: u64,
     pub file_count: u64,
+    pub vector_key_count: u64,
+    pub neural_vector_count: u64,
+    pub neural_coverage_percent: f64,
+    pub neural_profile: String,
+    pub neural_dimensions: usize,
+    pub index_components: IndexComponentSizes,
+    pub reranker_candidate_limit: usize,
     pub has_indexable_files: bool,
     pub findings: Vec<String>,
     pub repaired: bool,
@@ -40,6 +47,15 @@ impl DoctorReport {
             healthy: health.is_queryable(),
             chunk_count: health.chunk_count,
             file_count: health.file_count,
+            vector_key_count: workspace.vector_key_count(),
+            neural_vector_count: workspace.neural_vector_count(),
+            neural_coverage_percent: workspace.neural_coverage_percent(),
+            neural_profile: workspace
+                .neural_profile_name()
+                .unwrap_or_else(|| crate::embedding::configured_neural_profile_name().to_string()),
+            neural_dimensions: crate::embedding::NeuralProfile::configured().dimensions(),
+            index_components: workspace.index_component_sizes(),
+            reranker_candidate_limit: crate::search::rerank_candidate_limit(),
             has_indexable_files: health.has_indexable_files,
             findings,
             repaired,
@@ -52,13 +68,22 @@ pub fn inspect_workspace(workspace: &Workspace) -> DoctorReport {
     DoctorReport::from_health(workspace, health, false, runtime_findings(workspace))
 }
 
-pub fn inspect_and_maybe_fix(workspace: &Workspace, fix: bool) -> Result<DoctorReport> {
+pub fn inspect_workspace_quick(workspace: &Workspace) -> DoctorReport {
+    let health = workspace.quick_index_health();
+    DoctorReport::from_health(workspace, health, false, runtime_findings(workspace))
+}
+
+pub fn inspect_and_maybe_fix(workspace: &Workspace, fix: bool, deep: bool) -> Result<DoctorReport> {
     let cleanup_actions = if fix {
         workspace.cleanup_stale_legacy_runtime_files()
     } else {
         Vec::new()
     };
-    let initial = workspace.index_health();
+    let initial = if fix || deep {
+        workspace.index_health()
+    } else {
+        workspace.quick_index_health()
+    };
     if !fix {
         return Ok(DoctorReport::from_health(
             workspace,
@@ -263,7 +288,7 @@ mod tests {
         std::fs::create_dir_all(workspace.tantivy_dir()).unwrap();
         std::fs::write(workspace.vector_path(), "").unwrap();
 
-        let report = inspect_and_maybe_fix(&workspace, true).unwrap();
+        let report = inspect_and_maybe_fix(&workspace, true, true).unwrap();
         assert!(report.repaired);
         assert!(report.healthy);
         assert!(report.chunk_count >= 1);
@@ -360,7 +385,7 @@ mod tests {
         let _ = index_workspace(&workspace, model.as_ref()).unwrap();
         std::fs::write(workspace.watcher_pid_path(), "999999").unwrap();
 
-        let report = inspect_and_maybe_fix(&workspace, true).unwrap();
+        let report = inspect_and_maybe_fix(&workspace, true, true).unwrap();
         assert!(report.repaired);
         assert!(!workspace.watcher_pid_path().exists());
         assert!(

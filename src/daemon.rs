@@ -815,7 +815,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     all_indices,
                 );
                 if let Some(cached_hits) = state_clone.cached_query_results(&cache_key) {
-                    if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none() {
+                    if crate::config::background_enhancement_enabled() {
                         for root in ws_neural_missing {
                             if let Ok(ws) = Workspace::resolve(&root) {
                                 let _ = ws.trigger_background_enhancement();
@@ -875,7 +875,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     state_clone.store_query_results(cache_key, &all_hits);
                 }
                 // Spawn background hash and neural enhancement for workspaces that need it.
-                if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none() {
+                if crate::config::background_enhancement_enabled() {
                     for root in ws_neural_missing {
                         if let Ok(ws) = Workspace::resolve(&root) {
                             let _ = ws.trigger_background_enhancement();
@@ -1326,7 +1326,7 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                 match result {
                     Ok(()) => {
                         state.clear_workspace_contexts(&control.workspace);
-                        if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
+                        if crate::config::background_enhancement_enabled()
                             && control.workspace.needs_neural_enhancement()
                         {
                             let _ = control.workspace.trigger_background_enhancement();

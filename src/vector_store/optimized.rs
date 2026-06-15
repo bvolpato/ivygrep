@@ -1,0 +1,530 @@
+use std::fs;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+use usearch::{Index, IndexOptions, MetricKind};
+
+use super::{ScalarKind, VectorMatch};
+
+const HASH_VECTOR_DIMENSIONS: usize = 256;
+const HASH_CONNECTIVITY: usize = 8;
+const HASH_EXPANSION_ADD: usize = 16;
+const HASH_EXPANSION_SEARCH: usize = 64;
+const SERIALIZED_DIMENSIONS_BYTES: u64 = 8;
+const SERIALIZED_HEADER_BYTES: u64 = 64;
+const SERIALIZED_MAGIC: &[u8] = b"usearch";
+
+pub struct VectorStore {
+    path: PathBuf,
+    index: Index,
+}
+
+fn create_index(dimensions: usize, quantization: ScalarKind) -> Result<Index> {
+    let mut options = IndexOptions {
+        dimensions,
+        metric: MetricKind::Cos,
+        quantization: match quantization {
+            ScalarKind::F16 => usearch::ScalarKind::F16,
+            ScalarKind::F32 => usearch::ScalarKind::F32,
+        },
+        ..IndexOptions::default()
+    };
+
+    // Hash vectors provide first results before neural enhancement. A smaller
+    // graph reduces background build cost; neural vectors retain quality defaults.
+    if dimensions == HASH_VECTOR_DIMENSIONS && matches!(quantization, ScalarKind::F16) {
+        options.connectivity = HASH_CONNECTIVITY;
+        options.expansion_add = HASH_EXPANSION_ADD;
+        options.expansion_search = HASH_EXPANSION_SEARCH;
+    }
+
+    Ok(Index::new(&options)?)
+}
+
+// USearch mmap/load trusts serialized matrix dimensions before validating its
+// header, so reject malformed offsets here instead of risking a native crash.
+fn validate_existing_index_file(path: &Path) -> Result<()> {
+    let mut file = fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    anyhow::ensure!(
+        len >= SERIALIZED_DIMENSIONS_BYTES + SERIALIZED_HEADER_BYTES,
+        "vector store is truncated ({len} bytes)"
+    );
+
+    let mut dimensions = [0u8; SERIALIZED_DIMENSIONS_BYTES as usize];
+    file.read_exact(&mut dimensions)?;
+    let rows = u32::from_le_bytes(dimensions[..4].try_into().unwrap()) as u64;
+    let bytes_per_vector = u32::from_le_bytes(dimensions[4..].try_into().unwrap()) as u64;
+    let vectors_bytes = rows
+        .checked_mul(bytes_per_vector)
+        .context("vector store dimensions overflow")?;
+    let header_offset = SERIALIZED_DIMENSIONS_BYTES
+        .checked_add(vectors_bytes)
+        .context("vector store header offset overflow")?;
+    let required_len = header_offset
+        .checked_add(SERIALIZED_HEADER_BYTES)
+        .context("vector store length overflow")?;
+    anyhow::ensure!(
+        required_len <= len,
+        "vector store is truncated ({len} bytes, header requires {required_len})"
+    );
+
+    file.seek(SeekFrom::Start(header_offset))?;
+    let mut magic = [0u8; SERIALIZED_MAGIC.len()];
+    file.read_exact(&mut magic)?;
+    anyhow::ensure!(
+        magic == SERIALIZED_MAGIC,
+        "invalid vector store header magic"
+    );
+    Ok(())
+}
+
+impl VectorStore {
+    pub fn open(path: &Path, dimensions: usize, quantization: ScalarKind) -> Result<Self> {
+        let index = create_index(dimensions, quantization)?;
+        if path.exists() {
+            validate_existing_index_file(path)?;
+            let path_str = path
+                .to_str()
+                .context("vector path contains invalid UTF-8")?;
+            match index.load(path_str) {
+                Ok(()) => {}
+                Err(err) => {
+                    if matches!(quantization, ScalarKind::F32) {
+                        // Already F32 — no fallback possible. Propagate the
+                        // error instead of silently returning an empty index
+                        // (which would wipe the file on the next save()).
+                        return Err(err.into());
+                    }
+                    // Old index may use different quantization; retry with F32
+                    let fallback = create_index(dimensions, ScalarKind::F32)?;
+                    fallback.load(path_str)?;
+                    return Ok(Self {
+                        path: path.to_path_buf(),
+                        index: fallback,
+                    });
+                }
+            }
+        }
+
+        Ok(Self {
+            path: path.to_path_buf(),
+            index,
+        })
+    }
+
+    /// Open for read-only search using memory-mapping (`view()`).
+    /// Much faster than `open()` for large indices because it avoids
+    /// loading the entire vector data into memory upfront (~450ms → <1ms
+    /// on the Linux kernel's 1.5M-vector index).
+    ///
+    /// The returned store must NOT be used for writes (upsert/remove/save).
+    pub fn open_readonly(path: &Path, dimensions: usize, quantization: ScalarKind) -> Result<Self> {
+        let index = create_index(dimensions, quantization)?;
+        if path.exists() {
+            validate_existing_index_file(path)?;
+            let path_str = path
+                .to_str()
+                .context("vector path contains invalid UTF-8")?;
+            match index.view(path_str) {
+                Ok(()) => {}
+                Err(err) => {
+                    if matches!(quantization, ScalarKind::F32) {
+                        return Err(err.into());
+                    }
+                    // Old index may use different quantization; retry with F32
+                    let fallback = create_index(dimensions, ScalarKind::F32)?;
+                    fallback.view(path_str)?;
+                    return Ok(Self {
+                        path: path.to_path_buf(),
+                        index: fallback,
+                    });
+                }
+            }
+        }
+
+        Ok(Self {
+            path: path.to_path_buf(),
+            index,
+        })
+    }
+
+    pub fn save(&self) -> Result<()> {
+        let parent = self
+            .path
+            .parent()
+            .context("vector store path has no parent")?;
+        fs::create_dir_all(parent)?;
+
+        let tmp_path = self.path.with_extension("usearch.tmp");
+        let path_str = tmp_path
+            .to_str()
+            .context("vector path contains invalid UTF-8")?;
+
+        // Write to temporary file first
+        if let Err(e) = self.index.save(path_str) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(e.into());
+        }
+
+        // Atomically rename to avoid corrupted reads by concurrent search processes
+        fs::rename(&tmp_path, &self.path)?;
+
+        Ok(())
+    }
+
+    pub fn contains(&self, key: u64) -> bool {
+        self.index.contains(key)
+    }
+
+    pub fn remove(&mut self, key: u64) {
+        let _ = self.index.remove(key);
+    }
+
+    /// Reserve space for `additional` entries upfront, avoiding repeated
+    /// capacity doublings during bulk enhancement.
+    pub fn reserve_additional(&mut self, additional: usize) -> Result<()> {
+        if additional == 0 {
+            return Ok(());
+        }
+        let needed = self.index.size() + additional;
+        if needed > self.index.capacity() {
+            self.index.reserve(needed)?;
+        }
+        Ok(())
+    }
+
+    /// Add a vector without checking for duplicates. Use only when the caller
+    /// guarantees the key does not already exist (e.g., fresh enhancement).
+    pub fn add_unchecked(&mut self, key: u64, vector: Vec<f32>) -> Result<()> {
+        self.ensure_capacity_for_insert()?;
+        self.index.add(key, &vector)?;
+        Ok(())
+    }
+
+    pub fn upsert(&mut self, key: u64, vector: Vec<f32>) -> Result<()> {
+        self.ensure_capacity_for_insert()?;
+
+        if self.index.contains(key) {
+            let _ = self.index.remove(key);
+        }
+        self.index.add(key, &vector)?;
+        Ok(())
+    }
+
+    pub fn size(&self) -> usize {
+        self.index.size()
+    }
+
+    /// Dimensionality of the vectors stored in this index. Useful for asserting
+    /// that an index was built with the expected embedding model (e.g. 256-dim
+    /// hash vs 384-dim neural).
+    pub fn dimensions(&self) -> usize {
+        self.index.dimensions()
+    }
+
+    pub fn search(&self, query: &[f32], count: usize) -> Vec<VectorMatch> {
+        match self.index.search(query, count) {
+            Ok(matches) => matches
+                .keys
+                .iter()
+                .zip(matches.distances.iter())
+                .map(|(key, distance)| VectorMatch {
+                    key: *key,
+                    // usearch uses MetricKind::Cos where distance = 1 - cosine,
+                    // so recover the true cosine similarity in [-1, 1]. This is
+                    // monotonic with -distance (ranking is unchanged) but keeps
+                    // the magnitude usable by downstream score normalization,
+                    // which clamps to [0, 1].
+                    score: 1.0 - distance,
+                })
+                .collect(),
+            Err(_) => vec![],
+        }
+    }
+
+    /// Score a single vector by key against a query vector.
+    /// Returns None if the key doesn't exist in the index.
+    pub fn score(&self, key: u64, query: &[f32]) -> Option<f32> {
+        if !self.index.contains(key) {
+            return None;
+        }
+        // Use search with the query and check if this key appears
+        // For efficiency, retrieve the vector and compute cosine similarity directly
+        let dims = query.len();
+        let mut stored = vec![0.0f32; dims];
+        match self.index.get(key, &mut stored) {
+            Ok(_count) => {
+                // Cosine similarity: dot(a,b) / (|a| * |b|)
+                let dot: f32 = stored.iter().zip(query.iter()).map(|(a, b)| a * b).sum();
+                let norm_a: f32 = stored.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let norm_b: f32 = query.iter().map(|x| x * x).sum::<f32>().sqrt();
+                if norm_a > 0.0 && norm_b > 0.0 {
+                    Some(dot / (norm_a * norm_b))
+                } else {
+                    Some(0.0)
+                }
+            }
+            Err(_) => None,
+        }
+    }
+
+    fn ensure_capacity_for_insert(&mut self) -> Result<()> {
+        let size = self.index.size();
+        let capacity = self.index.capacity();
+
+        if size < capacity {
+            return Ok(());
+        }
+
+        // Cap growth to avoid unbounded memory allocation. Each vector
+        // entry costs ~(dimensions * 2) bytes for F16 quantization, so
+        // 1M entries × 256 dims × 2 bytes = 512 MB. Capping at 256K
+        // increments keeps each reallocation under 128 MB.
+        const MAX_GROWTH: usize = 262_144;
+        let next_capacity = match capacity {
+            0 => 1024,
+            n => n.saturating_add(n.min(MAX_GROWTH)),
+        };
+
+        self.index.reserve(next_capacity)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_score_is_cosine_similarity_not_clamped_to_zero() {
+        // Regression: search() used to return -distance (range [-2, 0]) which
+        // downstream normalization clamped to 0, discarding semantic magnitude.
+        // It must now return the true cosine similarity in [0, 1].
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]).unwrap(); // identical to query
+        store.upsert(2, vec![0.0, 1.0, 0.0, 0.0]).unwrap(); // orthogonal to query
+
+        let hits = store.search(&[1.0, 0.0, 0.0, 0.0], 2);
+        let by_key: std::collections::HashMap<u64, f32> =
+            hits.iter().map(|h| (h.key, h.score)).collect();
+
+        assert!(
+            by_key[&1] > 0.9,
+            "identical vector should score ~1.0 (cosine), got {}",
+            by_key[&1]
+        );
+        assert!(
+            by_key[&2].abs() < 0.1,
+            "orthogonal vector should score ~0.0 (cosine), got {}",
+            by_key[&2]
+        );
+        assert!(by_key[&1] > by_key[&2]);
+    }
+
+    #[test]
+    fn vector_store_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
+        store.upsert(2, vec![0.0, 1.0, 0.0, 0.0]).unwrap();
+        store.save().unwrap();
+
+        let store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        let hits = store.search(&[1.0, 0.0, 0.0, 0.0], 2);
+        assert!(!hits.is_empty());
+        assert_eq!(hits[0].key, 1);
+    }
+
+    #[test]
+    fn contains_and_remove() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        store.upsert(42, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
+        assert!(store.contains(42));
+        assert!(!store.contains(99));
+
+        store.remove(42);
+        assert!(!store.contains(42));
+    }
+
+    #[test]
+    fn size_tracks_insertions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        assert_eq!(store.size(), 0);
+        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
+        assert_eq!(store.size(), 1);
+        store.upsert(2, vec![0.0, 1.0, 0.0, 0.0]).unwrap();
+        assert_eq!(store.size(), 2);
+    }
+
+    #[test]
+    fn upsert_replaces_existing_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
+        store.upsert(1, vec![0.0, 1.0, 0.0, 0.0]).unwrap();
+
+        assert_eq!(store.size(), 1);
+        let hits = store.search(&[0.0, 1.0, 0.0, 0.0], 1);
+        assert_eq!(hits[0].key, 1);
+    }
+
+    #[test]
+    fn score_returns_similarity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        let score = store.score(1, &[1.0, 0.0, 0.0, 0.0]);
+        assert!(score.is_some());
+        assert!(score.unwrap() > 0.9);
+
+        assert!(store.score(999, &[1.0, 0.0, 0.0, 0.0]).is_none());
+    }
+
+    #[test]
+    fn open_readonly_sees_saved_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
+        store.upsert(2, vec![0.0, 1.0, 0.0, 0.0]).unwrap();
+        store.save().unwrap();
+
+        let ro = VectorStore::open_readonly(&path, 4, ScalarKind::F32).unwrap();
+        assert_eq!(ro.size(), 2);
+        assert!(ro.contains(1));
+        assert!(ro.contains(2));
+    }
+
+    #[test]
+    fn open_rejects_truncated_file_before_native_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+        fs::write(&path, b"truncated").unwrap();
+
+        let err = VectorStore::open_readonly(&path, 4, ScalarKind::F32)
+            .err()
+            .expect("truncated vector store should fail");
+        assert!(err.to_string().contains("vector store is truncated"));
+    }
+
+    #[test]
+    fn open_rejects_invalid_header_before_native_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+        fs::write(&path, vec![0; 80]).unwrap();
+
+        let err = VectorStore::open_readonly(&path, 4, ScalarKind::F32)
+            .err()
+            .expect("invalid vector store should fail");
+        assert!(
+            err.to_string()
+                .contains("invalid vector store header magic")
+        );
+    }
+
+    #[test]
+    fn capacity_grows_beyond_initial() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        for i in 0..1100 {
+            store.upsert(i, vec![i as f32, 0.0, 0.0, 0.0]).unwrap();
+        }
+        assert_eq!(store.size(), 1100);
+    }
+
+    #[test]
+    fn hash_first_tier_uses_lower_build_expansion_only_for_f16_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hash = VectorStore::open(
+            &tmp.path().join("hash.bin"),
+            HASH_VECTOR_DIMENSIONS,
+            ScalarKind::F16,
+        )
+        .unwrap();
+        let neural = VectorStore::open(
+            &tmp.path().join("neural.bin"),
+            HASH_VECTOR_DIMENSIONS,
+            ScalarKind::F32,
+        )
+        .unwrap();
+
+        assert_eq!(hash.index.connectivity(), HASH_CONNECTIVITY);
+        assert_eq!(hash.index.expansion_add(), HASH_EXPANSION_ADD);
+        assert_eq!(hash.index.expansion_search(), HASH_EXPANSION_SEARCH);
+        assert_ne!(neural.index.connectivity(), HASH_CONNECTIVITY);
+        assert_ne!(neural.index.expansion_add(), HASH_EXPANSION_ADD);
+    }
+
+    #[test]
+    fn f16_neural_store_preserves_recall_and_reduces_size() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f16_path = tmp.path().join("neural-f16.bin");
+        let f32_path = tmp.path().join("neural-f32.bin");
+        let vectors = (0..1_000u64)
+            .map(|key| {
+                let vector = (0..384)
+                    .map(|dimension| {
+                        let value = key.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(
+                            (dimension as u64 + 1).wrapping_mul(1_442_695_040_888_963_407),
+                        );
+                        ((value >> 40) as f32 / (1u64 << 24) as f32) - 0.5
+                    })
+                    .collect::<Vec<_>>();
+                (key, vector)
+            })
+            .collect::<Vec<_>>();
+
+        for (path, quantization) in [(&f16_path, ScalarKind::F16), (&f32_path, ScalarKind::F32)] {
+            let mut store = VectorStore::open(path, 384, quantization).unwrap();
+            store.reserve_additional(vectors.len()).unwrap();
+            for (key, vector) in &vectors {
+                store.add_unchecked(*key, vector.clone()).unwrap();
+            }
+            store.save().unwrap();
+        }
+
+        let query = &vectors[427].1;
+        let f16 = VectorStore::open_readonly(&f16_path, 384, ScalarKind::F16).unwrap();
+        let f32 = VectorStore::open_readonly(&f32_path, 384, ScalarKind::F32).unwrap();
+        let f16_keys = f16
+            .search(query, 20)
+            .into_iter()
+            .map(|hit| hit.key)
+            .collect::<std::collections::HashSet<_>>();
+        let f32_keys = f32
+            .search(query, 20)
+            .into_iter()
+            .map(|hit| hit.key)
+            .collect::<std::collections::HashSet<_>>();
+        let overlap = f16_keys.intersection(&f32_keys).count();
+
+        assert!(f16_keys.contains(&427));
+        assert!(f32_keys.contains(&427));
+        assert!(overlap >= 18, "F16/F32 top-20 overlap was {overlap}/20");
+        assert!(
+            fs::metadata(&f16_path).unwrap().len() * 10
+                < fs::metadata(&f32_path).unwrap().len() * 7,
+            "F16 store should be materially smaller than F32"
+        );
+    }
+}

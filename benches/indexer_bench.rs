@@ -525,6 +525,24 @@ fn bench_base_search_patterns(c: &mut Criterion) {
         })
     });
 
+    group.bench_function("bounded_rerank_100_candidates_1000_files", |b| {
+        let (_staging, _home, workspace, model) =
+            fixture.get_or_init(|| setup_bulk_indexed_workspace(1_000, 8));
+        b.iter_custom(|iters| {
+            repeated_per_op(iters, HYBRID_SEARCH_REPETITIONS, |_| {
+                let hits = hybrid_search(
+                    black_box(workspace),
+                    black_box("where is the bulk amount calculated"),
+                    Some(model as &dyn ivygrep::embedding::EmbeddingModel),
+                    black_box(&options),
+                )
+                .unwrap();
+                assert!(!hits.is_empty());
+                black_box(hits);
+            })
+        })
+    });
+
     group.bench_function("literal_simple_symbol_1000_files", |b| {
         let (_staging, _home, workspace, _model) =
             fixture.get_or_init(|| setup_bulk_indexed_workspace(1_000, 8));
@@ -720,6 +738,17 @@ fn bench_critical_journeys(c: &mut Criterion) {
         })
     });
 
+    let health_fixture = OnceCell::new();
+    group.bench_function("quick_health_cached_10k_chunks", |b| {
+        let (_staging, _home, workspace, _model) =
+            health_fixture.get_or_init(|| setup_bulk_indexed_workspace(200, 50));
+        b.iter(|| {
+            let health = black_box(workspace).quick_index_health();
+            assert!(health.is_queryable());
+            black_box(health);
+        })
+    });
+
     // ANN search at scale: 50K pseudo-random vectors (vs the 1K micro-bench),
     // enough to exercise usearch HNSW behaviour rather than a trivial set.
     let ann_fixture = OnceCell::new();
@@ -731,7 +760,7 @@ fn bench_critical_journeys(c: &mut Criterion) {
                 let mut store = ivygrep::vector_store::VectorStore::open(
                     &ann_path,
                     EMBEDDING_DIMENSIONS,
-                    ivygrep::vector_store::ScalarKind::F32,
+                    ivygrep::vector_store::NEURAL_VECTOR_QUANTIZATION,
                 )
                 .unwrap();
                 for i in 0..50_000u64 {
@@ -754,7 +783,7 @@ fn bench_critical_journeys(c: &mut Criterion) {
                 let store = ivygrep::vector_store::VectorStore::open_readonly(
                     black_box(ann_path),
                     EMBEDDING_DIMENSIONS,
-                    ivygrep::vector_store::ScalarKind::F32,
+                    ivygrep::vector_store::NEURAL_VECTOR_QUANTIZATION,
                 )
                 .unwrap();
                 let results = store.search(black_box(query), 50);
@@ -770,8 +799,12 @@ fn bench_critical_journeys(c: &mut Criterion) {
             let ann_dir = tempfile::tempdir().unwrap();
             let ann_path = ann_dir.path().join("ann.usearch");
             {
-                let mut store =
-                    VectorStore::open(&ann_path, EMBEDDING_DIMENSIONS, ScalarKind::F32).unwrap();
+                let mut store = VectorStore::open(
+                    &ann_path,
+                    EMBEDDING_DIMENSIONS,
+                    ivygrep::vector_store::NEURAL_VECTOR_QUANTIZATION,
+                )
+                .unwrap();
                 for i in 0..50_000u64 {
                     let v: Vec<f32> = (0..EMBEDDING_DIMENSIONS)
                         .map(|j| (((i as usize * 31 + j * 17) % 97) as f32) / 97.0)
@@ -785,8 +818,12 @@ fn bench_critical_journeys(c: &mut Criterion) {
                 .collect();
             (ann_dir, ann_path, query)
         });
-        let store =
-            VectorStore::open_readonly(ann_path, EMBEDDING_DIMENSIONS, ScalarKind::F32).unwrap();
+        let store = VectorStore::open_readonly(
+            ann_path,
+            EMBEDDING_DIMENSIONS,
+            ivygrep::vector_store::NEURAL_VECTOR_QUANTIZATION,
+        )
+        .unwrap();
 
         b.iter_custom(|iters| {
             repeated_per_op(iters, VECTOR_SEARCH_REPETITIONS, |_| {

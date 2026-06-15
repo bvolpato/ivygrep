@@ -80,8 +80,10 @@ jobs:
             cargo_flags: "--no-default-features"
             rust_flags: "-D warnings"
             name: "macOS ARM (Hash-only)"
-          # Windows excluded: usearch (simsimd) uses AVX-512 FP16 intrinsics
-          # that MSVC doesn't support. IPC layer is cross-platform ready.
+          - os: windows-latest
+            cargo_flags: "--no-default-features"
+            rust_flags: "-D warnings"
+            name: "Windows x86_64 (Portable vectors)"
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -90,6 +92,12 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
+      - name: Install Python on Windows
+        if: runner.os == 'Windows'
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.8.2
         with:
@@ -97,6 +105,7 @@ jobs:
           cache-bin: "false"
 
       - name: Run unit & integration tests
+        shell: bash
         run: |
           read -r -a cargo_flags <<< "$CARGO_FLAGS"
           cargo test --locked --lib --bins --tests "${cargo_flags[@]}"
@@ -130,7 +139,9 @@ jobs:
           - os: macos-latest
             cargo_flags: "--no-default-features"
             rust_flags: "-D warnings"
-          # Windows excluded: usearch (simsimd) doesn't compile on MSVC.
+          - os: windows-latest
+            cargo_flags: "--no-default-features"
+            rust_flags: "-D warnings"
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -139,6 +150,12 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
+      - name: Install Python on Windows
+        if: runner.os == 'Windows'
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.8.2
         with:
@@ -146,6 +163,7 @@ jobs:
           cache-bin: "false"
 
       - name: Build release binary
+        shell: bash
         run: |
           read -r -a cargo_flags <<< "$CARGO_FLAGS"
           cargo build --locked --release "${cargo_flags[@]}"
@@ -170,10 +188,16 @@ jobs:
           ./scripts/e2e_procedures.sh --binary "$IG_BIN"
 
           echo "==== Daemon/local equivalence ===="
-          python3 scripts/check_daemon_equivalence.py \
+          PYTHON=python3
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            PYTHON=python
+          fi
+          BENCH_ROOT="$("$PYTHON" -c 'import tempfile; print(tempfile.gettempdir())')"
+          BENCH_HOME="$BENCH_ROOT/ivygrep-daemon-equivalence"
+          "$PYTHON" scripts/check_daemon_equivalence.py \
             --skip-build \
             --binary "$IG_BIN" \
-            --bench-home /tmp/ivygrep-daemon-equivalence
+            --bench-home "$BENCH_HOME"
 
       - name: Validate local accelerator execution
         if: matrix.validate_backend == 'Candle Metal'

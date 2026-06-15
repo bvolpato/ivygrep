@@ -55,6 +55,47 @@ not_contains() {
   fi
 }
 
+status_contains_project() {
+  file=$1
+  expected=$2
+  label=$3
+  python_cmd=python3
+  if ! command -v "$python_cmd" >/dev/null 2>&1; then
+    python_cmd=python
+  fi
+  command -v "$python_cmd" >/dev/null 2>&1 || fail "$label: Python is required"
+  if command -v cygpath >/dev/null 2>&1; then
+    expected=$(cygpath -w "$expected")
+  fi
+
+  "$python_cmd" - "$file" "$expected" <<'PY' || fail "$label: expected project in $file"
+import json
+import ntpath
+import os
+import sys
+
+
+def normalize(path: str) -> str:
+    if path.startswith("\\\\?\\"):
+        path = path[4:]
+    path_module = ntpath if os.name == "nt" else os.path
+    return path_module.normcase(path_module.abspath(path))
+
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    projects = json.load(handle)
+
+expected = normalize(sys.argv[2])
+roots = {
+    normalize(project["root"])
+    for project in projects
+    if isinstance(project, dict) and isinstance(project.get("root"), str)
+}
+if expected not in roots:
+    raise SystemExit(f"{expected!r} not found in {sorted(roots)!r}")
+PY
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --binary)
@@ -148,7 +189,7 @@ run "$ig_bin" --add "$project" --force --json --no-watch --hash > "$out_dir/add.
 contains "$out_dir/add.json" "\"indexed_files\"" "add json"
 
 run "$ig_bin" --status --json > "$out_dir/status.json"
-contains "$out_dir/status.json" "$project" "status lists indexed project"
+status_contains_project "$out_dir/status.json" "$project" "status lists indexed project"
 contains "$out_dir/status.json" "\"watch_enabled\": false" "no-watch add status"
 
 run "$ig_bin" --json --hash -n 5 "refresh session token" "$project/src/auth" > "$out_dir/scoped-search.json"

@@ -1679,6 +1679,51 @@ fn worktree_rebuilds_outdated_base_index_format() {
     );
 }
 
+#[test]
+#[serial]
+fn worktree_inherits_sources_across_line_ending_styles() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    init_git_repo(root.path());
+    git(root.path(), &["config", "core.autocrlf", "true"]);
+    fs::write(
+        root.path().join("shared.rs"),
+        "pub fn shared_marker() -> bool {\n    true\n}\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "add shared source"]);
+
+    let main_bytes = fs::read(root.path().join("shared.rs")).unwrap();
+    assert!(!main_bytes.windows(2).any(|window| window == b"\r\n"));
+    setup_and_index(root.path(), home.path());
+
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("worktree");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "line-endings",
+            wt_path.to_str().unwrap(),
+            "main",
+        ],
+    );
+
+    let worktree_bytes = fs::read(wt_path.join("shared.rs")).unwrap();
+    assert!(worktree_bytes.windows(2).any(|window| window == b"\r\n"));
+
+    let summary = setup_and_index(&wt_path, home.path());
+    assert_eq!(
+        summary.indexed_files, 0,
+        "line-ending conversion must not materialize inherited sources"
+    );
+    assert_eq!(overlay_counts(&workspace_for(&wt_path)), (0, 0));
+}
+
 // ===========================================================================
 // WORKTREE OVERLAY: an outdated empty overlay format forces a thin rebuild
 // ===========================================================================

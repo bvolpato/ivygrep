@@ -17,7 +17,7 @@ use tantivy::schema::Value;
 use crate::indexer::open_tantivy_index;
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
-use crate::workspace::{Workspace, WorkspaceScope};
+use crate::workspace::{Workspace, WorkspaceScope, index_path_string};
 
 /// Index-backed regex search.
 ///
@@ -242,7 +242,7 @@ fn constrain_query_to_scope(
         return Some(query);
     };
 
-    let scope_path = scope.rel_path.to_string_lossy();
+    let scope_path = index_path_string(&scope.rel_path);
     let path_query: Box<dyn Query> = if scope.is_file {
         Box::new(TermQuery::new(
             tantivy::Term::from_field_text(file_path_field, &scope_path),

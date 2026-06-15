@@ -41,7 +41,9 @@ pub struct Workspace {
 ///   6 — Very large BUILD-like sources split target-call AST chunks
 ///   7 — Lexical index commits before background hash ANN enrichment
 ///   8 — Stable vector keys and tombstone journals preserve resumable background enrichment
-pub const INDEX_FORMAT_VERSION: u32 = 8;
+///   9 — Neural vector storage uses F16 quantization
+///  10 — Symbol graph persistence, F16 vectors, and portable relative paths
+pub const INDEX_FORMAT_VERSION: u32 = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceMetadata {
@@ -69,8 +71,15 @@ pub struct WorkspaceStatus {
     pub chunk_count: u64,
     pub file_count: u64,
     pub index_size_bytes: u64,
+    pub index_components: IndexComponentSizes,
+    pub vector_key_count: u64,
     pub has_neural_vectors: bool,
     pub neural_vector_count: u64,
+    pub neural_coverage_percent: f64,
+    pub neural_dimensions: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neural_profile: Option<String>,
+    pub reranker_candidate_limit: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub neural_backend: Option<String>,
     #[serde(default)]
@@ -99,6 +108,15 @@ pub struct WorkspaceStatus {
     pub base_repo_root: Option<PathBuf>,
     #[serde(default)]
     pub seeded_from_base: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IndexComponentSizes {
+    pub metadata_bytes: u64,
+    pub lexical_bytes: u64,
+    pub hash_vectors_bytes: u64,
+    pub neural_vectors_bytes: u64,
+    pub other_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
@@ -146,6 +164,15 @@ impl WorkspaceScope {
             rel_path.starts_with(&self.rel_path)
         }
     }
+}
+
+/// Canonical representation for relative paths persisted in an index.
+///
+/// Rust accepts `/` as a separator on Windows, so using it everywhere keeps
+/// SQLite, Tantivy, Merkle snapshots, and serialized results platform-neutral.
+pub fn index_path_string(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/")
 }
 
 impl Workspace {
@@ -226,6 +253,17 @@ impl Workspace {
         self.index_dir.join("vectors_neural.usearch")
     }
 
+    pub fn neural_profile_path(&self) -> PathBuf {
+        self.index_dir.join("neural_profile")
+    }
+
+    pub fn neural_profile_name(&self) -> Option<String> {
+        fs::read_to_string(self.neural_profile_path())
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    }
+
     /// Returns whether a neural vector store is available for query-time use.
     /// Worktree searches can use their base workspace's neural store.
     pub fn has_neural_vectors(&self) -> bool {
@@ -234,6 +272,23 @@ impl Workspace {
                 .base_index_dir
                 .as_ref()
                 .is_some_and(|base| neural_store_has_vectors(&base.join("vectors_neural.usearch")))
+    }
+
+    pub fn neural_vector_count(&self) -> u64 {
+        let path = self.vector_neural_path();
+        if !path.exists() {
+            return 0;
+        }
+        vector_store_size(&path, 384, crate::vector_store::NEURAL_VECTOR_QUANTIZATION).unwrap_or(0)
+    }
+
+    pub fn neural_coverage_percent(&self) -> f64 {
+        let total = self.vector_key_count();
+        if total == 0 {
+            100.0
+        } else {
+            (self.neural_vector_count() as f64 / total as f64 * 100.0).min(100.0)
+        }
     }
 
     pub fn neural_backend_path(&self) -> PathBuf {
@@ -404,7 +459,7 @@ impl Workspace {
         if vector_store_size(
             &hash_path,
             crate::EMBEDDING_DIMENSIONS,
-            crate::vector_store::ScalarKind::F16,
+            crate::vector_store::HASH_VECTOR_QUANTIZATION,
         )
         .is_none_or(|enhanced| enhanced < vector_key_count)
         {
@@ -432,18 +487,23 @@ impl Workspace {
             return false;
         }
 
+        if self.neural_profile_name().as_deref().unwrap_or("general")
+            != crate::embedding::configured_neural_profile_name()
+        {
+            return true;
+        }
+
         let neural_path = self.vector_neural_path();
         if !neural_path.exists() {
             return true;
         }
 
-        // Fast metadata size estimate. Each quantized F32 vector / I8 element is 384 bytes
-        // plus Usearch headers and hash metadata. If it's very small it's probably 0 chunks.
-        // For exact size, we memory-map it (takes < 1ms).
+        // Open the persisted store for an exact count. The optimized backend
+        // memory-maps this path; the portable backend validates and loads it.
         if let Ok(store) = crate::vector_store::VectorStore::open_readonly(
             &neural_path,
             384,
-            crate::vector_store::ScalarKind::F32,
+            crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
         ) {
             let enhanced = store.size();
             return (enhanced as u64) < vector_key_count;
@@ -460,8 +520,21 @@ impl Workspace {
         let exe = std::env::current_exe()?;
         let pid_path = self.enhancing_pid_path();
 
-        if jobs::job_status(self, JobKind::Enhancement, ENHANCEMENT_HEARTBEAT_TTL_SECS).active() {
+        let status = jobs::job_status(self, JobKind::Enhancement, ENHANCEMENT_HEARTBEAT_TTL_SECS);
+        if status.active() {
             return Ok(());
+        }
+        if status.stalled {
+            let _ = fs::remove_file(&pid_path);
+            let _ = fs::remove_file(self.enhancing_paused_path());
+            let _ = fs::remove_file(self.enhancing_progress_path());
+            let _ = fs::remove_file(self.enhancing_phase_path());
+            let _ = jobs::finish_job(
+                self,
+                JobKind::Enhancement,
+                "recovering-stale-worker",
+                status.record.and_then(|record| record.last_error),
+            );
         }
         let _ = is_active_pid_alive(&pid_path);
 
@@ -553,6 +626,14 @@ impl Workspace {
         let data = fs::read(path)?;
         let parsed = serde_json::from_slice(&data)?;
         Ok(Some(parsed))
+    }
+
+    pub fn vector_key_count(&self) -> u64 {
+        read_sqlite_vector_key_count(&self.index_dir)
+    }
+
+    pub fn index_component_sizes(&self) -> IndexComponentSizes {
+        index_component_sizes(&self.index_dir)
     }
 
     pub fn quick_index_health(&self) -> WorkspaceIndexHealth {
@@ -666,16 +747,24 @@ impl Workspace {
             }
         }
 
+        let cached_counts = read_cached_sqlite_counts(&self.index_dir);
+        let missing_cached_stats = !verify_stores && sqlite_p.exists() && cached_counts.is_none();
+        if missing_cached_stats {
+            issues.push(
+                "cached index statistics are missing; run `ig --doctor --deep` or rebuild"
+                    .to_string(),
+            );
+        }
         let (chunk_count, file_count) = if verify_stores && sqlite_p.exists() {
             match read_sqlite_counts_live(&sqlite_p) {
                 Ok(counts) => counts,
                 Err(err) => {
                     issues.push(format!("failed to read SQLite index: {err:#}"));
-                    read_sqlite_counts(&self.index_dir)
+                    cached_counts.unwrap_or((0, 0))
                 }
             }
         } else {
-            read_sqlite_counts(&self.index_dir)
+            cached_counts.unwrap_or((0, 0))
         };
         let vector_key_count = if verify_stores && sqlite_p.exists() {
             read_sqlite_vector_key_count_live(&sqlite_p).unwrap_or(chunk_count)
@@ -723,7 +812,7 @@ impl Workspace {
                 match crate::vector_store::VectorStore::open_readonly(
                     &vector_p,
                     256,
-                    crate::vector_store::ScalarKind::F16,
+                    crate::vector_store::HASH_VECTOR_QUANTIZATION,
                 ) {
                     Ok(store) => {
                         let generation = metadata.as_ref().map(|meta| meta.index_generation);
@@ -751,7 +840,7 @@ impl Workspace {
                     && let Err(err) = crate::vector_store::VectorStore::open_readonly(
                         &self.vector_neural_path(),
                         384,
-                        crate::vector_store::ScalarKind::F32,
+                        crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
                     )
                 {
                     issues.push(format!("failed to open neural vector store: {err:#}"));
@@ -784,7 +873,7 @@ impl Workspace {
             }
         }
 
-        let has_indexable_files = if chunk_count == 0 {
+        let has_indexable_files = if verify_stores && chunk_count == 0 && !missing_cached_stats {
             workspace_has_indexable_files(&self.root, skip_gitignore)
         } else {
             false
@@ -977,12 +1066,14 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
         let index_dir = entry.path();
         let (chunk_count, file_count) = read_sqlite_counts(&index_dir);
         let index_size_bytes = dir_size_bytes(&index_dir);
+        let index_components = index_component_sizes(&index_dir);
+        let vector_key_count = read_sqlite_vector_key_count(&index_dir);
         let neural_path = index_dir.join("vectors_neural.usearch");
         let neural_vector_count = if neural_path.exists() {
             crate::vector_store::VectorStore::open_readonly(
                 &neural_path,
                 384,
-                crate::vector_store::ScalarKind::F32,
+                crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
             )
             .map(|store| store.size() as u64)
             .unwrap_or(0)
@@ -990,10 +1081,20 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
             0
         };
         let has_neural_vectors = neural_vector_count > 0;
+        let neural_coverage_percent = if vector_key_count > 0 {
+            (neural_vector_count as f64 / vector_key_count as f64 * 100.0).min(100.0)
+        } else {
+            100.0
+        };
         let neural_backend = fs::read_to_string(index_dir.join("neural_backend"))
             .ok()
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
+        let neural_profile = fs::read_to_string(index_dir.join("neural_profile"))
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| Some(crate::embedding::configured_neural_profile_name().to_string()));
 
         let workspace = Workspace {
             id: metadata.id.clone(),
@@ -1117,8 +1218,14 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
                 chunk_count,
                 file_count,
                 index_size_bytes,
+                index_components,
+                vector_key_count,
                 has_neural_vectors,
                 neural_vector_count,
+                neural_coverage_percent,
+                neural_dimensions: crate::embedding::NeuralProfile::configured().dimensions(),
+                neural_profile,
+                reranker_candidate_limit: crate::search::rerank_candidate_limit(),
                 neural_backend,
                 enhancing_in_progress,
                 enhancing_progress_count,
@@ -1141,6 +1248,10 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
 }
 
 fn read_sqlite_counts(index_dir: &Path) -> (u64, u64) {
+    read_cached_sqlite_counts(index_dir).unwrap_or((0, 0))
+}
+
+fn read_cached_sqlite_counts(index_dir: &Path) -> Option<(u64, u64)> {
     let overlay_path = index_dir.join("overlay.sqlite3");
     let sqlite_path = if overlay_path.exists() {
         overlay_path
@@ -1149,93 +1260,59 @@ fn read_sqlite_counts(index_dir: &Path) -> (u64, u64) {
     };
 
     if !sqlite_path.exists() {
-        return (0, 0);
+        return Some((0, 0));
     }
 
-    // Try read-only first for speed (no CREATE TABLE / PRAGMA overhead).
-    let Ok(conn) = rusqlite::Connection::open_with_flags(
+    let conn = rusqlite::Connection::open_with_flags(
         &sqlite_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) else {
-        return (0, 0);
-    };
+    )
+    .ok()?;
+    let chunks = conn
+        .query_row(
+            "SELECT value FROM _stats WHERE key = 'chunk_count'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .ok()?;
+    let files = conn
+        .query_row(
+            "SELECT value FROM _stats WHERE key = 'file_count'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .ok()?;
+    Some((chunks as u64, files as u64))
+}
 
-    // Fast path: read from cached _stats table (O(1) lookup).
-    let cached_chunks = conn.query_row(
-        "SELECT value FROM _stats WHERE key = 'chunk_count'",
-        [],
-        |row| row.get::<_, i64>(0),
-    );
-    let cached_files = conn.query_row(
-        "SELECT value FROM _stats WHERE key = 'file_count'",
-        [],
-        |row| row.get::<_, i64>(0),
-    );
-
-    if let (Ok(c), Ok(f)) = (cached_chunks, cached_files) {
-        return (c as u64, f as u64);
+fn index_component_sizes(index_dir: &Path) -> IndexComponentSizes {
+    let metadata_bytes = ["metadata.sqlite3", "overlay.sqlite3"]
+        .iter()
+        .map(|name| file_size(&index_dir.join(name)))
+        .sum();
+    let lexical_bytes = ["tantivy", "overlay_tantivy"]
+        .iter()
+        .map(|name| shallow_dir_size_bytes(&index_dir.join(name)))
+        .sum();
+    let hash_vectors_bytes = ["vectors.usearch", "overlay_vectors.usearch"]
+        .iter()
+        .map(|name| file_size(&index_dir.join(name)))
+        .sum();
+    let neural_vectors_bytes = file_size(&index_dir.join("vectors_neural.usearch"));
+    let classified = metadata_bytes + lexical_bytes + hash_vectors_bytes + neural_vectors_bytes;
+    IndexComponentSizes {
+        metadata_bytes,
+        lexical_bytes,
+        hash_vectors_bytes,
+        neural_vectors_bytes,
+        other_bytes: dir_size_bytes(index_dir).saturating_sub(classified),
     }
+}
 
-    // Slow path: _stats table doesn't exist yet (pre-migration DB).
-    // Try to open read-write and cache counts. If the DB is locked
-    // (e.g., by the enhancer), fall back to a live read-only COUNT.
-    drop(conn);
-
-    // Try non-blocking write migration first
-    if let Ok(conn) = rusqlite::Connection::open(&sqlite_path) {
-        conn.busy_timeout(std::time::Duration::from_millis(100))
-            .ok();
-        if conn
-            .execute_batch(
-                "CREATE TABLE IF NOT EXISTS _stats (key TEXT PRIMARY KEY, value INTEGER NOT NULL)",
-            )
-            .is_ok()
-        {
-            let chunks: i64 = conn
-                .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
-                .unwrap_or(0);
-            let files: i64 = conn
-                .query_row("SELECT COUNT(DISTINCT file_path) FROM chunks", [], |row| {
-                    row.get(0)
-                })
-                .unwrap_or(0);
-            let vector_keys: i64 = conn
-                .query_row("SELECT COUNT(DISTINCT vector_key) FROM chunks", [], |row| {
-                    row.get(0)
-                })
-                .unwrap_or(0);
-            let _ = conn.execute(
-                "INSERT OR REPLACE INTO _stats (key, value) VALUES ('chunk_count', ?1)",
-                rusqlite::params![chunks],
-            );
-            let _ = conn.execute(
-                "INSERT OR REPLACE INTO _stats (key, value) VALUES ('file_count', ?1)",
-                rusqlite::params![files],
-            );
-            let _ = conn.execute(
-                "INSERT OR REPLACE INTO _stats (key, value) VALUES ('vector_key_count', ?1)",
-                rusqlite::params![vector_keys],
-            );
-            return (chunks as u64, files as u64);
-        }
-    }
-
-    // DB is locked — do a read-only live COUNT (won't cache, but won't block)
-    let Ok(conn) = rusqlite::Connection::open_with_flags(
-        &sqlite_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) else {
-        return (0, 0);
-    };
-    let chunks: i64 = conn
-        .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
-        .unwrap_or(0);
-    let files: i64 = conn
-        .query_row("SELECT COUNT(DISTINCT file_path) FROM chunks", [], |row| {
-            row.get(0)
-        })
-        .unwrap_or(0);
-    (chunks as u64, files as u64)
+fn file_size(path: &Path) -> u64 {
+    fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
 }
 
 fn read_sqlite_vector_key_count(index_dir: &Path) -> u64 {
@@ -1249,7 +1326,7 @@ fn read_sqlite_vector_key_count(index_dir: &Path) -> u64 {
         return 0;
     }
 
-    let cached = rusqlite::Connection::open_with_flags(
+    rusqlite::Connection::open_with_flags(
         &sqlite_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
@@ -1261,28 +1338,8 @@ fn read_sqlite_vector_key_count(index_dir: &Path) -> u64 {
             |row| row.get::<_, i64>(0),
         )
         .ok()
-    });
-    if let Some(count) = cached {
-        return count as u64;
-    }
-
-    if let Ok(conn) = rusqlite::Connection::open(&sqlite_path) {
-        conn.busy_timeout(std::time::Duration::from_millis(100))
-            .ok();
-        if let Ok(count) =
-            conn.query_row("SELECT COUNT(DISTINCT vector_key) FROM chunks", [], |row| {
-                row.get::<_, i64>(0)
-            })
-        {
-            let _ = conn.execute(
-                "INSERT OR REPLACE INTO _stats (key, value) VALUES ('vector_key_count', ?1)",
-                rusqlite::params![count],
-            );
-            return count as u64;
-        }
-    }
-
-    read_sqlite_vector_key_count_live(&sqlite_path).unwrap_or(0)
+    })
+    .unwrap_or(0) as u64
 }
 
 fn read_sqlite_counts_live(sqlite_path: &Path) -> Result<(u64, u64)> {
@@ -1351,8 +1408,12 @@ fn dir_has_entries(path: &Path) -> bool {
 }
 
 fn neural_store_has_vectors(path: &Path) -> bool {
-    crate::vector_store::VectorStore::open_readonly(path, 384, crate::vector_store::ScalarKind::F32)
-        .is_ok_and(|store| store.size() > 0)
+    crate::vector_store::VectorStore::open_readonly(
+        path,
+        384,
+        crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
+    )
+    .is_ok_and(|store| store.size() > 0)
 }
 
 fn vector_store_size(
@@ -1406,6 +1467,17 @@ fn dir_size_bytes(dir: &Path) -> u64 {
     total
 }
 
+fn shallow_dir_size_bytes(dir: &Path) -> u64 {
+    fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.metadata().ok())
+        .filter(|metadata| metadata.is_file())
+        .map(|metadata| metadata.len())
+        .sum()
+}
+
 /// Check if a background process is alive by reading the PID file.
 /// Returns false (and cleans up the file) if the PID is stale.
 fn is_active_pid_alive(pid_path: &Path) -> bool {
@@ -1441,7 +1513,7 @@ fn legacy_pid_status(pid_path: &Path, cleanup_stale: bool) -> LegacyPidStatus {
         }
     };
 
-    // kill(pid, 0) checks if process exists without sending a signal
+    // kill(pid, 0) checks if process exists without sending a signal.
     #[cfg(unix)]
     {
         let alive = unsafe { libc::kill(pid, 0) } == 0;
@@ -1454,10 +1526,28 @@ fn legacy_pid_status(pid_path: &Path, cleanup_stale: bool) -> LegacyPidStatus {
             LegacyPidStatus::Stale
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = cleanup_stale;
-        LegacyPidStatus::Alive
+        use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, GetLastError};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32) };
+        let alive = if handle.is_null() {
+            (unsafe { GetLastError() }) == ERROR_ACCESS_DENIED
+        } else {
+            let _ = unsafe { CloseHandle(handle) };
+            true
+        };
+        if !alive && cleanup_stale {
+            let _ = fs::remove_file(pid_path);
+        }
+        if alive {
+            LegacyPidStatus::Alive
+        } else {
+            LegacyPidStatus::Stale
+        }
     }
 }
 
@@ -1539,6 +1629,14 @@ mod tests {
     use serial_test::serial;
 
     #[test]
+    fn index_paths_use_forward_slashes() {
+        assert_eq!(
+            index_path_string(&PathBuf::from("src").join("search.rs")),
+            "src/search.rs"
+        );
+    }
+
+    #[test]
     fn resolve_workspace_and_scope_tracks_subpaths() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
@@ -1570,7 +1668,9 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_needs_neural_enhancement() {
+        unsafe { std::env::remove_var("IVYGREP_MODEL_PROFILE") };
         let tmp = tempfile::tempdir().unwrap();
         let index_dir = tmp.path().join("index");
         std::fs::create_dir_all(&index_dir).unwrap();
@@ -1590,6 +1690,21 @@ mod tests {
         let conn = crate::indexer::open_sqlite(&index_dir.join("metadata.sqlite3")).unwrap();
         conn.execute("INSERT INTO chunks (chunk_id, file_path, start_line, end_line, language, kind, text, content_hash, vector_key, modified_unix) VALUES ('1', '', 0, 0, '', '', x'', '0', 1, 0)", []).unwrap();
         conn.execute("INSERT INTO chunks (chunk_id, file_path, start_line, end_line, language, kind, text, content_hash, vector_key, modified_unix) VALUES ('2', '', 0, 0, '', '', x'', '0', 2, 0)", []).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO _stats (key, value) VALUES ('chunk_count', 2)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO _stats (key, value) VALUES ('file_count', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO _stats (key, value) VALUES ('vector_key_count', 2)",
+            [],
+        )
+        .unwrap();
 
         // 2 chunks, no hash vectors -> true
         assert!(ws.needs_neural_enhancement());
@@ -1619,7 +1734,7 @@ mod tests {
             let mut store = crate::vector_store::VectorStore::open(
                 &ws.vector_neural_path(),
                 384,
-                crate::vector_store::ScalarKind::F32,
+                crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
             )
             .unwrap();
             store.upsert(1, vec![0.0; 384]).unwrap();
@@ -1634,7 +1749,7 @@ mod tests {
             let mut store = crate::vector_store::VectorStore::open(
                 &ws.vector_neural_path(),
                 384,
-                crate::vector_store::ScalarKind::F32,
+                crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
             )
             .unwrap();
             store.upsert(2, vec![0.0; 384]).unwrap();
@@ -1643,6 +1758,14 @@ mod tests {
 
         // 2 vectors == 2 chunks → false
         assert!(!ws.needs_neural_enhancement());
+
+        std::fs::write(ws.neural_profile_path(), "general").unwrap();
+        unsafe { std::env::set_var("IVYGREP_MODEL_PROFILE", "code") };
+        assert!(
+            ws.needs_neural_enhancement(),
+            "a mismatched persisted model profile must force re-embedding"
+        );
+        unsafe { std::env::remove_var("IVYGREP_MODEL_PROFILE") };
     }
 
     #[test]
@@ -1661,6 +1784,21 @@ mod tests {
 
         let conn = crate::indexer::open_sqlite(&ws.overlay_sqlite_path()).unwrap();
         conn.execute("INSERT INTO chunks (chunk_id, file_path, start_line, end_line, language, kind, text, content_hash, vector_key, modified_unix) VALUES ('1', '', 0, 0, '', '', x'', '0', 1, 0)", []).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO _stats (key, value) VALUES ('chunk_count', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO _stats (key, value) VALUES ('file_count', 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO _stats (key, value) VALUES ('vector_key_count', 1)",
+            [],
+        )
+        .unwrap();
 
         assert!(ws.needs_neural_enhancement());
 
@@ -1737,6 +1875,111 @@ mod tests {
                 .iter()
                 .any(|issue| issue.contains("missing merkle snapshot"))
         );
+    }
+
+    #[test]
+    #[serial]
+    fn quick_index_health_never_scans_to_backfill_missing_stats() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            tmp.path().join("lib.rs"),
+            "pub fn sample() -> bool { true }\n",
+        )
+        .unwrap();
+
+        let ws = Workspace::resolve(tmp.path()).unwrap();
+        ws.ensure_dirs().unwrap();
+        ws.write_metadata(&WorkspaceMetadata {
+            id: ws.id.clone(),
+            root: ws.root.clone(),
+            created_at_unix: 0,
+            last_indexed_at_unix: Some(1),
+            watch_enabled: false,
+            skip_gitignore: false,
+            index_generation: 1,
+        })
+        .unwrap();
+        let sqlite = rusqlite::Connection::open(ws.sqlite_path()).unwrap();
+        sqlite
+            .execute_batch(
+                "CREATE TABLE chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    file_path TEXT NOT NULL,
+                    vector_key INTEGER NOT NULL
+                 );
+                 INSERT INTO chunks VALUES ('one', 'lib.rs', 1);",
+            )
+            .unwrap();
+        std::fs::create_dir_all(ws.tantivy_dir()).unwrap();
+        std::fs::write(ws.vector_path(), "").unwrap();
+        ws.write_index_format_version().unwrap();
+
+        let health = ws.quick_index_health();
+        assert!(
+            health
+                .issues
+                .iter()
+                .any(|issue| issue.contains("cached index statistics are missing"))
+        );
+        let stats_table_count = sqlite
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = '_stats'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stats_table_count, 0,
+            "quick health must not mutate or scan the database to backfill stats"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn quick_index_health_does_not_scan_cached_empty_indexes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            tmp.path().join("lib.rs"),
+            "pub fn should_only_be_seen_by_deep_health() {}\n",
+        )
+        .unwrap();
+
+        let ws = Workspace::resolve(tmp.path()).unwrap();
+        ws.ensure_dirs().unwrap();
+        ws.write_metadata(&WorkspaceMetadata {
+            id: ws.id.clone(),
+            root: ws.root.clone(),
+            created_at_unix: 0,
+            last_indexed_at_unix: Some(1),
+            watch_enabled: false,
+            skip_gitignore: false,
+            index_generation: 1,
+        })
+        .unwrap();
+        let sqlite = rusqlite::Connection::open(ws.sqlite_path()).unwrap();
+        sqlite
+            .execute_batch(
+                "CREATE TABLE _stats (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+                 INSERT INTO _stats VALUES ('chunk_count', 0);
+                 INSERT INTO _stats VALUES ('file_count', 0);
+                 INSERT INTO _stats VALUES ('vector_key_count', 0);",
+            )
+            .unwrap();
+        std::fs::create_dir_all(ws.tantivy_dir()).unwrap();
+        std::fs::write(ws.vector_path(), "").unwrap();
+
+        let quick = ws.quick_index_health();
+        assert_eq!(quick.state, WorkspaceIndexState::HealthyEmpty);
+        assert!(!quick.has_indexable_files);
+
+        let deep = ws.index_health();
+        assert_eq!(deep.state, WorkspaceIndexState::Unhealthy);
+        assert!(deep.has_indexable_files);
     }
 
     #[test]
@@ -1916,7 +2159,7 @@ mod tests {
         let mut store = crate::vector_store::VectorStore::open(
             &base_index_dir.join("vectors_neural.usearch"),
             384,
-            crate::vector_store::ScalarKind::F32,
+            crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
         )
         .unwrap();
         store.save().unwrap();

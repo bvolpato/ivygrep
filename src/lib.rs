@@ -14,6 +14,7 @@ pub mod protocol;
 pub(crate) mod query_aliases;
 pub mod regex_search;
 pub mod search;
+pub mod symbols;
 pub mod text;
 pub mod tui;
 pub mod vector_store;

@@ -19,9 +19,11 @@ use crate::text::{CODE_TOKENIZER_NAME, build_code_analyzer};
 use crate::chunking::{Chunk, chunk_source, is_indexable_file};
 use crate::embedding::EmbeddingModel;
 use crate::jobs::{self, JobKind, JobUpdate};
-use crate::merkle::{MerkleDiff, MerkleSnapshot};
-use crate::vector_store::{ScalarKind, VectorStore};
-use crate::workspace::{Workspace, WorkspaceMetadata};
+use crate::merkle::{MerkleDiff, MerkleSnapshot, normalized_indexable_content};
+use crate::vector_store::{
+    HASH_VECTOR_QUANTIZATION, NEURAL_VECTOR_QUANTIZATION, ScalarKind, VectorStore,
+};
+use crate::workspace::{Workspace, WorkspaceMetadata, index_path_string};
 
 const ZSTD_MAGIC: &[u8] = &[0x28, 0xB5, 0x2F, 0xFD];
 
@@ -572,7 +574,7 @@ fn index_workspace_inner(
         overlay_base_snapshot.as_ref().and_then(|snapshot| {
             snapshot
                 .files
-                .get(rel_path.to_string_lossy().as_ref())
+                .get(&index_path_string(rel_path))
                 .map(|hash| hash.ends_with("-1"))
         })
     };
@@ -600,7 +602,7 @@ fn index_workspace_inner(
             for (rel_path, is_ignored) in d.added_or_modified {
                 let base_snapshot_is_current = overlay_base_snapshot
                     .as_ref()
-                    .and_then(|snapshot| snapshot.files.get(rel_path.to_string_lossy().as_ref()))
+                    .and_then(|snapshot| snapshot.files.get(&index_path_string(&rel_path)))
                     .is_some_and(|hash| {
                         MerkleSnapshot::path_matches_metadata_snapshot(
                             &main_root.join(&rel_path),
@@ -776,12 +778,12 @@ fn index_workspace_inner(
             )?;
             tx.execute(
                 "DELETE FROM tombstones WHERE file_path = ?1",
-                params![rel_path.to_string_lossy().to_string()],
+                params![index_path_string(rel_path)],
             )?;
         }
 
         for rel_path in &diff.deleted {
-            let rel_str = rel_path.to_string_lossy().to_string();
+            let rel_str = index_path_string(rel_path);
             remove_file_chunks(
                 &tx,
                 &mut writer,
@@ -809,7 +811,7 @@ fn index_workspace_inner(
             if path_exists_in_base(rel_path) {
                 tx.execute(
                     "INSERT OR IGNORE INTO tombstones (file_path) VALUES (?1)",
-                    params![rel_path.to_string_lossy().to_string()],
+                    params![index_path_string(rel_path)],
                 )?;
             }
         }
@@ -941,8 +943,8 @@ fn index_workspace_inner(
         // provisional graph dominated first-index latency and delayed usable
         // BM25/literal results by minutes.
         for (rel_path, indexed_chunks) in &file_chunks {
-            let rel_path_string = rel_path.to_string_lossy();
-            touched_files.insert(rel_path_string.to_string());
+            let rel_path_string = index_path_string(rel_path);
+            touched_files.insert(rel_path_string.clone());
             total_chunks_processed += indexed_chunks.len();
             chunks_since_commit += indexed_chunks.len();
 
@@ -967,7 +969,7 @@ fn index_workspace_inner(
                 persist_or_stop!(insert_chunk(
                     &tx,
                     indexed,
-                    rel_path_string.as_ref(),
+                    &rel_path_string,
                     is_fresh_index,
                     now_unix
                 ));
@@ -975,7 +977,7 @@ fn index_workspace_inner(
                     &mut writer,
                     &fields,
                     indexed,
-                    rel_path_string.as_ref()
+                    &rel_path_string
                 ));
             }
         }
@@ -1000,6 +1002,8 @@ fn index_workspace_inner(
             t1.duration_since(t0).as_secs_f64()
         );
     }
+
+    create_graph_indexes(&tx)?;
 
     // Update cached stats before committing so status reads are O(1).
     let chunk_count: i64 = tx
@@ -1083,7 +1087,11 @@ fn index_workspace_inner(
 
 fn files_have_same_contents(left: &Path, right: &Path) -> bool {
     match (fs::read(left), fs::read(right)) {
-        (Ok(left_bytes), Ok(right_bytes)) => left_bytes == right_bytes,
+        (Ok(left_bytes), Ok(right_bytes)) => {
+            left_bytes == right_bytes
+                || normalized_indexable_content(left, &left_bytes)
+                    == normalized_indexable_content(right, &right_bytes)
+        }
         _ => false,
     }
 }
@@ -1287,8 +1295,11 @@ pub fn enhance_workspace_hash(
             row.get::<_, i64>(0)
         })
         .unwrap_or(0) as usize;
-    let mut vector_index =
-        VectorStore::open(&vector_path, hash_model.dimensions(), ScalarKind::F16)?;
+    let mut vector_index = VectorStore::open(
+        &vector_path,
+        hash_model.dimensions(),
+        HASH_VECTOR_QUANTIZATION,
+    )?;
     let claimed_tombstones = claim_vector_tombstones(
         &workspace.hash_tombstones_path(),
         &workspace.hash_tombstones_processing_path(),
@@ -1404,6 +1415,19 @@ pub fn enhance_workspace_neural(
         return Ok(0);
     }
 
+    let profile = neural_model.profile_info().unwrap_or("general");
+    if workspace
+        .neural_profile_name()
+        .as_deref()
+        .unwrap_or("general")
+        != profile
+    {
+        let _ = fs::remove_file(workspace.vector_neural_path());
+        let _ = fs::remove_file(workspace.neural_tombstones_path());
+        let _ = fs::remove_file(workspace.neural_tombstones_processing_path());
+    }
+    fs::write(workspace.neural_profile_path(), profile)?;
+
     let sqlite = open_sqlite(&workspace.sqlite_path())?;
 
     // Phase 1: Collect all vector_keys to determine which still need embedding.
@@ -1417,7 +1441,7 @@ pub fn enhance_workspace_neural(
     let mut vector_index = VectorStore::open(
         &workspace.vector_neural_path(),
         neural_model.dimensions(),
-        ScalarKind::F32,
+        NEURAL_VECTOR_QUANTIZATION,
     )?;
     let claimed_tombstones = claim_vector_tombstones(
         &workspace.neural_tombstones_path(),
@@ -1547,7 +1571,6 @@ pub fn enhance_workspace_neural(
     {
         fs::write(workspace.neural_backend_path(), backend)?;
     }
-
     Ok(newly_processed)
 }
 
@@ -1585,7 +1608,7 @@ fn vector_key_for_chunk(
     content_hash: &str,
 ) -> u64 {
     let mut key_data = Vec::with_capacity(content_hash.len() + 64);
-    key_data.extend_from_slice(file_path.to_string_lossy().as_bytes());
+    key_data.extend_from_slice(index_path_string(file_path).as_bytes());
     key_data.extend_from_slice(&start_line.to_le_bytes());
     key_data.extend_from_slice(&end_line.to_le_bytes());
     key_data.extend_from_slice(content_hash.as_bytes());
@@ -1642,7 +1665,7 @@ fn remove_file_chunks(
     neural_tombstones_path: Option<&Path>,
     rel_path: &Path,
 ) -> Result<()> {
-    let rel_str = rel_path.to_string_lossy().to_string();
+    let rel_str = index_path_string(rel_path);
     let keys = chunk_vector_keys_for_file(sqlite, &rel_str)?;
 
     writer.delete_term(Term::from_field_text(fields.file_path, &rel_str));
@@ -1652,6 +1675,7 @@ fn remove_file_chunks(
         append_vector_tombstones(path, &keys)?;
     }
 
+    crate::symbols::remove_file_graph(sqlite, &rel_str)?;
     sqlite.execute("DELETE FROM chunks WHERE file_path = ?1", params![rel_str])?;
     Ok(())
 }
@@ -1805,6 +1829,7 @@ fn insert_chunk(
         now_unix,
         is_ignored_int,
     ])?;
+    crate::symbols::index_chunk_graph(conn, chunk)?;
     Ok(())
 }
 
@@ -1890,6 +1915,21 @@ fn create_tables(conn: &Connection) -> Result<()> {
             value INTEGER NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS symbols (
+            normalized_name TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            symbol_kind TEXT NOT NULL,
+            chunk_id TEXT PRIMARY KEY
+        ) WITHOUT ROWID;
+
+        CREATE TABLE IF NOT EXISTS symbol_edges (
+            target_name TEXT NOT NULL,
+            edge_kind TEXT NOT NULL,
+            source_chunk_id TEXT NOT NULL,
+            line INTEGER NOT NULL,
+            PRIMARY KEY(target_name, edge_kind, source_chunk_id, line)
+        ) WITHOUT ROWID;
+
         CREATE INDEX IF NOT EXISTS idx_chunks_file_path ON chunks(file_path);
         CREATE INDEX IF NOT EXISTS idx_chunks_vector_key ON chunks(vector_key);
         CREATE INDEX IF NOT EXISTS idx_chunks_language ON chunks(language);
@@ -1902,6 +1942,15 @@ fn create_tables(conn: &Connection) -> Result<()> {
         [],
     );
 
+    Ok(())
+}
+
+fn create_graph_indexes(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(normalized_name);
+         CREATE INDEX IF NOT EXISTS idx_symbol_edges_source_chunk
+             ON symbol_edges(source_chunk_id);",
+    )?;
     Ok(())
 }
 
@@ -2416,7 +2465,7 @@ mod tests {
         let neural_store = VectorStore::open_readonly(
             &workspace.vector_neural_path(),
             EMBEDDING_DIMENSIONS,
-            ScalarKind::F32,
+            crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
         )
         .unwrap();
         assert_eq!(neural_store.size(), vector_key_count);
@@ -2470,7 +2519,15 @@ mod tests {
             serde_json::to_string(&md_fixed).unwrap(),
         )
         .unwrap();
-        assert!(workspace_is_indexed(&workspace));
+        // Completed metadata cannot make corrupt/incomplete stores queryable.
+        assert!(!workspace_is_indexed(&workspace));
+        assert!(
+            workspace
+                .quick_index_health()
+                .issues
+                .iter()
+                .any(|issue| issue.contains("cached index statistics are missing"))
+        );
     }
 
     #[test]
@@ -2555,13 +2612,17 @@ mod tests {
         let store = crate::vector_store::VectorStore::open(
             &workspace.vector_neural_path(),
             EMBEDDING_DIMENSIONS,
-            crate::vector_store::ScalarKind::F32,
+            crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
         )
         .unwrap();
         assert_eq!(store.size(), enhanced);
         assert_eq!(
             fs::read_to_string(workspace.neural_backend_path()).unwrap(),
             "test local neural backend"
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.neural_profile_path()).unwrap(),
+            "general"
         );
         let status = crate::workspace::list_workspaces()
             .unwrap()

@@ -1,6 +1,5 @@
 ---
 source: tests/cli_snapshot.rs
-assertion_line: 68
 expression: text
 ---
 Semantic grep that stays local
@@ -17,12 +16,16 @@ Options:
       --status                
       --doctor                
       --fix                   Repair a broken or stale index (used with --doctor)
+      --deep                  Perform full cross-store integrity scans (used with --doctor)
       --daemon                
       --mcp                   
       --wait-for-enhancement  
   -f, --force                 
       --interactive           Launch the interactive terminal UI [aliases: --ui]
   -l, --literal               Fast exact-match search backed by the index. Deterministic results, orders of magnitude faster than grep/rg for indexed repos
+      --symbol                Find exact symbol definitions
+      --refs                  Find exact symbol references
+      --callers               Find functions or methods that call the named symbol
       --json                  
   -C, --context <CONTEXT>     [default: 2]
       --type <TYPE_FILTER>    Filter by language name, extension, or alias (e.g. rust, rs, py, python, c++, bash, md)
@@ -37,5 +40,6 @@ Options:
       --verbose               
       --skip-gitignore        
       --hash                  Use lightweight hash-based embeddings instead of the default neural model. Faster startup, no model download, lower quality
+      --lexical-only          Use BM25/path/signature retrieval without vector search
   -h, --help                  Print help
   -V, --version               Print version
