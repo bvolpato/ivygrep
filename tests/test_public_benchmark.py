@@ -126,6 +126,8 @@ class PublicBenchmarkTest(unittest.TestCase):
                 "index_ms",
                 "hash_enhancement_ms",
                 "neural_enhancement_ms",
+                "daemon_startup_ms",
+                "neural_model_ready_ms",
                 "index_size_bytes",
                 "peak_child_rss_bytes",
             )
@@ -156,6 +158,8 @@ class PublicBenchmarkTest(unittest.TestCase):
                     "index_ms": 1.0,
                     "hash_enhancement_ms": 1.0,
                     "neural_enhancement_ms": 0.0,
+                    "daemon_startup_ms": 1.0,
+                    "neural_model_ready_ms": 0.0,
                     "index_size_bytes": 1,
                     "peak_child_rss_bytes": 1,
                     "details": [

@@ -12,6 +12,38 @@
     }
   },
   "profiles": {
+    "model-bakeoff": {
+      "description": "Deterministic 100-query, approximately 1,000-document screening sample for comparing local embedding profiles before full-matrix promotion.",
+      "minimum_queries": 100,
+      "tasks": [
+        "codetrans-dl",
+        "codetrans-contest",
+        "cosqa",
+        "codefeedback-st"
+      ],
+      "task_options": {
+        "codetrans-dl": {
+          "sample_queries": 25,
+          "sample_corpus": 250,
+          "seed": 20260615
+        },
+        "codetrans-contest": {
+          "sample_queries": 25,
+          "sample_corpus": 250,
+          "seed": 20260615
+        },
+        "cosqa": {
+          "sample_queries": 25,
+          "sample_corpus": 250,
+          "seed": 20260615
+        },
+        "codefeedback-st": {
+          "sample_queries": 25,
+          "sample_corpus": 250,
+          "seed": 20260615
+        }
+      }
+    },
     "public-core": {
       "description": "Four compact public CoIR tasks with 1,000 held-out queries across natural-language, code-to-code, and multilingual retrieval.",
       "minimum_queries": 1000,

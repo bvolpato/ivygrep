@@ -29,6 +29,8 @@ QUALITY_METRICS = (
     "mrr_at_10",
     "precision_at_5",
     "recall_at_20",
+    "no_hit_rate",
+    "support_file_spam_rate_at_10",
 )
 LATENCY_METRICS = (
     "cold_latency_p50_ms",
@@ -40,6 +42,8 @@ RESOURCE_METRICS = (
     "index_ms",
     "hash_enhancement_ms",
     "neural_enhancement_ms",
+    "daemon_startup_ms",
+    "neural_model_ready_ms",
     "index_size_bytes",
     "peak_child_rss_bytes",
 )
@@ -181,6 +185,12 @@ def aggregate_runs(results: list[dict], modes: list[str], runs: int) -> dict:
                 "neural_enhancement_ms": sum(
                     entry["neural_enhancement_ms"] for entry in entries
                 ),
+                "daemon_startup_ms": sum(
+                    entry["daemon_startup_ms"] for entry in entries
+                ),
+                "neural_model_ready_ms": sum(
+                    entry["neural_model_ready_ms"] for entry in entries
+                ),
                 "index_size_bytes": sum(entry["index_size_bytes"] for entry in entries),
                 "peak_child_rss_bytes": max(
                     (entry["peak_child_rss_bytes"] or 0 for entry in entries),
@@ -196,6 +206,7 @@ def aggregate_runs(results: list[dict], modes: list[str], runs: int) -> dict:
                 detail["cold_latency_ms"]
                 for entry in entries
                 for detail in entry["details"]
+                if detail["cold_latency_ms"] is not None
             ]
             warm_latencies = [
                 detail["warm_latency_ms"]
@@ -362,6 +373,19 @@ def main() -> int:
         "tasks": tasks,
         "modes": modes,
         "repetitions": args.runs,
+        "neural_models": [
+            json.loads(identity)
+            for identity in sorted(
+                {
+                    json.dumps(
+                        result["index_configuration"]["neural_model"],
+                        sort_keys=True,
+                    )
+                    for result in results
+                    if result.get("index_configuration", {}).get("neural_model")
+                }
+            )
+        ],
         "queries": sum(item["counts"]["queries"] for item in provenances),
         "languages": sorted(
             {

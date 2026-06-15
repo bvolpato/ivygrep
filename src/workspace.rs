@@ -79,6 +79,8 @@ pub struct WorkspaceStatus {
     pub neural_dimensions: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub neural_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub neural_model: Option<crate::embedding::NeuralModelIdentity>,
     pub reranker_candidate_limit: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub neural_backend: Option<String>,
@@ -264,14 +266,23 @@ impl Workspace {
             .filter(|value| !value.is_empty())
     }
 
+    pub fn neural_model_path(&self) -> PathBuf {
+        self.index_dir.join("neural_model.json")
+    }
+
+    pub fn neural_model_identity(&self) -> Option<crate::embedding::NeuralModelIdentity> {
+        let contents = fs::read_to_string(self.neural_model_path()).ok()?;
+        serde_json::from_str(&contents).ok()
+    }
+
     /// Returns whether a neural vector store is available for query-time use.
     /// Worktree searches can use their base workspace's neural store.
     pub fn has_neural_vectors(&self) -> bool {
-        neural_store_has_vectors(&self.vector_neural_path())
+        neural_store_has_vectors(&self.index_dir)
             || self
                 .base_index_dir
                 .as_ref()
-                .is_some_and(|base| neural_store_has_vectors(&base.join("vectors_neural.usearch")))
+                .is_some_and(|base| neural_store_has_vectors(base))
     }
 
     pub fn neural_vector_count(&self) -> u64 {
@@ -279,7 +290,14 @@ impl Workspace {
         if !path.exists() {
             return 0;
         }
-        vector_store_size(&path, 384, crate::vector_store::NEURAL_VECTOR_QUANTIZATION).unwrap_or(0)
+        vector_store_size(
+            &path,
+            self.neural_model_identity()
+                .map(|identity| identity.dimensions)
+                .unwrap_or(384),
+            crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
+        )
+        .unwrap_or(0)
     }
 
     pub fn neural_coverage_percent(&self) -> f64 {
@@ -487,8 +505,8 @@ impl Workspace {
             return false;
         }
 
-        if self.neural_profile_name().as_deref().unwrap_or("general")
-            != crate::embedding::configured_neural_profile_name()
+        if self.neural_model_identity().as_ref()
+            != Some(&crate::embedding::configured_neural_model_identity())
         {
             return true;
         }
@@ -502,7 +520,7 @@ impl Workspace {
         // memory-maps this path; the portable backend validates and loads it.
         if let Ok(store) = crate::vector_store::VectorStore::open_readonly(
             &neural_path,
-            384,
+            crate::embedding::configured_neural_model_identity().dimensions,
             crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
         ) {
             let enhanced = store.size();
@@ -839,7 +857,9 @@ impl Workspace {
                     && self.vector_neural_path().exists()
                     && let Err(err) = crate::vector_store::VectorStore::open_readonly(
                         &self.vector_neural_path(),
-                        384,
+                        self.neural_model_identity()
+                            .map(|identity| identity.dimensions)
+                            .unwrap_or(384),
                         crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
                     )
                 {
@@ -1068,11 +1088,20 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
         let index_size_bytes = dir_size_bytes(&index_dir);
         let index_components = index_component_sizes(&index_dir);
         let vector_key_count = read_sqlite_vector_key_count(&index_dir);
+        let neural_model = fs::read_to_string(index_dir.join("neural_model.json"))
+            .ok()
+            .and_then(|value| {
+                serde_json::from_str::<crate::embedding::NeuralModelIdentity>(&value).ok()
+            });
+        let neural_dimensions = neural_model
+            .as_ref()
+            .map(|identity| identity.dimensions)
+            .unwrap_or(384);
         let neural_path = index_dir.join("vectors_neural.usearch");
         let neural_vector_count = if neural_path.exists() {
             crate::vector_store::VectorStore::open_readonly(
                 &neural_path,
-                384,
+                neural_dimensions,
                 crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
             )
             .map(|store| store.size() as u64)
@@ -1223,8 +1252,9 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
                 has_neural_vectors,
                 neural_vector_count,
                 neural_coverage_percent,
-                neural_dimensions: crate::embedding::NeuralProfile::configured().dimensions(),
+                neural_dimensions,
                 neural_profile,
+                neural_model,
                 reranker_candidate_limit: crate::search::rerank_candidate_limit(),
                 neural_backend,
                 enhancing_in_progress,
@@ -1407,10 +1437,17 @@ fn dir_has_entries(path: &Path) -> bool {
         .is_some()
 }
 
-fn neural_store_has_vectors(path: &Path) -> bool {
+fn neural_store_has_vectors(index_dir: &Path) -> bool {
+    let dimensions = fs::read_to_string(index_dir.join("neural_model.json"))
+        .ok()
+        .and_then(|value| {
+            serde_json::from_str::<crate::embedding::NeuralModelIdentity>(&value).ok()
+        })
+        .map(|identity| identity.dimensions)
+        .unwrap_or(384);
     crate::vector_store::VectorStore::open_readonly(
-        path,
-        384,
+        &index_dir.join("vectors_neural.usearch"),
+        dimensions,
         crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
     )
     .is_ok_and(|store| store.size() > 0)
@@ -1756,14 +1793,22 @@ mod tests {
             store.save().unwrap();
         }
 
-        // 2 vectors == 2 chunks → false
+        // Identity-less vectors predate complete model metadata and rebuild once.
+        assert!(ws.needs_neural_enhancement());
+        std::fs::write(
+            ws.neural_model_path(),
+            serde_json::to_vec_pretty(&crate::embedding::configured_neural_model_identity())
+                .unwrap(),
+        )
+        .unwrap();
+
+        // 2 vectors == 2 chunks with matching identity → false
         assert!(!ws.needs_neural_enhancement());
 
-        std::fs::write(ws.neural_profile_path(), "general").unwrap();
         unsafe { std::env::set_var("IVYGREP_MODEL_PROFILE", "code") };
         assert!(
             ws.needs_neural_enhancement(),
-            "a mismatched persisted model profile must force re-embedding"
+            "a mismatched persisted model identity must force re-embedding"
         );
         unsafe { std::env::remove_var("IVYGREP_MODEL_PROFILE") };
     }

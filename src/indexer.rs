@@ -1416,17 +1416,30 @@ pub fn enhance_workspace_neural(
     }
 
     let profile = neural_model.profile_info().unwrap_or("general");
-    if workspace
-        .neural_profile_name()
-        .as_deref()
-        .unwrap_or("general")
-        != profile
-    {
+    let model_identity = neural_model.model_identity();
+    let identity_matches = match (workspace.neural_model_identity(), model_identity) {
+        (Some(persisted), Some(active)) => persisted == *active,
+        (None, None) => {
+            workspace
+                .neural_profile_name()
+                .as_deref()
+                .unwrap_or("general")
+                == profile
+        }
+        _ => false,
+    };
+    if !identity_matches {
         let _ = fs::remove_file(workspace.vector_neural_path());
         let _ = fs::remove_file(workspace.neural_tombstones_path());
         let _ = fs::remove_file(workspace.neural_tombstones_processing_path());
     }
     fs::write(workspace.neural_profile_path(), profile)?;
+    if let Some(identity) = model_identity {
+        fs::write(
+            workspace.neural_model_path(),
+            serde_json::to_vec_pretty(identity)?,
+        )?;
+    }
 
     let sqlite = open_sqlite(&workspace.sqlite_path())?;
 
@@ -2203,6 +2216,7 @@ mod tests {
     struct RecordedTestEmbedding {
         model: HashEmbeddingModel,
         backend: &'static str,
+        identity: crate::embedding::NeuralModelIdentity,
     }
 
     impl EmbeddingModel for RecordedTestEmbedding {
@@ -2220,6 +2234,14 @@ mod tests {
 
         fn backend_info(&self) -> Option<&'static str> {
             Some(self.backend)
+        }
+
+        fn profile_info(&self) -> Option<&'static str> {
+            Some("static")
+        }
+
+        fn model_identity(&self) -> Option<&crate::embedding::NeuralModelIdentity> {
+            Some(&self.identity)
         }
     }
 
@@ -2597,6 +2619,7 @@ mod tests {
         let neural_model = RecordedTestEmbedding {
             model: HashEmbeddingModel::new(EMBEDDING_DIMENSIONS),
             backend: "test local neural backend",
+            identity: crate::embedding::configured_neural_model_identity(),
         };
         let enhanced = enhance_workspace_neural(&workspace, &neural_model).unwrap();
         assert_eq!(enhanced, summary.total_chunks);
@@ -2622,7 +2645,7 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(workspace.neural_profile_path()).unwrap(),
-            "general"
+            "static"
         );
         let status = crate::workspace::list_workspaces()
             .unwrap()
@@ -2654,10 +2677,12 @@ mod tests {
         let first_model = RecordedTestEmbedding {
             model: HashEmbeddingModel::new(EMBEDDING_DIMENSIONS),
             backend: "first backend",
+            identity: crate::embedding::configured_neural_model_identity(),
         };
         let second_model = RecordedTestEmbedding {
             model: HashEmbeddingModel::new(EMBEDDING_DIMENSIONS),
             backend: "unused backend",
+            identity: crate::embedding::configured_neural_model_identity(),
         };
 
         let n1 = enhance_workspace_neural(&workspace, &first_model).unwrap();
@@ -2722,7 +2747,11 @@ mod tests {
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
         let workspace = Workspace::resolve(root.path()).unwrap();
         let hash_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
-        let neural_model = HashEmbeddingModel::new(384);
+        let neural_model = RecordedTestEmbedding {
+            model: HashEmbeddingModel::new(EMBEDDING_DIMENSIONS),
+            backend: "test local neural backend",
+            identity: crate::embedding::configured_neural_model_identity(),
+        };
         index_workspace(&workspace, &hash_model).unwrap();
         enhance_workspace_hash(&workspace, &hash_model).unwrap();
         enhance_workspace_neural(&workspace, &neural_model).unwrap();

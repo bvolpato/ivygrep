@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::embedding::create_hash_model;
+use crate::embedding::{NeuralModelIdentity, create_hash_model};
 use crate::indexer::{index_workspace, remove_workspace_index};
 use crate::jobs::{
     self, ENHANCEMENT_HEARTBEAT_TTL_SECS, ENHANCEMENT_PAUSE_WARN_SECS, INDEXING_HEARTBEAT_TTL_SECS,
@@ -22,6 +22,7 @@ pub struct DoctorReport {
     pub neural_vector_count: u64,
     pub neural_coverage_percent: f64,
     pub neural_profile: String,
+    pub neural_model: Option<NeuralModelIdentity>,
     pub neural_dimensions: usize,
     pub index_components: IndexComponentSizes,
     pub reranker_candidate_limit: usize,
@@ -53,7 +54,11 @@ impl DoctorReport {
             neural_profile: workspace
                 .neural_profile_name()
                 .unwrap_or_else(|| crate::embedding::configured_neural_profile_name().to_string()),
-            neural_dimensions: crate::embedding::NeuralProfile::configured().dimensions(),
+            neural_model: workspace.neural_model_identity(),
+            neural_dimensions: workspace
+                .neural_model_identity()
+                .map(|identity| identity.dimensions)
+                .unwrap_or_else(|| crate::embedding::NeuralProfile::configured().dimensions()),
             index_components: workspace.index_component_sizes(),
             reranker_candidate_limit: crate::search::rerank_candidate_limit(),
             has_indexable_files: health.has_indexable_files,

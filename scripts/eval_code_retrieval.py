@@ -182,6 +182,54 @@ def materialize_corpus(dataset: Path, repo: Path) -> dict[str, str]:
     return path_to_id
 
 
+def is_support_path(path: str) -> bool:
+    normalized = "/" + path.lower().replace("\\", "/")
+    name = Path(normalized).name
+    return (
+        any(
+            marker in normalized
+            for marker in (
+                "/doc/",
+                "/docs/",
+                "/example/",
+                "/examples/",
+                "/sample/",
+                "/samples/",
+                "/test/",
+                "/tests/",
+                "/spec/",
+                "/specs/",
+            )
+        )
+        or name.startswith(("readme", "test_", "example_"))
+        or any(marker in name for marker in ("_test.", ".test.", "_spec.", ".spec."))
+    )
+
+
+def query_targets_support(text: str) -> bool:
+    terms = {
+        term.strip(".,:;!?()[]{}\"'").lower()
+        for term in text.split()
+        if term.strip(".,:;!?()[]{}\"'")
+    }
+    return bool(
+        terms
+        & {
+            "doc",
+            "docs",
+            "documentation",
+            "readme",
+            "test",
+            "tests",
+            "testing",
+            "example",
+            "examples",
+            "sample",
+            "samples",
+        }
+    )
+
+
 def run_json(
     command: list[str], cwd: Path, env: dict[str, str]
 ) -> tuple[object, float]:
@@ -219,6 +267,12 @@ def warm_query_path(mode: str) -> str:
     return "local-process" if mode == "lexical" else "daemon"
 
 
+def process_cold_queries(mode: str, queries: list[dict]) -> list[dict]:
+    # Neural process startup includes loading model weights. Measuring that for
+    # every quality query turns a retrieval benchmark into a model-load loop.
+    return queries[:1] if mode == "neural" else queries
+
+
 def stop_process(process: subprocess.Popen) -> None:
     if process.poll() is not None:
         return
@@ -243,6 +297,7 @@ def evaluate(args: argparse.Namespace) -> dict:
         repo = temp_path / "repo"
         home = temp_path / "home"
         path_to_id = materialize_corpus(dataset, repo)
+        id_to_path = {document_id: path for path, document_id in path_to_id.items()}
         queries = load_jsonl(dataset / "queries.jsonl")
         qrels = load_qrels(dataset / "qrels.tsv")
         env = os.environ.copy()
@@ -298,7 +353,7 @@ def evaluate(args: argparse.Namespace) -> dict:
                 )
 
         cold_latencies: dict[str, float] = {}
-        for query in queries:
+        for query in process_cold_queries(args.mode, queries):
             query_id = str(query["_id"])
             text = query.get("text") or query.get("query") or ""
             command = [
@@ -316,6 +371,7 @@ def evaluate(args: argparse.Namespace) -> dict:
         daemon_log_path = temp_path / "daemon.log"
         daemon_log = daemon_log_path.open("wb")
         popen_options = {"start_new_session": True} if os.name != "nt" else {}
+        daemon_started = time.perf_counter()
         daemon = subprocess.Popen(
             [str(binary), "--daemon"],
             cwd=repo,
@@ -333,8 +389,11 @@ def evaluate(args: argparse.Namespace) -> dict:
                 time.sleep(0.05)
             if not endpoint.exists():
                 raise TimeoutError("timed out waiting for ivygrep daemon")
+            daemon_startup_ms = (time.perf_counter() - daemon_started) * 1000.0
 
+            neural_model_ready_ms = 0.0
             if args.mode == "neural":
+                model_started = time.perf_counter()
                 run_json(
                     [str(binary), "--json", "-n", "1", "neural model warmup"],
                     repo,
@@ -357,10 +416,14 @@ def evaluate(args: argparse.Namespace) -> dict:
                     raise TimeoutError(
                         "timed out waiting for the daemon neural model to become ready"
                     )
+                neural_model_ready_ms = (time.perf_counter() - model_started) * 1000.0
 
             scores: list[dict[str, float]] = []
             warm_latencies: list[float] = []
             details = []
+            no_hit_queries = 0
+            support_file_hits = 0
+            support_file_candidates = 0
             for query in queries:
                 query_id = str(query["_id"])
                 text = query.get("text") or query.get("query") or ""
@@ -373,7 +436,7 @@ def evaluate(args: argparse.Namespace) -> dict:
                     text,
                 ]
 
-                cold_ms = cold_latencies[query_id]
+                cold_ms = cold_latencies.get(query_id)
                 warm_output, warm_ms = run_json(command, repo, daemon_env)
                 ranked = []
                 seen: set[str] = set()
@@ -389,6 +452,19 @@ def evaluate(args: argparse.Namespace) -> dict:
                             seen.add(document_id)
                             ranked.append(document_id)
                 query_score = score_query(ranked, qrels.get(query_id, {}))
+                if not ranked:
+                    no_hit_queries += 1
+                eligible_for_support_spam = not query_targets_support(text)
+                query_support_hits = None
+                if eligible_for_support_spam:
+                    top_paths = [
+                        id_to_path[document_id]
+                        for document_id in ranked[:10]
+                        if document_id in id_to_path
+                    ]
+                    query_support_hits = sum(is_support_path(path) for path in top_paths)
+                    support_file_candidates += len(top_paths)
+                    support_file_hits += query_support_hits
                 scores.append(query_score)
                 warm_latencies.append(warm_ms)
                 details.append(
@@ -397,6 +473,8 @@ def evaluate(args: argparse.Namespace) -> dict:
                         "ranked": ranked,
                         "cold_latency_ms": cold_ms,
                         "warm_latency_ms": warm_ms,
+                        "no_hit": not ranked,
+                        "support_file_hits_at_10": query_support_hits,
                         **query_score,
                     }
                 )
@@ -415,6 +493,7 @@ def evaluate(args: argparse.Namespace) -> dict:
                     "neural_coverage_percent",
                     "neural_dimensions",
                     "neural_profile",
+                    "neural_model",
                     "neural_backend",
                     "reranker_candidate_limit",
                 )
@@ -433,11 +512,20 @@ def evaluate(args: argparse.Namespace) -> dict:
                 "index_size_bytes": workspace["index_size_bytes"],
                 "peak_child_rss_bytes": peak_child_rss_bytes(),
                 "index_configuration": index_configuration,
+                "cold_latency_samples": len(cold_latencies),
                 "cold_latency_p50_ms": percentile(list(cold_latencies.values()), 0.50),
                 "cold_latency_p95_ms": percentile(list(cold_latencies.values()), 0.95),
                 "warm_latency_p50_ms": percentile(warm_latencies, 0.50),
                 "warm_latency_p95_ms": percentile(warm_latencies, 0.95),
+                "daemon_startup_ms": daemon_startup_ms,
+                "neural_model_ready_ms": neural_model_ready_ms,
                 "warm_query_path": warm_query_path(args.mode),
+                "no_hit_rate": no_hit_queries / len(queries) if queries else 0.0,
+                "support_file_spam_rate_at_10": (
+                    support_file_hits / support_file_candidates
+                    if support_file_candidates
+                    else 0.0
+                ),
                 **aggregate(scores),
                 "details": details,
             }

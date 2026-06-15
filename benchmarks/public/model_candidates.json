@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "screening_budget": {
+    "max_peak_rss_bytes": 1073741824,
+    "max_task_neural_enhancement_ms": 120000,
+    "notes": "Candidates crossing either laptop screening limit are stopped after one completed task."
+  },
+  "candidates": {
+    "static-retrieval-v1": {
+      "status": "selected-default",
+      "source": "https://huggingface.co/sentence-transformers/static-retrieval-mrl-en-v1",
+      "license": "Apache-2.0",
+      "reason": "Best quality-cost Pareto point and promoted to the full public matrix."
+    },
+    "general": {
+      "status": "rejected",
+      "source": "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2",
+      "license": "Apache-2.0",
+      "reason": "Lower aggregate quality with substantially higher latency, memory, and indexing cost."
+    },
+    "code-minilm-l6-v1": {
+      "status": "rejected",
+      "source": "https://huggingface.co/isuruwijesiri/all-MiniLM-L6-v2-code-search-512",
+      "license": "Apache-2.0",
+      "reason": "No aggregate nDCG advantage over static and exceeds the laptop RSS and latency budgets."
+    },
+    "code-minilm-l12-v1": {
+      "status": "resource-stop",
+      "source": "https://huggingface.co/isuruwijesiri/all-MiniLM-L12-v2-code-search-512",
+      "license": "Apache-2.0",
+      "reason": "Stopped after one task because it exceeded both screening budgets and did not beat code MiniLM L6 quality."
+    },
+    "nomic-ai/CodeRankEmbed": {
+      "status": "excluded",
+      "source": "https://huggingface.co/nomic-ai/CodeRankEmbed",
+      "license": "MIT",
+      "reason": "Custom NomicBERT architecture is not supported by the portable local inference backend."
+    },
+    "Salesforce/SFR-Embedding-Code-400M_R": {
+      "status": "excluded",
+      "source": "https://huggingface.co/Salesforce/SFR-Embedding-Code-400M_R",
+      "license": "CC-BY-NC-4.0",
+      "reason": "Non-commercial license and custom architecture are incompatible with the shipped default."
+    },
+    "jinaai/jina-code-embeddings-1.5b": {
+      "status": "excluded",
+      "source": "https://huggingface.co/jinaai/jina-code-embeddings-1.5b",
+      "license": "Apache-2.0",
+      "reason": "The 1.5B-parameter custom model exceeds portable laptop download, memory, and inference budgets."
+    }
+  }
+}
