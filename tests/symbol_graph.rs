@@ -305,6 +305,9 @@ fn all_indices_symbol_search_uses_absolute_indexed_paths() {
     for root in [&first, &second, &unindexed] {
         fs::create_dir_all(root).unwrap();
     }
+    let first = first.canonicalize().unwrap();
+    let second = second.canonicalize().unwrap();
+    let unindexed = unindexed.canonicalize().unwrap();
     for root in [&first, &second] {
         fs::create_dir(root.join(".git")).unwrap();
         fs::write(root.join("service.rs"), "pub fn shared_symbol() {}\n").unwrap();
@@ -332,15 +335,11 @@ fn all_indices_symbol_search_uses_absolute_indexed_paths() {
             .collect::<Vec<_>>();
         assert_eq!(paths.len(), 2, "{paths:?}");
         assert!(paths.iter().all(|path| Path::new(path).is_absolute()));
+        assert!(paths.iter().any(|path| Path::new(path).starts_with(&first)));
         assert!(
             paths
                 .iter()
-                .any(|path| path.starts_with(first.to_str().unwrap()))
-        );
-        assert!(
-            paths
-                .iter()
-                .any(|path| path.starts_with(second.to_str().unwrap()))
+                .any(|path| Path::new(path).starts_with(&second))
         );
     }
 }
