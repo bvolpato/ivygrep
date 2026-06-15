@@ -19,7 +19,6 @@ jobs:
       ARCHIVE_FORMAT: ${{ matrix.archive }}
       ARCHIVE_NAME_SUFFIX: ${{ matrix.archive_name }}
       EXTRA_FEATURES: ${{ matrix.extra_features }}
-      EXTRA_RUSTFLAGS: ${{ matrix.extra_rustflags }}
       TARGET: ${{ matrix.target }}
       USE_CROSS: ${{ matrix.use_cross }}
     strategy:
@@ -82,9 +81,6 @@ jobs:
           fi
           if [ -n "$EXTRA_FEATURES" ]; then
             build_args+=(--features "$EXTRA_FEATURES")
-          fi
-          if [ -n "$EXTRA_RUSTFLAGS" ]; then
-            export RUSTFLAGS="${RUSTFLAGS:-} $EXTRA_RUSTFLAGS"
           fi
           if [ "$USE_CROSS" = "true" ]; then
             cross build "${build_args[@]}"
