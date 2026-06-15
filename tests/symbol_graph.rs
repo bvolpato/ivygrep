@@ -198,6 +198,155 @@ fn symbol_cli_supports_json_and_human_output() {
 
 #[test]
 #[serial]
+fn symbol_cli_respects_type_and_path_filters() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join(".git")).unwrap();
+    fs::create_dir_all(root.path().join("src")).unwrap();
+    fs::create_dir_all(root.path().join("tools")).unwrap();
+    fs::write(
+        root.path().join("src/service.rs"),
+        "pub fn shared_symbol() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("tools/service.py"),
+        "def shared_symbol():\n    return True\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("tools/ignored.py"),
+        "def shared_symbol():\n    return False\n",
+    )
+    .unwrap();
+    fs::write(root.path().join(".gitignore"), "tools/ignored.py\n").unwrap();
+
+    let mut add = AssertCommand::new(assert_cmd::cargo::cargo_bin!("ig"));
+    add.current_dir(root.path())
+        .env("IVYGREP_HOME", home.path())
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--add", "--no-watch", "--skip-gitignore", "."])
+        .assert()
+        .success();
+
+    let mut command = AssertCommand::new(assert_cmd::cargo::cargo_bin!("ig"));
+    let output = command
+        .current_dir(root.path())
+        .env("IVYGREP_HOME", home.path())
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args([
+            "--symbol",
+            "--json",
+            "--type",
+            "py",
+            "--include",
+            "tools/**",
+            "--exclude",
+            "**/ignored.py",
+            "shared_symbol",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let paths = value
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry["file_path"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(paths.len(), 1);
+    assert!(paths[0].ends_with("tools/service.py"), "{paths:?}");
+
+    let mut include_ignored = AssertCommand::new(assert_cmd::cargo::cargo_bin!("ig"));
+    let output = include_ignored
+        .current_dir(root.path())
+        .env("IVYGREP_HOME", home.path())
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args([
+            "--symbol",
+            "--json",
+            "--type",
+            "py",
+            "--include",
+            "tools/**",
+            "--skip-gitignore",
+            "shared_symbol",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let paths = value
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|entry| entry["file_path"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(paths.len(), 2, "{paths:?}");
+    assert!(
+        paths.iter().any(|path| path.ends_with("tools/ignored.py")),
+        "{paths:?}"
+    );
+}
+
+#[test]
+#[serial]
+fn all_indices_symbol_search_uses_absolute_indexed_paths() {
+    let parent = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let first = parent.path().join("first");
+    let second = parent.path().join("second");
+    let unindexed = parent.path().join("unindexed");
+    for root in [&first, &second, &unindexed] {
+        fs::create_dir_all(root).unwrap();
+    }
+    for root in [&first, &second] {
+        fs::create_dir(root.join(".git")).unwrap();
+        fs::write(root.join("service.rs"), "pub fn shared_symbol() {}\n").unwrap();
+        index(root, home.path());
+    }
+
+    for cwd in [&first, &unindexed] {
+        let mut command = AssertCommand::new(assert_cmd::cargo::cargo_bin!("ig"));
+        let output = command
+            .current_dir(cwd)
+            .env("IVYGREP_HOME", home.path())
+            .env("IVYGREP_NO_AUTOSPAWN", "1")
+            .args(["--all-indices", "--symbol", "--json", "shared_symbol"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        let paths = value
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|entry| entry["file_path"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(paths.len(), 2, "{paths:?}");
+        assert!(paths.iter().all(|path| Path::new(path).is_absolute()));
+        assert!(
+            paths
+                .iter()
+                .any(|path| path.starts_with(first.to_str().unwrap()))
+        );
+        assert!(
+            paths
+                .iter()
+                .any(|path| path.starts_with(second.to_str().unwrap()))
+        );
+    }
+}
+
+#[test]
+#[serial]
 fn worktree_overlay_hides_shadowed_base_symbols() {
     let root = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();

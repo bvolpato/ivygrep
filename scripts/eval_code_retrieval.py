@@ -213,6 +213,20 @@ def evaluate(args: argparse.Namespace) -> dict:
                     "neural mode requested but no neural vectors were built"
                 )
 
+        cold_latencies: dict[str, float] = {}
+        for query in queries:
+            query_id = str(query["_id"])
+            text = query.get("text") or query.get("query") or ""
+            command = [
+                str(binary),
+                "--json",
+                "-n",
+                str(args.limit),
+                *query_args(args.mode),
+                text,
+            ]
+            _, cold_latencies[query_id] = run_json(command, repo, env)
+
         daemon_env = env.copy()
         daemon_env.pop("IVYGREP_NO_AUTOSPAWN", None)
         daemon_log_path = temp_path / "daemon.log"
@@ -263,7 +277,6 @@ def evaluate(args: argparse.Namespace) -> dict:
                     )
 
             scores: list[dict[str, float]] = []
-            cold_latencies: list[float] = []
             warm_latencies: list[float] = []
             details = []
             for query in queries:
@@ -278,8 +291,7 @@ def evaluate(args: argparse.Namespace) -> dict:
                     text,
                 ]
 
-                cold_env = env.copy()
-                _, cold_ms = run_json(command, repo, cold_env)
+                cold_ms = cold_latencies[query_id]
                 warm_output, warm_ms = run_json(command, repo, daemon_env)
                 ranked = []
                 for item in warm_output:
@@ -292,7 +304,6 @@ def evaluate(args: argparse.Namespace) -> dict:
                         ranked.append(path_to_id[relative])
                 query_score = score_query(ranked, qrels.get(query_id, {}))
                 scores.append(query_score)
-                cold_latencies.append(cold_ms)
                 warm_latencies.append(warm_ms)
                 details.append(
                     {
@@ -312,8 +323,8 @@ def evaluate(args: argparse.Namespace) -> dict:
                 "queries": len(queries),
                 "index_ms": index_ms,
                 "index_size_bytes": workspace["index_size_bytes"],
-                "cold_latency_p50_ms": percentile(cold_latencies, 0.50),
-                "cold_latency_p95_ms": percentile(cold_latencies, 0.95),
+                "cold_latency_p50_ms": percentile(list(cold_latencies.values()), 0.50),
+                "cold_latency_p95_ms": percentile(list(cold_latencies.values()), 0.95),
                 "warm_latency_p50_ms": percentile(warm_latencies, 0.50),
                 "warm_latency_p95_ms": percentile(warm_latencies, 0.95),
                 "warm_query_path": warm_query_path(args.mode),

@@ -1062,33 +1062,18 @@ async fn run_query(cli: Cli) -> Result<()> {
         } else {
             crate::symbols::SymbolSearchMode::Callers
         };
-        let mut hits = crate::symbols::search_symbols(
-            &workspace,
-            query,
-            mode,
-            backend_limit,
-            scope_filter.as_ref(),
-        )?;
-        if cli.all_indices {
-            for status in list_workspaces()? {
-                if status.id == workspace.id || status.last_indexed_at_unix.is_none() {
-                    continue;
-                }
-                if let Ok(ws) = Workspace::resolve(&status.root) {
-                    let mut workspace_hits =
-                        crate::symbols::search_symbols(&ws, query, mode, backend_limit, None)?;
-                    for hit in &mut workspace_hits {
-                        hit.file_path = ws.root.join(&hit.file_path);
-                    }
-                    hits.extend(workspace_hits);
-                }
-            }
-            hits.sort_by(|left, right| right.score.total_cmp(&left.score));
-            if let Some(limit) = backend_limit {
-                hits.truncate(limit);
-            }
-        }
-        hits
+        let options = SearchOptions {
+            limit: backend_limit,
+            context: cli.context,
+            type_filter: cli.type_filter.clone(),
+            include_globs: cli.include.clone(),
+            exclude_globs: cli.exclude.clone(),
+            scope_filter: scope_filter.clone(),
+            skip_gitignore: cli.skip_gitignore,
+            progress_tx: None,
+            cancel_token: None,
+        };
+        local_symbol_search_hits(&workspace, cli.all_indices, query, mode, &options)?
     } else if cli.literal {
         let request = DaemonRequest::LiteralSearch {
             path: query_path_opt.clone(),
@@ -1627,6 +1612,60 @@ fn local_fallback_search(
 
     if let Some(l) = options.limit {
         all_hits.truncate(l);
+    }
+    Ok(all_hits)
+}
+
+fn local_symbol_search_hits(
+    workspace: &Workspace,
+    all_indices: bool,
+    query: &str,
+    mode: crate::symbols::SymbolSearchMode,
+    options: &SearchOptions,
+) -> Result<Vec<SearchHit>> {
+    let workspaces = if all_indices {
+        list_workspaces()?
+            .into_iter()
+            .filter(|status| status.last_indexed_at_unix.is_some())
+            .filter_map(|status| Workspace::resolve(&status.root).ok())
+            .collect()
+    } else {
+        vec![workspace.clone()]
+    };
+
+    let mut all_hits = Vec::new();
+    for ws in workspaces {
+        let mut workspace_options = options.clone();
+        if all_indices {
+            workspace_options.scope_filter = None;
+        }
+        match crate::symbols::search_symbols_with_options(&ws, query, mode, &workspace_options) {
+            Ok(mut hits) => {
+                if all_indices {
+                    for hit in &mut hits {
+                        hit.file_path = ws.root.join(&hit.file_path);
+                    }
+                }
+                all_hits.append(&mut hits);
+            }
+            Err(err) => {
+                if !all_indices {
+                    return Err(err);
+                }
+                tracing::warn!("symbol search failed for {}: {err:#}", ws.root.display());
+            }
+        }
+    }
+
+    all_hits.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.file_path.cmp(&right.file_path))
+            .then_with(|| left.start_line.cmp(&right.start_line))
+    });
+    if let Some(limit) = options.limit {
+        all_hits.truncate(limit);
     }
     Ok(all_hits)
 }

@@ -5,7 +5,9 @@ use anyhow::Result;
 use rusqlite::{Connection, params};
 
 use crate::indexer::{IndexedChunk, decompress_text, open_sqlite_readonly};
+use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
+use crate::search::SearchOptions;
 use crate::workspace::{Workspace, WorkspaceScope};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -78,10 +80,25 @@ pub fn search_symbols(
     limit: Option<usize>,
     scope: Option<&WorkspaceScope>,
 ) -> Result<Vec<SearchHit>> {
+    let options = SearchOptions {
+        limit,
+        scope_filter: scope.cloned(),
+        ..SearchOptions::default()
+    };
+    search_symbols_with_options(workspace, name, mode, &options)
+}
+
+pub fn search_symbols_with_options(
+    workspace: &Workspace,
+    name: &str,
+    mode: SymbolSearchMode,
+    options: &SearchOptions,
+) -> Result<Vec<SearchHit>> {
     let normalized = normalize_symbol(name);
     if normalized.is_empty() {
         return Ok(Vec::new());
     }
+    let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
 
     let primary_sqlite = if workspace.has_overlay() {
         workspace.overlay_sqlite_path()
@@ -92,17 +109,19 @@ pub fn search_symbols(
         &open_sqlite_readonly(&primary_sqlite)?,
         &normalized,
         mode,
-        limit,
-        scope,
+        options,
+        &path_matcher,
     )?;
 
     if let Some(base_dir) = &workspace.base_index_dir {
         let tombstones = load_path_set(&workspace.overlay_sqlite_path(), "tombstones")?;
         let overlay_files = load_chunk_paths(&workspace.overlay_sqlite_path())?;
-        let remaining = limit.map(|limit| limit.saturating_sub(hits.len()));
+        let remaining = options.limit.map(|limit| limit.saturating_sub(hits.len()));
         if remaining != Some(0) {
             let base = open_sqlite_readonly(&base_dir.join("metadata.sqlite3"))?;
-            for hit in query_workspace_db(&base, &normalized, mode, remaining, scope)? {
+            let mut base_options = options.clone();
+            base_options.limit = remaining;
+            for hit in query_workspace_db(&base, &normalized, mode, &base_options, &path_matcher)? {
                 let path = hit.file_path.to_string_lossy();
                 if !tombstones.contains(path.as_ref()) && !overlay_files.contains(path.as_ref()) {
                     hits.push(hit);
@@ -121,7 +140,7 @@ pub fn search_symbols(
     hits.dedup_by(|left, right| {
         left.file_path == right.file_path && left.start_line == right.start_line
     });
-    if let Some(limit) = limit {
+    if let Some(limit) = options.limit {
         hits.truncate(limit);
     }
     Ok(hits)
@@ -182,12 +201,13 @@ fn query_workspace_db(
     conn: &Connection,
     normalized: &str,
     mode: SymbolSearchMode,
-    limit: Option<usize>,
-    scope: Option<&WorkspaceScope>,
+    options: &SearchOptions,
+    path_matcher: &PathGlobMatcher,
 ) -> Result<Vec<SearchHit>> {
     let (sql, source, score) = match mode {
         SymbolSearchMode::Definitions => (
-            "SELECT c.file_path, c.start_line, c.end_line, c.text
+            "SELECT c.file_path, c.start_line, c.end_line, c.text,
+                    c.language, c.is_ignored
              FROM symbols s JOIN chunks c ON c.chunk_id = s.chunk_id
              WHERE s.normalized_name = ?1
              ORDER BY c.file_path, c.start_line",
@@ -195,7 +215,8 @@ fn query_workspace_db(
             10.0,
         ),
         SymbolSearchMode::References => (
-            "SELECT c.file_path, e.line, e.line, c.text
+            "SELECT c.file_path, e.line, e.line, c.text,
+                    c.language, c.is_ignored
              FROM symbol_edges e JOIN chunks c ON c.chunk_id = e.source_chunk_id
              WHERE e.target_name = ?1
              ORDER BY c.file_path, e.line",
@@ -203,7 +224,8 @@ fn query_workspace_db(
             6.0,
         ),
         SymbolSearchMode::Callers => (
-            "SELECT c.file_path, c.start_line, c.end_line, c.text
+            "SELECT c.file_path, c.start_line, c.end_line, c.text,
+                    c.language, c.is_ignored
              FROM symbol_edges e JOIN chunks c ON c.chunk_id = e.source_chunk_id
              WHERE e.target_name = ?1 AND e.edge_kind = 'call'
              ORDER BY c.file_path, c.start_line",
@@ -215,28 +237,47 @@ fn query_workspace_db(
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map([normalized], |row| {
         let raw: Vec<u8> = row.get(3)?;
-        Ok(SearchHit {
-            file_path: PathBuf::from(row.get::<_, String>(0)?),
-            start_line: row.get::<_, i64>(1)? as usize,
-            end_line: row.get::<_, i64>(2)? as usize,
-            preview: decompress_text(raw),
-            reason: format!("exact {source} match"),
-            score,
-            sources: vec![source.to_string()],
-        })
+        Ok((
+            SearchHit {
+                file_path: PathBuf::from(row.get::<_, String>(0)?),
+                start_line: row.get::<_, i64>(1)? as usize,
+                end_line: row.get::<_, i64>(2)? as usize,
+                preview: decompress_text(raw),
+                reason: format!("exact {source} match"),
+                score,
+                sources: vec![source.to_string()],
+            },
+            row.get::<_, String>(4)?,
+            row.get::<_, bool>(5)?,
+        ))
     })?;
 
     let mut hits = Vec::new();
     for row in rows {
-        let hit = row?;
-        if scope.is_none_or(|scope| scope.matches(&hit.file_path)) {
+        let (hit, language, is_ignored) = row?;
+        if options
+            .scope_filter
+            .as_ref()
+            .is_none_or(|scope| scope.matches(&hit.file_path))
+            && type_matches(&language, options.type_filter.as_deref())
+            && path_matcher.matches(&hit.file_path)
+            && (options.skip_gitignore || !is_ignored)
+        {
             hits.push(hit);
-            if limit.is_some_and(|limit| hits.len() >= limit) {
+            if options.limit.is_some_and(|limit| hits.len() >= limit) {
                 break;
             }
         }
     }
     Ok(hits)
+}
+
+fn type_matches(language: &str, type_filter: Option<&str>) -> bool {
+    type_filter.is_none_or(|filter| {
+        language.eq_ignore_ascii_case(filter)
+            || crate::chunking::resolve_type_alias(filter)
+                .is_some_and(|canonical| language.eq_ignore_ascii_case(canonical))
+    })
 }
 
 fn load_path_set(path: &std::path::Path, table: &str) -> Result<HashSet<String>> {
