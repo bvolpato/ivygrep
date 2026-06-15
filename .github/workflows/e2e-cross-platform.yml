@@ -217,6 +217,7 @@ jobs:
               echo "=== Architecture ==="
               uname -m
 
+              apk add --no-cache python3
               sh scripts/e2e_procedures.sh --binary "$IG"
             '
 
