@@ -49,6 +49,10 @@ pub struct Cli {
     #[arg(long, default_value_t = false, requires = "doctor")]
     pub fix: bool,
 
+    /// Perform full cross-store integrity scans (used with --doctor).
+    #[arg(long, default_value_t = false, requires = "doctor")]
+    pub deep: bool,
+
     #[arg(long, default_value_t = false)]
     pub daemon: bool,
 
@@ -73,6 +77,18 @@ pub struct Cli {
     /// Legacy regex mode. Uses an index prefilter when possible, otherwise walks files.
     #[arg(long, global = true, hide = true)]
     pub regex: bool,
+
+    /// Find exact symbol definitions.
+    #[arg(long, global = true, conflicts_with_all = ["refs", "callers", "literal", "regex"])]
+    pub symbol: bool,
+
+    /// Find exact symbol references.
+    #[arg(long, global = true, conflicts_with_all = ["symbol", "callers", "literal", "regex"])]
+    pub refs: bool,
+
+    /// Find functions or methods that call the named symbol.
+    #[arg(long, global = true, conflicts_with_all = ["symbol", "refs", "literal", "regex"])]
+    pub callers: bool,
 
     #[arg(long, global = true)]
     pub json: bool,
@@ -121,6 +137,10 @@ pub struct Cli {
     /// model. Faster startup, no model download, lower quality.
     #[arg(long, global = true)]
     pub hash: bool,
+
+    /// Use BM25/path/signature retrieval without vector search.
+    #[arg(long, global = true, conflicts_with_all = ["hash", "literal", "regex"])]
+    pub lexical_only: bool,
 
     #[arg(long, hide = true, value_name = "PATH")]
     pub enhance_internal: Option<PathBuf>,
@@ -177,7 +197,7 @@ pub async fn run() -> Result<()> {
 
     if cli.doctor {
         let path = cli.query_path.as_deref();
-        run_doctor(path, cli.fix, cli.json)?;
+        run_doctor(path, cli.fix, cli.deep, cli.json)?;
         return Ok(());
     }
 
@@ -417,6 +437,13 @@ async fn run_status(json: bool) -> Result<()> {
                 // Index size
                 let size = format_bytes(ws.index_size_bytes);
                 println!("{prefix}  Size:   {size}");
+                println!(
+                    "{prefix}          metadata {}, lexical {}, hash {}, neural {}",
+                    format_bytes(ws.index_components.metadata_bytes),
+                    format_bytes(ws.index_components.lexical_bytes),
+                    format_bytes(ws.index_components.hash_vectors_bytes),
+                    format_bytes(ws.index_components.neural_vectors_bytes),
+                );
 
                 // Embedding status
                 if ws.enhancing_in_progress {
@@ -446,19 +473,15 @@ async fn run_status(json: bool) -> Result<()> {
                         "{prefix}  Search: \x1b[1;31m⚠ stalled neural upgrade\x1b[0m (run `ig --doctor` or retry a query)"
                     );
                 } else if ws.has_neural_vectors {
-                    let pct = if ws.chunk_count > 0 {
-                        let ratio = (ws.neural_vector_count as f64 / ws.chunk_count as f64) * 100.0;
-                        format!("{:.0}%", ratio.min(100.0))
-                    } else {
-                        "100%".to_string()
-                    };
+                    let pct = format!("{:.0}%", ws.neural_coverage_percent);
                     let backend = ws
                         .neural_backend
                         .as_deref()
                         .unwrap_or("local backend unrecorded");
+                    let profile = ws.neural_profile.as_deref().unwrap_or("general");
                     println!(
-                        "{prefix}  Search: \x1b[1;32m★ neural\x1b[0m ({} enhanced, {pct}, last enhanced with {backend})",
-                        ws.neural_vector_count
+                        "{prefix}  Search: \x1b[1;32m★ neural\x1b[0m ({} / {} vectors, {pct}, {profile} {}d, last enhanced with {backend})",
+                        ws.neural_vector_count, ws.vector_key_count, ws.neural_dimensions
                     );
                 } else if ws.indexing_in_progress {
                     let progress_str = ws.indexing_progress.as_deref().unwrap_or("starting");
@@ -505,6 +528,10 @@ async fn run_status(json: bool) -> Result<()> {
                 } else {
                     println!("{prefix}  Search: \x1b[90m○ empty\x1b[0m");
                 }
+                println!(
+                    "{prefix}  Rank:   bounded top-{} reranker",
+                    ws.reranker_candidate_limit
+                );
 
                 println!();
             }
@@ -567,7 +594,7 @@ fn should_autospawn_daemon_for_query(workspace: &Workspace, no_watch: bool) -> b
         .read_metadata()
         .ok()
         .flatten()
-        .is_some_and(|meta| meta.watch_enabled)
+        .is_some_and(|meta| meta.last_indexed_at_unix.is_some())
 }
 
 async fn run_add(
@@ -686,7 +713,9 @@ async fn run_query(cli: Cli) -> Result<()> {
     };
     let (workspace, scope_filter) = resolve_workspace_and_scope(&query_path)?;
     let _ = workspace.cleanup_stale_legacy_runtime_files();
-    let watch_configured = should_autospawn_daemon_for_query(&workspace, cli.no_watch);
+    let local_only_mode = cli.lexical_only || cli.symbol || cli.refs || cli.callers;
+    let watch_configured =
+        should_autospawn_daemon_for_query(&workspace, cli.no_watch) && !local_only_mode;
     let scope_path = scope_filter.as_ref().map(|scope| scope.rel_path.clone());
     let scope_is_file = scope_filter.as_ref().is_some_and(|scope| scope.is_file);
     let skip_static_daemon_status = should_skip_static_daemon_status(watch_configured);
@@ -1025,7 +1054,42 @@ async fn run_query(cli: Cli) -> Result<()> {
         }
     }
 
-    let hits = if cli.literal {
+    let hits = if cli.symbol || cli.refs || cli.callers {
+        let mode = if cli.symbol {
+            crate::symbols::SymbolSearchMode::Definitions
+        } else if cli.refs {
+            crate::symbols::SymbolSearchMode::References
+        } else {
+            crate::symbols::SymbolSearchMode::Callers
+        };
+        let mut hits = crate::symbols::search_symbols(
+            &workspace,
+            query,
+            mode,
+            backend_limit,
+            scope_filter.as_ref(),
+        )?;
+        if cli.all_indices {
+            for status in list_workspaces()? {
+                if status.id == workspace.id || status.last_indexed_at_unix.is_none() {
+                    continue;
+                }
+                if let Ok(ws) = Workspace::resolve(&status.root) {
+                    let mut workspace_hits =
+                        crate::symbols::search_symbols(&ws, query, mode, backend_limit, None)?;
+                    for hit in &mut workspace_hits {
+                        hit.file_path = ws.root.join(&hit.file_path);
+                    }
+                    hits.extend(workspace_hits);
+                }
+            }
+            hits.sort_by(|left, right| right.score.total_cmp(&left.score));
+            if let Some(limit) = backend_limit {
+                hits.truncate(limit);
+            }
+        }
+        hits
+    } else if cli.literal {
         let request = DaemonRequest::LiteralSearch {
             path: query_path_opt.clone(),
             query: query.to_string(),
@@ -1131,7 +1195,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             cancel_token: None,
         };
 
-        if search_via_daemon {
+        if should_route_hybrid_query_via_daemon(search_via_daemon, cli.lexical_only) {
             let show_spinner = std::io::stderr().is_terminal();
             let _t_search = std::time::Instant::now();
             let search_future = daemon::request::<fn(String, usize, usize)>(&request, false, None);
@@ -1193,7 +1257,8 @@ async fn run_query(cli: Cli) -> Result<()> {
             } else {
                 vec![workspace.clone()]
             };
-            let search_model = local_hybrid_search_model(&workspaces, query, cli.hash);
+            let search_model =
+                local_hybrid_search_model(&workspaces, query, cli.hash, cli.lexical_only);
             for ws in workspaces {
                 let _ = ws.cleanup_stale_legacy_runtime_files();
                 let _t_search = std::time::Instant::now();
@@ -1265,11 +1330,14 @@ async fn run_query(cli: Cli) -> Result<()> {
     // We launch it as a separate hidden CLI process to prevent segmentation faults
     // observed while tearing down neural-model state when the main process exits.
     // Skipped in CI/test environments (IVYGREP_NO_AUTOSPAWN=1).
-    let no_autospawn = env::var("IVYGREP_NO_AUTOSPAWN").is_ok();
     if !cli.all_indices
         && !cli.hash
         && !cli.regex
-        && !no_autospawn
+        && !cli.lexical_only
+        && !cli.symbol
+        && !cli.refs
+        && !cli.callers
+        && config::background_enhancement_enabled()
         && workspace.needs_neural_enhancement()
     {
         let _ = workspace.trigger_background_enhancement();
@@ -1403,13 +1471,13 @@ fn init_tracing() {
         .try_init();
 }
 
-fn run_doctor(path: Option<&Path>, fix: bool, json: bool) -> Result<()> {
+fn run_doctor(path: Option<&Path>, fix: bool, deep: bool, json: bool) -> Result<()> {
     let target = match path {
         Some(path) => path.to_path_buf(),
         None => env::current_dir()?,
     };
     let workspace = Workspace::resolve(&target)?;
-    let report = crate::doctor::inspect_and_maybe_fix(&workspace, fix)?;
+    let report = crate::doctor::inspect_and_maybe_fix(&workspace, fix, deep)?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -1421,6 +1489,26 @@ fn run_doctor(path: Option<&Path>, fix: bool, json: bool) -> Result<()> {
     println!(
         "Chunks: {}  Files: {}",
         report.chunk_count, report.file_count
+    );
+    println!(
+        "Neural: {} / {} vectors ({:.1}%), {} {}d",
+        report.neural_vector_count,
+        report.vector_key_count,
+        report.neural_coverage_percent,
+        report.neural_profile,
+        report.neural_dimensions,
+    );
+    println!(
+        "Index: metadata {}, lexical {}, hash {}, neural {}, other {}",
+        format_bytes(report.index_components.metadata_bytes),
+        format_bytes(report.index_components.lexical_bytes),
+        format_bytes(report.index_components.hash_vectors_bytes),
+        format_bytes(report.index_components.neural_vectors_bytes),
+        format_bytes(report.index_components.other_bytes),
+    );
+    println!(
+        "Reranker: top {} candidates",
+        report.reranker_candidate_limit
     );
 
     for finding in report.findings {
@@ -1492,7 +1580,7 @@ fn local_fallback_search(
         vec![workspace.clone()]
     };
 
-    let model = local_hybrid_search_model(&workspaces, query, use_hash);
+    let model = local_hybrid_search_model(&workspaces, query, use_hash, false);
 
     for ws in workspaces {
         match hybrid_search(&ws, query, model.as_deref(), options) {
@@ -1740,8 +1828,9 @@ fn local_hybrid_search_model(
     workspaces: &[Workspace],
     query: &str,
     use_hash: bool,
+    lexical_only: bool,
 ) -> Option<Box<dyn crate::embedding::EmbeddingModel>> {
-    if is_single_word_symbol_query(query) {
+    if lexical_only || is_single_word_symbol_query(query) {
         return None;
     }
 
@@ -1750,6 +1839,10 @@ fn local_hybrid_search_model(
     } else {
         Some(create_model(false))
     }
+}
+
+fn should_route_hybrid_query_via_daemon(daemon_available: bool, lexical_only: bool) -> bool {
+    daemon_available && !lexical_only
 }
 
 fn initial_query_index_state(workspace: &Workspace) -> WorkspaceIndexState {
@@ -1803,7 +1896,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn query_autospawn_only_when_watch_is_configured() {
+    fn query_autospawn_uses_any_completed_index_unless_disabled() {
         let home = tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
 
@@ -1824,7 +1917,7 @@ mod tests {
                 root: workspace.root.clone(),
                 created_at_unix: now,
                 last_indexed_at_unix: Some(now),
-                watch_enabled: true,
+                watch_enabled: false,
                 skip_gitignore: false,
                 index_generation: 0,
             })
@@ -1870,7 +1963,8 @@ mod tests {
         let hash_model = create_hash_model();
         index_workspace(&workspace, hash_model.as_ref()).unwrap();
 
-        let model = local_hybrid_search_model(&[workspace], "semantic query", false).unwrap();
+        let model =
+            local_hybrid_search_model(&[workspace], "semantic query", false, false).unwrap();
         assert_eq!(model.dimensions(), 256);
     }
 
@@ -1925,5 +2019,12 @@ mod tests {
 
         crate::ipc::cleanup_socket();
         unsafe { std::env::remove_var("IVYGREP_NO_AUTOSPAWN") };
+    }
+
+    #[test]
+    fn lexical_only_search_never_routes_through_daemon() {
+        assert!(should_route_hybrid_query_via_daemon(true, false));
+        assert!(!should_route_hybrid_query_via_daemon(true, true));
+        assert!(!should_route_hybrid_query_via_daemon(false, false));
     }
 }

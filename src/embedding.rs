@@ -12,6 +12,56 @@
 use crate::text::{singularize_token, split_identifier_segments};
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum NeuralProfile {
+    General,
+    Code,
+}
+
+impl NeuralProfile {
+    pub fn configured() -> Self {
+        match std::env::var("IVYGREP_MODEL_PROFILE")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "code" | "codesearchnet" | "code-minilm-l6-v1" => Self::Code,
+            _ => Self::General,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Code => "code-minilm-l6-v1",
+        }
+    }
+
+    pub fn dimensions(self) -> usize {
+        384
+    }
+
+    #[cfg(feature = "neural")]
+    fn model_id(self) -> &'static str {
+        match self {
+            Self::General => "sentence-transformers/all-MiniLM-L6-v2",
+            Self::Code => "isuruwijesiri/all-MiniLM-L6-v2-code-search-512",
+        }
+    }
+
+    #[cfg(feature = "neural")]
+    fn model_revision(self) -> &'static str {
+        match self {
+            Self::General => "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+            Self::Code => "13b266a617039c16d924b49a56ae978dbd8727ff",
+        }
+    }
+}
+
+pub fn configured_neural_profile_name() -> &'static str {
+    NeuralProfile::configured().name()
+}
+
 /// Shared interface implemented by all embedding backends.
 pub trait EmbeddingModel: Send + Sync {
     fn dimensions(&self) -> usize;
@@ -25,6 +75,10 @@ pub trait EmbeddingModel: Send + Sync {
 
     /// Human-readable backend used to create persisted neural vectors.
     fn backend_info(&self) -> Option<&'static str> {
+        None
+    }
+
+    fn profile_info(&self) -> Option<&'static str> {
         None
     }
 
@@ -263,6 +317,7 @@ pub struct CandleEmbeddingModel {
     /// contention. Foreground (query) embedding only ever needs one.
     pool: Vec<parking_lot::Mutex<candle_embed::BasedBertEmbedder>>,
     backend: NeuralBackend,
+    profile: NeuralProfile,
 }
 
 /// Embed `texts` across up to `workers` OS threads, preserving input order.
@@ -363,13 +418,21 @@ impl CandleEmbeddingModel {
         };
 
         use candle_embed::{CandleEmbedBuilder, WithModel};
+        let profile = NeuralProfile::configured();
 
         let build_one = |requested: NeuralBackend| -> anyhow::Result<(
             candle_embed::BasedBertEmbedder,
             NeuralBackend,
         )> {
-            let builder =
-                CandleEmbedBuilder::new().set_model_from_presets(WithModel::AllMinilmL6V2);
+            let builder = match profile {
+                NeuralProfile::General => {
+                    CandleEmbedBuilder::new().set_model_from_presets(WithModel::AllMinilmL6V2)
+                }
+                NeuralProfile::Code => {
+                    CandleEmbedBuilder::new().custom_embedding_model(profile.model_id())
+                }
+            }
+            .custom_model_revision(profile.model_revision());
             let builder = match requested {
                 NeuralBackend::Metal => builder.with_device_metal(),
                 NeuralBackend::Cuda => builder.with_device_any_cuda(),
@@ -442,7 +505,11 @@ impl CandleEmbeddingModel {
             }
         }
 
-        Ok(Self { pool, backend })
+        Ok(Self {
+            pool,
+            backend,
+            profile,
+        })
     }
 }
 
@@ -485,6 +552,10 @@ impl EmbeddingModel for CandleEmbeddingModel {
         Some(self.backend.label())
     }
 
+    fn profile_info(&self) -> Option<&'static str> {
+        Some(self.profile.name())
+    }
+
     fn respects_system_constraints(&self) -> bool {
         true
     }
@@ -520,6 +591,39 @@ fn semantic_token_variants(raw_token: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn neural_profile_selection_is_explicit_and_stable() {
+        unsafe { std::env::remove_var("IVYGREP_MODEL_PROFILE") };
+        assert_eq!(NeuralProfile::configured(), NeuralProfile::General);
+        assert_eq!(NeuralProfile::General.name(), "general");
+        assert_eq!(NeuralProfile::General.dimensions(), 384);
+
+        unsafe { std::env::set_var("IVYGREP_MODEL_PROFILE", "code") };
+        assert_eq!(NeuralProfile::configured(), NeuralProfile::Code);
+        assert_eq!(NeuralProfile::Code.name(), "code-minilm-l6-v1");
+        assert_eq!(NeuralProfile::Code.dimensions(), 384);
+        unsafe { std::env::remove_var("IVYGREP_MODEL_PROFILE") };
+    }
+
+    #[cfg(feature = "neural")]
+    #[test]
+    fn neural_profiles_pin_model_revisions() {
+        assert_eq!(
+            NeuralProfile::General.model_revision(),
+            "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
+        );
+        assert_eq!(
+            NeuralProfile::Code.model_id(),
+            "isuruwijesiri/all-MiniLM-L6-v2-code-search-512"
+        );
+        assert_eq!(
+            NeuralProfile::Code.model_revision(),
+            "13b266a617039c16d924b49a56ae978dbd8727ff"
+        );
+    }
 
     /// `parallel_embed` must return vectors in input order no matter how the
     /// texts are split across worker threads (regression guard for the

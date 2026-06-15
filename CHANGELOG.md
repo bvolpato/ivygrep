@@ -4,6 +4,23 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-06-15
+
+### Added
+- **Public code-retrieval evaluation.** A BEIR/CoIR-style runner reports nDCG@10, MRR@10, precision@5, recall@20, indexing cost, index size, and cold/warm latency with an offline multilingual CI fixture.
+- **Persisted symbol and call graph.** `ig --symbol`, `ig --refs`, and `ig --callers` query exact definitions and callers across normal indexes and worktree overlays.
+- **Portable Windows vector backend.** Native hash-only Windows builds, E2E coverage, release archives, and checksums no longer depend on USearch/SimSIMD compiling under MSVC.
+- **Opt-in code embedding profile.** `IVYGREP_MODEL_PROFILE=code` selects a pinned compact CodeSearchNet-trained MiniLM checkpoint, with profile identity persisted beside neural vectors.
+
+### Changed
+- **Neural vectors now use F16 storage.** Index format v10 rebuilds incompatible stores, materially reduces neural payload size, and exposes per-component index sizes.
+- **Ranking work is bounded.** Coverage-aware hash/neural fusion preserves partial-index recall, exact symbol evidence feeds hybrid ranking, and expensive deterministic boosts examine at most `IVYGREP_RERANK_LIMIT` candidates (100 by default).
+- **Large-repository status is metadata-backed.** Normal status and doctor reads use cached counts; `ig --doctor --deep` is the explicit full integrity scan. Indexed no-watch workspaces also reuse the daemon unless auto-spawn is disabled.
+- **Release artifacts are stripped and size-gated.** Release binaries and archives enforce an 80 MiB budget.
+
+### Testing
+- Added multilingual symbol CRUD/worktree coverage, portable vector persistence and recovery tests, F16/F32 recall and size checks, model-profile compatibility tests, Windows CI/E2E lanes, and public retrieval metric tests.
+
 ## [0.9.7] - 2026-06-14
 
 ### Fixed

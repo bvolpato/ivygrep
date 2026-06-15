@@ -1,0 +1,5 @@
+{"_id":"rust-tax","title":"Rust tax calculation","text":"pub fn calculate_tax(subtotal: f64, rate: f64) -> f64 { subtotal * rate }","metadata":{"path":"rust/src/tax.rs"}}
+{"_id":"python-payment","title":"Python payment authorization","text":"def authorize_payment(card, amount):\n    return card.is_valid() and amount > 0","metadata":{"path":"python/payments.py"}}
+{"_id":"go-trace","title":"Go trace sampling","text":"func shouldSampleTrace(priority int) bool {\n    return priority > 0\n}","metadata":{"path":"go/trace/sampling.go"}}
+{"_id":"java-cache","title":"Java cache invalidation","text":"public void invalidateCache(String key) {\n    cache.remove(key);\n}","metadata":{"path":"java/CacheManager.java"}}
+{"_id":"ts-feature","title":"TypeScript feature flags","text":"export function isFeatureEnabled(name: string): boolean {\n  return flags.get(name) === true;\n}","metadata":{"path":"typescript/flags.ts"}}

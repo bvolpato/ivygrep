@@ -66,6 +66,11 @@ fn parse_env_path(value: &str) -> Option<PathBuf> {
     }
 }
 
+pub fn background_enhancement_enabled() -> bool {
+    env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
+        && env::var_os("IVYGREP_DISABLE_BACKGROUND_ENHANCEMENT").is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

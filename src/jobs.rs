@@ -282,6 +282,7 @@ pub fn process_is_alive(pid: u32, expected_start_time: Option<&str>) -> bool {
     }
     #[cfg(not(unix))]
     {
+        let _ = pid;
         let _ = expected_start_time;
         true
     }

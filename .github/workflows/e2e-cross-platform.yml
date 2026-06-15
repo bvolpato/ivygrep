@@ -7,7 +7,7 @@ on:
       architectures:
         description: "Architectures to test (comma-separated)"
         required: false
-        default: "linux-x86_64,linux-aarch64,macos-arm64"
+        default: "linux-x86_64,linux-aarch64,macos-arm64,windows-x86_64"
         type: string
       test_scope:
         description: "Test scope"
@@ -252,6 +252,36 @@ jobs:
           IG_BIN="$PWD/target/release/ig"
           ./scripts/e2e_procedures.sh --binary "$IG_BIN"
 
+  native-windows-x86_64:
+    name: "E2E: Windows x86_64 (portable vectors)"
+    if: >-
+      github.event_name != 'workflow_dispatch' ||
+      contains(github.event.inputs.architectures, 'windows-x86_64')
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Build portable hash-only binary
+        run: cargo build --locked --release --no-default-features
+        env:
+          RUSTFLAGS: "-D warnings"
+
+      - name: Run unit and integration tests
+        if: github.event.inputs.test_scope != 'smoke'
+        run: cargo test --locked --lib --bins --tests --no-default-features
+        env:
+          RUSTFLAGS: "-D warnings"
+
+      - name: E2E documented procedures
+        shell: bash
+        run: ./scripts/e2e_procedures.sh --binary "$PWD/target/release/ig.exe"
+
   # ── Summary ─────────────────────────────────────────────────────────
   summary:
     name: "E2E Summary"
@@ -261,6 +291,7 @@ jobs:
       - native-macos-intel
       - cross-linux-aarch64
       - hash-only-linux
+      - native-windows-x86_64
     if: always()
     runs-on: ubuntu-latest
     steps:
@@ -271,6 +302,7 @@ jobs:
           MACOS_X86_RESULT: ${{ needs.native-macos-intel.result }}
           LINUX_ARM_RESULT: ${{ needs.cross-linux-aarch64.result }}
           HASH_ONLY_RESULT: ${{ needs.hash-only-linux.result }}
+          WINDOWS_RESULT: ${{ needs.native-windows-x86_64.result }}
         run: |
           {
             echo "## Cross-Platform E2E Results"
@@ -282,6 +314,7 @@ jobs:
             echo "| macOS x86_64 (native) | $MACOS_X86_RESULT |"
             echo "| Linux aarch64 (QEMU) | $LINUX_ARM_RESULT |"
             echo "| Linux x86_64 (hash-only) | $HASH_ONLY_RESULT |"
+            echo "| Windows x86_64 (portable vectors) | $WINDOWS_RESULT |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check for failures
@@ -290,7 +323,8 @@ jobs:
           needs.native-macos-arm64.result == 'failure' ||
           needs.native-macos-intel.result == 'failure' ||
           needs.cross-linux-aarch64.result == 'failure' ||
-          needs.hash-only-linux.result == 'failure'
+          needs.hash-only-linux.result == 'failure' ||
+          needs.native-windows-x86_64.result == 'failure'
         run: |
           echo "❌ One or more E2E jobs failed!"
           exit 1

@@ -16,6 +16,8 @@ on:
     paths:
       - "src/**/*.rs"
       - "scripts/eval_relevance.py"
+      - "scripts/eval_code_retrieval.py"
+      - "tests/fixtures/retrieval/**"
       - "tests/fixtures/ivygrep_relevance_queries.json"
       - ".github/workflows/relevance.yml"
   workflow_dispatch:
@@ -58,3 +60,21 @@ jobs:
             --skip-build \
             --binary target/release/ig \
             --check --min-mrr 0.52 --min-p1 0.38 --min-recall5 0.70
+
+      - name: Public retrieval fixture
+        run: |
+          python3 scripts/eval_code_retrieval.py \
+            --dataset tests/fixtures/retrieval \
+            --binary target/release/ig \
+            --mode hash \
+            --output retrieval-results.json \
+            --min-ndcg-at-10 0.75 \
+            --min-mrr-at-10 0.75 \
+            --min-precision-at-5 0.18 \
+            --min-recall-at-20 0.95
+
+      - name: Upload public retrieval result
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: public-retrieval-results
+          path: retrieval-results.json

@@ -48,7 +48,11 @@ jobs:
             archive_name: macos-aarch64
             archive: tar.gz
             extra_features: accelerate
-          # Windows excluded: usearch (simsimd) doesn't compile on MSVC.
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            archive_name: windows-x86_64
+            archive: zip
+            cargo_flags: --no-default-features
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -60,6 +64,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Install Python on Windows
+        if: runner.os == 'Windows'
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
       - name: Install cross
         if: matrix.use_cross
         run: cargo install cross --git https://github.com/cross-rs/cross
@@ -67,6 +77,10 @@ jobs:
       - name: Build release binary
         run: |
           build_args=(--locked --release --target "$TARGET")
+          if [ -n "$CARGO_FLAGS" ]; then
+            read -r -a cargo_flags <<< "$CARGO_FLAGS"
+            build_args+=("${cargo_flags[@]}")
+          fi
           if [ -n "$EXTRA_FEATURES" ]; then
             build_args+=(--features "$EXTRA_FEATURES")
           fi
@@ -79,6 +93,23 @@ jobs:
             cargo build "${build_args[@]}"
           fi
         shell: bash
+        env:
+          CARGO_FLAGS: ${{ matrix.cargo_flags }}
+
+      - name: Enforce release size budget
+        shell: bash
+        run: |
+          EXE_SUFFIX=""
+          if [[ "$TARGET" == *"windows"* ]]; then
+            EXE_SUFFIX=".exe"
+          fi
+          PYTHON=python3
+          if [[ "$TARGET" == *"windows"* ]]; then
+            PYTHON=python
+          fi
+          "$PYTHON" scripts/check_release_size.py \
+            "target/${TARGET}/release/ig${EXE_SUFFIX}" \
+            --max-mib 80
 
       - name: Set up QEMU
         if: "contains(matrix.target, 'aarch64') && contains(matrix.runner, 'ubuntu-latest')"
@@ -99,7 +130,9 @@ jobs:
 
           # Basic sanity. Cross-compiled Linux aarch64 binaries are validated by
           # e2e-cross-platform.yml under QEMU, not executed on this x86 runner.
-          file "$IG_BIN"
+          if [[ "$TARGET" != *"windows"* ]]; then
+            file "$IG_BIN"
+          fi
           if [[ "$TARGET" != "aarch64-unknown-linux-musl" ]]; then
             "$IG_BIN" --version
             "$IG_BIN" --help > /dev/null
@@ -112,10 +145,18 @@ jobs:
             echo "Skipping index test for Linux aarch64 release binary (tested under QEMU in e2e-cross-platform.yml)"
           else
             ./scripts/e2e_procedures.sh --binary "$IG_BIN"
-            python3 scripts/check_daemon_equivalence.py \
+            PYTHON=python3
+            if [[ "$TARGET" == *"windows"* ]]; then
+              PYTHON=python
+            fi
+            BENCH_HOME=/tmp/ivygrep-release-daemon-equivalence
+            if [[ "$TARGET" == *"windows"* ]]; then
+              BENCH_HOME="$RUNNER_TEMP/ivygrep-release-daemon-equivalence"
+            fi
+            "$PYTHON" scripts/check_daemon_equivalence.py \
               --skip-build \
               --binary "$IG_BIN" \
-              --bench-home /tmp/ivygrep-release-daemon-equivalence
+              --bench-home "$BENCH_HOME"
           fi
 
       - name: Package archive
@@ -135,13 +176,22 @@ jobs:
           cd dist
           
           if [[ "$ARCHIVE_FORMAT" == "zip" ]]; then
-            zip -r "${ARCHIVE_NAME}.zip" "${ARCHIVE_NAME}"
+            7z a "${ARCHIVE_NAME}.zip" "${ARCHIVE_NAME}"
             echo "ARCHIVE_PATH=dist/${ARCHIVE_NAME}.zip" >> "$GITHUB_ENV"
           else
             tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
             echo "ARCHIVE_PATH=dist/${ARCHIVE_NAME}.tar.gz" >> "$GITHUB_ENV"
           fi
           echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> "$GITHUB_ENV"
+
+      - name: Enforce archive size budget
+        shell: bash
+        run: |
+          PYTHON=python3
+          if [[ "$TARGET" == *"windows"* ]]; then
+            PYTHON=python
+          fi
+          "$PYTHON" scripts/check_release_size.py "$ARCHIVE_PATH" --max-mib 80
 
       - name: Compute SHA256
         shell: bash

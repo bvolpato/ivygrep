@@ -1,0 +1,5 @@
+query-id	corpus-id	score
+q-tax	rust-tax	3
+q-payment	python-payment	3
+q-trace	go-trace	3
+q-feature	ts-feature	3

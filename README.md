@@ -53,6 +53,11 @@ mkdir -p ~/.local/bin
 install -m 0755 ig ~/.local/bin/ig
 ```
 
+Windows x86_64 releases include `ig.exe` in
+`ivygrep-${tag}-windows-x86_64.zip`. Extract it into a directory on `PATH`.
+Windows uses the dependency-light portable vector backend; Linux and macOS use
+the faster USearch backend.
+
 **Build from source:**
 ```bash
 git clone https://github.com/bvolpato/ivygrep.git && cd ivygrep
@@ -213,8 +218,11 @@ claim. Benchmark writeups and charts live under
 
 Indexing commits BM25/literal search first. A load-aware background subprocess
 builds hash ANN vectors, then upgrades to local neural vectors with Candle
-(`AllMiniLML6V2`). macOS release builds use Accelerate-backed CPU math; Metal
-is available as an opt-in local build while its background throughput is tuned.
+(`AllMiniLML6V2`). Set `IVYGREP_MODEL_PROFILE=code` to opt into the pinned,
+CodeSearchNet-trained `code-minilm-l6-v1` profile. Model identity is persisted
+with the index so incompatible vectors are rebuilt rather than silently reused.
+macOS release builds use Accelerate-backed CPU math; Metal is available as an
+opt-in local build while its background throughput is tuned.
 
 Relevance evaluation separates foreground readiness from post-background hash
 quality:
@@ -222,6 +230,10 @@ quality:
 ```bash
 uv run scripts/eval_relevance.py
 uv run scripts/eval_relevance.py --enhance-hash
+python3 scripts/eval_code_retrieval.py \
+  --dataset tests/fixtures/retrieval \
+  --binary target/release/ig \
+  --mode hash
 ```
 
 ---
@@ -234,7 +246,9 @@ ivygrep deeply understands git. This is a core design decision, not an afterthou
 - **Content-based deduplication:** Byte-identical files are never re-indexed across branches.
 - **`.gitignore` native:** Respects rules automatically at every level.
 
-**Tech stack:** `tantivy` (BM25), `usearch` (vector store), `tree-sitter` (AST), `candle_embed` / `candle-core` (local neural embeddings), `xxh3` (SIMD hashes).
+**Tech stack:** `tantivy` (BM25), `usearch` plus a pure-Rust portable vector
+backend, `tree-sitter` (AST), SQLite symbol/call graph storage,
+`candle_embed` / `candle-core` (local neural embeddings), and `xxh3` hashes.
 
 ---
 
@@ -242,8 +256,8 @@ ivygrep deeply understands git. This is a core design decision, not an afterthou
 
 ivygrep runs search and embedding inference locally and never sends your code, queries, or index data to an external service. A few things worth knowing:
 
-- **Where data lives:** the index (which stores compressed source chunks in SQLite) and the daemon socket live under `~/.local/share/ivygrep` (or `$XDG_DATA_HOME`/`$IVYGREP_HOME`). The index directory is `0700` and the daemon socket `0600`, and the daemon verifies the connecting peer's uid — so other local users on a shared host can't read your indexed code or reach the daemon.
-- **Model download:** neural mode uses `hf-hub` to download AllMiniLM-L6-v2 model assets on first use and caches them under `$HF_HOME` or `~/.cache/huggingface`. Use `--hash` or a `--no-default-features` build when no model-network access is permitted.
+- **Where data lives:** the index stores compressed source chunks under `~/.local/share/ivygrep` (or `$XDG_DATA_HOME`/`$IVYGREP_HOME`). Unix uses an owner-only `0600` socket plus peer-uid verification. Windows uses loopback TCP with a per-daemon authentication token stored beside the user-owned index. Keep a custom `IVYGREP_HOME` private to your account.
+- **Model download:** neural mode uses `hf-hub` to download pinned model assets on first use and caches them under `$HF_HOME` or `~/.cache/huggingface`. The default is AllMiniLM-L6-v2; `IVYGREP_MODEL_PROFILE=code` selects the compact CodeSearchNet-trained profile. Use `--hash` or a `--no-default-features` build when no model-network access is permitted.
 - **Inference backend:** macOS release binaries execute locally with Accelerate-backed CPU math; portable Linux release binaries execute locally on CPU. Source builds can opt into local Metal with `--features accelerate,metal` or CUDA with `--features cuda` on a compatible installation. The CUDA build does not require cuDNN. If `nvidia-smi` cannot report compute capability, `build.sh` and `test.sh` infer `CUDA_COMPUTE_CAP=120` for RTX 50/Blackwell hosts; set `CUDA_COMPUTE_CAP` explicitly for other affected GPUs. `ig --status` reports the recorded backend that last generated neural vectors.
 - **Secrets in your repo:** ivygrep indexes file *contents*, including config/dotfiles (e.g. `.env`) unless they're gitignored. Those contents are stored in the local index and can appear in search snippets. Keep secrets out of the workspace or in `.gitignore`.
 - **MCP scope:** the `ig_search` MCP tool only searches the workspace at the provided `path` — it cannot search across other indexed projects.
@@ -260,12 +274,17 @@ ig --add .                         # register & index a workspace
 ig --rm .                          # unregister a workspace
 ig --status                        # show workspace health & embedding status
 ig --doctor                        # inspect index health for the current workspace
+ig --doctor --deep                 # run full cross-store integrity scans
 ig --doctor --fix                  # rebuild a broken or stale index
 
 # Search modes
 ig --interactive "query"             # interactive TUI with file/snippet browsing
 ig --literal "fn_name"               # fast exact-match search (index-backed)
+ig --lexical-only "query"          # BM25/path/signature retrieval only
 ig --hash "query"                  # force hash embeddings (skip neural)
+ig --symbol calculate_tax          # exact definitions
+ig --refs calculate_tax            # indexed references/calls
+ig --callers calculate_tax         # caller chunks
 
 # Output control
 ig -n 5 "query"                    # limit to 5 files
@@ -293,7 +312,10 @@ ig --mcp                           # start MCP server (stdio)
 ./build.sh --locked --features cuda  # opt-in Linux CUDA neural binary
 ./bench.sh          # critical Criterion benchmark, no stale local baseline comparison
 ```
-The test suite covers unit tests, CLI snapshots, concurrency, golden queries, labeled relevance metrics, incremental CRUD, MCP, daemon recovery, git/worktree behavior, property-based Merkle invariants, and benchmark guards.
+The test suite covers unit tests, CLI snapshots, concurrency, golden queries,
+public-layout retrieval metrics, symbol/caller indexing, incremental CRUD, MCP,
+daemon recovery, git/worktree behavior, property-based Merkle invariants, and
+benchmark guards.
 Benchmark output reports per-operation latency; short-looking numbers are repeated inside Criterion so actual timed samples remain long enough to be stable.
 
 ### End-to-end procedures
@@ -324,10 +346,9 @@ These smoke tests run against throwaway projects and isolated `IVYGREP_HOME` dir
 ## Roadmap
 
 - **More Tree-sitter languages:** expand the AST pipeline to Kotlin, SQL, and additional grammars as high-quality tree-sitter parsers mature.
-- **Symbol retrieval:** store symbol tables during chunking, add a second index for definitions, references, and call edges. Enable `symbol`, `refs`, and `callers` workflows without replacing the current hybrid text retrieval.
-
+- **Public benchmark expansion:** run CoIR and CodeSearchNet baselines regularly and publish comparable quality/latency history.
+- **Learned reranking:** evaluate compact local cross-encoders against the bounded deterministic reranker without weakening offline portability.
 - **Editor integrations:** VS Code extension and Neovim telescope plugin for in-editor semantic search.
-- **Windows support:** resolve usearch/simsimd MSVC compatibility for native Windows builds.
 - **Background job resilience:** richer queue diagnostics and resumable worker state across daemon restarts.
 
 ## Contributing

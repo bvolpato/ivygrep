@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ivygrep Public Code-Retrieval Evaluation</title>
+    <meta name="description" content="Reproducible ivygrep code-retrieval quality, latency, indexing, and size evaluation.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Outfit:wght@300;400;600;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="report.css">
+    <link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
+</head>
+<body class="report-page">
+    <div class="bg-fx"></div>
+    <div class="bg-fx-glow"></div>
+    <main class="report-shell relative z-10">
+        <nav class="report-nav">
+            <a class="report-brand" href="../">
+                <img src="../assets/icon.svg" alt="ivygrep">
+                <span>ivygrep benchmarks</span>
+            </a>
+            <div class="report-links">
+                <a href="index.html">Reports</a>
+                <a href="../dev/bench/">CI Dashboard</a>
+                <a href="https://github.com/bvolpato/ivygrep/blob/main/docs/benchmarks/public-code-retrieval.md">Source</a>
+            </div>
+        </nav>
+
+        <section class="report-hero">
+            <div class="report-eyebrow">Public Code Retrieval</div>
+            <h1>Quality and speed from one reproducible runner</h1>
+            <p>The BEIR/CoIR-style harness measures retrieval quality, indexing cost, index size, and cold versus warm query latency without requiring an external service.</p>
+        </section>
+
+        <section class="report-grid" aria-label="reported metrics">
+            <div class="report-stat"><strong>nDCG@10</strong><span>graded ranking quality</span></div>
+            <div class="report-stat"><strong>MRR@10</strong><span>first relevant result</span></div>
+            <div class="report-stat"><strong>Recall@20</strong><span>relevant result coverage</span></div>
+            <div class="report-stat"><strong>p50 / p95</strong><span>cold and warm latency</span></div>
+        </section>
+
+        <section class="report-card">
+            <h2>Run the Offline Fixture</h2>
+            <pre><code>./build.sh
+python3 scripts/eval_code_retrieval.py \
+  --dataset tests/fixtures/retrieval \
+  --binary target/release/ig \
+  --mode hash</code></pre>
+            <p>The checked-in multilingual fixture keeps CI deterministic. Modes cover lexical-only, hash, normal hybrid, and verified neural retrieval. Neural measurements wait for daemon model readiness; lexical-only results identify their local-process warm path.</p>
+        </section>
+
+        <section class="report-card">
+            <h2>External Dataset Adapters</h2>
+            <p>CoIR is pinned to commit <code>89d0e769c18f0576a766072ba1071d4e04cca3dd</code>. CodeSearchNet is pinned to commit <code>106e827405c968597da938f6b373d30183918869</code>.</p>
+            <p>Export corpus documents, queries, and graded qrels into the documented three-file layout. Store dataset checksums with each result artifact so comparisons remain reproducible.</p>
+        </section>
+    </main>
+</body>
+</html>

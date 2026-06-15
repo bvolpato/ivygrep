@@ -57,11 +57,15 @@ Tantivy builds an inverted index once and answers term queries in milliseconds.
 On a 93K-file Linux checkout, indexed candidate lookup stays in milliseconds
 instead of scanning every file.
 
-### USearch — Vector Similarity Index
+### Vector Backends
 
-[USearch](https://github.com/unum-cloud/usearch) is a compact, embeddable
-approximate nearest-neighbor (ANN) search library. It implements HNSW
-(Hierarchical Navigable Small World) graphs for fast cosine similarity search.
+[USearch](https://github.com/unum-cloud/usearch) is the optimized Linux/macOS
+approximate nearest-neighbor backend. Windows hash-only builds use a
+dependency-light pure-Rust backend with the same persistence/search contract
+and deterministic linear cosine ranking.
+
+Windows daemon IPC uses loopback TCP with a fresh per-daemon authentication
+token. Unix keeps the owner-only socket and peer-uid check.
 
 **What we use it for:**
 
@@ -73,14 +77,15 @@ approximate nearest-neighbor (ANN) search library. It implements HNSW
   - `vectors.usearch` — 256-dimensional hash embeddings, built asynchronously
     after lexical indexing. The store exists immediately but can be empty while
     BM25/literal search is already queryable.
-  - `vectors_neural.usearch` — 384-dimensional Candle neural embeddings
-    (AllMiniLM-L6-v2), built asynchronously by a background subprocess. Higher
-    quality, used when available.
+  - `vectors_neural.usearch` — 384-dimensional F16 Candle neural embeddings,
+    built asynchronously by a background subprocess. Higher quality, used when
+    available.
 - **Memory-mapped reads** — search opens the vector index with `view()` (mmap)
   instead of `load()`. On large indices (e.g. 4.66M vectors/chunks for the
   Linux kernel), this keeps vector-store open time out of the hot path.
-- **Atomic writes** — vector saves write to a `.tmp` file then `rename()` to
-  prevent corrupted reads by concurrent search processes.
+- **Crash-safe writes** — vector saves write to a temporary file and replace
+  the active store. The portable backend keeps a recoverable backup during the
+  Windows replacement sequence.
 
 **Why USearch and not FAISS/Qdrant:** USearch is a single embeddable C++ library
 with Rust bindings. No server process, no Python, no external dependencies.
@@ -105,8 +110,13 @@ The entire index is a single file.
   (`SELECT ... WHERE language = ?`) to collect matching chunk vector keys, then
   scores only those against the query vector. This turns a full-corpus vector
   scan into a targeted lookup.
-- **Stats cache** — `chunk_count` and `file_count` are cached in a `_stats`
-  table, updated at commit time, so `--status` queries are O(1).
+- **Stats cache** — `chunk_count`, `file_count`, and `vector_key_count` are
+  cached in `_stats` at commit time. Normal status/doctor never falls back to
+  full-table scans; `--doctor --deep` performs live integrity counts.
+- **Symbol graph** — exact definitions and lightweight call/reference edges
+  are indexed by normalized symbol name for `--symbol`, `--refs`, and
+  `--callers`. Worktree tombstones prevent shadowed base symbols from leaking
+  into overlay results.
 - **WAL mode** — `PRAGMA journal_mode = WAL` allows concurrent reads during
   writes. Indexing batches all inserts in a single transaction for 10-50×
   speedup.
@@ -121,10 +131,13 @@ and embedding over [`candle-core`](https://github.com/huggingface/candle).
 
 **What we use them for:**
 
-- **AllMiniLM-L6-v2** -- the neural embedding model. Converts
+- **AllMiniLM-L6-v2** -- the default neural embedding model. Converts
   code chunks and search queries into 384-dimensional dense vectors that capture
   semantic meaning. Downloaded on first neural use through `hf-hub`, cached in
   `$HF_HOME` or `~/.cache/huggingface`.
+- **Code MiniLM profile** -- `IVYGREP_MODEL_PROFILE=code` selects a pinned
+  CodeSearchNet-trained 384-dimensional MiniLM checkpoint. The profile identity
+  is stored with the vector index; a mismatch forces re-embedding.
 - **Parallel background embedding** -- `embed_batch()` distributes slices over
   a bounded pool of Candle embedders in OS threads. The query path keeps one
   model instance.
@@ -148,8 +161,9 @@ with no Python service and no source-code upload.
 
 ### Model Evaluation Roadmap
 
-Keep `AllMiniLM-L6-v2` as default until a replacement wins relevance and laptop
-throughput gates on macOS and Linux.
+Keep `AllMiniLM-L6-v2` as the portable default until the opt-in code profile or
+another replacement wins public relevance and laptop-throughput gates on macOS,
+Linux, and Windows-compatible hash fallback.
 
 | Candidate | Fit | Required work before experiment |
 |---|---|---|

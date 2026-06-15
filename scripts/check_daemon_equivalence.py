@@ -10,14 +10,15 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 
-DEFAULT_HOME = Path("/tmp/ivygrep-daemon-equivalence-home")
-TMP_ROOT = Path("/tmp").resolve()
+TMP_ROOT = Path(tempfile.gettempdir()).resolve()
+DEFAULT_HOME = TMP_ROOT / "ivygrep-daemon-equivalence-home"
 
 
 @dataclass(frozen=True)
@@ -43,6 +44,7 @@ def ensure_bench_home_under_tmp(path: Path) -> Path:
 
 
 def write_fixture(repo: Path) -> None:
+    (repo / ".git").mkdir()
     (repo / "src").mkdir(parents=True)
     (repo / "tests").mkdir(parents=True)
     (repo / "docs").mkdir(parents=True)
@@ -91,25 +93,36 @@ class DaemonProcess:
 
     def stop(self) -> None:
         if self.proc.poll() is None:
-            try:
-                os.killpg(self.proc.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+            if os.name == "nt":
+                self.proc.terminate()
+            else:
+                try:
+                    os.killpg(self.proc.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
             try:
                 self.proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(self.proc.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                if os.name == "nt":
+                    self.proc.kill()
+                else:
+                    try:
+                        os.killpg(self.proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
                 self.proc.wait(timeout=5)
         self.log_file.close()
 
 
+def daemon_endpoint_path(bench_home: Path) -> Path:
+    return bench_home / ("daemon.port" if os.name == "nt" else "daemon.sock")
+
+
 def start_daemon(binary: Path, *, cwd: Path, env: dict[str, str], bench_home: Path) -> DaemonProcess:
-    socket = bench_home / "daemon.sock"
-    socket.unlink(missing_ok=True)
+    endpoint = daemon_endpoint_path(bench_home)
+    endpoint.unlink(missing_ok=True)
     log_file = (bench_home / "equivalence-daemon.log").open("ab")
+    popen_options = {"start_new_session": True} if os.name != "nt" else {}
     proc = subprocess.Popen(
         [str(binary), "--daemon"],
         cwd=cwd,
@@ -118,7 +131,7 @@ def start_daemon(binary: Path, *, cwd: Path, env: dict[str, str], bench_home: Pa
         stdout=log_file,
         stderr=subprocess.STDOUT,
         text=False,
-        start_new_session=True,
+        **popen_options,
     )
     daemon = DaemonProcess(proc, log_file)
     try:
@@ -126,7 +139,7 @@ def start_daemon(binary: Path, *, cwd: Path, env: dict[str, str], bench_home: Pa
         while time.monotonic() < deadline:
             if proc.poll() is not None:
                 raise RuntimeError("daemon exited before status became available")
-            if socket.exists():
+            if endpoint.exists():
                 try:
                     run([str(binary), "--status", "--json"], cwd=cwd, env=env)
                     return daemon

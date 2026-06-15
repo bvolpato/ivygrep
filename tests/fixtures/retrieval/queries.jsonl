@@ -1,0 +1,4 @@
+{"_id":"q-tax","text":"where is sales tax calculated"}
+{"_id":"q-payment","text":"authorize a card payment"}
+{"_id":"q-trace","text":"decide whether a trace should be sampled"}
+{"_id":"q-feature","text":"evaluate a feature flag"}
