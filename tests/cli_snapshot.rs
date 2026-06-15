@@ -63,7 +63,9 @@ fn cli_help_snapshot() {
         .get_output()
         .stdout
         .clone();
-    let text = String::from_utf8(output).unwrap();
+    let text = String::from_utf8(output)
+        .unwrap()
+        .replace("Usage: ig.exe ", "Usage: ig ");
 
     insta::assert_snapshot!("cli_help", text);
 }
