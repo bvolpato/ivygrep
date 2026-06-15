@@ -42,7 +42,7 @@ pub struct Workspace {
 ///   7 — Lexical index commits before background hash ANN enrichment
 ///   8 — Stable vector keys and tombstone journals preserve resumable background enrichment
 ///   9 — Neural vector storage uses F16 quantization
-///  10 — Symbol definitions and call edges are persisted in SQLite
+///  10 — Symbol graph persistence, F16 vectors, and portable relative paths
 pub const INDEX_FORMAT_VERSION: u32 = 10;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,6 +164,15 @@ impl WorkspaceScope {
             rel_path.starts_with(&self.rel_path)
         }
     }
+}
+
+/// Canonical representation for relative paths persisted in an index.
+///
+/// Rust accepts `/` as a separator on Windows, so using it everywhere keeps
+/// SQLite, Tantivy, Merkle snapshots, and serialized results platform-neutral.
+pub fn index_path_string(path: &Path) -> String {
+    path.to_string_lossy()
+        .replace(std::path::MAIN_SEPARATOR, "/")
 }
 
 impl Workspace {
@@ -1504,7 +1513,7 @@ fn legacy_pid_status(pid_path: &Path, cleanup_stale: bool) -> LegacyPidStatus {
         }
     };
 
-    // kill(pid, 0) checks if process exists without sending a signal
+    // kill(pid, 0) checks if process exists without sending a signal.
     #[cfg(unix)]
     {
         let alive = unsafe { libc::kill(pid, 0) } == 0;
@@ -1517,11 +1526,28 @@ fn legacy_pid_status(pid_path: &Path, cleanup_stale: bool) -> LegacyPidStatus {
             LegacyPidStatus::Stale
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = pid;
-        let _ = cleanup_stale;
-        LegacyPidStatus::Alive
+        use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, GetLastError};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32) };
+        let alive = if handle.is_null() {
+            (unsafe { GetLastError() }) == ERROR_ACCESS_DENIED
+        } else {
+            let _ = unsafe { CloseHandle(handle) };
+            true
+        };
+        if !alive && cleanup_stale {
+            let _ = fs::remove_file(pid_path);
+        }
+        if alive {
+            LegacyPidStatus::Alive
+        } else {
+            LegacyPidStatus::Stale
+        }
     }
 }
 
@@ -1601,6 +1627,14 @@ mod tests {
 
     use super::*;
     use serial_test::serial;
+
+    #[test]
+    fn index_paths_use_forward_slashes() {
+        assert_eq!(
+            index_path_string(&PathBuf::from("src").join("search.rs")),
+            "src/search.rs"
+        );
+    }
 
     #[test]
     fn resolve_workspace_and_scope_tracks_subpaths() {

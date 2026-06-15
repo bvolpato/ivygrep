@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::workspace::index_path_string;
+
 use std::io::IsTerminal;
 
 const MAX_INDEXABLE_FILE_BYTES: u64 = 16 * 1024 * 1024;
@@ -111,10 +113,7 @@ impl MerkleSnapshot {
                         && e.file_type().is_some_and(|ft| ft.is_file())
                         && let Ok(rel) = e.path().strip_prefix(root_ref)
                     {
-                        paths_ref
-                            .lock()
-                            .unwrap()
-                            .insert(rel.to_string_lossy().to_string());
+                        paths_ref.lock().unwrap().insert(index_path_string(rel));
                     }
                     ignore::WalkState::Continue
                 })
@@ -192,15 +191,16 @@ impl MerkleSnapshot {
                         Ok(c) => c,
                         Err(_) => return ignore::WalkState::Continue,
                     };
-                    let mut data = Vec::with_capacity(rel.to_string_lossy().len() + content.len());
-                    data.extend_from_slice(rel.to_string_lossy().as_bytes());
+                    let rel_str = index_path_string(&rel);
+                    let mut data = Vec::with_capacity(rel_str.len() + content.len());
+                    data.extend_from_slice(rel_str.as_bytes());
                     data.extend_from_slice(&content);
                     hex::encode(xxhash_rust::xxh3::xxh3_128(&data).to_le_bytes())
                 } else {
                     metadata_file_hash(&metadata)
                 };
 
-                let rel_str = rel.to_string_lossy().to_string();
+                let rel_str = index_path_string(&rel);
                 let is_ignored = skip_gitignore && !unignored_paths_clone.contains(&rel_str);
                 let final_hash = if is_ignored {
                     format!("{file_hash}-1")
@@ -290,7 +290,7 @@ impl MerkleSnapshot {
                 return Ok(None);
             }
 
-            let key = rel_path.to_string_lossy().to_string();
+            let key = index_path_string(rel_path);
             let next_hash = match fs::metadata(&path) {
                 Ok(metadata)
                     if metadata.is_file() && metadata.len() <= MAX_INDEXABLE_FILE_BYTES =>

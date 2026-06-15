@@ -192,10 +192,8 @@ jobs:
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             PYTHON=python
           fi
-          BENCH_HOME=/tmp/ivygrep-daemon-equivalence
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            BENCH_HOME="$RUNNER_TEMP/ivygrep-daemon-equivalence"
-          fi
+          BENCH_ROOT="$("$PYTHON" -c 'import tempfile; print(tempfile.gettempdir())')"
+          BENCH_HOME="$BENCH_ROOT/ivygrep-daemon-equivalence"
           "$PYTHON" scripts/check_daemon_equivalence.py \
             --skip-build \
             --binary "$IG_BIN" \

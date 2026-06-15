@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
-use std::path::{MAIN_SEPARATOR, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -20,7 +20,7 @@ use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
 use crate::text::{singularize_token, split_identifier_segments};
 use crate::vector_store::{HASH_VECTOR_QUANTIZATION, NEURAL_VECTOR_QUANTIZATION, VectorStore};
-use crate::workspace::{Workspace, WorkspaceScope};
+use crate::workspace::{Workspace, WorkspaceScope, index_path_string};
 
 #[derive(Debug, Clone)]
 pub struct RawIndexedChunk {
@@ -1535,14 +1535,14 @@ fn constrain_query_to_scope(
         return Ok(query);
     };
 
-    let scope_path = scope.rel_path.to_string_lossy();
+    let scope_path = index_path_string(&scope.rel_path);
     let path_query: Box<dyn Query> = if scope.is_file {
         Box::new(TermQuery::new(
             tantivy::Term::from_field_text(fields.file_path, &scope_path),
             IndexRecordOption::Basic,
         ))
     } else {
-        let prefix = format!("{}{MAIN_SEPARATOR}", regex::escape(&scope_path));
+        let prefix = format!("{}/", regex::escape(&scope_path));
         Box::new(RegexQuery::from_pattern(
             &format!("{prefix}.*"),
             fields.file_path,
@@ -1759,12 +1759,12 @@ fn query_filtered_chunks(
     }
 
     if let Some(scope) = scope_filter {
-        let prefix = scope.rel_path.to_string_lossy().to_string();
+        let prefix = index_path_string(&scope.rel_path);
         if scope.is_file {
             sql.push_str(" AND file_path = ?");
             params_vec.push(Box::new(prefix));
         } else {
-            let dir_prefix = format!("{prefix}{MAIN_SEPARATOR}");
+            let dir_prefix = format!("{prefix}/");
             sql.push_str(" AND file_path LIKE ? ESCAPE '\\'");
             params_vec.push(Box::new(format!("{}%", escape_like_pattern(&dir_prefix))));
         }
@@ -2559,8 +2559,8 @@ struct ChunkBoostContext {
 impl ChunkBoostContext {
     fn new(chunk: &IndexedChunk) -> Self {
         let text_lower = chunk.text.to_ascii_lowercase();
-        let path_lossy = chunk.file_path.to_string_lossy();
-        let path_lower = path_lossy.to_ascii_lowercase();
+        let path_string = index_path_string(&chunk.file_path);
+        let path_lower = path_string.to_ascii_lowercase();
         let path_segments: Vec<String> = path_lower.split('/').map(String::from).collect();
         let file_stem = chunk
             .file_path
@@ -2579,7 +2579,7 @@ impl ChunkBoostContext {
             .to_ascii_lowercase();
 
         let text_compact = compact_identifier(&chunk.text);
-        let path_compact = compact_identifier(&path_lossy);
+        let path_compact = compact_identifier(&path_string);
 
         Self {
             text_lower,

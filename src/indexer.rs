@@ -23,7 +23,7 @@ use crate::merkle::{MerkleDiff, MerkleSnapshot};
 use crate::vector_store::{
     HASH_VECTOR_QUANTIZATION, NEURAL_VECTOR_QUANTIZATION, ScalarKind, VectorStore,
 };
-use crate::workspace::{Workspace, WorkspaceMetadata};
+use crate::workspace::{Workspace, WorkspaceMetadata, index_path_string};
 
 const ZSTD_MAGIC: &[u8] = &[0x28, 0xB5, 0x2F, 0xFD];
 
@@ -574,7 +574,7 @@ fn index_workspace_inner(
         overlay_base_snapshot.as_ref().and_then(|snapshot| {
             snapshot
                 .files
-                .get(rel_path.to_string_lossy().as_ref())
+                .get(&index_path_string(rel_path))
                 .map(|hash| hash.ends_with("-1"))
         })
     };
@@ -602,7 +602,7 @@ fn index_workspace_inner(
             for (rel_path, is_ignored) in d.added_or_modified {
                 let base_snapshot_is_current = overlay_base_snapshot
                     .as_ref()
-                    .and_then(|snapshot| snapshot.files.get(rel_path.to_string_lossy().as_ref()))
+                    .and_then(|snapshot| snapshot.files.get(&index_path_string(&rel_path)))
                     .is_some_and(|hash| {
                         MerkleSnapshot::path_matches_metadata_snapshot(
                             &main_root.join(&rel_path),
@@ -778,12 +778,12 @@ fn index_workspace_inner(
             )?;
             tx.execute(
                 "DELETE FROM tombstones WHERE file_path = ?1",
-                params![rel_path.to_string_lossy().to_string()],
+                params![index_path_string(rel_path)],
             )?;
         }
 
         for rel_path in &diff.deleted {
-            let rel_str = rel_path.to_string_lossy().to_string();
+            let rel_str = index_path_string(rel_path);
             remove_file_chunks(
                 &tx,
                 &mut writer,
@@ -811,7 +811,7 @@ fn index_workspace_inner(
             if path_exists_in_base(rel_path) {
                 tx.execute(
                     "INSERT OR IGNORE INTO tombstones (file_path) VALUES (?1)",
-                    params![rel_path.to_string_lossy().to_string()],
+                    params![index_path_string(rel_path)],
                 )?;
             }
         }
@@ -943,8 +943,8 @@ fn index_workspace_inner(
         // provisional graph dominated first-index latency and delayed usable
         // BM25/literal results by minutes.
         for (rel_path, indexed_chunks) in &file_chunks {
-            let rel_path_string = rel_path.to_string_lossy();
-            touched_files.insert(rel_path_string.to_string());
+            let rel_path_string = index_path_string(rel_path);
+            touched_files.insert(rel_path_string.clone());
             total_chunks_processed += indexed_chunks.len();
             chunks_since_commit += indexed_chunks.len();
 
@@ -969,7 +969,7 @@ fn index_workspace_inner(
                 persist_or_stop!(insert_chunk(
                     &tx,
                     indexed,
-                    rel_path_string.as_ref(),
+                    &rel_path_string,
                     is_fresh_index,
                     now_unix
                 ));
@@ -977,7 +977,7 @@ fn index_workspace_inner(
                     &mut writer,
                     &fields,
                     indexed,
-                    rel_path_string.as_ref()
+                    &rel_path_string
                 ));
             }
         }
@@ -1604,7 +1604,7 @@ fn vector_key_for_chunk(
     content_hash: &str,
 ) -> u64 {
     let mut key_data = Vec::with_capacity(content_hash.len() + 64);
-    key_data.extend_from_slice(file_path.to_string_lossy().as_bytes());
+    key_data.extend_from_slice(index_path_string(file_path).as_bytes());
     key_data.extend_from_slice(&start_line.to_le_bytes());
     key_data.extend_from_slice(&end_line.to_le_bytes());
     key_data.extend_from_slice(content_hash.as_bytes());
@@ -1661,7 +1661,7 @@ fn remove_file_chunks(
     neural_tombstones_path: Option<&Path>,
     rel_path: &Path,
 ) -> Result<()> {
-    let rel_str = rel_path.to_string_lossy().to_string();
+    let rel_str = index_path_string(rel_path);
     let keys = chunk_vector_keys_for_file(sqlite, &rel_str)?;
 
     writer.delete_term(Term::from_field_text(fields.file_path, &rel_str));

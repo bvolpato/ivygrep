@@ -149,10 +149,8 @@ jobs:
             if [[ "$TARGET" == *"windows"* ]]; then
               PYTHON=python
             fi
-            BENCH_HOME=/tmp/ivygrep-release-daemon-equivalence
-            if [[ "$TARGET" == *"windows"* ]]; then
-              BENCH_HOME="$RUNNER_TEMP/ivygrep-release-daemon-equivalence"
-            fi
+            BENCH_ROOT="$("$PYTHON" -c 'import tempfile; print(tempfile.gettempdir())')"
+            BENCH_HOME="$BENCH_ROOT/ivygrep-release-daemon-equivalence"
             "$PYTHON" scripts/check_daemon_equivalence.py \
               --skip-build \
               --binary "$IG_BIN" \

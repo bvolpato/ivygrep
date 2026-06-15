@@ -97,6 +97,12 @@ openssl = { version = "0.10", features = ["vendored"] }
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 usearch = { version = "2.24", default-features = false, features = ["fp16lib"] }
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
+
 [profile.release]
 debug = false
 lto = "thin"
