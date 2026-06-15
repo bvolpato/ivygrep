@@ -107,13 +107,17 @@ def export_datasets(
                 seed=options.get("seed", 20260615),
             )
         )
-    minimum = manifest["profiles"][profile]["minimum_queries"]
-    query_count = sum(item["counts"]["queries"] for item in exported)
-    if query_count < minimum:
-        raise ValueError(
-            f"profile {profile} exported {query_count} queries, below {minimum}"
-        )
+    validate_profile_query_count(manifest, profile, exported)
     return exported
+
+
+def validate_profile_query_count(
+    manifest: dict, profile: str, provenances: list[dict]
+) -> None:
+    minimum = manifest["profiles"][profile]["minimum_queries"]
+    query_count = sum(item["counts"]["queries"] for item in provenances)
+    if query_count < minimum:
+        raise ValueError(f"profile {profile} has {query_count} queries, below {minimum}")
 
 
 def run_evaluation(
@@ -327,6 +331,7 @@ def main() -> int:
         json.loads((dataset / "provenance.json").read_text(encoding="utf-8"))
         for dataset in dataset_paths
     ]
+    validate_profile_query_count(manifest, args.profile, provenances)
     subprocess.run(
         [
             sys.executable,

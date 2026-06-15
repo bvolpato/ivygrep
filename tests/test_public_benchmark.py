@@ -44,6 +44,23 @@ class PublicBenchmarkTest(unittest.TestCase):
             manifest["profiles"]["public-core"]["tasks"],
         )
 
+    def test_cached_datasets_must_meet_profile_query_minimum(self):
+        manifest = {
+            "profiles": {
+                "public-core": {
+                    "minimum_queries": 1000,
+                }
+            }
+        }
+        with self.assertRaisesRegex(
+            ValueError, "profile public-core has 100 queries, below 1000"
+        ):
+            matrix_runner.validate_profile_query_count(
+                manifest,
+                "public-core",
+                [{"counts": {"queries": 25}} for _ in range(4)],
+            )
+
     def test_query_sampling_is_deterministic(self):
         qrels = [
             {"query_id": f"q{index}", "corpus_id": f"d{index}", "score": 1}
