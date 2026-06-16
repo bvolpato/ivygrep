@@ -3,13 +3,16 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::embedding::create_hash_model;
+use crate::embedding::{NeuralModelIdentity, create_hash_model};
 use crate::indexer::{index_workspace, remove_workspace_index};
 use crate::jobs::{
     self, ENHANCEMENT_HEARTBEAT_TTL_SECS, ENHANCEMENT_PAUSE_WARN_SECS, INDEXING_HEARTBEAT_TTL_SECS,
     JobKind, WATCHER_HEARTBEAT_TTL_SECS,
 };
-use crate::workspace::{IndexComponentSizes, Workspace, WorkspaceIndexHealth, WorkspaceIndexState};
+use crate::workspace::{
+    IndexCompactionHealth, IndexComponentSizes, Workspace, WorkspaceIndexHealth,
+    WorkspaceIndexState,
+};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DoctorReport {
@@ -22,9 +25,14 @@ pub struct DoctorReport {
     pub neural_vector_count: u64,
     pub neural_coverage_percent: f64,
     pub neural_profile: String,
+    pub neural_model: Option<NeuralModelIdentity>,
     pub neural_dimensions: usize,
     pub index_components: IndexComponentSizes,
+    pub compaction: IndexCompactionHealth,
     pub reranker_candidate_limit: usize,
+    pub reranker_mode: String,
+    pub reranker_model: Option<String>,
+    pub reranker_error: Option<String>,
     pub has_indexable_files: bool,
     pub findings: Vec<String>,
     pub repaired: bool,
@@ -41,6 +49,7 @@ impl DoctorReport {
             findings = default_findings(&health);
         }
 
+        let reranker = crate::reranker::runtime_status();
         Self {
             workspace_root: workspace.root.clone(),
             state: health.state,
@@ -53,9 +62,17 @@ impl DoctorReport {
             neural_profile: workspace
                 .neural_profile_name()
                 .unwrap_or_else(|| crate::embedding::configured_neural_profile_name().to_string()),
-            neural_dimensions: crate::embedding::NeuralProfile::configured().dimensions(),
+            neural_model: workspace.neural_model_identity(),
+            neural_dimensions: workspace
+                .neural_model_identity()
+                .map(|identity| identity.dimensions)
+                .unwrap_or_else(|| crate::embedding::NeuralProfile::configured().dimensions()),
             index_components: workspace.index_component_sizes(),
+            compaction: workspace.index_compaction_health(),
             reranker_candidate_limit: crate::search::rerank_candidate_limit(),
+            reranker_mode: reranker.mode,
+            reranker_model: reranker.model_id,
+            reranker_error: reranker.error,
             has_indexable_files: health.has_indexable_files,
             findings,
             repaired,
@@ -100,8 +117,12 @@ pub fn inspect_and_maybe_fix(workspace: &Workspace, fix: bool, deep: bool) -> Re
     };
 
     if !should_rebuild {
-        let repaired_runtime = !cleanup_actions.is_empty();
+        let compacted = workspace.compact_sqlite_if_needed()?;
+        let repaired_runtime = !cleanup_actions.is_empty() || compacted;
         let mut findings = cleanup_actions;
+        if compacted {
+            findings.push("SQLite index compacted successfully".to_string());
+        }
         findings.extend(runtime_findings(workspace));
         findings.extend(default_findings(&initial));
         if findings.is_empty() {
@@ -173,6 +194,26 @@ fn runtime_findings(workspace: &Workspace) -> Vec<String> {
         && age.as_secs() > ENHANCEMENT_PAUSE_WARN_SECS
     {
         findings.push("background enhancement has been paused for a long time".to_string());
+    }
+
+    let compaction = workspace.index_compaction_health();
+    if compaction.sqlite_page_bytes > 0
+        && compaction.format_version != compaction.current_format_version
+    {
+        findings.push(format!(
+            "index format v{} is incompatible with v{}; run `ig --doctor --fix` to rebuild",
+            compaction.format_version, compaction.current_format_version
+        ));
+    } else if compaction.compaction_recommended {
+        findings.push(format!(
+            "SQLite has {:.1}% reclaimable pages; run `ig --doctor --fix` to compact",
+            compaction.sqlite_free_percent
+        ));
+    }
+    if compaction.legacy_graph_bytes > 0 {
+        findings.push(
+            "legacy persisted call graph is present; rebuild to reclaim its storage".to_string(),
+        );
     }
 
     findings

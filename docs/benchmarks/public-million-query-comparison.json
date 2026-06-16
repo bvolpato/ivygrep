@@ -1,0 +1,18 @@
+{
+  "baseline_commit": "4b24c627d9bd733edec5d145437e9aa35c2ab2ca",
+  "baseline_runs": 1,
+  "current_commit": "c1442ebb68f5a8b162a7eaafe5b033666b7fa585",
+  "current_runs": 1,
+  "expected_recall_at_20_loss": 0.0,
+  "failures": [],
+  "index_throughput_ratio": null,
+  "passed": true,
+  "schema_version": 1,
+  "warm_distinct_p95_ratio": {
+    "bootstrap_repetitions": 5000,
+    "ci95_lower": 0.24657195898761863,
+    "ci95_upper": 0.3180137154371946,
+    "observed": 0.280237512372687,
+    "significant_regression": false
+  }
+}

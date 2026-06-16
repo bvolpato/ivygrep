@@ -68,6 +68,165 @@ pub struct SearchOptions {
     pub cancel_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum QueryIntent {
+    ExactIdentifier,
+    Path,
+    LiteralOrError,
+    NaturalLanguage,
+    DocsTestsExamples,
+    Mixed,
+}
+
+impl QueryIntent {
+    fn name(self) -> &'static str {
+        match self {
+            Self::ExactIdentifier => "exact-identifier",
+            Self::Path => "path-file",
+            Self::LiteralOrError => "literal-error",
+            Self::NaturalLanguage => "natural-language-implementation",
+            Self::DocsTestsExamples => "docs-tests-examples",
+            Self::Mixed => "mixed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct QueryRouting {
+    intent: QueryIntent,
+    use_neural: bool,
+    lexical_multiplier: usize,
+    literal_multiplier: usize,
+    semantic_multiplier: usize,
+    symbol_limit: usize,
+}
+
+impl QueryRouting {
+    fn classify(query: &str) -> Self {
+        let trimmed = query.trim();
+        let terms = raw_query_terms(trimmed);
+        let lower = trimmed.to_ascii_lowercase();
+        let concise_path_query = !trimmed.contains('\n') && terms.len() <= 8;
+        let has_path_shape = concise_path_query
+            && (trimmed.contains('/')
+                || trimmed.contains('\\')
+                || trimmed.split_whitespace().any(|term| {
+                    Path::new(term.trim_matches(|ch: char| {
+                        matches!(ch, '"' | '\'' | '(' | ')' | '[' | ']' | ',' | ';')
+                    }))
+                    .extension()
+                    .is_some_and(|extension| {
+                        let length = extension.to_string_lossy().len();
+                        (1..=8).contains(&length)
+                    })
+                }));
+        let has_literal_shape = trimmed.contains('\n')
+            || trimmed.contains('"')
+            || trimmed.contains('\'')
+            || lower.contains("error:")
+            || lower.contains("exception")
+            || lower.contains("traceback")
+            || lower.contains("failed to");
+        let targets_support = terms.iter().any(|term| {
+            matches!(
+                term.as_str(),
+                "doc"
+                    | "docs"
+                    | "documentation"
+                    | "readme"
+                    | "test"
+                    | "tests"
+                    | "testing"
+                    | "example"
+                    | "examples"
+                    | "sample"
+                    | "samples"
+            )
+        });
+        let exact_identifier = !trimmed.is_empty()
+            && !trimmed.contains(char::is_whitespace)
+            && trimmed
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | ':' | '.' | '$'));
+
+        let intent = if has_path_shape {
+            QueryIntent::Path
+        } else if has_literal_shape {
+            QueryIntent::LiteralOrError
+        } else if exact_identifier {
+            QueryIntent::ExactIdentifier
+        } else if targets_support {
+            QueryIntent::DocsTestsExamples
+        } else if terms.len() >= 13 {
+            QueryIntent::NaturalLanguage
+        } else {
+            QueryIntent::Mixed
+        };
+        match intent {
+            QueryIntent::ExactIdentifier => Self {
+                intent,
+                use_neural: false,
+                lexical_multiplier: 8,
+                literal_multiplier: 6,
+                semantic_multiplier: 1,
+                symbol_limit: 100,
+            },
+            QueryIntent::Path => Self {
+                intent,
+                use_neural: false,
+                lexical_multiplier: 8,
+                literal_multiplier: 5,
+                semantic_multiplier: 1,
+                symbol_limit: 50,
+            },
+            QueryIntent::LiteralOrError => Self {
+                intent,
+                // Long literals are usually pasted code or detailed prompts.
+                // Keep exact retrieval dominant, but let semantic retrieval
+                // contribute instead of treating every quote/newline as a
+                // short error lookup.
+                use_neural: terms.len() >= 13,
+                lexical_multiplier: 10,
+                literal_multiplier: 8,
+                semantic_multiplier: 1,
+                symbol_limit: 50,
+            },
+            QueryIntent::NaturalLanguage => Self {
+                intent,
+                use_neural: true,
+                lexical_multiplier: 5,
+                literal_multiplier: 4,
+                semantic_multiplier: 1,
+                symbol_limit: 50,
+            },
+            QueryIntent::DocsTestsExamples => Self {
+                intent,
+                use_neural: true,
+                lexical_multiplier: 5,
+                literal_multiplier: 5,
+                semantic_multiplier: 1,
+                symbol_limit: 50,
+            },
+            QueryIntent::Mixed => Self {
+                intent,
+                use_neural: false,
+                lexical_multiplier: 5,
+                literal_multiplier: 5,
+                semantic_multiplier: 1,
+                symbol_limit: 100,
+            },
+        }
+    }
+}
+
+fn corpus_candidate_multiplier(document_count: u64) -> usize {
+    match document_count {
+        0..=50_000 => 1,
+        50_001..=500_000 => 2,
+        _ => 3,
+    }
+}
+
 impl Default for SearchOptions {
     fn default() -> Self {
         Self {
@@ -109,15 +268,20 @@ pub struct SearchContext {
     pub base_neural_vectors: Option<VectorStore>,
     pub neural_profile: Option<String>,
     pub base_neural_profile: Option<String>,
+    pub neural_model: Option<crate::embedding::NeuralModelIdentity>,
+    pub base_neural_model: Option<crate::embedding::NeuralModelIdentity>,
 
     pub tombstones: HashSet<String>,
     pub overlay_files: HashSet<String>,
 }
 
 impl SearchContext {
-    pub fn load(workspace: &Workspace, emb_dim: Option<usize>) -> Result<Self> {
-        let wants_hash_vectors = matches!(emb_dim, Some(256 | 384));
-        let wants_neural_vectors = matches!(emb_dim, Some(384));
+    pub fn load(
+        workspace: &Workspace,
+        emb_dim: Option<usize>,
+        wants_neural_vectors: bool,
+    ) -> Result<Self> {
+        let wants_hash_vectors = emb_dim.is_some();
         let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
         if use_overlay {
             let overlay_sqlite = open_sqlite_readonly(&workspace.overlay_sqlite_path())?;
@@ -153,11 +317,19 @@ impl SearchContext {
                     .ok()
                 })
                 .flatten();
+            let base_neural_model = fs::read_to_string(base_dir.join("neural_model.json"))
+                .ok()
+                .and_then(|value| serde_json::from_str(&value).ok());
+            let base_neural_dimensions = base_neural_model
+                .as_ref()
+                .map_or(384, |identity: &crate::embedding::NeuralModelIdentity| {
+                    identity.dimensions
+                });
             let base_neural_vec = wants_neural_vectors
                 .then(|| {
                     VectorStore::open_readonly(
                         &base_dir.join("vectors_neural.usearch"),
-                        384,
+                        base_neural_dimensions,
                         NEURAL_VECTOR_QUANTIZATION,
                     )
                     .ok()
@@ -196,6 +368,8 @@ impl SearchContext {
                 base_neural_vectors: base_neural_vec,
                 neural_profile: None,
                 base_neural_profile,
+                neural_model: None,
+                base_neural_model,
                 tombstones,
                 overlay_files,
             })
@@ -214,11 +388,15 @@ impl SearchContext {
                     .ok()
                 })
                 .flatten();
+            let neural_model = workspace.neural_model_identity();
+            let neural_dimensions = neural_model
+                .as_ref()
+                .map_or(384, |identity| identity.dimensions);
             let neural_vec = wants_neural_vectors
                 .then(|| {
                     VectorStore::open_readonly(
                         &workspace.vector_neural_path(),
-                        384,
+                        neural_dimensions,
                         NEURAL_VECTOR_QUANTIZATION,
                     )
                     .ok()
@@ -238,6 +416,8 @@ impl SearchContext {
                 base_neural_vectors: None,
                 neural_profile,
                 base_neural_profile: None,
+                neural_model,
+                base_neural_model: None,
                 tombstones: HashSet::new(),
                 overlay_files: HashSet::new(),
             })
@@ -300,7 +480,7 @@ pub fn literal_search(
     query_text: &str,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
-    let ctx = SearchContext::load(workspace, None)?;
+    let ctx = SearchContext::load(workspace, None, false)?;
     literal_search_with_context(&ctx, workspace, query_text, options)
 }
 
@@ -318,23 +498,7 @@ pub fn literal_search_with_context(
 
     let query_lower = query.to_ascii_lowercase();
     let max_hits = options.limit.unwrap_or(500);
-    let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
-    let glob_path_filter = build_glob_path_query_filter(ctx, &path_matcher, options)?;
-
-    let matcher = regex::RegexBuilder::new(&regex::escape(query))
-        .case_insensitive(true)
-        .build()?;
-
-    // Use Tantivy index as a pre-filter: find candidate chunk IDs via the
-    // inverted index, then only decompress those to verify the exact match.
-    let candidate_chunks = collect_literal_candidates(
-        ctx,
-        query,
-        &matcher,
-        &path_matcher,
-        &glob_path_filter,
-        options,
-    )?;
+    let candidate_chunks = exact_literal_chunks_with_context(ctx, query, options, false)?;
 
     tracing::trace!(
         "literal_scan={:?} candidates={}",
@@ -407,6 +571,46 @@ pub fn literal_search_with_context(
     Ok(hits)
 }
 
+pub(crate) fn exact_literal_chunks(
+    workspace: &Workspace,
+    query: &str,
+    options: &SearchOptions,
+) -> Result<Vec<IndexedChunk>> {
+    let ctx = SearchContext::load(workspace, None, false)?;
+    exact_literal_chunks_with_context(&ctx, query, options, false)
+}
+
+pub(crate) fn exact_literal_chunks_unbounded(
+    workspace: &Workspace,
+    query: &str,
+    options: &SearchOptions,
+) -> Result<Vec<IndexedChunk>> {
+    let ctx = SearchContext::load(workspace, None, false)?;
+    exact_literal_chunks_with_context(&ctx, query, options, true)
+}
+
+fn exact_literal_chunks_with_context(
+    ctx: &SearchContext,
+    query: &str,
+    options: &SearchOptions,
+    unbounded: bool,
+) -> Result<Vec<IndexedChunk>> {
+    let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
+    let glob_path_filter = build_glob_path_query_filter(ctx, &path_matcher, options)?;
+    let matcher = regex::RegexBuilder::new(&regex::escape(query))
+        .case_insensitive(true)
+        .build()?;
+    collect_literal_candidates(
+        ctx,
+        query,
+        &matcher,
+        &path_matcher,
+        &glob_path_filter,
+        options,
+        unbounded,
+    )
+}
+
 /// Use the Tantivy inverted index to find candidate chunks containing the
 /// literal query, then verify with regex on the decompressed text.
 /// This is O(index_lookup + matched_candidates) instead of O(all_chunks).
@@ -417,8 +621,15 @@ fn collect_literal_candidates(
     path_matcher: &PathGlobMatcher,
     glob_path_filter: &GlobPathQueryFilter,
     options: &SearchOptions,
+    unbounded: bool,
 ) -> Result<Vec<IndexedChunk>> {
-    let candidate_limit = if let Some(limit) = options.limit {
+    let candidate_limit = if unbounded {
+        ctx.searchers
+            .iter()
+            .map(|searcher| searcher.num_docs() as usize)
+            .sum::<usize>()
+            .max(1)
+    } else if let Some(limit) = options.limit {
         if limit == usize::MAX {
             50_000
         } else {
@@ -439,7 +650,11 @@ fn collect_literal_candidates(
     parser.set_conjunction_by_default();
 
     let mut found_ids = HashSet::<String>::new();
-    let target_hits = options.limit.unwrap_or(100).min(500);
+    let target_hits = if unbounded {
+        candidate_limit
+    } else {
+        options.limit.unwrap_or(100).min(candidate_limit)
+    };
 
     // Phase 1: Collect candidate chunks from Tantivy (metadata only, no text).
     let mut candidates: Vec<IndexedChunk> = Vec::new();
@@ -516,7 +731,11 @@ pub fn hybrid_search(
     embedding_model: Option<&dyn EmbeddingModel>,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
-    let ctx = SearchContext::load(workspace, embedding_model.map(|m| m.dimensions()))?;
+    let ctx = SearchContext::load(
+        workspace,
+        embedding_model.map(|model| model.dimensions()),
+        embedding_model.is_some_and(|model| model.model_identity().is_some()),
+    )?;
     hybrid_search_with_context(&ctx, workspace, query_text, embedding_model, options)
 }
 
@@ -536,20 +755,23 @@ pub fn hybrid_search_with_context(
 
     let t0 = std::time::Instant::now();
     let output_limit = options.limit.unwrap_or(50);
+    let routing = QueryRouting::classify(query_text);
+    let corpus_multiplier =
+        corpus_candidate_multiplier(ctx.searchers.iter().map(tantivy::Searcher::num_docs).sum());
     // Tantivy lexical candidates: enough headroom for post-hoc filters
     // (gitignore, scope, globs) without blowing up on huge repos.
-    // Default ~50 → 500, --limit 500 → 5K, --limit 5000 → 50K.
+    // Default natural-language query: 50 → 250, --limit 500 → 2.5K.
     let candidate_limit = if output_limit == usize::MAX {
         50_000
     } else {
-        (output_limit * 10).clamp(500, 50_000)
+        (output_limit * routing.lexical_multiplier).clamp(100, 50_000)
     };
     // Literal pass needs exact substring verification via SQLite (text not
     // stored in Tantivy), so cap tighter: default → 250, scales up with limit.
     let literal_limit = if output_limit == usize::MAX {
         25_000
     } else {
-        (output_limit * 5).clamp(250, 25_000)
+        (output_limit * routing.literal_multiplier * corpus_multiplier).clamp(250, 25_000)
     };
     // Semantic (vector ANN) search: keep proportional but bounded.
     // Default ~50 → 50, --limit 500 → 500, --limit 5000 → 2000.
@@ -557,7 +779,7 @@ pub fn hybrid_search_with_context(
     let semantic_limit = if output_limit == usize::MAX {
         2_000
     } else {
-        output_limit.clamp(50, 2_000)
+        (output_limit * routing.semantic_multiplier * corpus_multiplier).clamp(50, 2_000)
     };
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
     let glob_path_filter = build_glob_path_query_filter(ctx, &path_matcher, options)?;
@@ -577,7 +799,7 @@ pub fn hybrid_search_with_context(
     // Compute once — used by literal pass, lexical pass, and path-match pass.
     let lexical_queries = build_lexical_queries(trimmed);
     let literal_queries = build_literal_queries(trimmed, &lexical_queries);
-    let symbol_candidate_limit = output_limit.clamp(20, 100);
+    let symbol_candidate_limit = output_limit.clamp(20, routing.symbol_limit);
     let literal_matcher = if !literal_queries.is_empty() {
         let literal_pattern = literal_queries
             .iter()
@@ -606,6 +828,7 @@ pub fn hybrid_search_with_context(
                     &path_matcher,
                     &glob_path_filter,
                     options,
+                    false,
                 )
             {
                 candidates.truncate(literal_limit);
@@ -660,6 +883,10 @@ pub fn hybrid_search_with_context(
     if let Some(f) = ctx.fields.signature {
         parser.set_field_boost(f, 10.0);
     }
+    let conjunctive_numeric_query = should_use_conjunctive_numeric_query(trimmed);
+    if conjunctive_numeric_query {
+        parser.set_conjunction_by_default();
+    }
 
     let mut allowed_languages = Vec::new();
     let mut can_pushdown_languages = options.include_globs.is_empty();
@@ -691,7 +918,12 @@ pub fn hybrid_search_with_context(
     }
 
     let mut lexical_by_id = HashMap::<String, (IndexedChunk, f32)>::new();
-    for lexical_query in &lexical_queries {
+    let lexical_search_queries = if conjunctive_numeric_query {
+        &lexical_queries[..1]
+    } else {
+        lexical_queries.as_slice()
+    };
+    for lexical_query in lexical_search_queries {
         let mut parsed_query = match parser.parse_query(lexical_query) {
             Ok(query) => query,
             Err(_) => continue,
@@ -797,7 +1029,11 @@ pub fn hybrid_search_with_context(
     // their own ranked list in fusion (see fuse_rrf) rather than being
     // injected into the lexical pool with a fake score.
     let mut path_chunks: Vec<(IndexedChunk, f32)> = Vec::new();
-    if let Some(fpt_field) = ctx.fields.file_path_text {
+    let run_path_pass = matches!(
+        routing.intent,
+        QueryIntent::ExactIdentifier | QueryIntent::Path
+    ) || raw_query_terms(trimmed).len() <= 3;
+    if run_path_pass && let Some(fpt_field) = ctx.fields.file_path_text {
         let mut path_parser = QueryParser::for_index(&ctx.indexes[0], vec![fpt_field]);
         path_parser.set_conjunction_by_default();
         // Reuse the lexical_queries computed at the start of hybrid_search.
@@ -917,16 +1153,27 @@ pub fn hybrid_search_with_context(
     // takes the max, so neural wins wherever it covers a chunk), and use hash
     // at full weight only when there is no neural store at all.
     let neural_profile_matches = embedding_model.is_none_or(|model| {
-        let Some(active_profile) = model.profile_info() else {
-            return true;
+        let Some(active_identity) = model.model_identity() else {
+            let Some(active_profile) = model.profile_info() else {
+                return true;
+            };
+            return ctx
+                .neural_profile
+                .as_deref()
+                .or(ctx.base_neural_profile.as_deref())
+                .unwrap_or("general")
+                == active_profile;
         };
-        ctx.neural_profile
-            .as_deref()
-            .or(ctx.base_neural_profile.as_deref())
-            .unwrap_or("general")
-            == active_profile
+        let Some(persisted_identity) = ctx.neural_model.as_ref().or(ctx.base_neural_model.as_ref())
+        else {
+            // Identity-less neural vectors predate complete model metadata and
+            // must not be queried with a potentially incompatible revision.
+            return false;
+        };
+        persisted_identity == active_identity
     });
-    let neural_available = embedding_model.is_some_and(|m| m.dimensions() == 384)
+    let neural_available = routing.use_neural
+        && embedding_model.is_some_and(|model| model.model_identity().is_some())
         && has_neural_vectors
         && neural_profile_matches;
     let hash_vector_count = ctx.hash_vectors.as_ref().map_or(0, VectorStore::size)
@@ -964,7 +1211,8 @@ pub fn hybrid_search_with_context(
         }
 
         if let Some(model) = embedding_model
-            && model.dimensions() == 384
+            && routing.use_neural
+            && model.model_identity().is_some()
             && has_neural_vectors
             && neural_profile_matches
         {
@@ -1033,13 +1281,22 @@ pub fn hybrid_search_with_context(
                 query_text,
                 score,
                 sources,
-                options.context,
-                file_content.as_deref(),
+                HitPresentation {
+                    context_lines: options.context,
+                    pre_read_content: file_content.as_deref(),
+                    routing,
+                },
             )?);
         }
     }
     // Re-sort since grouping by file changed the order
     hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+    if !matches!(
+        routing.intent,
+        QueryIntent::ExactIdentifier | QueryIntent::Path
+    ) {
+        crate::reranker::rerank_hits(query_text, &mut hits);
+    }
     tracing::trace!(
         "to_hit={:?} hits={} files_read={}",
         t0.elapsed(),
@@ -1068,9 +1325,13 @@ fn to_hit(
     query_text: &str,
     score: f32,
     sources: Vec<String>,
-    context_lines: usize,
-    pre_read_content: Option<&str>,
+    presentation: HitPresentation<'_>,
 ) -> Result<SearchHit> {
+    let HitPresentation {
+        context_lines,
+        pre_read_content,
+        routing,
+    } = presentation;
     // Use Cow to avoid cloning the file content when the caller already read it.
     let content: std::borrow::Cow<'_, str> = match pre_read_content {
         Some(c) => std::borrow::Cow::Borrowed(c),
@@ -1084,7 +1345,11 @@ fn to_hit(
                         start_line: chunk.start_line,
                         end_line: chunk.end_line,
                         preview: chunk.text,
-                        reason: "file no longer on disk".to_string(),
+                        reason: format!(
+                            "route={} neural={}; file no longer on disk",
+                            routing.intent.name(),
+                            routing.use_neural
+                        ),
                         score,
                         sources,
                     });
@@ -1100,7 +1365,11 @@ fn to_hit(
             start_line: chunk.start_line,
             end_line: chunk.start_line,
             preview: String::new(),
-            reason: "empty file".to_string(),
+            reason: format!(
+                "route={} neural={}; empty file",
+                routing.intent.name(),
+                routing.use_neural
+            ),
             score,
             sources,
         });
@@ -1109,12 +1378,17 @@ fn to_hit(
     let focus_line = find_focus_line(&chunk, query_text, &lines);
     let (snippet_start, snippet_end) = snippet_bounds(focus_line, context_lines, lines.len());
     let preview = lines[snippet_start.saturating_sub(1)..snippet_end].join("\n");
-    let reason = summarize_reason(
+    let ranking_reason = summarize_reason(
         query_text,
         lines
             .get(focus_line.saturating_sub(1))
             .copied()
             .unwrap_or_default(),
+    );
+    let reason = format!(
+        "route={} neural={}; {ranking_reason}",
+        routing.intent.name(),
+        routing.use_neural
     );
 
     Ok(SearchHit {
@@ -1126,6 +1400,12 @@ fn to_hit(
         score,
         sources,
     })
+}
+
+struct HitPresentation<'a> {
+    context_lines: usize,
+    pre_read_content: Option<&'a str>,
+    routing: QueryRouting,
 }
 
 fn find_focus_line(chunk: &IndexedChunk, query_text: &str, lines: &[&str]) -> usize {
@@ -1285,6 +1565,22 @@ fn should_run_literal_pass(query_text: &str) -> bool {
         || query
             .chars()
             .any(|c| c == '_' || c == '-' || c == '/' || c == ':' || c.is_ascii_uppercase())
+}
+
+fn should_use_conjunctive_numeric_query(query_text: &str) -> bool {
+    let terms = raw_query_terms(query_text);
+    (3..=10).contains(&terms.len())
+        && query_text
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch.is_ascii_whitespace())
+        && terms
+            .last()
+            .is_some_and(|term| term.len() >= 3 && term.chars().all(|ch| ch.is_ascii_digit()))
+        && terms
+            .iter()
+            .filter(|term| term.chars().all(|ch| ch.is_ascii_digit()))
+            .count()
+            == 1
 }
 
 fn build_literal_queries(query_text: &str, lexical_queries: &[String]) -> Vec<String> {
@@ -1745,7 +2041,9 @@ fn query_filtered_chunks(
 ) -> Vec<RawIndexedChunk> {
     // Build a SQL query that pushes as much filtering as possible into SQLite.
     let mut sql = String::from(
-        "SELECT chunk_id, file_path, start_line, end_line, language, kind, x'', content_hash, vector_key, is_ignored FROM chunks WHERE 1=1",
+        "SELECT file_path, start_line, end_line,
+                language, kind, x'', '', vector_key, is_ignored
+         FROM chunks WHERE 1=1",
     );
     let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
@@ -1802,18 +2100,26 @@ fn query_filtered_chunks(
     let params_refs: Vec<&dyn rusqlite::types::ToSql> =
         params_vec.iter().map(|p| p.as_ref()).collect();
     let Ok(rows) = stmt.query_map(params_refs.as_slice(), |row| {
-        let raw_text: Vec<u8> = row.get(6)?;
+        let file_path = PathBuf::from(row.get::<_, String>(0)?);
+        let start_line = row.get::<_, i64>(1)? as usize;
+        let end_line = row.get::<_, i64>(2)? as usize;
+        let language = row.get::<_, String>(3)?;
+        let kind = row.get::<_, String>(4)?;
+        let vector_key = row.get::<_, i64>(7)? as u64;
+        let raw_text: Vec<u8> = row.get(5)?;
         Ok(RawIndexedChunk {
-            chunk_id: row.get(0)?,
-            file_path: PathBuf::from(row.get::<_, String>(1)?),
-            start_line: row.get::<_, i64>(2)? as usize,
-            end_line: row.get::<_, i64>(3)? as usize,
-            language: row.get(4)?,
-            kind: row.get(5)?,
+            chunk_id: crate::indexer::logical_chunk_id(
+                &file_path, start_line, end_line, &language, &kind, vector_key,
+            ),
+            file_path,
+            start_line,
+            end_line,
+            language,
+            kind,
             raw_text,
-            content_hash: row.get(7)?,
-            vector_key: row.get::<_, i64>(8)? as u64,
-            is_ignored: row.get::<_, bool>(9)?,
+            content_hash: row.get(6)?,
+            vector_key,
+            is_ignored: row.get::<_, bool>(8)?,
         })
     }) else {
         return Vec::new();
@@ -3035,6 +3341,79 @@ mod tests {
     use super::*;
 
     #[test]
+    fn query_routing_covers_search_intents_without_corpus_rules() {
+        let cases = [
+            ("parse_request", QueryIntent::ExactIdentifier, false),
+            ("src/search.rs", QueryIntent::Path, false),
+            (
+                "error: connection refused",
+                QueryIntent::LiteralOrError,
+                false,
+            ),
+            (
+                "def parse_request(payload):\n    value = payload.get(\"value\")\n    return normalize and validate the incoming request before dispatching it",
+                QueryIntent::LiteralOrError,
+                true,
+            ),
+            (
+                "Using the given code, format the number 7.321 to contain two decimal points and return the transformed value without changing unrelated behavior",
+                QueryIntent::NaturalLanguage,
+                true,
+            ),
+            (
+                "where in the code is the request authentication policy evaluated before a handler is dispatched",
+                QueryIntent::NaturalLanguage,
+                true,
+            ),
+            (
+                "show an example test for retry behavior",
+                QueryIntent::DocsTestsExamples,
+                true,
+            ),
+            ("python sort list descending", QueryIntent::Mixed, false),
+        ];
+        for (query, expected_intent, expected_neural) in cases {
+            let routing = QueryRouting::classify(query);
+            assert_eq!(routing.intent, expected_intent, "{query}");
+            assert_eq!(routing.use_neural, expected_neural, "{query}");
+        }
+    }
+
+    #[test]
+    fn corpus_candidate_budgets_scale_at_stable_boundaries() {
+        assert_eq!(corpus_candidate_multiplier(50_000), 1);
+        assert_eq!(corpus_candidate_multiplier(50_001), 2);
+        assert_eq!(corpus_candidate_multiplier(500_000), 2);
+        assert_eq!(corpus_candidate_multiplier(500_001), 3);
+    }
+
+    #[test]
+    fn query_routing_p95_is_below_two_milliseconds() {
+        let queries = [
+            "parse_request",
+            "src/search.rs",
+            "error: connection refused",
+            "where in the code is the request authentication policy evaluated before a handler is dispatched",
+            "show an example test for retry behavior",
+            "def parse_request(payload):\n    value = payload.get(\"value\")\n    return normalize and validate the incoming request before dispatching it",
+        ];
+        let mut per_query_ns = Vec::with_capacity(200);
+        for _ in 0..200 {
+            let started = std::time::Instant::now();
+            for _ in 0..100 {
+                for query in queries {
+                    std::hint::black_box(QueryRouting::classify(query));
+                }
+            }
+            per_query_ns.push(started.elapsed().as_nanos() / (100 * queries.len()) as u128);
+        }
+        per_query_ns.sort_unstable();
+        let p95_ns = per_query_ns[189];
+        eprintln!("query routing p95: {:.3} ms", p95_ns as f64 / 1_000_000.0);
+        assert!(p95_ns < 2_000_000, "routing p95 was {p95_ns} ns");
+    }
+
+    #[test]
     fn hash_weight_tracks_partial_neural_coverage() {
         assert_eq!(semantic_hash_weight(false, 0, 100), 1.0);
         assert_eq!(semantic_hash_weight(true, 0, 100), 1.0);
@@ -3713,11 +4092,11 @@ mod tests {
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         index_workspace(&workspace, &model).unwrap();
 
-        let lexical_context = SearchContext::load(&workspace, None).unwrap();
+        let lexical_context = SearchContext::load(&workspace, None, false).unwrap();
         assert!(lexical_context.hash_vectors.is_none());
         assert!(lexical_context.neural_vectors.is_none());
 
-        let hash_context = SearchContext::load(&workspace, Some(256)).unwrap();
+        let hash_context = SearchContext::load(&workspace, Some(256), false).unwrap();
         assert!(hash_context.hash_vectors.is_some());
         assert!(hash_context.neural_vectors.is_none());
     }
@@ -3728,6 +4107,26 @@ mod tests {
         assert!(should_run_literal_pass("calculate_tax_for_region"));
         assert!(should_run_literal_pass("KernelMemoryAllocation"));
         assert!(!should_run_literal_pass("kernel memory allocation"));
+    }
+
+    #[test]
+    fn structured_numeric_queries_use_one_conjunctive_lexical_pass() {
+        assert!(should_use_conjunctive_numeric_query(
+            "retry request after status 503"
+        ));
+        assert!(should_use_conjunctive_numeric_query(
+            "find generated operation 498650"
+        ));
+        assert!(!should_use_conjunctive_numeric_query(
+            "retry request after failure"
+        ));
+        assert!(!should_use_conjunctive_numeric_query("status 5"));
+        assert!(!should_use_conjunctive_numeric_query(
+            "for slot in range 16 if slot in 6 7 12"
+        ));
+        assert!(!should_use_conjunctive_numeric_query(
+            "calculate payload checksum bits for binary value 1001001."
+        ));
     }
 
     #[test]

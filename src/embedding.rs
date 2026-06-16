@@ -1,21 +1,45 @@
 //! Embedding models for semantic vector search.
 //!
-//! Two implementations are available:
+//! Three implementations are available:
 //!
 //! | Model | Feature | Dimensions | Quality | Binary size |
 //! |-------|---------|------------|---------|-------------|
 //! | [`HashEmbeddingModel`] | *(always)* | 256 | Moderate — token overlap heuristic | Tiny |
-//! | [`CandleEmbeddingModel`] | `neural` | 384 | High — true semantic similarity | Model download on first use |
+//! | Static retrieval embedding | `neural` | 256 | High — portable learned retrieval | Model download on first use |
+//! | [`CandleEmbeddingModel`] | `neural` | 384 | Optional transformer profiles | Model download on first use |
 //!
 //! Use [`create_model`] to build the right model based on the `neural` flag.
 
 use crate::text::{singularize_token, split_identifier_segments};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum NeuralProfile {
+    Static,
     General,
     Code,
+    CodeHighQuality,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
+pub struct NeuralModelIdentity {
+    pub schema_version: u32,
+    pub profile: String,
+    pub model_id: String,
+    pub revision: String,
+    pub architecture: String,
+    pub dimensions: usize,
+    pub max_input_tokens: usize,
+    pub document_character_limit: usize,
+    pub pooling: String,
+    pub normalize_embeddings: bool,
+    pub model_weight_dtype: String,
+    pub vector_quantization: String,
+    pub license: String,
+    pub parameter_count: u64,
+    pub model_asset_bytes: u64,
+    pub model_weights_sha256: String,
 }
 
 impl NeuralProfile {
@@ -25,41 +49,132 @@ impl NeuralProfile {
             .to_ascii_lowercase()
             .as_str()
         {
+            "static" | "portable" | "static-retrieval" | "static-retrieval-v1" => Self::Static,
+            "general" | "minilm" | "all-minilm-l6-v2" => Self::General,
             "code" | "codesearchnet" | "code-minilm-l6-v1" => Self::Code,
-            _ => Self::General,
+            "code-hq" | "code-high-quality" | "code-minilm-l12-v1" => Self::CodeHighQuality,
+            _ => Self::Static,
         }
     }
 
     pub fn name(self) -> &'static str {
         match self {
+            Self::Static => "static-retrieval-v1",
             Self::General => "general",
             Self::Code => "code-minilm-l6-v1",
+            Self::CodeHighQuality => "code-minilm-l12-v1",
         }
     }
 
     pub fn dimensions(self) -> usize {
-        384
+        match self {
+            Self::Static => 256,
+            Self::General | Self::Code | Self::CodeHighQuality => 384,
+        }
     }
 
     #[cfg(feature = "neural")]
     fn model_id(self) -> &'static str {
         match self {
+            Self::Static => "sentence-transformers/static-retrieval-mrl-en-v1",
             Self::General => "sentence-transformers/all-MiniLM-L6-v2",
             Self::Code => "isuruwijesiri/all-MiniLM-L6-v2-code-search-512",
+            Self::CodeHighQuality => "isuruwijesiri/all-MiniLM-L12-v2-code-search-512",
         }
     }
 
-    #[cfg(feature = "neural")]
-    fn model_revision(self) -> &'static str {
+    pub fn model_revision(self) -> &'static str {
         match self {
+            Self::Static => "f60985c706f192d45d218078e49e5a8b6f15283a",
             Self::General => "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
             Self::Code => "13b266a617039c16d924b49a56ae978dbd8727ff",
+            Self::CodeHighQuality => "0574cd81b67ad333192c62bb5da302bec71818fe",
+        }
+    }
+
+    pub fn model_asset_bytes(self) -> u64 {
+        match self {
+            Self::Static => 125_729_604,
+            Self::General => 91_335_235,
+            Self::Code => 91_576_452,
+            Self::CodeHighQuality => 134_174_389,
+        }
+    }
+
+    pub fn model_weights_sha256(self) -> &'static str {
+        match self {
+            Self::Static => "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+            Self::General => "53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db",
+            Self::Code => "c71b7305a842dc64189c1e2c7b8e58aa0d430d8181afdb1a95db6d0a3617c90b",
+            Self::CodeHighQuality => {
+                "038856ae48e815d7510a2277e23650aab3293cbc2e21ffb7c22a86c1854ba109"
+            }
+        }
+    }
+
+    pub fn identity(self) -> NeuralModelIdentity {
+        let (model_id, architecture, dimensions, max_input_tokens, pooling, parameter_count) =
+            match self {
+                Self::Static => (
+                    "sentence-transformers/static-retrieval-mrl-en-v1",
+                    "static-embedding",
+                    256,
+                    0,
+                    "token-mean",
+                    31_254_528,
+                ),
+                Self::General => (
+                    "sentence-transformers/all-MiniLM-L6-v2",
+                    "bert",
+                    384,
+                    256,
+                    "attention-mask-mean",
+                    22_713_728,
+                ),
+                Self::Code => (
+                    "isuruwijesiri/all-MiniLM-L6-v2-code-search-512",
+                    "bert",
+                    384,
+                    512,
+                    "attention-mask-mean",
+                    22_713_216,
+                ),
+                Self::CodeHighQuality => (
+                    "isuruwijesiri/all-MiniLM-L12-v2-code-search-512",
+                    "bert",
+                    384,
+                    512,
+                    "attention-mask-mean",
+                    33_360_000,
+                ),
+            };
+        NeuralModelIdentity {
+            schema_version: 1,
+            profile: self.name().to_string(),
+            model_id: model_id.to_string(),
+            revision: self.model_revision().to_string(),
+            architecture: architecture.to_string(),
+            dimensions,
+            max_input_tokens,
+            document_character_limit: 1024,
+            pooling: pooling.to_string(),
+            normalize_embeddings: true,
+            model_weight_dtype: "f32".to_string(),
+            vector_quantization: "f16".to_string(),
+            license: "Apache-2.0".to_string(),
+            parameter_count,
+            model_asset_bytes: self.model_asset_bytes(),
+            model_weights_sha256: self.model_weights_sha256().to_string(),
         }
     }
 }
 
 pub fn configured_neural_profile_name() -> &'static str {
     NeuralProfile::configured().name()
+}
+
+pub fn configured_neural_model_identity() -> NeuralModelIdentity {
+    NeuralProfile::configured().identity()
 }
 
 /// Shared interface implemented by all embedding backends.
@@ -82,6 +197,10 @@ pub trait EmbeddingModel: Send + Sync {
         None
     }
 
+    fn model_identity(&self) -> Option<&NeuralModelIdentity> {
+        None
+    }
+
     /// Whether background embedding should pause under load, thermal, or
     /// battery pressure. Lightweight and test models stay deterministic.
     fn respects_system_constraints(&self) -> bool {
@@ -96,7 +215,7 @@ pub fn model_dimensions(hash: bool) -> usize {
     } else {
         #[cfg(feature = "neural")]
         {
-            384 // all-MiniLM-L6-v2
+            NeuralProfile::configured().dimensions()
         }
         #[cfg(not(feature = "neural"))]
         {
@@ -107,8 +226,8 @@ pub fn model_dimensions(hash: bool) -> usize {
 
 /// Create the appropriate embedding model.
 ///
-/// By default (when `hash` is `false`), returns a [`CandleEmbeddingModel`]
-/// backed by `all-MiniLM-L6-v2` for high-quality semantic search.
+/// By default (when `hash` is `false`), returns the portable static retrieval
+/// model selected by the public embedding bake-off.
 /// Pass `hash = true` to use the lightweight [`HashEmbeddingModel`] instead.
 ///
 /// If the `neural` feature is not compiled in, always falls back to hash.
@@ -116,7 +235,7 @@ pub fn create_model(hash: bool) -> Box<dyn EmbeddingModel> {
     if !hash {
         #[cfg(feature = "neural")]
         {
-            match CandleEmbeddingModel::new() {
+            match create_configured_neural_model(false) {
                 Ok(model) => return Box::new(model),
                 Err(e) => {
                     tracing::warn!("Failed to load neural model, falling back to hash: {e}");
@@ -138,7 +257,7 @@ pub fn create_hash_model() -> Box<dyn EmbeddingModel> {
 pub fn create_neural_model() -> anyhow::Result<Box<dyn EmbeddingModel>> {
     #[cfg(feature = "neural")]
     {
-        let model = CandleEmbeddingModel::new()?;
+        let model = create_configured_neural_model(false)?;
         Ok(Box::new(model))
     }
     #[cfg(not(feature = "neural"))]
@@ -148,17 +267,55 @@ pub fn create_neural_model() -> anyhow::Result<Box<dyn EmbeddingModel>> {
 }
 
 /// Create a neural model with reduced thread budget for background work.
-/// Uses half the CPU cores so the system stays responsive.
+/// Uses up to a quarter of the CPU cores so the system stays responsive.
 pub fn create_neural_model_background() -> anyhow::Result<Box<dyn EmbeddingModel>> {
     #[cfg(feature = "neural")]
     {
-        let model = CandleEmbeddingModel::new_background()?;
+        let model = create_configured_neural_model(true)?;
         Ok(Box::new(model))
     }
     #[cfg(not(feature = "neural"))]
     {
         anyhow::bail!("neural feature not compiled in")
     }
+}
+
+#[cfg(feature = "neural")]
+fn create_configured_neural_model(is_background: bool) -> anyhow::Result<ConfiguredNeuralModel> {
+    let profile = NeuralProfile::configured();
+    match profile {
+        NeuralProfile::Static => StaticEmbeddingModel::new(profile, is_background)
+            .map(Box::new)
+            .map(ConfiguredNeuralModel::Static),
+        NeuralProfile::General | NeuralProfile::Code | NeuralProfile::CodeHighQuality => {
+            CandleEmbeddingModel::new_internal(is_background)
+                .map(Box::new)
+                .map(ConfiguredNeuralModel::Candle)
+        }
+    }
+}
+
+#[cfg(feature = "neural")]
+fn neural_thread_budget(is_background: bool) -> usize {
+    let requested = std::env::var("IVYGREP_NEURAL_THREADS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0);
+    neural_thread_budget_for(is_background, num_cpus::get(), requested)
+}
+
+#[cfg(feature = "neural")]
+fn neural_thread_budget_for(
+    is_background: bool,
+    logical_cpus: usize,
+    requested: Option<usize>,
+) -> usize {
+    let default_threads = if is_background {
+        (logical_cpus / 4).clamp(1, 8)
+    } else {
+        logical_cpus.clamp(1, 8)
+    };
+    requested.unwrap_or(default_threads).clamp(1, 32)
 }
 
 // ── Hash-based embedding (always available) ────────────────────────────────
@@ -260,6 +417,195 @@ impl EmbeddingModel for HashEmbeddingModel {
 // ── Candle neural embedding (behind `neural` feature) ───────────────────────
 
 #[cfg(feature = "neural")]
+enum ConfiguredNeuralModel {
+    Static(Box<StaticEmbeddingModel>),
+    Candle(Box<CandleEmbeddingModel>),
+}
+
+#[cfg(feature = "neural")]
+impl EmbeddingModel for ConfiguredNeuralModel {
+    fn dimensions(&self) -> usize {
+        match self {
+            Self::Static(model) => model.dimensions(),
+            Self::Candle(model) => model.dimensions(),
+        }
+    }
+
+    fn embed(&self, text: &str) -> Vec<f32> {
+        match self {
+            Self::Static(model) => model.embed(text),
+            Self::Candle(model) => model.embed(text),
+        }
+    }
+
+    fn embed_batch(&self, texts: &[&str]) -> Vec<Vec<f32>> {
+        match self {
+            Self::Static(model) => model.embed_batch(texts),
+            Self::Candle(model) => model.embed_batch(texts),
+        }
+    }
+
+    fn backend_info(&self) -> Option<&'static str> {
+        match self {
+            Self::Static(model) => model.backend_info(),
+            Self::Candle(model) => model.backend_info(),
+        }
+    }
+
+    fn profile_info(&self) -> Option<&'static str> {
+        match self {
+            Self::Static(model) => model.profile_info(),
+            Self::Candle(model) => model.profile_info(),
+        }
+    }
+
+    fn model_identity(&self) -> Option<&NeuralModelIdentity> {
+        match self {
+            Self::Static(model) => model.model_identity(),
+            Self::Candle(model) => model.model_identity(),
+        }
+    }
+
+    fn respects_system_constraints(&self) -> bool {
+        match self {
+            Self::Static(model) => model.respects_system_constraints(),
+            Self::Candle(model) => model.respects_system_constraints(),
+        }
+    }
+}
+
+#[cfg(feature = "neural")]
+struct StaticEmbeddingModel {
+    tokenizer: tokenizers::Tokenizer,
+    weights: Vec<f32>,
+    dimensions: usize,
+    profile: NeuralProfile,
+    identity: NeuralModelIdentity,
+    thread_pool: rayon::ThreadPool,
+    is_background: bool,
+}
+
+#[cfg(feature = "neural")]
+impl StaticEmbeddingModel {
+    fn new(profile: NeuralProfile, is_background: bool) -> anyhow::Result<Self> {
+        use candle_core::{Device, safetensors::MmapedSafetensors};
+        use hf_hub::{Repo, RepoType, api::sync::Api};
+
+        let repo = Repo::with_revision(
+            profile.model_id().to_string(),
+            RepoType::Model,
+            profile.model_revision().to_string(),
+        );
+        let repo = Api::new()?.repo(repo);
+        let tokenizer_path = repo.get("0_StaticEmbedding/tokenizer.json")?;
+        let weights_path = repo.get("0_StaticEmbedding/model.safetensors")?;
+        let tokenizer =
+            tokenizers::Tokenizer::from_file(tokenizer_path).map_err(anyhow::Error::msg)?;
+        // SAFETY: the immutable model file remains mapped only while the
+        // tensor is copied into owned memory below.
+        let tensors = unsafe { MmapedSafetensors::new(weights_path)? };
+        let dimensions = profile.dimensions();
+        let weights = tensors
+            .load("embedding.weight", &Device::Cpu)?
+            .narrow(1, 0, dimensions)?
+            .contiguous()?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let thread_count = neural_thread_budget(is_background);
+        let thread_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(thread_count)
+            .build()?;
+        tracing::info!("static neural pool limited to {thread_count} thread(s)");
+        Ok(Self {
+            tokenizer,
+            weights,
+            dimensions,
+            profile,
+            identity: profile.identity(),
+            thread_pool,
+            is_background,
+        })
+    }
+
+    fn embed_inner(&self, text: &str) -> Vec<f32> {
+        let Ok(encoding) = self.tokenizer.encode(text, false) else {
+            return vec![0.0; self.dimensions];
+        };
+        let ids = encoding.get_ids();
+        if ids.is_empty() {
+            return vec![0.0; self.dimensions];
+        }
+        let mut embedding = vec![0.0f32; self.dimensions];
+        let mut token_count = 0usize;
+        for &id in ids {
+            let start = id as usize * self.dimensions;
+            let Some(row) = self.weights.get(start..start + self.dimensions) else {
+                continue;
+            };
+            for (value, token_value) in embedding.iter_mut().zip(row) {
+                *value += token_value;
+            }
+            token_count += 1;
+        }
+        if token_count == 0 {
+            return embedding;
+        }
+        let scale = 1.0 / token_count as f32;
+        for value in &mut embedding {
+            *value *= scale;
+        }
+        let norm = embedding
+            .iter()
+            .map(|value| value * value)
+            .sum::<f32>()
+            .sqrt();
+        if norm > 0.0 {
+            for value in &mut embedding {
+                *value /= norm;
+            }
+        }
+        embedding
+    }
+}
+
+#[cfg(feature = "neural")]
+impl EmbeddingModel for StaticEmbeddingModel {
+    fn dimensions(&self) -> usize {
+        self.dimensions
+    }
+
+    fn embed(&self, text: &str) -> Vec<f32> {
+        self.embed_inner(text)
+    }
+
+    fn embed_batch(&self, texts: &[&str]) -> Vec<Vec<f32>> {
+        use rayon::prelude::*;
+        self.thread_pool.install(|| {
+            texts
+                .par_iter()
+                .map(|text| self.embed_inner(text))
+                .collect()
+        })
+    }
+
+    fn backend_info(&self) -> Option<&'static str> {
+        Some("StaticEmbedding token mean via Rust")
+    }
+
+    fn profile_info(&self) -> Option<&'static str> {
+        Some(self.profile.name())
+    }
+
+    fn model_identity(&self) -> Option<&NeuralModelIdentity> {
+        Some(&self.identity)
+    }
+
+    fn respects_system_constraints(&self) -> bool {
+        self.is_background
+    }
+}
+
+#[cfg(feature = "neural")]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum NeuralBackend {
     Metal,
@@ -280,10 +626,10 @@ impl NeuralBackend {
 
     fn label(self) -> &'static str {
         match self {
-            Self::Metal => "AllMiniLML6V2 via Candle Metal",
-            Self::Cuda => "AllMiniLML6V2 via Candle CUDA",
-            Self::AccelerateCpu => "AllMiniLML6V2 via Candle CPU (Accelerate)",
-            Self::Cpu => "AllMiniLML6V2 via Candle CPU",
+            Self::Metal => "BERT embedding via Candle Metal",
+            Self::Cuda => "BERT embedding via Candle CUDA",
+            Self::AccelerateCpu => "BERT embedding via Candle CPU (Accelerate)",
+            Self::Cpu => "BERT embedding via Candle CPU",
         }
     }
 
@@ -318,6 +664,7 @@ pub struct CandleEmbeddingModel {
     pool: Vec<parking_lot::Mutex<candle_embed::BasedBertEmbedder>>,
     backend: NeuralBackend,
     profile: NeuralProfile,
+    identity: NeuralModelIdentity,
 }
 
 /// Embed `texts` across up to `workers` OS threads, preserving input order.
@@ -395,27 +742,15 @@ impl CandleEmbeddingModel {
     }
 
     fn new_internal(is_background: bool) -> anyhow::Result<Self> {
-        // When running as a background enhancement process, limit rayon's
-        // global thread pool to 25% of cores (min 1) so the system stays
-        // responsive. This affects both the Candle BLAS work-stealing and
-        // any par_iter calls in the enhancement pipeline.
-        let cpu_pool_size = if is_background {
-            // Cap the background budget to at most 8. The cap applies to BOTH
-            // the rayon pool and the embedder pool so worker count == embedder
-            // count: in embed_batch each worker maps to its own embedder, so if
-            // there were more workers than embedders the extras would collide on
-            // a shared mutex and serialize (wasting budget on high-core hosts).
-            // It also bounds model-copy memory (~tens of MB per instance).
-            let bg_threads = (num_cpus::get() / 4).clamp(1, 8);
-            let _ = rayon::ThreadPoolBuilder::new()
-                .num_threads(bg_threads)
-                .build_global();
-            tracing::info!("background mode: rayon global pool limited to {bg_threads} thread(s)");
-            bg_threads
-        } else {
-            // Foreground/query model embeds one text at a time — a pool of one.
-            1
-        };
+        // Candle's small matrix operations regress sharply when rayon fans out
+        // across every logical CPU on large hosts. Keep a laptop-sized default
+        // and allow controlled benchmark overrides.
+        let neural_threads = neural_thread_budget(is_background);
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(neural_threads)
+            .build_global();
+        tracing::info!("neural rayon pool limited to {neural_threads} thread(s)");
+        let cpu_pool_size = if is_background { neural_threads } else { 1 };
 
         use candle_embed::{CandleEmbedBuilder, WithModel};
         let profile = NeuralProfile::configured();
@@ -425,14 +760,18 @@ impl CandleEmbeddingModel {
             NeuralBackend,
         )> {
             let builder = match profile {
+                NeuralProfile::Static => {
+                    anyhow::bail!("static profile must use the static embedding backend")
+                }
                 NeuralProfile::General => {
                     CandleEmbedBuilder::new().set_model_from_presets(WithModel::AllMinilmL6V2)
                 }
-                NeuralProfile::Code => {
+                NeuralProfile::Code | NeuralProfile::CodeHighQuality => {
                     CandleEmbedBuilder::new().custom_embedding_model(profile.model_id())
                 }
             }
-            .custom_model_revision(profile.model_revision());
+            .custom_model_revision(profile.model_revision())
+            .normalize_embeddings(true);
             let builder = match requested {
                 NeuralBackend::Metal => builder.with_device_metal(),
                 NeuralBackend::Cuda => builder.with_device_any_cuda(),
@@ -509,6 +848,7 @@ impl CandleEmbeddingModel {
             pool,
             backend,
             profile,
+            identity: profile.identity(),
         })
     }
 }
@@ -538,10 +878,10 @@ impl EmbeddingModel for CandleEmbeddingModel {
             let embedder = &self.pool[i % n];
             slice
                 .iter()
-                .map(|t| {
+                .map(|text| {
                     embedder
                         .lock()
-                        .embed_one(t)
+                        .embed_one(text)
                         .unwrap_or_else(|_| vec![0.0; 384])
                 })
                 .collect()
@@ -554,6 +894,10 @@ impl EmbeddingModel for CandleEmbeddingModel {
 
     fn profile_info(&self) -> Option<&'static str> {
         Some(self.profile.name())
+    }
+
+    fn model_identity(&self) -> Option<&NeuralModelIdentity> {
+        Some(&self.identity)
     }
 
     fn respects_system_constraints(&self) -> bool {
@@ -597,7 +941,9 @@ mod tests {
     #[serial]
     fn neural_profile_selection_is_explicit_and_stable() {
         unsafe { std::env::remove_var("IVYGREP_MODEL_PROFILE") };
-        assert_eq!(NeuralProfile::configured(), NeuralProfile::General);
+        assert_eq!(NeuralProfile::configured(), NeuralProfile::Static);
+        assert_eq!(NeuralProfile::Static.name(), "static-retrieval-v1");
+        assert_eq!(NeuralProfile::Static.dimensions(), 256);
         assert_eq!(NeuralProfile::General.name(), "general");
         assert_eq!(NeuralProfile::General.dimensions(), 384);
 
@@ -605,6 +951,10 @@ mod tests {
         assert_eq!(NeuralProfile::configured(), NeuralProfile::Code);
         assert_eq!(NeuralProfile::Code.name(), "code-minilm-l6-v1");
         assert_eq!(NeuralProfile::Code.dimensions(), 384);
+
+        unsafe { std::env::set_var("IVYGREP_MODEL_PROFILE", "code-hq") };
+        assert_eq!(NeuralProfile::configured(), NeuralProfile::CodeHighQuality);
+        assert_eq!(NeuralProfile::CodeHighQuality.name(), "code-minilm-l12-v1");
         unsafe { std::env::remove_var("IVYGREP_MODEL_PROFILE") };
     }
 
@@ -623,6 +973,31 @@ mod tests {
             NeuralProfile::Code.model_revision(),
             "13b266a617039c16d924b49a56ae978dbd8727ff"
         );
+        assert_eq!(
+            NeuralProfile::CodeHighQuality.model_revision(),
+            "0574cd81b67ad333192c62bb5da302bec71818fe"
+        );
+    }
+
+    #[cfg(feature = "neural")]
+    #[test]
+    fn background_neural_thread_budget_is_bounded() {
+        assert_eq!(neural_thread_budget_for(true, 2, None), 1);
+        assert_eq!(neural_thread_budget_for(true, 32, None), 8);
+        assert_eq!(neural_thread_budget_for(false, 32, None), 8);
+        assert_eq!(neural_thread_budget_for(true, 32, Some(20)), 20);
+        assert_eq!(neural_thread_budget_for(true, 32, Some(64)), 32);
+    }
+
+    #[test]
+    fn neural_identity_covers_vector_compatibility_inputs() {
+        let identity = NeuralProfile::CodeHighQuality.identity();
+        assert_eq!(identity.dimensions, 384);
+        assert_eq!(identity.max_input_tokens, 512);
+        assert_eq!(identity.document_character_limit, 1024);
+        assert_eq!(identity.pooling, "attention-mask-mean");
+        assert!(identity.normalize_embeddings);
+        assert_eq!(identity.vector_quantization, "f16");
     }
 
     /// `parallel_embed` must return vectors in input order no matter how the
@@ -764,9 +1139,9 @@ mod tests {
     #[test]
     fn cpu_backend_label_reports_accelerate_feature_truthfully() {
         let expected = if cfg!(feature = "accelerate") {
-            "AllMiniLML6V2 via Candle CPU (Accelerate)"
+            "BERT embedding via Candle CPU (Accelerate)"
         } else {
-            "AllMiniLML6V2 via Candle CPU"
+            "BERT embedding via Candle CPU"
         };
         assert_eq!(NeuralBackend::cpu().label(), expected);
     }

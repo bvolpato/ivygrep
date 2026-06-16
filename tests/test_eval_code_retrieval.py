@@ -55,12 +55,20 @@ class RetrievalMetricsTest(unittest.TestCase):
             self.assertFalse((root / "escape.rs").exists())
 
     def test_query_modes_are_explicit(self):
-        self.assertEqual(
-            eval_code_retrieval.query_args("lexical"), ["--lexical-only"]
-        )
+        self.assertEqual(eval_code_retrieval.query_args("lexical"), ["--lexical-only"])
         self.assertEqual(eval_code_retrieval.query_args("hash"), ["--hash"])
         self.assertEqual(eval_code_retrieval.query_args("hybrid"), [])
         self.assertEqual(eval_code_retrieval.query_args("neural"), [])
+
+    def test_search_command_terminates_option_parsing_before_query(self):
+        command = eval_code_retrieval.search_command(
+            Path("ig"),
+            "neural",
+            20,
+            "-----Input-----\nexample",
+        )
+        self.assertEqual(command[-2], "--")
+        self.assertEqual(command[-1], "-----Input-----\nexample")
 
     def test_daemon_endpoint_matches_platform_transport(self):
         home = Path("benchmark-home")
@@ -76,9 +84,80 @@ class RetrievalMetricsTest(unittest.TestCase):
             )
 
     def test_warm_query_path_is_explicit_for_lexical_mode(self):
-        self.assertEqual(eval_code_retrieval.warm_query_path("lexical"), "local-process")
+        self.assertEqual(
+            eval_code_retrieval.warm_query_path("lexical"), "local-process"
+        )
         self.assertEqual(eval_code_retrieval.warm_query_path("hash"), "daemon")
         self.assertEqual(eval_code_retrieval.warm_query_path("neural"), "daemon")
+
+    def test_neural_process_cold_sampling_loads_model_once(self):
+        queries = [{"_id": str(index)} for index in range(3)]
+        self.assertEqual(
+            eval_code_retrieval.process_cold_queries("neural", queries),
+            queries[:1],
+        )
+        self.assertEqual(
+            eval_code_retrieval.process_cold_queries("hash", queries),
+            queries,
+        )
+
+    def test_peak_rss_is_sampled_after_daemon_wait(self):
+        events = []
+
+        class FakeProcess:
+            def poll(self):
+                events.append("poll")
+                return None
+
+            def terminate(self):
+                events.append("terminate")
+
+            def send_signal(self, _signal):
+                events.append("signal")
+
+            def wait(self, timeout):
+                events.append(("wait", timeout))
+
+            def kill(self):
+                events.append("kill")
+
+        daemon_log = mock.Mock()
+        daemon_log.close.side_effect = lambda: events.append("close")
+        with mock.patch.object(
+            eval_code_retrieval,
+            "peak_child_rss_bytes",
+            side_effect=lambda: events.append("rss") or 123,
+        ):
+            peak_rss = eval_code_retrieval.stop_daemon_and_measure_peak_rss(
+                FakeProcess(), daemon_log
+            )
+
+        self.assertEqual(peak_rss, 123)
+        wait_index = next(
+            index
+            for index, event in enumerate(events)
+            if isinstance(event, tuple) and event[0] == "wait"
+        )
+        self.assertLess(wait_index, events.index("rss"))
+        self.assertLess(events.index("close"), events.index("rss"))
+
+    def test_support_path_detection_is_specific(self):
+        self.assertTrue(eval_code_retrieval.is_support_path("tests/search_test.rs"))
+        self.assertTrue(eval_code_retrieval.is_support_path("docs/examples/basic.md"))
+        self.assertFalse(eval_code_retrieval.is_support_path("src/search.rs"))
+        self.assertFalse(eval_code_retrieval.is_support_path("src/contest.rs"))
+
+    def test_support_query_detection(self):
+        self.assertTrue(
+            eval_code_retrieval.query_targets_support(
+                "show an example test for retry behavior"
+            )
+        )
+        self.assertFalse(
+            eval_code_retrieval.query_targets_support(
+                "where is retry behavior implemented"
+            )
+        )
 
 
 if __name__ == "__main__":

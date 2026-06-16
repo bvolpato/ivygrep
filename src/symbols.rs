@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::fs;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -17,57 +18,26 @@ pub enum SymbolSearchMode {
     Callers,
 }
 
-pub fn index_chunk_graph(conn: &Connection, chunk: &IndexedChunk) -> Result<()> {
-    let definition = definition_name(chunk);
-    if let Some(name) = &definition {
+pub fn index_chunk_definition(
+    conn: &Connection,
+    chunk: &IndexedChunk,
+    chunk_key: i64,
+) -> Result<()> {
+    if let Some(name) = definition_name(chunk) {
         conn.prepare_cached(
             "INSERT OR REPLACE INTO symbols (
-                normalized_name, display_name, symbol_kind, chunk_id
-             ) VALUES (?1, ?2, ?3, ?4)",
+                normalized_name, chunk_key
+             ) VALUES (?1, ?2)",
         )?
-        .execute(params![
-            normalize_symbol(name),
-            name,
-            chunk.kind,
-            chunk.chunk_id,
-        ])?;
-    }
-
-    let normalized_source = definition
-        .as_deref()
-        .map(normalize_symbol)
-        .unwrap_or_default();
-    let mut skipped_declaration = false;
-    let mut seen = HashSet::new();
-    let mut insert_edge = conn.prepare_cached(
-        "INSERT OR IGNORE INTO symbol_edges (
-            target_name, edge_kind, source_chunk_id, line
-         ) VALUES (?1, 'call', ?2, ?3)",
-    )?;
-    for (target, line) in call_targets(chunk) {
-        let normalized = normalize_symbol(&target);
-        if !skipped_declaration && !normalized_source.is_empty() && normalized == normalized_source
-        {
-            skipped_declaration = true;
-            continue;
-        }
-        if normalized.is_empty() || !seen.insert((normalized.clone(), line)) {
-            continue;
-        }
-        insert_edge.execute(params![normalized, chunk.chunk_id, line as i64,])?;
+        .execute(params![normalize_symbol(&name), chunk_key])?;
     }
     Ok(())
 }
 
 pub fn remove_file_graph(conn: &Connection, file_path: &str) -> Result<()> {
     conn.execute(
-        "DELETE FROM symbol_edges
-         WHERE source_chunk_id IN (SELECT chunk_id FROM chunks WHERE file_path = ?1)",
-        [file_path],
-    )?;
-    conn.execute(
         "DELETE FROM symbols
-         WHERE chunk_id IN (SELECT chunk_id FROM chunks WHERE file_path = ?1)",
+         WHERE chunk_key IN (SELECT chunk_key FROM chunks WHERE file_path = ?1)",
         [file_path],
     )?;
     Ok(())
@@ -100,6 +70,10 @@ pub fn search_symbols_with_options(
     }
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
 
+    if mode != SymbolSearchMode::Definitions {
+        return search_call_sites(workspace, &normalized, mode, options);
+    }
+
     let primary_sqlite = if workspace.has_overlay() {
         workspace.overlay_sqlite_path()
     } else {
@@ -108,7 +82,6 @@ pub fn search_symbols_with_options(
     let mut hits = query_workspace_db(
         &open_sqlite_readonly(&primary_sqlite)?,
         &normalized,
-        mode,
         options,
         &path_matcher,
     )?;
@@ -121,7 +94,7 @@ pub fn search_symbols_with_options(
             let base = open_sqlite_readonly(&base_dir.join("metadata.sqlite3"))?;
             let mut base_options = options.clone();
             base_options.limit = remaining;
-            for hit in query_workspace_db(&base, &normalized, mode, &base_options, &path_matcher)? {
+            for hit in query_workspace_db(&base, &normalized, &base_options, &path_matcher)? {
                 let path = hit.file_path.to_string_lossy();
                 if !tombstones.contains(path.as_ref()) && !overlay_files.contains(path.as_ref()) {
                     hits.push(hit);
@@ -155,9 +128,9 @@ pub fn definition_candidates(
     let mut seen_chunks = HashSet::new();
     let mut chunks = Vec::new();
     let mut stmt = conn.prepare_cached(
-        "SELECT c.chunk_id, c.file_path, c.start_line, c.end_line, c.language,
-                c.kind, c.text, c.content_hash, c.vector_key, c.is_ignored
-         FROM symbols s JOIN chunks c ON c.chunk_id = s.chunk_id
+        "SELECT c.file_path, c.start_line, c.end_line, c.language,
+                c.kind, c.text, c.vector_key, c.is_ignored
+         FROM symbols s JOIN chunks c ON c.chunk_key = s.chunk_key
          WHERE s.normalized_name = ?1
          ORDER BY c.file_path, c.start_line
          LIMIT ?2",
@@ -173,18 +146,26 @@ pub fn definition_candidates(
             break;
         }
         let rows = stmt.query_map(params![normalized, remaining as i64], |row| {
-            let raw: Vec<u8> = row.get(6)?;
+            let raw: Vec<u8> = row.get(5)?;
+            let file_path = PathBuf::from(row.get::<_, String>(0)?);
+            let start_line = row.get::<_, i64>(1)? as usize;
+            let end_line = row.get::<_, i64>(2)? as usize;
+            let language = row.get::<_, String>(3)?;
+            let kind = row.get::<_, String>(4)?;
+            let vector_key = row.get::<_, i64>(6)? as u64;
             Ok(IndexedChunk {
-                chunk_id: row.get(0)?,
-                file_path: PathBuf::from(row.get::<_, String>(1)?),
-                start_line: row.get::<_, i64>(2)? as usize,
-                end_line: row.get::<_, i64>(3)? as usize,
-                language: row.get(4)?,
-                kind: row.get(5)?,
+                chunk_id: crate::indexer::logical_chunk_id(
+                    &file_path, start_line, end_line, &language, &kind, vector_key,
+                ),
+                file_path,
+                start_line,
+                end_line,
+                language,
+                kind,
                 text: decompress_text(raw),
-                content_hash: row.get(7)?,
-                vector_key: row.get::<_, i64>(8)? as u64,
-                is_ignored: row.get(9)?,
+                content_hash: String::new(),
+                vector_key,
+                is_ignored: row.get(7)?,
             })
         })?;
         for row in rows {
@@ -200,39 +181,14 @@ pub fn definition_candidates(
 fn query_workspace_db(
     conn: &Connection,
     normalized: &str,
-    mode: SymbolSearchMode,
     options: &SearchOptions,
     path_matcher: &PathGlobMatcher,
 ) -> Result<Vec<SearchHit>> {
-    let (sql, source, score) = match mode {
-        SymbolSearchMode::Definitions => (
-            "SELECT c.file_path, c.start_line, c.end_line, c.text,
-                    c.language, c.is_ignored
-             FROM symbols s JOIN chunks c ON c.chunk_id = s.chunk_id
-             WHERE s.normalized_name = ?1
-             ORDER BY c.file_path, c.start_line",
-            "symbol",
-            10.0,
-        ),
-        SymbolSearchMode::References => (
-            "SELECT c.file_path, e.line, e.line, c.text,
-                    c.language, c.is_ignored
-             FROM symbol_edges e JOIN chunks c ON c.chunk_id = e.source_chunk_id
-             WHERE e.target_name = ?1
-             ORDER BY c.file_path, e.line",
-            "reference",
-            6.0,
-        ),
-        SymbolSearchMode::Callers => (
-            "SELECT c.file_path, c.start_line, c.end_line, c.text,
-                    c.language, c.is_ignored
-             FROM symbol_edges e JOIN chunks c ON c.chunk_id = e.source_chunk_id
-             WHERE e.target_name = ?1 AND e.edge_kind = 'call'
-             ORDER BY c.file_path, c.start_line",
-            "caller",
-            8.0,
-        ),
-    };
+    let sql = "SELECT c.file_path, c.start_line, c.end_line, c.text,
+                      c.language, c.is_ignored
+               FROM symbols s JOIN chunks c ON c.chunk_key = s.chunk_key
+               WHERE s.normalized_name = ?1
+               ORDER BY c.file_path, c.start_line";
 
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map([normalized], |row| {
@@ -243,9 +199,9 @@ fn query_workspace_db(
                 start_line: row.get::<_, i64>(1)? as usize,
                 end_line: row.get::<_, i64>(2)? as usize,
                 preview: decompress_text(raw),
-                reason: format!("exact {source} match"),
-                score,
-                sources: vec![source.to_string()],
+                reason: "exact symbol match".to_string(),
+                score: 10.0,
+                sources: vec!["symbol".to_string()],
             },
             row.get::<_, String>(4)?,
             row.get::<_, bool>(5)?,
@@ -270,6 +226,145 @@ fn query_workspace_db(
         }
     }
     Ok(hits)
+}
+
+fn search_call_sites(
+    workspace: &Workspace,
+    normalized: &str,
+    mode: SymbolSearchMode,
+    options: &SearchOptions,
+) -> Result<Vec<SearchHit>> {
+    let source = match mode {
+        SymbolSearchMode::References => "reference",
+        SymbolSearchMode::Callers => "caller",
+        SymbolSearchMode::Definitions => unreachable!(),
+    };
+    let score = if mode == SymbolSearchMode::Callers {
+        8.0
+    } else {
+        6.0
+    };
+    let mut candidate_options = options.clone();
+    candidate_options.limit = options.limit.map(|limit| limit.saturating_mul(4));
+    let query = format!("{normalized}(");
+    let candidates = if options.limit.is_some() {
+        crate::search::exact_literal_chunks(workspace, &query, &candidate_options)?
+    } else {
+        crate::search::exact_literal_chunks_unbounded(workspace, &query, &candidate_options)?
+    };
+    let mut hits = Vec::new();
+    let mut seen_call_sites = HashSet::new();
+    let mut chunks_by_file = BTreeMap::<PathBuf, Vec<IndexedChunk>>::new();
+    for chunk in candidates {
+        chunks_by_file
+            .entry(chunk.file_path.clone())
+            .or_default()
+            .push(chunk);
+    }
+    for (file_path, mut chunks) in chunks_by_file {
+        let Ok(text) = fs::read_to_string(workspace.root.join(&file_path)) else {
+            continue;
+        };
+        chunks.sort_by_key(|chunk| {
+            (
+                chunk.end_line.saturating_sub(chunk.start_line),
+                chunk.start_line,
+            )
+        });
+        for chunk in chunks {
+            let call_lines =
+                matching_call_lines(&text, normalized, chunk.start_line, chunk.end_line)
+                    .into_iter()
+                    .filter(|(line, _)| seen_call_sites.insert((file_path.clone(), *line)))
+                    .collect::<Vec<_>>();
+            if call_lines.is_empty() {
+                continue;
+            }
+            if mode == SymbolSearchMode::Callers {
+                hits.push(SearchHit {
+                    file_path: chunk.file_path,
+                    start_line: chunk.start_line,
+                    end_line: chunk.end_line,
+                    preview: chunk.text,
+                    reason: format!("exact {source} match"),
+                    score,
+                    sources: vec![source.to_string()],
+                });
+            } else {
+                for (line, preview) in call_lines {
+                    hits.push(SearchHit {
+                        file_path: chunk.file_path.clone(),
+                        start_line: line,
+                        end_line: line,
+                        preview,
+                        reason: format!("exact {source} match"),
+                        score,
+                        sources: vec![source.to_string()],
+                    });
+                }
+            }
+            if options.limit.is_some_and(|limit| hits.len() >= limit) {
+                hits.truncate(options.limit.unwrap_or(hits.len()));
+                return Ok(hits);
+            }
+        }
+    }
+    Ok(hits)
+}
+
+fn matching_call_lines(
+    text: &str,
+    normalized: &str,
+    start_line: usize,
+    end_line: usize,
+) -> Vec<(usize, String)> {
+    let mut matches = Vec::new();
+    let needle = format!("{normalized}(");
+    for (offset, line) in text
+        .lines()
+        .enumerate()
+        .skip(start_line.saturating_sub(1))
+        .take(end_line.saturating_sub(start_line).saturating_add(1))
+    {
+        let lower = line.to_ascii_lowercase();
+        let mut from = 0;
+        while let Some(relative) = lower[from..].find(&needle) {
+            let index = from + relative;
+            let boundary_ok = index == 0
+                || !lower.as_bytes()[index - 1].is_ascii_alphanumeric()
+                    && lower.as_bytes()[index - 1] != b'_';
+            if boundary_ok && !looks_like_definition(&lower, index) {
+                matches.push((offset + 1, line.trim().to_string()));
+                break;
+            }
+            from = index + needle.len();
+        }
+    }
+    matches
+}
+
+fn looks_like_definition(line: &str, name_offset: usize) -> bool {
+    let prefix = line[..name_offset].trim_end();
+    if prefix.contains(['{', ';', '=']) {
+        return false;
+    }
+    let has_definition_keyword = prefix
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .any(|part| matches!(part, "fn" | "def" | "func" | "function"));
+    if has_definition_keyword {
+        return true;
+    }
+
+    let suffix = &line[name_offset..];
+    suffix
+        .find(')')
+        .map(|close| suffix[close + 1..].trim_start())
+        .is_some_and(|after| {
+            after.starts_with('{')
+                || after.starts_with("->")
+                || after.starts_with(':')
+                || after.starts_with("throws ")
+        })
 }
 
 fn type_matches(language: &str, type_filter: Option<&str>) -> bool {
@@ -358,39 +453,6 @@ fn definition_name(chunk: &IndexedChunk) -> Option<String> {
     (!candidate.is_empty()).then(|| candidate.to_string())
 }
 
-fn call_targets(chunk: &IndexedChunk) -> Vec<(String, usize)> {
-    const SKIP: &[&str] = &[
-        "if", "for", "while", "match", "switch", "catch", "return", "sizeof", "typeof", "function",
-        "fn", "def", "func",
-    ];
-    let mut calls = Vec::new();
-    for (offset, line) in chunk.text.lines().enumerate() {
-        let bytes = line.as_bytes();
-        for (index, byte) in bytes.iter().enumerate() {
-            if *byte != b'(' || index == 0 {
-                continue;
-            }
-            let mut start = index;
-            while start > 0 {
-                let previous = bytes[start - 1];
-                if previous.is_ascii_alphanumeric() || previous == b'_' {
-                    start -= 1;
-                } else {
-                    break;
-                }
-            }
-            let candidate = &line[start..index];
-            if candidate.len() >= 2 && !SKIP.contains(&candidate) {
-                calls.push((
-                    candidate.to_string(),
-                    chunk.start_line.saturating_add(offset),
-                ));
-            }
-        }
-    }
-    calls
-}
-
 fn identifier_prefix(value: &str) -> &str {
     let end = value
         .char_indices()
@@ -410,6 +472,9 @@ fn normalize_symbol(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use serial_test::serial;
+    use tempfile::tempdir;
+
     use super::*;
 
     fn chunk(language: &str, kind: &str, text: &str) -> IndexedChunk {
@@ -458,89 +523,113 @@ mod tests {
     }
 
     #[test]
-    fn extracts_distinct_call_targets() {
-        let calls = call_targets(&chunk(
-            "rust",
-            "Function",
-            "fn run() { parse(input); client.send(value); parse(other); }",
-        ));
-        assert!(calls.iter().any(|(name, _)| name == "parse"));
-        assert!(calls.iter().any(|(name, _)| name == "send"));
-    }
-
-    #[test]
-    fn declaration_is_not_persisted_as_a_self_call() {
+    fn definitions_store_only_normalized_name_and_chunk_identity() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE symbols (
                 normalized_name TEXT NOT NULL,
-                display_name TEXT NOT NULL,
-                symbol_kind TEXT NOT NULL,
-                chunk_id TEXT PRIMARY KEY
-             ) WITHOUT ROWID;
-             CREATE TABLE symbol_edges (
-                target_name TEXT NOT NULL,
-                edge_kind TEXT NOT NULL,
-                source_chunk_id TEXT NOT NULL,
-                line INTEGER NOT NULL,
-                PRIMARY KEY(target_name, edge_kind, source_chunk_id, line)
+                chunk_key INTEGER PRIMARY KEY
              ) WITHOUT ROWID;",
         )
         .unwrap();
         let function = chunk("rust", "Function", "fn run() { parse(); }");
-        index_chunk_graph(&conn, &function).unwrap();
+        index_chunk_definition(&conn, &function, 7).unwrap();
 
-        let self_calls: i64 = conn
+        let stored = conn
             .query_row(
-                "SELECT COUNT(*) FROM symbol_edges WHERE target_name = 'run'",
+                "SELECT normalized_name, chunk_key FROM symbols",
                 [],
-                |row| row.get(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
             )
             .unwrap();
-        let parse_calls: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM symbol_edges WHERE target_name = 'parse'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(self_calls, 0);
-        assert_eq!(parse_calls, 1);
+        assert_eq!(stored, ("run".to_string(), 7));
     }
 
     #[test]
-    fn distinct_reference_lines_are_preserved() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE symbols (
-                normalized_name TEXT NOT NULL,
-                display_name TEXT NOT NULL,
-                symbol_kind TEXT NOT NULL,
-                chunk_id TEXT PRIMARY KEY
-             ) WITHOUT ROWID;
-             CREATE TABLE symbol_edges (
-                target_name TEXT NOT NULL,
-                edge_kind TEXT NOT NULL,
-                source_chunk_id TEXT NOT NULL,
-                line INTEGER NOT NULL,
-                PRIMARY KEY(target_name, edge_kind, source_chunk_id, line)
-             ) WITHOUT ROWID;",
+    #[serial]
+    fn references_are_resolved_from_the_lexical_index() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".git")).unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            root.path().join("lib.rs"),
+            "fn parse() {}\nfn run() {\n    let one = 1;\n    let two = 2;\n    let three = 3;\n    let four = 4;\n    let five = 5;\n    parse();\n}\n",
         )
         .unwrap();
-        let function = chunk(
-            "rust",
-            "Function",
-            "fn run() {\n    parse(first);\n    parse(second);\n}",
-        );
-        index_chunk_graph(&conn, &function).unwrap();
 
-        let parse_calls: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM symbol_edges WHERE target_name = 'parse'",
-                [],
-                |row| row.get(0),
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        crate::indexer::index_workspace(&workspace, &model).unwrap();
+
+        let hits = search_symbols(
+            &workspace,
+            "parse",
+            SymbolSearchMode::References,
+            Some(10),
+            None,
+        )
+        .unwrap();
+        assert!(
+            hits.iter().any(|hit| {
+                hit.file_path == std::path::Path::new("lib.rs")
+                    && hit.start_line == 8
+                    && hit.reason == "exact reference match"
+                    && hit.preview == "parse();"
+            }),
+            "{hits:#?}"
+        );
+        assert!(
+            hits.iter().all(|hit| !hit.preview.starts_with("fn parse(")),
+            "definitions must not be returned as references: {hits:?}"
+        );
+
+        let callers = search_symbols(
+            &workspace,
+            "parse",
+            SymbolSearchMode::Callers,
+            Some(10),
+            None,
+        )
+        .unwrap();
+        assert_eq!(callers.len(), 1);
+        assert_eq!(callers[0].start_line, 2);
+        assert!(callers[0].preview.contains("fn run()"));
+        assert!(callers[0].preview.contains("parse();"));
+    }
+
+    #[test]
+    #[serial]
+    fn unbounded_call_site_searches_are_not_truncated() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".git")).unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(root.path().join("definition.rs"), "fn parse() {}\n").unwrap();
+        for index in 0..125 {
+            std::fs::write(
+                root.path().join(format!("caller_{index}.rs")),
+                format!("fn caller_{index}() {{ parse(); }}\n"),
             )
             .unwrap();
-        assert_eq!(parse_calls, 2);
+        }
+
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        crate::indexer::index_workspace(&workspace, &model).unwrap();
+
+        let references = search_symbols(
+            &workspace,
+            "parse",
+            SymbolSearchMode::References,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(references.len(), 125);
+
+        let callers =
+            search_symbols(&workspace, "parse", SymbolSearchMode::Callers, None, None).unwrap();
+        assert_eq!(callers.len(), 125);
     }
 }

@@ -13,6 +13,7 @@ pub mod path_glob;
 pub mod protocol;
 pub(crate) mod query_aliases;
 pub mod regex_search;
+pub(crate) mod reranker;
 pub mod search;
 pub mod symbols;
 pub mod text;

@@ -438,11 +438,24 @@ async fn run_status(json: bool) -> Result<()> {
                 let size = format_bytes(ws.index_size_bytes);
                 println!("{prefix}  Size:   {size}");
                 println!(
-                    "{prefix}          metadata {}, lexical {}, hash {}, neural {}",
-                    format_bytes(ws.index_components.metadata_bytes),
+                    "{prefix}          chunks {}, graph {}, sqlite aux {}, lexical {}, hash {}, neural {}",
+                    format_bytes(ws.index_components.stored_chunks_bytes),
+                    format_bytes(ws.index_components.graph_bytes),
+                    format_bytes(ws.index_components.sqlite_auxiliary_bytes),
                     format_bytes(ws.index_components.lexical_bytes),
                     format_bytes(ws.index_components.hash_vectors_bytes),
                     format_bytes(ws.index_components.neural_vectors_bytes),
+                );
+                println!(
+                    "{prefix}          compaction {} ({:.1}% free, format v{}/{})",
+                    if ws.compaction.healthy {
+                        "healthy"
+                    } else {
+                        "attention"
+                    },
+                    ws.compaction.sqlite_free_percent,
+                    ws.compaction.format_version,
+                    ws.compaction.current_format_version,
                 );
 
                 // Embedding status
@@ -528,10 +541,18 @@ async fn run_status(json: bool) -> Result<()> {
                 } else {
                     println!("{prefix}  Search: \x1b[90m○ empty\x1b[0m");
                 }
+                let reranker_model = ws
+                    .reranker_model
+                    .as_deref()
+                    .map(|model| format!(" {model}"))
+                    .unwrap_or_default();
                 println!(
-                    "{prefix}  Rank:   bounded top-{} reranker",
-                    ws.reranker_candidate_limit
+                    "{prefix}  Rank:   {}{} (bounded top-{})",
+                    ws.reranker_mode, reranker_model, ws.reranker_candidate_limit
                 );
+                if let Some(error) = &ws.reranker_error {
+                    println!("{prefix}          Reranker warning: {error}");
+                }
 
                 println!();
             }
@@ -1484,17 +1505,38 @@ fn run_doctor(path: Option<&Path>, fix: bool, deep: bool, json: bool) -> Result<
         report.neural_dimensions,
     );
     println!(
-        "Index: metadata {}, lexical {}, hash {}, neural {}, other {}",
-        format_bytes(report.index_components.metadata_bytes),
+        "Index: chunks {}, graph {}, sqlite aux {}, lexical {}, hash {}, neural {}, other {}",
+        format_bytes(report.index_components.stored_chunks_bytes),
+        format_bytes(report.index_components.graph_bytes),
+        format_bytes(report.index_components.sqlite_auxiliary_bytes),
         format_bytes(report.index_components.lexical_bytes),
         format_bytes(report.index_components.hash_vectors_bytes),
         format_bytes(report.index_components.neural_vectors_bytes),
         format_bytes(report.index_components.other_bytes),
     );
     println!(
-        "Reranker: top {} candidates",
-        report.reranker_candidate_limit
+        "Compaction: {} ({:.1}% free, format v{}/{})",
+        if report.compaction.healthy {
+            "healthy"
+        } else {
+            "attention"
+        },
+        report.compaction.sqlite_free_percent,
+        report.compaction.format_version,
+        report.compaction.current_format_version,
     );
+    let reranker_model = report
+        .reranker_model
+        .as_deref()
+        .map(|model| format!(" {model}"))
+        .unwrap_or_default();
+    println!(
+        "Reranker: {}{} (top {} candidates)",
+        report.reranker_mode, reranker_model, report.reranker_candidate_limit
+    );
+    if let Some(error) = &report.reranker_error {
+        println!("Reranker warning: {error}");
+    }
 
     for finding in report.findings {
         println!("- {finding}");

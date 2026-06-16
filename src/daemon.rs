@@ -117,6 +117,7 @@ impl WatchControl {
 struct SearchContextCacheKey {
     workspace_id: String,
     emb_dim: Option<usize>,
+    wants_neural: bool,
 }
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
@@ -227,6 +228,8 @@ struct QueryCacheKey {
     scope_filter: Option<WorkspaceScope>,
     skip_gitignore: bool,
     emb_dim: usize,
+    wants_neural: bool,
+    reranker: String,
 }
 
 #[derive(Default)]
@@ -390,12 +393,14 @@ impl DaemonState {
         &self,
         workspace: &Workspace,
         emb_dim: Option<usize>,
+        wants_neural: bool,
     ) -> Result<SearchContextLease> {
         let key = SearchContextCacheKey {
             workspace_id: workspace.id.clone(),
             emb_dim,
+            wants_neural,
         };
-        let signature = search_context_signature(workspace, emb_dim);
+        let signature = search_context_signature(workspace, emb_dim, wants_neural);
 
         let pool = {
             let mut cache = self.search_contexts.lock();
@@ -430,7 +435,7 @@ impl DaemonState {
         let context = pool
             .take_idle()
             .map(Ok)
-            .unwrap_or_else(|| SearchContext::load(workspace, emb_dim))?;
+            .unwrap_or_else(|| SearchContext::load(workspace, emb_dim, wants_neural))?;
         Ok(SearchContextLease {
             context: Some(context),
             pool,
@@ -592,18 +597,20 @@ fn stop_all_watchers(state: &DaemonState) {
 
 async fn handle_connection(stream: crate::ipc::IpcStream, state: DaemonState) -> Result<()> {
     let mut reader = BufReader::new(stream);
-    let response = match read_daemon_request(&mut reader).await {
-        Ok(Some(request)) => handle_request(state, request).await,
-        Ok(None) => return Ok(()),
-        Err(response) => response,
-    };
+    loop {
+        let (response, keep_alive) = match read_daemon_request(&mut reader).await {
+            Ok(Some(request)) => (handle_request(state.clone(), request).await, true),
+            Ok(None) => return Ok(()),
+            Err(response) => (response, false),
+        };
 
-    let payload = serde_json::to_vec(&response)?;
-    let mut stream = reader.into_inner();
-    stream.write_all(&payload).await?;
-    stream.write_all(b"\n").await?;
-
-    Ok(())
+        let payload = serde_json::to_vec(&response)?;
+        reader.get_mut().write_all(&payload).await?;
+        reader.get_mut().write_all(b"\n").await?;
+        if !keep_alive {
+            return Ok(());
+        }
+    }
 }
 
 async fn read_daemon_request<R>(
@@ -812,6 +819,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     &query,
                     &options,
                     model.dimensions(),
+                    model.model_identity().is_some(),
                     all_indices,
                 );
                 if let Some(cached_hits) = state_clone.cached_query_results(&cache_key) {
@@ -826,9 +834,11 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 }
 
                 for workspace in &workspaces {
-                    let context = match state_clone
-                        .cached_search_context(workspace, Some(model.dimensions()))
-                    {
+                    let context = match state_clone.cached_search_context(
+                        workspace,
+                        Some(model.dimensions()),
+                        model.model_identity().is_some(),
+                    ) {
                         Ok(context) => context,
                         Err(err) => {
                             warn!(
@@ -1041,7 +1051,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 let mut all_hits = Vec::new();
                 let mut all_errors: Vec<String> = Vec::new();
                 for workspace in &workspaces {
-                    let context = match state_clone.cached_search_context(workspace, None) {
+                    let context = match state_clone.cached_search_context(workspace, None, false) {
                         Ok(context) => context,
                         Err(err) => {
                             warn!(
@@ -1421,9 +1431,9 @@ fn cached_hash_model() -> Arc<dyn EmbeddingModel> {
 fn search_context_signature(
     workspace: &Workspace,
     emb_dim: Option<usize>,
+    wants_neural_vectors: bool,
 ) -> SearchContextSignature {
-    let wants_hash_vectors = matches!(emb_dim, Some(256 | 384));
-    let wants_neural_vectors = matches!(emb_dim, Some(384));
+    let wants_hash_vectors = emb_dim.is_some();
     let index_generation = workspace
         .read_metadata()
         .ok()
@@ -1477,6 +1487,7 @@ fn query_cache_key(
     query: &str,
     options: &SearchOptions,
     emb_dim: usize,
+    wants_neural: bool,
     all_indices: bool,
 ) -> QueryCacheKey {
     QueryCacheKey {
@@ -1486,7 +1497,7 @@ fn query_cache_key(
             .collect(),
         signatures: workspaces
             .iter()
-            .map(|workspace| search_context_signature(workspace, Some(emb_dim)))
+            .map(|workspace| search_context_signature(workspace, Some(emb_dim), wants_neural))
             .collect(),
         all_indices,
         query: query.to_string(),
@@ -1498,6 +1509,8 @@ fn query_cache_key(
         scope_filter: options.scope_filter.clone(),
         skip_gitignore: options.skip_gitignore,
         emb_dim,
+        wants_neural,
+        reranker: crate::reranker::cache_identity(),
     }
 }
 
@@ -1858,6 +1871,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn daemon_reads_multiple_requests_from_one_connection() {
+        let request =
+            serde_json::to_string(&DaemonRequestEnvelope::new(DaemonRequest::Status)).unwrap();
+        let payload = format!("{request}\n{request}\n");
+        let mut reader = BufReader::new(payload.as_bytes());
+
+        assert!(matches!(
+            read_daemon_request(&mut reader).await.unwrap(),
+            Some(DaemonRequest::Status)
+        ));
+        assert!(matches!(
+            read_daemon_request(&mut reader).await.unwrap(),
+            Some(DaemonRequest::Status)
+        ));
+        assert!(read_daemon_request(&mut reader).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
     #[serial]
     async fn restore_configured_watchers_makes_workspace_live_and_updates_search() {
         let home = tempdir().unwrap();
@@ -2013,8 +2044,12 @@ mod tests {
         index_workspace(&workspace, model.as_ref()).unwrap();
 
         let state = test_state();
-        let first = state.cached_search_context(&workspace, Some(256)).unwrap();
-        let second = state.cached_search_context(&workspace, Some(256)).unwrap();
+        let first = state
+            .cached_search_context(&workspace, Some(256), false)
+            .unwrap();
+        let second = state
+            .cached_search_context(&workspace, Some(256), false)
+            .unwrap();
         assert!(
             Arc::ptr_eq(&first.pool, &second.pool),
             "unchanged index should use the same SearchContext pool"
@@ -2039,7 +2074,9 @@ mod tests {
         .unwrap();
         index_workspace(&workspace, model.as_ref()).unwrap();
 
-        let third = state.cached_search_context(&workspace, Some(256)).unwrap();
+        let third = state
+            .cached_search_context(&workspace, Some(256), false)
+            .unwrap();
         assert!(
             !Arc::ptr_eq(&first_pool, &third.pool),
             "index generation change should replace the SearchContext pool"
@@ -2061,7 +2098,11 @@ mod tests {
 
         let state = test_state();
         let leases = (0..MAX_IDLE_SEARCH_CONTEXTS_PER_KEY + 2)
-            .map(|_| state.cached_search_context(&workspace, Some(256)).unwrap())
+            .map(|_| {
+                state
+                    .cached_search_context(&workspace, Some(256), false)
+                    .unwrap()
+            })
             .collect::<Vec<_>>();
         let pool = leases[0].pool.clone();
         drop(leases);
@@ -2096,7 +2137,7 @@ mod tests {
             let leases = (0..MAX_IDLE_SEARCH_CONTEXTS_PER_KEY)
                 .map(|_| {
                     state
-                        .cached_search_context(&workspace, Some(dimension))
+                        .cached_search_context(&workspace, Some(dimension), false)
                         .unwrap()
                 })
                 .collect::<Vec<_>>();

@@ -1,6 +1,6 @@
 [package]
 name = "ivygrep"
-version = "0.10.1"
+version = "0.11.0"
 edition = "2024"
 description = "Semantic grep that stays local — hybrid BM25 + vector search for code"
 license = "MIT"
@@ -16,7 +16,7 @@ path = "src/main.rs"
 
 [features]
 default = ["neural"]
-neural = ["dep:candle_embed", "dep:candle-core"]
+neural = ["dep:candle_embed", "dep:candle-core", "dep:hf-hub", "dep:tokenizers"]
 accelerate = ["candle-core/accelerate"]
 metal = ["neural", "candle-core/metal", "candle_embed/metal"]
 cuda = ["neural", "candle-core/cuda", "candle_embed/cuda"]
@@ -80,6 +80,8 @@ xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 zstd = "0.13"
 candle_embed = { version = "0.1.4", default-features = false, optional = true }
 candle-core = { version = "0.10.2", optional = true }
+hf-hub = { version = "0.3.2", optional = true }
+tokenizers = { version = "0.19.1", optional = true }
 
 [dev-dependencies]
 assert_cmd = "2.2"

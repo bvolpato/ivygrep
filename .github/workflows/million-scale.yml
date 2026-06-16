@@ -1,0 +1,135 @@
+name: Million-Scale Performance
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  schedule:
+    - cron: "15 4 * * 0"
+  workflow_dispatch:
+    inputs:
+      scale:
+        description: "Generated public corpus size"
+        required: true
+        default: "million"
+        type: choice
+        options:
+          - hundred-thousand
+          - million
+
+permissions:
+  contents: read
+
+jobs:
+  paired-benchmark:
+    name: Paired generated-corpus benchmark
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: "million-scale"
+          cache-bin: "false"
+
+      - name: Select paired benchmark parameters
+        id: parameters
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          INPUT_SCALE: ${{ inputs.scale }}
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            {
+              echo "base=$PR_BASE_SHA"
+              echo "files=1000"
+              echo "runs=3"
+            } >> "$GITHUB_OUTPUT"
+          else
+            scale="${INPUT_SCALE:-million}"
+            files=10000
+            if [[ "$scale" == "hundred-thousand" ]]; then
+              files=1000
+            fi
+            {
+              echo "base=$(git rev-parse HEAD^)"
+              echo "files=$files"
+              echo "runs=2"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build base and head
+        env:
+          BASE_SHA: ${{ steps.parameters.outputs.base }}
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/ivygrep-base" "$BASE_SHA"
+          cargo build --release --locked \
+            --manifest-path "$RUNNER_TEMP/ivygrep-base/Cargo.toml" \
+            --target-dir "$RUNNER_TEMP/base-target"
+          cargo build --release --locked --target-dir "$RUNNER_TEMP/head-target"
+
+      - name: Run paired generated-corpus trials
+        env:
+          BASE_SHA: ${{ steps.parameters.outputs.base }}
+          FILES: ${{ steps.parameters.outputs.files }}
+          RUNS: ${{ steps.parameters.outputs.runs }}
+        run: |
+          mkdir -p benchmark-results
+          for run in $(seq 1 "$RUNS"); do
+            run_base() {
+              uv run scripts/bench_million_chunks.py \
+                --corpus "$RUNNER_TEMP/generated-public-corpus" \
+                --home "$RUNNER_TEMP/base-home-$run" \
+                --binary "$RUNNER_TEMP/base-target/release/ig" \
+                --files "$FILES" \
+                --query-samples 100 \
+                --source-commit "$BASE_SHA" \
+                --output "benchmark-results/baseline-$run.json"
+              rm -rf "$RUNNER_TEMP/base-home-$run"
+            }
+            run_head() {
+              uv run scripts/bench_million_chunks.py \
+                --corpus "$RUNNER_TEMP/generated-public-corpus" \
+                --home "$RUNNER_TEMP/head-home-$run" \
+                --binary "$RUNNER_TEMP/head-target/release/ig" \
+                --files "$FILES" \
+                --query-samples 100 \
+                --source-commit "$GITHUB_SHA" \
+                --output "benchmark-results/current-$run.json"
+              rm -rf "$RUNNER_TEMP/head-home-$run"
+            }
+            if (( run % 2 )); then
+              run_base
+              run_head
+            else
+              run_head
+              run_base
+            fi
+          done
+
+      - name: Reject statistically significant regressions
+        run: |
+          python3 scripts/compare_million_benchmarks.py \
+            --baseline benchmark-results/baseline-*.json \
+            --current benchmark-results/current-*.json \
+            --significant-regression-ratio 1.15 \
+            --output benchmark-results/comparison.json
+          python3 scripts/check_public_benchmark_privacy.py benchmark-results
+
+      - name: Upload benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: million-scale-performance
+          path: benchmark-results

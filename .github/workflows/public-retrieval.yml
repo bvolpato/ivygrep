@@ -1,0 +1,202 @@
+name: Public Retrieval
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "benchmarks/public/**"
+      - "scripts/eval_code_retrieval.py"
+      - "scripts/export_public_retrieval.py"
+      - "scripts/run_public_benchmark_matrix.py"
+      - "scripts/bench_million_chunks.py"
+      - "scripts/bench_paired_million_queries.py"
+      - "scripts/compare_million_benchmarks.py"
+      - "scripts/render_embedding_bakeoff.py"
+      - "scripts/render_million_benchmark.py"
+      - "scripts/render_evidence_dashboard.py"
+      - "scripts/check_evidence_claims.py"
+      - "scripts/normalize_release_history.py"
+      - "scripts/render_public_benchmark.py"
+      - "scripts/check_public_benchmark_privacy.py"
+      - "scripts/check_retrieval_benchmark_leakage.py"
+      - "tests/test_public_benchmark.py"
+      - "tests/test_million_benchmark.py"
+      - "tests/test_evidence_dashboard.py"
+      - "benchmarks/evidence/**"
+      - "docs/benchmarks/public-million*"
+      - "docs/benchmarks/evidence-dashboard*"
+      - "docs/benchmarks/claims-policy.md"
+      - "docs/benchmarks/release-artifact-history.json"
+      - ".github/workflows/public-retrieval.yml"
+  schedule:
+    - cron: "30 5 * * 1"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Pinned public dataset profile"
+        required: true
+        default: "public-core"
+        type: choice
+        options:
+          - public-core
+          - full
+      modes:
+        description: "Comma-separated retrieval modes"
+        required: true
+        default: "lexical,hash,hybrid,neural"
+        type: string
+      repetitions:
+        description: "Independent repetitions"
+        required: true
+        default: "3"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  HF_HOME: ${{ github.workspace }}/.cache/huggingface
+
+jobs:
+  validate:
+    name: Validate public benchmark tooling
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Run benchmark tooling tests
+        run: |
+          python3 -m unittest \
+            tests.test_public_benchmark \
+            tests.test_eval_code_retrieval \
+            tests.test_million_benchmark \
+            tests.test_evidence_dashboard \
+            -v
+
+      - name: Verify evidence dashboard and claims
+        run: |
+          python3 scripts/render_evidence_dashboard.py
+          python3 scripts/check_evidence_claims.py
+          git diff --exit-code -- \
+            docs/benchmarks/evidence-dashboard.json \
+            docs/benchmarks/evidence-dashboard.md \
+            docs/benchmarks/evidence-dashboard.html \
+            docs/benchmarks/claims-policy.md
+
+      - name: Check publishable documentation privacy
+        run: |
+          python3 scripts/check_public_benchmark_privacy.py \
+            docs/benchmarks/public-code-retrieval-baseline-results.json \
+            docs/benchmarks/public-code-retrieval-results.json \
+            docs/benchmarks/public-code-retrieval.md \
+            docs/benchmarks/public-code-retrieval.html \
+            docs/benchmarks/embedding-model-bakeoff.json \
+            docs/benchmarks/embedding-model-bakeoff.md \
+            docs/benchmarks/embedding-model-bakeoff.html \
+            benchmarks/public/reranker_model.json \
+            docs/benchmarks/public-reranker-deterministic-results.json \
+            docs/benchmarks/public-reranker-learned-results.json \
+            docs/benchmarks/public-reranker-results.json \
+            docs/benchmarks/public-reranker.md \
+            docs/benchmarks/public-reranker.html \
+            docs/benchmarks/public-million-index-baseline.json \
+            docs/benchmarks/public-million-index-current.json \
+            docs/benchmarks/public-million-system-baseline.json \
+            docs/benchmarks/public-million-system-current.json \
+            docs/benchmarks/public-million-query-baseline.json \
+            docs/benchmarks/public-million-query-current.json \
+            docs/benchmarks/public-million-query-comparison.json \
+            docs/benchmarks/public-million-quality-current.json \
+            docs/benchmarks/public-million-results.json \
+            docs/benchmarks/public-million.md \
+            docs/benchmarks/public-million.html \
+            docs/benchmarks/evidence-dashboard.json \
+            docs/benchmarks/evidence-dashboard.md \
+            docs/benchmarks/evidence-dashboard.html \
+            docs/benchmarks/claims-policy.md \
+            docs/benchmarks/release-artifact-history.json
+
+  matrix:
+    name: Run pinned public matrix
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 720
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: "public-retrieval"
+          cache-bin: "false"
+
+      - name: Select matrix parameters
+        id: parameters
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PROFILE: ${{ inputs.profile }}
+          INPUT_MODES: ${{ inputs.modes }}
+          INPUT_REPETITIONS: ${{ inputs.repetitions }}
+        run: |
+          if [[ "$EVENT_NAME" == "schedule" ]]; then
+            {
+              echo "profile=public-core"
+              echo "modes=lexical,hash,hybrid,neural"
+              echo "repetitions=3"
+            } >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "profile=$INPUT_PROFILE"
+              echo "modes=$INPUT_MODES"
+              echo "repetitions=$INPUT_REPETITIONS"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run public retrieval matrix
+        run: |
+          uv run scripts/run_public_benchmark_matrix.py \
+            --profile "${{ steps.parameters.outputs.profile }}" \
+            --modes "${{ steps.parameters.outputs.modes }}" \
+            --runs "${{ steps.parameters.outputs.repetitions }}" \
+            --datasets-root "$RUNNER_TEMP/public-datasets" \
+            --work-root "$RUNNER_TEMP/public-results" \
+            --output public-code-retrieval-results.json
+
+      - name: Render report
+        run: |
+          baseline_args=()
+          if [[ "${{ steps.parameters.outputs.profile }}" == "public-core" ]]; then
+            baseline_args=(
+              --baseline docs/benchmarks/public-code-retrieval-baseline-results.json
+            )
+          fi
+          python3 scripts/render_public_benchmark.py \
+            --input public-code-retrieval-results.json \
+            "${baseline_args[@]}" \
+            --markdown public-code-retrieval.md \
+            --html public-code-retrieval.html
+          python3 scripts/check_public_benchmark_privacy.py \
+            public-code-retrieval-results.json \
+            public-code-retrieval.md \
+            public-code-retrieval.html
+
+      - name: Upload public benchmark evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: public-code-retrieval-${{ steps.parameters.outputs.profile }}
+          path: |
+            public-code-retrieval-results.json
+            public-code-retrieval.md
+            public-code-retrieval.html
+            ${{ runner.temp }}/public-results/*.json

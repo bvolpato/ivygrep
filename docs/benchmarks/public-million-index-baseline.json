@@ -1,0 +1,91 @@
+{
+  "binary": {
+    "sha256": "92f91629fa9a5dbad4f9f540e35703e27cc188776a763c7818cc06ee7b619a61",
+    "version": "ivygrep 0.10.1"
+  },
+  "corpus": {
+    "chunks_per_file": 100,
+    "expected_chunks": 1000000,
+    "files": 10000,
+    "generator": "ivygrep-public-million-rust-v1",
+    "license": "CC0-1.0",
+    "manifest_sha256": "349244bbc97f87a7d9997c292d09bd91395522a87c36e47098c54218a039d32e",
+    "schema_version": 1
+  },
+  "generated_at": "2026-06-16T01:24:20.880189+00:00",
+  "index": {
+    "chunk_count": 1010001,
+    "chunks_per_second": 4963.317419550483,
+    "components": {
+      "hash_vectors_bytes": 112,
+      "lexical_bytes": 246295626,
+      "metadata_bytes": 896479232,
+      "neural_vectors_bytes": 0,
+      "other_bytes": 673142
+    },
+    "file_count": 10001,
+    "metrics": {
+      "filesystem_read_bytes": 90238976,
+      "filesystem_write_bytes": 25722142720,
+      "peak_rss_bytes": 491511808,
+      "wall_ms": 203493.13062703004
+    },
+    "size_bytes": 1143448112,
+    "summary": {
+      "deleted_files": 0,
+      "indexed_files": 10001,
+      "total_chunks": 1010001,
+      "workspace_id": "31862a426cd09a71c742282dd782dda1"
+    }
+  },
+  "ivygrep_commit": "4b24c627d9bd733edec5d145437e9aa35c2ab2ca",
+  "queries": {
+    "cache_replay": {
+      "maximum_ms": 211.15010598441586,
+      "median_ms": 37.83538853167556,
+      "minimum_ms": 22.91067998157814,
+      "p95_ms": 77.0057660411112,
+      "samples": 100
+    },
+    "concurrent": {
+      "maximum_ms": 186.11452099867165,
+      "median_ms": 90.618423972046,
+      "minimum_ms": 49.755999003537,
+      "p95_ms": 141.13288302905858,
+      "queries_per_second": 77.37122603419988,
+      "samples": 64,
+      "wall_ms": 827.1808950230479,
+      "workers": 8
+    },
+    "filtered": {
+      "maximum_ms": 173.43731399159878,
+      "median_ms": 97.99950546585023,
+      "minimum_ms": 48.32514398731291,
+      "p95_ms": 143.85116298217326,
+      "samples": 100
+    },
+    "process_cold": {
+      "maximum_ms": 182.9792709904723,
+      "median_ms": 74.46532149333507,
+      "minimum_ms": 55.149829015135765,
+      "p95_ms": 182.9792709904723,
+      "samples": 10
+    },
+    "warm_distinct": {
+      "maximum_ms": 133.70960199972615,
+      "median_ms": 58.00499298493378,
+      "minimum_ms": 34.590696974191815,
+      "p95_ms": 90.17194103216752,
+      "samples": 100
+    }
+  },
+  "runtime": {
+    "logical_cpus": 32,
+    "machine": "aarch64",
+    "physical_memory_bytes": 132651511808,
+    "python": "3.14.5",
+    "release": "6.8.0-1057-aws",
+    "system": "Linux"
+  },
+  "schema_version": 1
+}

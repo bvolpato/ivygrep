@@ -49,6 +49,15 @@ pub struct IndexingSummary {
     pub indexed_files: usize,
     pub deleted_files: usize,
     pub total_chunks: usize,
+    #[serde(default)]
+    pub phase_timings: IndexingPhaseTimings,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IndexingPhaseTimings {
+    pub discovery_ms: f64,
+    pub persist_ms: f64,
+    pub finalize_ms: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -65,7 +74,21 @@ pub struct IndexedChunk {
     pub is_ignored: bool,
 }
 
-type IndexedFileBatch = Vec<(PathBuf, Vec<IndexedChunk>)>;
+#[derive(Debug, Clone)]
+struct PreparedIndexedChunk {
+    chunk: IndexedChunk,
+    compressed_text: Vec<u8>,
+}
+
+fn prepare_indexed_chunk(chunk: IndexedChunk) -> PreparedIndexedChunk {
+    let compressed_text = compress_text(&chunk.text);
+    PreparedIndexedChunk {
+        chunk,
+        compressed_text,
+    }
+}
+
+type IndexedFileBatch = Vec<(PathBuf, Vec<PreparedIndexedChunk>)>;
 
 struct IndexBatchProducer {
     receiver: Option<std::sync::mpsc::Receiver<IndexedFileBatch>>,
@@ -113,14 +136,13 @@ impl Drop for IndexBatchProducer {
 
 #[derive(Debug, Clone)]
 pub struct TantivyFields {
-    pub chunk_id: Field,
+    pub vector_key: Field,
     pub file_path: Field,
     pub start_line: Field,
     pub end_line: Field,
     pub language: Field,
     pub kind: Field,
     pub text: Field,
-    pub content_hash: Field,
     pub is_ignored: Option<Field>,
     pub file_path_text: Option<Field>,
     pub signature: Option<Field>,
@@ -339,6 +361,8 @@ fn index_workspace_inner(
     trust_live_watcher: bool,
     watcher_paths: Option<&[PathBuf]>,
 ) -> Result<IndexingSummary> {
+    let index_started = std::time::Instant::now();
+
     // Write metadata early so the workspace appears in `ig --status` during indexing.
     // The final write after completion updates last_indexed_at_unix.
     if workspace.read_metadata()?.is_none() {
@@ -366,6 +390,10 @@ fn index_workspace_inner(
             indexed_files: 0,
             deleted_files: 0,
             total_chunks: count_chunks(&workspace.sqlite_path())?,
+            phase_timings: IndexingPhaseTimings {
+                discovery_ms: index_started.elapsed().as_secs_f64() * 1_000.0,
+                ..Default::default()
+            },
         });
     }
 
@@ -429,20 +457,20 @@ fn index_workspace_inner(
             }
         }
 
-        // If the base index predates the current on-disk format, migrate it
-        // before referencing it: an overlay serves chunks/vectors from the
-        // base, so a v1 base would be queried with v2-derived lookups. The
-        // base self-heals via its own health check during index_workspace.
+        // If the base index uses a different on-disk format, rebuild it before
+        // referencing it. An overlay serves chunks and vectors from the base,
+        // so querying any incompatible layout is unsafe. The base self-heals
+        // via its own health check during index_workspace.
         let base_format = std::fs::read_to_string(base_dir.join("index_format_version"))
             .ok()
             .and_then(|s| s.trim().parse::<u32>().ok())
             .unwrap_or(0);
         if base_sqlite.exists()
-            && base_format < crate::workspace::INDEX_FORMAT_VERSION
+            && base_format != crate::workspace::INDEX_FORMAT_VERSION
             && let Some(main_root) = workspace.main_worktree_root()
             && let Ok(base_ws) = crate::workspace::Workspace::resolve(&main_root)
         {
-            eprintln!("  ⚡ base index format outdated — rebuilding base before overlay...");
+            eprintln!("  ⚡ base index format incompatible — rebuilding base before overlay...");
             let _ = index_workspace(&base_ws, embedding_model)?;
             base_refreshed = true;
             if workspace.has_overlay() {
@@ -646,6 +674,10 @@ fn index_workspace_inner(
                 indexed_files: 0,
                 deleted_files: 0,
                 total_chunks: count_workspace_chunks(workspace).unwrap_or(0),
+                phase_timings: IndexingPhaseTimings {
+                    discovery_ms: index_started.elapsed().as_secs_f64() * 1_000.0,
+                    ..Default::default()
+                },
             });
         }
         (d, Some(new), clear_overlay_paths)
@@ -677,10 +709,17 @@ fn index_workspace_inner(
                 indexed_files: 0,
                 deleted_files: 0,
                 total_chunks: count_workspace_chunks(workspace).unwrap_or(0),
+                phase_timings: IndexingPhaseTimings {
+                    discovery_ms: index_started.elapsed().as_secs_f64() * 1_000.0,
+                    ..Default::default()
+                },
             });
         }
         (d, Some(new), Vec::new())
     };
+
+    let discovery_ms = index_started.elapsed().as_secs_f64() * 1_000.0;
+    let persist_started = std::time::Instant::now();
 
     // Determine which stores to write to: overlay or main
     let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
@@ -896,6 +935,7 @@ fn index_workspace_inner(
                         .into_iter()
                         .map(|c| build_indexed_chunk(c, *is_ignored))
                         .filter(|chunk| seen_vector_keys.insert(chunk.vector_key))
+                        .map(prepare_indexed_chunk)
                         .collect();
 
                     let n = progress_counter_clone
@@ -965,12 +1005,13 @@ fn index_workspace_inner(
                 .unwrap_or_default()
                 .as_secs() as i64;
 
-            for indexed in indexed_chunks {
+            for prepared in indexed_chunks {
+                let indexed = &prepared.chunk;
                 persist_or_stop!(insert_chunk(
                     &tx,
                     indexed,
+                    &prepared.compressed_text,
                     &rel_path_string,
-                    is_fresh_index,
                     now_unix
                 ));
                 persist_or_stop!(add_chunk_doc(
@@ -982,10 +1023,14 @@ fn index_workspace_inner(
             }
         }
 
-        // Prevent memory/WAL ballooning on massive repositories
+        // Bound SQLite WAL growth independently from Tantivy publication.
+        // Fresh indexes publish Tantivy once at the end: committing every
+        // SQLite batch forces repeated segment merges and multiplies disk I/O.
         if chunks_since_commit >= 25_000 {
             persist_or_stop!(tx.commit());
-            persist_or_stop!(writer.commit());
+            if !is_fresh_index {
+                persist_or_stop!(writer.commit());
+            }
             tx = persist_or_stop!(sqlite.transaction());
             chunks_since_commit = 0;
         }
@@ -994,6 +1039,8 @@ fn index_workspace_inner(
     producer.finish()?;
 
     let t1 = std::time::Instant::now();
+    let persist_ms = persist_started.elapsed().as_secs_f64() * 1_000.0;
+    let finalize_started = std::time::Instant::now();
     if show_progress && total > 0 {
         eprint!(
             "\r\x1b[K  ✓ {} files, {} chunks — indexed completely in {:.1}s\n",
@@ -1082,6 +1129,11 @@ fn index_workspace_inner(
         indexed_files: touched_files.len(),
         deleted_files: diff.deleted.len(),
         total_chunks: count_workspace_chunks(workspace).unwrap_or(0),
+        phase_timings: IndexingPhaseTimings {
+            discovery_ms,
+            persist_ms,
+            finalize_ms: finalize_started.elapsed().as_secs_f64() * 1_000.0,
+        },
     })
 }
 
@@ -1416,17 +1468,30 @@ pub fn enhance_workspace_neural(
     }
 
     let profile = neural_model.profile_info().unwrap_or("general");
-    if workspace
-        .neural_profile_name()
-        .as_deref()
-        .unwrap_or("general")
-        != profile
-    {
+    let model_identity = neural_model.model_identity();
+    let identity_matches = match (workspace.neural_model_identity(), model_identity) {
+        (Some(persisted), Some(active)) => persisted == *active,
+        (None, None) => {
+            workspace
+                .neural_profile_name()
+                .as_deref()
+                .unwrap_or("general")
+                == profile
+        }
+        _ => false,
+    };
+    if !identity_matches {
         let _ = fs::remove_file(workspace.vector_neural_path());
         let _ = fs::remove_file(workspace.neural_tombstones_path());
         let _ = fs::remove_file(workspace.neural_tombstones_processing_path());
     }
     fs::write(workspace.neural_profile_path(), profile)?;
+    if let Some(identity) = model_identity {
+        fs::write(
+            workspace.neural_model_path(),
+            serde_json::to_vec_pretty(identity)?,
+        )?;
+    }
 
     let sqlite = open_sqlite(&workspace.sqlite_path())?;
 
@@ -1578,7 +1643,6 @@ fn build_indexed_chunk(chunk: Chunk, is_ignored: bool) -> IndexedChunk {
     // Stable logical keys let background vector enrichment resume across an
     // unchanged reindex. Path and bounds keep identical boilerplate chunks in
     // different files distinct.
-    let chunk_id = chunk.id.to_string();
     let vector_key = vector_key_for_chunk(
         &chunk.file_path,
         chunk.start_line,
@@ -1586,6 +1650,14 @@ fn build_indexed_chunk(chunk: Chunk, is_ignored: bool) -> IndexedChunk {
         &chunk.content_hash,
     );
     let kind = format!("{:?}", chunk.kind);
+    let chunk_id = logical_chunk_id(
+        &chunk.file_path,
+        chunk.start_line,
+        chunk.end_line,
+        &chunk.language,
+        &kind,
+        vector_key,
+    );
 
     IndexedChunk {
         chunk_id,
@@ -1599,6 +1671,28 @@ fn build_indexed_chunk(chunk: Chunk, is_ignored: bool) -> IndexedChunk {
         vector_key,
         is_ignored,
     }
+}
+
+pub(crate) fn logical_chunk_id(
+    file_path: &Path,
+    start_line: usize,
+    end_line: usize,
+    language: &str,
+    kind: &str,
+    vector_key: u64,
+) -> String {
+    let mut identity =
+        Vec::with_capacity(file_path.as_os_str().len() + language.len() + kind.len() + 48);
+    identity.extend_from_slice(index_path_string(file_path).as_bytes());
+    identity.push(0);
+    identity.extend_from_slice(&start_line.to_le_bytes());
+    identity.extend_from_slice(&end_line.to_le_bytes());
+    identity.extend_from_slice(language.as_bytes());
+    identity.push(0);
+    identity.extend_from_slice(kind.as_bytes());
+    identity.push(0);
+    identity.extend_from_slice(&vector_key.to_le_bytes());
+    format!("{:032x}", xxhash_rust::xxh3::xxh3_128(&identity))
 }
 
 fn vector_key_for_chunk(
@@ -1754,14 +1848,13 @@ fn add_chunk_doc(
     file_path: &str,
 ) -> Result<()> {
     let mut doc = TantivyDocument::default();
-    doc.add_text(fields.chunk_id, &chunk.chunk_id);
+    doc.add_u64(fields.vector_key, chunk.vector_key);
     doc.add_text(fields.file_path, file_path);
     doc.add_u64(fields.start_line, chunk.start_line as u64);
     doc.add_u64(fields.end_line, chunk.end_line as u64);
     doc.add_text(fields.language, &chunk.language);
     doc.add_text(fields.kind, &chunk.kind);
     doc.add_text(fields.text, &chunk.text);
-    doc.add_text(fields.content_hash, &chunk.content_hash);
     if let Some(f) = fields.is_ignored {
         doc.add_u64(f, if chunk.is_ignored { 1u64 } else { 0u64 });
     }
@@ -1781,55 +1874,36 @@ fn add_chunk_doc(
 fn insert_chunk(
     conn: &Connection,
     chunk: &IndexedChunk,
+    compressed_text: &[u8],
     file_path: &str,
-    fresh: bool,
     now_unix: i64,
 ) -> Result<()> {
-    let sql = if fresh {
+    let mut stmt = conn.prepare_cached(
         "INSERT INTO chunks (
-            chunk_id,
             file_path,
             start_line,
             end_line,
             language,
             kind,
             text,
-            content_hash,
             vector_key,
             modified_unix,
             is_ignored
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
-    } else {
-        "INSERT OR REPLACE INTO chunks (
-            chunk_id,
-            file_path,
-            start_line,
-            end_line,
-            language,
-            kind,
-            text,
-            content_hash,
-            vector_key,
-            modified_unix,
-            is_ignored
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)"
-    };
-    let mut stmt = conn.prepare_cached(sql)?;
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+    )?;
     let is_ignored_int = if chunk.is_ignored { 1i64 } else { 0i64 };
     stmt.execute(params![
-        chunk.chunk_id,
         file_path,
         chunk.start_line as i64,
         chunk.end_line as i64,
         chunk.language,
         chunk.kind,
-        compress_text(&chunk.text),
-        chunk.content_hash,
+        compressed_text,
         chunk.vector_key as i64,
         now_unix,
         is_ignored_int,
     ])?;
-    crate::symbols::index_chunk_graph(conn, chunk)?;
+    crate::symbols::index_chunk_definition(conn, chunk, conn.last_insert_rowid())?;
     Ok(())
 }
 
@@ -1897,14 +1971,13 @@ fn create_tables(conn: &Connection) -> Result<()> {
         PRAGMA synchronous = NORMAL;
 
         CREATE TABLE IF NOT EXISTS chunks (
-            chunk_id TEXT PRIMARY KEY,
+            chunk_key INTEGER PRIMARY KEY,
             file_path TEXT NOT NULL,
             start_line INTEGER NOT NULL,
             end_line INTEGER NOT NULL,
             language TEXT NOT NULL,
             kind TEXT NOT NULL,
             text TEXT NOT NULL,
-            content_hash TEXT NOT NULL,
             vector_key INTEGER NOT NULL,
             modified_unix INTEGER NOT NULL,
             is_ignored INTEGER NOT NULL DEFAULT 0
@@ -1917,17 +1990,7 @@ fn create_tables(conn: &Connection) -> Result<()> {
 
         CREATE TABLE IF NOT EXISTS symbols (
             normalized_name TEXT NOT NULL,
-            display_name TEXT NOT NULL,
-            symbol_kind TEXT NOT NULL,
-            chunk_id TEXT PRIMARY KEY
-        ) WITHOUT ROWID;
-
-        CREATE TABLE IF NOT EXISTS symbol_edges (
-            target_name TEXT NOT NULL,
-            edge_kind TEXT NOT NULL,
-            source_chunk_id TEXT NOT NULL,
-            line INTEGER NOT NULL,
-            PRIMARY KEY(target_name, edge_kind, source_chunk_id, line)
+            chunk_key INTEGER PRIMARY KEY
         ) WITHOUT ROWID;
 
         CREATE INDEX IF NOT EXISTS idx_chunks_file_path ON chunks(file_path);
@@ -1946,11 +2009,7 @@ fn create_tables(conn: &Connection) -> Result<()> {
 }
 
 fn create_graph_indexes(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(normalized_name);
-         CREATE INDEX IF NOT EXISTS idx_symbol_edges_source_chunk
-             ON symbol_edges(source_chunk_id);",
-    )?;
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(normalized_name);")?;
     Ok(())
 }
 
@@ -1961,7 +2020,7 @@ fn build_schema() -> Schema {
     let code_text_opts = TextOptions::default().set_indexing_options(code_indexing.clone());
 
     let mut schema = Schema::builder();
-    schema.add_text_field("chunk_id", STRING | STORED);
+    schema.add_u64_field("vector_key", STORED);
     schema.add_text_field("file_path", STRING | STORED);
     schema.add_u64_field("start_line", STORED);
     schema.add_u64_field("end_line", STORED);
@@ -1969,7 +2028,6 @@ fn build_schema() -> Schema {
     schema.add_text_field("kind", STRING | STORED);
     // Full text indexed with code-aware tokenizer (not STORED — lives in SQLite)
     schema.add_text_field("text", code_text_opts.clone());
-    schema.add_text_field("content_hash", STRING | STORED);
     schema.add_u64_field("is_ignored", STORED);
     // BM25F fields: tokenized path + definition signature with code tokenizer
     schema.add_text_field("file_path_text", code_text_opts.clone());
@@ -1994,14 +2052,13 @@ pub fn open_tantivy_index(path: &Path) -> Result<(TantivyIndex, TantivyFields)> 
 
     let schema = index.schema();
     let fields = TantivyFields {
-        chunk_id: schema.get_field("chunk_id")?,
+        vector_key: schema.get_field("vector_key")?,
         file_path: schema.get_field("file_path")?,
         start_line: schema.get_field("start_line")?,
         end_line: schema.get_field("end_line")?,
         language: schema.get_field("language")?,
         kind: schema.get_field("kind")?,
         text: schema.get_field("text")?,
-        content_hash: schema.get_field("content_hash")?,
         is_ignored: schema.get_field("is_ignored").ok(),
         file_path_text: schema.get_field("file_path_text").ok(),
         signature: schema.get_field("signature").ok(),
@@ -2015,7 +2072,8 @@ pub fn fetch_chunk_by_vector_key(
     vector_key: u64,
 ) -> Result<Option<IndexedChunk>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT chunk_id, file_path, start_line, end_line, language, kind, text, content_hash, vector_key, is_ignored
+        "SELECT file_path, start_line, end_line, language, kind, text,
+                vector_key, is_ignored
          FROM chunks
          WHERE vector_key = ?1
          LIMIT 1",
@@ -2023,18 +2081,26 @@ pub fn fetch_chunk_by_vector_key(
 
     let mut rows = stmt.query(params![vector_key as i64])?;
     if let Some(row) = rows.next()? {
-        let raw_text: Vec<u8> = row.get(6)?;
+        let raw_text: Vec<u8> = row.get(5)?;
+        let file_path = PathBuf::from(row.get::<_, String>(0)?);
+        let start_line = row.get::<_, i64>(1)? as usize;
+        let end_line = row.get::<_, i64>(2)? as usize;
+        let language = row.get::<_, String>(3)?;
+        let kind = row.get::<_, String>(4)?;
+        let vector_key = row.get::<_, i64>(6)? as u64;
         let chunk = IndexedChunk {
-            chunk_id: row.get::<_, String>(0)?,
-            file_path: PathBuf::from(row.get::<_, String>(1)?),
-            start_line: row.get::<_, i64>(2)? as usize,
-            end_line: row.get::<_, i64>(3)? as usize,
-            language: row.get(4)?,
-            kind: row.get(5)?,
+            chunk_id: logical_chunk_id(
+                &file_path, start_line, end_line, &language, &kind, vector_key,
+            ),
+            file_path,
+            start_line,
+            end_line,
+            language,
+            kind,
             text: decompress_text(raw_text),
-            content_hash: row.get(7)?,
-            vector_key: row.get::<_, i64>(8)? as u64,
-            is_ignored: row.get::<_, bool>(9)?,
+            content_hash: String::new(),
+            vector_key,
+            is_ignored: row.get::<_, bool>(7)?,
         };
 
         return Ok(Some(chunk));
@@ -2059,8 +2125,8 @@ pub fn fetch_chunks_by_vector_keys_batch(
     for batch in keys.chunks(500) {
         let placeholders = batch.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let query = format!(
-            "SELECT chunk_id, file_path, start_line, end_line, language, kind, text, \
-             content_hash, vector_key, is_ignored \
+            "SELECT file_path, start_line, end_line, language, kind, text, \
+             vector_key, is_ignored \
              FROM chunks WHERE vector_key IN ({})",
             placeholders
         );
@@ -2077,19 +2143,26 @@ pub fn fetch_chunks_by_vector_keys_batch(
 
         let mut rows = stmt.query(param_refs.as_slice())?;
         while let Some(row) = rows.next()? {
-            let raw_text: Vec<u8> = row.get(6)?;
-            let vector_key = row.get::<_, i64>(8)? as u64;
+            let raw_text: Vec<u8> = row.get(5)?;
+            let file_path = PathBuf::from(row.get::<_, String>(0)?);
+            let start_line = row.get::<_, i64>(1)? as usize;
+            let end_line = row.get::<_, i64>(2)? as usize;
+            let language = row.get::<_, String>(3)?;
+            let kind = row.get::<_, String>(4)?;
+            let vector_key = row.get::<_, i64>(6)? as u64;
             let chunk = IndexedChunk {
-                chunk_id: row.get::<_, String>(0)?,
-                file_path: PathBuf::from(row.get::<_, String>(1)?),
-                start_line: row.get::<_, i64>(2)? as usize,
-                end_line: row.get::<_, i64>(3)? as usize,
-                language: row.get(4)?,
-                kind: row.get(5)?,
+                chunk_id: logical_chunk_id(
+                    &file_path, start_line, end_line, &language, &kind, vector_key,
+                ),
+                file_path,
+                start_line,
+                end_line,
+                language,
+                kind,
                 text: decompress_text(raw_text),
-                content_hash: row.get(7)?,
+                content_hash: String::new(),
                 vector_key,
-                is_ignored: row.get::<_, bool>(9)?,
+                is_ignored: row.get::<_, bool>(7)?,
             };
             result.insert(vector_key, chunk);
         }
@@ -2111,10 +2184,9 @@ pub fn fetch_chunk_by_id(
     search_doc: TantivyDocument,
     fields: &TantivyFields,
 ) -> Option<IndexedChunk> {
-    let chunk_id = search_doc
-        .get_first(fields.chunk_id)
-        .and_then(|v| v.as_str())?
-        .to_string();
+    let vector_key = search_doc
+        .get_first(fields.vector_key)
+        .and_then(|v| v.as_u64())?;
 
     let file_path = PathBuf::from(
         search_doc
@@ -2148,19 +2220,15 @@ pub fn fetch_chunk_by_id(
         .unwrap_or("")
         .to_string();
 
-    let content_hash = search_doc
-        .get_first(fields.content_hash)
-        .and_then(|v| v.as_str())?
-        .to_string();
-
     let is_ignored = fields
         .is_ignored
         .and_then(|f| search_doc.get_first(f))
         .and_then(|v| v.as_u64())
         .unwrap_or(0)
         > 0;
-
-    let vector_key = vector_key_for_chunk(&file_path, start_line, end_line, &content_hash);
+    let chunk_id = logical_chunk_id(
+        &file_path, start_line, end_line, &language, &kind, vector_key,
+    );
 
     Some(IndexedChunk {
         chunk_id,
@@ -2170,7 +2238,7 @@ pub fn fetch_chunk_by_id(
         language,
         kind,
         text,
-        content_hash,
+        content_hash: String::new(),
         vector_key,
         is_ignored,
     })
@@ -2203,6 +2271,7 @@ mod tests {
     struct RecordedTestEmbedding {
         model: HashEmbeddingModel,
         backend: &'static str,
+        identity: crate::embedding::NeuralModelIdentity,
     }
 
     impl EmbeddingModel for RecordedTestEmbedding {
@@ -2220,6 +2289,14 @@ mod tests {
 
         fn backend_info(&self) -> Option<&'static str> {
             Some(self.backend)
+        }
+
+        fn profile_info(&self) -> Option<&'static str> {
+            Some("static")
+        }
+
+        fn model_identity(&self) -> Option<&crate::embedding::NeuralModelIdentity> {
+            Some(&self.identity)
         }
     }
 
@@ -2420,13 +2497,12 @@ mod tests {
         sqlite
             .execute(
                 "INSERT INTO chunks (
-                    chunk_id, file_path, start_line, end_line, language, kind,
-                    text, content_hash, vector_key, modified_unix, is_ignored
+                    file_path, start_line, end_line, language, kind, text,
+                    vector_key, modified_unix, is_ignored
                  )
                  SELECT
-                    'duplicate-' || chunk_id, file_path, start_line, end_line,
-                    language, kind, text, content_hash, vector_key, modified_unix,
-                    is_ignored
+                    file_path, start_line, end_line, language, kind, text,
+                    vector_key, modified_unix, is_ignored
                  FROM chunks
                  LIMIT 1",
                 [],
@@ -2597,6 +2673,7 @@ mod tests {
         let neural_model = RecordedTestEmbedding {
             model: HashEmbeddingModel::new(EMBEDDING_DIMENSIONS),
             backend: "test local neural backend",
+            identity: crate::embedding::configured_neural_model_identity(),
         };
         let enhanced = enhance_workspace_neural(&workspace, &neural_model).unwrap();
         assert_eq!(enhanced, summary.total_chunks);
@@ -2622,7 +2699,7 @@ mod tests {
         );
         assert_eq!(
             fs::read_to_string(workspace.neural_profile_path()).unwrap(),
-            "general"
+            "static"
         );
         let status = crate::workspace::list_workspaces()
             .unwrap()
@@ -2654,10 +2731,12 @@ mod tests {
         let first_model = RecordedTestEmbedding {
             model: HashEmbeddingModel::new(EMBEDDING_DIMENSIONS),
             backend: "first backend",
+            identity: crate::embedding::configured_neural_model_identity(),
         };
         let second_model = RecordedTestEmbedding {
             model: HashEmbeddingModel::new(EMBEDDING_DIMENSIONS),
             backend: "unused backend",
+            identity: crate::embedding::configured_neural_model_identity(),
         };
 
         let n1 = enhance_workspace_neural(&workspace, &first_model).unwrap();
@@ -2722,7 +2801,11 @@ mod tests {
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
         let workspace = Workspace::resolve(root.path()).unwrap();
         let hash_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
-        let neural_model = HashEmbeddingModel::new(384);
+        let neural_model = RecordedTestEmbedding {
+            model: HashEmbeddingModel::new(EMBEDDING_DIMENSIONS),
+            backend: "test local neural backend",
+            identity: crate::embedding::configured_neural_model_identity(),
+        };
         index_workspace(&workspace, &hash_model).unwrap();
         enhance_workspace_hash(&workspace, &hash_model).unwrap();
         enhance_workspace_neural(&workspace, &neural_model).unwrap();
@@ -2787,6 +2870,27 @@ mod tests {
         let compressed = super::compress_text(original);
         let decompressed = super::decompress_text(compressed);
         assert_eq!(decompressed, original);
+    }
+
+    #[test]
+    fn prepared_chunk_compresses_text_before_persistence() {
+        let chunk = build_indexed_chunk(
+            Chunk {
+                id: uuid::Uuid::new_v4(),
+                file_path: PathBuf::from("src/lib.rs"),
+                start_line: 1,
+                end_line: 1,
+                text: "pub fn prepared() {}\n".to_string(),
+                language: "rust".to_string(),
+                kind: ChunkKind::Function,
+                content_hash: "prepared-content-hash".to_string(),
+            },
+            false,
+        );
+        let prepared = super::prepare_indexed_chunk(chunk.clone());
+
+        assert_eq!(prepared.chunk.text, chunk.text);
+        assert_eq!(super::decompress_text(prepared.compressed_text), chunk.text);
     }
 
     #[test]

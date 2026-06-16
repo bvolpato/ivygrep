@@ -1,0 +1,63 @@
+{
+  "schema_version": 1,
+  "evidence": [
+    {
+      "id": "public-retrieval-baseline",
+      "kind": "quality",
+      "label": "Frozen public retrieval baseline",
+      "path": "docs/benchmarks/public-code-retrieval-baseline-results.json",
+      "publication_commit": "262cb61f70624a8d0f10844d204ae7593a85a6d8"
+    },
+    {
+      "id": "public-retrieval-current",
+      "kind": "quality",
+      "label": "Current public retrieval matrix",
+      "path": "docs/benchmarks/public-code-retrieval-results.json",
+      "publication_commit": "262cb61f70624a8d0f10844d204ae7593a85a6d8"
+    },
+    {
+      "id": "public-retrieval-compact-current",
+      "kind": "quality",
+      "label": "Compact-index public retrieval matrix",
+      "path": "docs/benchmarks/public-million-quality-current.json",
+      "publication_commit": "107e3b0726cf15dc1d4d45178aad3f732168a793"
+    },
+    {
+      "id": "embedding-selection",
+      "kind": "model",
+      "label": "Portable embedding model selection",
+      "path": "docs/benchmarks/embedding-model-bakeoff.json",
+      "publication_commit": "262cb61f70624a8d0f10844d204ae7593a85a6d8"
+    },
+    {
+      "id": "learned-reranker",
+      "kind": "quality",
+      "label": "Held-out learned reranker",
+      "path": "docs/benchmarks/public-reranker-results.json",
+      "publication_commit": "4b24c627d9bd733edec5d145437e9aa35c2ab2ca"
+    },
+    {
+      "id": "million-scale",
+      "kind": "scale",
+      "label": "Public million-chunk benchmark",
+      "path": "docs/benchmarks/public-million-results.json",
+      "publication_commit": "107e3b0726cf15dc1d4d45178aad3f732168a793"
+    },
+    {
+      "id": "daemon-cache",
+      "kind": "latency",
+      "label": "Daemon hot-query cache",
+      "path": "docs/benchmarks/daemon-hot-query-cache-explore-results.tsv",
+      "publication_commit": "a99f5fb6eafef9c41d656a42dccaf44e27972d32"
+    },
+    {
+      "id": "release-workflow",
+      "kind": "portability",
+      "label": "Release artifact acceptance gate",
+      "path": ".github/workflows/release.yml",
+      "publication_commit": "030e32e275494896d4b5e348c6c370f205c0bb69"
+    }
+  ],
+  "release_history": "docs/benchmarks/release-artifact-history.json",
+  "release_history_publication_commit": "a21f59b13b692d495b83e7d33ae4bcb712c4c195"
+}

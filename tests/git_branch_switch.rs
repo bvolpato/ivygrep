@@ -1594,12 +1594,12 @@ fn worktree_auto_indexes_base_when_missing() {
 }
 
 // ===========================================================================
-// WORKTREE OVERLAY: an outdated base index format forces a base rebuild
+// WORKTREE OVERLAY: an incompatible base index format forces a base rebuild
 // ===========================================================================
 
 #[test]
 #[serial]
-fn worktree_rebuilds_outdated_base_index_format() {
+fn worktree_rebuilds_newer_base_index_format() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
@@ -1651,19 +1651,24 @@ fn worktree_rebuilds_outdated_base_index_format() {
         "worktree should find inherited base content before migration"
     );
 
-    // Simulate a base index written by an older format version. The worktree
-    // serves base chunks/vectors, so its index path must migrate the base
-    // before referencing it (the base self-heals via its own health check).
-    fs::write(base_ws.index_format_version_path(), "1").unwrap();
-    assert_eq!(base_ws.read_index_format_version(), 1);
+    // Simulate a base index written by a newer, incompatible binary. The
+    // worktree serves base chunks/vectors, so it must rebuild the base before
+    // referencing it.
+    let newer_format = ivygrep::workspace::INDEX_FORMAT_VERSION + 1;
+    fs::write(
+        base_ws.index_format_version_path(),
+        newer_format.to_string(),
+    )
+    .unwrap();
+    assert_eq!(base_ws.read_index_format_version(), newer_format);
 
-    // Re-indexing the worktree rebuilds the outdated base back to the current
-    // format and the inherited content remains searchable.
+    // Re-indexing the worktree rebuilds the incompatible base back to the
+    // current format and the inherited content remains searchable.
     setup_and_index(&wt_path, home.path());
     assert_eq!(
         base_ws.read_index_format_version(),
         ivygrep::workspace::INDEX_FORMAT_VERSION,
-        "outdated base index should be migrated during worktree indexing"
+        "incompatible base index should be rebuilt during worktree indexing"
     );
     let wt_ws = workspace_for(&wt_path);
     assert!(
