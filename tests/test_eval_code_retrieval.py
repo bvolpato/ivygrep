@@ -60,6 +60,16 @@ class RetrievalMetricsTest(unittest.TestCase):
         self.assertEqual(eval_code_retrieval.query_args("hybrid"), [])
         self.assertEqual(eval_code_retrieval.query_args("neural"), [])
 
+    def test_search_command_terminates_option_parsing_before_query(self):
+        command = eval_code_retrieval.search_command(
+            Path("ig"),
+            "neural",
+            20,
+            "-----Input-----\nexample",
+        )
+        self.assertEqual(command[-2], "--")
+        self.assertEqual(command[-1], "-----Input-----\nexample")
+
     def test_daemon_endpoint_matches_platform_transport(self):
         home = Path("benchmark-home")
         with mock.patch.object(eval_code_retrieval.os, "name", "nt"):

@@ -259,6 +259,18 @@ def query_args(mode: str) -> list[str]:
     raise ValueError(f"unsupported mode {mode}")
 
 
+def search_command(binary: Path, mode: str, limit: int, query: str) -> list[str]:
+    return [
+        str(binary),
+        "--json",
+        "-n",
+        str(limit),
+        *query_args(mode),
+        "--",
+        query,
+    ]
+
+
 def daemon_endpoint_path(home: Path) -> Path:
     return home / ("daemon.port" if os.name == "nt" else "daemon.sock")
 
@@ -356,14 +368,7 @@ def evaluate(args: argparse.Namespace) -> dict:
         for query in process_cold_queries(args.mode, queries):
             query_id = str(query["_id"])
             text = query.get("text") or query.get("query") or ""
-            command = [
-                str(binary),
-                "--json",
-                "-n",
-                str(args.limit),
-                *query_args(args.mode),
-                text,
-            ]
+            command = search_command(binary, args.mode, args.limit, text)
             _, cold_latencies[query_id] = run_json(command, repo, env)
 
         daemon_env = env.copy()
@@ -395,7 +400,7 @@ def evaluate(args: argparse.Namespace) -> dict:
             if args.mode == "neural":
                 model_started = time.perf_counter()
                 run_json(
-                    [str(binary), "--json", "-n", "1", "neural model warmup"],
+                    search_command(binary, args.mode, 1, "neural model warmup"),
                     repo,
                     daemon_env,
                 )
@@ -427,14 +432,7 @@ def evaluate(args: argparse.Namespace) -> dict:
             for query in queries:
                 query_id = str(query["_id"])
                 text = query.get("text") or query.get("query") or ""
-                command = [
-                    str(binary),
-                    "--json",
-                    "-n",
-                    str(args.limit),
-                    *query_args(args.mode),
-                    text,
-                ]
+                command = search_command(binary, args.mode, args.limit, text)
 
                 cold_ms = cold_latencies.get(query_id)
                 warm_output, warm_ms = run_json(command, repo, daemon_env)
