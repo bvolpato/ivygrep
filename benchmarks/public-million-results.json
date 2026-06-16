@@ -1,0 +1,361 @@
+{
+  "binaries": {
+    "index_baseline": {
+      "sha256": "92f91629fa9a5dbad4f9f540e35703e27cc188776a763c7818cc06ee7b619a61",
+      "version": "ivygrep 0.10.1"
+    },
+    "index_current": {
+      "sha256": "16c0b048eee3b1ff441d40603e1ed7158fed4c64bb723c22ca1b3dc7894a22e5",
+      "version": "ivygrep 0.10.1"
+    },
+    "paired_baseline": {
+      "sha256": "4861543f0c19e680eb27e705f26437bed0a5a4bf6803bdf1b9722d54abe68f2b",
+      "version": "ivygrep 0.10.1"
+    },
+    "paired_current": {
+      "sha256": "9163c541da9db0ccc650fde033fe72ba8b6f12354b8901a79963759a44a0c40e",
+      "version": "ivygrep 0.10.1"
+    }
+  },
+  "corpus": {
+    "chunks_per_file": 100,
+    "expected_chunks": 1000000,
+    "files": 10000,
+    "generator": "ivygrep-public-million-rust-v1",
+    "license": "CC0-1.0",
+    "manifest_sha256": "349244bbc97f87a7d9997c292d09bd91395522a87c36e47098c54218a039d32e",
+    "schema_version": 1
+  },
+  "gate": {
+    "expected_recall_preserved": true,
+    "footprint_reduced_forty_percent": true,
+    "indexing_ceiling_documented": true,
+    "mrr_loss_within_two_points": true,
+    "ndcg_loss_within_two_points": true,
+    "no_hit_rate_not_regressed": true,
+    "passed": true,
+    "recall_loss_within_two_points": true,
+    "warm_distinct_two_x": true
+  },
+  "generated_at": "2026-06-16T04:07:28.114546+00:00",
+  "indexing": {
+    "baseline_commit": "4b24c627d9bd733edec5d145437e9aa35c2ab2ca",
+    "chunks": 1010001,
+    "chunks_per_second": {
+      "baseline": 4963.317419550483,
+      "current": 109005.5024359201,
+      "ratio": 21.96222671686239
+    },
+    "components": {
+      "baseline": {
+        "hash_vectors_bytes": 112,
+        "lexical_bytes": 246295626,
+        "metadata_bytes": 896479232,
+        "neural_vectors_bytes": 0,
+        "other_bytes": 673142
+      },
+      "current": {
+        "graph_bytes": 77643776,
+        "hash_vectors_bytes": 112,
+        "lexical_bytes": 98208446,
+        "metadata_bytes": 392708096,
+        "neural_vectors_bytes": 0,
+        "other_bytes": 673126,
+        "sqlite_auxiliary_bytes": 72331264,
+        "stored_chunks_bytes": 242733056
+      }
+    },
+    "current_commit": "2c7629e18d4026722605cb11765af3a9b788b57f",
+    "documented_io_bound_ceiling": true,
+    "filesystem_read_bytes": {
+      "baseline": 90238976,
+      "current": 0,
+      "ratio": 0.0
+    },
+    "filesystem_write_bytes": {
+      "baseline": 25722142720,
+      "current": 0,
+      "ratio": 0.0
+    },
+    "index_size_bytes": {
+      "baseline": 1143448112,
+      "current": 491589780,
+      "ratio": 0.42991874737556957
+    },
+    "peak_disk_bytes": {
+      "baseline": 1433720380,
+      "current": 491557443,
+      "ratio": 0.3428544713858361
+    },
+    "peak_rss_bytes": {
+      "baseline": 491511808,
+      "current": 298405888,
+      "ratio": 0.6071184519741996
+    },
+    "wall_ms": {
+      "baseline": 203493.13062703004,
+      "current": 9265.59648301918,
+      "ratio": 0.045532723657397155
+    }
+  },
+  "paired_queries": {
+    "baseline_commit": "4b24c627d9bd733edec5d145437e9aa35c2ab2ca",
+    "baseline_median_ms": 27.24532748106867,
+    "baseline_p95_ms": 53.76635299762711,
+    "current_commit": "c1442ebb68f5a8b162a7eaafe5b033666b7fa585",
+    "current_median_ms": 6.271928490605205,
+    "current_p95_ms": 15.067349013406783,
+    "expected_mrr_at_20": 0.9981666666666666,
+    "expected_recall_at_20": 1.0,
+    "load_average": [
+      91.912109375,
+      81.76416015625,
+      92.72900390625
+    ],
+    "logical_cpus": 32,
+    "p95_ratio": {
+      "bootstrap_repetitions": 5000,
+      "ci95_lower": 0.24657195898761863,
+      "ci95_upper": 0.3180137154371946,
+      "observed": 0.280237512372687
+    },
+    "samples": 500,
+    "speedup": 3.568401644495413
+  },
+  "quality": {
+    "baseline_commit": "2c735847d43edbe8a31d516b0fbb7c22b20105c2",
+    "current_commit": "2c7629e18d4026722605cb11765af3a9b788b57f",
+    "harness_sha256": {
+      "eval_code_retrieval.py": "b170545e17c6b923aa11b498d6ba3bb2784aceae0b2761cf125a2bc878af1960",
+      "export_public_retrieval.py": "fff230c93d982adb3a0cae7d734fb107a46e6ec5997c3922664cdab94d7da432",
+      "run_public_benchmark_matrix.py": "356ca5655af09098153add5b98bf3d8db6b1ed109451be4f7abfb4b67a1f592c"
+    },
+    "manifest_sha256": {
+      "baseline": "c853f3b3bd89496115f838bd17279222a650c4dd9299b3cb6bd225210df03b2f",
+      "current": "19bbafddd4353c55cd1f4ed460628b0fe2d5656fb575748ccc80439ea0431c26"
+    },
+    "metrics": {
+      "mrr_at_10": {
+        "absolute_delta": 0.004194444444444445,
+        "baseline": 0.2178291005291005,
+        "baseline_standard_deviation": 0.0004420827669243649,
+        "current": 0.22202354497354496,
+        "current_standard_deviation": 0.0014269693520156915
+      },
+      "ndcg_at_10": {
+        "absolute_delta": 0.0046085309921554685,
+        "baseline": 0.26203649518855393,
+        "baseline_standard_deviation": 0.00017418632834996045,
+        "current": 0.2666450261807094,
+        "current_standard_deviation": 0.0015776579425337421
+      },
+      "no_hit_rate": {
+        "absolute_delta": 0.0,
+        "baseline": 0.0,
+        "baseline_standard_deviation": 0.0,
+        "current": 0.0,
+        "current_standard_deviation": 0.0
+      },
+      "precision_at_5": {
+        "absolute_delta": 0.003933333333333344,
+        "baseline": 0.056133333333333334,
+        "baseline_standard_deviation": 0.00018856180831641154,
+        "current": 0.06006666666666668,
+        "current_standard_deviation": 0.0014727148022916372
+      },
+      "recall_at_20": {
+        "absolute_delta": -0.01899999999999996,
+        "baseline": 0.508,
+        "baseline_standard_deviation": 0.0024494897427831805,
+        "current": 0.48900000000000005,
+        "current_standard_deviation": 0.0008164965809277267
+      }
+    },
+    "model": {
+      "architecture": "static-embedding",
+      "dimensions": 256,
+      "document_character_limit": 1024,
+      "license": "Apache-2.0",
+      "max_input_tokens": 0,
+      "model_asset_bytes": 125729604,
+      "model_id": "sentence-transformers/static-retrieval-mrl-en-v1",
+      "model_weight_dtype": "f32",
+      "model_weights_sha256": "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+      "normalize_embeddings": true,
+      "parameter_count": 31254528,
+      "pooling": "token-mean",
+      "profile": "static-retrieval-v1",
+      "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
+      "schema_version": 1,
+      "vector_quantization": "f16"
+    },
+    "profile": "public-core",
+    "queries": 1000,
+    "repetitions": 3,
+    "task_ndcg_at_10": {
+      "codefeedback-st": {
+        "absolute_delta": -0.013450543091401035,
+        "baseline_ndcg_at_10": 0.524273948791983,
+        "baseline_standard_deviation": 0.0,
+        "current_ndcg_at_10": 0.5108234057005819,
+        "current_standard_deviation": 0.0
+      },
+      "codetrans-contest": {
+        "absolute_delta": 0.0008984146397379433,
+        "baseline_ndcg_at_10": 0.4269046587910597,
+        "baseline_standard_deviation": 0.0,
+        "current_ndcg_at_10": 0.42780307343079765,
+        "current_standard_deviation": 6.536870529450844e-05
+      },
+      "codetrans-dl": {
+        "absolute_delta": 0.003698677167425002,
+        "baseline_ndcg_at_10": 0.2365174872768762,
+        "baseline_standard_deviation": 0.0005182693540106133,
+        "current_ndcg_at_10": 0.2402161644443012,
+        "current_standard_deviation": 0.0032846637267748154
+      },
+      "cosqa": {
+        "absolute_delta": 0.0101516464653712,
+        "baseline_ndcg_at_10": 0.14642859391097132,
+        "baseline_standard_deviation": 0.0003258304994435418,
+        "current_ndcg_at_10": 0.15658024037634252,
+        "current_standard_deviation": 0.004127483303044883
+      }
+    },
+    "tasks": [
+      "codetrans-dl",
+      "codetrans-contest",
+      "cosqa",
+      "codefeedback-st"
+    ]
+  },
+  "runtime": {
+    "index_baseline": {
+      "logical_cpus": 32,
+      "machine": "aarch64",
+      "physical_memory_bytes": 132651511808,
+      "python": "3.14.5",
+      "release": "6.8.0-1057-aws",
+      "system": "Linux"
+    },
+    "index_current": {
+      "cpu_model": "aarch64",
+      "load_average": [
+        36.6591796875,
+        60.88818359375,
+        81.07861328125
+      ],
+      "logical_cpus": 32,
+      "machine": "aarch64",
+      "physical_memory_bytes": 132651511808,
+      "python": "3.14.5",
+      "release": "6.8.0-1057-aws",
+      "system": "Linux"
+    },
+    "paired_baseline": {
+      "cpu_model": "aarch64",
+      "load_average": [
+        91.912109375,
+        81.76416015625,
+        92.72900390625
+      ],
+      "logical_cpus": 32,
+      "machine": "aarch64",
+      "physical_memory_bytes": 132651511808,
+      "python": "3.13.13",
+      "release": "6.8.0-1057-aws",
+      "system": "Linux"
+    },
+    "paired_current": {
+      "cpu_model": "aarch64",
+      "load_average": [
+        91.912109375,
+        81.76416015625,
+        92.72900390625
+      ],
+      "logical_cpus": 32,
+      "machine": "aarch64",
+      "physical_memory_bytes": 132651511808,
+      "python": "3.13.13",
+      "release": "6.8.0-1057-aws",
+      "system": "Linux"
+    },
+    "quality_baseline": {
+      "cpu_model": "aarch64",
+      "logical_cpus": 32,
+      "machine": "aarch64",
+      "physical_memory_bytes": 132651511808,
+      "python": "3.14.5",
+      "release": "6.8.0-1057-aws",
+      "system": "Linux"
+    },
+    "quality_current": {
+      "cpu_model": "aarch64",
+      "logical_cpus": 32,
+      "machine": "aarch64",
+      "physical_memory_bytes": 132651511808,
+      "python": "3.13.13",
+      "release": "6.8.0-1057-aws",
+      "system": "Linux"
+    }
+  },
+  "saturated_full_run": {
+    "baseline_commit": "4b24c627d9bd733edec5d145437e9aa35c2ab2ca",
+    "baseline_index_cpu_ms": 186720.0,
+    "baseline_index_wall_ms": 351252.4747700081,
+    "baseline_load_average": [
+      97.34423828125,
+      122.55029296875,
+      108.21044921875
+    ],
+    "current_commit": "d7b76cc3341a7a50d08339b4684840706b872926",
+    "current_index_cpu_ms": 185420.0,
+    "current_index_wall_ms": 437311.05853500776,
+    "current_load_average": [
+      133.232421875,
+      135.3232421875,
+      121.0302734375
+    ]
+  },
+  "schema_version": 1,
+  "system_queries": {
+    "cache_replay": {
+      "baseline_p95_ms": 27.84595196135342,
+      "current_p95_ms": 31.959832995198667,
+      "label": "Cache replay",
+      "ratio": 1.1477371303216632
+    },
+    "cli_warm_distinct": {
+      "baseline_p95_ms": 151.27118001691997,
+      "current_p95_ms": 138.993279018905,
+      "label": "Warm CLI",
+      "ratio": 0.9188351608241461
+    },
+    "concurrent": {
+      "baseline_p95_ms": 164.74329197080806,
+      "baseline_queries_per_second": 106.65024235668865,
+      "current_p95_ms": 99.16567901382223,
+      "current_queries_per_second": 160.71657049667365,
+      "label": "Concurrent",
+      "ratio": 0.6019406182037084
+    },
+    "filtered": {
+      "baseline_p95_ms": 257.31468899175525,
+      "current_p95_ms": 45.21778901107609,
+      "label": "Filtered",
+      "ratio": 0.17572952864935332
+    },
+    "process_cold": {
+      "baseline_p95_ms": 307.22029495518655,
+      "current_p95_ms": 478.0236129881814,
+      "label": "Process cold",
+      "ratio": 1.5559636548682747
+    },
+    "warm_distinct": {
+      "baseline_p95_ms": 112.5670499750413,
+      "current_p95_ms": 58.28727100742981,
+      "label": "Warm distinct",
+      "ratio": 0.5178004666583466
+    }
+  }
+}

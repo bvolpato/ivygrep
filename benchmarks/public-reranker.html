@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Public learned reranker - ivygrep</title>
+  <link rel="stylesheet" href="../style.css">
+  <link rel="stylesheet" href="report.css">
+  <link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
+</head>
+<body class="report-page">
+  <main class="report-shell relative z-10">
+    <nav class="report-nav"><a class="report-brand" href="index.html"><img src="../assets/icon.svg" alt="ivygrep"><span>ivygrep benchmarks</span></a><div class="report-links"><a href="index.html">Reports</a><a href="public-reranker-results.json">Raw JSON</a><a href="https://github.com/bvolpato/ivygrep">GitHub</a></div></nav>
+    <section class="report-hero"><div class="report-eyebrow">Held-out public evidence</div><h1>Bounded Learned Reranker</h1><p>A 41-feature linear model trained from pinned public traces, embedded in the binary with a deterministic fallback.</p></section>
+    <section class="report-grid">
+      <article class="report-card"><h2>nDCG@10</h2><div class="metric-value">+7.74%</div><p>0.2476 -> 0.2668</p></article>
+      <article class="report-card"><h2>MRR@10</h2><div class="metric-value">+10.12%</div><p>0.2009 -> 0.2212</p></article>
+      <article class="report-card"><h2>Acceptance</h2><div class="metric-value">PASS</div><p>Quality, per-task loss, and latency gates.</p></article>
+    </section>
+    <section class="report-card"><h2>Per-task quality</h2><div class="table-wrap"><table><thead><tr><th>Task</th><th>Deterministic nDCG</th><th>Learned nDCG</th><th>nDCG delta</th><th>MRR delta</th></tr></thead><tbody><tr><td>codetrans-dl</td><td>0.2380</td><td>0.2785</td><td>+0.0404</td><td>+0.0359</td></tr><tr><td>codetrans-contest</td><td>0.4008</td><td>0.3937</td><td>-0.0070</td><td>-0.0033</td></tr><tr><td>cosqa</td><td>0.1521</td><td>0.1637</td><td>+0.0116</td><td>+0.0137</td></tr><tr><td>codefeedback-st</td><td>0.4077</td><td>0.4769</td><td>+0.0692</td><td>+0.0725</td></tr></tbody></table></div></section>
+    <section class="report-card"><h2>Latency and portability</h2><p>Warm p50 delta: +15.04 ms. Warm p95 delta: -54.42 ms. Set <code>IVYGREP_RERANKER=deterministic</code> to retain the zero-model fallback.</p></section>
+    <section class="report-card"><h2>Identity</h2><p>Commit <code>76a404ec051cc9009433fe0ed021f51774b104ee</code><br>Binary <code>92f91629fa9a5dbad4f9f540e35703e27cc188776a763c7818cc06ee7b619a61</code><br>Model <code>public-linear-reranker-v2</code></p></section>
+  </main>
+</body>
+</html>

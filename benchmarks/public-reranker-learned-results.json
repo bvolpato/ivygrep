@@ -1,0 +1,1281 @@
+{
+  "generated_at": "2026-06-16T01:15:40.770477+00:00",
+  "harness_sha256": {
+    "eval_code_retrieval.py": "b170545e17c6b923aa11b498d6ba3bb2784aceae0b2761cf125a2bc878af1960",
+    "export_public_retrieval.py": "fff230c93d982adb3a0cae7d734fb107a46e6ec5997c3922664cdab94d7da432",
+    "run_public_benchmark_matrix.py": "85a61440685c7c907bd12645876e92552eafe6f02202af9f8e2b01daeb1842ba"
+  },
+  "ivygrep_commit": "76a404ec051cc9009433fe0ed021f51774b104ee",
+  "languages": [
+    "applescript",
+    "asm",
+    "assembly",
+    "bat",
+    "c",
+    "C++",
+    "cmd",
+    "cpp",
+    "csharp",
+    "css",
+    "dart",
+    "dockerfile",
+    "go",
+    "graphql",
+    "groovy",
+    "html",
+    "http",
+    "java",
+    "javascript",
+    "json",
+    "jsp",
+    "jsx",
+    "kotlin",
+    "lua",
+    "matlab",
+    "objective-c",
+    "perl",
+    "php",
+    "plaintext",
+    "powershell",
+    "python",
+    "PYTHON",
+    "r",
+    "redis",
+    "regex",
+    "ruby",
+    "rust",
+    "scala",
+    "shell",
+    "sql",
+    "svg",
+    "swift",
+    "terraform",
+    "typescript",
+    "vb",
+    "vba",
+    "vbnet",
+    "xml",
+    "xslt",
+    "yaml"
+  ],
+  "manifest_sha256": "19bbafddd4353c55cd1f4ed460628b0fe2d5656fb575748ccc80439ea0431c26",
+  "modes": [
+    "neural"
+  ],
+  "neural_models": [
+    {
+      "architecture": "static-embedding",
+      "dimensions": 256,
+      "document_character_limit": 1024,
+      "license": "Apache-2.0",
+      "max_input_tokens": 0,
+      "model_asset_bytes": 125729604,
+      "model_id": "sentence-transformers/static-retrieval-mrl-en-v1",
+      "model_weight_dtype": "f32",
+      "model_weights_sha256": "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+      "normalize_embeddings": true,
+      "parameter_count": 31254528,
+      "pooling": "token-mean",
+      "profile": "static-retrieval-v1",
+      "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
+      "schema_version": 1,
+      "vector_quantization": "f16"
+    }
+  ],
+  "profile": "reranker-eval",
+  "queries": 520,
+  "raw_result_files": [
+    {
+      "name": "codetrans-dl-neural-run-1.json",
+      "sha256": "f30412d7a219a6bcb0714212174cbf3af72b83a7bb163dacbc75050e7bb6363a"
+    },
+    {
+      "name": "codetrans-contest-neural-run-1.json",
+      "sha256": "05f5d32d3eae0ce631b49b2084a66a078879df11cb37fbf9a4e1b9414866fa7f"
+    },
+    {
+      "name": "cosqa-neural-run-1.json",
+      "sha256": "bff58c53df122ae3a0e87e2a24c231eca5553298a6d1bb36bd92ad25a47b0399"
+    },
+    {
+      "name": "codefeedback-st-neural-run-1.json",
+      "sha256": "4a9df1a901fc406943ccdf5c4a5f20826818f424f0e948c6d11ef02104245448"
+    }
+  ],
+  "repetitions": 1,
+  "results": [
+    {
+      "binary": {
+        "sha256": "92f91629fa9a5dbad4f9f540e35703e27cc188776a763c7818cc06ee7b619a61",
+        "version": "ivygrep 0.10.1"
+      },
+      "cold_latency_p50_ms": 235.25357199832797,
+      "cold_latency_p95_ms": 235.25357199832797,
+      "cold_latency_samples": 1,
+      "daemon_startup_ms": 52.96978703700006,
+      "dataset": "codetrans-dl",
+      "dataset_provenance": {
+        "checksums": {
+          "corpus.jsonl": "46839b42fc89146de362ca6d744bdf27badd8392fc176817701ec2614fd20496",
+          "qrels.tsv": "6b68fae4ad1dcdce32e6696ea8a6ba5d0ec94329e60b7292824982712b03cfc5",
+          "queries.jsonl": "bec8b858c03334d0e4f332c4317a062b0e46b623aaf21144069163feb880008c"
+        },
+        "counts": {
+          "corpus": 816,
+          "qrels": 108,
+          "queries": 108,
+          "source_corpus": 816
+        },
+        "languages": [
+          "python"
+        ],
+        "license": "not-declared-in-dataset-card",
+        "license_source": "https://huggingface.co/datasets/CoIR-Retrieval/codetrans-dl-queries-corpus",
+        "qrels": {
+          "repository": "CoIR-Retrieval/codetrans-dl-qrels",
+          "revision": "3c26def7e3903a50c219584fedc85d3ad77fac43",
+          "split": "test"
+        },
+        "query_corpus": {
+          "repository": "CoIR-Retrieval/codetrans-dl-queries-corpus",
+          "revision": "328b6b6870fce952a3d5d49a8672518a0e6f6f58"
+        },
+        "sample": {
+          "corpus_limit": null,
+          "query_limit": null,
+          "query_partition": {
+            "modulus": 2,
+            "residues": [
+              1
+            ]
+          },
+          "seed": null
+        },
+        "schema_version": 1,
+        "task": "codetrans-dl"
+      },
+      "hash_enhancement_ms": 458.77375500276685,
+      "index_configuration": {
+        "chunk_count": 4706,
+        "file_count": 816,
+        "has_neural_vectors": true,
+        "index_components": {
+          "hash_vectors_bytes": 2808024,
+          "lexical_bytes": 1381839,
+          "metadata_bytes": 6340608,
+          "neural_vectors_bytes": 2808024,
+          "other_bytes": 83680
+        },
+        "neural_backend": "StaticEmbedding token mean via Rust",
+        "neural_coverage_percent": 100.0,
+        "neural_dimensions": 256,
+        "neural_model": {
+          "architecture": "static-embedding",
+          "dimensions": 256,
+          "document_character_limit": 1024,
+          "license": "Apache-2.0",
+          "max_input_tokens": 0,
+          "model_asset_bytes": 125729604,
+          "model_id": "sentence-transformers/static-retrieval-mrl-en-v1",
+          "model_weight_dtype": "f32",
+          "model_weights_sha256": "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+          "normalize_embeddings": true,
+          "parameter_count": 31254528,
+          "pooling": "token-mean",
+          "profile": "static-retrieval-v1",
+          "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
+          "schema_version": 1,
+          "vector_quantization": "f16"
+        },
+        "neural_profile": "static-retrieval-v1",
+        "neural_vector_count": 4706,
+        "reranker_candidate_limit": 100,
+        "reranker_mode": "learned",
+        "reranker_model": "public-linear-reranker-v2",
+        "vector_key_count": 4706
+      },
+      "index_ms": 1253.286366991233,
+      "index_size_bytes": 13422175,
+      "mode": "neural",
+      "mrr_at_10": 0.18675778953556732,
+      "ndcg_at_10": 0.27845629264329375,
+      "neural_enhancement_ms": 1694.5348259760067,
+      "neural_model_ready_ms": 222.1342720440589,
+      "no_hit_rate": 0.0,
+      "peak_child_rss_bytes": 332345344,
+      "precision_at_5": 0.05370370370370371,
+      "queries": 108,
+      "recall_at_20": 0.7592592592592593,
+      "run": 1,
+      "runtime": {
+        "cpu_model": "aarch64",
+        "logical_cpus": 32,
+        "machine": "aarch64",
+        "physical_memory_bytes": 132651511808,
+        "python": "3.14.5",
+        "release": "6.8.0-1057-aws",
+        "system": "Linux"
+      },
+      "support_file_spam_rate_at_10": 0.0,
+      "warm_latency_p50_ms": 60.14106498332694,
+      "warm_latency_p95_ms": 250.772733008489,
+      "warm_query_path": "daemon"
+    },
+    {
+      "binary": {
+        "sha256": "92f91629fa9a5dbad4f9f540e35703e27cc188776a763c7818cc06ee7b619a61",
+        "version": "ivygrep 0.10.1"
+      },
+      "cold_latency_p50_ms": 187.24505801219493,
+      "cold_latency_p95_ms": 187.24505801219493,
+      "cold_latency_samples": 1,
+      "daemon_startup_ms": 55.505566007923335,
+      "dataset": "codetrans-contest",
+      "dataset_provenance": {
+        "checksums": {
+          "corpus.jsonl": "a9877275a8dde90776e0616c4bab26ef377f7afea82efd1282ea509dd71ffd7d",
+          "qrels.tsv": "6d6c9df6e6aaf269bc64cd0186f36bf98ea53b4dfeceeebe617f23dea312dcae",
+          "queries.jsonl": "fb18522e991f3b4ff01ec656ed362017519c2118e3e683f5e95b794975a6af6a"
+        },
+        "counts": {
+          "corpus": 1008,
+          "qrels": 111,
+          "queries": 111,
+          "source_corpus": 1008
+        },
+        "languages": [
+          "C++"
+        ],
+        "license": "not-declared-in-dataset-card",
+        "license_source": "https://huggingface.co/datasets/CoIR-Retrieval/codetrans-contest-queries-corpus",
+        "qrels": {
+          "repository": "CoIR-Retrieval/codetrans-contest-qrels",
+          "revision": "981ff059af50f8d336dc17a0e46dc6e4b7bd1ca5",
+          "split": "test"
+        },
+        "query_corpus": {
+          "repository": "CoIR-Retrieval/codetrans-contest-queries-corpus",
+          "revision": "60a64fc853989c538f1d7495514bdd428b641371"
+        },
+        "sample": {
+          "corpus_limit": null,
+          "query_limit": null,
+          "query_partition": {
+            "modulus": 2,
+            "residues": [
+              1
+            ]
+          },
+          "seed": null
+        },
+        "schema_version": 1,
+        "task": "codetrans-contest"
+      },
+      "hash_enhancement_ms": 589.9232259835117,
+      "index_configuration": {
+        "chunk_count": 6620,
+        "file_count": 1008,
+        "has_neural_vectors": true,
+        "index_components": {
+          "hash_vectors_bytes": 3954864,
+          "lexical_bytes": 2065541,
+          "metadata_bytes": 6225920,
+          "neural_vectors_bytes": 3954864,
+          "other_bytes": 96592
+        },
+        "neural_backend": "StaticEmbedding token mean via Rust",
+        "neural_coverage_percent": 100.0,
+        "neural_dimensions": 256,
+        "neural_model": {
+          "architecture": "static-embedding",
+          "dimensions": 256,
+          "document_character_limit": 1024,
+          "license": "Apache-2.0",
+          "max_input_tokens": 0,
+          "model_asset_bytes": 125729604,
+          "model_id": "sentence-transformers/static-retrieval-mrl-en-v1",
+          "model_weight_dtype": "f32",
+          "model_weights_sha256": "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+          "normalize_embeddings": true,
+          "parameter_count": 31254528,
+          "pooling": "token-mean",
+          "profile": "static-retrieval-v1",
+          "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
+          "schema_version": 1,
+          "vector_quantization": "f16"
+        },
+        "neural_profile": "static-retrieval-v1",
+        "neural_vector_count": 6620,
+        "reranker_candidate_limit": 100,
+        "reranker_mode": "learned",
+        "reranker_model": "public-linear-reranker-v2",
+        "vector_key_count": 6620
+      },
+      "index_ms": 545.0414060032926,
+      "index_size_bytes": 16297781,
+      "mode": "neural",
+      "mrr_at_10": 0.36205848705848703,
+      "ndcg_at_10": 0.3937412431684227,
+      "neural_enhancement_ms": 1556.8849169649184,
+      "neural_model_ready_ms": 251.98893301421776,
+      "no_hit_rate": 0.0,
+      "peak_child_rss_bytes": 331444224,
+      "precision_at_5": 0.0864864864864865,
+      "queries": 111,
+      "recall_at_20": 0.5585585585585585,
+      "run": 1,
+      "runtime": {
+        "cpu_model": "aarch64",
+        "logical_cpus": 32,
+        "machine": "aarch64",
+        "physical_memory_bytes": 132651511808,
+        "python": "3.14.5",
+        "release": "6.8.0-1057-aws",
+        "system": "Linux"
+      },
+      "support_file_spam_rate_at_10": 0.0,
+      "warm_latency_p50_ms": 81.19946398073807,
+      "warm_latency_p95_ms": 149.35111801605672,
+      "warm_query_path": "daemon"
+    },
+    {
+      "binary": {
+        "sha256": "92f91629fa9a5dbad4f9f540e35703e27cc188776a763c7818cc06ee7b619a61",
+        "version": "ivygrep 0.10.1"
+      },
+      "cold_latency_p50_ms": 207.37154397647828,
+      "cold_latency_p95_ms": 207.37154397647828,
+      "cold_latency_samples": 1,
+      "daemon_startup_ms": 54.708176001440734,
+      "dataset": "cosqa",
+      "dataset_provenance": {
+        "checksums": {
+          "corpus.jsonl": "a74ab03594404160a915b96bb1694edaa2bfcecc7f744f658bec16bc7db388fb",
+          "qrels.tsv": "aa7084deaaa88a5dfe73df4b0514a96d286b9de3f86f9306dbef5de9fc9002bb",
+          "queries.jsonl": "643d0d9835340239630b0abfa582dd895fef4f56b5e249ad1c9d4cec1e4d0d50"
+        },
+        "counts": {
+          "corpus": 20604,
+          "qrels": 251,
+          "queries": 251,
+          "source_corpus": 20604
+        },
+        "languages": [
+          "PYTHON"
+        ],
+        "license": "not-declared-in-dataset-card",
+        "license_source": "https://huggingface.co/datasets/CoIR-Retrieval/cosqa-queries-corpus",
+        "qrels": {
+          "repository": "CoIR-Retrieval/cosqa-qrels",
+          "revision": "c70cfe89508993ed4707e31be1f83908f1fd6d38",
+          "split": "test"
+        },
+        "query_corpus": {
+          "repository": "CoIR-Retrieval/cosqa-queries-corpus",
+          "revision": "d56676dfbe7cd137229c33bd1e7dd96c688d2126"
+        },
+        "sample": {
+          "corpus_limit": null,
+          "query_limit": null,
+          "query_partition": {
+            "modulus": 2,
+            "residues": [
+              1
+            ]
+          },
+          "seed": null
+        },
+        "schema_version": 1,
+        "task": "cosqa"
+      },
+      "hash_enhancement_ms": 2765.2632500394247,
+      "index_configuration": {
+        "chunk_count": 20872,
+        "file_count": 20604,
+        "has_neural_vectors": true,
+        "index_components": {
+          "hash_vectors_bytes": 12461456,
+          "lexical_bytes": 6781984,
+          "metadata_bytes": 19693568,
+          "neural_vectors_bytes": 12461456,
+          "other_bytes": 1310536
+        },
+        "neural_backend": "StaticEmbedding token mean via Rust",
+        "neural_coverage_percent": 100.0,
+        "neural_dimensions": 256,
+        "neural_model": {
+          "architecture": "static-embedding",
+          "dimensions": 256,
+          "document_character_limit": 1024,
+          "license": "Apache-2.0",
+          "max_input_tokens": 0,
+          "model_asset_bytes": 125729604,
+          "model_id": "sentence-transformers/static-retrieval-mrl-en-v1",
+          "model_weight_dtype": "f32",
+          "model_weights_sha256": "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+          "normalize_embeddings": true,
+          "parameter_count": 31254528,
+          "pooling": "token-mean",
+          "profile": "static-retrieval-v1",
+          "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
+          "schema_version": 1,
+          "vector_quantization": "f16"
+        },
+        "neural_profile": "static-retrieval-v1",
+        "neural_vector_count": 20872,
+        "reranker_candidate_limit": 100,
+        "reranker_mode": "learned",
+        "reranker_model": "public-linear-reranker-v2",
+        "vector_key_count": 20872
+      },
+      "index_ms": 2003.1200780067593,
+      "index_size_bytes": 52709000,
+      "mode": "neural",
+      "mrr_at_10": 0.12673433251122493,
+      "ndcg_at_10": 0.16373155396055628,
+      "neural_enhancement_ms": 6663.830431993119,
+      "neural_model_ready_ms": 442.51558399992064,
+      "no_hit_rate": 0.0,
+      "peak_child_rss_bytes": 332185600,
+      "precision_at_5": 0.037450199203187255,
+      "queries": 251,
+      "recall_at_20": 0.38247011952191234,
+      "run": 1,
+      "runtime": {
+        "cpu_model": "aarch64",
+        "logical_cpus": 32,
+        "machine": "aarch64",
+        "physical_memory_bytes": 132651511808,
+        "python": "3.14.5",
+        "release": "6.8.0-1057-aws",
+        "system": "Linux"
+      },
+      "support_file_spam_rate_at_10": 0.0,
+      "warm_latency_p50_ms": 82.59429002646357,
+      "warm_latency_p95_ms": 143.8021369976923,
+      "warm_query_path": "daemon"
+    },
+    {
+      "binary": {
+        "sha256": "92f91629fa9a5dbad4f9f540e35703e27cc188776a763c7818cc06ee7b619a61",
+        "version": "ivygrep 0.10.1"
+      },
+      "cold_latency_p50_ms": 245.11080904630944,
+      "cold_latency_p95_ms": 245.11080904630944,
+      "cold_latency_samples": 1,
+      "daemon_startup_ms": 50.874628010205925,
+      "dataset": "codefeedback-st",
+      "dataset_provenance": {
+        "checksums": {
+          "corpus.jsonl": "b7135e78ff8b578e15ccfde75c95c5656a72b574e3de9635a451f8ce2fb180ef",
+          "qrels.tsv": "8fc4584d4de5b98060781f788dfc3245577a683f54fc9bc6e0fcc77d9fb71624",
+          "queries.jsonl": "3ff364f7800ffc404e8b8041eabc46483bd20c7104aecb7f6f349662692e9e96"
+        },
+        "counts": {
+          "corpus": 5000,
+          "qrels": 50,
+          "queries": 50,
+          "source_corpus": 156526
+        },
+        "languages": [
+          "applescript",
+          "asm",
+          "assembly",
+          "bat",
+          "c",
+          "cmd",
+          "cpp",
+          "csharp",
+          "css",
+          "dart",
+          "dockerfile",
+          "go",
+          "graphql",
+          "groovy",
+          "html",
+          "http",
+          "java",
+          "javascript",
+          "json",
+          "jsp",
+          "jsx",
+          "kotlin",
+          "lua",
+          "matlab",
+          "objective-c",
+          "perl",
+          "php",
+          "plaintext",
+          "powershell",
+          "python",
+          "r",
+          "redis",
+          "regex",
+          "ruby",
+          "rust",
+          "scala",
+          "shell",
+          "sql",
+          "svg",
+          "swift",
+          "terraform",
+          "typescript",
+          "vb",
+          "vba",
+          "vbnet",
+          "xml",
+          "xslt",
+          "yaml"
+        ],
+        "license": "not-declared-in-dataset-card",
+        "license_source": "https://huggingface.co/datasets/CoIR-Retrieval/codefeedback-st-queries-corpus",
+        "qrels": {
+          "repository": "CoIR-Retrieval/codefeedback-st-qrels",
+          "revision": "a5f9ffe7f0c6f60fda0e3f06043e1e43df40d4f6",
+          "split": "test"
+        },
+        "query_corpus": {
+          "repository": "CoIR-Retrieval/codefeedback-st-queries-corpus",
+          "revision": "9ea30d040642f9a77df65e0911c3d5e04bc18ddb"
+        },
+        "sample": {
+          "corpus_limit": 5000,
+          "query_limit": 50,
+          "query_partition": {
+            "modulus": 2,
+            "residues": [
+              1
+            ]
+          },
+          "seed": 20260615
+        },
+        "schema_version": 1,
+        "task": "codefeedback-st"
+      },
+      "hash_enhancement_ms": 3157.6475329929963,
+      "index_configuration": {
+        "chunk_count": 24869,
+        "file_count": 5000,
+        "has_neural_vectors": true,
+        "index_components": {
+          "hash_vectors_bytes": 14851584,
+          "lexical_bytes": 8395393,
+          "metadata_bytes": 19869696,
+          "neural_vectors_bytes": 14851584,
+          "other_bytes": 344460
+        },
+        "neural_backend": "StaticEmbedding token mean via Rust",
+        "neural_coverage_percent": 100.0,
+        "neural_dimensions": 256,
+        "neural_model": {
+          "architecture": "static-embedding",
+          "dimensions": 256,
+          "document_character_limit": 1024,
+          "license": "Apache-2.0",
+          "max_input_tokens": 0,
+          "model_asset_bytes": 125729604,
+          "model_id": "sentence-transformers/static-retrieval-mrl-en-v1",
+          "model_weight_dtype": "f32",
+          "model_weights_sha256": "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+          "normalize_embeddings": true,
+          "parameter_count": 31254528,
+          "pooling": "token-mean",
+          "profile": "static-retrieval-v1",
+          "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
+          "schema_version": 1,
+          "vector_quantization": "f16"
+        },
+        "neural_profile": "static-retrieval-v1",
+        "neural_vector_count": 24869,
+        "reranker_candidate_limit": 100,
+        "reranker_mode": "learned",
+        "reranker_model": "public-linear-reranker-v2",
+        "vector_key_count": 24869
+      },
+      "index_ms": 3362.3187170014717,
+      "index_size_bytes": 58312717,
+      "mode": "neural",
+      "mrr_at_10": 0.4575793650793651,
+      "ndcg_at_10": 0.4768523493299483,
+      "neural_enhancement_ms": 6143.129181989934,
+      "neural_model_ready_ms": 368.44873597146943,
+      "no_hit_rate": 0.0,
+      "peak_child_rss_bytes": 332828672,
+      "precision_at_5": 0.09600000000000002,
+      "queries": 50,
+      "recall_at_20": 0.56,
+      "run": 1,
+      "runtime": {
+        "cpu_model": "aarch64",
+        "logical_cpus": 32,
+        "machine": "aarch64",
+        "physical_memory_bytes": 132651511808,
+        "python": "3.14.5",
+        "release": "6.8.0-1057-aws",
+        "system": "Linux"
+      },
+      "support_file_spam_rate_at_10": 0.0,
+      "warm_latency_p50_ms": 135.95993595663458,
+      "warm_latency_p95_ms": 278.71425496414304,
+      "warm_query_path": "daemon"
+    }
+  ],
+  "runtime": {
+    "cpu_model": "aarch64",
+    "logical_cpus": 32,
+    "machine": "aarch64",
+    "physical_memory_bytes": 132651511808,
+    "python": "3.14.5",
+    "release": "6.8.0-1057-aws",
+    "system": "Linux"
+  },
+  "schema_version": 1,
+  "summary": {
+    "neural": {
+      "metrics": {
+        "cold_latency_p50_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 207.37154397647828,
+          "mean": 207.37154397647828,
+          "minimum": 207.37154397647828,
+          "standard_deviation": 0.0
+        },
+        "cold_latency_p95_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 245.11080904630944,
+          "mean": 245.11080904630944,
+          "minimum": 245.11080904630944,
+          "standard_deviation": 0.0
+        },
+        "daemon_startup_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 214.05815705657005,
+          "mean": 214.05815705657005,
+          "minimum": 214.05815705657005,
+          "standard_deviation": 0.0
+        },
+        "hash_enhancement_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 6971.6077640186995,
+          "mean": 6971.6077640186995,
+          "minimum": 6971.6077640186995,
+          "standard_deviation": 0.0
+        },
+        "index_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 7163.766568002757,
+          "mean": 7163.766568002757,
+          "minimum": 7163.766568002757,
+          "standard_deviation": 0.0
+        },
+        "index_size_bytes": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 140741673.0,
+          "mean": 140741673.0,
+          "minimum": 140741673.0,
+          "standard_deviation": 0.0
+        },
+        "mrr_at_10": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.22124542124542124,
+          "mean": 0.22124542124542124,
+          "minimum": 0.22124542124542124,
+          "standard_deviation": 0.0
+        },
+        "ndcg_at_10": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.266764990591861,
+          "mean": 0.266764990591861,
+          "minimum": 0.266764990591861,
+          "standard_deviation": 0.0
+        },
+        "neural_enhancement_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 16058.379356923979,
+          "mean": 16058.379356923979,
+          "minimum": 16058.379356923979,
+          "standard_deviation": 0.0
+        },
+        "neural_model_ready_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 1285.0875250296667,
+          "mean": 1285.0875250296667,
+          "minimum": 1285.0875250296667,
+          "standard_deviation": 0.0
+        },
+        "no_hit_rate": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.0,
+          "mean": 0.0,
+          "minimum": 0.0,
+          "standard_deviation": 0.0
+        },
+        "peak_child_rss_bytes": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 332828672.0,
+          "mean": 332828672.0,
+          "minimum": 332828672.0,
+          "standard_deviation": 0.0
+        },
+        "precision_at_5": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.05692307692307692,
+          "mean": 0.05692307692307692,
+          "minimum": 0.05692307692307692,
+          "standard_deviation": 0.0
+        },
+        "recall_at_20": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.5153846153846153,
+          "mean": 0.5153846153846153,
+          "minimum": 0.5153846153846153,
+          "standard_deviation": 0.0
+        },
+        "support_file_spam_rate_at_10": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.0,
+          "mean": 0.0,
+          "minimum": 0.0,
+          "standard_deviation": 0.0
+        },
+        "warm_latency_p50_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 82.82825903734192,
+          "mean": 82.82825903734192,
+          "minimum": 82.82825903734192,
+          "standard_deviation": 0.0
+        },
+        "warm_latency_p95_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 174.56186399795115,
+          "mean": 174.56186399795115,
+          "minimum": 174.56186399795115,
+          "standard_deviation": 0.0
+        }
+      },
+      "runs": [
+        {
+          "cold_latency_p50_ms": 207.37154397647828,
+          "cold_latency_p95_ms": 245.11080904630944,
+          "daemon_startup_ms": 214.05815705657005,
+          "hash_enhancement_ms": 6971.6077640186995,
+          "index_ms": 7163.766568002757,
+          "index_size_bytes": 140741673,
+          "mrr_at_10": 0.22124542124542124,
+          "ndcg_at_10": 0.266764990591861,
+          "neural_enhancement_ms": 16058.379356923979,
+          "neural_model_ready_ms": 1285.0875250296667,
+          "no_hit_rate": 0.0,
+          "peak_child_rss_bytes": 332828672,
+          "precision_at_5": 0.05692307692307692,
+          "queries": 520,
+          "recall_at_20": 0.5153846153846153,
+          "run": 1,
+          "support_file_spam_rate_at_10": 0.0,
+          "warm_latency_p50_ms": 82.82825903734192,
+          "warm_latency_p95_ms": 174.56186399795115
+        }
+      ]
+    }
+  },
+  "task_summary": {
+    "codefeedback-st": {
+      "neural": {
+        "cold_latency_p50_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 245.11080904630944,
+          "mean": 245.11080904630944,
+          "minimum": 245.11080904630944,
+          "standard_deviation": 0.0
+        },
+        "cold_latency_p95_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 245.11080904630944,
+          "mean": 245.11080904630944,
+          "minimum": 245.11080904630944,
+          "standard_deviation": 0.0
+        },
+        "daemon_startup_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 50.874628010205925,
+          "mean": 50.874628010205925,
+          "minimum": 50.874628010205925,
+          "standard_deviation": 0.0
+        },
+        "hash_enhancement_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 3157.6475329929963,
+          "mean": 3157.6475329929963,
+          "minimum": 3157.6475329929963,
+          "standard_deviation": 0.0
+        },
+        "index_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 3362.3187170014717,
+          "mean": 3362.3187170014717,
+          "minimum": 3362.3187170014717,
+          "standard_deviation": 0.0
+        },
+        "index_size_bytes": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 58312717.0,
+          "mean": 58312717.0,
+          "minimum": 58312717.0,
+          "standard_deviation": 0.0
+        },
+        "mrr_at_10": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.4575793650793651,
+          "mean": 0.4575793650793651,
+          "minimum": 0.4575793650793651,
+          "standard_deviation": 0.0
+        },
+        "ndcg_at_10": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.4768523493299483,
+          "mean": 0.4768523493299483,
+          "minimum": 0.4768523493299483,
+          "standard_deviation": 0.0
+        },
+        "neural_enhancement_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 6143.129181989934,
+          "mean": 6143.129181989934,
+          "minimum": 6143.129181989934,
+          "standard_deviation": 0.0
+        },
+        "neural_model_ready_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 368.44873597146943,
+          "mean": 368.44873597146943,
+          "minimum": 368.44873597146943,
+          "standard_deviation": 0.0
+        },
+        "no_hit_rate": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.0,
+          "mean": 0.0,
+          "minimum": 0.0,
+          "standard_deviation": 0.0
+        },
+        "peak_child_rss_bytes": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 332828672.0,
+          "mean": 332828672.0,
+          "minimum": 332828672.0,
+          "standard_deviation": 0.0
+        },
+        "precision_at_5": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.09600000000000002,
+          "mean": 0.09600000000000002,
+          "minimum": 0.09600000000000002,
+          "standard_deviation": 0.0
+        },
+        "recall_at_20": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.56,
+          "mean": 0.56,
+          "minimum": 0.56,
+          "standard_deviation": 0.0
+        },
+        "support_file_spam_rate_at_10": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.0,
+          "mean": 0.0,
+          "minimum": 0.0,
+          "standard_deviation": 0.0
+        },
+        "warm_latency_p50_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 135.95993595663458,
+          "mean": 135.95993595663458,
+          "minimum": 135.95993595663458,
+          "standard_deviation": 0.0
+        },
+        "warm_latency_p95_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 278.71425496414304,
+          "mean": 278.71425496414304,
+          "minimum": 278.71425496414304,
+          "standard_deviation": 0.0
+        }
+      }
+    },
+    "codetrans-contest": {
+      "neural": {
+        "cold_latency_p50_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 187.24505801219493,
+          "mean": 187.24505801219493,
+          "minimum": 187.24505801219493,
+          "standard_deviation": 0.0
+        },
+        "cold_latency_p95_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 187.24505801219493,
+          "mean": 187.24505801219493,
+          "minimum": 187.24505801219493,
+          "standard_deviation": 0.0
+        },
+        "daemon_startup_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 55.505566007923335,
+          "mean": 55.505566007923335,
+          "minimum": 55.505566007923335,
+          "standard_deviation": 0.0
+        },
+        "hash_enhancement_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 589.9232259835117,
+          "mean": 589.9232259835117,
+          "minimum": 589.9232259835117,
+          "standard_deviation": 0.0
+        },
+        "index_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 545.0414060032926,
+          "mean": 545.0414060032926,
+          "minimum": 545.0414060032926,
+          "standard_deviation": 0.0
+        },
+        "index_size_bytes": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 16297781.0,
+          "mean": 16297781.0,
+          "minimum": 16297781.0,
+          "standard_deviation": 0.0
+        },
+        "mrr_at_10": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.36205848705848703,
+          "mean": 0.36205848705848703,
+          "minimum": 0.36205848705848703,
+          "standard_deviation": 0.0
+        },
+        "ndcg_at_10": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.3937412431684227,
+          "mean": 0.3937412431684227,
+          "minimum": 0.3937412431684227,
+          "standard_deviation": 0.0
+        },
+        "neural_enhancement_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 1556.8849169649184,
+          "mean": 1556.8849169649184,
+          "minimum": 1556.8849169649184,
+          "standard_deviation": 0.0
+        },
+        "neural_model_ready_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 251.98893301421776,
+          "mean": 251.98893301421776,
+          "minimum": 251.98893301421776,
+          "standard_deviation": 0.0
+        },
+        "no_hit_rate": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.0,
+          "mean": 0.0,
+          "minimum": 0.0,
+          "standard_deviation": 0.0
+        },
+        "peak_child_rss_bytes": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 331444224.0,
+          "mean": 331444224.0,
+          "minimum": 331444224.0,
+          "standard_deviation": 0.0
+        },
+        "precision_at_5": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.0864864864864865,
+          "mean": 0.0864864864864865,
+          "minimum": 0.0864864864864865,
+          "standard_deviation": 0.0
+        },
+        "recall_at_20": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.5585585585585585,
+          "mean": 0.5585585585585585,
+          "minimum": 0.5585585585585585,
+          "standard_deviation": 0.0
+        },
+        "support_file_spam_rate_at_10": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.0,
+          "mean": 0.0,
+          "minimum": 0.0,
+          "standard_deviation": 0.0
+        },
+        "warm_latency_p50_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 81.19946398073807,
+          "mean": 81.19946398073807,
+          "minimum": 81.19946398073807,
+          "standard_deviation": 0.0
+        },
+        "warm_latency_p95_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 149.35111801605672,
+          "mean": 149.35111801605672,
+          "minimum": 149.35111801605672,
+          "standard_deviation": 0.0
+        }
+      }
+    },
+    "codetrans-dl": {
+      "neural": {
+        "cold_latency_p50_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 235.25357199832797,
+          "mean": 235.25357199832797,
+          "minimum": 235.25357199832797,
+          "standard_deviation": 0.0
+        },
+        "cold_latency_p95_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 235.25357199832797,
+          "mean": 235.25357199832797,
+          "minimum": 235.25357199832797,
+          "standard_deviation": 0.0
+        },
+        "daemon_startup_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 52.96978703700006,
+          "mean": 52.96978703700006,
+          "minimum": 52.96978703700006,
+          "standard_deviation": 0.0
+        },
+        "hash_enhancement_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 458.77375500276685,
+          "mean": 458.77375500276685,
+          "minimum": 458.77375500276685,
+          "standard_deviation": 0.0
+        },
+        "index_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 1253.286366991233,
+          "mean": 1253.286366991233,
+          "minimum": 1253.286366991233,
+          "standard_deviation": 0.0
+        },
+        "index_size_bytes": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 13422175.0,
+          "mean": 13422175.0,
+          "minimum": 13422175.0,
+          "standard_deviation": 0.0
+        },
+        "mrr_at_10": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.18675778953556732,
+          "mean": 0.18675778953556732,
+          "minimum": 0.18675778953556732,
+          "standard_deviation": 0.0
+        },
+        "ndcg_at_10": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.27845629264329375,
+          "mean": 0.27845629264329375,
+          "minimum": 0.27845629264329375,
+          "standard_deviation": 0.0
+        },
+        "neural_enhancement_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 1694.5348259760067,
+          "mean": 1694.5348259760067,
+          "minimum": 1694.5348259760067,
+          "standard_deviation": 0.0
+        },
+        "neural_model_ready_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 222.1342720440589,
+          "mean": 222.1342720440589,
+          "minimum": 222.1342720440589,
+          "standard_deviation": 0.0
+        },
+        "no_hit_rate": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.0,
+          "mean": 0.0,
+          "minimum": 0.0,
+          "standard_deviation": 0.0
+        },
+        "peak_child_rss_bytes": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 332345344.0,
+          "mean": 332345344.0,
+          "minimum": 332345344.0,
+          "standard_deviation": 0.0
+        },
+        "precision_at_5": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.05370370370370371,
+          "mean": 0.05370370370370371,
+          "minimum": 0.05370370370370371,
+          "standard_deviation": 0.0
+        },
+        "recall_at_20": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.7592592592592593,
+          "mean": 0.7592592592592593,
+          "minimum": 0.7592592592592593,
+          "standard_deviation": 0.0
+        },
+        "support_file_spam_rate_at_10": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.0,
+          "mean": 0.0,
+          "minimum": 0.0,
+          "standard_deviation": 0.0
+        },
+        "warm_latency_p50_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 60.14106498332694,
+          "mean": 60.14106498332694,
+          "minimum": 60.14106498332694,
+          "standard_deviation": 0.0
+        },
+        "warm_latency_p95_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 250.772733008489,
+          "mean": 250.772733008489,
+          "minimum": 250.772733008489,
+          "standard_deviation": 0.0
+        }
+      }
+    },
+    "cosqa": {
+      "neural": {
+        "cold_latency_p50_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 207.37154397647828,
+          "mean": 207.37154397647828,
+          "minimum": 207.37154397647828,
+          "standard_deviation": 0.0
+        },
+        "cold_latency_p95_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 207.37154397647828,
+          "mean": 207.37154397647828,
+          "minimum": 207.37154397647828,
+          "standard_deviation": 0.0
+        },
+        "daemon_startup_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 54.708176001440734,
+          "mean": 54.708176001440734,
+          "minimum": 54.708176001440734,
+          "standard_deviation": 0.0
+        },
+        "hash_enhancement_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 2765.2632500394247,
+          "mean": 2765.2632500394247,
+          "minimum": 2765.2632500394247,
+          "standard_deviation": 0.0
+        },
+        "index_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 2003.1200780067593,
+          "mean": 2003.1200780067593,
+          "minimum": 2003.1200780067593,
+          "standard_deviation": 0.0
+        },
+        "index_size_bytes": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 52709000.0,
+          "mean": 52709000.0,
+          "minimum": 52709000.0,
+          "standard_deviation": 0.0
+        },
+        "mrr_at_10": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.12673433251122493,
+          "mean": 0.12673433251122493,
+          "minimum": 0.12673433251122493,
+          "standard_deviation": 0.0
+        },
+        "ndcg_at_10": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.16373155396055628,
+          "mean": 0.16373155396055628,
+          "minimum": 0.16373155396055628,
+          "standard_deviation": 0.0
+        },
+        "neural_enhancement_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 6663.830431993119,
+          "mean": 6663.830431993119,
+          "minimum": 6663.830431993119,
+          "standard_deviation": 0.0
+        },
+        "neural_model_ready_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 442.51558399992064,
+          "mean": 442.51558399992064,
+          "minimum": 442.51558399992064,
+          "standard_deviation": 0.0
+        },
+        "no_hit_rate": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.0,
+          "mean": 0.0,
+          "minimum": 0.0,
+          "standard_deviation": 0.0
+        },
+        "peak_child_rss_bytes": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 332185600.0,
+          "mean": 332185600.0,
+          "minimum": 332185600.0,
+          "standard_deviation": 0.0
+        },
+        "precision_at_5": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.037450199203187255,
+          "mean": 0.037450199203187255,
+          "minimum": 0.037450199203187255,
+          "standard_deviation": 0.0
+        },
+        "recall_at_20": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.38247011952191234,
+          "mean": 0.38247011952191234,
+          "minimum": 0.38247011952191234,
+          "standard_deviation": 0.0
+        },
+        "support_file_spam_rate_at_10": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.0,
+          "mean": 0.0,
+          "minimum": 0.0,
+          "standard_deviation": 0.0
+        },
+        "warm_latency_p50_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 82.59429002646357,
+          "mean": 82.59429002646357,
+          "minimum": 82.59429002646357,
+          "standard_deviation": 0.0
+        },
+        "warm_latency_p95_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 143.8021369976923,
+          "mean": 143.8021369976923,
+          "minimum": 143.8021369976923,
+          "standard_deviation": 0.0
+        }
+      }
+    }
+  },
+  "tasks": [
+    "codetrans-dl",
+    "codetrans-contest",
+    "cosqa",
+    "codefeedback-st"
+  ]
+}
