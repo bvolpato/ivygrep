@@ -130,6 +130,25 @@ fn overlay_counts(workspace: &Workspace) -> (i64, i64) {
     (files, tombstones)
 }
 
+fn assert_only_overlay_stores(workspace: &Workspace) {
+    assert!(workspace.overlay_sqlite_path().exists());
+    assert!(workspace.overlay_tantivy_dir().exists());
+    assert!(workspace.overlay_vector_path().exists());
+
+    for path in [
+        workspace.sqlite_path(),
+        workspace.tantivy_dir(),
+        workspace.vector_path(),
+        workspace.vector_neural_path(),
+    ] {
+        assert!(
+            !path.exists(),
+            "worktree must not materialize a full base store at {}",
+            path.display()
+        );
+    }
+}
+
 fn stored_chunk_text(workspace: &Workspace, file_path: &str) -> Option<String> {
     let conn = open_sqlite(&workspace.sqlite_path()).unwrap();
     conn.query_row(
@@ -1365,6 +1384,69 @@ fn worktree_first_overlay_refreshes_stale_base_before_inheriting_content() {
 
 #[test]
 #[serial]
+fn worktree_first_overlay_refreshes_base_after_clean_head_change() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    init_git_repo(root.path());
+    fs::write(
+        root.path().join("shared.rs"),
+        "pub fn base_v1_marker() -> bool { true }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base v1"]);
+    setup_and_index(root.path(), home.path());
+
+    git(root.path(), &["branch", "wt-old-base", "main"]);
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_old_base");
+    git(
+        root.path(),
+        &["worktree", "add", wt_path.to_str().unwrap(), "wt-old-base"],
+    );
+
+    fs::write(
+        root.path().join("shared.rs"),
+        "pub fn base_v2_marker() -> bool { true }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base v2"]);
+
+    let summary = setup_and_index(&wt_path, home.path());
+    let base_ws = workspace_for(root.path());
+    let wt_ws = workspace_for(&wt_path);
+    assert_eq!(summary.indexed_files, 1);
+    assert_eq!(overlay_counts(&wt_ws), (1, 1));
+    assert_only_overlay_stores(&wt_ws);
+    assert!(
+        search_file_paths(&base_ws, "base_v2_marker")
+            .iter()
+            .any(|path| path.contains("shared.rs")),
+        "the shared base must refresh when its clean HEAD changes"
+    );
+    assert!(
+        search_file_paths(&wt_ws, "base_v1_marker")
+            .iter()
+            .any(|path| path.contains("shared.rs")),
+        "the older worktree version must remain searchable as a delta"
+    );
+    assert!(
+        search_hits_for_file(&wt_ws, "base_v2_marker", "shared.rs")
+            .iter()
+            .all(|(_, preview)| !preview.contains("base_v2_marker")),
+        "the refreshed base version must remain shadowed in the older worktree"
+    );
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+#[test]
+#[serial]
 fn worktree_empty_edit_hides_base_content_on_first_overlay_index() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
@@ -1428,7 +1510,7 @@ fn worktree_skip_gitignore_indexes_inherited_ignored_content_via_base() {
     let home = tempdir().unwrap();
 
     init_git_repo(root.path());
-    fs::write(root.path().join(".gitignore"), ".git\nignored.rs\n").unwrap();
+    fs::write(root.path().join(".gitignore"), ".git\nignored*.rs\n").unwrap();
     fs::write(
         root.path().join("visible.rs"),
         "pub fn visible_marker() -> bool { true }\n",
@@ -1437,6 +1519,11 @@ fn worktree_skip_gitignore_indexes_inherited_ignored_content_via_base() {
     fs::write(
         root.path().join("ignored.rs"),
         "pub fn inherited_ignored_marker() -> bool { true }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("ignored_untracked.rs"),
+        "pub fn ignored_untracked_v1() -> bool { true }\n",
     )
     .unwrap();
     git(root.path(), &["add", ".gitignore", "visible.rs"]);
@@ -1478,10 +1565,14 @@ fn worktree_skip_gitignore_indexes_inherited_ignored_content_via_base() {
         indexed_files(&base_ws).contains("ignored.rs"),
         "base must be upgraded to supply inherited ignored content"
     );
+    assert!(
+        indexed_files(&base_ws).contains("ignored_untracked.rs"),
+        "base must include ignored untracked content when requested"
+    );
     assert_eq!(
         overlay_counts(&wt_ws),
-        (0, 0),
-        "base-identical ignored content should not be materialized in overlay"
+        (0, 1),
+        "the worktree should inherit tracked ignored content and tombstone the base-only untracked file"
     );
     let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
     let included_hits = hybrid_search(
@@ -1507,6 +1598,63 @@ fn worktree_skip_gitignore_indexes_inherited_ignored_content_via_base() {
         "default worktree search must still exclude ignored base content"
     );
 
+    let base_generation = base_ws.read_metadata().unwrap().unwrap().index_generation;
+    fs::write(
+        root.path().join("ignored_untracked.rs"),
+        "pub fn ignored_untracked_v2() -> bool { true }\n",
+    )
+    .unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["status", "--porcelain=v1"])
+            .current_dir(root.path())
+            .output()
+            .unwrap()
+            .stdout
+            .is_empty(),
+        "ignored untracked changes must remain invisible to Git status"
+    );
+
+    git(root.path(), &["branch", "wt-ignore-refresh", "main"]);
+    let refresh_dir = tempdir().unwrap();
+    let refresh_path = refresh_dir.path().join("wt_ignore_refresh");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            refresh_path.to_str().unwrap(),
+            "wt-ignore-refresh",
+        ],
+    );
+    let mut refresh_index = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    refresh_index
+        .current_dir(&refresh_path)
+        .env("IVYGREP_HOME", home.path())
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--add", ".", "--hash", "--skip-gitignore", "--no-watch"])
+        .assert()
+        .success();
+
+    assert!(
+        stored_chunk_text(&base_ws, "ignored_untracked.rs")
+            .is_some_and(|text| text.contains("ignored_untracked_v2")),
+        "ignored untracked changes must trigger base reconciliation"
+    );
+    assert!(
+        base_ws.read_metadata().unwrap().unwrap().index_generation > base_generation,
+        "reconciling ignored files must advance the shared base generation"
+    );
+
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "remove",
+            refresh_path.to_str().unwrap(),
+            "--force",
+        ],
+    );
     git(
         root.path(),
         &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
@@ -1990,6 +2138,8 @@ fn multiple_worktrees_are_independent() {
     git(root.path(), &["commit", "-m", "shared base"]);
 
     setup_and_index(root.path(), home.path());
+    let base_ws = workspace_for(root.path());
+    let base_generation = base_ws.read_metadata().unwrap().unwrap().index_generation;
 
     // Branch A: adds file_a.rs
     git(root.path(), &["checkout", "-b", "wt-a"]);
@@ -2033,11 +2183,27 @@ fn multiple_worktrees_are_independent() {
     );
 
     // Index both worktrees
-    setup_and_index(&wt_a_path, home.path());
-    setup_and_index(&wt_b_path, home.path());
+    let summary_a = setup_and_index(&wt_a_path, home.path());
+    let summary_b = setup_and_index(&wt_b_path, home.path());
 
     let ws_a = workspace_for(&wt_a_path);
     let ws_b = workspace_for(&wt_b_path);
+
+    assert_eq!(summary_a.indexed_files, 1);
+    assert_eq!(summary_a.deleted_files, 0);
+    assert_eq!(summary_b.indexed_files, 1);
+    assert_eq!(summary_b.deleted_files, 1);
+    assert_eq!(overlay_counts(&ws_a), (1, 0));
+    assert_eq!(overlay_counts(&ws_b), (1, 1));
+    assert_eq!(ws_a.base_index_dir.as_ref(), Some(&base_ws.index_dir));
+    assert_eq!(ws_b.base_index_dir.as_ref(), Some(&base_ws.index_dir));
+    assert_only_overlay_stores(&ws_a);
+    assert_only_overlay_stores(&ws_b);
+    assert_eq!(
+        base_ws.read_metadata().unwrap().unwrap().index_generation,
+        base_generation,
+        "indexing unchanged worktrees must not rewrite the shared base index"
+    );
 
     // Worktree A: should find branch_a_unique_marker and shared_func
     let a_own = search_file_paths(&ws_a, "branch_a_unique_marker");
@@ -2074,7 +2240,6 @@ fn multiple_worktrees_are_independent() {
     );
 
     // Base: must be unaffected by both worktrees
-    let base_ws = workspace_for(root.path());
     let base_shared = search_file_paths(&base_ws, "shared_func");
     assert!(
         base_shared.iter().any(|p| p.contains("shared.rs")),
@@ -2089,6 +2254,121 @@ fn multiple_worktrees_are_independent() {
     assert!(
         !base_b.iter().any(|p| p.contains("file_b.rs")),
         "base must NOT find branch_b content"
+    );
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_a_path.to_str().unwrap(), "--force"],
+    );
+    git(
+        root.path(),
+        &["worktree", "remove", wt_b_path.to_str().unwrap(), "--force"],
+    );
+}
+
+#[test]
+#[serial]
+fn concurrent_worktrees_auto_index_one_shared_base_and_store_only_deltas() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    init_git_repo(root.path());
+    for i in 0..40 {
+        fs::write(
+            root.path().join(format!("base_{i}.rs")),
+            format!("pub fn shared_base_{i}() -> usize {{ {i} }}\n"),
+        )
+        .unwrap();
+    }
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "shared base"]);
+
+    git(root.path(), &["checkout", "-b", "concurrent-a"]);
+    fs::write(
+        root.path().join("delta_a.rs"),
+        "pub fn concurrent_delta_a() -> bool { true }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "delta a"]);
+    git(root.path(), &["checkout", "main"]);
+
+    git(root.path(), &["checkout", "-b", "concurrent-b"]);
+    fs::write(
+        root.path().join("delta_b.rs"),
+        "pub fn concurrent_delta_b() -> bool { true }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "delta b"]);
+    git(root.path(), &["checkout", "main"]);
+
+    let wt_a_dir = tempdir().unwrap();
+    let wt_a_path = wt_a_dir.path().join("wt_a");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            wt_a_path.to_str().unwrap(),
+            "concurrent-a",
+        ],
+    );
+    let wt_b_dir = tempdir().unwrap();
+    let wt_b_path = wt_b_dir.path().join("wt_b");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            wt_b_path.to_str().unwrap(),
+            "concurrent-b",
+        ],
+    );
+
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let index_worktree = |path: std::path::PathBuf, barrier: std::sync::Arc<std::sync::Barrier>| {
+        std::thread::spawn(move || {
+            let workspace = Workspace::resolve(&path).unwrap();
+            let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+            barrier.wait();
+            index_workspace(&workspace, &model).unwrap()
+        })
+    };
+    let handle_a = index_worktree(wt_a_path.clone(), barrier.clone());
+    let handle_b = index_worktree(wt_b_path.clone(), barrier.clone());
+    barrier.wait();
+    let summary_a = handle_a.join().unwrap();
+    let summary_b = handle_b.join().unwrap();
+
+    let base_ws = workspace_for(root.path());
+    let ws_a = workspace_for(&wt_a_path);
+    let ws_b = workspace_for(&wt_b_path);
+    assert_eq!(indexed_files(&base_ws).len(), 40);
+    assert_eq!(
+        base_ws.read_metadata().unwrap().unwrap().index_generation,
+        1,
+        "concurrent worktree startup must build the shared base only once"
+    );
+    assert_eq!(summary_a.indexed_files, 1);
+    assert_eq!(summary_b.indexed_files, 1);
+    assert_eq!(overlay_counts(&ws_a), (1, 0));
+    assert_eq!(overlay_counts(&ws_b), (1, 0));
+    assert_eq!(ws_a.base_index_dir.as_ref(), Some(&base_ws.index_dir));
+    assert_eq!(ws_b.base_index_dir.as_ref(), Some(&base_ws.index_dir));
+    assert_only_overlay_stores(&ws_a);
+    assert_only_overlay_stores(&ws_b);
+
+    assert!(
+        search_file_paths(&ws_a, "shared_base_17")
+            .iter()
+            .any(|path| path.contains("base_17.rs"))
+    );
+    assert!(
+        search_file_paths(&ws_b, "shared_base_17")
+            .iter()
+            .any(|path| path.contains("base_17.rs"))
     );
 
     git(

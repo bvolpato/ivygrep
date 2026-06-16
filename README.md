@@ -272,8 +272,8 @@ machine-readable result live under
 ## 🏗️ Architecture & Git-Native Intelligence
 
 ivygrep deeply understands git. This is a core design decision, not an afterthought:
-- **Worktree overlays:** Doesn't duplicate indexes contextually. Creates thin overlays mapping divergent chunks.
-- **Branch-switch deltas:** Targets Merkle-diff re-indexes of *only* changed files upon branch switch.
+- **Worktree overlays:** Reuses one base search index. Per-worktree SQLite, lexical, and vector stores contain only divergent chunks and tombstones; lightweight Merkle metadata tracks filesystem state.
+- **Branch-switch deltas:** Merkle reconciliation re-indexes *only* changed files upon branch switch instead of rebuilding the search index.
 - **Content-based deduplication:** Byte-identical files are never re-indexed across branches.
 - **`.gitignore` native:** Respects rules automatically at every level.
 

@@ -52,6 +52,16 @@ fn write_stale_daemon_socket(home: &Path) {
     std::fs::write(ipc::socket_path().unwrap(), b"stale daemon socket").unwrap();
 }
 
+fn init_git_repo(root: &Path) {
+    std::fs::create_dir_all(root).unwrap();
+    let status = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(root)
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
 #[test]
 #[serial]
 fn cli_help_snapshot() {
@@ -310,7 +320,7 @@ fn cli_query_from_subdirectory_is_scope_restricted() {
     let root = tmp.path().join("repo");
     let scoped = root.join("scoped");
     let other = root.join("other");
-    std::fs::create_dir_all(root.join(".git")).unwrap();
+    init_git_repo(&root);
     std::fs::create_dir_all(&scoped).unwrap();
     std::fs::create_dir_all(&other).unwrap();
 
@@ -358,7 +368,7 @@ fn cli_scoped_literal_search_survives_high_scoring_parent_matches() {
     let root = tmp.path().join("repo");
     let scoped = root.join("scoped");
     let other = root.join("other");
-    std::fs::create_dir_all(root.join(".git")).unwrap();
+    init_git_repo(&root);
     std::fs::create_dir_all(&scoped).unwrap();
     std::fs::create_dir_all(&other).unwrap();
 

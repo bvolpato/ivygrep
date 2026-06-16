@@ -2,7 +2,7 @@ use criterion::{BatchSize, Criterion, SamplingMode, criterion_group, criterion_m
 use ivygrep::EMBEDDING_DIMENSIONS;
 use ivygrep::chunking::chunk_source;
 use ivygrep::embedding::{EmbeddingModel, HashEmbeddingModel};
-use ivygrep::indexer::{enhance_workspace_hash, index_workspace};
+use ivygrep::indexer::{enhance_workspace_hash, index_workspace, remove_workspace_index};
 use ivygrep::merkle::MerkleSnapshot;
 use ivygrep::search::{SearchOptions, hybrid_search, literal_search};
 use ivygrep::vector_store::{ScalarKind, VectorStore};
@@ -12,6 +12,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::hint::black_box;
 use std::path::Path;
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 // Criterion reports per-operation latency. These repetitions keep actual timed
@@ -33,6 +34,25 @@ fn configure_benchmark_env(home: &Path) {
         std::env::set_var("IVYGREP_ENHANCE_MAX_LOAD_RATIO", "0");
         std::env::set_var("IVYGREP_NO_AUTOSPAWN", "1");
     }
+}
+
+fn git(dir: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(["-c", "commit.gpgSign=false"])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_AUTHOR_NAME", "Benchmark")
+        .env("GIT_AUTHOR_EMAIL", "benchmark@example.com")
+        .env("GIT_COMMITTER_NAME", "Benchmark")
+        .env("GIT_COMMITTER_EMAIL", "benchmark@example.com")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn repeated_per_op<F>(iters: u64, repetitions: u32, mut f: F) -> Duration
@@ -181,6 +201,61 @@ fn setup_bulk_indexed_workspace(
     (staging, home, workspace, model)
 }
 
+fn setup_worktree_overlay(
+    base_files: usize,
+) -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    tempfile::TempDir,
+    Workspace,
+    HashEmbeddingModel,
+) {
+    let staging = tempfile::tempdir().unwrap();
+    let root = staging.path().join("repository");
+    fs::create_dir_all(&root).unwrap();
+    git(&root, &["init"]);
+    git(&root, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    for i in 0..base_files {
+        fs::write(
+            root.join(format!("base_{i}.rs")),
+            format!("pub fn base_{i}() -> usize {{ {i} }}\n"),
+        )
+        .unwrap();
+    }
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-m", "base"]);
+
+    let home = tempfile::tempdir().unwrap();
+    configure_benchmark_env(home.path());
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+    let base_workspace = Workspace::resolve(&root).unwrap();
+    index_workspace(&base_workspace, &model).unwrap();
+
+    git(&root, &["checkout", "-b", "feature"]);
+    fs::write(
+        root.join("delta.rs"),
+        "pub fn worktree_delta() -> bool { true }\n",
+    )
+    .unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-m", "delta"]);
+    git(&root, &["checkout", "main"]);
+
+    let worktree_parent = tempfile::tempdir().unwrap();
+    let worktree_root = worktree_parent.path().join("feature");
+    git(
+        &root,
+        &[
+            "worktree",
+            "add",
+            worktree_root.to_str().unwrap(),
+            "feature",
+        ],
+    );
+    let workspace = Workspace::resolve(&worktree_root).unwrap();
+    (staging, worktree_parent, home, workspace, model)
+}
+
 fn bench_indexer(c: &mut Criterion) {
     let mut group = c.benchmark_group("indexer");
     group
@@ -209,6 +284,25 @@ fn bench_indexer(c: &mut Criterion) {
                 let summary = index_workspace(workspace, model).unwrap();
                 assert_eq!(summary.indexed_files, 0);
             })
+        })
+    });
+
+    let worktree_fixture = OnceCell::new();
+    group.bench_function("worktree_overlay_one_file_delta", |b| {
+        let (_staging, _worktree_parent, home, workspace, model) =
+            worktree_fixture.get_or_init(|| setup_worktree_overlay(1_000));
+        b.iter_custom(|iters| {
+            configure_benchmark_env(home.path());
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iters {
+                remove_workspace_index(workspace).unwrap();
+                let start = Instant::now();
+                let summary = index_workspace(workspace, model).unwrap();
+                elapsed += start.elapsed();
+                assert_eq!(summary.indexed_files, 1);
+                assert_eq!(summary.deleted_files, 0);
+            }
+            elapsed
         })
     });
 
