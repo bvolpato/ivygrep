@@ -15,9 +15,16 @@ jobs:
   build:
     name: Build ${{ matrix.archive_name }}
     runs-on: ${{ matrix.runner }}
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
     env:
       ARCHIVE_FORMAT: ${{ matrix.archive }}
       ARCHIVE_NAME_SUFFIX: ${{ matrix.archive_name }}
+      BINARY_NAME: ${{ matrix.binary_name }}
+      CARGO_FLAGS: ${{ matrix.cargo_flags }}
       EXTRA_FEATURES: ${{ matrix.extra_features }}
       TARGET: ${{ matrix.target }}
       USE_CROSS: ${{ matrix.use_cross }}
@@ -29,27 +36,32 @@ jobs:
             runner: ubuntu-latest
             archive_name: linux-x86_64-musl
             archive: tar.gz
+            binary_name: ig
             use_cross: true
 
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-latest
             archive_name: linux-aarch64-musl
             archive: tar.gz
+            binary_name: ig
             use_cross: true
           - target: x86_64-apple-darwin
             runner: macos-15-intel
             archive_name: macos-x86_64
             archive: tar.gz
+            binary_name: ig
             extra_features: accelerate
           - target: aarch64-apple-darwin
             runner: macos-latest
             archive_name: macos-aarch64
             archive: tar.gz
+            binary_name: ig
             extra_features: accelerate
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
             archive_name: windows-x86_64
             archive: zip
+            binary_name: ig.exe
             cargo_flags: --no-default-features
 
     steps:
@@ -88,94 +100,66 @@ jobs:
             cargo build "${build_args[@]}"
           fi
         shell: bash
-        env:
-          CARGO_FLAGS: ${{ matrix.cargo_flags }}
+
+      - name: Set release artifact metadata
+        shell: bash
+        run: |
+          mkdir -p dist
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          ARCHIVE_NAME="ivygrep-${TAG}-${ARCHIVE_NAME_SUFFIX}"
+          ARCHIVE_PATH="dist/${ARCHIVE_NAME}.${ARCHIVE_FORMAT}"
+          {
+            echo "ARCHIVE_NAME=${ARCHIVE_NAME}"
+            echo "ARCHIVE_PATH=${ARCHIVE_PATH}"
+            echo "BINARY_PATH=target/${TARGET}/release/${BINARY_NAME}"
+            echo "PROVENANCE_PATH=dist/${ARCHIVE_NAME}.provenance.json"
+            echo "SBOM_PATH=dist/${ARCHIVE_NAME}.spdx.json"
+            echo "VERSION=${VERSION}"
+          } >> "$GITHUB_ENV"
 
       - name: Enforce release size budget
         shell: bash
         run: |
-          EXE_SUFFIX=""
-          if [[ "$TARGET" == *"windows"* ]]; then
-            EXE_SUFFIX=".exe"
-          fi
           PYTHON=python3
           if [[ "$TARGET" == *"windows"* ]]; then
             PYTHON=python
           fi
-          "$PYTHON" scripts/check_release_size.py \
-            "target/${TARGET}/release/ig${EXE_SUFFIX}" \
-            --max-mib 80
+          "$PYTHON" scripts/check_release_size.py "$BINARY_PATH" --max-mib 80
 
-      - name: Set up QEMU
-        if: "contains(matrix.target, 'aarch64') && contains(matrix.runner, 'ubuntu-latest')"
-        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4
-        with:
-          cache-image: false
-
-      - name: Smoke test
+      - name: Build-output sanity check
         shell: bash
         env:
           IVYGREP_NO_AUTOSPAWN: "1"
         run: |
-          EXE_SUFFIX=""
-          if [[ "$TARGET" == *"windows"* ]]; then
-            EXE_SUFFIX=".exe"
-          fi
-          IG_BIN="$PWD/target/${TARGET}/release/ig${EXE_SUFFIX}"
-
-          # Basic sanity. Cross-compiled Linux aarch64 binaries are validated by
-          # e2e-cross-platform.yml under QEMU, not executed on this x86 runner.
           if [[ "$TARGET" != *"windows"* ]]; then
-            file "$IG_BIN"
+            file "$BINARY_PATH"
           fi
           if [[ "$TARGET" != "aarch64-unknown-linux-musl" ]]; then
-            "$IG_BIN" --version
-            "$IG_BIN" --help > /dev/null
+            "$BINARY_PATH" --version
+            "$BINARY_PATH" --help > /dev/null
           fi
 
-          # Cross-compiled Linux aarch64 binaries are tested under QEMU in
-          # e2e-cross-platform.yml. Every runnable release binary must pass the
-          # documented CLI procedure smoke test here.
-          if [[ "$TARGET" == "aarch64-unknown-linux-musl" ]]; then
-            echo "Skipping index test for Linux aarch64 release binary (tested under QEMU in e2e-cross-platform.yml)"
-          else
-            ./scripts/e2e_procedures.sh --binary "$IG_BIN"
-            PYTHON=python3
-            if [[ "$TARGET" == *"windows"* ]]; then
-              PYTHON=python
-            fi
-            BENCH_ROOT="$("$PYTHON" -c 'import tempfile; print(tempfile.gettempdir())')"
-            BENCH_HOME="$BENCH_ROOT/ivygrep-release-daemon-equivalence"
-            "$PYTHON" scripts/check_daemon_equivalence.py \
-              --skip-build \
-              --binary "$IG_BIN" \
-              --bench-home "$BENCH_HOME"
-          fi
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@17ae1740179002c89186b61233e0f892c3118b11 # v0.23.0
+        with:
+          path: target/${{ matrix.target }}/release/${{ matrix.binary_name }}
+          format: spdx-json
+          output-file: dist/ivygrep-${{ github.ref_name }}-${{ matrix.archive_name }}.spdx.json
+          upload-artifact: false
 
       - name: Package archive
         shell: bash
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          ARCHIVE_NAME="ivygrep-${TAG}-${ARCHIVE_NAME_SUFFIX}"
           mkdir -p "dist/${ARCHIVE_NAME}"
-          
-          EXE_SUFFIX=""
-          if [[ "$TARGET" == *"windows"* ]]; then
-            EXE_SUFFIX=".exe"
-          fi
-          
-          cp "target/${TARGET}/release/ig${EXE_SUFFIX}" "dist/${ARCHIVE_NAME}/"
+          cp "$BINARY_PATH" "dist/${ARCHIVE_NAME}/"
           cp README.md LICENSE* 2>/dev/null "dist/${ARCHIVE_NAME}/" || true
           cd dist
-          
           if [[ "$ARCHIVE_FORMAT" == "zip" ]]; then
             7z a "${ARCHIVE_NAME}.zip" "${ARCHIVE_NAME}"
-            echo "ARCHIVE_PATH=dist/${ARCHIVE_NAME}.zip" >> "$GITHUB_ENV"
           else
             tar czf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
-            echo "ARCHIVE_PATH=dist/${ARCHIVE_NAME}.tar.gz" >> "$GITHUB_ENV"
           fi
-          echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> "$GITHUB_ENV"
 
       - name: Enforce archive size budget
         shell: bash
@@ -186,7 +170,7 @@ jobs:
           fi
           "$PYTHON" scripts/check_release_size.py "$ARCHIVE_PATH" --max-mib 80
 
-      - name: Compute SHA256
+      - name: Compute checksum and provenance
         shell: bash
         run: |
           if [[ "$OSTYPE" == "darwin"* ]]; then
@@ -194,14 +178,36 @@ jobs:
           else
             SHA=$(sha256sum "$ARCHIVE_PATH" | awk '{print $1}')
           fi
-          echo "SHA256=${SHA}" >> "$GITHUB_ENV"
-          
-          # Use proper file extension depending on the generated archive format
-          ARCHIVE_EXT="tar.gz"
-          if [[ "$ARCHIVE_FORMAT" == "zip" ]]; then
-            ARCHIVE_EXT="zip"
+          echo "${SHA}  $(basename "$ARCHIVE_PATH")" > "${ARCHIVE_PATH}.sha256"
+          PYTHON=python3
+          if [[ "$TARGET" == *"windows"* ]]; then
+            PYTHON=python
           fi
-          echo "${SHA}  ${ARCHIVE_NAME}.${ARCHIVE_EXT}" > "${ARCHIVE_PATH}.sha256"
+          RUSTC_VERSION=$(rustc --version --verbose | tr '\n' ';')
+          "$PYTHON" scripts/generate_release_provenance.py \
+            --archive "$ARCHIVE_PATH" \
+            --archive-root "$ARCHIVE_NAME" \
+            --binary "$BINARY_PATH" \
+            --sbom "$SBOM_PATH" \
+            --target "$TARGET" \
+            --features "$EXTRA_FEATURES $CARGO_FLAGS" \
+            --version "$VERSION" \
+            --source-commit "$GITHUB_SHA" \
+            --source-ref "$GITHUB_REF" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --rustc-version "$RUSTC_VERSION" \
+            --output "$PROVENANCE_PATH"
+
+      - name: Attest build provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4
+        with:
+          subject-path: dist/ivygrep-${{ github.ref_name }}-${{ matrix.archive_name }}.${{ matrix.archive }}
+
+      - name: Attest SBOM
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4
+        with:
+          subject-path: dist/ivygrep-${{ github.ref_name }}-${{ matrix.archive_name }}.${{ matrix.archive }}
+          sbom-path: dist/ivygrep-${{ github.ref_name }}-${{ matrix.archive_name }}.spdx.json
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -210,11 +216,164 @@ jobs:
           path: |
             ${{ env.ARCHIVE_PATH }}
             ${{ env.ARCHIVE_PATH }}.sha256
-          retention-days: 5
+            ${{ env.PROVENANCE_PATH }}
+            ${{ env.SBOM_PATH }}
+          retention-days: 30
+
+  artifact-acceptance:
+    name: Accept ${{ matrix.archive_name }} archive
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            archive_name: linux-x86_64-musl
+            archive: tar.gz
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-latest
+            archive_name: linux-aarch64-musl
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            archive_name: macos-x86_64
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            archive_name: macos-aarch64
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            archive_name: windows-x86_64
+            archive: zip
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Install Python on Windows
+        if: runner.os == 'Windows'
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Download exact release artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: ivygrep-${{ github.ref_name }}-${{ matrix.archive_name }}
+          path: release-artifact
+
+      - name: Verify checksum, provenance, SBOM, and archive contents
+        id: artifact
+        shell: bash
+        run: |
+          NAME="ivygrep-${GITHUB_REF_NAME}-${{ matrix.archive_name }}"
+          ARCHIVE=$(find release-artifact -name "${NAME}.${{ matrix.archive }}" -type f -print -quit)
+          CHECKSUM=$(find release-artifact -name "${NAME}.${{ matrix.archive }}.sha256" -type f -print -quit)
+          PROVENANCE=$(find release-artifact -name "${NAME}.provenance.json" -type f -print -quit)
+          SBOM=$(find release-artifact -name "${NAME}.spdx.json" -type f -print -quit)
+          PYTHON=python3
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            PYTHON=python
+          fi
+          "$PYTHON" scripts/verify_release_artifact.py \
+            --archive "$ARCHIVE" \
+            --checksum "$CHECKSUM" \
+            --provenance "$PROVENANCE" \
+            --sbom "$SBOM" \
+            --extract-dir "$PWD/release-extracted" \
+            --expected-target "${{ matrix.target }}" \
+            --expected-commit "$GITHUB_SHA" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3 # v4
+        with:
+          platforms: arm64
+          cache-image: false
+
+      - name: Run exact archive procedures
+        if: matrix.target != 'aarch64-unknown-linux-musl'
+        shell: bash
+        env:
+          BINARY: ${{ steps.artifact.outputs.binary }}
+          HF_HOME: ${{ runner.temp }}/ivygrep-empty-hf-cache
+          IVYGREP_NO_AUTOSPAWN: "1"
+        run: |
+          ./scripts/e2e_procedures.sh --binary "$BINARY"
+          PYTHON=python3
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            PYTHON=python
+          fi
+          "$PYTHON" scripts/check_daemon_equivalence.py \
+            --skip-build \
+            --binary "$BINARY" \
+            --bench-home "${RUNNER_TEMP:-$TEMP}/ivygrep-release-daemon-equivalence"
+
+      - name: Run exact Linux aarch64 archive under QEMU
+        if: matrix.target == 'aarch64-unknown-linux-musl'
+        shell: bash
+        env:
+          BINARY: ${{ steps.artifact.outputs.binary }}
+        run: |
+          BINARY_REL="${BINARY#"$PWD/"}"
+          docker run --rm \
+            --platform linux/arm64 \
+            --network none \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            -e BINARY="/workspace/${BINARY_REL}" \
+            -e IVYGREP_NO_AUTOSPAWN=1 \
+            alpine:latest sh -c '
+              set -eu
+              sh scripts/e2e_procedures.sh --binary "$BINARY"
+            '
+          docker run --rm \
+            --platform linux/arm64 \
+            -v "$PWD:/workspace" \
+            -w /workspace \
+            -e BINARY="/workspace/${BINARY_REL}" \
+            python:3.13-alpine sh -c '
+              set -eu
+              python3 scripts/check_daemon_equivalence.py \
+                --skip-build \
+                --binary "$BINARY" \
+                --bench-home /tmp/ivygrep-release-daemon-equivalence
+            '
+
+      - name: Reject elevated x86 ISA requirements
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        shell: bash
+        env:
+          BINARY: ${{ steps.artifact.outputs.binary }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes qemu-user
+          ./scripts/e2e_x86_baseline.sh --binary "$BINARY"
+
+      - name: Prime and import cached neural model without network
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        shell: bash
+        env:
+          BINARY: ${{ steps.artifact.outputs.binary }}
+        run: |
+          CACHE="$RUNNER_TEMP/ivygrep-release-hf-cache"
+          ./scripts/e2e_cached_model.sh --binary "$BINARY" --cache "$CACHE"
+          BINARY_REL="${BINARY#"$PWD/"}"
+          docker run --rm \
+            --network none \
+            -v "$PWD:/workspace" \
+            -v "$CACHE:/hf-cache" \
+            -w /workspace \
+            alpine:latest sh -c \
+              "sh scripts/e2e_cached_model.sh --binary /workspace/${BINARY_REL} --cache /hf-cache"
 
   release:
     name: Create GitHub Release
-    needs: build
+    needs: artifact-acceptance
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -235,6 +394,8 @@ jobs:
           find artifacts -name '*.tar.gz' -exec cp {} release-assets/ \;
           find artifacts -name '*.zip' -exec cp {} release-assets/ \;
           find artifacts -name '*.sha256' -exec cp {} release-assets/ \;
+          find artifacts -name '*.spdx.json' -exec cp {} release-assets/ \;
+          find artifacts -name '*.provenance.json' -exec cp {} release-assets/ \;
           ls -la release-assets/
 
       - name: Extract Release Notes

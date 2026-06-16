@@ -20,6 +20,20 @@ class ReleaseWorkflowTest(unittest.TestCase):
         for target in forbidden_cpu_targets:
             self.assertNotIn(target, workflow)
 
+    def test_release_waits_for_archive_acceptance(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("artifact-acceptance:", workflow)
+        self.assertIn("needs: artifact-acceptance", workflow)
+        self.assertIn("scripts/verify_release_artifact.py", workflow)
+        self.assertIn("scripts/e2e_x86_baseline.sh", workflow)
+
+    def test_release_publishes_sbom_and_provenance(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("anchore/sbom-action@", workflow)
+        self.assertIn("actions/attest@", workflow)
+        self.assertIn("*.spdx.json", workflow)
+        self.assertIn("*.provenance.json", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

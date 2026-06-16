@@ -62,13 +62,13 @@ jobs:
       - name: Build
         run: cargo build --locked --release
         env:
-          RUSTFLAGS: "-D warnings -C target-cpu=x86-64-v3"
+          RUSTFLAGS: "-D warnings -C target-cpu=x86-64"
 
       - name: Run full test suite
         if: github.event.inputs.test_scope != 'smoke'
         run: cargo test --locked --lib --bins --tests
         env:
-          RUSTFLAGS: "-D warnings -C target-cpu=x86-64-v3"
+          RUSTFLAGS: "-D warnings -C target-cpu=x86-64"
 
       - name: Bootstrap stress fixtures
         if: github.event_name != 'workflow_dispatch' || github.event.inputs.test_scope == 'stress'
@@ -217,8 +217,12 @@ jobs:
               echo "=== Architecture ==="
               uname -m
 
-              apk add --no-cache python3
               sh scripts/e2e_procedures.sh --binary "$IG"
+              apk add --no-cache python3
+              python3 scripts/check_daemon_equivalence.py \
+                --skip-build \
+                --binary "$IG" \
+                --bench-home /tmp/ivygrep-e2e-daemon-equivalence
             '
 
   # ── Hash-only mode (no neural/ONNX — tests portability) ─────────────

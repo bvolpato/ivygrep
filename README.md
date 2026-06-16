@@ -58,6 +58,29 @@ Windows x86_64 releases include `ig.exe` in
 Windows uses the dependency-light portable vector backend; Linux and macOS use
 the faster USearch backend.
 
+Every release publishes a SHA-256 checksum, SPDX JSON SBOM, and provenance
+sidecar for each archive. The release is created only after CI extracts and
+runs those exact archive bytes:
+
+| Target | Release behavior | Offline fallback |
+|---|---|---|
+| Linux x86_64 musl | Static binary, baseline x86-64 exercised under QEMU `qemu64` | Hash search, no model or service |
+| Linux aarch64 musl | Static binary exercised under ARM64 QEMU in Alpine | Hash search, no model or service |
+| macOS Intel | Native archive with Accelerate-backed local neural inference | Hash search |
+| macOS Apple Silicon | Native archive with Accelerate-backed local neural inference | Hash search |
+| Windows x86_64 | Dependency-light portable vector backend | Hash-only release |
+
+The archive procedure covers startup, indexing, hybrid/hash/literal/regex
+search, daemon equivalence, status/doctor, stale-index rebuild, and removal.
+Running `ig` requires no Python, compiler, system database, or external
+service. Linux/macOS neural mode may download its pinned model once; a
+network-isolated acceptance check verifies that the cached model can then be
+imported locally.
+
+Quality, latency, footprint, release-size history, unavailable comparisons,
+and the mechanically enforced claim policy are published in the
+[evidence dashboard](https://bvolpato.github.io/ivygrep/benchmarks/evidence-dashboard.html).
+
 **Build from source:**
 ```bash
 git clone https://github.com/bvolpato/ivygrep.git && cd ivygrep
@@ -354,7 +377,7 @@ These smoke tests run against throwaway projects and isolated `IVYGREP_HOME` dir
 ## Roadmap
 
 - **More Tree-sitter languages:** expand the AST pipeline to Kotlin, SQL, and additional grammars as high-quality tree-sitter parsers mature.
-- **State-of-the-art search program:** track the evidence-backed quality,
+- **Evidence-backed search program:** track the quality,
   latency, footprint, and portability work in
   [#128](https://github.com/bvolpato/ivygrep/issues/128).
 - **Learned reranking:** evaluate compact local cross-encoders against the

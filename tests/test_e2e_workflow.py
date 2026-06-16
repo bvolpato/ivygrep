@@ -11,15 +11,13 @@ E2E_WORKFLOW = (
 
 
 class E2EWorkflowTest(unittest.TestCase):
-    def test_aarch64_alpine_installs_python_for_procedure_checks(self) -> None:
+    def test_aarch64_procedure_checks_do_not_require_python(self) -> None:
         workflow = E2E_WORKFLOW.read_text(encoding="utf-8")
 
         self.assertIn("alpine:latest sh -c", workflow)
-        self.assertIn("apk add --no-cache python3", workflow)
-        self.assertLess(
-            workflow.index("apk add --no-cache python3"),
-            workflow.index('sh scripts/e2e_procedures.sh --binary "$IG"'),
-        )
+        procedure = workflow.index('sh scripts/e2e_procedures.sh --binary "$IG"')
+        python_install = workflow.index("apk add --no-cache python3")
+        self.assertLess(procedure, python_install)
 
 
 if __name__ == "__main__":
