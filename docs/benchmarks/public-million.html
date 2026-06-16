@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Public million-chunk benchmark - ivygrep</title>
+  <link rel="stylesheet" href="../style.css">
+  <link rel="stylesheet" href="report.css">
+  <link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
+</head>
+<body class="report-page">
+  <main class="report-shell relative z-10">
+    <nav class="report-nav"><a class="report-brand" href="index.html"><img src="../assets/icon.svg" alt="ivygrep"><span>ivygrep benchmarks</span></a><div class="report-links"><a href="index.html">Reports</a><a href="public-million-results.json">Summary JSON</a><a href="https://github.com/bvolpato/ivygrep">GitHub</a></div></nav>
+    <section class="report-hero"><div class="report-eyebrow">Deterministic CC0 corpus</div><h1>Million-Chunk Performance</h1><p>Paired query latency, controlled indexing, full-system paths, and pinned public retrieval quality.</p></section>
+    <section class="report-grid">
+      <article class="report-card"><h2>Warm p95</h2><div class="metric-value">3.57x</div><p>53.77 ms -> 15.07 ms</p></article>
+      <article class="report-card"><h2>Index throughput</h2><div class="metric-value">1.26x</div><p>6231 chunks/s</p></article>
+      <article class="report-card"><h2>Acceptance</h2><div class="metric-value">PASS</div><p>Latency, quality, recall, and documented indexing ceiling.</p></article>
+    </section>
+    <section class="report-card"><h2>Full-system query paths</h2><div class="table-wrap"><table><thead><tr><th>Path</th><th>Baseline p95 ms</th><th>Current p95 ms</th><th>Ratio</th></tr></thead><tbody><tr><td>Process cold</td><td>307.22</td><td>478.02</td><td>1.556</td></tr><tr><td>Warm distinct</td><td>112.57</td><td>58.29</td><td>0.518</td></tr><tr><td>Cache replay</td><td>27.85</td><td>31.96</td><td>1.148</td></tr><tr><td>Filtered</td><td>257.31</td><td>45.22</td><td>0.176</td></tr><tr><td>Warm CLI</td><td>151.27</td><td>138.99</td><td>0.919</td></tr><tr><td>Concurrent</td><td>164.74</td><td>99.17</td><td>0.602</td></tr></tbody></table></div></section>
+    <section class="report-card"><h2>Public retrieval quality</h2><div class="table-wrap"><table><thead><tr><th>Metric</th><th>Baseline</th><th>Current</th><th>Delta</th></tr></thead><tbody><tr><td>ndcg_at_10</td><td>0.2620</td><td>0.2632</td><td>+0.0012</td></tr><tr><td>mrr_at_10</td><td>0.2178</td><td>0.2192</td><td>+0.0014</td></tr><tr><td>precision_at_5</td><td>0.0561</td><td>0.0598</td><td>+0.0037</td></tr><tr><td>recall_at_20</td><td>0.5080</td><td>0.4887</td><td>-0.0193</td></tr><tr><td>no_hit_rate</td><td>0.0000</td><td>0.0000</td><td>+0.0000</td></tr></tbody></table></div></section>
+    <section class="report-card"><h2>Method</h2><p>The query run kept both daemons live and alternated request order. The controlled indexing run used the same generated corpus for both binaries. The exact full-system run is retained separately because the shared host was heavily saturated.</p></section>
+  </main>
+</body>
+</html>
