@@ -457,20 +457,20 @@ fn index_workspace_inner(
             }
         }
 
-        // If the base index predates the current on-disk format, migrate it
-        // before referencing it: an overlay serves chunks/vectors from the
-        // base, so a v1 base would be queried with v2-derived lookups. The
-        // base self-heals via its own health check during index_workspace.
+        // If the base index uses a different on-disk format, rebuild it before
+        // referencing it. An overlay serves chunks and vectors from the base,
+        // so querying any incompatible layout is unsafe. The base self-heals
+        // via its own health check during index_workspace.
         let base_format = std::fs::read_to_string(base_dir.join("index_format_version"))
             .ok()
             .and_then(|s| s.trim().parse::<u32>().ok())
             .unwrap_or(0);
         if base_sqlite.exists()
-            && base_format < crate::workspace::INDEX_FORMAT_VERSION
+            && base_format != crate::workspace::INDEX_FORMAT_VERSION
             && let Some(main_root) = workspace.main_worktree_root()
             && let Ok(base_ws) = crate::workspace::Workspace::resolve(&main_root)
         {
-            eprintln!("  ⚡ base index format outdated — rebuilding base before overlay...");
+            eprintln!("  ⚡ base index format incompatible — rebuilding base before overlay...");
             let _ = index_workspace(&base_ws, embedding_model)?;
             base_refreshed = true;
             if workspace.has_overlay() {

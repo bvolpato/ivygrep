@@ -817,9 +817,9 @@ impl Workspace {
                 .ok()
                 .and_then(|s| s.trim().parse::<u32>().ok())
                 .unwrap_or(0);
-            if base_format < INDEX_FORMAT_VERSION {
+            if base_format != INDEX_FORMAT_VERSION {
                 issues.push(format!(
-                    "base index format outdated (v{base_format} < v{INDEX_FORMAT_VERSION}); rebuild required"
+                    "base index format incompatible (v{base_format} != v{INDEX_FORMAT_VERSION}); rebuild required"
                 ));
             }
         }
@@ -858,9 +858,9 @@ impl Workspace {
         // so their format must be validated before incremental comparison.
         if chunk_count > 0 || is_overlay {
             let format_version = self.read_index_format_version();
-            if format_version < INDEX_FORMAT_VERSION {
+            if format_version != INDEX_FORMAT_VERSION {
                 issues.push(format!(
-                    "index format outdated (v{format_version} < v{INDEX_FORMAT_VERSION}); rebuild required"
+                    "index format incompatible (v{format_version} != v{INDEX_FORMAT_VERSION}); rebuild required"
                 ));
             }
         }
