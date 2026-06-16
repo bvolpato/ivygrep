@@ -39,7 +39,8 @@ class ReleaseWorkflowTest(unittest.TestCase):
             workflow,
         )
         self.assertIn("actions/attest@", workflow)
-        self.assertIn('--cargo-flags "$CARGO_FLAGS"', workflow)
+        self.assertIn('--features="$EXTRA_FEATURES"', workflow)
+        self.assertIn('--cargo-flags="$CARGO_FLAGS"', workflow)
         self.assertIn("*.spdx.json", workflow)
         self.assertIn("*.provenance.json", workflow)
 

@@ -2,6 +2,8 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -68,6 +70,44 @@ class ReleaseArtifactTest(unittest.TestCase):
         rendered = json.dumps(document)
         self.assertNotIn("/home/", rendered)
         self.assertNotIn("\\\\Users\\\\", rendered)
+
+    def test_provenance_accepts_option_like_cargo_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "ivygrep-v1-windows.zip"
+            binary = root / "ig.exe"
+            sbom = root / "ivygrep-v1-windows.spdx.json"
+            output = root / "ivygrep-v1-windows.provenance.json"
+            archive.write_bytes(b"archive")
+            binary.write_bytes(b"binary")
+            sbom.write_text('{"spdxVersion":"SPDX-2.3"}\n', encoding="utf-8")
+
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "generate_release_provenance.py"),
+                    f"--archive={archive}",
+                    "--archive-root=ivygrep-v1-windows",
+                    f"--binary={binary}",
+                    f"--sbom={sbom}",
+                    "--target=x86_64-pc-windows-msvc",
+                    "--features=",
+                    "--cargo-flags=--no-default-features",
+                    "--version=1.0.0",
+                    f"--source-commit={'a' * 40}",
+                    "--source-ref=refs/tags/v1.0.0",
+                    "--workflow-run-id=123",
+                    "--rustc-version=rustc 1.96.0",
+                    f"--output={output}",
+                ],
+                check=True,
+            )
+
+            document = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(
+                document["build"]["cargo_flags"],
+                ["--no-default-features"],
+            )
 
 
 if __name__ == "__main__":

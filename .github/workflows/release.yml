@@ -190,8 +190,8 @@ jobs:
             --binary "$BINARY_PATH" \
             --sbom "$SBOM_PATH" \
             --target "$TARGET" \
-            --features "$EXTRA_FEATURES" \
-            --cargo-flags "$CARGO_FLAGS" \
+            --features="$EXTRA_FEATURES" \
+            --cargo-flags="$CARGO_FLAGS" \
             --version "$VERSION" \
             --source-commit "$GITHUB_SHA" \
             --source-ref "$GITHUB_REF" \
