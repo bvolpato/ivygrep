@@ -33,6 +33,12 @@ reranker_renderer = load_script("render_public_reranker")
 
 
 class PublicBenchmarkTest(unittest.TestCase):
+    def test_source_commit_override_tracks_the_benchmark_binary(self):
+        self.assertEqual(
+            matrix_runner.benchmark_revision(ROOT, "a" * 40),
+            "a" * 40,
+        )
+
     def test_manifest_covers_every_full_profile_task(self):
         manifest = exporter.load_manifest(
             ROOT / "benchmarks" / "public" / "manifest.json"

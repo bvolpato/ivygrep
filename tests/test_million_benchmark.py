@@ -1,5 +1,6 @@
 import importlib.util
 from pathlib import Path
+import sys
 import unittest
 
 
@@ -17,6 +18,8 @@ def load_script(name: str):
 
 benchmark = load_script("bench_million_chunks")
 comparator = load_script("compare_million_benchmarks")
+sys.modules["compare_million_benchmarks"] = comparator
+renderer = load_script("render_million_benchmark")
 
 
 def artifact(
@@ -46,6 +49,35 @@ def artifact(
 
 
 class MillionBenchmarkTest(unittest.TestCase):
+    def test_dataset_provenance_ignores_unrelated_manifest_changes(self):
+        matrix = {
+            "results": [
+                {
+                    "dataset": "public-task",
+                    "dataset_provenance": {
+                        "revision": "abc",
+                        "checksums": {"corpus": "123"},
+                    },
+                },
+                {
+                    "dataset": "public-task",
+                    "dataset_provenance": {
+                        "revision": "abc",
+                        "checksums": {"corpus": "123"},
+                    },
+                },
+            ]
+        }
+        self.assertEqual(
+            renderer.dataset_provenances(matrix),
+            {
+                "public-task": {
+                    "revision": "abc",
+                    "checksums": {"corpus": "123"},
+                }
+            },
+        )
+
     def test_generated_query_cases_map_to_the_expected_file(self):
         cases = benchmark.query_cases(2, 1_000_000, 100)
         self.assertEqual(

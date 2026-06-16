@@ -69,6 +69,10 @@ def git_revision(root: Path) -> str:
     return completed.stdout.strip()
 
 
+def benchmark_revision(root: Path, source_commit: str | None) -> str:
+    return source_commit or git_revision(root)
+
+
 def parse_modes(value: str) -> list[str]:
     modes = [mode.strip() for mode in value.split(",") if mode.strip()]
     allowed = {"lexical", "hash", "hybrid", "neural"}
@@ -303,6 +307,10 @@ def main() -> int:
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--skip-export", action="store_true")
     parser.add_argument(
+        "--source-commit",
+        help="Commit used to build --binary; defaults to the current checkout.",
+    )
+    parser.add_argument(
         "--reuse-results",
         action="store_true",
         help="reuse completed per-task result files from --work-root",
@@ -364,7 +372,7 @@ def main() -> int:
     matrix = {
         "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "ivygrep_commit": git_revision(root),
+        "ivygrep_commit": benchmark_revision(root, args.source_commit),
         "manifest_sha256": sha256_file(args.manifest),
         "runtime": eval_code_retrieval.runtime_metadata(),
         "harness_sha256": {

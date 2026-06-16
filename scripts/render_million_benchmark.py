@@ -35,6 +35,23 @@ def quality_metric(matrix: dict, name: str) -> float:
     return float(matrix["summary"]["neural"]["metrics"][name]["mean"])
 
 
+def quality_metric_stddev(matrix: dict, name: str) -> float:
+    return float(
+        matrix["summary"]["neural"]["metrics"][name]["standard_deviation"]
+    )
+
+
+def dataset_provenances(matrix: dict) -> dict[str, dict]:
+    provenances = {}
+    for result in matrix["results"]:
+        dataset = result["dataset"]
+        provenance = result["dataset_provenance"]
+        previous = provenances.setdefault(dataset, provenance)
+        if previous != provenance:
+            raise ValueError(f"{dataset} provenance changes within one matrix")
+    return provenances
+
+
 def build_report(
     index_baseline: dict,
     index_current: dict,
@@ -51,6 +68,10 @@ def build_report(
         raise ValueError("paired query artifacts use different corpora")
     if quality_baseline["profile"] != quality_current["profile"]:
         raise ValueError("quality artifacts use different profiles")
+    if quality_baseline["tasks"] != quality_current["tasks"]:
+        raise ValueError("quality artifacts use different task sets")
+    if dataset_provenances(quality_baseline) != dataset_provenances(quality_current):
+        raise ValueError("quality artifacts use different dataset revisions")
 
     baseline_index = index_baseline["index"]
     current_index = index_current["index"]
@@ -179,6 +200,12 @@ def build_report(
             "baseline": before,
             "current": after,
             "absolute_delta": after - before,
+            "baseline_standard_deviation": quality_metric_stddev(
+                quality_baseline, name
+            ),
+            "current_standard_deviation": quality_metric_stddev(
+                quality_current, name
+            ),
         }
     baseline_no_hit = quality_metric(quality_baseline, "no_hit_rate")
     current_no_hit = quality_metric(quality_current, "no_hit_rate")
@@ -186,7 +213,24 @@ def build_report(
         "baseline": baseline_no_hit,
         "current": current_no_hit,
         "absolute_delta": current_no_hit - baseline_no_hit,
+        "baseline_standard_deviation": quality_metric_stddev(
+            quality_baseline, "no_hit_rate"
+        ),
+        "current_standard_deviation": quality_metric_stddev(
+            quality_current, "no_hit_rate"
+        ),
     }
+    task_quality = {}
+    for task in quality_current["tasks"]:
+        before = quality_baseline["task_summary"][task]["neural"]["ndcg_at_10"]
+        after = quality_current["task_summary"][task]["neural"]["ndcg_at_10"]
+        task_quality[task] = {
+            "baseline_ndcg_at_10": before["mean"],
+            "current_ndcg_at_10": after["mean"],
+            "absolute_delta": after["mean"] - before["mean"],
+            "baseline_standard_deviation": before["standard_deviation"],
+            "current_standard_deviation": after["standard_deviation"],
+        }
 
     gate = {
         "warm_distinct_two_x": latency["observed"] <= 0.5,
@@ -214,6 +258,32 @@ def build_report(
             "queries": quality_current["queries"],
             "tasks": quality_current["tasks"],
             "metrics": quality,
+            "task_ndcg_at_10": task_quality,
+            "model": (
+                quality_current.get("neural_models", [None])[0]
+                if quality_current.get("neural_models")
+                else None
+            ),
+            "repetitions": quality_current["repetitions"],
+            "manifest_sha256": {
+                "baseline": quality_baseline["manifest_sha256"],
+                "current": quality_current["manifest_sha256"],
+            },
+            "harness_sha256": quality_current["harness_sha256"],
+        },
+        "runtime": {
+            "index_baseline": index_baseline["runtime"],
+            "index_current": index_current["runtime"],
+            "paired_baseline": paired_baseline["runtime"],
+            "paired_current": paired_current["runtime"],
+            "quality_baseline": quality_baseline["runtime"],
+            "quality_current": quality_current["runtime"],
+        },
+        "binaries": {
+            "index_baseline": index_baseline["binary"],
+            "index_current": index_current["binary"],
+            "paired_baseline": paired_baseline["binary"],
+            "paired_current": paired_current["binary"],
         },
         "saturated_full_run": {
             "baseline_commit": system_baseline["ivygrep_commit"],
@@ -248,9 +318,20 @@ def render_markdown(report: dict) -> str:
         for values in report["system_queries"].values()
     )
     quality_rows = "\n".join(
-        f"| {name} | {values['baseline']:.4f} | {values['current']:.4f} | "
+        f"| {name} | {values['baseline']:.4f} +/- "
+        f"{values['baseline_standard_deviation']:.4f} | "
+        f"{values['current']:.4f} +/- "
+        f"{values['current_standard_deviation']:.4f} | "
         f"{values['absolute_delta']:+.4f} |"
         for name, values in quality["metrics"].items()
+    )
+    task_rows = "\n".join(
+        f"| {name} | {values['baseline_ndcg_at_10']:.4f} +/- "
+        f"{values['baseline_standard_deviation']:.4f} | "
+        f"{values['current_ndcg_at_10']:.4f} +/- "
+        f"{values['current_standard_deviation']:.4f} | "
+        f"{values['absolute_delta']:+.4f} |"
+        for name, values in quality["task_ndcg_at_10"].items()
     )
     load = paired["load_average"]
     components = indexing["components"]["current"]
@@ -321,9 +402,15 @@ separately: process cold, warm distinct, replay, filtered, CLI, and concurrent.
 
 ## Public retrieval quality
 
-| Metric | baseline | current | delta |
+| Metric | baseline mean +/- sd | current mean +/- sd | delta |
 | --- | ---: | ---: | ---: |
 {quality_rows}
+
+### Per-dataset nDCG@10
+
+| Dataset | baseline mean +/- sd | current mean +/- sd | delta |
+| --- | ---: | ---: | ---: |
+{task_rows}
 
 Raw evidence is published beside this report. CI runs repeated paired base/head
 trials on the same runner, bootstraps p95 and median indexing throughput, and
@@ -351,11 +438,20 @@ def render_html(report: dict) -> str:
     quality_rows = "".join(
         "<tr>"
         f"<td>{escape(name)}</td>"
-        f"<td>{values['baseline']:.4f}</td>"
-        f"<td>{values['current']:.4f}</td>"
+        f"<td>{values['baseline']:.4f} +/- {values['baseline_standard_deviation']:.4f}</td>"
+        f"<td>{values['current']:.4f} +/- {values['current_standard_deviation']:.4f}</td>"
         f"<td>{values['absolute_delta']:+.4f}</td>"
         "</tr>"
         for name, values in quality["metrics"].items()
+    )
+    task_rows = "".join(
+        "<tr>"
+        f"<td>{escape(name)}</td>"
+        f"<td>{values['baseline_ndcg_at_10']:.4f} +/- {values['baseline_standard_deviation']:.4f}</td>"
+        f"<td>{values['current_ndcg_at_10']:.4f} +/- {values['current_standard_deviation']:.4f}</td>"
+        f"<td>{values['absolute_delta']:+.4f}</td>"
+        "</tr>"
+        for name, values in quality["task_ndcg_at_10"].items()
     )
     gate = "PASS" if report["gate"]["passed"] else "FAIL"
     return f"""<!DOCTYPE html>
@@ -380,6 +476,7 @@ def render_html(report: dict) -> str:
     </section>
     <section class="report-card"><h2>Full-system query paths</h2><div class="table-wrap"><table><thead><tr><th>Path</th><th>Baseline p95 ms</th><th>Current p95 ms</th><th>Ratio</th></tr></thead><tbody>{query_rows}</tbody></table></div></section>
     <section class="report-card"><h2>Public retrieval quality</h2><div class="table-wrap"><table><thead><tr><th>Metric</th><th>Baseline</th><th>Current</th><th>Delta</th></tr></thead><tbody>{quality_rows}</tbody></table></div></section>
+    <section class="report-card"><h2>Per-dataset nDCG@10</h2><div class="table-wrap"><table><thead><tr><th>Dataset</th><th>Baseline</th><th>Current</th><th>Delta</th></tr></thead><tbody>{task_rows}</tbody></table></div></section>
     <section class="report-card"><h2>Method</h2><p>The query run kept both daemons live and alternated request order. The controlled indexing run used the same generated corpus for both binaries. The exact full-system run is retained separately because the shared host was heavily saturated.</p></section>
   </main>
 </body>
