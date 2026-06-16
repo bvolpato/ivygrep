@@ -72,9 +72,29 @@ def safe_extension(language: object) -> str:
 
 
 def sampled_query_ids(
-    qrels: Iterable[dict], sample_queries: int | None, seed: int
+    qrels: Iterable[dict],
+    sample_queries: int | None,
+    seed: int,
+    query_partition: dict | None = None,
 ) -> set[str]:
     query_ids = sorted({str(row["query_id"]) for row in qrels})
+    if query_partition:
+        modulus = int(query_partition["modulus"])
+        residues = {int(value) for value in query_partition["residues"]}
+        if modulus < 2:
+            raise ValueError("query partition modulus must be at least 2")
+        if not residues or any(value < 0 or value >= modulus for value in residues):
+            raise ValueError("query partition residues must be within the modulus")
+        query_ids = [
+            query_id
+            for query_id in query_ids
+            if int.from_bytes(
+                hashlib.sha256(query_id.encode()).digest()[:8],
+                "big",
+            )
+            % modulus
+            in residues
+        ]
     if sample_queries is None or sample_queries >= len(query_ids):
         return set(query_ids)
     if sample_queries < 1:
@@ -130,6 +150,7 @@ def export_task(
     sample_queries: int | None,
     sample_corpus: int | None,
     seed: int,
+    query_partition: dict | None = None,
 ) -> dict:
     from datasets import load_dataset
 
@@ -144,7 +165,12 @@ def export_task(
         revision=task_config["qrels_revision"],
     )
     test_qrels = list(qrels_dataset["test"])
-    included_queries = sampled_query_ids(test_qrels, sample_queries, seed)
+    included_queries = sampled_query_ids(
+        test_qrels,
+        sample_queries,
+        seed,
+        query_partition,
+    )
     query_by_id = {
         str(row["_id"]): row
         for row in query_corpus["queries"]
@@ -239,6 +265,7 @@ def export_task(
             "query_limit": sample_queries,
             "corpus_limit": sample_corpus,
             "seed": seed if sample_queries is not None else None,
+            "query_partition": query_partition,
         },
         "counts": {
             "source_corpus": len(corpus),
@@ -301,6 +328,7 @@ def main() -> int:
                 if args.sample_corpus is not None
                 else options.get("sample_corpus"),
                 options.get("seed", args.seed),
+                options.get("query_partition"),
             )
         )
     summary = {

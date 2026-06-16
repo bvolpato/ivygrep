@@ -79,6 +79,26 @@ class PublicBenchmarkTest(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(len(first), 5)
 
+    def test_query_partitions_are_disjoint_and_complete(self):
+        qrels = [
+            {"query_id": f"q{index}", "corpus_id": f"d{index}", "score": 1}
+            for index in range(100)
+        ]
+        left = exporter.sampled_query_ids(
+            qrels,
+            None,
+            42,
+            {"modulus": 2, "residues": [0]},
+        )
+        right = exporter.sampled_query_ids(
+            qrels,
+            None,
+            42,
+            {"modulus": 2, "residues": [1]},
+        )
+        self.assertFalse(left & right)
+        self.assertEqual(left | right, {f"q{index}" for index in range(100)})
+
     def test_language_extensions_are_neutral_and_portable(self):
         self.assertEqual(exporter.safe_extension("Python"), "py")
         self.assertEqual(exporter.safe_extension("C++"), "cpp")

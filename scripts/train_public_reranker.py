@@ -36,6 +36,15 @@ FEATURE_NAMES = (
     "lexical_semantic",
     "literal_exact",
     "semantic_only",
+    "score_preview_coverage",
+    "rank_preview_coverage",
+    "short_preview_coverage",
+    "medium_preview_coverage",
+    "long_preview_coverage",
+    "short_semantic",
+    "long_semantic",
+    "short_literal",
+    "long_literal",
 )
 
 CODE_EXTENSIONS = {
@@ -124,10 +133,18 @@ def feature_vector(query: str, candidate: dict, rank: int) -> list[float]:
     literal = "literal" in sources
     exact_preview = bool(query_lower and query_lower in preview_lower)
     exact_path = bool(query_lower and query_lower in path_lower)
+    preview_coverage = coverage(terms, preview_lower)
+    score = min(
+        math.log1p(max(0.0, float(candidate.get("total_score", 0.0)))),
+        4.0,
+    ) / 4.0
+    reciprocal_rank = 1.0 / (rank + 1.0)
+    short_query = len(terms) <= 5
+    long_query = len(terms) >= 13
+    medium_query = not short_query and not long_query
     return [
-        min(math.log1p(max(0.0, float(candidate.get("total_score", 0.0)))), 4.0)
-        / 4.0,
-        1.0 / (rank + 1.0),
+        score,
+        reciprocal_rank,
         min(float(candidate.get("hit_count", 0)), 4.0) / 4.0,
         min(len(sources), 5) / 5.0,
         float(lexical),
@@ -135,7 +152,7 @@ def feature_vector(query: str, candidate: dict, rank: int) -> list[float]:
         float(literal),
         float("path" in sources),
         float("symbol" in sources),
-        coverage(terms, preview_lower),
+        preview_coverage,
         coverage(terms, path_lower),
         float(exact_preview),
         float(exact_path),
@@ -147,6 +164,15 @@ def feature_vector(query: str, candidate: dict, rank: int) -> list[float]:
         float(lexical and semantic),
         float(literal and (exact_preview or exact_path)),
         float(semantic and not (lexical or literal or "path" in sources or "symbol" in sources)),
+        score * preview_coverage,
+        reciprocal_rank * preview_coverage,
+        float(short_query) * preview_coverage,
+        float(medium_query) * preview_coverage,
+        float(long_query) * preview_coverage,
+        float(short_query and semantic),
+        float(long_query and semantic),
+        float(short_query and literal),
+        float(long_query and literal),
     ]
 
 

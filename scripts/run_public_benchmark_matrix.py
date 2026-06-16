@@ -105,6 +105,7 @@ def export_datasets(
                 sample_queries=options.get("sample_queries"),
                 sample_corpus=options.get("sample_corpus"),
                 seed=options.get("seed", 20260615),
+                query_partition=options.get("query_partition"),
             )
         )
     validate_profile_query_count(manifest, profile, exported)

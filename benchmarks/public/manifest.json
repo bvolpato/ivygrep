@@ -76,6 +76,80 @@
         }
       }
     },
+    "reranker-fit": {
+      "description": "Deterministic half of public-core queries used to fit the learned reranker; query IDs in reranker-eval are disjoint.",
+      "minimum_queries": 450,
+      "tasks": [
+        "codetrans-dl",
+        "codetrans-contest",
+        "cosqa",
+        "codefeedback-st"
+      ],
+      "task_options": {
+        "codetrans-dl": {
+          "query_partition": {
+            "modulus": 2,
+            "residues": [0]
+          }
+        },
+        "codetrans-contest": {
+          "query_partition": {
+            "modulus": 2,
+            "residues": [0]
+          }
+        },
+        "cosqa": {
+          "query_partition": {
+            "modulus": 2,
+            "residues": [0]
+          }
+        },
+        "codefeedback-st": {
+          "sample_corpus": 5000,
+          "query_partition": {
+            "modulus": 2,
+            "residues": [0]
+          }
+        }
+      }
+    },
+    "reranker-eval": {
+      "description": "Held-out deterministic half of public-core queries used only for final learned-reranker acceptance.",
+      "minimum_queries": 450,
+      "tasks": [
+        "codetrans-dl",
+        "codetrans-contest",
+        "cosqa",
+        "codefeedback-st"
+      ],
+      "task_options": {
+        "codetrans-dl": {
+          "query_partition": {
+            "modulus": 2,
+            "residues": [1]
+          }
+        },
+        "codetrans-contest": {
+          "query_partition": {
+            "modulus": 2,
+            "residues": [1]
+          }
+        },
+        "cosqa": {
+          "query_partition": {
+            "modulus": 2,
+            "residues": [1]
+          }
+        },
+        "codefeedback-st": {
+          "sample_corpus": 5000,
+          "query_partition": {
+            "modulus": 2,
+            "residues": [1]
+          }
+        }
+      }
+    },
     "public-core": {
       "description": "Four compact public CoIR tasks with 1,000 held-out queries across natural-language, code-to-code, and multilingual retrieval.",
       "minimum_queries": 1000,
