@@ -1,0 +1,4016 @@
+{
+  "claims": {
+    "competitive": {
+      "definition": "A controlled public comparison against a comparable local system is available for the same retrieval mode, corpus, hardware class, and resource budget.",
+      "status": "not-claimed",
+      "supported": false
+    },
+    "portable": {
+      "definition": "The downloaded archives execute the documented offline procedure on all five supported targets, with baseline x86 ISA enforcement and no runtime toolchain or service dependency.",
+      "required_release_targets": 5,
+      "status": "qualified",
+      "supported": true
+    },
+    "state_of_the_art": {
+      "definition": "A top-tier public quality result and a documented Pareto advantage in local latency, footprint, or portability are both present.",
+      "pareto_advantage": true,
+      "status": "not-claimed",
+      "supported": false,
+      "top_tier_public_quality": false
+    }
+  },
+  "comparisons": [
+    {
+      "class": "exact-search",
+      "reason": "No retained same-hardware exact-search comparison is available.",
+      "status": "unavailable"
+    },
+    {
+      "class": "semantic-retrieval",
+      "reason": "No retained external local semantic system uses the same corpus, model budget, and hardware.",
+      "status": "unavailable"
+    }
+  ],
+  "evidence": [
+    {
+      "id": "public-retrieval-baseline",
+      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/262cb61f70624a8d0f10844d204ae7593a85a6d8/docs/benchmarks/public-code-retrieval-baseline-results.json",
+      "kind": "quality",
+      "label": "Frozen public retrieval baseline",
+      "path": "docs/benchmarks/public-code-retrieval-baseline-results.json",
+      "publication_commit": "262cb61f70624a8d0f10844d204ae7593a85a6d8",
+      "sha256": "6c855c4308b45f1c3bcf91a80368b32807568027928633c9c438ba763f331fec",
+      "source_commit": "49b1571de77ab096512469e324f76a48e4257123",
+      "summary": {
+        "index_size_bytes": 106788135.33333333,
+        "mode": "hybrid",
+        "models": [],
+        "modes": {
+          "hash": {
+            "index_ms": {
+              "coefficient_of_variation": 0.2844295745150512,
+              "maximum": 5350.4882080014795,
+              "mean": 3992.1037016805108,
+              "minimum": 2571.2647260224912,
+              "standard_deviation": 1135.4723572889486
+            },
+            "index_size_bytes": {
+              "coefficient_of_variation": 0.001360832770375123,
+              "maximum": 106929759.0,
+              "mean": 106789424.66666667,
+              "minimum": 106589228.0,
+              "standard_deviation": 145322.5486159055
+            },
+            "mrr_at_10": {
+              "coefficient_of_variation": 0.003099792940780661,
+              "maximum": 0.19317539682539683,
+              "mean": 0.1924005291005291,
+              "minimum": 0.1917246031746032,
+              "standard_deviation": 0.0005964018019082842
+            },
+            "ndcg_at_10": {
+              "coefficient_of_variation": 0.0015195611940088886,
+              "maximum": 0.2328460934655558,
+              "mean": 0.2323693825109141,
+              "minimum": 0.23200226803093266,
+              "standard_deviation": 0.00035309949633939276
+            },
+            "peak_child_rss_bytes": {
+              "coefficient_of_variation": 0.013375100387252823,
+              "maximum": 127954944.0,
+              "mean": 125644800.0,
+              "minimum": 124006400.0,
+              "standard_deviation": 1680511.8131363036
+            },
+            "warm_latency_p95_ms": {
+              "coefficient_of_variation": 0.21475615829184388,
+              "maximum": 152.08097800496034,
+              "mean": 117.38423867306362,
+              "minimum": 92.94067102018744,
+              "standard_deviation": 25.208988141440035
+            }
+          },
+          "hybrid": {
+            "index_ms": {
+              "coefficient_of_variation": 0.12839613753852644,
+              "maximum": 3896.42859302694,
+              "mean": 3360.5418856798983,
+              "minimum": 2839.848977018846,
+              "standard_deviation": 431.4805981577352
+            },
+            "index_size_bytes": {
+              "coefficient_of_variation": 0.000194769026571021,
+              "maximum": 106816907.0,
+              "mean": 106788135.33333333,
+              "minimum": 106768454.0,
+              "standard_deviation": 20799.021168207786
+            },
+            "mrr_at_10": {
+              "coefficient_of_variation": 0.01130687486313838,
+              "maximum": 0.19084444444444443,
+              "mean": 0.1892642857142857,
+              "minimum": 0.18623888888888887,
+              "standard_deviation": 0.002139987594632697
+            },
+            "ndcg_at_10": {
+              "coefficient_of_variation": 0.009655636239912271,
+              "maximum": 0.23179107324910883,
+              "mean": 0.2301014382014164,
+              "minimum": 0.22696243639636804,
+              "standard_deviation": 0.0022217757855535303
+            },
+            "peak_child_rss_bytes": {
+              "coefficient_of_variation": 0.01046443171523853,
+              "maximum": 128946176.0,
+              "mean": 127541248.0,
+              "minimum": 125747200.0,
+              "standard_deviation": 1334646.6805723028
+            },
+            "warm_latency_p95_ms": {
+              "coefficient_of_variation": 0.11136133386156667,
+              "maximum": 118.87705899425782,
+              "mean": 104.20173533687678,
+              "minimum": 90.50349800963886,
+              "standard_deviation": 11.604044237804544
+            }
+          },
+          "lexical": {
+            "index_ms": {
+              "coefficient_of_variation": 0.13182284429898916,
+              "maximum": 3621.2460120150354,
+              "mean": 3083.9043263501176,
+              "minimum": 2638.183420000132,
+              "standard_deviation": 406.52903984543065
+            },
+            "index_size_bytes": {
+              "coefficient_of_variation": 0.0005084650605653361,
+              "maximum": 72769246.0,
+              "mean": 72732221.33333333,
+              "minimum": 72681719.0,
+              "standard_deviation": 36981.79332530476
+            },
+            "mrr_at_10": {
+              "coefficient_of_variation": 0.014042816753154325,
+              "maximum": 0.19106071428571428,
+              "mean": 0.1874511904761905,
+              "minimum": 0.18485753968253968,
+              "standard_deviation": 0.0026323427180177704
+            },
+            "ndcg_at_10": {
+              "coefficient_of_variation": 0.010644561996626837,
+              "maximum": 0.2308574994287854,
+              "mean": 0.22782005171077682,
+              "minimum": 0.22492230792531145,
+              "standard_deviation": 0.0024250446645100957
+            },
+            "peak_child_rss_bytes": {
+              "coefficient_of_variation": 0.01093889689798966,
+              "maximum": 128004096.0,
+              "mean": 126227797.33333333,
+              "minimum": 124637184.0,
+              "standard_deviation": 1380792.8606896675
+            },
+            "warm_latency_p95_ms": {
+              "coefficient_of_variation": 0.09560909556681439,
+              "maximum": 145.7211870001629,
+              "mean": 129.07641733181663,
+              "minimum": 116.2087389966473,
+              "standard_deviation": 12.340879520099673
+            }
+          }
+        },
+        "mrr_at_10": 0.1892642857142857,
+        "ndcg_at_10": 0.2301014382014164,
+        "peak_child_rss_bytes": 127541248.0,
+        "profile": "public-core",
+        "queries": 1000,
+        "repetitions": 3,
+        "runtime": {
+          "cpu_model": "aarch64",
+          "logical_cpus": 32,
+          "machine": "aarch64",
+          "physical_memory_bytes": 132651511808,
+          "python": "3.13.13",
+          "release": "6.8.0-1057-aws",
+          "system": "Linux"
+        },
+        "tasks": [
+          "codetrans-dl",
+          "codetrans-contest",
+          "cosqa",
+          "codefeedback-st"
+        ],
+        "warm_latency_p95_ms": 104.20173533687678
+      }
+    },
+    {
+      "id": "public-retrieval-current",
+      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/262cb61f70624a8d0f10844d204ae7593a85a6d8/docs/benchmarks/public-code-retrieval-results.json",
+      "kind": "quality",
+      "label": "Current public retrieval matrix",
+      "path": "docs/benchmarks/public-code-retrieval-results.json",
+      "publication_commit": "262cb61f70624a8d0f10844d204ae7593a85a6d8",
+      "sha256": "37a4821a9876911467204a0d539421059c9ddb8ccf876bde132f3284043ddb3c",
+      "source_commit": "2c735847d43edbe8a31d516b0fbb7c22b20105c2",
+      "summary": {
+        "index_size_bytes": 140773402.66666666,
+        "mode": "neural",
+        "models": [
+          {
+            "architecture": "static-embedding",
+            "dimensions": 256,
+            "document_character_limit": 1024,
+            "license": "Apache-2.0",
+            "max_input_tokens": 0,
+            "model_asset_bytes": 125729604,
+            "model_id": "sentence-transformers/static-retrieval-mrl-en-v1",
+            "model_weight_dtype": "f32",
+            "model_weights_sha256": "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+            "normalize_embeddings": true,
+            "parameter_count": 31254528,
+            "pooling": "token-mean",
+            "profile": "static-retrieval-v1",
+            "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
+            "schema_version": 1,
+            "vector_quantization": "f16"
+          }
+        ],
+        "modes": {
+          "neural": {
+            "index_ms": {
+              "coefficient_of_variation": 0.4053550002151744,
+              "maximum": 23338.989856943954,
+              "mean": 16331.470388938518,
+              "minimum": 7451.051767042372,
+              "standard_deviation": 6620.043183022287
+            },
+            "index_size_bytes": {
+              "coefficient_of_variation": 0.0011015639013374071,
+              "maximum": 140991844.0,
+              "mean": 140773402.66666666,
+              "minimum": 140647359.0,
+              "standard_deviation": 155070.8986460351
+            },
+            "mrr_at_10": {
+              "coefficient_of_variation": 0.002029493606917344,
+              "maximum": 0.21837817460317457,
+              "mean": 0.2178291005291005,
+              "minimum": 0.21729563492063492,
+              "standard_deviation": 0.0004420827669243649
+            },
+            "ndcg_at_10": {
+              "coefficient_of_variation": 0.0006647407195116885,
+              "maximum": 0.26227067754671357,
+              "mean": 0.26203649518855393,
+              "minimum": 0.2618532203043712,
+              "standard_deviation": 0.00017418632834996045
+            },
+            "peak_child_rss_bytes": {
+              "coefficient_of_variation": 0.0002666688491066085,
+              "maximum": 332615680.0,
+              "mean": 332521472.0,
+              "minimum": 332402688.0,
+              "standard_deviation": 88673.11824147534
+            },
+            "warm_latency_p95_ms": {
+              "coefficient_of_variation": 0.2510326729407815,
+              "maximum": 270.2597819734365,
+              "mean": 220.13918298762292,
+              "minimum": 143.1481770123355,
+              "standard_deviation": 55.2621275243828
+            }
+          }
+        },
+        "mrr_at_10": 0.2178291005291005,
+        "ndcg_at_10": 0.26203649518855393,
+        "peak_child_rss_bytes": 332521472.0,
+        "profile": "public-core",
+        "queries": 1000,
+        "repetitions": 3,
+        "runtime": {
+          "cpu_model": "aarch64",
+          "logical_cpus": 32,
+          "machine": "aarch64",
+          "physical_memory_bytes": 132651511808,
+          "python": "3.14.5",
+          "release": "6.8.0-1057-aws",
+          "system": "Linux"
+        },
+        "tasks": [
+          "codetrans-dl",
+          "codetrans-contest",
+          "cosqa",
+          "codefeedback-st"
+        ],
+        "warm_latency_p95_ms": 220.13918298762292
+      }
+    },
+    {
+      "id": "public-retrieval-compact-current",
+      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-quality-current.json",
+      "kind": "quality",
+      "label": "Compact-index public retrieval matrix",
+      "path": "docs/benchmarks/public-million-quality-current.json",
+      "publication_commit": "107e3b0726cf15dc1d4d45178aad3f732168a793",
+      "sha256": "0a939ed959689bd90828f876fd49798aab894e5cf0a35fd6f6ab3d5a31eb942b",
+      "source_commit": "2c7629e18d4026722605cb11765af3a9b788b57f",
+      "summary": {
+        "index_size_bytes": 102086665.66666667,
+        "mode": "neural",
+        "models": [
+          {
+            "architecture": "static-embedding",
+            "dimensions": 256,
+            "document_character_limit": 1024,
+            "license": "Apache-2.0",
+            "max_input_tokens": 0,
+            "model_asset_bytes": 125729604,
+            "model_id": "sentence-transformers/static-retrieval-mrl-en-v1",
+            "model_weight_dtype": "f32",
+            "model_weights_sha256": "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+            "normalize_embeddings": true,
+            "parameter_count": 31254528,
+            "pooling": "token-mean",
+            "profile": "static-retrieval-v1",
+            "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
+            "schema_version": 1,
+            "vector_quantization": "f16"
+          }
+        ],
+        "modes": {
+          "hash": {
+            "index_ms": {
+              "coefficient_of_variation": 0.04290187492828537,
+              "maximum": 1959.7133520292118,
+              "mean": 1889.6175970051747,
+              "minimum": 1776.0012570070103,
+              "standard_deviation": 81.06813780900316
+            },
+            "index_size_bytes": {
+              "coefficient_of_variation": 0.00011257873076512196,
+              "maximum": 68012247.0,
+              "mean": 68003083.33333333,
+              "minimum": 67993508.0,
+              "standard_deviation": 7655.700809781485
+            },
+            "mrr_at_10": {
+              "coefficient_of_variation": 0.011537440292442809,
+              "maximum": 0.21528174603174602,
+              "mean": 0.2119899470899471,
+              "minimum": 0.20942420634920633,
+              "standard_deviation": 0.0024458213571483746
+            },
+            "ndcg_at_10": {
+              "coefficient_of_variation": 0.011777999068860501,
+              "maximum": 0.2609498400600372,
+              "mean": 0.2566904025188921,
+              "minimum": 0.25423912184279035,
+              "standard_deviation": 0.003023299321852938
+            },
+            "peak_child_rss_bytes": {
+              "coefficient_of_variation": 0.0030614654323206274,
+              "maximum": 119418880.0,
+              "mean": 118913706.66666667,
+              "minimum": 118575104.0,
+              "standard_deviation": 364050.20238911494
+            },
+            "warm_latency_p95_ms": {
+              "coefficient_of_variation": 0.045228947598165384,
+              "maximum": 94.6193520212546,
+              "mean": 90.30421367303158,
+              "minimum": 84.82132700737566,
+              "standard_deviation": 4.0843645481110755
+            }
+          },
+          "hybrid": {
+            "index_ms": {
+              "coefficient_of_variation": 0.035514176262361426,
+              "maximum": 1846.160341927316,
+              "mean": 1768.2307903305627,
+              "minimum": 1692.3812950844876,
+              "standard_deviation": 62.79725996033426
+            },
+            "index_size_bytes": {
+              "coefficient_of_variation": 0.00010627239467790712,
+              "maximum": 68006878.0,
+              "mean": 67998981.66666667,
+              "minimum": 67989415.0,
+              "standard_deviation": 7226.414617375772
+            },
+            "mrr_at_10": {
+              "coefficient_of_variation": 0.006923198696665208,
+              "maximum": 0.21606666666666666,
+              "mean": 0.21398108465608465,
+              "minimum": 0.21276587301587302,
+              "standard_deviation": 0.0014814335664020128
+            },
+            "ndcg_at_10": {
+              "coefficient_of_variation": 0.006133302538455998,
+              "maximum": 0.2614499272340749,
+              "mean": 0.25920295166941215,
+              "minimum": 0.25801328860894907,
+              "standard_deviation": 0.0015897701214492928
+            },
+            "peak_child_rss_bytes": {
+              "coefficient_of_variation": 0.0036561430003219956,
+              "maximum": 118157312.0,
+              "mean": 117549738.66666667,
+              "minimum": 117231616.0,
+              "standard_deviation": 429778.6542158132
+            },
+            "warm_latency_p95_ms": {
+              "coefficient_of_variation": 0.026436234527776718,
+              "maximum": 90.902998985257,
+              "mean": 88.7384006831174,
+              "minimum": 85.47875902149826,
+              "standard_deviation": 2.3459091720787133
+            }
+          },
+          "lexical": {
+            "index_ms": {
+              "coefficient_of_variation": 0.08960487735873017,
+              "maximum": 2081.261349027045,
+              "mean": 1902.7025950296472,
+              "minimum": 1673.107247974258,
+              "standard_deviation": 170.49143267776918
+            },
+            "index_size_bytes": {
+              "coefficient_of_variation": 0.0003530809669678156,
+              "maximum": 33911435.0,
+              "mean": 33894788.0,
+              "minimum": 33883820.0,
+              "standard_deviation": 11967.604522209112
+            },
+            "mrr_at_10": {
+              "coefficient_of_variation": 0.004374673576985127,
+              "maximum": 0.20692222222222223,
+              "mean": 0.2058330687830688,
+              "minimum": 0.20471706349206348,
+              "standard_deviation": 0.0009004524872750534
+            },
+            "ndcg_at_10": {
+              "coefficient_of_variation": 0.0062584144927286,
+              "maximum": 0.2498062089315943,
+              "mean": 0.24797392057072312,
+              "minimum": 0.24601147829157305,
+              "standard_deviation": 0.0015519235783185443
+            },
+            "peak_child_rss_bytes": {
+              "coefficient_of_variation": 0.0041955312267597245,
+              "maximum": 119484416.0,
+              "mean": 118779904.0,
+              "minimum": 118411264.0,
+              "standard_deviation": 498344.79634352226
+            },
+            "warm_latency_p95_ms": {
+              "coefficient_of_variation": 0.06924898597637348,
+              "maximum": 114.79341296944767,
+              "mean": 104.55416333085547,
+              "minimum": 99.41035002702847,
+              "standard_deviation": 7.240269790269873
+            }
+          },
+          "neural": {
+            "index_ms": {
+              "coefficient_of_variation": 0.09844492657302598,
+              "maximum": 2224.683348031249,
+              "mean": 1977.9587206430733,
+              "minimum": 1748.6764519126154,
+              "standard_deviation": 194.72000101818375
+            },
+            "index_size_bytes": {
+              "coefficient_of_variation": 0.00029315585413075177,
+              "maximum": 102118921.0,
+              "mean": 102086665.66666667,
+              "minimum": 102046807.0,
+              "standard_deviation": 29927.30366887216
+            },
+            "mrr_at_10": {
+              "coefficient_of_variation": 0.006427108224876425,
+              "maximum": 0.22383095238095238,
+              "mean": 0.22202354497354496,
+              "minimum": 0.2203424603174603,
+              "standard_deviation": 0.0014269693520156915
+            },
+            "ndcg_at_10": {
+              "coefficient_of_variation": 0.005916697435280639,
+              "maximum": 0.26834058065502503,
+              "mean": 0.2666450261807094,
+              "minimum": 0.2645413316915278,
+              "standard_deviation": 0.0015776579425337421
+            },
+            "peak_child_rss_bytes": {
+              "coefficient_of_variation": 0.0001808520083270666,
+              "maximum": 332935168.0,
+              "mean": 332861440.0,
+              "minimum": 332787712.0,
+              "standard_deviation": 60198.65991863939
+            },
+            "warm_latency_p95_ms": {
+              "coefficient_of_variation": 0.034795873791968024,
+              "maximum": 97.33918099664152,
+              "mean": 92.83418132690713,
+              "minimum": 89.92557803867385,
+              "standard_deviation": 3.2302464570317353
+            }
+          }
+        },
+        "mrr_at_10": 0.22202354497354496,
+        "ndcg_at_10": 0.2666450261807094,
+        "peak_child_rss_bytes": 332861440.0,
+        "profile": "public-core",
+        "queries": 1000,
+        "repetitions": 3,
+        "runtime": {
+          "cpu_model": "aarch64",
+          "logical_cpus": 32,
+          "machine": "aarch64",
+          "physical_memory_bytes": 132651511808,
+          "python": "3.13.13",
+          "release": "6.8.0-1057-aws",
+          "system": "Linux"
+        },
+        "tasks": [
+          "codetrans-dl",
+          "codetrans-contest",
+          "cosqa",
+          "codefeedback-st"
+        ],
+        "warm_latency_p95_ms": 92.83418132690713
+      }
+    },
+    {
+      "id": "embedding-selection",
+      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/262cb61f70624a8d0f10844d204ae7593a85a6d8/docs/benchmarks/embedding-model-bakeoff.json",
+      "kind": "model",
+      "label": "Portable embedding model selection",
+      "path": "docs/benchmarks/embedding-model-bakeoff.json",
+      "publication_commit": "262cb61f70624a8d0f10844d204ae7593a85a6d8",
+      "sha256": "5b3596feabcdfa836f2c8cea094b4f14db7e91a3cb1bce7b77a8ae47f7de109a",
+      "source_commit": "2c735847d43edbe8a31d516b0fbb7c22b20105c2",
+      "summary": {
+        "candidates": 7,
+        "selection": "static-retrieval-v1"
+      }
+    },
+    {
+      "id": "learned-reranker",
+      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/4b24c627d9bd733edec5d145437e9aa35c2ab2ca/docs/benchmarks/public-reranker-results.json",
+      "kind": "quality",
+      "label": "Held-out learned reranker",
+      "path": "docs/benchmarks/public-reranker-results.json",
+      "publication_commit": "4b24c627d9bd733edec5d145437e9aa35c2ab2ca",
+      "sha256": "e9ba2fee6fe5bb3e393890b8d7b22d4367fdca2abffda00c8ba6011060c4d9a5",
+      "source_commit": "76a404ec051cc9009433fe0ed021f51774b104ee",
+      "summary": {
+        "mrr_at_10_delta": 0.020332722832722833,
+        "ndcg_at_10_delta": 0.01917139127686271,
+        "passed": true,
+        "queries": 520,
+        "warm_p95_delta_ms": -54.42339897854254
+      }
+    },
+    {
+      "id": "million-scale",
+      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json",
+      "kind": "scale",
+      "label": "Public million-chunk benchmark",
+      "path": "docs/benchmarks/public-million-results.json",
+      "publication_commit": "107e3b0726cf15dc1d4d45178aad3f732168a793",
+      "sha256": "f4ba8051b2c7cf8831284dff17e028f57f16a4708551bfdc10e360011028f602",
+      "source_commit": "2c7629e18d4026722605cb11765af3a9b788b57f",
+      "summary": {
+        "baseline": {
+          "chunks_per_second": 4963.317419550483,
+          "index_commit": "4b24c627d9bd733edec5d145437e9aa35c2ab2ca",
+          "index_size_bytes": 1143448112,
+          "latency_commit": "4b24c627d9bd733edec5d145437e9aa35c2ab2ca",
+          "ndcg_at_10": 0.26203649518855393,
+          "peak_disk_bytes": 1433720380,
+          "peak_rss_bytes": 491511808,
+          "quality_commit": "2c735847d43edbe8a31d516b0fbb7c22b20105c2",
+          "warm_p95_ms": 53.76635299762711
+        },
+        "binaries": {
+          "index_baseline": {
+            "sha256": "92f91629fa9a5dbad4f9f540e35703e27cc188776a763c7818cc06ee7b619a61",
+            "version": "ivygrep 0.10.1"
+          },
+          "index_current": {
+            "sha256": "16c0b048eee3b1ff441d40603e1ed7158fed4c64bb723c22ca1b3dc7894a22e5",
+            "version": "ivygrep 0.10.1"
+          },
+          "paired_baseline": {
+            "sha256": "4861543f0c19e680eb27e705f26437bed0a5a4bf6803bdf1b9722d54abe68f2b",
+            "version": "ivygrep 0.10.1"
+          },
+          "paired_current": {
+            "sha256": "9163c541da9db0ccc650fde033fe72ba8b6f12354b8901a79963759a44a0c40e",
+            "version": "ivygrep 0.10.1"
+          }
+        },
+        "corpus": {
+          "chunks_per_file": 100,
+          "expected_chunks": 1000000,
+          "files": 10000,
+          "generator": "ivygrep-public-million-rust-v1",
+          "license": "CC0-1.0",
+          "manifest_sha256": "349244bbc97f87a7d9997c292d09bd91395522a87c36e47098c54218a039d32e",
+          "schema_version": 1
+        },
+        "current": {
+          "chunks_per_second": 109005.5024359201,
+          "index_commit": "2c7629e18d4026722605cb11765af3a9b788b57f",
+          "index_size_bytes": 491589780,
+          "latency_commit": "c1442ebb68f5a8b162a7eaafe5b033666b7fa585",
+          "ndcg_at_10": 0.2666450261807094,
+          "peak_disk_bytes": 491557443,
+          "peak_rss_bytes": 298405888,
+          "quality_commit": "2c7629e18d4026722605cb11765af3a9b788b57f",
+          "warm_p95_ms": 15.067349013406783
+        },
+        "harness_sha256": {
+          "eval_code_retrieval.py": "b170545e17c6b923aa11b498d6ba3bb2784aceae0b2761cf125a2bc878af1960",
+          "export_public_retrieval.py": "fff230c93d982adb3a0cae7d734fb107a46e6ec5997c3922664cdab94d7da432",
+          "run_public_benchmark_matrix.py": "356ca5655af09098153add5b98bf3d8db6b1ed109451be4f7abfb4b67a1f592c"
+        },
+        "index_size_bytes": 491589780,
+        "index_size_ratio": 0.42991874737556957,
+        "latency_variance": {
+          "bootstrap_repetitions": 5000,
+          "ci95_lower": 0.24657195898761863,
+          "ci95_upper": 0.3180137154371946,
+          "observed": 0.280237512372687
+        },
+        "manifest_sha256": {
+          "baseline": "c853f3b3bd89496115f838bd17279222a650c4dd9299b3cb6bd225210df03b2f",
+          "current": "19bbafddd4353c55cd1f4ed460628b0fe2d5656fb575748ccc80439ea0431c26"
+        },
+        "model": {
+          "architecture": "static-embedding",
+          "dimensions": 256,
+          "document_character_limit": 1024,
+          "license": "Apache-2.0",
+          "max_input_tokens": 0,
+          "model_asset_bytes": 125729604,
+          "model_id": "sentence-transformers/static-retrieval-mrl-en-v1",
+          "model_weight_dtype": "f32",
+          "model_weights_sha256": "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+          "normalize_embeddings": true,
+          "parameter_count": 31254528,
+          "pooling": "token-mean",
+          "profile": "static-retrieval-v1",
+          "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
+          "schema_version": 1,
+          "vector_quantization": "f16"
+        },
+        "ndcg_at_10": 0.2666450261807094,
+        "ndcg_at_10_delta": 0.0046085309921554685,
+        "passed": true,
+        "peak_disk_bytes": 491557443,
+        "peak_rss_bytes": 298405888,
+        "quality_variance": {
+          "baseline_standard_deviation": 0.00017418632834996045,
+          "current_standard_deviation": 0.0015776579425337421
+        },
+        "queries": 1000,
+        "repetitions": 3,
+        "runtime": {
+          "index_baseline": {
+            "logical_cpus": 32,
+            "machine": "aarch64",
+            "physical_memory_bytes": 132651511808,
+            "python": "3.14.5",
+            "release": "6.8.0-1057-aws",
+            "system": "Linux"
+          },
+          "index_current": {
+            "cpu_model": "aarch64",
+            "load_average": [
+              36.6591796875,
+              60.88818359375,
+              81.07861328125
+            ],
+            "logical_cpus": 32,
+            "machine": "aarch64",
+            "physical_memory_bytes": 132651511808,
+            "python": "3.14.5",
+            "release": "6.8.0-1057-aws",
+            "system": "Linux"
+          },
+          "paired_baseline": {
+            "cpu_model": "aarch64",
+            "load_average": [
+              91.912109375,
+              81.76416015625,
+              92.72900390625
+            ],
+            "logical_cpus": 32,
+            "machine": "aarch64",
+            "physical_memory_bytes": 132651511808,
+            "python": "3.13.13",
+            "release": "6.8.0-1057-aws",
+            "system": "Linux"
+          },
+          "paired_current": {
+            "cpu_model": "aarch64",
+            "load_average": [
+              91.912109375,
+              81.76416015625,
+              92.72900390625
+            ],
+            "logical_cpus": 32,
+            "machine": "aarch64",
+            "physical_memory_bytes": 132651511808,
+            "python": "3.13.13",
+            "release": "6.8.0-1057-aws",
+            "system": "Linux"
+          },
+          "quality_baseline": {
+            "cpu_model": "aarch64",
+            "logical_cpus": 32,
+            "machine": "aarch64",
+            "physical_memory_bytes": 132651511808,
+            "python": "3.14.5",
+            "release": "6.8.0-1057-aws",
+            "system": "Linux"
+          },
+          "quality_current": {
+            "cpu_model": "aarch64",
+            "logical_cpus": 32,
+            "machine": "aarch64",
+            "physical_memory_bytes": 132651511808,
+            "python": "3.13.13",
+            "release": "6.8.0-1057-aws",
+            "system": "Linux"
+          }
+        },
+        "warm_p95_ms": 15.067349013406783,
+        "warm_speedup": 3.568401644495413
+      }
+    },
+    {
+      "id": "daemon-cache",
+      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/a99f5fb6eafef9c41d656a42dccaf44e27972d32/docs/benchmarks/daemon-hot-query-cache-explore-results.tsv",
+      "kind": "latency",
+      "label": "Daemon hot-query cache",
+      "path": "docs/benchmarks/daemon-hot-query-cache-explore-results.tsv",
+      "publication_commit": "a99f5fb6eafef9c41d656a42dccaf44e27972d32",
+      "sha256": "bf168523793c2c3faa6104a52d55019c6ec8528b640cfe1dbd0a33eaae191426",
+      "source_commit": "445fcb829d8e519849162ba237eb609d57b9006e",
+      "summary": {
+        "retained_iterations": 1,
+        "retained_warm_p95_ms": 4.902387002948672
+      }
+    },
+    {
+      "id": "release-workflow",
+      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/030e32e275494896d4b5e348c6c370f205c0bb69/.github/workflows/release.yml",
+      "kind": "portability",
+      "label": "Release artifact acceptance gate",
+      "path": ".github/workflows/release.yml",
+      "publication_commit": "030e32e275494896d4b5e348c6c370f205c0bb69",
+      "sha256": "822d3070594a0e4d119ca67373ab045f179cddeae9bf51591afd68356c601b07",
+      "source_commit": null,
+      "summary": {
+        "artifact_acceptance": true,
+        "provenance": true,
+        "release_targets": 5,
+        "sbom": true
+      }
+    }
+  ],
+  "histories": {
+    "archive_size": [
+      {
+        "context": {
+          "published_at": "2026-06-15T10:39:14Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.10.1",
+          "tag": "v0.10.1",
+          "target": "linux-aarch64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.1/ivygrep-v0.10.1-linux-aarch64-musl.tar.gz",
+        "series": "release/linux-aarch64-musl",
+        "unit": "bytes",
+        "value": 12677430,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-15T10:39:14Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.10.1",
+          "tag": "v0.10.1",
+          "target": "linux-x86_64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.1/ivygrep-v0.10.1-linux-x86_64-musl.tar.gz",
+        "series": "release/linux-x86_64-musl",
+        "unit": "bytes",
+        "value": 13438409,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-15T10:39:14Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.10.1",
+          "tag": "v0.10.1",
+          "target": "macos-aarch64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.1/ivygrep-v0.10.1-macos-aarch64.tar.gz",
+        "series": "release/macos-aarch64",
+        "unit": "bytes",
+        "value": 12261740,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-15T10:39:14Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.10.1",
+          "tag": "v0.10.1",
+          "target": "macos-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.1/ivygrep-v0.10.1-macos-x86_64.tar.gz",
+        "series": "release/macos-x86_64",
+        "unit": "bytes",
+        "value": 12462107,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-15T10:39:14Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.10.1",
+          "tag": "v0.10.1",
+          "target": "windows-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.1/ivygrep-v0.10.1-windows-x86_64.zip",
+        "series": "release/windows-x86_64",
+        "unit": "bytes",
+        "value": 10078798,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-15T09:14:17Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.10.0",
+          "tag": "v0.10.0",
+          "target": "linux-aarch64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.0/ivygrep-v0.10.0-linux-aarch64-musl.tar.gz",
+        "series": "release/linux-aarch64-musl",
+        "unit": "bytes",
+        "value": 12678962,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-15T09:14:17Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.10.0",
+          "tag": "v0.10.0",
+          "target": "linux-x86_64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.0/ivygrep-v0.10.0-linux-x86_64-musl.tar.gz",
+        "series": "release/linux-x86_64-musl",
+        "unit": "bytes",
+        "value": 13498545,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-15T09:14:17Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.10.0",
+          "tag": "v0.10.0",
+          "target": "macos-aarch64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.0/ivygrep-v0.10.0-macos-aarch64.tar.gz",
+        "series": "release/macos-aarch64",
+        "unit": "bytes",
+        "value": 12260851,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-15T09:14:17Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.10.0",
+          "tag": "v0.10.0",
+          "target": "macos-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.0/ivygrep-v0.10.0-macos-x86_64.tar.gz",
+        "series": "release/macos-x86_64",
+        "unit": "bytes",
+        "value": 12461207,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-15T09:14:17Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.10.0",
+          "tag": "v0.10.0",
+          "target": "windows-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.0/ivygrep-v0.10.0-windows-x86_64.zip",
+        "series": "release/windows-x86_64",
+        "unit": "bytes",
+        "value": 10076686,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-14T23:06:53Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.7",
+          "tag": "v0.9.7",
+          "target": "linux-aarch64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.7/ivygrep-v0.9.7-linux-aarch64-musl.tar.gz",
+        "series": "release/linux-aarch64-musl",
+        "unit": "bytes",
+        "value": 128025527,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-14T23:06:53Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.7",
+          "tag": "v0.9.7",
+          "target": "linux-x86_64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.7/ivygrep-v0.9.7-linux-x86_64-musl.tar.gz",
+        "series": "release/linux-x86_64-musl",
+        "unit": "bytes",
+        "value": 130231270,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-14T23:06:53Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.7",
+          "tag": "v0.9.7",
+          "target": "macos-aarch64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.7/ivygrep-v0.9.7-macos-aarch64.tar.gz",
+        "series": "release/macos-aarch64",
+        "unit": "bytes",
+        "value": 13332947,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-14T23:06:53Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.7",
+          "tag": "v0.9.7",
+          "target": "macos-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.7/ivygrep-v0.9.7-macos-x86_64.tar.gz",
+        "series": "release/macos-x86_64",
+        "unit": "bytes",
+        "value": 13456979,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-13T04:26:04Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.6",
+          "tag": "v0.9.6",
+          "target": "linux-aarch64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.6/ivygrep-v0.9.6-linux-aarch64-musl.tar.gz",
+        "series": "release/linux-aarch64-musl",
+        "unit": "bytes",
+        "value": 128066131,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-13T04:26:04Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.6",
+          "tag": "v0.9.6",
+          "target": "linux-x86_64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.6/ivygrep-v0.9.6-linux-x86_64-musl.tar.gz",
+        "series": "release/linux-x86_64-musl",
+        "unit": "bytes",
+        "value": 130209922,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-13T04:26:04Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.6",
+          "tag": "v0.9.6",
+          "target": "macos-aarch64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.6/ivygrep-v0.9.6-macos-aarch64.tar.gz",
+        "series": "release/macos-aarch64",
+        "unit": "bytes",
+        "value": 13330678,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-13T04:26:04Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.6",
+          "tag": "v0.9.6",
+          "target": "macos-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.6/ivygrep-v0.9.6-macos-x86_64.tar.gz",
+        "series": "release/macos-x86_64",
+        "unit": "bytes",
+        "value": 13448357,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-07T05:49:12Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.5",
+          "tag": "v0.9.5",
+          "target": "linux-aarch64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.5/ivygrep-v0.9.5-linux-aarch64-musl.tar.gz",
+        "series": "release/linux-aarch64-musl",
+        "unit": "bytes",
+        "value": 127980183,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-07T05:49:12Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.5",
+          "tag": "v0.9.5",
+          "target": "linux-x86_64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.5/ivygrep-v0.9.5-linux-x86_64-musl.tar.gz",
+        "series": "release/linux-x86_64-musl",
+        "unit": "bytes",
+        "value": 130213135,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-07T05:49:12Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.5",
+          "tag": "v0.9.5",
+          "target": "macos-aarch64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.5/ivygrep-v0.9.5-macos-aarch64.tar.gz",
+        "series": "release/macos-aarch64",
+        "unit": "bytes",
+        "value": 13328062,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-07T05:49:12Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.5",
+          "tag": "v0.9.5",
+          "target": "macos-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.5/ivygrep-v0.9.5-macos-x86_64.tar.gz",
+        "series": "release/macos-x86_64",
+        "unit": "bytes",
+        "value": 13437241,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-05T06:00:01Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.4",
+          "tag": "v0.9.4",
+          "target": "linux-aarch64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.4/ivygrep-v0.9.4-linux-aarch64-musl.tar.gz",
+        "series": "release/linux-aarch64-musl",
+        "unit": "bytes",
+        "value": 127894163,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-05T06:00:01Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.4",
+          "tag": "v0.9.4",
+          "target": "linux-x86_64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.4/ivygrep-v0.9.4-linux-x86_64-musl.tar.gz",
+        "series": "release/linux-x86_64-musl",
+        "unit": "bytes",
+        "value": 130181940,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-05T06:00:01Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.4",
+          "tag": "v0.9.4",
+          "target": "macos-aarch64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.4/ivygrep-v0.9.4-macos-aarch64.tar.gz",
+        "series": "release/macos-aarch64",
+        "unit": "bytes",
+        "value": 13322463,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-05T06:00:01Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.4",
+          "tag": "v0.9.4",
+          "target": "macos-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.4/ivygrep-v0.9.4-macos-x86_64.tar.gz",
+        "series": "release/macos-x86_64",
+        "unit": "bytes",
+        "value": 13437614,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-05T02:50:29Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.3",
+          "tag": "v0.9.3",
+          "target": "linux-aarch64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.3/ivygrep-v0.9.3-linux-aarch64-musl.tar.gz",
+        "series": "release/linux-aarch64-musl",
+        "unit": "bytes",
+        "value": 127830721,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-05T02:50:29Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.3",
+          "tag": "v0.9.3",
+          "target": "linux-x86_64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.3/ivygrep-v0.9.3-linux-x86_64-musl.tar.gz",
+        "series": "release/linux-x86_64-musl",
+        "unit": "bytes",
+        "value": 129969848,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-05T02:50:29Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.3",
+          "tag": "v0.9.3",
+          "target": "macos-aarch64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.3/ivygrep-v0.9.3-macos-aarch64.tar.gz",
+        "series": "release/macos-aarch64",
+        "unit": "bytes",
+        "value": 13301776,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-05T02:50:29Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.3",
+          "tag": "v0.9.3",
+          "target": "macos-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.3/ivygrep-v0.9.3-macos-x86_64.tar.gz",
+        "series": "release/macos-x86_64",
+        "unit": "bytes",
+        "value": 13417554,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-04T06:45:06Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.2",
+          "tag": "v0.9.2",
+          "target": "linux-aarch64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.2/ivygrep-v0.9.2-linux-aarch64-musl.tar.gz",
+        "series": "release/linux-aarch64-musl",
+        "unit": "bytes",
+        "value": 127808864,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-04T06:45:06Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.2",
+          "tag": "v0.9.2",
+          "target": "linux-x86_64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.2/ivygrep-v0.9.2-linux-x86_64-musl.tar.gz",
+        "series": "release/linux-x86_64-musl",
+        "unit": "bytes",
+        "value": 129958847,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-04T06:45:06Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.2",
+          "tag": "v0.9.2",
+          "target": "macos-aarch64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.2/ivygrep-v0.9.2-macos-aarch64.tar.gz",
+        "series": "release/macos-aarch64",
+        "unit": "bytes",
+        "value": 13294661,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-04T06:45:06Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.2",
+          "tag": "v0.9.2",
+          "target": "macos-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.2/ivygrep-v0.9.2-macos-x86_64.tar.gz",
+        "series": "release/macos-x86_64",
+        "unit": "bytes",
+        "value": 13409308,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-05-31T23:22:47Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.1",
+          "tag": "v0.9.1",
+          "target": "linux-aarch64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.1/ivygrep-v0.9.1-linux-aarch64-musl.tar.gz",
+        "series": "release/linux-aarch64-musl",
+        "unit": "bytes",
+        "value": 127809041,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-05-31T23:22:47Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.1",
+          "tag": "v0.9.1",
+          "target": "linux-x86_64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.1/ivygrep-v0.9.1-linux-x86_64-musl.tar.gz",
+        "series": "release/linux-x86_64-musl",
+        "unit": "bytes",
+        "value": 129964906,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-05-31T23:22:47Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.1",
+          "tag": "v0.9.1",
+          "target": "macos-aarch64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.1/ivygrep-v0.9.1-macos-aarch64.tar.gz",
+        "series": "release/macos-aarch64",
+        "unit": "bytes",
+        "value": 13292985,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-05-31T23:22:47Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.1",
+          "tag": "v0.9.1",
+          "target": "macos-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.1/ivygrep-v0.9.1-macos-x86_64.tar.gz",
+        "series": "release/macos-x86_64",
+        "unit": "bytes",
+        "value": 13407370,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-05-31T14:30:05Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.0",
+          "tag": "v0.9.0",
+          "target": "linux-aarch64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.0/ivygrep-v0.9.0-linux-aarch64-musl.tar.gz",
+        "series": "release/linux-aarch64-musl",
+        "unit": "bytes",
+        "value": 114689491,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-05-31T14:30:05Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.0",
+          "tag": "v0.9.0",
+          "target": "linux-x86_64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.0/ivygrep-v0.9.0-linux-x86_64-musl.tar.gz",
+        "series": "release/linux-x86_64-musl",
+        "unit": "bytes",
+        "value": 116632560,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-05-31T14:30:05Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.0",
+          "tag": "v0.9.0",
+          "target": "macos-aarch64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.0/ivygrep-v0.9.0-macos-aarch64.tar.gz",
+        "series": "release/macos-aarch64",
+        "unit": "bytes",
+        "value": 13195015,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-05-31T14:30:05Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.0",
+          "tag": "v0.9.0",
+          "target": "macos-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.0/ivygrep-v0.9.0-macos-x86_64.tar.gz",
+        "series": "release/macos-x86_64",
+        "unit": "bytes",
+        "value": 13310535,
+        "variance": {
+          "status": "not-applicable"
+        }
+      }
+    ],
+    "binary_size": [
+      {
+        "context": {
+          "published_at": "2026-06-15T10:39:14Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.10.1",
+          "tag": "v0.10.1",
+          "target": "linux-aarch64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.1/ivygrep-v0.10.1-linux-aarch64-musl.tar.gz",
+        "series": "release/linux-aarch64-musl",
+        "status": "available",
+        "unit": "bytes",
+        "value": 65278544,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-15T10:39:14Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.10.1",
+          "tag": "v0.10.1",
+          "target": "linux-x86_64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.1/ivygrep-v0.10.1-linux-x86_64-musl.tar.gz",
+        "series": "release/linux-x86_64-musl",
+        "status": "available",
+        "unit": "bytes",
+        "value": 68654224,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-15T10:39:14Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.10.1",
+          "tag": "v0.10.1",
+          "target": "macos-aarch64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.1/ivygrep-v0.10.1-macos-aarch64.tar.gz",
+        "series": "release/macos-aarch64",
+        "status": "available",
+        "unit": "bytes",
+        "value": 64833872,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-15T10:39:14Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.10.1",
+          "tag": "v0.10.1",
+          "target": "macos-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.1/ivygrep-v0.10.1-macos-x86_64.tar.gz",
+        "series": "release/macos-x86_64",
+        "status": "available",
+        "unit": "bytes",
+        "value": 65331684,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-15T10:39:14Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.10.1",
+          "tag": "v0.10.1",
+          "target": "windows-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.1/ivygrep-v0.10.1-windows-x86_64.zip",
+        "series": "release/windows-x86_64",
+        "status": "available",
+        "unit": "bytes",
+        "value": 61896192,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-15T09:14:17Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.10.0",
+          "tag": "v0.10.0",
+          "target": "linux-aarch64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.0/ivygrep-v0.10.0-linux-aarch64-musl.tar.gz",
+        "series": "release/linux-aarch64-musl",
+        "status": "available",
+        "unit": "bytes",
+        "value": 65278544,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-15T09:14:17Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.10.0",
+          "tag": "v0.10.0",
+          "target": "linux-x86_64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.0/ivygrep-v0.10.0-linux-x86_64-musl.tar.gz",
+        "series": "release/linux-x86_64-musl",
+        "status": "available",
+        "unit": "bytes",
+        "value": 68990096,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-15T09:14:17Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.10.0",
+          "tag": "v0.10.0",
+          "target": "macos-aarch64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.0/ivygrep-v0.10.0-macos-aarch64.tar.gz",
+        "series": "release/macos-aarch64",
+        "status": "available",
+        "unit": "bytes",
+        "value": 64833856,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-15T09:14:17Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.10.0",
+          "tag": "v0.10.0",
+          "target": "macos-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.0/ivygrep-v0.10.0-macos-x86_64.tar.gz",
+        "series": "release/macos-x86_64",
+        "status": "available",
+        "unit": "bytes",
+        "value": 65331684,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-15T09:14:17Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.10.0",
+          "tag": "v0.10.0",
+          "target": "windows-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.0/ivygrep-v0.10.0-windows-x86_64.zip",
+        "series": "release/windows-x86_64",
+        "status": "available",
+        "unit": "bytes",
+        "value": 61895168,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-14T23:06:53Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.7",
+          "tag": "v0.9.7",
+          "target": "linux-aarch64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.7/ivygrep-v0.9.7-linux-aarch64-musl.tar.gz",
+        "series": "release/linux-aarch64-musl",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-14T23:06:53Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.7",
+          "tag": "v0.9.7",
+          "target": "linux-x86_64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.7/ivygrep-v0.9.7-linux-x86_64-musl.tar.gz",
+        "series": "release/linux-x86_64-musl",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-14T23:06:53Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.7",
+          "tag": "v0.9.7",
+          "target": "macos-aarch64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.7/ivygrep-v0.9.7-macos-aarch64.tar.gz",
+        "series": "release/macos-aarch64",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-14T23:06:53Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.7",
+          "tag": "v0.9.7",
+          "target": "macos-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.7/ivygrep-v0.9.7-macos-x86_64.tar.gz",
+        "series": "release/macos-x86_64",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-13T04:26:04Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.6",
+          "tag": "v0.9.6",
+          "target": "linux-aarch64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.6/ivygrep-v0.9.6-linux-aarch64-musl.tar.gz",
+        "series": "release/linux-aarch64-musl",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-13T04:26:04Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.6",
+          "tag": "v0.9.6",
+          "target": "linux-x86_64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.6/ivygrep-v0.9.6-linux-x86_64-musl.tar.gz",
+        "series": "release/linux-x86_64-musl",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-13T04:26:04Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.6",
+          "tag": "v0.9.6",
+          "target": "macos-aarch64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.6/ivygrep-v0.9.6-macos-aarch64.tar.gz",
+        "series": "release/macos-aarch64",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-13T04:26:04Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.6",
+          "tag": "v0.9.6",
+          "target": "macos-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.6/ivygrep-v0.9.6-macos-x86_64.tar.gz",
+        "series": "release/macos-x86_64",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-07T05:49:12Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.5",
+          "tag": "v0.9.5",
+          "target": "linux-aarch64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.5/ivygrep-v0.9.5-linux-aarch64-musl.tar.gz",
+        "series": "release/linux-aarch64-musl",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-07T05:49:12Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.5",
+          "tag": "v0.9.5",
+          "target": "linux-x86_64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.5/ivygrep-v0.9.5-linux-x86_64-musl.tar.gz",
+        "series": "release/linux-x86_64-musl",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-07T05:49:12Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.5",
+          "tag": "v0.9.5",
+          "target": "macos-aarch64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.5/ivygrep-v0.9.5-macos-aarch64.tar.gz",
+        "series": "release/macos-aarch64",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-07T05:49:12Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.5",
+          "tag": "v0.9.5",
+          "target": "macos-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.5/ivygrep-v0.9.5-macos-x86_64.tar.gz",
+        "series": "release/macos-x86_64",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-05T06:00:01Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.4",
+          "tag": "v0.9.4",
+          "target": "linux-aarch64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.4/ivygrep-v0.9.4-linux-aarch64-musl.tar.gz",
+        "series": "release/linux-aarch64-musl",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-05T06:00:01Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.4",
+          "tag": "v0.9.4",
+          "target": "linux-x86_64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.4/ivygrep-v0.9.4-linux-x86_64-musl.tar.gz",
+        "series": "release/linux-x86_64-musl",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-05T06:00:01Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.4",
+          "tag": "v0.9.4",
+          "target": "macos-aarch64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.4/ivygrep-v0.9.4-macos-aarch64.tar.gz",
+        "series": "release/macos-aarch64",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-05T06:00:01Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.4",
+          "tag": "v0.9.4",
+          "target": "macos-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.4/ivygrep-v0.9.4-macos-x86_64.tar.gz",
+        "series": "release/macos-x86_64",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-05T02:50:29Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.3",
+          "tag": "v0.9.3",
+          "target": "linux-aarch64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.3/ivygrep-v0.9.3-linux-aarch64-musl.tar.gz",
+        "series": "release/linux-aarch64-musl",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-05T02:50:29Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.3",
+          "tag": "v0.9.3",
+          "target": "linux-x86_64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.3/ivygrep-v0.9.3-linux-x86_64-musl.tar.gz",
+        "series": "release/linux-x86_64-musl",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-05T02:50:29Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.3",
+          "tag": "v0.9.3",
+          "target": "macos-aarch64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.3/ivygrep-v0.9.3-macos-aarch64.tar.gz",
+        "series": "release/macos-aarch64",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-05T02:50:29Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.3",
+          "tag": "v0.9.3",
+          "target": "macos-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.3/ivygrep-v0.9.3-macos-x86_64.tar.gz",
+        "series": "release/macos-x86_64",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-04T06:45:06Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.2",
+          "tag": "v0.9.2",
+          "target": "linux-aarch64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.2/ivygrep-v0.9.2-linux-aarch64-musl.tar.gz",
+        "series": "release/linux-aarch64-musl",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-04T06:45:06Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.2",
+          "tag": "v0.9.2",
+          "target": "linux-x86_64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.2/ivygrep-v0.9.2-linux-x86_64-musl.tar.gz",
+        "series": "release/linux-x86_64-musl",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-04T06:45:06Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.2",
+          "tag": "v0.9.2",
+          "target": "macos-aarch64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.2/ivygrep-v0.9.2-macos-aarch64.tar.gz",
+        "series": "release/macos-aarch64",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-06-04T06:45:06Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.2",
+          "tag": "v0.9.2",
+          "target": "macos-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.2/ivygrep-v0.9.2-macos-x86_64.tar.gz",
+        "series": "release/macos-x86_64",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-05-31T23:22:47Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.1",
+          "tag": "v0.9.1",
+          "target": "linux-aarch64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.1/ivygrep-v0.9.1-linux-aarch64-musl.tar.gz",
+        "series": "release/linux-aarch64-musl",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-05-31T23:22:47Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.1",
+          "tag": "v0.9.1",
+          "target": "linux-x86_64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.1/ivygrep-v0.9.1-linux-x86_64-musl.tar.gz",
+        "series": "release/linux-x86_64-musl",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-05-31T23:22:47Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.1",
+          "tag": "v0.9.1",
+          "target": "macos-aarch64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.1/ivygrep-v0.9.1-macos-aarch64.tar.gz",
+        "series": "release/macos-aarch64",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-05-31T23:22:47Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.1",
+          "tag": "v0.9.1",
+          "target": "macos-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.1/ivygrep-v0.9.1-macos-x86_64.tar.gz",
+        "series": "release/macos-x86_64",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-05-31T14:30:05Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.0",
+          "tag": "v0.9.0",
+          "target": "linux-aarch64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.0/ivygrep-v0.9.0-linux-aarch64-musl.tar.gz",
+        "series": "release/linux-aarch64-musl",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-05-31T14:30:05Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.0",
+          "tag": "v0.9.0",
+          "target": "linux-x86_64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.0/ivygrep-v0.9.0-linux-x86_64-musl.tar.gz",
+        "series": "release/linux-x86_64-musl",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-05-31T14:30:05Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.0",
+          "tag": "v0.9.0",
+          "target": "macos-aarch64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.0/ivygrep-v0.9.0-macos-aarch64.tar.gz",
+        "series": "release/macos-aarch64",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-05-31T14:30:05Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.0",
+          "tag": "v0.9.0",
+          "target": "macos-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.0/ivygrep-v0.9.0-macos-x86_64.tar.gz",
+        "series": "release/macos-x86_64",
+        "status": "unavailable",
+        "unit": "bytes",
+        "value": null,
+        "variance": {
+          "status": "not-applicable"
+        }
+      }
+    ],
+    "index_size": [
+      {
+        "context": {
+          "binaries": {
+            "index_baseline": {
+              "sha256": "92f91629fa9a5dbad4f9f540e35703e27cc188776a763c7818cc06ee7b619a61",
+              "version": "ivygrep 0.10.1"
+            },
+            "index_current": {
+              "sha256": "16c0b048eee3b1ff441d40603e1ed7158fed4c64bb723c22ca1b3dc7894a22e5",
+              "version": "ivygrep 0.10.1"
+            },
+            "paired_baseline": {
+              "sha256": "4861543f0c19e680eb27e705f26437bed0a5a4bf6803bdf1b9722d54abe68f2b",
+              "version": "ivygrep 0.10.1"
+            },
+            "paired_current": {
+              "sha256": "9163c541da9db0ccc650fde033fe72ba8b6f12354b8901a79963759a44a0c40e",
+              "version": "ivygrep 0.10.1"
+            }
+          },
+          "corpus": {
+            "chunks_per_file": 100,
+            "expected_chunks": 1000000,
+            "files": 10000,
+            "generator": "ivygrep-public-million-rust-v1",
+            "license": "CC0-1.0",
+            "manifest_sha256": "349244bbc97f87a7d9997c292d09bd91395522a87c36e47098c54218a039d32e",
+            "schema_version": 1
+          },
+          "hardware": {
+            "index_baseline": {
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "index_current": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                36.6591796875,
+                60.88818359375,
+                81.07861328125
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "paired_baseline": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                91.912109375,
+                81.76416015625,
+                92.72900390625
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "paired_current": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                91.912109375,
+                81.76416015625,
+                92.72900390625
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "quality_baseline": {
+              "cpu_model": "aarch64",
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "quality_current": {
+              "cpu_model": "aarch64",
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            }
+          },
+          "harness_sha256": {
+            "eval_code_retrieval.py": "b170545e17c6b923aa11b498d6ba3bb2784aceae0b2761cf125a2bc878af1960",
+            "export_public_retrieval.py": "fff230c93d982adb3a0cae7d734fb107a46e6ec5997c3922664cdab94d7da432",
+            "run_public_benchmark_matrix.py": "356ca5655af09098153add5b98bf3d8db6b1ed109451be4f7abfb4b67a1f592c"
+          },
+          "manifest_sha256": {
+            "baseline": "c853f3b3bd89496115f838bd17279222a650c4dd9299b3cb6bd225210df03b2f",
+            "current": "19bbafddd4353c55cd1f4ed460628b0fe2d5656fb575748ccc80439ea0431c26"
+          },
+          "model": {
+            "architecture": "static-embedding",
+            "dimensions": 256,
+            "document_character_limit": 1024,
+            "license": "Apache-2.0",
+            "max_input_tokens": 0,
+            "model_asset_bytes": 125729604,
+            "model_id": "sentence-transformers/static-retrieval-mrl-en-v1",
+            "model_weight_dtype": "f32",
+            "model_weights_sha256": "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+            "normalize_embeddings": true,
+            "parameter_count": 31254528,
+            "pooling": "token-mean",
+            "profile": "static-retrieval-v1",
+            "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
+            "schema_version": 1,
+            "vector_quantization": "f16"
+          },
+          "repetitions": 3
+        },
+        "evidence_id": "million-scale",
+        "immutable_url": "https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json",
+        "publication_commit": "107e3b0726cf15dc1d4d45178aad3f732168a793",
+        "series": "million-chunk/final-index",
+        "source_commit": "4b24c627d9bd733edec5d145437e9aa35c2ab2ca",
+        "unit": "bytes",
+        "value": 1143448112,
+        "variance": {
+          "reason": "The retained artifact is a single deterministic run.",
+          "status": "unavailable"
+        }
+      },
+      {
+        "context": {
+          "binaries": {
+            "index_baseline": {
+              "sha256": "92f91629fa9a5dbad4f9f540e35703e27cc188776a763c7818cc06ee7b619a61",
+              "version": "ivygrep 0.10.1"
+            },
+            "index_current": {
+              "sha256": "16c0b048eee3b1ff441d40603e1ed7158fed4c64bb723c22ca1b3dc7894a22e5",
+              "version": "ivygrep 0.10.1"
+            },
+            "paired_baseline": {
+              "sha256": "4861543f0c19e680eb27e705f26437bed0a5a4bf6803bdf1b9722d54abe68f2b",
+              "version": "ivygrep 0.10.1"
+            },
+            "paired_current": {
+              "sha256": "9163c541da9db0ccc650fde033fe72ba8b6f12354b8901a79963759a44a0c40e",
+              "version": "ivygrep 0.10.1"
+            }
+          },
+          "corpus": {
+            "chunks_per_file": 100,
+            "expected_chunks": 1000000,
+            "files": 10000,
+            "generator": "ivygrep-public-million-rust-v1",
+            "license": "CC0-1.0",
+            "manifest_sha256": "349244bbc97f87a7d9997c292d09bd91395522a87c36e47098c54218a039d32e",
+            "schema_version": 1
+          },
+          "hardware": {
+            "index_baseline": {
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "index_current": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                36.6591796875,
+                60.88818359375,
+                81.07861328125
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "paired_baseline": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                91.912109375,
+                81.76416015625,
+                92.72900390625
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "paired_current": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                91.912109375,
+                81.76416015625,
+                92.72900390625
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "quality_baseline": {
+              "cpu_model": "aarch64",
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "quality_current": {
+              "cpu_model": "aarch64",
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            }
+          },
+          "harness_sha256": {
+            "eval_code_retrieval.py": "b170545e17c6b923aa11b498d6ba3bb2784aceae0b2761cf125a2bc878af1960",
+            "export_public_retrieval.py": "fff230c93d982adb3a0cae7d734fb107a46e6ec5997c3922664cdab94d7da432",
+            "run_public_benchmark_matrix.py": "356ca5655af09098153add5b98bf3d8db6b1ed109451be4f7abfb4b67a1f592c"
+          },
+          "manifest_sha256": {
+            "baseline": "c853f3b3bd89496115f838bd17279222a650c4dd9299b3cb6bd225210df03b2f",
+            "current": "19bbafddd4353c55cd1f4ed460628b0fe2d5656fb575748ccc80439ea0431c26"
+          },
+          "model": {
+            "architecture": "static-embedding",
+            "dimensions": 256,
+            "document_character_limit": 1024,
+            "license": "Apache-2.0",
+            "max_input_tokens": 0,
+            "model_asset_bytes": 125729604,
+            "model_id": "sentence-transformers/static-retrieval-mrl-en-v1",
+            "model_weight_dtype": "f32",
+            "model_weights_sha256": "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+            "normalize_embeddings": true,
+            "parameter_count": 31254528,
+            "pooling": "token-mean",
+            "profile": "static-retrieval-v1",
+            "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
+            "schema_version": 1,
+            "vector_quantization": "f16"
+          },
+          "repetitions": 3
+        },
+        "evidence_id": "million-scale",
+        "immutable_url": "https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json",
+        "publication_commit": "107e3b0726cf15dc1d4d45178aad3f732168a793",
+        "series": "million-chunk/final-index",
+        "source_commit": "2c7629e18d4026722605cb11765af3a9b788b57f",
+        "unit": "bytes",
+        "value": 491589780,
+        "variance": {
+          "reason": "The retained artifact is a single deterministic run.",
+          "status": "unavailable"
+        }
+      }
+    ],
+    "indexing": [
+      {
+        "context": {
+          "binaries": {
+            "index_baseline": {
+              "sha256": "92f91629fa9a5dbad4f9f540e35703e27cc188776a763c7818cc06ee7b619a61",
+              "version": "ivygrep 0.10.1"
+            },
+            "index_current": {
+              "sha256": "16c0b048eee3b1ff441d40603e1ed7158fed4c64bb723c22ca1b3dc7894a22e5",
+              "version": "ivygrep 0.10.1"
+            },
+            "paired_baseline": {
+              "sha256": "4861543f0c19e680eb27e705f26437bed0a5a4bf6803bdf1b9722d54abe68f2b",
+              "version": "ivygrep 0.10.1"
+            },
+            "paired_current": {
+              "sha256": "9163c541da9db0ccc650fde033fe72ba8b6f12354b8901a79963759a44a0c40e",
+              "version": "ivygrep 0.10.1"
+            }
+          },
+          "corpus": {
+            "chunks_per_file": 100,
+            "expected_chunks": 1000000,
+            "files": 10000,
+            "generator": "ivygrep-public-million-rust-v1",
+            "license": "CC0-1.0",
+            "manifest_sha256": "349244bbc97f87a7d9997c292d09bd91395522a87c36e47098c54218a039d32e",
+            "schema_version": 1
+          },
+          "hardware": {
+            "index_baseline": {
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "index_current": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                36.6591796875,
+                60.88818359375,
+                81.07861328125
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "paired_baseline": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                91.912109375,
+                81.76416015625,
+                92.72900390625
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "paired_current": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                91.912109375,
+                81.76416015625,
+                92.72900390625
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "quality_baseline": {
+              "cpu_model": "aarch64",
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "quality_current": {
+              "cpu_model": "aarch64",
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            }
+          },
+          "harness_sha256": {
+            "eval_code_retrieval.py": "b170545e17c6b923aa11b498d6ba3bb2784aceae0b2761cf125a2bc878af1960",
+            "export_public_retrieval.py": "fff230c93d982adb3a0cae7d734fb107a46e6ec5997c3922664cdab94d7da432",
+            "run_public_benchmark_matrix.py": "356ca5655af09098153add5b98bf3d8db6b1ed109451be4f7abfb4b67a1f592c"
+          },
+          "manifest_sha256": {
+            "baseline": "c853f3b3bd89496115f838bd17279222a650c4dd9299b3cb6bd225210df03b2f",
+            "current": "19bbafddd4353c55cd1f4ed460628b0fe2d5656fb575748ccc80439ea0431c26"
+          },
+          "model": {
+            "architecture": "static-embedding",
+            "dimensions": 256,
+            "document_character_limit": 1024,
+            "license": "Apache-2.0",
+            "max_input_tokens": 0,
+            "model_asset_bytes": 125729604,
+            "model_id": "sentence-transformers/static-retrieval-mrl-en-v1",
+            "model_weight_dtype": "f32",
+            "model_weights_sha256": "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+            "normalize_embeddings": true,
+            "parameter_count": 31254528,
+            "pooling": "token-mean",
+            "profile": "static-retrieval-v1",
+            "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
+            "schema_version": 1,
+            "vector_quantization": "f16"
+          },
+          "repetitions": 3
+        },
+        "evidence_id": "million-scale",
+        "immutable_url": "https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json",
+        "publication_commit": "107e3b0726cf15dc1d4d45178aad3f732168a793",
+        "series": "million-chunk/chunks-per-second",
+        "source_commit": "4b24c627d9bd733edec5d145437e9aa35c2ab2ca",
+        "unit": "chunks/s",
+        "value": 4963.317419550483,
+        "variance": {
+          "reason": "The retained artifact is a single deterministic run.",
+          "status": "unavailable"
+        }
+      },
+      {
+        "context": {
+          "binaries": {
+            "index_baseline": {
+              "sha256": "92f91629fa9a5dbad4f9f540e35703e27cc188776a763c7818cc06ee7b619a61",
+              "version": "ivygrep 0.10.1"
+            },
+            "index_current": {
+              "sha256": "16c0b048eee3b1ff441d40603e1ed7158fed4c64bb723c22ca1b3dc7894a22e5",
+              "version": "ivygrep 0.10.1"
+            },
+            "paired_baseline": {
+              "sha256": "4861543f0c19e680eb27e705f26437bed0a5a4bf6803bdf1b9722d54abe68f2b",
+              "version": "ivygrep 0.10.1"
+            },
+            "paired_current": {
+              "sha256": "9163c541da9db0ccc650fde033fe72ba8b6f12354b8901a79963759a44a0c40e",
+              "version": "ivygrep 0.10.1"
+            }
+          },
+          "corpus": {
+            "chunks_per_file": 100,
+            "expected_chunks": 1000000,
+            "files": 10000,
+            "generator": "ivygrep-public-million-rust-v1",
+            "license": "CC0-1.0",
+            "manifest_sha256": "349244bbc97f87a7d9997c292d09bd91395522a87c36e47098c54218a039d32e",
+            "schema_version": 1
+          },
+          "hardware": {
+            "index_baseline": {
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "index_current": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                36.6591796875,
+                60.88818359375,
+                81.07861328125
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "paired_baseline": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                91.912109375,
+                81.76416015625,
+                92.72900390625
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "paired_current": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                91.912109375,
+                81.76416015625,
+                92.72900390625
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "quality_baseline": {
+              "cpu_model": "aarch64",
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "quality_current": {
+              "cpu_model": "aarch64",
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            }
+          },
+          "harness_sha256": {
+            "eval_code_retrieval.py": "b170545e17c6b923aa11b498d6ba3bb2784aceae0b2761cf125a2bc878af1960",
+            "export_public_retrieval.py": "fff230c93d982adb3a0cae7d734fb107a46e6ec5997c3922664cdab94d7da432",
+            "run_public_benchmark_matrix.py": "356ca5655af09098153add5b98bf3d8db6b1ed109451be4f7abfb4b67a1f592c"
+          },
+          "manifest_sha256": {
+            "baseline": "c853f3b3bd89496115f838bd17279222a650c4dd9299b3cb6bd225210df03b2f",
+            "current": "19bbafddd4353c55cd1f4ed460628b0fe2d5656fb575748ccc80439ea0431c26"
+          },
+          "model": {
+            "architecture": "static-embedding",
+            "dimensions": 256,
+            "document_character_limit": 1024,
+            "license": "Apache-2.0",
+            "max_input_tokens": 0,
+            "model_asset_bytes": 125729604,
+            "model_id": "sentence-transformers/static-retrieval-mrl-en-v1",
+            "model_weight_dtype": "f32",
+            "model_weights_sha256": "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+            "normalize_embeddings": true,
+            "parameter_count": 31254528,
+            "pooling": "token-mean",
+            "profile": "static-retrieval-v1",
+            "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
+            "schema_version": 1,
+            "vector_quantization": "f16"
+          },
+          "repetitions": 3
+        },
+        "evidence_id": "million-scale",
+        "immutable_url": "https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json",
+        "publication_commit": "107e3b0726cf15dc1d4d45178aad3f732168a793",
+        "series": "million-chunk/chunks-per-second",
+        "source_commit": "2c7629e18d4026722605cb11765af3a9b788b57f",
+        "unit": "chunks/s",
+        "value": 109005.5024359201,
+        "variance": {
+          "reason": "The retained artifact is a single deterministic run.",
+          "status": "unavailable"
+        }
+      }
+    ],
+    "latency": [
+      {
+        "context": {
+          "binaries": {
+            "index_baseline": {
+              "sha256": "92f91629fa9a5dbad4f9f540e35703e27cc188776a763c7818cc06ee7b619a61",
+              "version": "ivygrep 0.10.1"
+            },
+            "index_current": {
+              "sha256": "16c0b048eee3b1ff441d40603e1ed7158fed4c64bb723c22ca1b3dc7894a22e5",
+              "version": "ivygrep 0.10.1"
+            },
+            "paired_baseline": {
+              "sha256": "4861543f0c19e680eb27e705f26437bed0a5a4bf6803bdf1b9722d54abe68f2b",
+              "version": "ivygrep 0.10.1"
+            },
+            "paired_current": {
+              "sha256": "9163c541da9db0ccc650fde033fe72ba8b6f12354b8901a79963759a44a0c40e",
+              "version": "ivygrep 0.10.1"
+            }
+          },
+          "corpus": {
+            "chunks_per_file": 100,
+            "expected_chunks": 1000000,
+            "files": 10000,
+            "generator": "ivygrep-public-million-rust-v1",
+            "license": "CC0-1.0",
+            "manifest_sha256": "349244bbc97f87a7d9997c292d09bd91395522a87c36e47098c54218a039d32e",
+            "schema_version": 1
+          },
+          "hardware": {
+            "index_baseline": {
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "index_current": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                36.6591796875,
+                60.88818359375,
+                81.07861328125
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "paired_baseline": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                91.912109375,
+                81.76416015625,
+                92.72900390625
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "paired_current": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                91.912109375,
+                81.76416015625,
+                92.72900390625
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "quality_baseline": {
+              "cpu_model": "aarch64",
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "quality_current": {
+              "cpu_model": "aarch64",
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            }
+          },
+          "harness_sha256": {
+            "eval_code_retrieval.py": "b170545e17c6b923aa11b498d6ba3bb2784aceae0b2761cf125a2bc878af1960",
+            "export_public_retrieval.py": "fff230c93d982adb3a0cae7d734fb107a46e6ec5997c3922664cdab94d7da432",
+            "run_public_benchmark_matrix.py": "356ca5655af09098153add5b98bf3d8db6b1ed109451be4f7abfb4b67a1f592c"
+          },
+          "manifest_sha256": {
+            "baseline": "c853f3b3bd89496115f838bd17279222a650c4dd9299b3cb6bd225210df03b2f",
+            "current": "19bbafddd4353c55cd1f4ed460628b0fe2d5656fb575748ccc80439ea0431c26"
+          },
+          "model": {
+            "architecture": "static-embedding",
+            "dimensions": 256,
+            "document_character_limit": 1024,
+            "license": "Apache-2.0",
+            "max_input_tokens": 0,
+            "model_asset_bytes": 125729604,
+            "model_id": "sentence-transformers/static-retrieval-mrl-en-v1",
+            "model_weight_dtype": "f32",
+            "model_weights_sha256": "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+            "normalize_embeddings": true,
+            "parameter_count": 31254528,
+            "pooling": "token-mean",
+            "profile": "static-retrieval-v1",
+            "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
+            "schema_version": 1,
+            "vector_quantization": "f16"
+          },
+          "repetitions": 3
+        },
+        "evidence_id": "million-scale",
+        "immutable_url": "https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json",
+        "publication_commit": "107e3b0726cf15dc1d4d45178aad3f732168a793",
+        "series": "million-chunk/warm-distinct-p95",
+        "source_commit": "4b24c627d9bd733edec5d145437e9aa35c2ab2ca",
+        "unit": "ms",
+        "value": 53.76635299762711,
+        "variance": {
+          "bootstrap_repetitions": 5000,
+          "ci95_lower": 0.24657195898761863,
+          "ci95_upper": 0.3180137154371946,
+          "observed": 0.280237512372687
+        }
+      },
+      {
+        "context": {
+          "binaries": {
+            "index_baseline": {
+              "sha256": "92f91629fa9a5dbad4f9f540e35703e27cc188776a763c7818cc06ee7b619a61",
+              "version": "ivygrep 0.10.1"
+            },
+            "index_current": {
+              "sha256": "16c0b048eee3b1ff441d40603e1ed7158fed4c64bb723c22ca1b3dc7894a22e5",
+              "version": "ivygrep 0.10.1"
+            },
+            "paired_baseline": {
+              "sha256": "4861543f0c19e680eb27e705f26437bed0a5a4bf6803bdf1b9722d54abe68f2b",
+              "version": "ivygrep 0.10.1"
+            },
+            "paired_current": {
+              "sha256": "9163c541da9db0ccc650fde033fe72ba8b6f12354b8901a79963759a44a0c40e",
+              "version": "ivygrep 0.10.1"
+            }
+          },
+          "corpus": {
+            "chunks_per_file": 100,
+            "expected_chunks": 1000000,
+            "files": 10000,
+            "generator": "ivygrep-public-million-rust-v1",
+            "license": "CC0-1.0",
+            "manifest_sha256": "349244bbc97f87a7d9997c292d09bd91395522a87c36e47098c54218a039d32e",
+            "schema_version": 1
+          },
+          "hardware": {
+            "index_baseline": {
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "index_current": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                36.6591796875,
+                60.88818359375,
+                81.07861328125
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "paired_baseline": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                91.912109375,
+                81.76416015625,
+                92.72900390625
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "paired_current": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                91.912109375,
+                81.76416015625,
+                92.72900390625
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "quality_baseline": {
+              "cpu_model": "aarch64",
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "quality_current": {
+              "cpu_model": "aarch64",
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            }
+          },
+          "harness_sha256": {
+            "eval_code_retrieval.py": "b170545e17c6b923aa11b498d6ba3bb2784aceae0b2761cf125a2bc878af1960",
+            "export_public_retrieval.py": "fff230c93d982adb3a0cae7d734fb107a46e6ec5997c3922664cdab94d7da432",
+            "run_public_benchmark_matrix.py": "356ca5655af09098153add5b98bf3d8db6b1ed109451be4f7abfb4b67a1f592c"
+          },
+          "manifest_sha256": {
+            "baseline": "c853f3b3bd89496115f838bd17279222a650c4dd9299b3cb6bd225210df03b2f",
+            "current": "19bbafddd4353c55cd1f4ed460628b0fe2d5656fb575748ccc80439ea0431c26"
+          },
+          "model": {
+            "architecture": "static-embedding",
+            "dimensions": 256,
+            "document_character_limit": 1024,
+            "license": "Apache-2.0",
+            "max_input_tokens": 0,
+            "model_asset_bytes": 125729604,
+            "model_id": "sentence-transformers/static-retrieval-mrl-en-v1",
+            "model_weight_dtype": "f32",
+            "model_weights_sha256": "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+            "normalize_embeddings": true,
+            "parameter_count": 31254528,
+            "pooling": "token-mean",
+            "profile": "static-retrieval-v1",
+            "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
+            "schema_version": 1,
+            "vector_quantization": "f16"
+          },
+          "repetitions": 3
+        },
+        "evidence_id": "million-scale",
+        "immutable_url": "https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json",
+        "publication_commit": "107e3b0726cf15dc1d4d45178aad3f732168a793",
+        "series": "million-chunk/warm-distinct-p95",
+        "source_commit": "c1442ebb68f5a8b162a7eaafe5b033666b7fa585",
+        "unit": "ms",
+        "value": 15.067349013406783,
+        "variance": {
+          "bootstrap_repetitions": 5000,
+          "ci95_lower": 0.24657195898761863,
+          "ci95_upper": 0.3180137154371946,
+          "observed": 0.280237512372687
+        }
+      }
+    ],
+    "memory": [
+      {
+        "context": {
+          "binaries": {
+            "index_baseline": {
+              "sha256": "92f91629fa9a5dbad4f9f540e35703e27cc188776a763c7818cc06ee7b619a61",
+              "version": "ivygrep 0.10.1"
+            },
+            "index_current": {
+              "sha256": "16c0b048eee3b1ff441d40603e1ed7158fed4c64bb723c22ca1b3dc7894a22e5",
+              "version": "ivygrep 0.10.1"
+            },
+            "paired_baseline": {
+              "sha256": "4861543f0c19e680eb27e705f26437bed0a5a4bf6803bdf1b9722d54abe68f2b",
+              "version": "ivygrep 0.10.1"
+            },
+            "paired_current": {
+              "sha256": "9163c541da9db0ccc650fde033fe72ba8b6f12354b8901a79963759a44a0c40e",
+              "version": "ivygrep 0.10.1"
+            }
+          },
+          "corpus": {
+            "chunks_per_file": 100,
+            "expected_chunks": 1000000,
+            "files": 10000,
+            "generator": "ivygrep-public-million-rust-v1",
+            "license": "CC0-1.0",
+            "manifest_sha256": "349244bbc97f87a7d9997c292d09bd91395522a87c36e47098c54218a039d32e",
+            "schema_version": 1
+          },
+          "hardware": {
+            "index_baseline": {
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "index_current": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                36.6591796875,
+                60.88818359375,
+                81.07861328125
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "paired_baseline": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                91.912109375,
+                81.76416015625,
+                92.72900390625
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "paired_current": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                91.912109375,
+                81.76416015625,
+                92.72900390625
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "quality_baseline": {
+              "cpu_model": "aarch64",
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "quality_current": {
+              "cpu_model": "aarch64",
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            }
+          },
+          "harness_sha256": {
+            "eval_code_retrieval.py": "b170545e17c6b923aa11b498d6ba3bb2784aceae0b2761cf125a2bc878af1960",
+            "export_public_retrieval.py": "fff230c93d982adb3a0cae7d734fb107a46e6ec5997c3922664cdab94d7da432",
+            "run_public_benchmark_matrix.py": "356ca5655af09098153add5b98bf3d8db6b1ed109451be4f7abfb4b67a1f592c"
+          },
+          "manifest_sha256": {
+            "baseline": "c853f3b3bd89496115f838bd17279222a650c4dd9299b3cb6bd225210df03b2f",
+            "current": "19bbafddd4353c55cd1f4ed460628b0fe2d5656fb575748ccc80439ea0431c26"
+          },
+          "model": {
+            "architecture": "static-embedding",
+            "dimensions": 256,
+            "document_character_limit": 1024,
+            "license": "Apache-2.0",
+            "max_input_tokens": 0,
+            "model_asset_bytes": 125729604,
+            "model_id": "sentence-transformers/static-retrieval-mrl-en-v1",
+            "model_weight_dtype": "f32",
+            "model_weights_sha256": "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+            "normalize_embeddings": true,
+            "parameter_count": 31254528,
+            "pooling": "token-mean",
+            "profile": "static-retrieval-v1",
+            "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
+            "schema_version": 1,
+            "vector_quantization": "f16"
+          },
+          "repetitions": 3
+        },
+        "evidence_id": "million-scale",
+        "immutable_url": "https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json",
+        "publication_commit": "107e3b0726cf15dc1d4d45178aad3f732168a793",
+        "series": "million-chunk/peak-rss",
+        "source_commit": "4b24c627d9bd733edec5d145437e9aa35c2ab2ca",
+        "unit": "bytes",
+        "value": 491511808,
+        "variance": {
+          "reason": "The retained artifact is a single deterministic run.",
+          "status": "unavailable"
+        }
+      },
+      {
+        "context": {
+          "binaries": {
+            "index_baseline": {
+              "sha256": "92f91629fa9a5dbad4f9f540e35703e27cc188776a763c7818cc06ee7b619a61",
+              "version": "ivygrep 0.10.1"
+            },
+            "index_current": {
+              "sha256": "16c0b048eee3b1ff441d40603e1ed7158fed4c64bb723c22ca1b3dc7894a22e5",
+              "version": "ivygrep 0.10.1"
+            },
+            "paired_baseline": {
+              "sha256": "4861543f0c19e680eb27e705f26437bed0a5a4bf6803bdf1b9722d54abe68f2b",
+              "version": "ivygrep 0.10.1"
+            },
+            "paired_current": {
+              "sha256": "9163c541da9db0ccc650fde033fe72ba8b6f12354b8901a79963759a44a0c40e",
+              "version": "ivygrep 0.10.1"
+            }
+          },
+          "corpus": {
+            "chunks_per_file": 100,
+            "expected_chunks": 1000000,
+            "files": 10000,
+            "generator": "ivygrep-public-million-rust-v1",
+            "license": "CC0-1.0",
+            "manifest_sha256": "349244bbc97f87a7d9997c292d09bd91395522a87c36e47098c54218a039d32e",
+            "schema_version": 1
+          },
+          "hardware": {
+            "index_baseline": {
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "index_current": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                36.6591796875,
+                60.88818359375,
+                81.07861328125
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "paired_baseline": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                91.912109375,
+                81.76416015625,
+                92.72900390625
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "paired_current": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                91.912109375,
+                81.76416015625,
+                92.72900390625
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "quality_baseline": {
+              "cpu_model": "aarch64",
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "quality_current": {
+              "cpu_model": "aarch64",
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            }
+          },
+          "harness_sha256": {
+            "eval_code_retrieval.py": "b170545e17c6b923aa11b498d6ba3bb2784aceae0b2761cf125a2bc878af1960",
+            "export_public_retrieval.py": "fff230c93d982adb3a0cae7d734fb107a46e6ec5997c3922664cdab94d7da432",
+            "run_public_benchmark_matrix.py": "356ca5655af09098153add5b98bf3d8db6b1ed109451be4f7abfb4b67a1f592c"
+          },
+          "manifest_sha256": {
+            "baseline": "c853f3b3bd89496115f838bd17279222a650c4dd9299b3cb6bd225210df03b2f",
+            "current": "19bbafddd4353c55cd1f4ed460628b0fe2d5656fb575748ccc80439ea0431c26"
+          },
+          "model": {
+            "architecture": "static-embedding",
+            "dimensions": 256,
+            "document_character_limit": 1024,
+            "license": "Apache-2.0",
+            "max_input_tokens": 0,
+            "model_asset_bytes": 125729604,
+            "model_id": "sentence-transformers/static-retrieval-mrl-en-v1",
+            "model_weight_dtype": "f32",
+            "model_weights_sha256": "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+            "normalize_embeddings": true,
+            "parameter_count": 31254528,
+            "pooling": "token-mean",
+            "profile": "static-retrieval-v1",
+            "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
+            "schema_version": 1,
+            "vector_quantization": "f16"
+          },
+          "repetitions": 3
+        },
+        "evidence_id": "million-scale",
+        "immutable_url": "https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json",
+        "publication_commit": "107e3b0726cf15dc1d4d45178aad3f732168a793",
+        "series": "million-chunk/peak-rss",
+        "source_commit": "2c7629e18d4026722605cb11765af3a9b788b57f",
+        "unit": "bytes",
+        "value": 298405888,
+        "variance": {
+          "reason": "The retained artifact is a single deterministic run.",
+          "status": "unavailable"
+        }
+      }
+    ],
+    "quality": [
+      {
+        "context": {
+          "binaries": {
+            "index_baseline": {
+              "sha256": "92f91629fa9a5dbad4f9f540e35703e27cc188776a763c7818cc06ee7b619a61",
+              "version": "ivygrep 0.10.1"
+            },
+            "index_current": {
+              "sha256": "16c0b048eee3b1ff441d40603e1ed7158fed4c64bb723c22ca1b3dc7894a22e5",
+              "version": "ivygrep 0.10.1"
+            },
+            "paired_baseline": {
+              "sha256": "4861543f0c19e680eb27e705f26437bed0a5a4bf6803bdf1b9722d54abe68f2b",
+              "version": "ivygrep 0.10.1"
+            },
+            "paired_current": {
+              "sha256": "9163c541da9db0ccc650fde033fe72ba8b6f12354b8901a79963759a44a0c40e",
+              "version": "ivygrep 0.10.1"
+            }
+          },
+          "corpus": {
+            "chunks_per_file": 100,
+            "expected_chunks": 1000000,
+            "files": 10000,
+            "generator": "ivygrep-public-million-rust-v1",
+            "license": "CC0-1.0",
+            "manifest_sha256": "349244bbc97f87a7d9997c292d09bd91395522a87c36e47098c54218a039d32e",
+            "schema_version": 1
+          },
+          "hardware": {
+            "index_baseline": {
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "index_current": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                36.6591796875,
+                60.88818359375,
+                81.07861328125
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "paired_baseline": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                91.912109375,
+                81.76416015625,
+                92.72900390625
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "paired_current": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                91.912109375,
+                81.76416015625,
+                92.72900390625
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "quality_baseline": {
+              "cpu_model": "aarch64",
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "quality_current": {
+              "cpu_model": "aarch64",
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            }
+          },
+          "harness_sha256": {
+            "eval_code_retrieval.py": "b170545e17c6b923aa11b498d6ba3bb2784aceae0b2761cf125a2bc878af1960",
+            "export_public_retrieval.py": "fff230c93d982adb3a0cae7d734fb107a46e6ec5997c3922664cdab94d7da432",
+            "run_public_benchmark_matrix.py": "356ca5655af09098153add5b98bf3d8db6b1ed109451be4f7abfb4b67a1f592c"
+          },
+          "manifest_sha256": {
+            "baseline": "c853f3b3bd89496115f838bd17279222a650c4dd9299b3cb6bd225210df03b2f",
+            "current": "19bbafddd4353c55cd1f4ed460628b0fe2d5656fb575748ccc80439ea0431c26"
+          },
+          "model": {
+            "architecture": "static-embedding",
+            "dimensions": 256,
+            "document_character_limit": 1024,
+            "license": "Apache-2.0",
+            "max_input_tokens": 0,
+            "model_asset_bytes": 125729604,
+            "model_id": "sentence-transformers/static-retrieval-mrl-en-v1",
+            "model_weight_dtype": "f32",
+            "model_weights_sha256": "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+            "normalize_embeddings": true,
+            "parameter_count": 31254528,
+            "pooling": "token-mean",
+            "profile": "static-retrieval-v1",
+            "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
+            "schema_version": 1,
+            "vector_quantization": "f16"
+          },
+          "repetitions": 3
+        },
+        "evidence_id": "million-scale",
+        "immutable_url": "https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json",
+        "publication_commit": "107e3b0726cf15dc1d4d45178aad3f732168a793",
+        "series": "semantic-retrieval/neural/ndcg_at_10",
+        "source_commit": "2c735847d43edbe8a31d516b0fbb7c22b20105c2",
+        "unit": "score",
+        "value": 0.26203649518855393,
+        "variance": {
+          "standard_deviation": 0.00017418632834996045
+        }
+      },
+      {
+        "context": {
+          "binaries": {
+            "index_baseline": {
+              "sha256": "92f91629fa9a5dbad4f9f540e35703e27cc188776a763c7818cc06ee7b619a61",
+              "version": "ivygrep 0.10.1"
+            },
+            "index_current": {
+              "sha256": "16c0b048eee3b1ff441d40603e1ed7158fed4c64bb723c22ca1b3dc7894a22e5",
+              "version": "ivygrep 0.10.1"
+            },
+            "paired_baseline": {
+              "sha256": "4861543f0c19e680eb27e705f26437bed0a5a4bf6803bdf1b9722d54abe68f2b",
+              "version": "ivygrep 0.10.1"
+            },
+            "paired_current": {
+              "sha256": "9163c541da9db0ccc650fde033fe72ba8b6f12354b8901a79963759a44a0c40e",
+              "version": "ivygrep 0.10.1"
+            }
+          },
+          "corpus": {
+            "chunks_per_file": 100,
+            "expected_chunks": 1000000,
+            "files": 10000,
+            "generator": "ivygrep-public-million-rust-v1",
+            "license": "CC0-1.0",
+            "manifest_sha256": "349244bbc97f87a7d9997c292d09bd91395522a87c36e47098c54218a039d32e",
+            "schema_version": 1
+          },
+          "hardware": {
+            "index_baseline": {
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "index_current": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                36.6591796875,
+                60.88818359375,
+                81.07861328125
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "paired_baseline": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                91.912109375,
+                81.76416015625,
+                92.72900390625
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "paired_current": {
+              "cpu_model": "aarch64",
+              "load_average": [
+                91.912109375,
+                81.76416015625,
+                92.72900390625
+              ],
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "quality_baseline": {
+              "cpu_model": "aarch64",
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.14.5",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            },
+            "quality_current": {
+              "cpu_model": "aarch64",
+              "logical_cpus": 32,
+              "machine": "aarch64",
+              "physical_memory_bytes": 132651511808,
+              "python": "3.13.13",
+              "release": "6.8.0-1057-aws",
+              "system": "Linux"
+            }
+          },
+          "harness_sha256": {
+            "eval_code_retrieval.py": "b170545e17c6b923aa11b498d6ba3bb2784aceae0b2761cf125a2bc878af1960",
+            "export_public_retrieval.py": "fff230c93d982adb3a0cae7d734fb107a46e6ec5997c3922664cdab94d7da432",
+            "run_public_benchmark_matrix.py": "356ca5655af09098153add5b98bf3d8db6b1ed109451be4f7abfb4b67a1f592c"
+          },
+          "manifest_sha256": {
+            "baseline": "c853f3b3bd89496115f838bd17279222a650c4dd9299b3cb6bd225210df03b2f",
+            "current": "19bbafddd4353c55cd1f4ed460628b0fe2d5656fb575748ccc80439ea0431c26"
+          },
+          "model": {
+            "architecture": "static-embedding",
+            "dimensions": 256,
+            "document_character_limit": 1024,
+            "license": "Apache-2.0",
+            "max_input_tokens": 0,
+            "model_asset_bytes": 125729604,
+            "model_id": "sentence-transformers/static-retrieval-mrl-en-v1",
+            "model_weight_dtype": "f32",
+            "model_weights_sha256": "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+            "normalize_embeddings": true,
+            "parameter_count": 31254528,
+            "pooling": "token-mean",
+            "profile": "static-retrieval-v1",
+            "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
+            "schema_version": 1,
+            "vector_quantization": "f16"
+          },
+          "repetitions": 3
+        },
+        "evidence_id": "million-scale",
+        "immutable_url": "https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json",
+        "publication_commit": "107e3b0726cf15dc1d4d45178aad3f732168a793",
+        "series": "semantic-retrieval/neural/ndcg_at_10",
+        "source_commit": "2c7629e18d4026722605cb11765af3a9b788b57f",
+        "unit": "score",
+        "value": 0.2666450261807094,
+        "variance": {
+          "standard_deviation": 0.0015776579425337421
+        }
+      }
+    ]
+  },
+  "release_history": {
+    "releases": [
+      {
+        "archives": [
+          {
+            "binary_size_bytes": 65278544,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.1/ivygrep-v0.10.1-linux-aarch64-musl.tar.gz",
+            "name": "ivygrep-v0.10.1-linux-aarch64-musl.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 12677430,
+            "target": "linux-aarch64-musl"
+          },
+          {
+            "binary_size_bytes": 68654224,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.1/ivygrep-v0.10.1-linux-x86_64-musl.tar.gz",
+            "name": "ivygrep-v0.10.1-linux-x86_64-musl.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 13438409,
+            "target": "linux-x86_64-musl"
+          },
+          {
+            "binary_size_bytes": 64833872,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.1/ivygrep-v0.10.1-macos-aarch64.tar.gz",
+            "name": "ivygrep-v0.10.1-macos-aarch64.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 12261740,
+            "target": "macos-aarch64"
+          },
+          {
+            "binary_size_bytes": 65331684,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.1/ivygrep-v0.10.1-macos-x86_64.tar.gz",
+            "name": "ivygrep-v0.10.1-macos-x86_64.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 12462107,
+            "target": "macos-x86_64"
+          },
+          {
+            "binary_size_bytes": 61896192,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.1/ivygrep-v0.10.1-windows-x86_64.zip",
+            "name": "ivygrep-v0.10.1-windows-x86_64.zip",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 10078798,
+            "target": "windows-x86_64"
+          }
+        ],
+        "published_at": "2026-06-15T10:39:14Z",
+        "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.10.1",
+        "tag": "v0.10.1",
+        "total_archive_bytes": 60918484
+      },
+      {
+        "archives": [
+          {
+            "binary_size_bytes": 65278544,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.0/ivygrep-v0.10.0-linux-aarch64-musl.tar.gz",
+            "name": "ivygrep-v0.10.0-linux-aarch64-musl.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 12678962,
+            "target": "linux-aarch64-musl"
+          },
+          {
+            "binary_size_bytes": 68990096,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.0/ivygrep-v0.10.0-linux-x86_64-musl.tar.gz",
+            "name": "ivygrep-v0.10.0-linux-x86_64-musl.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 13498545,
+            "target": "linux-x86_64-musl"
+          },
+          {
+            "binary_size_bytes": 64833856,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.0/ivygrep-v0.10.0-macos-aarch64.tar.gz",
+            "name": "ivygrep-v0.10.0-macos-aarch64.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 12260851,
+            "target": "macos-aarch64"
+          },
+          {
+            "binary_size_bytes": 65331684,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.0/ivygrep-v0.10.0-macos-x86_64.tar.gz",
+            "name": "ivygrep-v0.10.0-macos-x86_64.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 12461207,
+            "target": "macos-x86_64"
+          },
+          {
+            "binary_size_bytes": 61895168,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.10.0/ivygrep-v0.10.0-windows-x86_64.zip",
+            "name": "ivygrep-v0.10.0-windows-x86_64.zip",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 10076686,
+            "target": "windows-x86_64"
+          }
+        ],
+        "published_at": "2026-06-15T09:14:17Z",
+        "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.10.0",
+        "tag": "v0.10.0",
+        "total_archive_bytes": 60976251
+      },
+      {
+        "archives": [
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.7/ivygrep-v0.9.7-linux-aarch64-musl.tar.gz",
+            "name": "ivygrep-v0.9.7-linux-aarch64-musl.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 128025527,
+            "target": "linux-aarch64-musl"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.7/ivygrep-v0.9.7-linux-x86_64-musl.tar.gz",
+            "name": "ivygrep-v0.9.7-linux-x86_64-musl.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 130231270,
+            "target": "linux-x86_64-musl"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.7/ivygrep-v0.9.7-macos-aarch64.tar.gz",
+            "name": "ivygrep-v0.9.7-macos-aarch64.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 13332947,
+            "target": "macos-aarch64"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.7/ivygrep-v0.9.7-macos-x86_64.tar.gz",
+            "name": "ivygrep-v0.9.7-macos-x86_64.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 13456979,
+            "target": "macos-x86_64"
+          }
+        ],
+        "published_at": "2026-06-14T23:06:53Z",
+        "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.7",
+        "tag": "v0.9.7",
+        "total_archive_bytes": 285046723
+      },
+      {
+        "archives": [
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.6/ivygrep-v0.9.6-linux-aarch64-musl.tar.gz",
+            "name": "ivygrep-v0.9.6-linux-aarch64-musl.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 128066131,
+            "target": "linux-aarch64-musl"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.6/ivygrep-v0.9.6-linux-x86_64-musl.tar.gz",
+            "name": "ivygrep-v0.9.6-linux-x86_64-musl.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 130209922,
+            "target": "linux-x86_64-musl"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.6/ivygrep-v0.9.6-macos-aarch64.tar.gz",
+            "name": "ivygrep-v0.9.6-macos-aarch64.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 13330678,
+            "target": "macos-aarch64"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.6/ivygrep-v0.9.6-macos-x86_64.tar.gz",
+            "name": "ivygrep-v0.9.6-macos-x86_64.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 13448357,
+            "target": "macos-x86_64"
+          }
+        ],
+        "published_at": "2026-06-13T04:26:04Z",
+        "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.6",
+        "tag": "v0.9.6",
+        "total_archive_bytes": 285055088
+      },
+      {
+        "archives": [
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.5/ivygrep-v0.9.5-linux-aarch64-musl.tar.gz",
+            "name": "ivygrep-v0.9.5-linux-aarch64-musl.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 127980183,
+            "target": "linux-aarch64-musl"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.5/ivygrep-v0.9.5-linux-x86_64-musl.tar.gz",
+            "name": "ivygrep-v0.9.5-linux-x86_64-musl.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 130213135,
+            "target": "linux-x86_64-musl"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.5/ivygrep-v0.9.5-macos-aarch64.tar.gz",
+            "name": "ivygrep-v0.9.5-macos-aarch64.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 13328062,
+            "target": "macos-aarch64"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.5/ivygrep-v0.9.5-macos-x86_64.tar.gz",
+            "name": "ivygrep-v0.9.5-macos-x86_64.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 13437241,
+            "target": "macos-x86_64"
+          }
+        ],
+        "published_at": "2026-06-07T05:49:12Z",
+        "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.5",
+        "tag": "v0.9.5",
+        "total_archive_bytes": 284958621
+      },
+      {
+        "archives": [
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.4/ivygrep-v0.9.4-linux-aarch64-musl.tar.gz",
+            "name": "ivygrep-v0.9.4-linux-aarch64-musl.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 127894163,
+            "target": "linux-aarch64-musl"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.4/ivygrep-v0.9.4-linux-x86_64-musl.tar.gz",
+            "name": "ivygrep-v0.9.4-linux-x86_64-musl.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 130181940,
+            "target": "linux-x86_64-musl"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.4/ivygrep-v0.9.4-macos-aarch64.tar.gz",
+            "name": "ivygrep-v0.9.4-macos-aarch64.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 13322463,
+            "target": "macos-aarch64"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.4/ivygrep-v0.9.4-macos-x86_64.tar.gz",
+            "name": "ivygrep-v0.9.4-macos-x86_64.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 13437614,
+            "target": "macos-x86_64"
+          }
+        ],
+        "published_at": "2026-06-05T06:00:01Z",
+        "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.4",
+        "tag": "v0.9.4",
+        "total_archive_bytes": 284836180
+      },
+      {
+        "archives": [
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.3/ivygrep-v0.9.3-linux-aarch64-musl.tar.gz",
+            "name": "ivygrep-v0.9.3-linux-aarch64-musl.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 127830721,
+            "target": "linux-aarch64-musl"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.3/ivygrep-v0.9.3-linux-x86_64-musl.tar.gz",
+            "name": "ivygrep-v0.9.3-linux-x86_64-musl.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 129969848,
+            "target": "linux-x86_64-musl"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.3/ivygrep-v0.9.3-macos-aarch64.tar.gz",
+            "name": "ivygrep-v0.9.3-macos-aarch64.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 13301776,
+            "target": "macos-aarch64"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.3/ivygrep-v0.9.3-macos-x86_64.tar.gz",
+            "name": "ivygrep-v0.9.3-macos-x86_64.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 13417554,
+            "target": "macos-x86_64"
+          }
+        ],
+        "published_at": "2026-06-05T02:50:29Z",
+        "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.3",
+        "tag": "v0.9.3",
+        "total_archive_bytes": 284519899
+      },
+      {
+        "archives": [
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.2/ivygrep-v0.9.2-linux-aarch64-musl.tar.gz",
+            "name": "ivygrep-v0.9.2-linux-aarch64-musl.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 127808864,
+            "target": "linux-aarch64-musl"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.2/ivygrep-v0.9.2-linux-x86_64-musl.tar.gz",
+            "name": "ivygrep-v0.9.2-linux-x86_64-musl.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 129958847,
+            "target": "linux-x86_64-musl"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.2/ivygrep-v0.9.2-macos-aarch64.tar.gz",
+            "name": "ivygrep-v0.9.2-macos-aarch64.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 13294661,
+            "target": "macos-aarch64"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.2/ivygrep-v0.9.2-macos-x86_64.tar.gz",
+            "name": "ivygrep-v0.9.2-macos-x86_64.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 13409308,
+            "target": "macos-x86_64"
+          }
+        ],
+        "published_at": "2026-06-04T06:45:06Z",
+        "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.2",
+        "tag": "v0.9.2",
+        "total_archive_bytes": 284471680
+      },
+      {
+        "archives": [
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.1/ivygrep-v0.9.1-linux-aarch64-musl.tar.gz",
+            "name": "ivygrep-v0.9.1-linux-aarch64-musl.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 127809041,
+            "target": "linux-aarch64-musl"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.1/ivygrep-v0.9.1-linux-x86_64-musl.tar.gz",
+            "name": "ivygrep-v0.9.1-linux-x86_64-musl.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 129964906,
+            "target": "linux-x86_64-musl"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.1/ivygrep-v0.9.1-macos-aarch64.tar.gz",
+            "name": "ivygrep-v0.9.1-macos-aarch64.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 13292985,
+            "target": "macos-aarch64"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.1/ivygrep-v0.9.1-macos-x86_64.tar.gz",
+            "name": "ivygrep-v0.9.1-macos-x86_64.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 13407370,
+            "target": "macos-x86_64"
+          }
+        ],
+        "published_at": "2026-05-31T23:22:47Z",
+        "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.1",
+        "tag": "v0.9.1",
+        "total_archive_bytes": 284474302
+      },
+      {
+        "archives": [
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.0/ivygrep-v0.9.0-linux-aarch64-musl.tar.gz",
+            "name": "ivygrep-v0.9.0-linux-aarch64-musl.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 114689491,
+            "target": "linux-aarch64-musl"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.0/ivygrep-v0.9.0-linux-x86_64-musl.tar.gz",
+            "name": "ivygrep-v0.9.0-linux-x86_64-musl.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 116632560,
+            "target": "linux-x86_64-musl"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.0/ivygrep-v0.9.0-macos-aarch64.tar.gz",
+            "name": "ivygrep-v0.9.0-macos-aarch64.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 13195015,
+            "target": "macos-aarch64"
+          },
+          {
+            "binary_size_bytes": null,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v0.9.0/ivygrep-v0.9.0-macos-x86_64.tar.gz",
+            "name": "ivygrep-v0.9.0-macos-x86_64.tar.gz",
+            "provenance": false,
+            "sbom": false,
+            "size_bytes": 13310535,
+            "target": "macos-x86_64"
+          }
+        ],
+        "published_at": "2026-05-31T14:30:05Z",
+        "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v0.9.0",
+        "tag": "v0.9.0",
+        "total_archive_bytes": 257827601
+      }
+    ],
+    "schema_version": 1,
+    "source": "https://api.github.com/repos/bvolpato/ivygrep/releases"
+  },
+  "release_history_artifact": {
+    "immutable_url": "https://github.com/bvolpato/ivygrep/blob/a21f59b13b692d495b83e7d33ae4bcb712c4c195/docs/benchmarks/release-artifact-history.json",
+    "path": "docs/benchmarks/release-artifact-history.json",
+    "publication_commit": "a21f59b13b692d495b83e7d33ae4bcb712c4c195",
+    "sha256": "be897033dc72795822265d4fe90b155e80e4e1ddb34eacb9281700f12f151741"
+  },
+  "schema_version": 1
+}
