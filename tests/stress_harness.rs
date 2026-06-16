@@ -1464,9 +1464,14 @@ fn stress_hash_index_speed_benchmark() {
         elapsed.as_secs_f64(),
     );
 
-    // Hash indexing 200 files should complete in under 5 seconds
+    // Windows hosted runners have substantially slower temporary-file I/O.
+    let max_index_time = if cfg!(windows) {
+        Duration::from_secs(10)
+    } else {
+        Duration::from_secs(5)
+    };
     assert!(
-        elapsed < Duration::from_secs(5),
+        elapsed < max_index_time,
         "hash indexing too slow: {:?}",
         elapsed
     );
