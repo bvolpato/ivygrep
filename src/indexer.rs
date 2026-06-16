@@ -1025,11 +1025,14 @@ fn index_workspace_inner(
             }
         }
 
-        // Prevent memory/WAL ballooning on massive repositories
-        let commit_threshold = if is_fresh_index { 250_000 } else { 25_000 };
-        if chunks_since_commit >= commit_threshold {
+        // Bound SQLite WAL growth independently from Tantivy publication.
+        // Fresh indexes publish Tantivy once at the end: committing every
+        // SQLite batch forces repeated segment merges and multiplies disk I/O.
+        if chunks_since_commit >= 25_000 {
             persist_or_stop!(tx.commit());
-            persist_or_stop!(writer.commit());
+            if !is_fresh_index {
+                persist_or_stop!(writer.commit());
+            }
             tx = persist_or_stop!(sqlite.transaction());
             chunks_since_commit = 0;
         }
