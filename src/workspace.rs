@@ -322,11 +322,12 @@ impl Workspace {
         if !path.exists() {
             return 0;
         }
+        let Some(identity) = self.neural_model_identity() else {
+            return 0;
+        };
         vector_store_size(
             &path,
-            self.neural_model_identity()
-                .map(|identity| identity.dimensions)
-                .unwrap_or(384),
+            identity.dimensions,
             crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
         )
         .unwrap_or(0)
@@ -1627,13 +1628,15 @@ fn dir_has_entries(path: &Path) -> bool {
 }
 
 fn neural_store_has_vectors(index_dir: &Path) -> bool {
-    let dimensions = fs::read_to_string(index_dir.join("neural_model.json"))
+    let Some(dimensions) = fs::read_to_string(index_dir.join("neural_model.json"))
         .ok()
         .and_then(|value| {
             serde_json::from_str::<crate::embedding::NeuralModelIdentity>(&value).ok()
         })
         .map(|identity| identity.dimensions)
-        .unwrap_or(384);
+    else {
+        return false;
+    };
     crate::vector_store::VectorStore::open_readonly(
         &index_dir.join("vectors_neural.usearch"),
         dimensions,
@@ -1970,7 +1973,7 @@ mod tests {
 
         // 1 vector < 2 chunks → true
         assert!(ws.needs_neural_enhancement());
-        assert!(ws.has_neural_vectors());
+        assert!(!ws.has_neural_vectors());
 
         {
             let mut store = crate::vector_store::VectorStore::open(
@@ -1985,6 +1988,7 @@ mod tests {
 
         // Identity-less vectors predate complete model metadata and rebuild once.
         assert!(ws.needs_neural_enhancement());
+        assert!(!ws.has_neural_vectors());
         std::fs::write(
             ws.neural_model_path(),
             serde_json::to_vec_pretty(&crate::embedding::configured_neural_model_identity())
@@ -1993,6 +1997,7 @@ mod tests {
         .unwrap();
 
         // 2 vectors == 2 chunks with matching identity → false
+        assert!(ws.has_neural_vectors());
         assert!(!ws.needs_neural_enhancement());
 
         unsafe { std::env::set_var("IVYGREP_MODEL_PROFILE", "code") };
@@ -2391,16 +2396,22 @@ mod tests {
         };
         assert!(!ws.has_neural_vectors());
 
+        let identity = crate::embedding::configured_neural_model_identity();
         let mut store = crate::vector_store::VectorStore::open(
             &base_index_dir.join("vectors_neural.usearch"),
-            384,
+            identity.dimensions,
             crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
+        )
+        .unwrap();
+        std::fs::write(
+            base_index_dir.join("neural_model.json"),
+            serde_json::to_vec_pretty(&identity).unwrap(),
         )
         .unwrap();
         store.save().unwrap();
         assert!(!ws.has_neural_vectors());
 
-        store.upsert(1, vec![0.0; 384]).unwrap();
+        store.upsert(1, vec![0.0; identity.dimensions]).unwrap();
         store.save().unwrap();
         assert!(ws.has_neural_vectors());
     }
