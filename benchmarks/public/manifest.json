@@ -105,6 +105,7 @@
           }
         },
         "codefeedback-st": {
+          "sample_queries": 50,
           "sample_corpus": 5000,
           "query_partition": {
             "modulus": 2,
@@ -142,6 +143,7 @@
           }
         },
         "codefeedback-st": {
+          "sample_queries": 50,
           "sample_corpus": 5000,
           "query_partition": {
             "modulus": 2,
