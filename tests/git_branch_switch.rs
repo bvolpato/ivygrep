@@ -42,6 +42,21 @@ fn git(dir: &std::path::Path, args: &[&str]) {
     );
 }
 
+fn git_output(dir: &std::path::Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run git {:?}: {e}", args));
+    assert!(
+        output.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
 fn init_git_repo(dir: &std::path::Path) {
     git(dir, &["init"]);
     git(dir, &["symbolic-ref", "HEAD", "refs/heads/main"]);
@@ -1557,6 +1572,69 @@ fn worktree_empty_edit_hides_base_content_on_first_overlay_index() {
             .any(|path| path.contains("mutable.rs")),
         "base remains searchable"
     );
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+#[test]
+#[serial]
+fn worktree_reconciles_base_after_sparse_checkout_change() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    init_git_repo(root.path());
+    fs::write(
+        root.path().join("kept.rs"),
+        "pub fn sparse_kept_marker() -> bool { true }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("restored.rs"),
+        "pub fn sparse_restored_marker() -> bool { true }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "sparse base"]);
+    git(root.path(), &["branch", "wt-full", "main"]);
+    setup_and_index(root.path(), home.path());
+
+    git(root.path(), &["sparse-checkout", "init", "--no-cone"]);
+    git(root.path(), &["sparse-checkout", "set", "kept.rs"]);
+    assert!(!root.path().join("restored.rs").exists());
+    assert!(
+        git_output(root.path(), &["status", "--porcelain=v1"]).is_empty(),
+        "sparse checkout must remain clean while changing the visible file set"
+    );
+
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_full");
+    git(
+        root.path(),
+        &["worktree", "add", wt_path.to_str().unwrap(), "wt-full"],
+    );
+    git(&wt_path, &["sparse-checkout", "disable"]);
+    assert!(wt_path.join("restored.rs").exists());
+
+    let summary = setup_and_index(&wt_path, home.path());
+    let base_ws = workspace_for(root.path());
+    let wt_ws = workspace_for(&wt_path);
+
+    assert_eq!(summary.indexed_files, 1);
+    assert_eq!(overlay_counts(&wt_ws), (1, 0));
+    assert!(
+        stored_chunk_text(&base_ws, "restored.rs").is_none(),
+        "the reconciled sparse base must not retain hidden file chunks"
+    );
+    assert!(
+        search_file_paths(&wt_ws, "sparse_restored_marker")
+            .iter()
+            .any(|path| path.contains("restored.rs")),
+        "the full worktree must restore the sparse-hidden file as an overlay delta"
+    );
+    assert_only_overlay_stores(&wt_ws);
 
     git(
         root.path(),

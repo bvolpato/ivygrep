@@ -9,7 +9,7 @@ All notable changes to ivygrep are documented in this file.
 - **Worktree checkpoints stay inside overlay storage.** Completing an overlay index no longer creates an empty `metadata.sqlite3` beside the delta stores.
 
 ### Performance
-- **Clean worktrees reuse one shared base index.** Worktree creation skips redundant base rewrites when the indexed commit is unchanged; checkout-only Git metadata churn refreshes the shared Merkle snapshot without re-indexing base chunks, lexical data, or vectors.
+- **Clean worktrees reuse one shared base index.** Worktree creation skips redundant base rewrites when the indexed checkout state is unchanged; sparse-checkout and other checkout-shape changes run incremental base reconciliation before an overlay inherits data.
 
 ### Testing
 - Added sequential and concurrent multi-worktree coverage that requires one shared base index, exact per-worktree chunk/tombstone deltas, no full-store artifacts in overlay directories, and correct refresh behavior for dirty or newly committed base content.

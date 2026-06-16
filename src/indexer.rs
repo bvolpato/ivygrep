@@ -1210,11 +1210,44 @@ fn git_worktree_is_clean(root: &Path) -> bool {
 }
 
 fn git_checkout_state(root: &Path) -> Option<String> {
-    Some(format!("{}\n{}", git_head(root)?, git_index_hash(root)?))
+    Some(format!(
+        "{}\n{}\n{}",
+        git_head(root)?,
+        git_index_hash(root)?,
+        git_sparse_checkout_state(root)
+    ))
 }
 
 fn clean_git_checkout_state(root: &Path) -> Option<String> {
     git_worktree_is_clean(root).then(|| git_checkout_state(root))?
+}
+
+fn git_sparse_checkout_state(root: &Path) -> String {
+    let list = std::process::Command::new("git")
+        .args(["sparse-checkout", "list"])
+        .current_dir(root)
+        .output();
+    let Ok(list) = list else {
+        return "disabled".to_string();
+    };
+    if !list.status.success() {
+        return "disabled".to_string();
+    }
+
+    let cone = std::process::Command::new("git")
+        .args(["config", "--bool", "core.sparseCheckoutCone"])
+        .current_dir(root)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| output.stdout)
+        .unwrap_or_default();
+    let mut state = list.stdout;
+    state.extend_from_slice(&cone);
+    format!(
+        "enabled:{}",
+        hex::encode(xxhash_rust::xxh3::xxh3_128(&state).to_le_bytes())
+    )
 }
 
 fn indexed_git_state_path(workspace: &Workspace) -> PathBuf {
@@ -1260,7 +1293,10 @@ fn base_index_checkout_state(workspace: &Workspace) -> BaseIndexCheckoutState {
     if indexed_state == current_state {
         return BaseIndexCheckoutState::Current;
     }
-    if indexed_state.lines().next() == current_state.lines().next() {
+
+    let same_head = indexed_state.lines().next() == current_state.lines().next();
+    let same_sparse_checkout = indexed_state.lines().nth(2) == current_state.lines().nth(2);
+    if same_head && same_sparse_checkout {
         BaseIndexCheckoutState::MetadataChanged
     } else {
         BaseIndexCheckoutState::Stale
