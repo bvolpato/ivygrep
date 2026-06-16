@@ -43,7 +43,10 @@ pub struct Workspace {
 ///   8 — Stable vector keys and tombstone journals preserve resumable background enrichment
 ///   9 — Neural vector storage uses F16 quantization
 ///  10 — Symbol graph persistence, F16 vectors, and portable relative paths
-pub const INDEX_FORMAT_VERSION: u32 = 10;
+///  11 — Deduplicated chunk metadata, compact symbols, and on-demand call-site lookup
+pub const INDEX_FORMAT_VERSION: u32 = 11;
+const COMPACTION_FREE_BYTES_THRESHOLD: u64 = 16 * 1024 * 1024;
+const COMPACTION_FREE_PERCENT_THRESHOLD: f64 = 20.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceMetadata {
@@ -72,6 +75,7 @@ pub struct WorkspaceStatus {
     pub file_count: u64,
     pub index_size_bytes: u64,
     pub index_components: IndexComponentSizes,
+    pub compaction: IndexCompactionHealth,
     pub vector_key_count: u64,
     pub has_neural_vectors: bool,
     pub neural_vector_count: u64,
@@ -121,10 +125,28 @@ pub struct WorkspaceStatus {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct IndexComponentSizes {
     pub metadata_bytes: u64,
+    #[serde(default)]
+    pub stored_chunks_bytes: u64,
+    #[serde(default)]
+    pub graph_bytes: u64,
+    #[serde(default)]
+    pub sqlite_auxiliary_bytes: u64,
     pub lexical_bytes: u64,
     pub hash_vectors_bytes: u64,
     pub neural_vectors_bytes: u64,
     pub other_bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IndexCompactionHealth {
+    pub format_version: u32,
+    pub current_format_version: u32,
+    pub sqlite_page_bytes: u64,
+    pub sqlite_free_bytes: u64,
+    pub sqlite_free_percent: f64,
+    pub legacy_graph_bytes: u64,
+    pub compaction_recommended: bool,
+    pub healthy: bool,
 }
 
 fn default_reranker_mode() -> String {
@@ -664,6 +686,33 @@ impl Workspace {
         index_component_sizes(&self.index_dir)
     }
 
+    pub fn index_compaction_health(&self) -> IndexCompactionHealth {
+        index_compaction_health(&self.index_dir)
+    }
+
+    pub fn compact_sqlite_if_needed(&self) -> Result<bool> {
+        let health = self.index_compaction_health();
+        if !health.compaction_recommended || health.format_version != health.current_format_version
+        {
+            return Ok(false);
+        }
+
+        let mut compacted = false;
+        for name in ["metadata.sqlite3", "overlay.sqlite3"] {
+            let path = self.index_dir.join(name);
+            if !path.exists() {
+                continue;
+            }
+            let conn = rusqlite::Connection::open(&path)?;
+            let (page_bytes, free_bytes) = sqlite_page_usage(&conn);
+            if compaction_is_recommended(page_bytes, free_bytes) {
+                conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;")?;
+                compacted = true;
+            }
+        }
+        Ok(compacted)
+    }
+
     pub fn quick_index_health(&self) -> WorkspaceIndexHealth {
         self.index_health_with_options(false)
     }
@@ -1098,6 +1147,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
         let (chunk_count, file_count) = read_sqlite_counts(&index_dir);
         let index_size_bytes = dir_size_bytes(&index_dir);
         let index_components = index_component_sizes(&index_dir);
+        let compaction = index_compaction_health(&index_dir);
         let vector_key_count = read_sqlite_vector_key_count(&index_dir);
         let neural_model = fs::read_to_string(index_dir.join("neural_model.json"))
             .ok()
@@ -1259,6 +1309,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
                 file_count,
                 index_size_bytes,
                 index_components,
+                compaction,
                 vector_key_count,
                 has_neural_vectors,
                 neural_vector_count,
@@ -1330,27 +1381,151 @@ fn read_cached_sqlite_counts(index_dir: &Path) -> Option<(u64, u64)> {
 }
 
 fn index_component_sizes(index_dir: &Path) -> IndexComponentSizes {
-    let metadata_bytes = ["metadata.sqlite3", "overlay.sqlite3"]
+    let metadata_bytes: u64 = ["metadata.sqlite3", "overlay.sqlite3"]
         .iter()
         .map(|name| file_size(&index_dir.join(name)))
         .sum();
-    let lexical_bytes = ["tantivy", "overlay_tantivy"]
+    let lexical_bytes: u64 = ["tantivy", "overlay_tantivy"]
         .iter()
         .map(|name| shallow_dir_size_bytes(&index_dir.join(name)))
         .sum();
-    let hash_vectors_bytes = ["vectors.usearch", "overlay_vectors.usearch"]
+    let hash_vectors_bytes: u64 = ["vectors.usearch", "overlay_vectors.usearch"]
         .iter()
         .map(|name| file_size(&index_dir.join(name)))
         .sum();
     let neural_vectors_bytes = file_size(&index_dir.join("vectors_neural.usearch"));
+    let (stored_chunks_bytes, graph_bytes) = ["metadata.sqlite3", "overlay.sqlite3"]
+        .iter()
+        .map(|name| sqlite_tier_bytes(&index_dir.join(name)))
+        .fold((0, 0), |(chunks, graph), (next_chunks, next_graph)| {
+            (chunks + next_chunks, graph + next_graph)
+        });
+    let sqlite_auxiliary_bytes = metadata_bytes.saturating_sub(stored_chunks_bytes + graph_bytes);
     let classified = metadata_bytes + lexical_bytes + hash_vectors_bytes + neural_vectors_bytes;
     IndexComponentSizes {
         metadata_bytes,
+        stored_chunks_bytes,
+        graph_bytes,
+        sqlite_auxiliary_bytes,
         lexical_bytes,
         hash_vectors_bytes,
         neural_vectors_bytes,
         other_bytes: dir_size_bytes(index_dir).saturating_sub(classified),
     }
+}
+
+fn index_compaction_health(index_dir: &Path) -> IndexCompactionHealth {
+    let format_version = fs::read_to_string(index_dir.join("index_format_version"))
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(0);
+    let mut sqlite_page_bytes = 0;
+    let mut sqlite_free_bytes = 0;
+    let mut legacy_graph_bytes = 0;
+
+    for name in ["metadata.sqlite3", "overlay.sqlite3"] {
+        let path = index_dir.join(name);
+        let Ok(conn) = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) else {
+            continue;
+        };
+        let (page_bytes, free_bytes) = sqlite_page_usage(&conn);
+        sqlite_page_bytes += page_bytes;
+        sqlite_free_bytes += free_bytes;
+        legacy_graph_bytes += sqlite_named_bytes(
+            &conn,
+            &[
+                "symbol_edges",
+                "sqlite_autoindex_symbol_edges_1",
+                "idx_symbol_edges_source_chunk",
+            ],
+        );
+    }
+
+    let sqlite_free_percent = if sqlite_page_bytes == 0 {
+        0.0
+    } else {
+        sqlite_free_bytes as f64 / sqlite_page_bytes as f64 * 100.0
+    };
+    let compaction_recommended = compaction_is_recommended(sqlite_page_bytes, sqlite_free_bytes);
+    let healthy = sqlite_page_bytes == 0
+        || (format_version == INDEX_FORMAT_VERSION
+            && legacy_graph_bytes == 0
+            && !compaction_recommended);
+
+    IndexCompactionHealth {
+        format_version,
+        current_format_version: INDEX_FORMAT_VERSION,
+        sqlite_page_bytes,
+        sqlite_free_bytes,
+        sqlite_free_percent,
+        legacy_graph_bytes,
+        compaction_recommended,
+        healthy,
+    }
+}
+
+fn sqlite_tier_bytes(path: &Path) -> (u64, u64) {
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ) else {
+        return (0, 0);
+    };
+    let stored_chunks_bytes = sqlite_named_bytes(&conn, &["chunks"]);
+    let graph_bytes = sqlite_named_bytes(
+        &conn,
+        &[
+            "symbols",
+            "idx_symbols_name",
+            "symbol_edges",
+            "sqlite_autoindex_symbol_edges_1",
+            "idx_symbol_edges_source_chunk",
+        ],
+    );
+    (stored_chunks_bytes, graph_bytes)
+}
+
+fn sqlite_named_bytes(conn: &rusqlite::Connection, names: &[&str]) -> u64 {
+    let Ok(mut stmt) = conn.prepare("SELECT name, SUM(pgsize) FROM dbstat GROUP BY name") else {
+        return 0;
+    };
+    let Ok(rows) = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    }) else {
+        return 0;
+    };
+    rows.filter_map(Result::ok)
+        .filter(|(name, _)| names.contains(&name.as_str()))
+        .map(|(_, bytes)| bytes.max(0) as u64)
+        .sum()
+}
+
+fn sqlite_page_usage(conn: &rusqlite::Connection) -> (u64, u64) {
+    let page_count = conn
+        .query_row("PRAGMA page_count", [], |row| row.get::<_, i64>(0))
+        .unwrap_or(0)
+        .max(0) as u64;
+    let page_size = conn
+        .query_row("PRAGMA page_size", [], |row| row.get::<_, i64>(0))
+        .unwrap_or(0)
+        .max(0) as u64;
+    let freelist_count = conn
+        .query_row("PRAGMA freelist_count", [], |row| row.get::<_, i64>(0))
+        .unwrap_or(0)
+        .max(0) as u64;
+    (
+        page_count.saturating_mul(page_size),
+        freelist_count.saturating_mul(page_size),
+    )
+}
+
+fn compaction_is_recommended(page_bytes: u64, free_bytes: u64) -> bool {
+    free_bytes >= COMPACTION_FREE_BYTES_THRESHOLD
+        && page_bytes > 0
+        && free_bytes as f64 / page_bytes as f64 * 100.0 >= COMPACTION_FREE_PERCENT_THRESHOLD
 }
 
 fn file_size(path: &Path) -> u64 {
@@ -1739,8 +1914,8 @@ mod tests {
 
         // Insert 2 chunks into the database
         let conn = crate::indexer::open_sqlite(&index_dir.join("metadata.sqlite3")).unwrap();
-        conn.execute("INSERT INTO chunks (chunk_id, file_path, start_line, end_line, language, kind, text, content_hash, vector_key, modified_unix) VALUES ('1', '', 0, 0, '', '', x'', '0', 1, 0)", []).unwrap();
-        conn.execute("INSERT INTO chunks (chunk_id, file_path, start_line, end_line, language, kind, text, content_hash, vector_key, modified_unix) VALUES ('2', '', 0, 0, '', '', x'', '0', 2, 0)", []).unwrap();
+        conn.execute("INSERT INTO chunks (file_path, start_line, end_line, language, kind, text, vector_key, modified_unix) VALUES ('', 0, 0, '', '', x'', 1, 0)", []).unwrap();
+        conn.execute("INSERT INTO chunks (file_path, start_line, end_line, language, kind, text, vector_key, modified_unix) VALUES ('', 0, 0, '', '', x'', 2, 0)", []).unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO _stats (key, value) VALUES ('chunk_count', 2)",
             [],
@@ -1842,7 +2017,7 @@ mod tests {
         };
 
         let conn = crate::indexer::open_sqlite(&ws.overlay_sqlite_path()).unwrap();
-        conn.execute("INSERT INTO chunks (chunk_id, file_path, start_line, end_line, language, kind, text, content_hash, vector_key, modified_unix) VALUES ('1', '', 0, 0, '', '', x'', '0', 1, 0)", []).unwrap();
+        conn.execute("INSERT INTO chunks (file_path, start_line, end_line, language, kind, text, vector_key, modified_unix) VALUES ('', 0, 0, '', '', x'', 1, 0)", []).unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO _stats (key, value) VALUES ('chunk_count', 1)",
             [],
@@ -2227,5 +2402,74 @@ mod tests {
         store.upsert(1, vec![0.0; 384]).unwrap();
         store.save().unwrap();
         assert!(ws.has_neural_vectors());
+    }
+
+    #[test]
+    #[serial]
+    fn component_sizes_and_compaction_health_report_v11_tiers() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".git")).unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            root.path().join("lib.rs"),
+            "pub fn answer() -> usize { 42 }\n",
+        )
+        .unwrap();
+
+        let ws = Workspace::resolve(root.path()).unwrap();
+        let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        crate::indexer::index_workspace(&ws, &model).unwrap();
+
+        let sizes = ws.index_component_sizes();
+        assert!(sizes.stored_chunks_bytes > 0);
+        assert!(sizes.graph_bytes > 0);
+        assert!(sizes.sqlite_auxiliary_bytes > 0);
+        assert!(
+            sizes.stored_chunks_bytes + sizes.graph_bytes + sizes.sqlite_auxiliary_bytes
+                <= sizes.metadata_bytes
+        );
+
+        let health = ws.index_compaction_health();
+        assert_eq!(health.format_version, INDEX_FORMAT_VERSION);
+        assert_eq!(health.legacy_graph_bytes, 0);
+        assert!(!health.compaction_recommended);
+        assert!(health.healthy);
+    }
+
+    #[test]
+    #[serial]
+    fn compact_sqlite_reclaims_large_freelist() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".git")).unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let ws = Workspace::resolve(root.path()).unwrap();
+        ws.ensure_dirs().unwrap();
+        let conn = crate::indexer::open_sqlite(&ws.sqlite_path()).unwrap();
+        let payload = vec![b'x'; 1024 * 1024];
+        for index in 0..20 {
+            conn.execute(
+                "INSERT INTO chunks (
+                    file_path, start_line, end_line, language, kind, text,
+                    vector_key, modified_unix, is_ignored
+                 ) VALUES ('generated.rs', 1, 1, 'rust', 'Function', ?1, ?2, 0, 0)",
+                rusqlite::params![payload, index],
+            )
+            .unwrap();
+        }
+        conn.execute("DELETE FROM chunks", []).unwrap();
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        drop(conn);
+        ws.write_index_format_version().unwrap();
+
+        let before = ws.index_compaction_health();
+        assert!(before.compaction_recommended, "{before:#?}");
+        assert!(ws.compact_sqlite_if_needed().unwrap());
+        let after = ws.index_compaction_health();
+        assert!(!after.compaction_recommended, "{after:#?}");
+        assert!(after.sqlite_free_bytes < before.sqlite_free_bytes);
+        assert!(after.healthy);
     }
 }

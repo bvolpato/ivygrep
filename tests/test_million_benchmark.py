@@ -19,10 +19,23 @@ benchmark = load_script("bench_million_chunks")
 comparator = load_script("compare_million_benchmarks")
 
 
-def artifact(latencies, throughput=100.0, recall=1.0, commit="commit"):
+def artifact(
+    latencies,
+    throughput=100.0,
+    recall=1.0,
+    commit="commit",
+    size_bytes=1000,
+):
     return {
         "ivygrep_commit": commit,
-        "index": {"chunks_per_second": throughput},
+        "index": {
+            "chunks_per_second": throughput,
+            "size_bytes": size_bytes,
+            "metrics": {
+                "peak_disk_bytes": size_bytes * 2,
+                "peak_rss_bytes": 100,
+            },
+        },
         "queries": {
             "warm_distinct": {
                 "latency_samples_ms": latencies,
@@ -87,6 +100,21 @@ class MillionBenchmarkTest(unittest.TestCase):
         )
         self.assertFalse(result["passed"])
         self.assertTrue(result["index_throughput_ratio"]["significant_regression"])
+
+    def test_comparison_rejects_index_size_regression(self):
+        result = comparator.compare(
+            artifact([100.0] * 40, size_bytes=1000),
+            artifact([100.0] * 40, size_bytes=1100),
+            significant_regression_ratio=1.15,
+            required_warm_ratio=None,
+            required_index_ratio=None,
+            maximum_quality_loss=0.0,
+        )
+        self.assertFalse(result["passed"])
+        self.assertEqual(result["index_size_ratio"], 1.1)
+        self.assertTrue(
+            any("index size ratio" in failure for failure in result["failures"])
+        )
 
 
 if __name__ == "__main__":

@@ -100,6 +100,20 @@ def build_report(
                 baseline_metrics["peak_rss_bytes"],
             ),
         },
+        "peak_disk_bytes": {
+            "baseline": baseline_metrics.get(
+                "peak_disk_bytes",
+                system_baseline["index"]["metrics"]["peak_disk_bytes"],
+            ),
+            "current": current_metrics["peak_disk_bytes"],
+            "ratio": ratio(
+                current_metrics["peak_disk_bytes"],
+                baseline_metrics.get(
+                    "peak_disk_bytes",
+                    system_baseline["index"]["metrics"]["peak_disk_bytes"],
+                ),
+            ),
+        },
         "index_size_bytes": {
             "baseline": baseline_index["size_bytes"],
             "current": current_index["size_bytes"],
@@ -107,6 +121,10 @@ def build_report(
                 current_index["size_bytes"],
                 baseline_index["size_bytes"],
             ),
+        },
+        "components": {
+            "baseline": baseline_index.get("components", {}),
+            "current": current_index.get("components", {}),
         },
         "documented_io_bound_ceiling": True,
     }
@@ -178,6 +196,7 @@ def build_report(
         "recall_loss_within_two_points": quality["recall_at_20"]["absolute_delta"]
         >= -0.02,
         "no_hit_rate_not_regressed": quality["no_hit_rate"]["absolute_delta"] <= 0.01,
+        "footprint_reduced_forty_percent": indexing["index_size_bytes"]["ratio"] <= 0.60,
         "indexing_ceiling_documented": True,
     }
     gate["passed"] = all(gate.values())
@@ -234,6 +253,7 @@ def render_markdown(report: dict) -> str:
         for name, values in quality["metrics"].items()
     )
     load = paired["load_average"]
+    components = indexing["components"]["current"]
     return f"""# Public million-chunk benchmark
 
 This report uses a deterministic CC0 Rust corpus with
@@ -271,7 +291,18 @@ a dedicated-host claim.
 - Peak RSS: {bytes_value(indexing["peak_rss_bytes"]["baseline"])} ->
   {bytes_value(indexing["peak_rss_bytes"]["current"])}
   ({percent_delta(indexing["peak_rss_bytes"]["ratio"] - 1.0)})
-- Final index size: {bytes_value(indexing["index_size_bytes"]["current"])}
+- Peak disk: {bytes_value(indexing["peak_disk_bytes"]["baseline"])} ->
+  {bytes_value(indexing["peak_disk_bytes"]["current"])}
+  ({percent_delta(indexing["peak_disk_bytes"]["ratio"] - 1.0)})
+- Final index size: {bytes_value(indexing["index_size_bytes"]["baseline"])} ->
+  {bytes_value(indexing["index_size_bytes"]["current"])}
+  ({percent_delta(indexing["index_size_bytes"]["ratio"] - 1.0)})
+- Current tiers: stored chunks {bytes_value(components.get("stored_chunks_bytes", 0))},
+  graph {bytes_value(components.get("graph_bytes", 0))}, SQLite auxiliary
+  {bytes_value(components.get("sqlite_auxiliary_bytes", 0))}, lexical
+  {bytes_value(components.get("lexical_bytes", 0))}, hash vectors
+  {bytes_value(components.get("hash_vectors_bytes", 0))}, neural vectors
+  {bytes_value(components.get("neural_vectors_bytes", 0))}
 
 The indexing target did not reach 2x. The measured ceiling is storage and
 scheduler bound: producer-side compression and checkpoint changes improved the
@@ -344,7 +375,8 @@ def render_html(report: dict) -> str:
     <section class="report-grid">
       <article class="report-card"><h2>Warm p95</h2><div class="metric-value">{paired["speedup"]:.2f}x</div><p>{paired["baseline_p95_ms"]:.2f} ms -> {paired["current_p95_ms"]:.2f} ms</p></article>
       <article class="report-card"><h2>Index throughput</h2><div class="metric-value">{indexing["chunks_per_second"]["ratio"]:.2f}x</div><p>{indexing["chunks_per_second"]["current"]:.0f} chunks/s</p></article>
-      <article class="report-card"><h2>Acceptance</h2><div class="metric-value">{gate}</div><p>Latency, quality, recall, and documented indexing ceiling.</p></article>
+      <article class="report-card"><h2>Footprint</h2><div class="metric-value">{percent_delta(indexing["index_size_bytes"]["ratio"] - 1.0)}</div><p>{bytes_value(indexing["index_size_bytes"]["baseline"])} -> {bytes_value(indexing["index_size_bytes"]["current"])}</p></article>
+      <article class="report-card"><h2>Acceptance</h2><div class="metric-value">{gate}</div><p>Latency, quality, footprint, recall, and documented indexing ceiling.</p></article>
     </section>
     <section class="report-card"><h2>Full-system query paths</h2><div class="table-wrap"><table><thead><tr><th>Path</th><th>Baseline p95 ms</th><th>Current p95 ms</th><th>Ratio</th></tr></thead><tbody>{query_rows}</tbody></table></div></section>
     <section class="report-card"><h2>Public retrieval quality</h2><div class="table-wrap"><table><thead><tr><th>Metric</th><th>Baseline</th><th>Current</th><th>Delta</th></tr></thead><tbody>{quality_rows}</tbody></table></div></section>

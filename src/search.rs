@@ -498,23 +498,7 @@ pub fn literal_search_with_context(
 
     let query_lower = query.to_ascii_lowercase();
     let max_hits = options.limit.unwrap_or(500);
-    let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
-    let glob_path_filter = build_glob_path_query_filter(ctx, &path_matcher, options)?;
-
-    let matcher = regex::RegexBuilder::new(&regex::escape(query))
-        .case_insensitive(true)
-        .build()?;
-
-    // Use Tantivy index as a pre-filter: find candidate chunk IDs via the
-    // inverted index, then only decompress those to verify the exact match.
-    let candidate_chunks = collect_literal_candidates(
-        ctx,
-        query,
-        &matcher,
-        &path_matcher,
-        &glob_path_filter,
-        options,
-    )?;
+    let candidate_chunks = exact_literal_chunks_with_context(ctx, query, options)?;
 
     tracing::trace!(
         "literal_scan={:?} candidates={}",
@@ -587,6 +571,35 @@ pub fn literal_search_with_context(
     Ok(hits)
 }
 
+pub(crate) fn exact_literal_chunks(
+    workspace: &Workspace,
+    query: &str,
+    options: &SearchOptions,
+) -> Result<Vec<IndexedChunk>> {
+    let ctx = SearchContext::load(workspace, None, false)?;
+    exact_literal_chunks_with_context(&ctx, query, options)
+}
+
+fn exact_literal_chunks_with_context(
+    ctx: &SearchContext,
+    query: &str,
+    options: &SearchOptions,
+) -> Result<Vec<IndexedChunk>> {
+    let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
+    let glob_path_filter = build_glob_path_query_filter(ctx, &path_matcher, options)?;
+    let matcher = regex::RegexBuilder::new(&regex::escape(query))
+        .case_insensitive(true)
+        .build()?;
+    collect_literal_candidates(
+        ctx,
+        query,
+        &matcher,
+        &path_matcher,
+        &glob_path_filter,
+        options,
+    )
+}
+
 /// Use the Tantivy inverted index to find candidate chunks containing the
 /// literal query, then verify with regex on the decompressed text.
 /// This is O(index_lookup + matched_candidates) instead of O(all_chunks).
@@ -619,7 +632,7 @@ fn collect_literal_candidates(
     parser.set_conjunction_by_default();
 
     let mut found_ids = HashSet::<String>::new();
-    let target_hits = options.limit.unwrap_or(100).min(500);
+    let target_hits = options.limit.unwrap_or(100).min(candidate_limit);
 
     // Phase 1: Collect candidate chunks from Tantivy (metadata only, no text).
     let mut candidates: Vec<IndexedChunk> = Vec::new();
@@ -2005,7 +2018,9 @@ fn query_filtered_chunks(
 ) -> Vec<RawIndexedChunk> {
     // Build a SQL query that pushes as much filtering as possible into SQLite.
     let mut sql = String::from(
-        "SELECT chunk_id, file_path, start_line, end_line, language, kind, x'', content_hash, vector_key, is_ignored FROM chunks WHERE 1=1",
+        "SELECT file_path, start_line, end_line,
+                language, kind, x'', '', vector_key, is_ignored
+         FROM chunks WHERE 1=1",
     );
     let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
@@ -2062,18 +2077,26 @@ fn query_filtered_chunks(
     let params_refs: Vec<&dyn rusqlite::types::ToSql> =
         params_vec.iter().map(|p| p.as_ref()).collect();
     let Ok(rows) = stmt.query_map(params_refs.as_slice(), |row| {
-        let raw_text: Vec<u8> = row.get(6)?;
+        let file_path = PathBuf::from(row.get::<_, String>(0)?);
+        let start_line = row.get::<_, i64>(1)? as usize;
+        let end_line = row.get::<_, i64>(2)? as usize;
+        let language = row.get::<_, String>(3)?;
+        let kind = row.get::<_, String>(4)?;
+        let vector_key = row.get::<_, i64>(7)? as u64;
+        let raw_text: Vec<u8> = row.get(5)?;
         Ok(RawIndexedChunk {
-            chunk_id: row.get(0)?,
-            file_path: PathBuf::from(row.get::<_, String>(1)?),
-            start_line: row.get::<_, i64>(2)? as usize,
-            end_line: row.get::<_, i64>(3)? as usize,
-            language: row.get(4)?,
-            kind: row.get(5)?,
+            chunk_id: crate::indexer::logical_chunk_id(
+                &file_path, start_line, end_line, &language, &kind, vector_key,
+            ),
+            file_path,
+            start_line,
+            end_line,
+            language,
+            kind,
             raw_text,
-            content_hash: row.get(7)?,
-            vector_key: row.get::<_, i64>(8)? as u64,
-            is_ignored: row.get::<_, bool>(9)?,
+            content_hash: row.get(6)?,
+            vector_key,
+            is_ignored: row.get::<_, bool>(8)?,
         })
     }) else {
         return Vec::new();

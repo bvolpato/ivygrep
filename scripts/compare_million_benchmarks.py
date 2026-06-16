@@ -70,6 +70,7 @@ def compare_runs(
     required_warm_ratio: float | None,
     required_index_ratio: float | None,
     maximum_quality_loss: float,
+    maximum_index_size_ratio: float = 1.05,
 ) -> dict:
     if not baseline_runs or not current_runs:
         raise ValueError("at least one baseline and current run is required")
@@ -109,6 +110,36 @@ def compare_runs(
         [run["expected_recall_at_20"] for run in current_warm]
     )
     quality_loss = baseline_recall - current_recall
+    baseline_sizes = [
+        run["index"]["size_bytes"]
+        for run in baseline_runs
+        if run["index"].get("size_bytes") is not None
+    ]
+    current_sizes = [
+        run["index"]["size_bytes"]
+        for run in current_runs
+        if run["index"].get("size_bytes") is not None
+    ]
+    index_size_ratio = (
+        statistics.median(current_sizes) / statistics.median(baseline_sizes)
+        if baseline_sizes and current_sizes
+        else None
+    )
+
+    def resource_ratio(name: str) -> float | None:
+        baseline = [
+            run["index"]["metrics"][name]
+            for run in baseline_runs
+            if run["index"].get("metrics", {}).get(name) is not None
+        ]
+        current = [
+            run["index"]["metrics"][name]
+            for run in current_runs
+            if run["index"].get("metrics", {}).get(name) is not None
+        ]
+        if not baseline or not current:
+            return None
+        return statistics.median(current) / statistics.median(baseline)
 
     failures = []
     if latency["significant_regression"]:
@@ -137,6 +168,11 @@ def compare_runs(
             f"expected recall@20 loss {quality_loss:.4f} exceeds "
             f"allowed {maximum_quality_loss:.4f}"
         )
+    if index_size_ratio is not None and index_size_ratio > maximum_index_size_ratio:
+        failures.append(
+            f"index size ratio {index_size_ratio:.3f} exceeds "
+            f"allowed {maximum_index_size_ratio:.3f}"
+        )
 
     return {
         "schema_version": 1,
@@ -146,6 +182,9 @@ def compare_runs(
         "current_runs": len(current_runs),
         "warm_distinct_p95_ratio": latency,
         "index_throughput_ratio": index_ratio,
+        "index_size_ratio": index_size_ratio,
+        "peak_disk_ratio": resource_ratio("peak_disk_bytes"),
+        "peak_rss_ratio": resource_ratio("peak_rss_bytes"),
         "expected_recall_at_20_loss": quality_loss,
         "passed": not failures,
         "failures": failures,
@@ -159,6 +198,7 @@ def compare(
     required_warm_ratio: float | None,
     required_index_ratio: float | None,
     maximum_quality_loss: float,
+    maximum_index_size_ratio: float = 1.05,
 ) -> dict:
     return compare_runs(
         [baseline],
@@ -167,6 +207,7 @@ def compare(
         required_warm_ratio,
         required_index_ratio,
         maximum_quality_loss,
+        maximum_index_size_ratio,
     )
 
 
@@ -179,6 +220,7 @@ def main() -> int:
     parser.add_argument("--require-warm-p95-ratio", type=float)
     parser.add_argument("--require-index-throughput-ratio", type=float)
     parser.add_argument("--maximum-quality-loss", type=float, default=0.0)
+    parser.add_argument("--maximum-index-size-ratio", type=float, default=1.05)
     args = parser.parse_args()
 
     result = compare_runs(
@@ -188,6 +230,7 @@ def main() -> int:
         args.require_warm_p95_ratio,
         args.require_index_throughput_ratio,
         args.maximum_quality_loss,
+        args.maximum_index_size_ratio,
     )
     rendered = json.dumps(result, indent=2, sort_keys=True) + "\n"
     if args.output:

@@ -694,6 +694,56 @@ fn cli_doctor_fix_repairs_unhealthy_index() {
         value["chunk_count"].as_u64().unwrap_or_default() >= 1,
         "doctor --fix should rebuild the index: {value:#}"
     );
+    assert!(
+        value["index_components"]["stored_chunks_bytes"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "doctor should report stored chunk bytes: {value:#}"
+    );
+    assert_eq!(value["compaction"]["healthy"], true);
+}
+
+#[test]
+#[serial]
+fn cli_status_json_reports_storage_tiers_and_compaction_health() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    std::fs::write(root.join("lib.rs"), "pub fn answer() -> usize { 42 }\n").unwrap();
+    let home = tmp.path().join("ivygrep_home");
+
+    unsafe { std::env::set_var("IVYGREP_HOME", &home) };
+    let workspace = Workspace::resolve(&root).unwrap();
+    index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
+
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    let output = cmd
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .args(["--status", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let status = &value[0];
+    assert!(
+        status["index_components"]["stored_chunks_bytes"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "{value:#}"
+    );
+    assert!(
+        status["index_components"]["graph_bytes"]
+            .as_u64()
+            .unwrap_or_default()
+            > 0,
+        "{value:#}"
+    );
+    assert_eq!(status["compaction"]["healthy"], true);
 }
 
 #[test]
