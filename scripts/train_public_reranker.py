@@ -45,7 +45,89 @@ FEATURE_NAMES = (
     "long_semantic",
     "short_literal",
     "long_literal",
+    "preview_term_precision",
+    "preview_term_f1",
+    "weighted_preview_coverage",
+    "informative_preview_coverage",
+    "long_term_preview_coverage",
+    "numeric_preview_coverage",
+    "query_bigram_preview_coverage",
+    "query_line_preview_coverage",
+    "path_term_f1",
+    "natural_language_preview_f1",
+    "code_query_line_coverage",
 )
+
+UNINFORMATIVE_TERMS = {
+    "and",
+    "are",
+    "can",
+    "class",
+    "const",
+    "def",
+    "else",
+    "false",
+    "find",
+    "fix",
+    "for",
+    "from",
+    "function",
+    "how",
+    "import",
+    "include",
+    "int",
+    "let",
+    "new",
+    "not",
+    "null",
+    "return",
+    "should",
+    "static",
+    "string",
+    "struct",
+    "the",
+    "this",
+    "true",
+    "use",
+    "using",
+    "value",
+    "var",
+    "void",
+    "what",
+    "when",
+    "where",
+    "which",
+    "with",
+}
+
+NATURAL_LANGUAGE_TERMS = {
+    "a",
+    "an",
+    "and",
+    "appropriate",
+    "can",
+    "error",
+    "find",
+    "fix",
+    "for",
+    "following",
+    "how",
+    "in",
+    "is",
+    "of",
+    "please",
+    "should",
+    "suggest",
+    "the",
+    "this",
+    "to",
+    "value",
+    "what",
+    "when",
+    "where",
+    "which",
+    "with",
+}
 
 CODE_EXTENSIONS = {
     "c",
@@ -114,6 +196,60 @@ def coverage(terms: list[str], text: str) -> float:
     return sum(term in lower for term in terms) / len(terms)
 
 
+def set_overlap(left: list[str], right: list[str]) -> tuple[float, float, float]:
+    left_set = set(left)
+    right_set = set(right)
+    if not left_set or not right_set:
+        return 0.0, 0.0, 0.0
+    overlap = len(left_set & right_set)
+    recall = overlap / len(left_set)
+    precision = overlap / len(right_set)
+    if recall + precision == 0.0:
+        return recall, precision, 0.0
+    return recall, precision, 2.0 * recall * precision / (recall + precision)
+
+
+def weighted_coverage(terms: list[str], text_terms: list[str]) -> float:
+    if not terms:
+        return 0.0
+    present = set(text_terms)
+    weights = [min(len(term), 16) for term in terms]
+    return sum(weight for term, weight in zip(terms, weights) if term in present) / sum(
+        weights
+    )
+
+
+def bigram_coverage(query: list[str], text: list[str]) -> float:
+    query_bigrams = set(zip(query, query[1:]))
+    if not query_bigrams:
+        return 0.0
+    return len(query_bigrams & set(zip(text, text[1:]))) / len(query_bigrams)
+
+
+def line_coverage(query: str, text: str) -> float:
+    lines = {
+        " ".join(line.strip().lower().split())
+        for line in query.splitlines()
+        if len(" ".join(line.strip().split())) >= 8
+    }
+    if not lines:
+        return 0.0
+    normalized_text = " ".join(text.lower().split())
+    return sum(line in normalized_text for line in lines) / len(lines)
+
+
+def query_shape(terms: list[str], query: str) -> tuple[float, float]:
+    if not terms:
+        return 0.0, 0.0
+    natural_language = min(
+        1.0,
+        sum(term in NATURAL_LANGUAGE_TERMS for term in terms) / max(3.0, len(terms) / 2),
+    )
+    punctuation = sum(character in "{}[]();=<>:+-*/" for character in query)
+    code = min(1.0, punctuation / max(4.0, len(query) / 40.0))
+    return natural_language, code
+
+
 def is_support_path(path: str) -> bool:
     return eval_code_retrieval.is_support_path(path)
 
@@ -126,6 +262,8 @@ def feature_vector(query: str, candidate: dict, rank: int) -> list[float]:
     query_lower = query.strip().lower()
     path_lower = path.lower()
     preview_lower = preview.lower()
+    preview_terms = query_terms(preview)
+    path_terms = query_terms(path)
     extension = Path(path_lower).suffix.lstrip(".")
     support = is_support_path(path_lower)
     lexical = "lexical" in sources
@@ -134,6 +272,15 @@ def feature_vector(query: str, candidate: dict, rank: int) -> list[float]:
     exact_preview = bool(query_lower and query_lower in preview_lower)
     exact_path = bool(query_lower and query_lower in path_lower)
     preview_coverage = coverage(terms, preview_lower)
+    _, preview_precision, preview_f1 = set_overlap(terms, preview_terms)
+    _, _, path_f1 = set_overlap(terms, path_terms)
+    informative_terms = [
+        term for term in terms if len(term) >= 4 and term not in UNINFORMATIVE_TERMS
+    ]
+    long_terms = [term for term in terms if len(term) >= 7]
+    numeric_terms = [term for term in terms if term.isdigit()]
+    exact_line_coverage = line_coverage(query, preview)
+    natural_language, code_query = query_shape(terms, query)
     score = min(
         math.log1p(max(0.0, float(candidate.get("total_score", 0.0)))),
         4.0,
@@ -173,6 +320,17 @@ def feature_vector(query: str, candidate: dict, rank: int) -> list[float]:
         float(long_query and semantic),
         float(short_query and literal),
         float(long_query and literal),
+        preview_precision,
+        preview_f1,
+        weighted_coverage(terms, preview_terms),
+        coverage(informative_terms, preview_lower),
+        coverage(long_terms, preview_lower),
+        coverage(numeric_terms, preview_lower),
+        bigram_coverage(terms, preview_terms),
+        exact_line_coverage,
+        path_f1,
+        natural_language * preview_f1,
+        code_query * exact_line_coverage,
     ]
 
 
@@ -212,6 +370,7 @@ def load_examples(pairs: list[tuple[Path, Path]]) -> tuple[list[dict], list[dict
                     {
                         "dataset": dataset.name,
                         "query_id": query_id,
+                        "query": queries[query_id],
                         "candidates": candidates,
                         "judgments": qrels.get(query_id, {}),
                     }
@@ -351,8 +510,8 @@ def main() -> int:
         selected["epochs"],
     )
     report = {
-        "schema_version": 1,
-        "model_id": "public-linear-reranker-v1",
+        "schema_version": 2,
+        "model_id": "public-linear-reranker-v2",
         "feature_schema": list(FEATURE_NAMES),
         "weights": weights,
         "training": {
