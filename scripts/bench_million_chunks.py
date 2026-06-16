@@ -15,6 +15,7 @@ import platform
 import re
 import shutil
 import signal
+import socket
 import statistics
 import subprocess
 import tempfile
@@ -323,6 +324,92 @@ def run_query(
     }
 
 
+class DaemonClient:
+    def __init__(self, home: Path, corpus: Path):
+        self.home = home
+        self.corpus = corpus
+        self.connection: socket.socket | None = None
+        self.reader = None
+
+    def __enter__(self):
+        self._connect()
+        return self
+
+    def _connect(self) -> None:
+        if os.name == "nt":
+            port = int((self.home / "daemon.port").read_text(encoding="utf-8").strip())
+            self.connection = socket.create_connection(("127.0.0.1", port), timeout=120)
+        else:
+            self.connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            self.connection.settimeout(120)
+            self.connection.connect(str(self.home / "daemon.sock"))
+        self.reader = self.connection.makefile("rb")
+
+    def __exit__(self, _exc_type, _exc_value, _traceback):
+        self._close()
+
+    def _close(self) -> None:
+        if self.reader is not None:
+            self.reader.close()
+            self.reader = None
+        if self.connection is not None:
+            self.connection.close()
+            self.connection = None
+
+    def query(self, query: str, type_filter: str | None = None) -> dict:
+        request = {
+            "protocol_version": 1,
+            "type": "search",
+            "path": str(self.corpus),
+            "query": query,
+            "limit": 20,
+            "context": 2,
+            "type_filter": type_filter,
+            "include_globs": [],
+            "exclude_globs": [],
+            "scope_path": None,
+            "scope_is_file": False,
+            "skip_gitignore": False,
+        }
+        started = time.perf_counter()
+        payload = json.dumps(request).encode() + b"\n"
+        response_bytes = b""
+        for attempt in range(2):
+            try:
+                self.connection.sendall(payload)
+                response_bytes = self.reader.readline()
+                if response_bytes:
+                    break
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            if attempt == 0:
+                self._close()
+                self._connect()
+        if not response_bytes:
+            raise RuntimeError("daemon closed the connection without a response")
+        response = json.loads(response_bytes)
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        if response.get("type") == "error":
+            raise RuntimeError(response.get("message", "daemon search failed"))
+        hits = response.get("hits", [])
+        paths = list(dict.fromkeys(hit["file_path"] for hit in hits))
+        return {
+            "elapsed_ms": elapsed_ms,
+            "hit_count": len(hits),
+            "paths": paths,
+        }
+
+
+def run_daemon_query(
+    home: Path,
+    corpus: Path,
+    query: str,
+    type_filter: str | None = None,
+) -> dict:
+    with DaemonClient(home, corpus) as client:
+        return client.query(query, type_filter)
+
+
 def query_cases(
     samples: int, total_chunks: int, chunks_per_file: int
 ) -> list[tuple[str, str]]:
@@ -438,9 +525,10 @@ def profile_query_phases(
         "million-benchmark-trace.log",
     )
     try:
-        run_query(binary, corpus, "warmup generated operation", trace_env)
-        for query, _ in cases[: min(20, len(cases))]:
-            run_query(binary, corpus, query, trace_env)
+        with DaemonClient(Path(env["IVYGREP_HOME"]), corpus) as client:
+            client.query("warmup generated operation")
+            for query, _ in cases[: min(20, len(cases))]:
+                client.query(query)
     finally:
         stop_daemon(daemon, log)
     return parse_trace_phases(log_path)
@@ -456,10 +544,14 @@ def query_suite(
 ) -> dict:
     cases = query_cases(samples, total_chunks, chunks_per_file)
 
-    def measure(case: tuple[str, str], extra: list[str] | None = None) -> dict:
+    def measure(
+        client: DaemonClient,
+        case: tuple[str, str],
+        type_filter: str | None = None,
+    ) -> dict:
         query, expected_path = case
         return {
-            **run_query(binary, corpus, query, env, extra),
+            **client.query(query, type_filter),
             "expected_path": expected_path,
         }
 
@@ -477,14 +569,36 @@ def query_suite(
     ]
     daemon, log, _ = start_daemon(binary, corpus, env, Path(env["IVYGREP_HOME"]))
     try:
-        run_query(binary, corpus, "warmup generated operation", env)
-        distinct = [measure(case) for case in cases]
-        replay = [measure(cases[0]) for _ in range(samples)]
-        filtered = [measure(case, ["--type", "rust"]) for case in cases]
+        with DaemonClient(Path(env["IVYGREP_HOME"]), corpus) as client:
+            client.query("warmup generated operation")
+            distinct = [measure(client, case) for case in cases]
+            replay = [measure(client, cases[0]) for _ in range(samples)]
+            filtered = [measure(client, case, "rust") for case in cases]
+        cli_warm = [
+            {
+                **run_query(binary, corpus, query, env),
+                "expected_path": expected_path,
+            }
+            for query, expected_path in cases[: min(20, samples)]
+        ]
 
         started = time.perf_counter()
+
+        def concurrent_measure(case: tuple[str, str]) -> dict:
+            query, expected_path = case
+            return {
+                **run_daemon_query(
+                    Path(env["IVYGREP_HOME"]),
+                    corpus,
+                    query,
+                ),
+                "expected_path": expected_path,
+            }
+
         with ThreadPoolExecutor(max_workers=8) as executor:
-            concurrent = list(executor.map(measure, cases[: min(64, samples)]))
+            concurrent = list(
+                executor.map(concurrent_measure, cases[: min(64, samples)])
+            )
         concurrent_wall_ms = (time.perf_counter() - started) * 1000.0
     finally:
         stop_daemon(daemon, log)
@@ -494,6 +608,7 @@ def query_suite(
         "warm_distinct": summarize_queries(distinct),
         "cache_replay": summarize_queries(replay),
         "filtered": summarize_queries(filtered),
+        "cli_warm_distinct": summarize_queries(cli_warm),
         "concurrent": {
             **summarize_queries(concurrent),
             "workers": 8,

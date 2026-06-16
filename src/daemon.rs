@@ -597,18 +597,20 @@ fn stop_all_watchers(state: &DaemonState) {
 
 async fn handle_connection(stream: crate::ipc::IpcStream, state: DaemonState) -> Result<()> {
     let mut reader = BufReader::new(stream);
-    let response = match read_daemon_request(&mut reader).await {
-        Ok(Some(request)) => handle_request(state, request).await,
-        Ok(None) => return Ok(()),
-        Err(response) => response,
-    };
+    loop {
+        let (response, keep_alive) = match read_daemon_request(&mut reader).await {
+            Ok(Some(request)) => (handle_request(state.clone(), request).await, true),
+            Ok(None) => return Ok(()),
+            Err(response) => (response, false),
+        };
 
-    let payload = serde_json::to_vec(&response)?;
-    let mut stream = reader.into_inner();
-    stream.write_all(&payload).await?;
-    stream.write_all(b"\n").await?;
-
-    Ok(())
+        let payload = serde_json::to_vec(&response)?;
+        reader.get_mut().write_all(&payload).await?;
+        reader.get_mut().write_all(b"\n").await?;
+        if !keep_alive {
+            return Ok(());
+        }
+    }
 }
 
 async fn read_daemon_request<R>(
@@ -1866,6 +1868,24 @@ mod tests {
             response,
             DaemonResponse::Error { message } if message.contains("exceeds maximum")
         ));
+    }
+
+    #[tokio::test]
+    async fn daemon_reads_multiple_requests_from_one_connection() {
+        let request =
+            serde_json::to_string(&DaemonRequestEnvelope::new(DaemonRequest::Status)).unwrap();
+        let payload = format!("{request}\n{request}\n");
+        let mut reader = BufReader::new(payload.as_bytes());
+
+        assert!(matches!(
+            read_daemon_request(&mut reader).await.unwrap(),
+            Some(DaemonRequest::Status)
+        ));
+        assert!(matches!(
+            read_daemon_request(&mut reader).await.unwrap(),
+            Some(DaemonRequest::Status)
+        ));
+        assert!(read_daemon_request(&mut reader).await.unwrap().is_none());
     }
 
     #[tokio::test]

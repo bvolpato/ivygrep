@@ -194,7 +194,7 @@ impl QueryRouting {
             QueryIntent::NaturalLanguage => Self {
                 intent,
                 use_neural: true,
-                lexical_multiplier: 10,
+                lexical_multiplier: 5,
                 literal_multiplier: 4,
                 semantic_multiplier: 1,
                 symbol_limit: 50,
@@ -202,7 +202,7 @@ impl QueryRouting {
             QueryIntent::DocsTestsExamples => Self {
                 intent,
                 use_neural: true,
-                lexical_multiplier: 10,
+                lexical_multiplier: 5,
                 literal_multiplier: 5,
                 semantic_multiplier: 1,
                 symbol_limit: 50,
@@ -210,7 +210,7 @@ impl QueryRouting {
             QueryIntent::Mixed => Self {
                 intent,
                 use_neural: false,
-                lexical_multiplier: 10,
+                lexical_multiplier: 5,
                 literal_multiplier: 5,
                 semantic_multiplier: 1,
                 symbol_limit: 100,
@@ -725,11 +725,11 @@ pub fn hybrid_search_with_context(
         corpus_candidate_multiplier(ctx.searchers.iter().map(tantivy::Searcher::num_docs).sum());
     // Tantivy lexical candidates: enough headroom for post-hoc filters
     // (gitignore, scope, globs) without blowing up on huge repos.
-    // Default ~50 → 500, --limit 500 → 5K, --limit 5000 → 50K.
+    // Default natural-language query: 50 → 250, --limit 500 → 2.5K.
     let candidate_limit = if output_limit == usize::MAX {
         50_000
     } else {
-        (output_limit * routing.lexical_multiplier).clamp(200, 50_000)
+        (output_limit * routing.lexical_multiplier).clamp(100, 50_000)
     };
     // Literal pass needs exact substring verification via SQLite (text not
     // stored in Tantivy), so cap tighter: default → 250, scales up with limit.
@@ -847,6 +847,10 @@ pub fn hybrid_search_with_context(
     if let Some(f) = ctx.fields.signature {
         parser.set_field_boost(f, 10.0);
     }
+    let conjunctive_numeric_query = should_use_conjunctive_numeric_query(trimmed);
+    if conjunctive_numeric_query {
+        parser.set_conjunction_by_default();
+    }
 
     let mut allowed_languages = Vec::new();
     let mut can_pushdown_languages = options.include_globs.is_empty();
@@ -878,7 +882,12 @@ pub fn hybrid_search_with_context(
     }
 
     let mut lexical_by_id = HashMap::<String, (IndexedChunk, f32)>::new();
-    for lexical_query in &lexical_queries {
+    let lexical_search_queries = if conjunctive_numeric_query {
+        &lexical_queries[..1]
+    } else {
+        lexical_queries.as_slice()
+    };
+    for lexical_query in lexical_search_queries {
         let mut parsed_query = match parser.parse_query(lexical_query) {
             Ok(query) => query,
             Err(_) => continue,
@@ -1520,6 +1529,14 @@ fn should_run_literal_pass(query_text: &str) -> bool {
         || query
             .chars()
             .any(|c| c == '_' || c == '-' || c == '/' || c == ':' || c.is_ascii_uppercase())
+}
+
+fn should_use_conjunctive_numeric_query(query_text: &str) -> bool {
+    let terms = raw_query_terms(query_text);
+    terms.len() >= 3
+        && terms
+            .iter()
+            .any(|term| term.len() >= 2 && term.chars().all(|ch| ch.is_ascii_digit()))
 }
 
 fn build_literal_queries(query_text: &str, lexical_queries: &[String]) -> Vec<String> {
@@ -4036,6 +4053,20 @@ mod tests {
         assert!(should_run_literal_pass("calculate_tax_for_region"));
         assert!(should_run_literal_pass("KernelMemoryAllocation"));
         assert!(!should_run_literal_pass("kernel memory allocation"));
+    }
+
+    #[test]
+    fn structured_numeric_queries_use_one_conjunctive_lexical_pass() {
+        assert!(should_use_conjunctive_numeric_query(
+            "retry request after status 503"
+        ));
+        assert!(should_use_conjunctive_numeric_query(
+            "find generated operation 498650"
+        ));
+        assert!(!should_use_conjunctive_numeric_query(
+            "retry request after failure"
+        ));
+        assert!(!should_use_conjunctive_numeric_query("status 5"));
     }
 
     #[test]
