@@ -4,6 +4,22 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-06-16
+
+### Added
+- **Public retrieval evidence is reproducible and claim-gated.** Pinned public datasets now report repeated quality, latency, indexing, memory, and footprint metrics with leakage checks, per-task results, and machine-readable artifacts.
+- **Portable neural selection and bounded learned reranking are integrated.** Query intent routes lexical, hash, and neural evidence adaptively, while a held-out public evaluation gates the local reranker and preserves deterministic fallback.
+- **Release archives are authoritative.** All five supported targets publish checksums, SPDX SBOMs, provenance, and binary-size metadata, then execute the exact packaged bytes before a release can be created.
+- **An evidence dashboard controls public claims.** Versioned histories retain context, variance, immutable commit links, regressions, and unavailable comparable-system results.
+
+### Changed
+- **Index format v11 reduces million-chunk storage by 57%.** Compact integer chunk keys, derived logical IDs, narrower symbol persistence, and tier accounting reduce the frozen generated-corpus index from 1.06 GiB to 469 MiB while keeping aggregate nDCG@10 within the 2-point gate.
+- **Million-scale query and indexing paths are bounded.** Persistent daemon sessions, hot-query caching, less frequent storage checkpoints, and explicit I/O-ceiling reporting improve warm distinct-query p95 by more than 2x without hiding saturated-host results.
+- **Status and doctor expose storage tiers and compaction health.** Deep checks remain explicit, and repair mode can checkpoint and vacuum reclaimable SQLite storage.
+
+### Testing
+- Added archive traversal checks, baseline x86 QEMU execution, no-network hash fallback, cached-model import, stale-index rebuild coverage, cross-platform daemon equivalence, public million-chunk footprint gates, and generated evidence consistency checks.
+
 ## [0.10.1] - 2026-06-15
 
 ### Fixed
