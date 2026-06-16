@@ -101,6 +101,46 @@ class RetrievalMetricsTest(unittest.TestCase):
             queries,
         )
 
+    def test_peak_rss_is_sampled_after_daemon_wait(self):
+        events = []
+
+        class FakeProcess:
+            def poll(self):
+                events.append("poll")
+                return None
+
+            def terminate(self):
+                events.append("terminate")
+
+            def send_signal(self, _signal):
+                events.append("signal")
+
+            def wait(self, timeout):
+                events.append(("wait", timeout))
+
+            def kill(self):
+                events.append("kill")
+
+        daemon_log = mock.Mock()
+        daemon_log.close.side_effect = lambda: events.append("close")
+        with mock.patch.object(
+            eval_code_retrieval,
+            "peak_child_rss_bytes",
+            side_effect=lambda: events.append("rss") or 123,
+        ):
+            peak_rss = eval_code_retrieval.stop_daemon_and_measure_peak_rss(
+                FakeProcess(), daemon_log
+            )
+
+        self.assertEqual(peak_rss, 123)
+        wait_index = next(
+            index
+            for index, event in enumerate(events)
+            if isinstance(event, tuple) and event[0] == "wait"
+        )
+        self.assertLess(wait_index, events.index("rss"))
+        self.assertLess(events.index("close"), events.index("rss"))
+
     def test_support_path_detection_is_specific(self):
         self.assertTrue(eval_code_retrieval.is_support_path("tests/search_test.rs"))
         self.assertTrue(eval_code_retrieval.is_support_path("docs/examples/basic.md"))

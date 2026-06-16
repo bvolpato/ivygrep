@@ -299,6 +299,14 @@ def stop_process(process: subprocess.Popen) -> None:
         process.wait(timeout=5)
 
 
+def stop_daemon_and_measure_peak_rss(
+    daemon: subprocess.Popen, daemon_log
+) -> int | None:
+    stop_process(daemon)
+    daemon_log.close()
+    return peak_child_rss_bytes()
+
+
 def evaluate(args: argparse.Namespace) -> dict:
     dataset = args.dataset.resolve()
     binary = args.binary.resolve()
@@ -385,6 +393,7 @@ def evaluate(args: argparse.Namespace) -> dict:
             stderr=subprocess.STDOUT,
             **popen_options,
         )
+        result = None
         try:
             endpoint = daemon_endpoint_path(home)
             deadline = time.time() + 10
@@ -522,7 +531,7 @@ def evaluate(args: argparse.Namespace) -> dict:
                 )
                 if key in workspace
             }
-            return {
+            result = {
                 "dataset": dataset.name,
                 "dataset_provenance": provenance,
                 "mode": args.mode,
@@ -533,7 +542,6 @@ def evaluate(args: argparse.Namespace) -> dict:
                 "hash_enhancement_ms": hash_enhancement_ms,
                 "neural_enhancement_ms": neural_enhancement_ms,
                 "index_size_bytes": workspace["index_size_bytes"],
-                "peak_child_rss_bytes": peak_child_rss_bytes(),
                 "index_configuration": index_configuration,
                 "cold_latency_samples": len(cold_latencies),
                 "cold_latency_p50_ms": percentile(list(cold_latencies.values()), 0.50),
@@ -553,8 +561,10 @@ def evaluate(args: argparse.Namespace) -> dict:
                 "details": details,
             }
         finally:
-            stop_process(daemon)
-            daemon_log.close()
+            peak_rss = stop_daemon_and_measure_peak_rss(daemon, daemon_log)
+
+        result["peak_child_rss_bytes"] = peak_rss
+        return result
 
 
 def main() -> int:
