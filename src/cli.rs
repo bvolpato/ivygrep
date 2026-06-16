@@ -528,10 +528,18 @@ async fn run_status(json: bool) -> Result<()> {
                 } else {
                     println!("{prefix}  Search: \x1b[90m○ empty\x1b[0m");
                 }
+                let reranker_model = ws
+                    .reranker_model
+                    .as_deref()
+                    .map(|model| format!(" {model}"))
+                    .unwrap_or_default();
                 println!(
-                    "{prefix}  Rank:   bounded top-{} reranker",
-                    ws.reranker_candidate_limit
+                    "{prefix}  Rank:   {}{} (bounded top-{})",
+                    ws.reranker_mode, reranker_model, ws.reranker_candidate_limit
                 );
+                if let Some(error) = &ws.reranker_error {
+                    println!("{prefix}          Reranker warning: {error}");
+                }
 
                 println!();
             }
@@ -1491,10 +1499,18 @@ fn run_doctor(path: Option<&Path>, fix: bool, deep: bool, json: bool) -> Result<
         format_bytes(report.index_components.neural_vectors_bytes),
         format_bytes(report.index_components.other_bytes),
     );
+    let reranker_model = report
+        .reranker_model
+        .as_deref()
+        .map(|model| format!(" {model}"))
+        .unwrap_or_default();
     println!(
-        "Reranker: top {} candidates",
-        report.reranker_candidate_limit
+        "Reranker: {}{} (top {} candidates)",
+        report.reranker_mode, reranker_model, report.reranker_candidate_limit
     );
+    if let Some(error) = &report.reranker_error {
+        println!("Reranker warning: {error}");
+    }
 
     for finding in report.findings {
         println!("- {finding}");

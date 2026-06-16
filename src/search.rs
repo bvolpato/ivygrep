@@ -1242,6 +1242,12 @@ pub fn hybrid_search_with_context(
     }
     // Re-sort since grouping by file changed the order
     hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+    if !matches!(
+        routing.intent,
+        QueryIntent::ExactIdentifier | QueryIntent::Path
+    ) {
+        crate::reranker::rerank_hits(query_text, &mut hits);
+    }
     tracing::trace!(
         "to_hit={:?} hits={} files_read={}",
         t0.elapsed(),

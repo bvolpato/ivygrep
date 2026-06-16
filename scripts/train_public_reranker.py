@@ -470,10 +470,69 @@ def evaluate(examples: list[dict], weights: list[float] | None) -> dict[str, flo
     return eval_code_retrieval.aggregate(scores)
 
 
+def evaluation_report(
+    examples: list[dict],
+    provenance: list[dict],
+    weights: list[float],
+    minimum_relative_gain: float,
+    maximum_task_loss: float,
+) -> dict:
+    baseline = evaluate(examples, None)
+    learned = evaluate(examples, weights)
+    relative_ndcg = learned["ndcg_at_10"] / baseline["ndcg_at_10"] - 1.0
+    relative_mrr = learned["mrr_at_10"] / baseline["mrr_at_10"] - 1.0
+    tasks = {}
+    for dataset in sorted({example["dataset"] for example in examples}):
+        task_examples = [
+            example for example in examples if example["dataset"] == dataset
+        ]
+        task_baseline = evaluate(task_examples, None)
+        task_learned = evaluate(task_examples, weights)
+        tasks[dataset] = {
+            "queries": len(task_examples),
+            "baseline": task_baseline,
+            "learned": task_learned,
+            "ndcg_absolute_delta": (
+                task_learned["ndcg_at_10"] - task_baseline["ndcg_at_10"]
+            ),
+            "mrr_absolute_delta": (
+                task_learned["mrr_at_10"] - task_baseline["mrr_at_10"]
+            ),
+        }
+    task_gate_passed = all(
+        task["ndcg_absolute_delta"] >= -maximum_task_loss
+        and task["mrr_absolute_delta"] >= -maximum_task_loss
+        for task in tasks.values()
+    )
+    aggregate_gate_passed = (
+        relative_ndcg >= minimum_relative_gain
+        or relative_mrr >= minimum_relative_gain
+    )
+    return {
+        "queries": len(examples),
+        "sources": provenance,
+        "baseline": baseline,
+        "learned": learned,
+        "relative_ndcg": relative_ndcg,
+        "relative_mrr": relative_mrr,
+        "tasks": tasks,
+        "gate": {
+            "minimum_relative_ndcg_or_mrr_gain": minimum_relative_gain,
+            "maximum_absolute_task_loss": maximum_task_loss,
+            "aggregate_passed": aggregate_gate_passed,
+            "per_task_passed": task_gate_passed,
+            "passed": aggregate_gate_passed and task_gate_passed,
+        },
+    }
+
+
 def main() -> int:
     root = Path(__file__).resolve().parents[1]
     parser = argparse.ArgumentParser()
     parser.add_argument("--pair", action="append", required=True)
+    parser.add_argument("--evaluation-pair", action="append", default=[])
+    parser.add_argument("--minimum-relative-gain", type=float, default=0.05)
+    parser.add_argument("--maximum-task-loss", type=float, default=0.02)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     pairs = [parse_pair(value) for value in args.pair]
@@ -531,12 +590,27 @@ def main() -> int:
             "learned_all": evaluate(examples, weights),
         },
     }
+    if args.evaluation_pair:
+        evaluation_pairs = [
+            parse_pair(value) for value in args.evaluation_pair
+        ]
+        evaluation_examples, evaluation_provenance = load_examples(evaluation_pairs)
+        report["evaluation"] = evaluation_report(
+            evaluation_examples,
+            evaluation_provenance,
+            weights,
+            args.minimum_relative_gain,
+            args.maximum_task_loss,
+        )
     args.output.write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    print(json.dumps(report["training"], indent=2, sort_keys=True))
-    return 0
+    summary = {"training": report["training"]}
+    if "evaluation" in report:
+        summary["evaluation"] = report["evaluation"]
+    print(json.dumps(summary, indent=2, sort_keys=True))
+    return 0 if report.get("evaluation", {}).get("gate", {}).get("passed", True) else 1
 
 
 if __name__ == "__main__":

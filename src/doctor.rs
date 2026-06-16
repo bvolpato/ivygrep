@@ -26,6 +26,9 @@ pub struct DoctorReport {
     pub neural_dimensions: usize,
     pub index_components: IndexComponentSizes,
     pub reranker_candidate_limit: usize,
+    pub reranker_mode: String,
+    pub reranker_model: Option<String>,
+    pub reranker_error: Option<String>,
     pub has_indexable_files: bool,
     pub findings: Vec<String>,
     pub repaired: bool,
@@ -42,6 +45,7 @@ impl DoctorReport {
             findings = default_findings(&health);
         }
 
+        let reranker = crate::reranker::runtime_status();
         Self {
             workspace_root: workspace.root.clone(),
             state: health.state,
@@ -61,6 +65,9 @@ impl DoctorReport {
                 .unwrap_or_else(|| crate::embedding::NeuralProfile::configured().dimensions()),
             index_components: workspace.index_component_sizes(),
             reranker_candidate_limit: crate::search::rerank_candidate_limit(),
+            reranker_mode: reranker.mode,
+            reranker_model: reranker.model_id,
+            reranker_error: reranker.error,
             has_indexable_files: health.has_indexable_files,
             findings,
             repaired,

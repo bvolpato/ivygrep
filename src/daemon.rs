@@ -229,6 +229,7 @@ struct QueryCacheKey {
     skip_gitignore: bool,
     emb_dim: usize,
     wants_neural: bool,
+    reranker: String,
 }
 
 #[derive(Default)]
@@ -1507,6 +1508,7 @@ fn query_cache_key(
         skip_gitignore: options.skip_gitignore,
         emb_dim,
         wants_neural,
+        reranker: crate::reranker::cache_identity(),
     }
 }
 

@@ -516,6 +516,9 @@ def evaluate(args: argparse.Namespace) -> dict:
                     "neural_model",
                     "neural_backend",
                     "reranker_candidate_limit",
+                    "reranker_mode",
+                    "reranker_model",
+                    "reranker_error",
                 )
                 if key in workspace
             }

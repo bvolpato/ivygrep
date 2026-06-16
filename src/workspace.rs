@@ -82,6 +82,12 @@ pub struct WorkspaceStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub neural_model: Option<crate::embedding::NeuralModelIdentity>,
     pub reranker_candidate_limit: usize,
+    #[serde(default = "default_reranker_mode")]
+    pub reranker_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reranker_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reranker_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub neural_backend: Option<String>,
     #[serde(default)]
@@ -119,6 +125,10 @@ pub struct IndexComponentSizes {
     pub hash_vectors_bytes: u64,
     pub neural_vectors_bytes: u64,
     pub other_bytes: u64,
+}
+
+fn default_reranker_mode() -> String {
+    "deterministic".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
@@ -1064,6 +1074,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
     }
 
     let mut by_id = BTreeMap::new();
+    let reranker = crate::reranker::runtime_status();
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         if !entry.file_type()?.is_dir() {
@@ -1256,6 +1267,9 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
                 neural_profile,
                 neural_model,
                 reranker_candidate_limit: crate::search::rerank_candidate_limit(),
+                reranker_mode: reranker.mode.clone(),
+                reranker_model: reranker.model_id.clone(),
+                reranker_error: reranker.error.clone(),
                 neural_backend,
                 enhancing_in_progress,
                 enhancing_progress_count,
