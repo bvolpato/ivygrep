@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781532615292,
+  "lastUpdate": 1781591798712,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -19497,6 +19497,155 @@ window.BENCHMARK_DATA = {
           {
             "name": "critical_journeys/vector_search_in_50k_hot",
             "value": 37.71,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "14efc6643aadaf5114768d575610399ee48d5085",
+          "message": "feat: complete the evidence-backed search program (#129)\n\n* feat(benchmarks): establish public retrieval matrix\n\n* feat(search): select portable embeddings and route queries\n\n- persist complete model identities and default to static retrieval\n- route query intents with adaptive public-benchmark candidate budgets\n- publish reproducible model-screening and routing metrics\n\n* fix(benchmarks): enforce cached profile query minimums\n\n* feat(benchmarks): bind retrieval claims to evidence\n\n* ci(benchmarks): retain neural evidence artifacts\n\n* docs(benchmarks): publish portable retrieval evidence\n\n* feat(benchmarks): train a public linear reranker\n\n* fix(benchmarks): terminate query option parsing\n\n* feat(benchmarks): add held-out reranker splits\n\n* fix(benchmarks): bound held-out reranker corpora\n\n* feat(benchmarks): strengthen public reranker features\n\n* feat(search): ship a bounded public learned reranker\n\n* docs(benchmarks): publish learned reranker evidence\n\n* perf(search): bound million-scale indexing and queries\n\n* fix(indexing): decouple sqlite checkpoints from tantivy\n\n* perf(search): reuse daemon sessions at million scale\n\n* chore(benchmarks): record million-run provenance\n\n* perf(search): gate million-scale regressions\n\n* docs(benchmarks): publish million-scale evidence\n\n* perf(index): compact million-scale storage\n\n* ci(release): gate published portability artifacts\n\nVerify checksums, provenance, SBOMs, CPU baselines, offline fallback, and exact archive procedures before creating a release.\n\n* build(release): pin artifact provenance inputs\n\nPin cross to an exact revision and retain cargo flags separately from features in every release provenance sidecar.\n\n* docs(benchmarks): publish compact-index evidence\n\nRetain the full public matrix, per-dataset quality variance, source-commit provenance, and million-scale footprint, RSS, disk, and latency gates.\n\n* feat(benchmarks): enforce evidence-backed claims\n\nGenerate comparable metric histories, immutable source links, release size history, explicit unavailable comparisons, and README/site claim checks.\n\n* docs(benchmarks): publish evidence dashboard\n\nRender immutable benchmark and release histories, visible unavailable comparisons, and the mechanically evaluated claim policy.\n\n* chore(release): prepare v0.11.0\n\nDocument the retrieval, compact-index, evidence, and exact-artifact release work and bump the crate version.\n\n* ci: align pinned action annotations\n\nMatch Rust cache version comments to the pinned upstream tag so the repository-wide workflow security audit is clean.\n\n* fix(indexing): reject incompatible index formats\n\n* fix(benchmarks): retain evidence publication commits\n\n* test(windows): use configured neural dimensions\n\n* fix(search): reject neural stores without identity\n\n* fix: address release review findings\n\n* fix(symbols): preserve unbounded call-site searches\n\n* fix(benchmarks): include daemon RSS in evidence\n\n---------\n\nCo-authored-by: bruno.volpato <bruno.volpato@datadoghq.com>",
+          "timestamp": "2026-06-16T02:16:40-04:00",
+          "tree_id": "a88de51c8437c1566ec531f4988375eb3fdf9db6",
+          "url": "https://github.com/bvolpato/ivygrep/commit/14efc6643aadaf5114768d575610399ee48d5085"
+        },
+        "date": 1781591798411,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 51689.53,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 3899.47,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer_bulk/fresh_index_30k_chunks",
+            "value": 533229.68,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_small_file",
+            "value": 13.51,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 1958.91,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 1663.12,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11314.16,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 11063.97,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 10.81,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 705.76,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 15400.86,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 4059.62,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 1401.14,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_simple_symbol_1000_files",
+            "value": 8491.03,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_complex_phrase_1000_files",
+            "value": 6777.08,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/bounded_rerank_100_candidates_1000_files",
+            "value": 5137.67,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/literal_simple_symbol_1000_files",
+            "value": 1669.14,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/regex_symbol_1000_files",
+            "value": 2400.52,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 471319.76,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 187.59,
+            "unit": "µs"
+          },
+          {
+            "name": "hash_vector_build/ingest_5k_hash_vectors",
+            "value": 409596.17,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_one_file_change_10k_chunks",
+            "value": 17317.32,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/quick_health_cached_10k_chunks",
+            "value": 371.73,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k",
+            "value": 1217.64,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k_hot",
+            "value": 39.31,
             "unit": "µs"
           }
         ]
