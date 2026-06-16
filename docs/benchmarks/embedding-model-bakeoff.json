@@ -1,0 +1,381 @@
+{
+  "binary_sha256": "2d5864761a9ad0ec8f0407cd31662d4eab5995d3d1b76fccf2e9bc2c3bbd321b",
+  "candidates": [
+    {
+      "binary": {
+        "sha256": "2d5864761a9ad0ec8f0407cd31662d4eab5995d3d1b76fccf2e9bc2c3bbd321b",
+        "version": "ivygrep 0.10.1"
+      },
+      "evaluation": "complete-screening-matrix",
+      "evidence_sha256": "6204398e565eca9bfb1ee9ccc8307229f4cddf5a5868f99ccd29e7e18980a507",
+      "harness_sha256": {
+        "eval_code_retrieval.py": "195b2e2b1eb4bce6c077cba718f3bb7bdba0339bc459120832e4b9c8d191e0d3",
+        "export_public_retrieval.py": "a652e970ba59926632e11055c77dfb71a7874a899bc4bf2445dd1f38b92f112e",
+        "run_public_benchmark_matrix.py": "a5f42bdc8403b7c325e52ac0f299be63ba3288ea26f937e71e60f54bac4ec31b"
+      },
+      "ivygrep_commit": "2c735847d43edbe8a31d516b0fbb7c22b20105c2",
+      "license": "Apache-2.0",
+      "metrics": {
+        "index_size_bytes": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 12152492.0,
+          "mean": 12152492.0,
+          "minimum": 12152492.0,
+          "standard_deviation": 0.0
+        },
+        "mrr_at_10": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.5189722222222223,
+          "mean": 0.5189722222222223,
+          "minimum": 0.5189722222222223,
+          "standard_deviation": 0.0
+        },
+        "ndcg_at_10": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.5909747010371926,
+          "mean": 0.5909747010371926,
+          "minimum": 0.5909747010371926,
+          "standard_deviation": 0.0
+        },
+        "neural_enhancement_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 2969.0287510165945,
+          "mean": 2969.0287510165945,
+          "minimum": 2969.0287510165945,
+          "standard_deviation": 0.0
+        },
+        "peak_child_rss_bytes": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 331898880.0,
+          "mean": 331898880.0,
+          "minimum": 331898880.0,
+          "standard_deviation": 0.0
+        },
+        "recall_at_20": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.88,
+          "mean": 0.88,
+          "minimum": 0.88,
+          "standard_deviation": 0.0
+        },
+        "warm_latency_p95_ms": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 294.63157802820206,
+          "mean": 294.63157802820206,
+          "minimum": 294.63157802820206,
+          "standard_deviation": 0.0
+        }
+      },
+      "model": {
+        "architecture": "static-embedding",
+        "dimensions": 256,
+        "document_character_limit": 1024,
+        "license": "Apache-2.0",
+        "max_input_tokens": 0,
+        "model_asset_bytes": 125729604,
+        "model_id": "sentence-transformers/static-retrieval-mrl-en-v1",
+        "model_weight_dtype": "f32",
+        "model_weights_sha256": "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+        "normalize_embeddings": true,
+        "parameter_count": 31254528,
+        "pooling": "token-mean",
+        "profile": "static-retrieval-v1",
+        "revision": "f60985c706f192d45d218078e49e5a8b6f15283a",
+        "schema_version": 1,
+        "vector_quantization": "f16"
+      },
+      "profile": "static-retrieval-v1",
+      "queries": 100,
+      "reason": "Best quality-cost Pareto point and promoted to the full public matrix.",
+      "repetitions": 1,
+      "source": "https://huggingface.co/sentence-transformers/static-retrieval-mrl-en-v1",
+      "status": "selected-default",
+      "task_ndcg_at_10": {
+        "codefeedback-st": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.7093195897959768,
+          "mean": 0.7093195897959768,
+          "minimum": 0.7093195897959768,
+          "standard_deviation": 0.0
+        },
+        "codetrans-contest": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.5666207786835465,
+          "mean": 0.5666207786835465,
+          "minimum": 0.5666207786835465,
+          "standard_deviation": 0.0
+        },
+        "codetrans-dl": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.502508449293588,
+          "mean": 0.502508449293588,
+          "minimum": 0.502508449293588,
+          "standard_deviation": 0.0
+        },
+        "cosqa": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.5854499863756594,
+          "mean": 0.5854499863756594,
+          "minimum": 0.5854499863756594,
+          "standard_deviation": 0.0
+        }
+      },
+      "tasks": [
+        "codetrans-dl",
+        "codetrans-contest",
+        "cosqa",
+        "codefeedback-st"
+      ]
+    },
+    {
+      "binary": {
+        "sha256": "2d5864761a9ad0ec8f0407cd31662d4eab5995d3d1b76fccf2e9bc2c3bbd321b",
+        "version": "ivygrep 0.10.1"
+      },
+      "evaluation": "resource-stop-after-one-task",
+      "evidence_sha256": "487ec05c4c73141a0494a56bda721db421d51e382686f5ed90ee3d7556346d16",
+      "harness_sha256": {
+        "eval_code_retrieval.py": "195b2e2b1eb4bce6c077cba718f3bb7bdba0339bc459120832e4b9c8d191e0d3"
+      },
+      "ivygrep_commit": "2c735847d43edbe8a31d516b0fbb7c22b20105c2",
+      "license": "Apache-2.0",
+      "metrics": {
+        "index_size_bytes": {
+          "mean": 4938721
+        },
+        "mrr_at_10": {
+          "mean": 0.40753968253968254
+        },
+        "ndcg_at_10": {
+          "mean": 0.5272623590963638
+        },
+        "neural_enhancement_ms": {
+          "mean": 319223.0020320276
+        },
+        "peak_child_rss_bytes": {
+          "mean": 1434591232
+        },
+        "recall_at_20": {
+          "mean": 0.96
+        },
+        "warm_latency_p95_ms": {
+          "mean": 1847.214613982942
+        }
+      },
+      "model": {
+        "architecture": "bert",
+        "dimensions": 384,
+        "document_character_limit": 1024,
+        "license": "Apache-2.0",
+        "max_input_tokens": 512,
+        "model_asset_bytes": 134174389,
+        "model_id": "isuruwijesiri/all-MiniLM-L12-v2-code-search-512",
+        "model_weight_dtype": "f32",
+        "model_weights_sha256": "038856ae48e815d7510a2277e23650aab3293cbc2e21ffb7c22a86c1854ba109",
+        "normalize_embeddings": true,
+        "parameter_count": 33360000,
+        "pooling": "attention-mask-mean",
+        "profile": "code-minilm-l12-v1",
+        "revision": "0574cd81b67ad333192c62bb5da302bec71818fe",
+        "schema_version": 1,
+        "vector_quantization": "f16"
+      },
+      "profile": "code-minilm-l12-v1",
+      "queries": 25,
+      "reason": "Stopped after one task because it exceeded both screening budgets and did not beat code MiniLM L6 quality.",
+      "repetitions": 1,
+      "source": "https://huggingface.co/isuruwijesiri/all-MiniLM-L12-v2-code-search-512",
+      "status": "resource-stop",
+      "task_ndcg_at_10": {
+        "codetrans-dl": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.5272623590963638,
+          "mean": 0.5272623590963638,
+          "minimum": 0.5272623590963638,
+          "standard_deviation": 0.0
+        }
+      },
+      "tasks": [
+        "codetrans-dl"
+      ]
+    },
+    {
+      "binary": {
+        "sha256": "2d5864761a9ad0ec8f0407cd31662d4eab5995d3d1b76fccf2e9bc2c3bbd321b",
+        "version": "ivygrep 0.10.1"
+      },
+      "evaluation": "resource-stop-after-one-task",
+      "evidence_sha256": "a8f930ad5b1e26abad416a952cd7a59f0fa0fbbc68dbd48196157f8397533942",
+      "harness_sha256": {
+        "eval_code_retrieval.py": "195b2e2b1eb4bce6c077cba718f3bb7bdba0339bc459120832e4b9c8d191e0d3"
+      },
+      "ivygrep_commit": "2c735847d43edbe8a31d516b0fbb7c22b20105c2",
+      "license": "Apache-2.0",
+      "metrics": {
+        "index_size_bytes": {
+          "mean": 4887746
+        },
+        "mrr_at_10": {
+          "mean": 0.42482539682539683
+        },
+        "ndcg_at_10": {
+          "mean": 0.5330106357823786
+        },
+        "neural_enhancement_ms": {
+          "mean": 187393.67989002494
+        },
+        "peak_child_rss_bytes": {
+          "mean": 1094172672
+        },
+        "recall_at_20": {
+          "mean": 1.0
+        },
+        "warm_latency_p95_ms": {
+          "mean": 1155.552031006664
+        }
+      },
+      "model": {
+        "architecture": "bert",
+        "dimensions": 384,
+        "document_character_limit": 1024,
+        "license": "Apache-2.0",
+        "max_input_tokens": 512,
+        "model_asset_bytes": 91576452,
+        "model_id": "isuruwijesiri/all-MiniLM-L6-v2-code-search-512",
+        "model_weight_dtype": "f32",
+        "model_weights_sha256": "c71b7305a842dc64189c1e2c7b8e58aa0d430d8181afdb1a95db6d0a3617c90b",
+        "normalize_embeddings": true,
+        "parameter_count": 22713216,
+        "pooling": "attention-mask-mean",
+        "profile": "code-minilm-l6-v1",
+        "revision": "13b266a617039c16d924b49a56ae978dbd8727ff",
+        "schema_version": 1,
+        "vector_quantization": "f16"
+      },
+      "profile": "code-minilm-l6-v1",
+      "queries": 25,
+      "reason": "Crossed both laptop screening limits on its first completed task; the partial quality result is not an aggregate claim.",
+      "repetitions": 1,
+      "source": "https://huggingface.co/isuruwijesiri/all-MiniLM-L6-v2-code-search-512",
+      "status": "rejected",
+      "task_ndcg_at_10": {
+        "codetrans-dl": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.5330106357823786,
+          "mean": 0.5330106357823786,
+          "minimum": 0.5330106357823786,
+          "standard_deviation": 0.0
+        }
+      },
+      "tasks": [
+        "codetrans-dl"
+      ]
+    },
+    {
+      "binary": {
+        "sha256": "2d5864761a9ad0ec8f0407cd31662d4eab5995d3d1b76fccf2e9bc2c3bbd321b",
+        "version": "ivygrep 0.10.1"
+      },
+      "evaluation": "resource-stop-after-one-task",
+      "evidence_sha256": "f0bac11a581d1bcdfd637243e5bc03ccd18a6e9ca4017b3d50fca42945dbda28",
+      "harness_sha256": {
+        "eval_code_retrieval.py": "195b2e2b1eb4bce6c077cba718f3bb7bdba0339bc459120832e4b9c8d191e0d3"
+      },
+      "ivygrep_commit": "2c735847d43edbe8a31d516b0fbb7c22b20105c2",
+      "license": "Apache-2.0",
+      "metrics": {
+        "index_size_bytes": {
+          "mean": 4929109
+        },
+        "mrr_at_10": {
+          "mean": 0.32404761904761903
+        },
+        "ndcg_at_10": {
+          "mean": 0.4466104937065086
+        },
+        "neural_enhancement_ms": {
+          "mean": 196297.97260195483
+        },
+        "peak_child_rss_bytes": {
+          "mean": 1075355648
+        },
+        "recall_at_20": {
+          "mean": 0.96
+        },
+        "warm_latency_p95_ms": {
+          "mean": 1309.5091250143014
+        }
+      },
+      "model": {
+        "architecture": "bert",
+        "dimensions": 384,
+        "document_character_limit": 1024,
+        "license": "Apache-2.0",
+        "max_input_tokens": 256,
+        "model_asset_bytes": 91335235,
+        "model_id": "sentence-transformers/all-MiniLM-L6-v2",
+        "model_weight_dtype": "f32",
+        "model_weights_sha256": "53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db",
+        "normalize_embeddings": true,
+        "parameter_count": 22713728,
+        "pooling": "attention-mask-mean",
+        "profile": "general",
+        "revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
+        "schema_version": 1,
+        "vector_quantization": "f16"
+      },
+      "profile": "general",
+      "queries": 25,
+      "reason": "Crossed both laptop screening limits on its first completed task.",
+      "repetitions": 1,
+      "source": "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2",
+      "status": "rejected",
+      "task_ndcg_at_10": {
+        "codetrans-dl": {
+          "coefficient_of_variation": 0.0,
+          "maximum": 0.4466104937065086,
+          "mean": 0.4466104937065086,
+          "minimum": 0.4466104937065086,
+          "standard_deviation": 0.0
+        }
+      },
+      "tasks": [
+        "codetrans-dl"
+      ]
+    },
+    {
+      "evaluation": "not-run",
+      "license": "CC-BY-NC-4.0",
+      "profile": "Salesforce/SFR-Embedding-Code-400M_R",
+      "reason": "Non-commercial license and custom architecture are incompatible with the shipped default.",
+      "source": "https://huggingface.co/Salesforce/SFR-Embedding-Code-400M_R",
+      "status": "excluded"
+    },
+    {
+      "evaluation": "not-run",
+      "license": "Apache-2.0",
+      "profile": "jinaai/jina-code-embeddings-1.5b",
+      "reason": "The 1.5B-parameter custom model exceeds portable laptop download, memory, and inference budgets.",
+      "source": "https://huggingface.co/jinaai/jina-code-embeddings-1.5b",
+      "status": "excluded"
+    },
+    {
+      "evaluation": "not-run",
+      "license": "MIT",
+      "profile": "nomic-ai/CodeRankEmbed",
+      "reason": "Custom NomicBERT architecture is not supported by the portable local inference backend.",
+      "source": "https://huggingface.co/nomic-ai/CodeRankEmbed",
+      "status": "excluded"
+    }
+  ],
+  "generated_at": "2026-06-16T00:09:50.594004+00:00",
+  "ivygrep_commit": "2c735847d43edbe8a31d516b0fbb7c22b20105c2",
+  "renderer_commit": "46da244d38f288ed952576f6ba4fefd737aa9946",
+  "schema_version": 2,
+  "screening_budget": {
+    "max_peak_rss_bytes": 1073741824,
+    "max_task_neural_enhancement_ms": 120000,
+    "notes": "Candidates crossing either laptop screening limit are stopped after one completed task."
+  },
+  "selection": "static-retrieval-v1"
+}

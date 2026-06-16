@@ -2,7 +2,7 @@
 
 This report is generated from pinned public CoIR datasets. It contains no hostnames, user paths, private repository names, or source text.
 
-- Commit: `49b1571de77ab096512469e324f76a48e4257123`
+- Commit: `2c735847d43edbe8a31d516b0fbb7c22b20105c2`
 - Profile: `public-core`
 - Tasks: 4
 - Languages: 50
@@ -13,34 +13,40 @@ This report is generated from pinned public CoIR datasets. It contains no hostna
 
 | Mode | nDCG@10 | MRR@10 | P@5 | R@20 | Warm p95 | Index time | Index size | Peak RSS |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| lexical | 0.2278 | 0.1875 | 0.0496 | 0.4640 | 129.08 ms | 3083.90 ms | 69.36 MiB | 120.38 MiB |
-| hash | 0.2324 | 0.1924 | 0.0517 | 0.4733 | 117.38 ms | 3992.10 ms | 101.84 MiB | 119.82 MiB |
-| hybrid | 0.2301 | 0.1893 | 0.0506 | 0.4747 | 104.20 ms | 3360.54 ms | 101.84 MiB | 121.63 MiB |
+| neural | 0.2620 | 0.2178 | 0.0561 | 0.5080 | 220.14 ms | 16331.47 ms | 134.25 MiB | 317.12 MiB |
+
+## Change from frozen baseline
+
+Baseline commit `49b1571de77ab096512469e324f76a48e4257123` mode `hash` is compared with current mode `neural`.
+
+| Metric | Baseline | Current | Relative change |
+| --- | ---: | ---: | ---: |
+| nDCG@10 | 0.2324 | 0.2620 | +12.77% |
+| MRR@10 | 0.1924 | 0.2178 | +13.22% |
+| P@5 | 0.0517 | 0.0561 | +8.65% |
+| R@20 | 0.4733 | 0.5080 | +7.32% |
+
+| Task | Baseline nDCG@10 | Current nDCG@10 | Absolute change |
+| --- | ---: | ---: | ---: |
+| codetrans-dl | 0.1944 | 0.2365 | +0.0421 |
+| codetrans-contest | 0.3970 | 0.4269 | +0.0299 |
+| cosqa | 0.1455 | 0.1464 | +0.0009 |
+| codefeedback-st | 0.3724 | 0.5243 | +0.1518 |
 
 ## Run variance
 
 | Mode | nDCG@10 stddev | nDCG CV | Warm p95 stddev | Warm p95 CV |
 | --- | ---: | ---: | ---: | ---: |
-| lexical | 0.0024 | 1.06% | 12.34 ms | 9.56% |
-| hash | 0.0004 | 0.15% | 25.21 ms | 21.48% |
-| hybrid | 0.0022 | 0.97% | 11.60 ms | 11.14% |
+| neural | 0.0002 | 0.07% | 55.26 ms | 25.10% |
 
 ## Per-task quality
 
 | Task | Mode | nDCG@10 | MRR@10 | R@20 |
 | --- | --- | ---: | ---: | ---: |
-| codetrans-dl | lexical | 0.1905 | 0.1192 | 0.6426 |
-| codetrans-dl | hash | 0.1944 | 0.1214 | 0.6981 |
-| codetrans-dl | hybrid | 0.1939 | 0.1199 | 0.6944 |
-| codetrans-contest | lexical | 0.3853 | 0.3476 | 0.5656 |
-| codetrans-contest | hash | 0.3970 | 0.3568 | 0.5671 |
-| codetrans-contest | hybrid | 0.3982 | 0.3586 | 0.5656 |
-| cosqa | lexical | 0.1466 | 0.1125 | 0.3427 |
-| cosqa | hash | 0.1455 | 0.1128 | 0.3407 |
-| cosqa | hybrid | 0.1406 | 0.1063 | 0.3453 |
-| codefeedback-st | lexical | 0.3544 | 0.3330 | 0.5253 |
-| codefeedback-st | hash | 0.3724 | 0.3563 | 0.5253 |
-| codefeedback-st | hybrid | 0.3724 | 0.3563 | 0.5253 |
+| codetrans-dl | neural | 0.2365 | 0.1454 | 0.7796 |
+| codetrans-contest | neural | 0.4269 | 0.3921 | 0.5973 |
+| cosqa | neural | 0.1464 | 0.1130 | 0.3413 |
+| codefeedback-st | neural | 0.5243 | 0.4897 | 0.6566 |
 
 Variance is recorded in the machine-readable JSON as population standard deviation, coefficient of variation, minimum, and maximum.
 
@@ -53,7 +59,7 @@ These numbers establish a reproducible baseline; they are not a state-of-the-art
 ```bash
 uv run scripts/run_public_benchmark_matrix.py \
   --profile public-core \
-  --modes lexical,hash,hybrid \
+  --modes neural \
   --runs 3 \
   --datasets-root /tmp/ivygrep-public-datasets \
   --work-root /tmp/ivygrep-public-results \
