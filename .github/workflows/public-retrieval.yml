@@ -13,12 +13,20 @@ on:
       - "scripts/compare_million_benchmarks.py"
       - "scripts/render_embedding_bakeoff.py"
       - "scripts/render_million_benchmark.py"
+      - "scripts/render_evidence_dashboard.py"
+      - "scripts/check_evidence_claims.py"
+      - "scripts/normalize_release_history.py"
       - "scripts/render_public_benchmark.py"
       - "scripts/check_public_benchmark_privacy.py"
       - "scripts/check_retrieval_benchmark_leakage.py"
       - "tests/test_public_benchmark.py"
       - "tests/test_million_benchmark.py"
+      - "tests/test_evidence_dashboard.py"
+      - "benchmarks/evidence/**"
       - "docs/benchmarks/public-million*"
+      - "docs/benchmarks/evidence-dashboard*"
+      - "docs/benchmarks/claims-policy.md"
+      - "docs/benchmarks/release-artifact-history.json"
       - ".github/workflows/public-retrieval.yml"
   schedule:
     - cron: "30 5 * * 1"
@@ -65,7 +73,18 @@ jobs:
             tests.test_public_benchmark \
             tests.test_eval_code_retrieval \
             tests.test_million_benchmark \
+            tests.test_evidence_dashboard \
             -v
+
+      - name: Verify evidence dashboard and claims
+        run: |
+          python3 scripts/render_evidence_dashboard.py
+          python3 scripts/check_evidence_claims.py
+          git diff --exit-code -- \
+            docs/benchmarks/evidence-dashboard.json \
+            docs/benchmarks/evidence-dashboard.md \
+            docs/benchmarks/evidence-dashboard.html \
+            docs/benchmarks/claims-policy.md
 
       - name: Check publishable documentation privacy
         run: |
@@ -93,7 +112,12 @@ jobs:
             docs/benchmarks/public-million-quality-current.json \
             docs/benchmarks/public-million-results.json \
             docs/benchmarks/public-million.md \
-            docs/benchmarks/public-million.html
+            docs/benchmarks/public-million.html \
+            docs/benchmarks/evidence-dashboard.json \
+            docs/benchmarks/evidence-dashboard.md \
+            docs/benchmarks/evidence-dashboard.html \
+            docs/benchmarks/claims-policy.md \
+            docs/benchmarks/release-artifact-history.json
 
   matrix:
     name: Run pinned public matrix
@@ -112,7 +136,7 @@ jobs:
         uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # v8.2.0
 
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.8.2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: "public-retrieval"
           cache-bin: "false"

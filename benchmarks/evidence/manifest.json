@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "evidence": [
+    {
+      "id": "public-retrieval-baseline",
+      "kind": "quality",
+      "label": "Frozen public retrieval baseline",
+      "path": "docs/benchmarks/public-code-retrieval-baseline-results.json"
+    },
+    {
+      "id": "public-retrieval-current",
+      "kind": "quality",
+      "label": "Current public retrieval matrix",
+      "path": "docs/benchmarks/public-code-retrieval-results.json"
+    },
+    {
+      "id": "public-retrieval-compact-current",
+      "kind": "quality",
+      "label": "Compact-index public retrieval matrix",
+      "path": "docs/benchmarks/public-million-quality-current.json"
+    },
+    {
+      "id": "embedding-selection",
+      "kind": "model",
+      "label": "Portable embedding model selection",
+      "path": "docs/benchmarks/embedding-model-bakeoff.json"
+    },
+    {
+      "id": "learned-reranker",
+      "kind": "quality",
+      "label": "Held-out learned reranker",
+      "path": "docs/benchmarks/public-reranker-results.json"
+    },
+    {
+      "id": "million-scale",
+      "kind": "scale",
+      "label": "Public million-chunk benchmark",
+      "path": "docs/benchmarks/public-million-results.json"
+    },
+    {
+      "id": "daemon-cache",
+      "kind": "latency",
+      "label": "Daemon hot-query cache",
+      "path": "docs/benchmarks/daemon-hot-query-cache-explore-results.tsv"
+    },
+    {
+      "id": "release-workflow",
+      "kind": "portability",
+      "label": "Release artifact acceptance gate",
+      "path": ".github/workflows/release.yml"
+    }
+  ],
+  "release_history": "docs/benchmarks/release-artifact-history.json"
+}

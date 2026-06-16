@@ -29,7 +29,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.8.2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: "lint"
           cache-bin: "false"
@@ -41,10 +41,20 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
 
       - name: ShellCheck scripts
-        run: shellcheck build.sh test.sh bench.sh scripts/bootstrap_stress_fixtures.sh scripts/e2e_procedures.sh scripts/e2e_neural_backend.sh scripts/stress_large_repo.sh
+        run: shellcheck build.sh test.sh bench.sh scripts/bootstrap_stress_fixtures.sh scripts/e2e_procedures.sh scripts/e2e_neural_backend.sh scripts/e2e_x86_baseline.sh scripts/e2e_cached_model.sh scripts/stress_large_repo.sh
 
       - name: Test Python harnesses
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Verify generated evidence and claims
+        run: |
+          python3 scripts/render_evidence_dashboard.py
+          python3 scripts/check_evidence_claims.py
+          git diff --exit-code -- \
+            docs/benchmarks/evidence-dashboard.json \
+            docs/benchmarks/evidence-dashboard.md \
+            docs/benchmarks/evidence-dashboard.html \
+            docs/benchmarks/claims-policy.md
 
       - name: Clippy lints
         run: cargo clippy --locked --all-targets -- -D warnings
@@ -99,7 +109,7 @@ jobs:
           python-version: "3.13"
 
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.8.2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: "test"
           cache-bin: "false"
@@ -157,7 +167,7 @@ jobs:
           python-version: "3.13"
 
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.8.2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: "release"
           cache-bin: "false"
