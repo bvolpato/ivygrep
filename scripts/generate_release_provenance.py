@@ -26,6 +26,7 @@ def main() -> int:
     parser.add_argument("--sbom", type=Path, required=True)
     parser.add_argument("--target", required=True)
     parser.add_argument("--features", default="")
+    parser.add_argument("--cargo-flags", default="")
     parser.add_argument("--version", required=True)
     parser.add_argument("--source-commit", required=True)
     parser.add_argument("--source-ref", required=True)
@@ -37,8 +38,9 @@ def main() -> int:
     feature_values = sorted(
         value
         for value in args.features.replace(",", " ").split()
-        if value and not value.startswith("--")
+        if value
     )
+    cargo_flags = args.cargo_flags.split()
     document = {
         "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -51,6 +53,7 @@ def main() -> int:
         "build": {
             "target": args.target,
             "features": feature_values,
+            "cargo_flags": cargo_flags,
             "rustc": args.rustc_version,
             "version": args.version,
         },

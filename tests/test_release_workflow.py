@@ -31,6 +31,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("anchore/sbom-action@", workflow)
         self.assertIn("actions/attest@", workflow)
+        self.assertIn('--cargo-flags "$CARGO_FLAGS"', workflow)
         self.assertIn("*.spdx.json", workflow)
         self.assertIn("*.provenance.json", workflow)
 
