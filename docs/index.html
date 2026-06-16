@@ -313,11 +313,11 @@
             <div class="grid grid-2" style="gap: 1.5rem;">
                 <div class="git-feature">
                     <h4>Worktree Overlays</h4>
-                    <p>When you <code>git worktree add</code>, ivygrep does <strong>not</strong> copy the index. It creates a thin overlay storing only divergent chunks & tombstones — referencing the base index. A 93K-file repo with 50 changed files creates a ~200 KB overlay instead of duplicating ~50 MB.</p>
+                    <p>When you <code>git worktree add</code>, ivygrep does <strong>not</strong> copy the search index. Each worktree references one shared base index while its SQLite, lexical, and vector overlay stores contain only divergent chunks and tombstones. Lightweight Merkle metadata tracks filesystem state.</p>
                 </div>
                 <div class="git-feature">
                     <h4>Branch-Switch Deltas</h4>
-                    <p>Switching branches triggers a targeted Merkle-diff re-index of <strong>only the changed files</strong> — no full re-scan. Content-based hashes mean byte-identical files across branches are never re-processed.</p>
+                    <p>Switching branches triggers Merkle reconciliation that re-indexes <strong>only the changed files</strong> instead of rebuilding the search index. Content-based hashes mean byte-identical files across branches are never re-processed.</p>
                 </div>
             </div>
         </div>

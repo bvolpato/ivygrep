@@ -324,16 +324,31 @@ fn index_workspace_with_options(
         }
     });
 
+    let tracks_reusable_base_state =
+        workspace.repo_id.is_some() && workspace.base_index_dir.is_none();
+    let clean_git_state_before = tracks_reusable_base_state
+        .then(|| clean_git_checkout_state(&workspace.root))
+        .flatten();
     let result = index_workspace_inner(
         workspace,
         embedding_model,
         trust_live_watcher,
         watcher_paths,
     );
+    if result.is_ok() && tracks_reusable_base_state {
+        record_indexed_git_state(workspace, clean_git_state_before.as_deref());
+    }
 
     // Run a checkpoint to reclaim WAL space after bulk writes, then
     // truncate the WAL file so it doesn't keep consuming disk.
-    if let Ok(conn) = Connection::open(workspace.sqlite_path()) {
+    let sqlite_path = if workspace.has_overlay() || workspace.base_ref_path().exists() {
+        workspace.overlay_sqlite_path()
+    } else {
+        workspace.sqlite_path()
+    };
+    if sqlite_path.exists()
+        && let Ok(conn) = Connection::open(sqlite_path)
+    {
         let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
     }
 
@@ -510,7 +525,7 @@ fn index_workspace_inner(
             // The overlay may inherit base paths only after the base index
             // reflects its current files. This is incremental and avoids
             // silently inheriting stale chunks from an unindexed base edit.
-            if !base_refreshed {
+            if !base_refreshed && !refresh_clean_base_metadata(&base_ws)? {
                 let _ = index_workspace_for_watcher(&base_ws, embedding_model)?;
             }
             let base_generation = base_ws
@@ -1145,6 +1160,178 @@ fn files_have_same_contents(left: &Path, right: &Path) -> bool {
                     == normalized_indexable_content(right, &right_bytes)
         }
         _ => false,
+    }
+}
+
+fn git_head(root: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--verify", "HEAD"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|head| !head.is_empty())
+}
+
+fn git_index_hash(root: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--git-path", "index"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(raw);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    };
+    let bytes = fs::read(path).ok()?;
+    Some(hex::encode(
+        xxhash_rust::xxh3::xxh3_128(&bytes).to_le_bytes(),
+    ))
+}
+
+fn git_worktree_is_clean(root: &Path) -> bool {
+    std::process::Command::new("git")
+        .args(["status", "--porcelain=v1", "--untracked-files=normal"])
+        .current_dir(root)
+        .output()
+        .is_ok_and(|output| output.status.success() && output.stdout.is_empty())
+}
+
+fn git_checkout_state(root: &Path) -> Option<String> {
+    Some(format!(
+        "{}\n{}\n{}",
+        git_head(root)?,
+        git_index_hash(root)?,
+        git_sparse_checkout_state(root)
+    ))
+}
+
+fn clean_git_checkout_state(root: &Path) -> Option<String> {
+    git_worktree_is_clean(root).then(|| git_checkout_state(root))?
+}
+
+fn git_sparse_checkout_state(root: &Path) -> String {
+    let list = std::process::Command::new("git")
+        .args(["sparse-checkout", "list"])
+        .current_dir(root)
+        .output();
+    let Ok(list) = list else {
+        return "disabled".to_string();
+    };
+    if !list.status.success() {
+        return "disabled".to_string();
+    }
+
+    let cone = std::process::Command::new("git")
+        .args(["config", "--bool", "core.sparseCheckoutCone"])
+        .current_dir(root)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| output.stdout)
+        .unwrap_or_default();
+    let mut state = list.stdout;
+    state.extend_from_slice(&cone);
+    format!(
+        "enabled:{}",
+        hex::encode(xxhash_rust::xxh3::xxh3_128(&state).to_le_bytes())
+    )
+}
+
+fn indexed_git_state_path(workspace: &Workspace) -> PathBuf {
+    workspace.index_dir.join("indexed_git_state")
+}
+
+fn record_indexed_git_state(workspace: &Workspace, expected_state: Option<&str>) -> bool {
+    let current_state = clean_git_checkout_state(&workspace.root);
+    if current_state.as_deref() == expected_state
+        && let Some(state) = current_state
+        && fs::write(indexed_git_state_path(workspace), state).is_ok()
+    {
+        return true;
+    }
+    let _ = fs::remove_file(indexed_git_state_path(workspace));
+    false
+}
+
+enum BaseIndexCheckoutState {
+    Current,
+    MetadataChanged,
+    Stale,
+}
+
+fn base_index_checkout_state(workspace: &Workspace) -> BaseIndexCheckoutState {
+    let indexes_ignored_files = workspace
+        .read_metadata()
+        .ok()
+        .flatten()
+        .is_some_and(|metadata| metadata.skip_gitignore);
+    if indexes_ignored_files
+        || !workspace.quick_index_health().is_queryable()
+        || !git_worktree_is_clean(&workspace.root)
+    {
+        return BaseIndexCheckoutState::Stale;
+    }
+    let Some(current_state) = git_checkout_state(&workspace.root) else {
+        return BaseIndexCheckoutState::Stale;
+    };
+    let Some(indexed_state) = fs::read_to_string(indexed_git_state_path(workspace)).ok() else {
+        return BaseIndexCheckoutState::Stale;
+    };
+    if indexed_state == current_state {
+        return BaseIndexCheckoutState::Current;
+    }
+
+    let same_head = indexed_state.lines().next() == current_state.lines().next();
+    let same_sparse_checkout = indexed_state.lines().nth(2) == current_state.lines().nth(2);
+    if same_head && same_sparse_checkout {
+        BaseIndexCheckoutState::MetadataChanged
+    } else {
+        BaseIndexCheckoutState::Stale
+    }
+}
+
+fn refresh_clean_base_metadata(workspace: &Workspace) -> Result<bool> {
+    match base_index_checkout_state(workspace) {
+        BaseIndexCheckoutState::Current => return Ok(true),
+        BaseIndexCheckoutState::Stale => return Ok(false),
+        BaseIndexCheckoutState::MetadataChanged => {}
+    }
+
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(workspace.lock_path())?;
+    fs2::FileExt::lock_exclusive(&lock_file)?;
+
+    match base_index_checkout_state(workspace) {
+        BaseIndexCheckoutState::Current => Ok(true),
+        BaseIndexCheckoutState::Stale => Ok(false),
+        BaseIndexCheckoutState::MetadataChanged => {
+            let skip_gitignore = workspace
+                .read_metadata()?
+                .is_some_and(|metadata| metadata.skip_gitignore);
+            let expected_state = clean_git_checkout_state(&workspace.root);
+            MerkleSnapshot::build(&workspace.root, skip_gitignore)?
+                .save(&workspace.merkle_snapshot_path())?;
+            Ok(record_indexed_git_state(
+                workspace,
+                expected_state.as_deref(),
+            ))
+        }
     }
 }
 

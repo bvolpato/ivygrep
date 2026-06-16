@@ -4,6 +4,16 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Workspace discovery validates Git roots.** Invalid `.git` ancestors are ignored instead of causing unrelated parent directories to be indexed.
+- **Worktree checkpoints stay inside overlay storage.** Completing an overlay index no longer creates an empty `metadata.sqlite3` beside the delta stores.
+
+### Performance
+- **Clean worktrees reuse one shared base index.** Worktree creation skips redundant base rewrites when the indexed checkout state is unchanged; sparse-checkout and other checkout-shape changes run incremental base reconciliation before an overlay inherits data.
+
+### Testing
+- Added sequential and concurrent multi-worktree coverage that requires one shared base index, exact per-worktree chunk/tombstone deltas, no full-store artifacts in overlay directories, and correct refresh behavior for dirty or newly committed base content.
+
 ## [0.11.0] - 2026-06-16
 
 ### Added

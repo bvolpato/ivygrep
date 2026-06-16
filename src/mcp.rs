@@ -640,7 +640,13 @@ mod tests {
         let root = tmp.path().join("repo");
         let scoped = root.join("scoped");
         let other = root.join("other");
-        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        assert!(status.success());
         std::fs::create_dir_all(&scoped).unwrap();
         std::fs::create_dir_all(&other).unwrap();
 

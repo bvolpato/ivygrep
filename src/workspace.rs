@@ -1003,7 +1003,7 @@ pub fn detect_workspace_root(path: &Path) -> Result<PathBuf> {
 
     let mut cursor = current.clone();
     loop {
-        if cursor.join(".git").exists() {
+        if cursor.join(".git").exists() && is_git_workspace_root(&cursor) {
             return Ok(cursor);
         }
 
@@ -1013,6 +1013,36 @@ pub fn detect_workspace_root(path: &Path) -> Result<PathBuf> {
     }
 
     Ok(current)
+}
+
+fn is_git_workspace_root(path: &Path) -> bool {
+    let marker = path.join(".git");
+    if marker.is_dir() {
+        return is_git_dir(&marker);
+    }
+    if !marker.is_file() {
+        return false;
+    }
+
+    let Ok(contents) = fs::read_to_string(marker) else {
+        return false;
+    };
+    let Some(raw_git_dir) = contents.trim().strip_prefix("gitdir:") else {
+        return false;
+    };
+    let raw_git_dir = PathBuf::from(raw_git_dir.trim());
+    let git_dir = if raw_git_dir.is_absolute() {
+        raw_git_dir
+    } else {
+        path.join(raw_git_dir)
+    };
+    is_git_dir(&git_dir)
+}
+
+fn is_git_dir(path: &Path) -> bool {
+    path.join("HEAD").is_file()
+        && (path.join("commondir").is_file()
+            || (path.join("objects").is_dir() && path.join("refs").is_dir()))
 }
 
 pub fn resolve_workspace_and_scope(path: &Path) -> Result<(Workspace, Option<WorkspaceScope>)> {
@@ -1674,6 +1704,7 @@ fn dir_size_bytes(dir: &Path) -> u64 {
         "overlay_vectors.usearch",
         "merkle_snapshot.json",
         "workspace.json",
+        "indexed_git_state",
     ];
 
     let mut total = 0u64;
@@ -1872,7 +1903,12 @@ mod tests {
     #[test]
     fn resolve_workspace_and_scope_tracks_subpaths() {
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".git")).unwrap();
+        let status = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
         std::fs::create_dir_all(tmp.path().join("src")).unwrap();
         std::fs::write(tmp.path().join("src/lib.rs"), "pub fn sample() {}\n").unwrap();
         let canonical_root = config::canonicalize_lossy(tmp.path()).unwrap();
@@ -1898,6 +1934,37 @@ mod tests {
                 is_file: true,
             })
         );
+    }
+
+    #[test]
+    fn invalid_git_marker_in_ancestor_is_ignored() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+
+        assert_eq!(
+            detect_workspace_root(&project).unwrap(),
+            config::canonicalize_lossy(&project).unwrap()
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn invalid_git_marker_does_not_create_repository_identity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+
+        assert_eq!(
+            workspace.root,
+            config::canonicalize_lossy(tmp.path()).unwrap()
+        );
+        assert!(workspace.repo_id.is_none());
+        assert!(workspace.base_index_dir.is_none());
     }
 
     #[test]
