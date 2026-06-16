@@ -1447,6 +1447,67 @@ fn worktree_first_overlay_refreshes_base_after_clean_head_change() {
 
 #[test]
 #[serial]
+fn worktree_does_not_reuse_base_indexed_from_dirty_checkout() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    init_git_repo(root.path());
+    fs::write(
+        root.path().join("shared.rs"),
+        "pub fn committed_marker() -> bool { true }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "committed base"]);
+
+    fs::write(
+        root.path().join("shared.rs"),
+        "pub fn dirty_marker() -> bool { true }\n",
+    )
+    .unwrap();
+    setup_and_index(root.path(), home.path());
+    let base_ws = workspace_for(root.path());
+    assert!(
+        !base_ws.index_dir.join("indexed_git_state").exists(),
+        "a dirty base index must not be marked as reusable"
+    );
+    git(root.path(), &["checkout", "--", "shared.rs"]);
+
+    git(root.path(), &["branch", "wt-clean", "main"]);
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_clean");
+    git(
+        root.path(),
+        &["worktree", "add", wt_path.to_str().unwrap(), "wt-clean"],
+    );
+
+    setup_and_index(&wt_path, home.path());
+    let wt_ws = workspace_for(&wt_path);
+    let base_text = stored_chunk_text(&base_ws, "shared.rs").unwrap();
+    assert!(
+        base_text.contains("committed_marker"),
+        "a clean worktree must force reconciliation of a base indexed while dirty"
+    );
+    assert!(
+        !base_text.contains("dirty_marker"),
+        "dirty base content must not survive after the checkout is cleaned"
+    );
+    assert!(
+        search_file_paths(&wt_ws, "committed_marker")
+            .iter()
+            .any(|path| path.contains("shared.rs")),
+        "the worktree must inherit reconciled committed content"
+    );
+    assert_only_overlay_stores(&wt_ws);
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+#[test]
+#[serial]
 fn worktree_empty_edit_hides_base_content_on_first_overlay_index() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();

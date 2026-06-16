@@ -324,6 +324,7 @@ fn index_workspace_with_options(
         }
     });
 
+    let clean_git_state_before = clean_git_checkout_state(&workspace.root);
     let result = index_workspace_inner(
         workspace,
         embedding_model,
@@ -331,7 +332,7 @@ fn index_workspace_with_options(
         watcher_paths,
     );
     if result.is_ok() {
-        record_indexed_git_state(workspace);
+        record_indexed_git_state(workspace, clean_git_state_before.as_deref());
     }
 
     // Run a checkpoint to reclaim WAL space after bulk writes, then
@@ -1208,14 +1209,24 @@ fn git_checkout_state(root: &Path) -> Option<String> {
     Some(format!("{}\n{}", git_head(root)?, git_index_hash(root)?))
 }
 
+fn clean_git_checkout_state(root: &Path) -> Option<String> {
+    git_worktree_is_clean(root).then(|| git_checkout_state(root))?
+}
+
 fn indexed_git_state_path(workspace: &Workspace) -> PathBuf {
     workspace.index_dir.join("indexed_git_state")
 }
 
-fn record_indexed_git_state(workspace: &Workspace) {
-    if let Some(state) = git_checkout_state(&workspace.root) {
-        let _ = fs::write(indexed_git_state_path(workspace), state);
+fn record_indexed_git_state(workspace: &Workspace, expected_state: Option<&str>) -> bool {
+    let current_state = clean_git_checkout_state(&workspace.root);
+    if current_state.as_deref() == expected_state
+        && let Some(state) = current_state
+        && fs::write(indexed_git_state_path(workspace), state).is_ok()
+    {
+        return true;
     }
+    let _ = fs::remove_file(indexed_git_state_path(workspace));
+    false
 }
 
 enum BaseIndexCheckoutState {
@@ -1273,10 +1284,13 @@ fn refresh_clean_base_metadata(workspace: &Workspace) -> Result<bool> {
             let skip_gitignore = workspace
                 .read_metadata()?
                 .is_some_and(|metadata| metadata.skip_gitignore);
+            let expected_state = clean_git_checkout_state(&workspace.root);
             MerkleSnapshot::build(&workspace.root, skip_gitignore)?
                 .save(&workspace.merkle_snapshot_path())?;
-            record_indexed_git_state(workspace);
-            Ok(true)
+            Ok(record_indexed_git_state(
+                workspace,
+                expected_state.as_deref(),
+            ))
         }
     }
 }
