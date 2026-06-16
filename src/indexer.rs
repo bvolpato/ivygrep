@@ -324,14 +324,18 @@ fn index_workspace_with_options(
         }
     });
 
-    let clean_git_state_before = clean_git_checkout_state(&workspace.root);
+    let tracks_reusable_base_state =
+        workspace.repo_id.is_some() && workspace.base_index_dir.is_none();
+    let clean_git_state_before = tracks_reusable_base_state
+        .then(|| clean_git_checkout_state(&workspace.root))
+        .flatten();
     let result = index_workspace_inner(
         workspace,
         embedding_model,
         trust_live_watcher,
         watcher_paths,
     );
-    if result.is_ok() {
+    if result.is_ok() && tracks_reusable_base_state {
         record_indexed_git_state(workspace, clean_git_state_before.as_deref());
     }
 
