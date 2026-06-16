@@ -21,6 +21,25 @@ def task_metric(matrix: dict, task: str, mode: str, name: str) -> float:
     return matrix["task_summary"][task][mode][name]["mean"]
 
 
+def best_quality_mode(matrix: dict) -> str:
+    return max(matrix["modes"], key=lambda mode: metric(matrix, mode, "ndcg_at_10"))
+
+
+def relative_change(current: float, baseline: float) -> float:
+    if baseline == 0:
+        raise ValueError("cannot calculate relative change from zero")
+    return (current - baseline) / baseline
+
+
+def validate_comparison(matrix: dict, baseline: dict) -> None:
+    if matrix["profile"] != baseline["profile"]:
+        raise ValueError("benchmark profiles do not match")
+    if matrix["queries"] != baseline["queries"]:
+        raise ValueError("benchmark query counts do not match")
+    if matrix["tasks"] != baseline["tasks"]:
+        raise ValueError("benchmark tasks do not match")
+
+
 def format_ms(value: float) -> str:
     return f"{value:.2f} ms"
 
@@ -35,7 +54,7 @@ def format_bytes(value: float) -> str:
     raise AssertionError("unreachable")
 
 
-def markdown(matrix: dict) -> str:
+def markdown(matrix: dict, baseline: dict | None = None) -> str:
     lines = [
         "# Public code-retrieval benchmark",
         "",
@@ -72,6 +91,48 @@ def markdown(matrix: dict) -> str:
             )
             + " |"
         )
+    if baseline is not None:
+        validate_comparison(matrix, baseline)
+        baseline_mode = best_quality_mode(baseline)
+        current_mode = best_quality_mode(matrix)
+        lines.extend(
+            (
+                "",
+                "## Change from frozen baseline",
+                "",
+                f"Baseline commit `{baseline['ivygrep_commit']}` mode "
+                f"`{baseline_mode}` is compared with current mode `{current_mode}`.",
+                "",
+                "| Metric | Baseline | Current | Relative change |",
+                "| --- | ---: | ---: | ---: |",
+            )
+        )
+        for name, label in (
+            ("ndcg_at_10", "nDCG@10"),
+            ("mrr_at_10", "MRR@10"),
+            ("precision_at_5", "P@5"),
+            ("recall_at_20", "R@20"),
+        ):
+            baseline_value = metric(baseline, baseline_mode, name)
+            current_value = metric(matrix, current_mode, name)
+            lines.append(
+                f"| {label} | {baseline_value:.4f} | {current_value:.4f} | "
+                f"{relative_change(current_value, baseline_value):+.2%} |"
+            )
+        lines.extend(
+            (
+                "",
+                "| Task | Baseline nDCG@10 | Current nDCG@10 | Absolute change |",
+                "| --- | ---: | ---: | ---: |",
+            )
+        )
+        for task in matrix["tasks"]:
+            baseline_value = task_metric(baseline, task, baseline_mode, "ndcg_at_10")
+            current_value = task_metric(matrix, task, current_mode, "ndcg_at_10")
+            lines.append(
+                f"| {task} | {baseline_value:.4f} | {current_value:.4f} | "
+                f"{current_value - baseline_value:+.4f} |"
+            )
     lines.extend(
         (
             "",
@@ -145,7 +206,7 @@ def markdown(matrix: dict) -> str:
             "```bash",
             "uv run scripts/run_public_benchmark_matrix.py \\",
             "  --profile public-core \\",
-            "  --modes lexical,hash,hybrid \\",
+            f"  --modes {','.join(matrix['modes'])} \\",
             "  --runs 3 \\",
             "  --datasets-root /tmp/ivygrep-public-datasets \\",
             "  --work-root /tmp/ivygrep-public-results \\",
@@ -166,7 +227,7 @@ def markdown(matrix: dict) -> str:
     return "\n".join(lines)
 
 
-def html(matrix: dict) -> str:
+def html(matrix: dict, baseline: dict | None = None) -> str:
     rows = []
     for mode in matrix["modes"]:
         rows.append(
@@ -194,6 +255,24 @@ def html(matrix: dict) -> str:
                 f"<td>{task_metric(matrix, task, mode, 'recall_at_20'):.4f}</td>"
                 "</tr>"
             )
+    comparison = ""
+    if baseline is not None:
+        validate_comparison(matrix, baseline)
+        baseline_mode = best_quality_mode(baseline)
+        current_mode = best_quality_mode(matrix)
+        ndcg_change = relative_change(
+            metric(matrix, current_mode, "ndcg_at_10"),
+            metric(baseline, baseline_mode, "ndcg_at_10"),
+        )
+        mrr_change = relative_change(
+            metric(matrix, current_mode, "mrr_at_10"),
+            metric(baseline, baseline_mode, "mrr_at_10"),
+        )
+        comparison = f"""
+        <section class="report-card">
+            <h2>Change from frozen baseline</h2>
+            <p><code>{escape(current_mode)}</code> improves nDCG@10 by {ndcg_change:+.2%} and MRR@10 by {mrr_change:+.2%} over <code>{escape(baseline_mode)}</code> at commit <code>{escape(baseline["ivygrep_commit"][:12])}</code>. The raw JSON retains every task and run.</p>
+        </section>"""
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -232,6 +311,7 @@ def html(matrix: dict) -> str:
             </table></div>
             <p>Population variance, phase timings, peak RSS, binary identity, dataset revisions, and checksums are retained in the raw JSON.</p>
         </section>
+        {comparison}
         <section class="report-card">
             <h2>Per-task quality</h2>
             <div class="report-table-wrap"><table class="report-table">
@@ -253,12 +333,18 @@ def html(matrix: dict) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument("--baseline", type=Path)
     parser.add_argument("--markdown", type=Path, required=True)
     parser.add_argument("--html", type=Path, required=True)
     args = parser.parse_args()
     matrix = json.loads(args.input.read_text(encoding="utf-8"))
-    args.markdown.write_text(markdown(matrix), encoding="utf-8")
-    args.html.write_text(html(matrix), encoding="utf-8")
+    baseline = (
+        json.loads(args.baseline.read_text(encoding="utf-8"))
+        if args.baseline
+        else None
+    )
+    args.markdown.write_text(markdown(matrix, baseline), encoding="utf-8")
+    args.html.write_text(html(matrix, baseline), encoding="utf-8")
     return 0
 
 

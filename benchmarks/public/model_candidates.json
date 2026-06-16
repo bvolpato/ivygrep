@@ -16,13 +16,13 @@
       "status": "rejected",
       "source": "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2",
       "license": "Apache-2.0",
-      "reason": "Lower aggregate quality with substantially higher latency, memory, and indexing cost."
+      "reason": "Crossed both laptop screening limits on its first completed task."
     },
     "code-minilm-l6-v1": {
       "status": "rejected",
       "source": "https://huggingface.co/isuruwijesiri/all-MiniLM-L6-v2-code-search-512",
       "license": "Apache-2.0",
-      "reason": "No aggregate nDCG advantage over static and exceeds the laptop RSS and latency budgets."
+      "reason": "Crossed both laptop screening limits on its first completed task; the partial quality result is not an aggregate claim."
     },
     "code-minilm-l12-v1": {
       "status": "resource-stop",

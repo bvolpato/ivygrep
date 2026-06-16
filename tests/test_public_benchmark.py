@@ -25,6 +25,7 @@ sys.modules["eval_code_retrieval"] = evaluator
 privacy = load_script("check_public_benchmark_privacy")
 leakage = load_script("check_retrieval_benchmark_leakage")
 renderer = load_script("render_public_benchmark")
+embedding_renderer = load_script("render_embedding_bakeoff")
 matrix_runner = load_script("run_public_benchmark_matrix")
 
 
@@ -163,6 +164,58 @@ class PublicBenchmarkTest(unittest.TestCase):
         self.assertIn("0.5000", report)
         self.assertNotIn("/home/", report)
 
+    def test_renderer_compares_matching_frozen_baseline(self):
+        def matrix(commit: str, ndcg: float) -> dict:
+            metrics = {
+                name: {
+                    "mean": ndcg,
+                    "standard_deviation": 0.0,
+                    "coefficient_of_variation": 0.0,
+                    "minimum": ndcg,
+                    "maximum": ndcg,
+                }
+                for name in (
+                    "ndcg_at_10",
+                    "mrr_at_10",
+                    "precision_at_5",
+                    "recall_at_20",
+                    "cold_latency_p50_ms",
+                    "cold_latency_p95_ms",
+                    "warm_latency_p50_ms",
+                    "warm_latency_p95_ms",
+                    "index_ms",
+                    "hash_enhancement_ms",
+                    "neural_enhancement_ms",
+                    "daemon_startup_ms",
+                    "neural_model_ready_ms",
+                    "index_size_bytes",
+                    "peak_child_rss_bytes",
+                )
+            }
+            return {
+                "ivygrep_commit": commit,
+                "profile": "public-core",
+                "tasks": ["one"],
+                "queries": 1000,
+                "repetitions": 3,
+                "modes": ["hash"],
+                "summary": {"hash": {"metrics": metrics}},
+                "task_summary": {
+                    "one": {
+                        "hash": {
+                            "ndcg_at_10": metrics["ndcg_at_10"],
+                            "mrr_at_10": metrics["mrr_at_10"],
+                            "recall_at_20": metrics["recall_at_20"],
+                        }
+                    }
+                },
+            }
+
+        report = renderer.markdown(matrix("current", 0.55), matrix("baseline", 0.50))
+        self.assertIn("Change from frozen baseline", report)
+        self.assertIn("+10.00%", report)
+        self.assertIn("+0.0500", report)
+
     def test_matrix_uses_global_query_latency_percentiles(self):
         def result(dataset: str, queries: int, latency: float) -> dict:
             metrics = {name: 0.5 for name in matrix_runner.QUALITY_METRICS}
@@ -205,6 +258,72 @@ class PublicBenchmarkTest(unittest.TestCase):
             matrix_runner.publication_result(result),
             {"dataset": "public"},
         )
+
+    def test_embedding_partial_must_match_selected_binary(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            matrix_path = root / "matrix.json"
+            partial_path = root / "partial.json"
+            metrics = {
+                name: {
+                    "mean": 1.0,
+                    "standard_deviation": 0.0,
+                    "coefficient_of_variation": 0.0,
+                    "minimum": 1.0,
+                    "maximum": 1.0,
+                }
+                for name in embedding_renderer.METRICS
+            }
+            matrix_path.write_text(
+                json.dumps(
+                    {
+                        "ivygrep_commit": "abc123",
+                        "harness_sha256": {
+                            "eval_code_retrieval.py": embedding_renderer.sha256_file(
+                                ROOT / "scripts" / "eval_code_retrieval.py"
+                            )
+                        },
+                        "neural_models": [{"profile": "static-retrieval-v1"}],
+                        "summary": {"neural": {"metrics": metrics}},
+                        "queries": 100,
+                        "tasks": ["public"],
+                        "repetitions": 1,
+                        "task_summary": {
+                            "public": {"neural": {"ndcg_at_10": metrics["ndcg_at_10"]}}
+                        },
+                        "results": [{"binary": {"sha256": "selected"}}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            partial_path.write_text(
+                json.dumps(
+                    {
+                        "dataset": "public",
+                        "queries": 25,
+                        "binary": {"sha256": "different"},
+                        "index_configuration": {
+                            "neural_model": {"profile": "general"}
+                        },
+                        **{name: 1.0 for name in embedding_renderer.METRICS},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manifest = {
+                "screening_budget": {},
+                "candidates": {
+                    "static-retrieval-v1": {"status": "selected-default"},
+                    "general": {"status": "rejected"},
+                },
+            }
+            with self.assertRaisesRegex(ValueError, "binary does not match"):
+                embedding_renderer.build_report(
+                    ROOT,
+                    manifest,
+                    {"static-retrieval-v1": matrix_path},
+                    {"general": partial_path},
+                )
 
     def test_reused_result_must_match_binary_and_dataset(self):
         with tempfile.TemporaryDirectory() as temp:

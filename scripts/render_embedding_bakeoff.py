@@ -71,11 +71,19 @@ def matrix_candidate(profile: str, path: Path, metadata: dict) -> dict:
             for task in matrix["tasks"]
         },
         "binary": matrix["results"][0]["binary"],
+        "ivygrep_commit": matrix["ivygrep_commit"],
+        "harness_sha256": matrix["harness_sha256"],
         "evidence_sha256": sha256_file(path),
     }
 
 
-def partial_candidate(profile: str, path: Path, metadata: dict) -> dict:
+def partial_candidate(
+    profile: str,
+    path: Path,
+    metadata: dict,
+    ivygrep_commit: str,
+    evaluator_sha256: str,
+) -> dict:
     result = json.loads(path.read_text(encoding="utf-8"))
     model = result["index_configuration"]["neural_model"]
     if model.get("profile") != profile:
@@ -102,6 +110,10 @@ def partial_candidate(profile: str, path: Path, metadata: dict) -> dict:
             }
         },
         "binary": result["binary"],
+        "ivygrep_commit": ivygrep_commit,
+        "harness_sha256": {
+            "eval_code_retrieval.py": evaluator_sha256,
+        },
         "evidence_sha256": sha256_file(path),
     }
 
@@ -118,10 +130,38 @@ def build_report(
         candidates.append(
             matrix_candidate(profile, path, manifest["candidates"][profile])
         )
+    selected = next(
+        (
+            candidate
+            for candidate in candidates
+            if candidate["status"] == "selected-default"
+        ),
+        None,
+    )
+    if selected is None:
+        raise ValueError("the selected default must have a complete screening matrix")
+    evidence_commit = selected["ivygrep_commit"]
+    binary_sha256 = selected["binary"]["sha256"]
+    evaluator_sha256 = selected["harness_sha256"]["eval_code_retrieval.py"]
+    current_evaluator_sha256 = sha256_file(root / "scripts" / "eval_code_retrieval.py")
+    if current_evaluator_sha256 != evaluator_sha256:
+        raise ValueError("partial evidence evaluator does not match the selected matrix")
     for profile, path in partials.items():
-        candidates.append(
-            partial_candidate(profile, path, manifest["candidates"][profile])
+        candidate = partial_candidate(
+            profile,
+            path,
+            manifest["candidates"][profile],
+            evidence_commit,
+            evaluator_sha256,
         )
+        if candidate["binary"]["sha256"] != binary_sha256:
+            raise ValueError(f"{path}: binary does not match the selected matrix")
+        candidates.append(candidate)
+    for candidate in candidates:
+        if candidate["ivygrep_commit"] != evidence_commit:
+            raise ValueError("evaluated candidates must use one ivygrep commit")
+        if candidate["binary"]["sha256"] != binary_sha256:
+            raise ValueError("evaluated candidates must use one ivygrep binary")
     for name, metadata in manifest["candidates"].items():
         if name not in evaluated:
             candidates.append({**metadata, "profile": name, "evaluation": "not-run"})
@@ -133,9 +173,11 @@ def build_report(
         )
     )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "ivygrep_commit": git_revision(root),
+        "ivygrep_commit": evidence_commit,
+        "renderer_commit": git_revision(root),
+        "binary_sha256": binary_sha256,
         "screening_budget": manifest["screening_budget"],
         "selection": "static-retrieval-v1",
         "candidates": candidates,
@@ -159,6 +201,7 @@ def markdown(report: dict) -> str:
         "hostname, query text, or source text is retained.",
         "",
         f"- Commit: `{report['ivygrep_commit']}`",
+        f"- Binary SHA-256: `{report['binary_sha256']}`",
         f"- Selected default: `{report['selection']}`",
         "",
         "| Profile | Status | nDCG@10 | MRR@10 | R@20 | Warm p95 | Neural build | Peak RSS | Index size |",
@@ -190,10 +233,10 @@ def markdown(report: dict) -> str:
             "",
             "## Decision",
             "",
-            "The static retrieval profile is the portable Pareto winner. The code "
-            "MiniLM L6 screen is statistically tied on aggregate nDCG but requires "
-            "substantially more memory, indexing time, and query latency. The L12 "
-            "profile crossed both screening stop limits on its first completed task.",
+            "The static retrieval profile is the portable Pareto winner and the only "
+            "candidate promoted through the complete screening matrix. Transformer "
+            "candidates that crossed a laptop screening limit were stopped after one "
+            "completed task, so their partial results are not aggregate quality claims.",
             "",
             "The selected model was promoted to the full 1,000-query public matrix; "
             "screening-only results are not used as headline quality claims.",
