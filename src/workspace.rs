@@ -854,10 +854,9 @@ impl Workspace {
             issues.push("missing merkle snapshot; rebuild required".to_string());
         }
 
-        // Empty standalone indexes carry no queryable data to migrate. Empty
-        // overlays still persist a Merkle snapshot and serve the base index,
-        // so their format must be validated before incremental comparison.
-        if chunk_count > 0 || is_overlay {
+        // Empty indexes still carry a concrete SQLite schema. Validate the
+        // format before a later incremental write targets stale columns.
+        if sqlite_p.exists() {
             let format_version = self.read_index_format_version();
             if format_version != INDEX_FORMAT_VERSION {
                 issues.push(format!(
@@ -1155,10 +1154,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
             .and_then(|value| {
                 serde_json::from_str::<crate::embedding::NeuralModelIdentity>(&value).ok()
             });
-        let neural_dimensions = neural_model
-            .as_ref()
-            .map(|identity| identity.dimensions)
-            .unwrap_or(384);
+        let neural_dimensions = persisted_or_configured_neural_dimensions(neural_model.as_ref());
         let neural_path = index_dir.join("vectors_neural.usearch");
         let neural_vector_count = if neural_path.exists() {
             crate::vector_store::VectorStore::open_readonly(
@@ -1345,6 +1341,14 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
 
 fn read_sqlite_counts(index_dir: &Path) -> (u64, u64) {
     read_cached_sqlite_counts(index_dir).unwrap_or((0, 0))
+}
+
+fn persisted_or_configured_neural_dimensions(
+    identity: Option<&crate::embedding::NeuralModelIdentity>,
+) -> usize {
+    identity
+        .map(|value| value.dimensions)
+        .unwrap_or_else(|| crate::embedding::configured_neural_model_identity().dimensions)
 }
 
 fn read_cached_sqlite_counts(index_dir: &Path) -> Option<(u64, u64)> {
@@ -2212,14 +2216,47 @@ mod tests {
             .unwrap();
         std::fs::create_dir_all(ws.tantivy_dir()).unwrap();
         std::fs::write(ws.vector_path(), "").unwrap();
+        ws.write_index_format_version().unwrap();
 
         let quick = ws.quick_index_health();
         assert_eq!(quick.state, WorkspaceIndexState::HealthyEmpty);
         assert!(!quick.has_indexable_files);
 
+        std::fs::write(
+            ws.index_format_version_path(),
+            (INDEX_FORMAT_VERSION - 1).to_string(),
+        )
+        .unwrap();
+        let stale = ws.quick_index_health();
+        assert_eq!(stale.state, WorkspaceIndexState::Unhealthy);
+        assert!(
+            stale
+                .issues
+                .iter()
+                .any(|issue| issue.contains("index format incompatible"))
+        );
+
+        ws.write_index_format_version().unwrap();
         let deep = ws.index_health();
         assert_eq!(deep.state, WorkspaceIndexState::Unhealthy);
         assert!(deep.has_indexable_files);
+    }
+
+    #[test]
+    #[serial]
+    fn configured_neural_dimensions_are_reported_before_identity_exists() {
+        unsafe { std::env::remove_var("IVYGREP_MODEL_PROFILE") };
+        assert_eq!(persisted_or_configured_neural_dimensions(None), 256);
+
+        unsafe { std::env::set_var("IVYGREP_MODEL_PROFILE", "code") };
+        assert_eq!(persisted_or_configured_neural_dimensions(None), 384);
+
+        let static_identity = crate::embedding::NeuralProfile::Static.identity();
+        assert_eq!(
+            persisted_or_configured_neural_dimensions(Some(&static_identity)),
+            256
+        );
+        unsafe { std::env::remove_var("IVYGREP_MODEL_PROFILE") };
     }
 
     #[test]

@@ -259,6 +259,7 @@ def start_daemon(
     home: Path,
     log_name: str = "million-benchmark-daemon.log",
 ):
+    home.mkdir(parents=True, exist_ok=True)
     endpoint = daemon_endpoint(home)
     endpoint.unlink(missing_ok=True)
     log_path = home / log_name
@@ -382,10 +383,14 @@ class DaemonClient:
             "scope_is_file": False,
             "skip_gitignore": False,
         }
-        started = time.perf_counter()
         payload = json.dumps(request).encode() + b"\n"
         response_bytes = b""
         for attempt in range(2):
+            if self.connection is None or self.reader is None:
+                self._connect()
+            # Time each attempt independently so reconnecting an older
+            # one-request daemon is not charged to the successful query.
+            started = time.perf_counter()
             try:
                 self.connection.sendall(payload)
                 response_bytes = self.reader.readline()
@@ -398,8 +403,8 @@ class DaemonClient:
                 self._connect()
         if not response_bytes:
             raise RuntimeError("daemon closed the connection without a response")
-        response = json.loads(response_bytes)
         elapsed_ms = (time.perf_counter() - started) * 1000.0
+        response = json.loads(response_bytes)
         if response.get("type") == "error":
             raise RuntimeError(response.get("message", "daemon search failed"))
         hits = response.get("hits", [])

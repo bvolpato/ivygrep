@@ -1,7 +1,10 @@
 import importlib.util
+import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,6 +52,79 @@ def artifact(
 
 
 class MillionBenchmarkTest(unittest.TestCase):
+    def test_start_daemon_creates_fresh_home_before_opening_log(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / "fresh-home"
+
+            class FakeProcess:
+                def poll(self):
+                    return None
+
+            def fake_popen(*_args, **_kwargs):
+                benchmark.daemon_endpoint(home).touch()
+                return FakeProcess()
+
+            with mock.patch.object(benchmark.subprocess, "Popen", fake_popen):
+                process, log, log_path = benchmark.start_daemon(
+                    Path("/tmp/ig"),
+                    Path(temp),
+                    {},
+                    home,
+                )
+
+            self.assertIsInstance(process, FakeProcess)
+            self.assertEqual(log_path, home / "million-benchmark-daemon.log")
+            self.assertTrue(log_path.exists())
+            log.close()
+
+    def test_daemon_retry_excludes_stale_connection_from_latency(self):
+        response = json.dumps({"type": "search_results", "hits": []}).encode() + b"\n"
+        connections = []
+        responses = [[response, b""], [response]]
+
+        class FakeReader:
+            def __init__(self, values):
+                self.values = values
+
+            def readline(self):
+                return self.values.pop(0)
+
+            def close(self):
+                pass
+
+        class FakeConnection:
+            def __init__(self, values):
+                self.closed = False
+                self.reader = FakeReader(values)
+
+            def sendall(self, _payload):
+                pass
+
+            def makefile(self, _mode):
+                return self.reader
+
+            def close(self):
+                self.closed = True
+
+        client = benchmark.DaemonClient(Path("/tmp/home"), Path("/tmp/corpus"))
+
+        def connect():
+            connection = FakeConnection(responses[len(connections)])
+            connections.append(connection)
+            client.connection = connection
+            client.reader = connection.makefile("rb")
+
+        client._connect = connect
+        clock = iter((0.0, 0.001, 10.0, 20.0, 20.002))
+        with mock.patch.object(benchmark.time, "perf_counter", lambda: next(clock)):
+            with client:
+                client.query("first")
+                result = client.query("second")
+
+        self.assertEqual(len(connections), 2)
+        self.assertTrue(all(connection.closed for connection in connections))
+        self.assertAlmostEqual(result["elapsed_ms"], 2.0)
+
     def test_dataset_provenance_ignores_unrelated_manifest_changes(self):
         matrix = {
             "results": [

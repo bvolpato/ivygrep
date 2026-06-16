@@ -267,7 +267,7 @@ pub fn create_neural_model() -> anyhow::Result<Box<dyn EmbeddingModel>> {
 }
 
 /// Create a neural model with reduced thread budget for background work.
-/// Uses half the CPU cores so the system stays responsive.
+/// Uses up to a quarter of the CPU cores so the system stays responsive.
 pub fn create_neural_model_background() -> anyhow::Result<Box<dyn EmbeddingModel>> {
     #[cfg(feature = "neural")]
     {
@@ -284,7 +284,7 @@ pub fn create_neural_model_background() -> anyhow::Result<Box<dyn EmbeddingModel
 fn create_configured_neural_model(is_background: bool) -> anyhow::Result<ConfiguredNeuralModel> {
     let profile = NeuralProfile::configured();
     match profile {
-        NeuralProfile::Static => StaticEmbeddingModel::new(profile)
+        NeuralProfile::Static => StaticEmbeddingModel::new(profile, is_background)
             .map(Box::new)
             .map(ConfiguredNeuralModel::Static),
         NeuralProfile::General | NeuralProfile::Code | NeuralProfile::CodeHighQuality => {
@@ -293,6 +293,29 @@ fn create_configured_neural_model(is_background: bool) -> anyhow::Result<Configu
                 .map(ConfiguredNeuralModel::Candle)
         }
     }
+}
+
+#[cfg(feature = "neural")]
+fn neural_thread_budget(is_background: bool) -> usize {
+    let requested = std::env::var("IVYGREP_NEURAL_THREADS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0);
+    neural_thread_budget_for(is_background, num_cpus::get(), requested)
+}
+
+#[cfg(feature = "neural")]
+fn neural_thread_budget_for(
+    is_background: bool,
+    logical_cpus: usize,
+    requested: Option<usize>,
+) -> usize {
+    let default_threads = if is_background {
+        (logical_cpus / 4).clamp(1, 8)
+    } else {
+        logical_cpus.clamp(1, 8)
+    };
+    requested.unwrap_or(default_threads).clamp(1, 32)
 }
 
 // ── Hash-based embedding (always available) ────────────────────────────────
@@ -458,11 +481,13 @@ struct StaticEmbeddingModel {
     dimensions: usize,
     profile: NeuralProfile,
     identity: NeuralModelIdentity,
+    thread_pool: rayon::ThreadPool,
+    is_background: bool,
 }
 
 #[cfg(feature = "neural")]
 impl StaticEmbeddingModel {
-    fn new(profile: NeuralProfile) -> anyhow::Result<Self> {
+    fn new(profile: NeuralProfile, is_background: bool) -> anyhow::Result<Self> {
         use candle_core::{Device, safetensors::MmapedSafetensors};
         use hf_hub::{Repo, RepoType, api::sync::Api};
 
@@ -486,12 +511,19 @@ impl StaticEmbeddingModel {
             .contiguous()?
             .flatten_all()?
             .to_vec1::<f32>()?;
+        let thread_count = neural_thread_budget(is_background);
+        let thread_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(thread_count)
+            .build()?;
+        tracing::info!("static neural pool limited to {thread_count} thread(s)");
         Ok(Self {
             tokenizer,
             weights,
             dimensions,
             profile,
             identity: profile.identity(),
+            thread_pool,
+            is_background,
         })
     }
 
@@ -548,10 +580,12 @@ impl EmbeddingModel for StaticEmbeddingModel {
 
     fn embed_batch(&self, texts: &[&str]) -> Vec<Vec<f32>> {
         use rayon::prelude::*;
-        texts
-            .par_iter()
-            .map(|text| self.embed_inner(text))
-            .collect()
+        self.thread_pool.install(|| {
+            texts
+                .par_iter()
+                .map(|text| self.embed_inner(text))
+                .collect()
+        })
     }
 
     fn backend_info(&self) -> Option<&'static str> {
@@ -564,6 +598,10 @@ impl EmbeddingModel for StaticEmbeddingModel {
 
     fn model_identity(&self) -> Option<&NeuralModelIdentity> {
         Some(&self.identity)
+    }
+
+    fn respects_system_constraints(&self) -> bool {
+        self.is_background
     }
 }
 
@@ -707,16 +745,7 @@ impl CandleEmbeddingModel {
         // Candle's small matrix operations regress sharply when rayon fans out
         // across every logical CPU on large hosts. Keep a laptop-sized default
         // and allow controlled benchmark overrides.
-        let requested_threads = std::env::var("IVYGREP_NEURAL_THREADS")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .filter(|value| *value > 0);
-        let default_threads = if is_background {
-            (num_cpus::get() / 4).clamp(1, 8)
-        } else {
-            num_cpus::get().clamp(1, 8)
-        };
-        let neural_threads = requested_threads.unwrap_or(default_threads).clamp(1, 32);
+        let neural_threads = neural_thread_budget(is_background);
         let _ = rayon::ThreadPoolBuilder::new()
             .num_threads(neural_threads)
             .build_global();
@@ -948,6 +977,16 @@ mod tests {
             NeuralProfile::CodeHighQuality.model_revision(),
             "0574cd81b67ad333192c62bb5da302bec71818fe"
         );
+    }
+
+    #[cfg(feature = "neural")]
+    #[test]
+    fn background_neural_thread_budget_is_bounded() {
+        assert_eq!(neural_thread_budget_for(true, 2, None), 1);
+        assert_eq!(neural_thread_budget_for(true, 32, None), 8);
+        assert_eq!(neural_thread_budget_for(false, 32, None), 8);
+        assert_eq!(neural_thread_budget_for(true, 32, Some(20)), 20);
+        assert_eq!(neural_thread_budget_for(true, 32, Some(64)), 32);
     }
 
     #[test]
