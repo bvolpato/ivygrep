@@ -4,6 +4,7 @@ from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 
@@ -25,6 +26,19 @@ renderer = load_script("render_evidence_dashboard")
 
 
 class EvidenceDashboardTest(unittest.TestCase):
+    def test_retained_publication_commit_does_not_require_git_history(
+        self,
+    ) -> None:
+        retained = "a" * 40
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "artifact.json"
+            path.write_text("{}\n", encoding="utf-8")
+            with mock.patch.object(renderer.subprocess, "run") as run:
+                commit = renderer.publication_commit(root, path, retained)
+        self.assertEqual(commit, retained)
+        run.assert_not_called()
+
     def test_release_history_retains_missing_sidecars(self) -> None:
         releases = [
             {

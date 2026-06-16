@@ -22,7 +22,18 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def publication_commit(root: Path, path: Path) -> str:
+def publication_commit(
+    root: Path, path: Path, retained_commit: str | None = None
+) -> str:
+    if retained_commit is not None:
+        normalized = retained_commit.lower()
+        if len(normalized) != 40 or any(
+            char not in "0123456789abcdef" for char in normalized
+        ):
+            raise ValueError(
+                f"{path} has an invalid retained publication commit"
+            )
+        return normalized
     result = subprocess.run(
         ["git", "log", "-1", "--format=%H", "--", str(path.relative_to(root))],
         cwd=root,
@@ -383,7 +394,9 @@ def build_dashboard(root: Path, manifest_path: Path, claims_path: Path) -> dict:
     for item in manifest["evidence"]:
         path = root / item["path"]
         source_commit, summary = summarize(item["id"], path)
-        published = publication_commit(root, path)
+        published = publication_commit(
+            root, path, item.get("publication_commit")
+        )
         evidence.append(
             {
                 **item,
@@ -399,7 +412,11 @@ def build_dashboard(root: Path, manifest_path: Path, claims_path: Path) -> dict:
     release_history = json.loads(
         release_history_path.read_text(encoding="utf-8")
     )
-    release_history_commit = publication_commit(root, release_history_path)
+    release_history_commit = publication_commit(
+        root,
+        release_history_path,
+        manifest.get("release_history_publication_commit"),
+    )
     by_id = {item["id"]: item for item in evidence}
     million = by_id["million-scale"]["summary"]
     release_gate = by_id["release-workflow"]["summary"]["artifact_acceptance"]
