@@ -27,6 +27,18 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("scripts/verify_release_artifact.py", workflow)
         self.assertIn("scripts/e2e_x86_baseline.sh", workflow)
 
+    def test_native_daemon_acceptance_uses_platform_temp_default(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        native_acceptance = workflow.split(
+            "- name: Run exact archive procedures", maxsplit=1
+        )[1].split(
+            "- name: Run exact Linux aarch64 archive under QEMU", maxsplit=1
+        )[0]
+
+        self.assertIn("scripts/check_daemon_equivalence.py", native_acceptance)
+        self.assertNotIn("--bench-home", native_acceptance)
+        self.assertNotIn("${RUNNER_TEMP:-$TEMP}", workflow)
+
     def test_release_publishes_sbom_and_provenance(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("anchore/sbom-action@", workflow)

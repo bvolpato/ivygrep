@@ -311,8 +311,7 @@ jobs:
           fi
           "$PYTHON" scripts/check_daemon_equivalence.py \
             --skip-build \
-            --binary "$BINARY" \
-            --bench-home "${RUNNER_TEMP:-$TEMP}/ivygrep-release-daemon-equivalence"
+            --binary "$BINARY"
 
       - name: Run exact Linux aarch64 archive under QEMU
         if: matrix.target == 'aarch64-unknown-linux-musl'
