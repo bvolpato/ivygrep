@@ -22,8 +22,10 @@ ivygrep releases are driven by Git tags. To deploy a new version:
 5. **Push** with tags: `git push && git push --tags`
 
 The `release.yml` GitHub Actions workflow will automatically:
-- Build binaries for Linux (x86_64 musl, aarch64 musl), macOS (x86_64, aarch64)
-- Create a GitHub Release with the binaries and SHA256 checksums
+- Build binaries for Linux (x86_64 musl, aarch64 musl), macOS (x86_64, aarch64),
+  and Windows (x86_64)
+- Create a GitHub Release with the binaries, SHA256 checksums, SPDX SBOMs, and
+  build provenance
 - Update the Homebrew tap at `bvolpato/homebrew-tap`
 
 ## Verify Release

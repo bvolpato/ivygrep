@@ -16,6 +16,7 @@ Options:
   --quick               Run only library tests, skip fmt/clippy
   --all-targets         Compile/test all Cargo targets
   --stress              Run ignored stress tests (requires fixtures)
+  --release             Compile Clippy/tests with the release profile
   --hash-only           Test without default neural feature
   --features FEATURES   Pass explicit Cargo features
   --no-fmt              Skip cargo fmt -- --check
@@ -30,6 +31,7 @@ Options:
 Examples:
   ./test.sh
   ./test.sh --quick
+  ./test.sh --release
   ./test.sh --hash-only
   ./test.sh --features cuda
   ./test.sh --filter query_aliases --nocapture
@@ -55,11 +57,14 @@ do_shellcheck=1
 do_clippy=1
 do_python_tests=1
 cargo_flags=(--locked)
+profile_flags=()
 scope_flags=(--lib --bins --tests)
 filter=()
 test_args=()
 extra_args=()
 wants_cuda=0
+hash_only=0
+force_release=0
 
 features_include_cuda() {
   local features=$1
@@ -91,6 +96,23 @@ configure_cuda_compute_cap() {
   fi
 }
 
+configure_build_profile() {
+  if ((force_release)); then
+    profile_flags=(--release)
+    return
+  fi
+
+  local system machine
+  system="$(uname -s)"
+  machine="$(uname -m)"
+  if [[ "$system" == "Linux" ]] &&
+    [[ "$machine" == "aarch64" || "$machine" == "arm64" ]] &&
+    ((!hash_only)); then
+    profile_flags=(--release)
+    echo "Using release profile for neural tests on Linux ARM64"
+  fi
+}
+
 while (($#)); do
   case "$1" in
     --ci)
@@ -119,8 +141,12 @@ while (($#)); do
       do_clippy=0
       do_python_tests=0
       ;;
+    --release)
+      force_release=1
+      ;;
     --hash-only)
       cargo_flags+=(--no-default-features)
+      hash_only=1
       ;;
     --features)
       [[ $# -ge 2 ]] || { echo "--features needs value" >&2; exit 2; }
@@ -177,6 +203,7 @@ export IVYGREP_NO_AUTOSPAWN="${IVYGREP_NO_AUTOSPAWN:-1}"
 export IVYGREP_ENHANCE_MAX_LOAD_RATIO="${IVYGREP_ENHANCE_MAX_LOAD_RATIO:-0}"
 export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
 configure_cuda_compute_cap
+configure_build_profile
 
 if ((do_fmt)); then
   run cargo fmt -- --check
@@ -191,13 +218,13 @@ if ((do_shellcheck)); then
 fi
 
 if ((do_clippy)); then
-  run cargo clippy --all-targets "${cargo_flags[@]}" -- -D warnings
+  run cargo clippy "${profile_flags[@]}" --all-targets "${cargo_flags[@]}" -- -D warnings
 fi
 
 if [[ "$mode" == "stress" ]]; then
-  cmd=(cargo test --test stress_harness "${cargo_flags[@]}" "${extra_args[@]}" -- --ignored --nocapture --test-threads 1)
+  cmd=(cargo test "${profile_flags[@]}" --test stress_harness "${cargo_flags[@]}" "${extra_args[@]}" -- --ignored --nocapture --test-threads 1)
 else
-  cmd=(cargo test "${scope_flags[@]}" "${cargo_flags[@]}" "${extra_args[@]}" "${filter[@]}")
+  cmd=(cargo test "${profile_flags[@]}" "${scope_flags[@]}" "${cargo_flags[@]}" "${extra_args[@]}" "${filter[@]}")
   if ((${#test_args[@]})); then
     cmd+=(-- "${test_args[@]}")
   fi

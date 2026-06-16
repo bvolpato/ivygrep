@@ -6,6 +6,10 @@
 ./test.sh --quick
 ```
 
+On Linux ARM64, neural-mode validation automatically uses the release profile.
+The upstream SIMD dependency emits FP16-only assembly in debug builds on a
+baseline ARM target. Use `./test.sh --release` to select that profile explicitly.
+
 ## Full Validation (with clippy)
 
 ```bash
