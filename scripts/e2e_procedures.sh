@@ -102,7 +102,8 @@ trap cleanup EXIT INT TERM
 
 project="$tmp_root/project"
 out_dir="$tmp_root/out"
-mkdir -p "$project/.git" "$project/src/auth" "$project/src/payments" "$project/docs" "$project/vendor" "$out_dir"
+mkdir -p "$project/src/auth" "$project/src/payments" "$project/docs" "$project/vendor" "$out_dir"
+git -C "$project" init -q
 
 cat > "$project/src/payments/tax.rs" <<'EOF'
 pub fn calculate_sales_tax(subtotal: u64, region: &str) -> u64 {
