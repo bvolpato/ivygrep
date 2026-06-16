@@ -4,11 +4,12 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
-## [0.11.1] - 2026-06-16
+## [0.11.2] - 2026-06-16
 
 ### Fixed
 - **Workspace discovery validates Git roots.** Invalid `.git` ancestors are ignored instead of causing unrelated parent directories to be indexed.
 - **Worktree checkpoints stay inside overlay storage.** Completing an overlay index no longer creates an empty `metadata.sqlite3` beside the delta stores.
+- **Linux ARM64 release acceptance includes Git offline.** The exact-archive QEMU smoke test now uses a pinned Git-capable image while retaining network isolation.
 
 ### Performance
 - **Clean worktrees reuse one shared base index.** Worktree creation skips redundant base rewrites when the indexed checkout state is unchanged; sparse-checkout and other checkout-shape changes run incremental base reconciliation before an overlay inherits data.

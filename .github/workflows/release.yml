@@ -323,11 +323,12 @@ jobs:
           docker run --rm \
             --platform linux/arm64 \
             --network none \
+            --entrypoint sh \
             -v "$PWD:/workspace" \
             -w /workspace \
             -e BINARY="/workspace/${BINARY_REL}" \
             -e IVYGREP_NO_AUTOSPAWN=1 \
-            alpine:latest sh -c '
+            alpine/git@sha256:113d99116e236f93f0b1f53cd46dbda662cf1136d20dc9ae2834962226654d9f -c '
               set -eu
               sh scripts/e2e_procedures.sh --binary "$BINARY"
             '

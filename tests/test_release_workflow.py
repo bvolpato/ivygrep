@@ -39,6 +39,16 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertNotIn("--bench-home", native_acceptance)
         self.assertNotIn("${RUNNER_TEMP:-$TEMP}", workflow)
 
+    def test_linux_arm_acceptance_has_git_without_network_access(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        arm_acceptance = workflow.split(
+            "- name: Run exact Linux aarch64 archive under QEMU", maxsplit=1
+        )[1].split("- name: Reject elevated x86 ISA requirements", maxsplit=1)[0]
+
+        self.assertIn("--network none", arm_acceptance)
+        self.assertIn("--entrypoint sh", arm_acceptance)
+        self.assertIn("alpine/git@sha256:", arm_acceptance)
+
     def test_release_publishes_sbom_and_provenance(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("anchore/sbom-action@", workflow)
