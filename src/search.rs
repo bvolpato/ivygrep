@@ -729,7 +729,7 @@ pub fn hybrid_search_with_context(
     let candidate_limit = if output_limit == usize::MAX {
         50_000
     } else {
-        (output_limit * routing.lexical_multiplier * corpus_multiplier).clamp(500, 50_000)
+        (output_limit * routing.lexical_multiplier).clamp(200, 50_000)
     };
     // Literal pass needs exact substring verification via SQLite (text not
     // stored in Tantivy), so cap tighter: default → 250, scales up with limit.
@@ -984,7 +984,11 @@ pub fn hybrid_search_with_context(
     // their own ranked list in fusion (see fuse_rrf) rather than being
     // injected into the lexical pool with a fake score.
     let mut path_chunks: Vec<(IndexedChunk, f32)> = Vec::new();
-    if let Some(fpt_field) = ctx.fields.file_path_text {
+    let run_path_pass = matches!(
+        routing.intent,
+        QueryIntent::ExactIdentifier | QueryIntent::Path
+    ) || raw_query_terms(trimmed).len() <= 3;
+    if run_path_pass && let Some(fpt_field) = ctx.fields.file_path_text {
         let mut path_parser = QueryParser::for_index(&ctx.indexes[0], vec![fpt_field]);
         path_parser.set_conjunction_by_default();
         // Reuse the lexical_queries computed at the start of hybrid_search.

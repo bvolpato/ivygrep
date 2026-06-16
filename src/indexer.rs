@@ -49,6 +49,15 @@ pub struct IndexingSummary {
     pub indexed_files: usize,
     pub deleted_files: usize,
     pub total_chunks: usize,
+    #[serde(default)]
+    pub phase_timings: IndexingPhaseTimings,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IndexingPhaseTimings {
+    pub discovery_ms: f64,
+    pub persist_ms: f64,
+    pub finalize_ms: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -65,7 +74,21 @@ pub struct IndexedChunk {
     pub is_ignored: bool,
 }
 
-type IndexedFileBatch = Vec<(PathBuf, Vec<IndexedChunk>)>;
+#[derive(Debug, Clone)]
+struct PreparedIndexedChunk {
+    chunk: IndexedChunk,
+    compressed_text: Vec<u8>,
+}
+
+fn prepare_indexed_chunk(chunk: IndexedChunk) -> PreparedIndexedChunk {
+    let compressed_text = compress_text(&chunk.text);
+    PreparedIndexedChunk {
+        chunk,
+        compressed_text,
+    }
+}
+
+type IndexedFileBatch = Vec<(PathBuf, Vec<PreparedIndexedChunk>)>;
 
 struct IndexBatchProducer {
     receiver: Option<std::sync::mpsc::Receiver<IndexedFileBatch>>,
@@ -339,6 +362,8 @@ fn index_workspace_inner(
     trust_live_watcher: bool,
     watcher_paths: Option<&[PathBuf]>,
 ) -> Result<IndexingSummary> {
+    let index_started = std::time::Instant::now();
+
     // Write metadata early so the workspace appears in `ig --status` during indexing.
     // The final write after completion updates last_indexed_at_unix.
     if workspace.read_metadata()?.is_none() {
@@ -366,6 +391,10 @@ fn index_workspace_inner(
             indexed_files: 0,
             deleted_files: 0,
             total_chunks: count_chunks(&workspace.sqlite_path())?,
+            phase_timings: IndexingPhaseTimings {
+                discovery_ms: index_started.elapsed().as_secs_f64() * 1_000.0,
+                ..Default::default()
+            },
         });
     }
 
@@ -646,6 +675,10 @@ fn index_workspace_inner(
                 indexed_files: 0,
                 deleted_files: 0,
                 total_chunks: count_workspace_chunks(workspace).unwrap_or(0),
+                phase_timings: IndexingPhaseTimings {
+                    discovery_ms: index_started.elapsed().as_secs_f64() * 1_000.0,
+                    ..Default::default()
+                },
             });
         }
         (d, Some(new), clear_overlay_paths)
@@ -677,10 +710,17 @@ fn index_workspace_inner(
                 indexed_files: 0,
                 deleted_files: 0,
                 total_chunks: count_workspace_chunks(workspace).unwrap_or(0),
+                phase_timings: IndexingPhaseTimings {
+                    discovery_ms: index_started.elapsed().as_secs_f64() * 1_000.0,
+                    ..Default::default()
+                },
             });
         }
         (d, Some(new), Vec::new())
     };
+
+    let discovery_ms = index_started.elapsed().as_secs_f64() * 1_000.0;
+    let persist_started = std::time::Instant::now();
 
     // Determine which stores to write to: overlay or main
     let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
@@ -896,6 +936,7 @@ fn index_workspace_inner(
                         .into_iter()
                         .map(|c| build_indexed_chunk(c, *is_ignored))
                         .filter(|chunk| seen_vector_keys.insert(chunk.vector_key))
+                        .map(prepare_indexed_chunk)
                         .collect();
 
                     let n = progress_counter_clone
@@ -965,10 +1006,12 @@ fn index_workspace_inner(
                 .unwrap_or_default()
                 .as_secs() as i64;
 
-            for indexed in indexed_chunks {
+            for prepared in indexed_chunks {
+                let indexed = &prepared.chunk;
                 persist_or_stop!(insert_chunk(
                     &tx,
                     indexed,
+                    &prepared.compressed_text,
                     &rel_path_string,
                     is_fresh_index,
                     now_unix
@@ -983,7 +1026,8 @@ fn index_workspace_inner(
         }
 
         // Prevent memory/WAL ballooning on massive repositories
-        if chunks_since_commit >= 25_000 {
+        let commit_threshold = if is_fresh_index { 250_000 } else { 25_000 };
+        if chunks_since_commit >= commit_threshold {
             persist_or_stop!(tx.commit());
             persist_or_stop!(writer.commit());
             tx = persist_or_stop!(sqlite.transaction());
@@ -994,6 +1038,8 @@ fn index_workspace_inner(
     producer.finish()?;
 
     let t1 = std::time::Instant::now();
+    let persist_ms = persist_started.elapsed().as_secs_f64() * 1_000.0;
+    let finalize_started = std::time::Instant::now();
     if show_progress && total > 0 {
         eprint!(
             "\r\x1b[K  ✓ {} files, {} chunks — indexed completely in {:.1}s\n",
@@ -1082,6 +1128,11 @@ fn index_workspace_inner(
         indexed_files: touched_files.len(),
         deleted_files: diff.deleted.len(),
         total_chunks: count_workspace_chunks(workspace).unwrap_or(0),
+        phase_timings: IndexingPhaseTimings {
+            discovery_ms,
+            persist_ms,
+            finalize_ms: finalize_started.elapsed().as_secs_f64() * 1_000.0,
+        },
     })
 }
 
@@ -1794,6 +1845,7 @@ fn add_chunk_doc(
 fn insert_chunk(
     conn: &Connection,
     chunk: &IndexedChunk,
+    compressed_text: &[u8],
     file_path: &str,
     fresh: bool,
     now_unix: i64,
@@ -1836,7 +1888,7 @@ fn insert_chunk(
         chunk.end_line as i64,
         chunk.language,
         chunk.kind,
-        compress_text(&chunk.text),
+        compressed_text,
         chunk.content_hash,
         chunk.vector_key as i64,
         now_unix,
@@ -2816,6 +2868,27 @@ mod tests {
         let compressed = super::compress_text(original);
         let decompressed = super::decompress_text(compressed);
         assert_eq!(decompressed, original);
+    }
+
+    #[test]
+    fn prepared_chunk_compresses_text_before_persistence() {
+        let chunk = build_indexed_chunk(
+            Chunk {
+                id: uuid::Uuid::new_v4(),
+                file_path: PathBuf::from("src/lib.rs"),
+                start_line: 1,
+                end_line: 1,
+                text: "pub fn prepared() {}\n".to_string(),
+                language: "rust".to_string(),
+                kind: ChunkKind::Function,
+                content_hash: "prepared-content-hash".to_string(),
+            },
+            false,
+        );
+        let prepared = super::prepare_indexed_chunk(chunk.clone());
+
+        assert_eq!(prepared.chunk.text, chunk.text);
+        assert_eq!(super::decompress_text(prepared.compressed_text), chunk.text);
     }
 
     #[test]

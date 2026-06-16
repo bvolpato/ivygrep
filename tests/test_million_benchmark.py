@@ -1,0 +1,73 @@
+import importlib.util
+from pathlib import Path
+import unittest
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def load_script(name: str):
+    path = ROOT / "scripts" / f"{name}.py"
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+benchmark = load_script("bench_million_chunks")
+comparator = load_script("compare_million_benchmarks")
+
+
+def artifact(latencies, throughput=100.0, recall=1.0, commit="commit"):
+    return {
+        "ivygrep_commit": commit,
+        "index": {"chunks_per_second": throughput},
+        "queries": {
+            "warm_distinct": {
+                "latency_samples_ms": latencies,
+                "expected_recall_at_20": recall,
+            }
+        },
+    }
+
+
+class MillionBenchmarkTest(unittest.TestCase):
+    def test_generated_query_cases_map_to_the_expected_file(self):
+        cases = benchmark.query_cases(2, 1_000_000, 100)
+        self.assertEqual(
+            cases[0],
+            (
+                "calculate invoice tax for regional order 0",
+                "shard_00/module_00000.rs",
+            ),
+        )
+        self.assertEqual(cases[1][1], "shard_00/module_00099.rs")
+
+    def test_comparison_accepts_two_x_speedups_without_quality_loss(self):
+        result = comparator.compare(
+            artifact([100.0] * 40, throughput=100.0, commit="base"),
+            artifact([40.0] * 40, throughput=220.0, commit="head"),
+            significant_regression_ratio=1.15,
+            required_warm_ratio=0.5,
+            required_index_ratio=2.0,
+            maximum_quality_loss=0.0,
+        )
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["failures"], [])
+
+    def test_comparison_rejects_significant_latency_regression(self):
+        result = comparator.compare(
+            artifact([100.0] * 40),
+            artifact([130.0] * 40),
+            significant_regression_ratio=1.15,
+            required_warm_ratio=None,
+            required_index_ratio=None,
+            maximum_quality_loss=0.0,
+        )
+        self.assertFalse(result["passed"])
+        self.assertTrue(result["warm_distinct_p95_ratio"]["significant_regression"])
+
+
+if __name__ == "__main__":
+    unittest.main()
