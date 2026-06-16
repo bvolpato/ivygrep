@@ -1533,10 +1533,18 @@ fn should_run_literal_pass(query_text: &str) -> bool {
 
 fn should_use_conjunctive_numeric_query(query_text: &str) -> bool {
     let terms = raw_query_terms(query_text);
-    terms.len() >= 3
+    (3..=10).contains(&terms.len())
+        && query_text
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch.is_ascii_whitespace())
+        && terms
+            .last()
+            .is_some_and(|term| term.len() >= 3 && term.chars().all(|ch| ch.is_ascii_digit()))
         && terms
             .iter()
-            .any(|term| term.len() >= 2 && term.chars().all(|ch| ch.is_ascii_digit()))
+            .filter(|term| term.chars().all(|ch| ch.is_ascii_digit()))
+            .count()
+            == 1
 }
 
 fn build_literal_queries(query_text: &str, lexical_queries: &[String]) -> Vec<String> {
@@ -4067,6 +4075,12 @@ mod tests {
             "retry request after failure"
         ));
         assert!(!should_use_conjunctive_numeric_query("status 5"));
+        assert!(!should_use_conjunctive_numeric_query(
+            "for slot in range 16 if slot in 6 7 12"
+        ));
+        assert!(!should_use_conjunctive_numeric_query(
+            "calculate payload checksum bits for binary value 1001001."
+        ));
     }
 
     #[test]

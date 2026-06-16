@@ -170,7 +170,10 @@ def timed(
     env: dict[str, str],
     monitor_path: Path | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], dict]:
-    with tempfile.NamedTemporaryFile() as stdout, tempfile.NamedTemporaryFile() as stderr:
+    with (
+        tempfile.NamedTemporaryFile() as stdout,
+        tempfile.NamedTemporaryFile() as stderr,
+    ):
         started = time.perf_counter()
         process = subprocess.Popen(
             command,
@@ -638,10 +641,11 @@ def main() -> int:
     parser.add_argument(
         "--home",
         type=Path,
-        default=Path(os.environ.get("TMPDIR", "/tmp"))
-        / "ivygrep-public-million-home",
+        default=Path(os.environ.get("TMPDIR", "/tmp")) / "ivygrep-public-million-home",
     )
-    parser.add_argument("--binary", type=Path, default=root / "target" / "release" / "ig")
+    parser.add_argument(
+        "--binary", type=Path, default=root / "target" / "release" / "ig"
+    )
     parser.add_argument("--files", type=int, default=DEFAULT_FILES)
     parser.add_argument("--chunks-per-file", type=int, default=DEFAULT_CHUNKS_PER_FILE)
     parser.add_argument("--query-samples", type=int, default=100)
@@ -726,7 +730,7 @@ def main() -> int:
             "chunk_count": workspace["chunk_count"],
             "file_count": workspace["file_count"],
             "size_bytes": workspace["index_size_bytes"],
-            "components": workspace["index_components"],
+            "components": workspace.get("index_components", {}),
             "chunks_per_second": (
                 workspace["chunk_count"] / (index_metrics["wall_ms"] / 1000.0)
                 if index_metrics

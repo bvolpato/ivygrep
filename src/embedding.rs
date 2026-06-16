@@ -284,11 +284,13 @@ pub fn create_neural_model_background() -> anyhow::Result<Box<dyn EmbeddingModel
 fn create_configured_neural_model(is_background: bool) -> anyhow::Result<ConfiguredNeuralModel> {
     let profile = NeuralProfile::configured();
     match profile {
-        NeuralProfile::Static => {
-            StaticEmbeddingModel::new(profile).map(ConfiguredNeuralModel::Static)
-        }
+        NeuralProfile::Static => StaticEmbeddingModel::new(profile)
+            .map(Box::new)
+            .map(ConfiguredNeuralModel::Static),
         NeuralProfile::General | NeuralProfile::Code | NeuralProfile::CodeHighQuality => {
-            CandleEmbeddingModel::new_internal(is_background).map(ConfiguredNeuralModel::Candle)
+            CandleEmbeddingModel::new_internal(is_background)
+                .map(Box::new)
+                .map(ConfiguredNeuralModel::Candle)
         }
     }
 }
@@ -393,8 +395,8 @@ impl EmbeddingModel for HashEmbeddingModel {
 
 #[cfg(feature = "neural")]
 enum ConfiguredNeuralModel {
-    Static(StaticEmbeddingModel),
-    Candle(CandleEmbeddingModel),
+    Static(Box<StaticEmbeddingModel>),
+    Candle(Box<CandleEmbeddingModel>),
 }
 
 #[cfg(feature = "neural")]

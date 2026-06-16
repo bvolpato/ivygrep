@@ -68,6 +68,26 @@ class MillionBenchmarkTest(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertTrue(result["warm_distinct_p95_ratio"]["significant_regression"])
 
+    def test_comparison_rejects_significant_index_regression_across_runs(self):
+        baselines = [
+            artifact([100.0] * 40, throughput=value, commit="base")
+            for value in (100.0, 102.0, 98.0)
+        ]
+        currents = [
+            artifact([100.0] * 40, throughput=value, commit="head")
+            for value in (70.0, 72.0, 68.0)
+        ]
+        result = comparator.compare_runs(
+            baselines,
+            currents,
+            significant_regression_ratio=1.15,
+            required_warm_ratio=None,
+            required_index_ratio=None,
+            maximum_quality_loss=0.0,
+        )
+        self.assertFalse(result["passed"])
+        self.assertTrue(result["index_throughput_ratio"]["significant_regression"])
+
 
 if __name__ == "__main__":
     unittest.main()

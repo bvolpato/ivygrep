@@ -209,7 +209,7 @@ pub(crate) fn cache_identity() -> String {
     }
 }
 
-pub(crate) fn rerank_hits(query: &str, hits: &mut Vec<SearchHit>) {
+pub(crate) fn rerank_hits(query: &str, hits: &mut [SearchHit]) {
     if configured_mode().0 == Mode::Deterministic {
         return;
     }
@@ -227,7 +227,7 @@ pub(crate) fn rerank_hits(query: &str, hits: &mut Vec<SearchHit>) {
     rerank_hits_with_model(query, hits, model);
 }
 
-fn rerank_hits_with_model(query: &str, hits: &mut Vec<SearchHit>, model: &LearnedModel) {
+fn rerank_hits_with_model(query: &str, hits: &mut [SearchHit], model: &LearnedModel) {
     let mut grouped = HashMap::<PathBuf, FileCandidate>::new();
     for (index, hit) in hits.iter().enumerate() {
         let entry = grouped
