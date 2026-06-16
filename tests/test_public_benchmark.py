@@ -29,6 +29,7 @@ renderer = load_script("render_public_benchmark")
 embedding_renderer = load_script("render_embedding_bakeoff")
 matrix_runner = load_script("run_public_benchmark_matrix")
 reranker_trainer = load_script("train_public_reranker")
+reranker_renderer = load_script("render_public_reranker")
 
 
 class PublicBenchmarkTest(unittest.TestCase):
@@ -370,6 +371,27 @@ class PublicBenchmarkTest(unittest.TestCase):
         self.assertEqual(len(first), len(reranker_trainer.FEATURE_NAMES))
         self.assertTrue(all(math.isfinite(value) for value in first))
         self.assertTrue(all(0.0 <= value <= 1.0 for value in first))
+
+    def test_public_reranker_evidence_passes_acceptance_gate(self):
+        report = reranker_renderer.build_report(
+            ROOT / "benchmarks" / "public" / "reranker_model.json",
+            ROOT
+            / "docs"
+            / "benchmarks"
+            / "public-reranker-deterministic-results.json",
+            ROOT
+            / "docs"
+            / "benchmarks"
+            / "public-reranker-learned-results.json",
+        )
+        self.assertTrue(report["model"]["offline_evaluation"]["gate"]["passed"])
+        self.assertTrue(report["integrated_evaluation"]["gate"]["passed"])
+        self.assertGreaterEqual(
+            report["integrated_evaluation"]["metrics"]["ndcg_at_10"][
+                "relative_delta"
+            ],
+            0.05,
+        )
 
     def test_reused_result_must_match_binary_and_dataset(self):
         with tempfile.TemporaryDirectory() as temp:

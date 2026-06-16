@@ -65,7 +65,13 @@ jobs:
             docs/benchmarks/public-code-retrieval.html \
             docs/benchmarks/embedding-model-bakeoff.json \
             docs/benchmarks/embedding-model-bakeoff.md \
-            docs/benchmarks/embedding-model-bakeoff.html
+            docs/benchmarks/embedding-model-bakeoff.html \
+            benchmarks/public/reranker_model.json \
+            docs/benchmarks/public-reranker-deterministic-results.json \
+            docs/benchmarks/public-reranker-learned-results.json \
+            docs/benchmarks/public-reranker-results.json \
+            docs/benchmarks/public-reranker.md \
+            docs/benchmarks/public-reranker.html
 
   matrix:
     name: Run pinned public matrix
