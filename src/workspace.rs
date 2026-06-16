@@ -1956,14 +1956,15 @@ mod tests {
         // Hash vectors are complete, but neural vectors are missing -> true
         assert!(ws.needs_neural_enhancement());
 
+        let neural_dimensions = crate::embedding::configured_neural_model_identity().dimensions;
         {
             let mut store = crate::vector_store::VectorStore::open(
                 &ws.vector_neural_path(),
-                384,
+                neural_dimensions,
                 crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
             )
             .unwrap();
-            store.upsert(1, vec![0.0; 384]).unwrap();
+            store.upsert(1, vec![0.0; neural_dimensions]).unwrap();
             store.save().unwrap();
         }
 
@@ -1974,11 +1975,11 @@ mod tests {
         {
             let mut store = crate::vector_store::VectorStore::open(
                 &ws.vector_neural_path(),
-                384,
+                neural_dimensions,
                 crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
             )
             .unwrap();
-            store.upsert(2, vec![0.0; 384]).unwrap();
+            store.upsert(2, vec![0.0; neural_dimensions]).unwrap();
             store.save().unwrap();
         }
 
