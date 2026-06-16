@@ -143,7 +143,7 @@ jobs:
       - name: Generate SPDX SBOM
         uses: anchore/sbom-action@17ae1740179002c89186b61233e0f892c3118b11 # v0.23.0
         with:
-          path: target/${{ matrix.target }}/release/${{ matrix.binary_name }}
+          file: target/${{ matrix.target }}/release/${{ matrix.binary_name }}
           format: spdx-json
           output-file: dist/ivygrep-${{ github.ref_name }}-${{ matrix.archive_name }}.spdx.json
           upload-artifact: false

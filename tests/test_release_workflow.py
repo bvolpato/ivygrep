@@ -30,6 +30,14 @@ class ReleaseWorkflowTest(unittest.TestCase):
     def test_release_publishes_sbom_and_provenance(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("anchore/sbom-action@", workflow)
+        self.assertIn(
+            "file: target/${{ matrix.target }}/release/${{ matrix.binary_name }}",
+            workflow,
+        )
+        self.assertNotIn(
+            "path: target/${{ matrix.target }}/release/${{ matrix.binary_name }}",
+            workflow,
+        )
         self.assertIn("actions/attest@", workflow)
         self.assertIn('--cargo-flags "$CARGO_FLAGS"', workflow)
         self.assertIn("*.spdx.json", workflow)
