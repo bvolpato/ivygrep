@@ -283,20 +283,33 @@ def html(report: dict) -> str:
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>ivygrep Embedding Model Bake-off</title>
+  <link rel="stylesheet" href="../style.css">
   <link rel="stylesheet" href="report.css">
+  <link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
 </head>
 <body class="report-page">
-  <main class="report-shell">
+  <div class="bg-fx"></div>
+  <div class="bg-fx-glow"></div>
+  <main class="report-shell relative z-10">
+    <nav class="report-nav">
+      <a class="report-brand" href="../"><img src="../assets/icon.svg" alt="ivygrep"><span>ivygrep benchmarks</span></a>
+      <div class="report-links"><a href="index.html">Reports</a><a href="embedding-model-bakeoff.json">Raw JSON</a><a href="https://github.com/bvolpato/ivygrep/blob/main/docs/benchmarks/embedding-model-bakeoff.md">Source</a></div>
+    </nav>
     <section class="report-hero">
       <div class="report-eyebrow">Portable Model Evidence</div>
       <h1>Embedding model bake-off</h1>
       <p>Public screening evidence selected <code>{escape(report["selection"])}</code> for the full retrieval matrix.</p>
     </section>
     <section class="report-card">
+      <h2>Candidate results</h2>
       <div class="report-table-wrap"><table class="report-table">
         <thead><tr><th>Profile</th><th>Status</th><th>nDCG@10</th><th>Warm p95</th><th>Peak RSS</th><th>Decision</th></tr></thead>
         <tbody>{"".join(rows)}</tbody>
       </table></div>
+    </section>
+    <section class="report-card">
+      <h2>Claim boundary</h2>
+      <p>The static profile is the only candidate that completed the screening matrix within the declared laptop budget. Resource-stopped rows are single-task observations, not aggregate quality claims.</p>
     </section>
   </main>
 </body>

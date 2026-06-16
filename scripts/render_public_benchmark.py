@@ -268,8 +268,7 @@ def html(matrix: dict, baseline: dict | None = None) -> str:
             metric(matrix, current_mode, "mrr_at_10"),
             metric(baseline, baseline_mode, "mrr_at_10"),
         )
-        comparison = f"""
-        <section class="report-card">
+        comparison = f"""        <section class="report-card">
             <h2>Change from frozen baseline</h2>
             <p><code>{escape(current_mode)}</code> improves nDCG@10 by {ndcg_change:+.2%} and MRR@10 by {mrr_change:+.2%} over <code>{escape(baseline_mode)}</code> at commit <code>{escape(baseline["ivygrep_commit"][:12])}</code>. The raw JSON retains every task and run.</p>
         </section>"""
