@@ -439,6 +439,7 @@ def evaluate(args: argparse.Namespace) -> dict:
                 cold_ms = cold_latencies.get(query_id)
                 warm_output, warm_ms = run_json(command, repo, daemon_env)
                 ranked = []
+                ranked_hits = []
                 seen: set[str] = set()
                 for item in warm_output:
                     result_path = Path(item["file_path"])
@@ -451,6 +452,26 @@ def evaluate(args: argparse.Namespace) -> dict:
                         if document_id not in seen:
                             seen.add(document_id)
                             ranked.append(document_id)
+                            hits = item.get("hits") or []
+                            sources = sorted(
+                                {
+                                    source
+                                    for hit in hits
+                                    for source in hit.get("sources", [])
+                                }
+                            )
+                            ranked_hits.append(
+                                {
+                                    "document_id": document_id,
+                                    "file_path": relative,
+                                    "total_score": float(item.get("total_score", 0.0)),
+                                    "hit_count": int(item.get("hit_count", len(hits))),
+                                    "sources": sources,
+                                    "preview": "\n".join(
+                                        str(hit.get("preview", "")) for hit in hits[:3]
+                                    )[:12000],
+                                }
+                            )
                 query_score = score_query(ranked, qrels.get(query_id, {}))
                 if not ranked:
                     no_hit_queries += 1
@@ -471,6 +492,7 @@ def evaluate(args: argparse.Namespace) -> dict:
                     {
                         "query_id": query_id,
                         "ranked": ranked,
+                        "ranked_hits": ranked_hits,
                         "cold_latency_ms": cold_ms,
                         "warm_latency_ms": warm_ms,
                         "no_hit": not ranked,

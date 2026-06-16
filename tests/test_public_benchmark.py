@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import math
 from pathlib import Path
 import sys
 import tempfile
@@ -27,6 +28,7 @@ leakage = load_script("check_retrieval_benchmark_leakage")
 renderer = load_script("render_public_benchmark")
 embedding_renderer = load_script("render_embedding_bakeoff")
 matrix_runner = load_script("run_public_benchmark_matrix")
+reranker_trainer = load_script("train_public_reranker")
 
 
 class PublicBenchmarkTest(unittest.TestCase):
@@ -43,6 +45,11 @@ class PublicBenchmarkTest(unittest.TestCase):
         self.assertIn(
             "codefeedback-st",
             manifest["profiles"]["public-core"]["tasks"],
+        )
+        self.assertTrue(
+            set(manifest["profiles"]["reranker-train"]["tasks"]).isdisjoint(
+                manifest["profiles"]["public-core"]["tasks"]
+            )
         )
 
     def test_cached_datasets_must_meet_profile_query_minimum(self):
@@ -324,6 +331,25 @@ class PublicBenchmarkTest(unittest.TestCase):
                     {"static-retrieval-v1": matrix_path},
                     {"general": partial_path},
                 )
+
+    def test_reranker_features_are_bounded_and_deterministic(self):
+        candidate = {
+            "file_path": "src/search.rs",
+            "total_score": 0.5,
+            "hit_count": 2,
+            "sources": ["lexical", "semantic"],
+            "preview": "fn route_query() { learned_rerank(); }",
+        }
+        first = reranker_trainer.feature_vector(
+            "route learned query", candidate, 0
+        )
+        second = reranker_trainer.feature_vector(
+            "route learned query", candidate, 0
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), len(reranker_trainer.FEATURE_NAMES))
+        self.assertTrue(all(math.isfinite(value) for value in first))
+        self.assertTrue(all(0.0 <= value <= 1.0 for value in first))
 
     def test_reused_result_must_match_binary_and_dataset(self):
         with tempfile.TemporaryDirectory() as temp:

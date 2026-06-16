@@ -44,6 +44,38 @@
         }
       }
     },
+    "reranker-train": {
+      "description": "Disjoint public CoIR tasks used to train and validate the compact learned reranker without touching public-core evaluation queries.",
+      "minimum_queries": 500,
+      "tasks": [
+        "stackoverflow-qa",
+        "apps",
+        "codefeedback-mt",
+        "synthetic-text2sql"
+      ],
+      "task_options": {
+        "stackoverflow-qa": {
+          "sample_queries": 200,
+          "sample_corpus": 5000,
+          "seed": 20260615
+        },
+        "apps": {
+          "sample_queries": 200,
+          "sample_corpus": 5000,
+          "seed": 20260615
+        },
+        "codefeedback-mt": {
+          "sample_queries": 200,
+          "sample_corpus": 5000,
+          "seed": 20260615
+        },
+        "synthetic-text2sql": {
+          "sample_queries": 200,
+          "sample_corpus": 5000,
+          "seed": 20260615
+        }
+      }
+    },
     "public-core": {
       "description": "Four compact public CoIR tasks with 1,000 held-out queries across natural-language, code-to-code, and multilingual retrieval.",
       "minimum_queries": 1000,
