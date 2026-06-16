@@ -498,7 +498,7 @@ pub fn literal_search_with_context(
 
     let query_lower = query.to_ascii_lowercase();
     let max_hits = options.limit.unwrap_or(500);
-    let candidate_chunks = exact_literal_chunks_with_context(ctx, query, options)?;
+    let candidate_chunks = exact_literal_chunks_with_context(ctx, query, options, false)?;
 
     tracing::trace!(
         "literal_scan={:?} candidates={}",
@@ -577,13 +577,23 @@ pub(crate) fn exact_literal_chunks(
     options: &SearchOptions,
 ) -> Result<Vec<IndexedChunk>> {
     let ctx = SearchContext::load(workspace, None, false)?;
-    exact_literal_chunks_with_context(&ctx, query, options)
+    exact_literal_chunks_with_context(&ctx, query, options, false)
+}
+
+pub(crate) fn exact_literal_chunks_unbounded(
+    workspace: &Workspace,
+    query: &str,
+    options: &SearchOptions,
+) -> Result<Vec<IndexedChunk>> {
+    let ctx = SearchContext::load(workspace, None, false)?;
+    exact_literal_chunks_with_context(&ctx, query, options, true)
 }
 
 fn exact_literal_chunks_with_context(
     ctx: &SearchContext,
     query: &str,
     options: &SearchOptions,
+    unbounded: bool,
 ) -> Result<Vec<IndexedChunk>> {
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
     let glob_path_filter = build_glob_path_query_filter(ctx, &path_matcher, options)?;
@@ -597,6 +607,7 @@ fn exact_literal_chunks_with_context(
         &path_matcher,
         &glob_path_filter,
         options,
+        unbounded,
     )
 }
 
@@ -610,8 +621,15 @@ fn collect_literal_candidates(
     path_matcher: &PathGlobMatcher,
     glob_path_filter: &GlobPathQueryFilter,
     options: &SearchOptions,
+    unbounded: bool,
 ) -> Result<Vec<IndexedChunk>> {
-    let candidate_limit = if let Some(limit) = options.limit {
+    let candidate_limit = if unbounded {
+        ctx.searchers
+            .iter()
+            .map(|searcher| searcher.num_docs() as usize)
+            .sum::<usize>()
+            .max(1)
+    } else if let Some(limit) = options.limit {
         if limit == usize::MAX {
             50_000
         } else {
@@ -632,7 +650,11 @@ fn collect_literal_candidates(
     parser.set_conjunction_by_default();
 
     let mut found_ids = HashSet::<String>::new();
-    let target_hits = options.limit.unwrap_or(100).min(candidate_limit);
+    let target_hits = if unbounded {
+        candidate_limit
+    } else {
+        options.limit.unwrap_or(100).min(candidate_limit)
+    };
 
     // Phase 1: Collect candidate chunks from Tantivy (metadata only, no text).
     let mut candidates: Vec<IndexedChunk> = Vec::new();
@@ -806,6 +828,7 @@ pub fn hybrid_search_with_context(
                     &path_matcher,
                     &glob_path_filter,
                     options,
+                    false,
                 )
             {
                 candidates.truncate(literal_limit);

@@ -246,11 +246,12 @@ fn search_call_sites(
     };
     let mut candidate_options = options.clone();
     candidate_options.limit = options.limit.map(|limit| limit.saturating_mul(4));
-    let candidates = crate::search::exact_literal_chunks(
-        workspace,
-        &format!("{normalized}("),
-        &candidate_options,
-    )?;
+    let query = format!("{normalized}(");
+    let candidates = if options.limit.is_some() {
+        crate::search::exact_literal_chunks(workspace, &query, &candidate_options)?
+    } else {
+        crate::search::exact_literal_chunks_unbounded(workspace, &query, &candidate_options)?
+    };
     let mut hits = Vec::new();
     let mut seen_call_sites = HashSet::new();
     let mut chunks_by_file = BTreeMap::<PathBuf, Vec<IndexedChunk>>::new();
@@ -595,5 +596,40 @@ mod tests {
         assert_eq!(callers[0].start_line, 2);
         assert!(callers[0].preview.contains("fn run()"));
         assert!(callers[0].preview.contains("parse();"));
+    }
+
+    #[test]
+    #[serial]
+    fn unbounded_call_site_searches_are_not_truncated() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        std::fs::create_dir(root.path().join(".git")).unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(root.path().join("definition.rs"), "fn parse() {}\n").unwrap();
+        for index in 0..125 {
+            std::fs::write(
+                root.path().join(format!("caller_{index}.rs")),
+                format!("fn caller_{index}() {{ parse(); }}\n"),
+            )
+            .unwrap();
+        }
+
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        crate::indexer::index_workspace(&workspace, &model).unwrap();
+
+        let references = search_symbols(
+            &workspace,
+            "parse",
+            SymbolSearchMode::References,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(references.len(), 125);
+
+        let callers =
+            search_symbols(&workspace, "parse", SymbolSearchMode::Callers, None, None).unwrap();
+        assert_eq!(callers.len(), 125);
     }
 }
