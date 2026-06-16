@@ -63,10 +63,17 @@ def binary_identity(binary: Path) -> dict:
 
 
 def runtime_metadata() -> dict:
+    cpu_model = platform.processor().strip()
+    if not cpu_model and platform.system() == "Linux":
+        for line in Path("/proc/cpuinfo").read_text(errors="replace").splitlines():
+            if line.lower().startswith(("model name", "hardware")):
+                cpu_model = line.split(":", 1)[-1].strip()
+                break
     return {
         "system": platform.system(),
         "release": platform.release(),
         "machine": platform.machine(),
+        "cpu_model": cpu_model or None,
         "logical_cpus": os.cpu_count() or 1,
         "physical_memory_bytes": (
             os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
@@ -74,6 +81,7 @@ def runtime_metadata() -> dict:
             else 0
         ),
         "python": platform.python_version(),
+        "load_average": list(os.getloadavg()) if hasattr(os, "getloadavg") else None,
     }
 
 
@@ -699,6 +707,13 @@ def main() -> int:
         "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "ivygrep_commit": args.source_commit or git_revision(root),
+        "harness_sha256": {
+            path.name: sha256_file(path)
+            for path in (
+                root / "scripts" / "bench_million_chunks.py",
+                root / "scripts" / "compare_million_benchmarks.py",
+            )
+        },
         "binary": binary_identity(binary),
         "runtime": runtime_metadata(),
         "corpus": {
