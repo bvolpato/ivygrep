@@ -82,6 +82,7 @@ candle_embed = { version = "0.1.4", default-features = false, optional = true }
 candle-core = { version = "0.10.2", optional = true }
 hf-hub = { version = "0.3.2", optional = true }
 tokenizers = { version = "0.19.1", optional = true }
+usearch = { version = "=2.24.0", default-features = false, features = ["fp16lib"] }
 
 [dev-dependencies]
 assert_cmd = "2.2"
@@ -95,9 +96,6 @@ tempfile = "3.27"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }
-
-[target.'cfg(not(target_os = "windows"))'.dependencies]
-usearch = { version = "2.24", default-features = false, features = ["fp16lib"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = [
@@ -117,3 +115,4 @@ harness = false
 [patch.crates-io]
 hf-hub = { path = "vendor/hf-hub" }
 candle_embed = { path = "vendor/candle_embed" }
+usearch = { path = "vendor/usearch" }

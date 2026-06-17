@@ -3,6 +3,7 @@ set -eu
 
 binary=
 cache=
+expected_backend=
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -12,6 +13,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --cache)
       cache=$2
+      shift 2
+      ;;
+    --expect-backend)
+      expected_backend=$2
       shift 2
       ;;
     *)
@@ -45,5 +50,8 @@ export IVYGREP_ENHANCE_MAX_LOAD_RATIO=0
 "$binary" --status --json > "$tmp_root/status.json"
 grep -Fq '"has_neural_vectors": true' "$tmp_root/status.json"
 grep -Fq '"neural_model": {' "$tmp_root/status.json"
+if [ -n "$expected_backend" ]; then
+  grep -Fq "$expected_backend" "$tmp_root/status.json"
+fi
 
 echo "cached neural model import passed"

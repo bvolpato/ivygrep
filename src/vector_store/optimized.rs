@@ -1,4 +1,6 @@
 use std::fs;
+#[cfg(target_os = "windows")]
+use std::io::Write;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -14,10 +16,16 @@ const HASH_EXPANSION_SEARCH: usize = 64;
 const SERIALIZED_DIMENSIONS_BYTES: u64 = 8;
 const SERIALIZED_HEADER_BYTES: u64 = 64;
 const SERIALIZED_MAGIC: &[u8] = b"usearch";
+#[cfg(target_os = "windows")]
+const BACKUP_EXTENSION: &str = "usearch.bak";
 
 pub struct VectorStore {
     path: PathBuf,
     index: Index,
+    // USearch retains a pointer to the buffer passed to view_from_buffer().
+    // Keep the index field first so it is dropped before its backing storage.
+    #[cfg(target_os = "windows")]
+    _readonly_buffer: Option<Box<[u8]>>,
 }
 
 fn create_index(dimensions: usize, quantization: ScalarKind) -> Result<Index> {
@@ -83,12 +91,22 @@ fn validate_existing_index_file(path: &Path) -> Result<()> {
 impl VectorStore {
     pub fn open(path: &Path, dimensions: usize, quantization: ScalarKind) -> Result<Self> {
         let index = create_index(dimensions, quantization)?;
-        if path.exists() {
-            validate_existing_index_file(path)?;
-            let path_str = path
-                .to_str()
-                .context("vector path contains invalid UTF-8")?;
-            match index.load(path_str) {
+        if let Some(load_path) = existing_index_path(path) {
+            validate_existing_index_file(&load_path)?;
+            #[cfg(target_os = "windows")]
+            let load_result = {
+                let bytes = fs::read(&load_path)?;
+                index.load_from_buffer(&bytes)
+            };
+            #[cfg(not(target_os = "windows"))]
+            let load_result = {
+                let path_str = load_path
+                    .to_str()
+                    .context("vector path contains invalid UTF-8")?;
+                index.load(path_str)
+            };
+
+            match load_result {
                 Ok(()) => {}
                 Err(err) => {
                     if matches!(quantization, ScalarKind::F32) {
@@ -97,33 +115,79 @@ impl VectorStore {
                         // (which would wipe the file on the next save()).
                         return Err(err.into());
                     }
-                    // Old index may use different quantization; retry with F32
+                    // Old index may use different quantization; retry with F32.
                     let fallback = create_index(dimensions, ScalarKind::F32)?;
-                    fallback.load(path_str)?;
-                    return Ok(Self {
-                        path: path.to_path_buf(),
-                        index: fallback,
-                    });
+                    #[cfg(target_os = "windows")]
+                    {
+                        let bytes = fs::read(&load_path)?;
+                        fallback.load_from_buffer(&bytes)?;
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        let path_str = load_path
+                            .to_str()
+                            .context("vector path contains invalid UTF-8")?;
+                        fallback.load(path_str)?;
+                    }
+                    return Ok(Self::new(path, fallback));
                 }
             }
         }
 
-        Ok(Self {
-            path: path.to_path_buf(),
-            index,
-        })
+        Ok(Self::new(path, index))
     }
 
-    /// Open for read-only search using memory-mapping (`view()`).
-    /// Much faster than `open()` for large indices because it avoids
-    /// loading the entire vector data into memory upfront (~450ms → <1ms
-    /// on the Linux kernel's 1.5M-vector index).
+    fn new(path: &Path, index: Index) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            index,
+            #[cfg(target_os = "windows")]
+            _readonly_buffer: None,
+        }
+    }
+
+    /// Open for read-only search using memory-mapping on Unix and a retained
+    /// serialized buffer on Windows. The Windows path avoids USearch's narrow
+    /// native path APIs and keeps the index file replaceable by another process.
     ///
     /// The returned store must NOT be used for writes (upsert/remove/save).
     pub fn open_readonly(path: &Path, dimensions: usize, quantization: ScalarKind) -> Result<Self> {
         let index = create_index(dimensions, quantization)?;
-        if path.exists() {
-            validate_existing_index_file(path)?;
+        let Some(load_path) = existing_index_path(path) else {
+            return Ok(Self::new(path, index));
+        };
+        validate_existing_index_file(&load_path)?;
+
+        #[cfg(target_os = "windows")]
+        {
+            let buffer = fs::read(&load_path)?.into_boxed_slice();
+            // SAFETY: the buffer is stored in VectorStore and the index field is
+            // dropped before readonly_buffer, so it outlives every index access.
+            let view_result = unsafe { index.view_from_buffer(&buffer) };
+            match view_result {
+                Ok(()) => Ok(Self {
+                    path: path.to_path_buf(),
+                    index,
+                    _readonly_buffer: Some(buffer),
+                }),
+                Err(err) => {
+                    if matches!(quantization, ScalarKind::F32) {
+                        return Err(err.into());
+                    }
+                    let fallback = create_index(dimensions, ScalarKind::F32)?;
+                    // SAFETY: same retained-buffer lifetime guarantee as above.
+                    unsafe { fallback.view_from_buffer(&buffer) }?;
+                    Ok(Self {
+                        path: path.to_path_buf(),
+                        index: fallback,
+                        _readonly_buffer: Some(buffer),
+                    })
+                }
+            }
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
             let path_str = path
                 .to_str()
                 .context("vector path contains invalid UTF-8")?;
@@ -133,21 +197,13 @@ impl VectorStore {
                     if matches!(quantization, ScalarKind::F32) {
                         return Err(err.into());
                     }
-                    // Old index may use different quantization; retry with F32
                     let fallback = create_index(dimensions, ScalarKind::F32)?;
                     fallback.view(path_str)?;
-                    return Ok(Self {
-                        path: path.to_path_buf(),
-                        index: fallback,
-                    });
+                    return Ok(Self::new(path, fallback));
                 }
             }
+            Ok(Self::new(path, index))
         }
-
-        Ok(Self {
-            path: path.to_path_buf(),
-            index,
-        })
     }
 
     pub fn save(&self) -> Result<()> {
@@ -158,19 +214,30 @@ impl VectorStore {
         fs::create_dir_all(parent)?;
 
         let tmp_path = self.path.with_extension("usearch.tmp");
-        let path_str = tmp_path
-            .to_str()
-            .context("vector path contains invalid UTF-8")?;
+        #[cfg(target_os = "windows")]
+        let save_result: Result<()> = (|| {
+            let mut bytes = vec![0; self.index.serialized_length()];
+            self.index.save_to_buffer(&mut bytes)?;
+            let mut file = fs::File::create(&tmp_path)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            Ok(())
+        })();
+        #[cfg(not(target_os = "windows"))]
+        let save_result: Result<()> = (|| {
+            let path_str = tmp_path
+                .to_str()
+                .context("vector path contains invalid UTF-8")?;
+            self.index.save(path_str)?;
+            Ok(())
+        })();
 
-        // Write to temporary file first
-        if let Err(e) = self.index.save(path_str) {
+        if let Err(error) = save_result {
             let _ = fs::remove_file(&tmp_path);
-            return Err(e.into());
+            return Err(error);
         }
 
-        // Atomically rename to avoid corrupted reads by concurrent search processes
-        fs::rename(&tmp_path, &self.path)?;
-
+        replace_file(&tmp_path, &self.path)?;
         Ok(())
     }
 
@@ -293,6 +360,47 @@ impl VectorStore {
     }
 }
 
+fn existing_index_path(path: &Path) -> Option<PathBuf> {
+    if path.exists() {
+        return Some(path.to_path_buf());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let backup = path.with_extension(BACKUP_EXTENSION);
+        if backup.exists() {
+            return Some(backup);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn replace_file(source: &Path, destination: &Path) -> Result<()> {
+    fs::rename(source, destination)?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn replace_file(source: &Path, destination: &Path) -> Result<()> {
+    let backup = destination.with_extension(BACKUP_EXTENSION);
+    if destination.exists() {
+        if backup.exists() {
+            fs::remove_file(&backup)?;
+        }
+        fs::rename(destination, &backup)?;
+    }
+    if let Err(error) = fs::rename(source, destination) {
+        if backup.exists() {
+            let _ = fs::rename(&backup, destination);
+        }
+        return Err(error.into());
+    }
+    if backup.exists() {
+        fs::remove_file(backup)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,6 +447,65 @@ mod tests {
         let hits = store.search(&[1.0, 0.0, 0.0, 0.0], 2);
         assert!(!hits.is_empty());
         assert_eq!(hits[0].key, 1);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn unicode_path_roundtrip_uses_buffer_persistence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let directory = tmp.path().join("ivygrep-数据-é");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("vectors.usearch");
+
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F16).unwrap();
+        store.upsert(7, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
+        store.save().unwrap();
+
+        let reopened = VectorStore::open_readonly(&path, 4, ScalarKind::F16).unwrap();
+        assert!(reopened.contains(7));
+        assert_eq!(reopened.search(&[1.0, 0.0, 0.0, 0.0], 1)[0].key, 7);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn save_replaces_an_existing_index_while_readonly_view_is_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.usearch");
+        let mut store = VectorStore::open(&path, 2, ScalarKind::F16).unwrap();
+        store.upsert(1, vec![1.0, 0.0]).unwrap();
+        store.save().unwrap();
+
+        let readonly = VectorStore::open_readonly(&path, 2, ScalarKind::F16).unwrap();
+        store.upsert(2, vec![0.0, 1.0]).unwrap();
+        store.save().unwrap();
+
+        assert!(readonly.contains(1));
+        assert!(!readonly.contains(2));
+        let reopened = VectorStore::open_readonly(&path, 2, ScalarKind::F16).unwrap();
+        assert!(reopened.contains(1));
+        assert!(reopened.contains(2));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn recovers_interrupted_replacement_from_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.usearch");
+        let backup = path.with_extension(BACKUP_EXTENSION);
+        let mut store = VectorStore::open(&path, 2, ScalarKind::F16).unwrap();
+        store.upsert(1, vec![1.0, 0.0]).unwrap();
+        store.save().unwrap();
+        fs::rename(&path, &backup).unwrap();
+
+        let mut recovered = VectorStore::open(&path, 2, ScalarKind::F16).unwrap();
+        assert!(recovered.contains(1));
+        recovered.upsert(2, vec![0.0, 1.0]).unwrap();
+        recovered.save().unwrap();
+
+        let reopened = VectorStore::open_readonly(&path, 2, ScalarKind::F16).unwrap();
+        assert!(reopened.contains(1));
+        assert!(reopened.contains(2));
+        assert!(!backup.exists());
     }
 
     #[test]

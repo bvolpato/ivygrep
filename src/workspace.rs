@@ -549,8 +549,8 @@ impl Workspace {
             return true;
         }
 
-        // Open the persisted store for an exact count. The optimized backend
-        // memory-maps this path; the portable backend validates and loads it.
+        // Open the persisted store for an exact count. Unix memory-maps this
+        // path; Windows retains a Rust-owned serialized buffer for the view.
         if let Ok(store) = crate::vector_store::VectorStore::open_readonly(
             &neural_path,
             crate::embedding::configured_neural_model_identity().dimensions,

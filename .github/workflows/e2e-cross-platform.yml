@@ -258,7 +258,7 @@ jobs:
           ./scripts/e2e_procedures.sh --binary "$IG_BIN"
 
   native-windows-x86_64:
-    name: "E2E: Windows x86_64 (portable vectors)"
+    name: "E2E: Windows x86_64 (neural CPU)"
     if: >-
       github.event_name != 'workflow_dispatch' ||
       contains(github.event.inputs.architectures, 'windows-x86_64')
@@ -272,20 +272,56 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - name: Build portable hash-only binary
-        run: cargo build --locked --release --no-default-features
+      - name: Build neural release binary
+        run: cargo build --locked --release
         env:
-          RUSTFLAGS: "-D warnings"
+          RUSTFLAGS: "-D warnings -C target-feature=+crt-static"
 
       - name: Run unit and integration tests
         if: github.event.inputs.test_scope != 'smoke'
-        run: cargo test --locked --lib --bins --tests --no-default-features
+        run: cargo test --locked --lib --bins --tests
         env:
-          RUSTFLAGS: "-D warnings"
+          RUSTFLAGS: "-D warnings -C target-feature=+crt-static"
 
       - name: E2E documented procedures
         shell: bash
         run: ./scripts/e2e_procedures.sh --binary "$PWD/target/release/ig.exe"
+
+      - name: E2E neural backend
+        shell: bash
+        run: ./scripts/e2e_neural_backend.sh --binary "$PWD/target/release/ig.exe" --expect-backend "StaticEmbedding token mean via Rust"
+
+      - name: E2E Unicode workspace and index paths
+        shell: bash
+        run: |
+          ROOT="$RUNNER_TEMP/ivygrep-数据-é"
+          PROJECT="$ROOT/project-ß"
+          export IVYGREP_HOME="$ROOT/state-索引"
+          export IVYGREP_NO_AUTOSPAWN=1
+          mkdir -p "$PROJECT/src"
+          git -C "$PROJECT" init -q
+          DEEP="$PROJECT/src"
+          for segment in \
+            segment_01_abcdefghijklmnopqrstuvwxyz \
+            segment_02_abcdefghijklmnopqrstuvwxyz \
+            segment_03_abcdefghijklmnopqrstuvwxyz \
+            segment_04_abcdefghijklmnopqrstuvwxyz \
+            segment_05_abcdefghijklmnopqrstuvwxyz \
+            segment_06_abcdefghijklmnopqrstuvwxyz \
+            segment_07_abcdefghijklmnopqrstuvwxyz \
+            segment_08_abcdefghijklmnopqrstuvwxyz
+          do
+            DEEP="$DEEP/$segment"
+          done
+          mkdir -p "$DEEP"
+          cat > "$DEEP/unicode.rs" <<'EOF'
+          pub fn unicode_windows_path() -> &'static str {
+              "wide character and long paths remain searchable"
+          }
+          EOF
+          "$PWD/target/release/ig.exe" --add "$PROJECT" --force --no-watch --hash --json > "$ROOT/add.json"
+          "$PWD/target/release/ig.exe" --json --hash "long paths remain searchable" "$PROJECT" > "$ROOT/search.json"
+          grep -Fq "unicode.rs" "$ROOT/search.json"
 
   # ── Summary ─────────────────────────────────────────────────────────
   summary:
@@ -319,7 +355,7 @@ jobs:
             echo "| macOS x86_64 (native) | $MACOS_X86_RESULT |"
             echo "| Linux aarch64 (QEMU) | $LINUX_ARM_RESULT |"
             echo "| Linux x86_64 (hash-only) | $HASH_ONLY_RESULT |"
-            echo "| Windows x86_64 (portable vectors) | $WINDOWS_RESULT |"
+            echo "| Windows x86_64 (neural CPU) | $WINDOWS_RESULT |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check for failures

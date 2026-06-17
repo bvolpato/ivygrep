@@ -91,9 +91,13 @@ jobs:
             rust_flags: "-D warnings"
             name: "macOS ARM (Hash-only)"
           - os: windows-latest
+            cargo_flags: ""
+            rust_flags: "-D warnings -C target-feature=+crt-static"
+            name: "Windows x86_64 (Neural CPU)"
+          - os: windows-latest
             cargo_flags: "--no-default-features"
-            rust_flags: "-D warnings"
-            name: "Windows x86_64 (Portable vectors)"
+            rust_flags: "-D warnings -C target-feature=+crt-static"
+            name: "Windows x86_64 (Hash-only fallback)"
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -146,12 +150,16 @@ jobs:
             cargo_flags: "--features accelerate,metal"
             rust_flags: "-D warnings"
             validate_backend: "Candle Metal"
+            allow_backend: "Candle CPU (Accelerate)"
+            model_profile: "general"
           - os: macos-latest
             cargo_flags: "--no-default-features"
             rust_flags: "-D warnings"
           - os: windows-latest
-            cargo_flags: "--no-default-features"
-            rust_flags: "-D warnings"
+            cargo_flags: ""
+            rust_flags: "-D warnings -C target-feature=+crt-static"
+            validate_backend: "StaticEmbedding token mean via Rust"
+            model_profile: "static"
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -209,8 +217,23 @@ jobs:
             --binary "$IG_BIN" \
             --bench-home "$BENCH_HOME"
 
-      - name: Validate local accelerator execution
-        if: matrix.validate_backend == 'Candle Metal'
-        run: ./scripts/e2e_neural_backend.sh --binary "$PWD/target/release/ig" --expect-backend "${{ matrix.validate_backend }}" --allow-backend "Candle CPU (Accelerate)"
+      - name: Validate local neural execution
+        if: matrix.validate_backend != ''
+        shell: bash
+        run: |
+          EXE_SUFFIX=""
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            EXE_SUFFIX=".exe"
+          fi
+          args=(
+            --binary "$PWD/target/release/ig${EXE_SUFFIX}"
+            --expect-backend "$EXPECTED_BACKEND"
+          )
+          if [[ -n "$ALLOWED_BACKEND" ]]; then
+            args+=(--allow-backend "$ALLOWED_BACKEND")
+          fi
+          ./scripts/e2e_neural_backend.sh "${args[@]}"
         env:
-          IVYGREP_MODEL_PROFILE: general
+          ALLOWED_BACKEND: ${{ matrix.allow_backend }}
+          EXPECTED_BACKEND: ${{ matrix.validate_backend }}
+          IVYGREP_MODEL_PROFILE: ${{ matrix.model_profile }}

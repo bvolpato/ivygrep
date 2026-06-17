@@ -4,6 +4,13 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **Windows releases now include local neural search and USearch ANN.** Windows uses Rust-managed buffer persistence around USearch to support Unicode index paths, replace active stores while readers are open, and retain crash recovery without falling back to linear vector scans. The executable opts into long-path-aware Windows APIs and statically links the Visual C++ runtime.
+- **USearch 2.24 now builds on Windows.** The vendored backend retains the proven F16 performance while backporting MSVC fixes for the stale `MAP_FAILED` reference and consistent static-runtime linking.
+
+### Testing
+- Windows CI now runs the default neural feature set, optimized vector-store tests, backend attribution, Unicode workspace/index paths, cached offline model reuse, and exact release-archive acceptance.
+
 ## [0.11.2] - 2026-06-16
 
 ### Fixed
