@@ -4,6 +4,17 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **One-command verified installers.** Linux, macOS, and Windows users can install the latest portable release with a single command; the maintained installers select the correct archive, verify its published SHA-256 checksum, and configure a standard user binary location.
+- **Coding-agent integration guidance.** Verified Claude Code, Codex, Cursor, Gemini CLI, and OpenCode configurations now document explicit workspace scoping, exact-versus-semantic query selection, and shared-base worktree overlays.
+
+### Fixed
+- **MCP sessions now keep indexed workspaces fresh.** Agent searches start or reconnect the shared daemon watcher, route queries through its cached search contexts, and fall back to local Merkle reconciliation when daemon spawning is unavailable.
+- **Windows MCP can auto-spawn the daemon.** Executable detection now recognizes `ig.exe` in addition to the Unix `ig` filename.
+
+### Testing
+- Added same-session MCP edit coverage, Windows daemon-name regression coverage, installer documentation checks, Unix ShellCheck validation, and an isolated native PowerShell install smoke test in CI.
+
 ## [0.12.0] - 2026-06-17
 
 ### Changed

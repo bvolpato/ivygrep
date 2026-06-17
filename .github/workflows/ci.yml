@@ -41,7 +41,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
 
       - name: ShellCheck scripts
-        run: shellcheck build.sh test.sh bench.sh scripts/bootstrap_stress_fixtures.sh scripts/e2e_procedures.sh scripts/e2e_neural_backend.sh scripts/e2e_x86_baseline.sh scripts/e2e_cached_model.sh scripts/stress_large_repo.sh
+        run: shellcheck install.sh build.sh test.sh bench.sh scripts/bootstrap_stress_fixtures.sh scripts/e2e_procedures.sh scripts/e2e_neural_backend.sh scripts/e2e_x86_baseline.sh scripts/e2e_cached_model.sh scripts/stress_large_repo.sh
 
       - name: Test Python harnesses
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
@@ -111,6 +111,29 @@ jobs:
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: "3.13"
+
+      - name: Parse PowerShell installer
+        if: matrix.name == 'Windows x86_64 (Hash-only fallback)'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path ./install.ps1),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | Format-List | Out-String | Write-Error
+          }
+
+      - name: Smoke test PowerShell installer
+        if: matrix.name == 'Windows x86_64 (Hash-only fallback)'
+        shell: pwsh
+        run: |
+          $env:IVYGREP_INSTALL_DIR = Join-Path $env:RUNNER_TEMP "ivygrep-installer"
+          & ./install.ps1
+          & (Join-Path $env:IVYGREP_INSTALL_DIR "ig.exe") --version
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2

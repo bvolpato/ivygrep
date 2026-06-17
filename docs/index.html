@@ -516,8 +516,8 @@
                         Cursor
                     </h4>
                     <div class="agent-cmd">
-                        <code>"ig": { "command": "ig", "args": ["--mcp"] }</code>
-                        <button class="agent-copy-btn" data-copy='{"ig": {"command": "ig", "args": ["--mcp"]}}' onclick="copyAgentCmd(this)">Copy</button>
+                        <code>"ig": { "type": "stdio", "command": "ig", "args": ["--mcp"] }</code>
+                        <button class="agent-copy-btn" data-copy='{"ig": {"type": "stdio", "command": "ig", "args": ["--mcp"]}}' onclick="copyAgentCmd(this)">Copy</button>
                     </div>
                 </div>
                 <div class="agent-card glass-card fade-in-scroll">
@@ -526,10 +526,17 @@
                         OpenCode
                     </h4>
                     <div class="agent-cmd">
-                        <code>opencode mcp add</code>
-                        <button class="agent-copy-btn" data-copy="opencode mcp add" onclick="copyAgentCmd(this)">Copy</button>
+                        <code>"ig": { "type": "local", "command": ["ig", "--mcp"] }</code>
+                        <button class="agent-copy-btn" data-copy='"ig": {"type": "local", "command": ["ig", "--mcp"]}' onclick="copyAgentCmd(this)">Copy</button>
                     </div>
                 </div>
+            </div>
+
+            <div class="glass-panel fade-in-scroll mt-4 agent-guidance">
+                <h3>Agent-safe defaults</h3>
+                <p>Pass the absolute current repository or worktree path to <code>ig_search</code>. Use natural-language queries for concepts, <code>literal=true</code> for exact identifiers, and <code>ig_status</code> when indexing health is unclear.</p>
+                <p>The first search creates an index and starts incremental watching. Worktrees reuse one shared base index and store only divergent chunks and tombstones.</p>
+                <a href="https://github.com/bvolpato/ivygrep/blob/main/AGENT_INTEGRATION.md" class="btn btn-ghost">Full integration guide</a>
             </div>
 
             <div class="mcp-workflow glass-panel fade-in-scroll mt-4">
@@ -568,33 +575,29 @@
         <div class="section-header">
             <span class="section-tag">Get Started</span>
             <h2 class="section-title text-center">Install ivygrep</h2>
-            <p class="text-center subtitle-small">Install with Homebrew or a verified release archive.</p>
+            <p class="text-center subtitle-small">One command installs the latest release and verifies its published SHA-256 checksum.</p>
         </div>
 
-        <div class="grid grid-2 mt-4">
+        <div class="grid grid-3 mt-4">
             <div class="glass-panel fade-in-scroll install-card">
                 <h3 class="install-title">🍺 Homebrew (macOS / Linux)</h3>
                 <div class="install-code relative">
-                    <pre class="code-block"><span class="prompt">$</span> brew tap bvolpato/tap
-<span class="prompt">$</span> brew install bvolpato/tap/ivygrep</pre>
-                    <button class="copy-btn" onclick="navigator.clipboard.writeText('brew tap bvolpato/tap\nbrew install bvolpato/tap/ivygrep'); this.innerText='Copied!'; setTimeout(() => this.innerText='Copy', 2000)">Copy</button>
+                    <pre class="code-block"><span class="prompt">$</span> brew install bvolpato/tap/ivygrep</pre>
+                    <button class="copy-btn" onclick="copyInstallCmd(this)">Copy</button>
                 </div>
             </div>
             <div class="glass-panel fade-in-scroll install-card">
-                <h3 class="install-title">📦 Pre-built Binaries</h3>
+                <h3 class="install-title">📦 Linux / macOS</h3>
                 <div class="install-code relative">
-                    <pre class="code-block"><span class="prompt">$</span> tag=$(curl -fsSL https://api.github.com/repos/bvolpato/ivygrep/releases/latest | sed -n "s/.*\"tag_name\": \"\\(v[^\"]*\\)\".*/\\1/p")
-<span class="prompt">$</span> case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64) target=linux-x86_64-musl ;;
-  Linux-aarch64|Linux-arm64) target=linux-aarch64-musl ;;
-  Darwin-x86_64) target=macos-x86_64 ;;
-  Darwin-arm64) target=macos-aarch64 ;;
-  *) echo "unsupported platform: $(uname -s)-$(uname -m)" &gt;&amp;2; exit 1 ;;
-esac
-<span class="prompt">$</span> curl -fsSL "https://github.com/bvolpato/ivygrep/releases/download/${tag}/ivygrep-${tag}-${target}.tar.gz" | tar xz --strip-components=1 "ivygrep-${tag}-${target}/ig"
-<span class="prompt">$</span> mkdir -p ~/.local/bin
-<span class="prompt">$</span> install -m 0755 ig ~/.local/bin/ig</pre>
-                    <button class="copy-btn" onclick="navigator.clipboard.writeText('tag=$(curl -fsSL https://api.github.com/repos/bvolpato/ivygrep/releases/latest | sed -n &quot;s/.*\\&quot;tag_name\\&quot;: \\&quot;\\\\(v[^\\&quot;]*\\\\)\\&quot;.*/\\\\1/p&quot;)\ncase &quot;$(uname -s)-$(uname -m)&quot; in\n  Linux-x86_64) target=linux-x86_64-musl ;;\n  Linux-aarch64|Linux-arm64) target=linux-aarch64-musl ;;\n  Darwin-x86_64) target=macos-x86_64 ;;\n  Darwin-arm64) target=macos-aarch64 ;;\n  *) echo &quot;unsupported platform: $(uname -s)-$(uname -m)&quot; &gt;&amp;2; exit 1 ;;\nesac\ncurl -fsSL &quot;https://github.com/bvolpato/ivygrep/releases/download/${tag}/ivygrep-${tag}-${target}.tar.gz&quot; | tar xz --strip-components=1 &quot;ivygrep-${tag}-${target}/ig&quot;\nmkdir -p ~/.local/bin\ninstall -m 0755 ig ~/.local/bin/ig'); this.innerText='Copied!'; setTimeout(() => this.innerText='Copy', 2000)">Copy</button>
+                    <pre class="code-block"><span class="prompt">$</span> curl -fsSL https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.sh | sh</pre>
+                    <button class="copy-btn" onclick="copyInstallCmd(this)">Copy</button>
+                </div>
+            </div>
+            <div class="glass-panel fade-in-scroll install-card">
+                <h3 class="install-title">🪟 Windows PowerShell</h3>
+                <div class="install-code relative">
+                    <pre class="code-block">irm https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.ps1 | iex</pre>
+                    <button class="copy-btn" onclick="copyInstallCmd(this)">Copy</button>
                 </div>
             </div>
         </div>
@@ -645,6 +648,7 @@ esac
                 <div class="footer-links">
                     <a href="https://github.com/bvolpato/ivygrep" class="footer-link">GitHub</a>
                     <a href="https://github.com/bvolpato/ivygrep/releases" class="footer-link">Releases</a>
+                    <a href="https://github.com/bvolpato/ivygrep/blob/main/AGENT_INTEGRATION.md" class="footer-link">AI Agents</a>
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/ARCHITECTURE.md" class="footer-link">Architecture</a>
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/CONTRIBUTING.md" class="footer-link">Contributing</a>
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md" class="footer-link">Changelog</a>
@@ -663,6 +667,16 @@ esac
             btn.textContent = 'Copied!';
             btn.classList.add('copied');
             setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 2000);
+        }
+
+        function copyInstallCmd(btn) {
+            const code = btn.parentElement.querySelector('pre').innerText
+                .split('\n')
+                .map(line => line.startsWith('$ ') ? line.slice(2) : line)
+                .join('\n');
+            navigator.clipboard.writeText(code);
+            btn.textContent = 'Copied!';
+            setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
         }
 
         // ─── Intersection Observer for scroll animations ───

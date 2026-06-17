@@ -23,6 +23,7 @@
 <p align="center">
   <a href="https://bvolpato.github.io/ivygrep/">Website</a> ·
   <a href="https://bvolpato.github.io/ivygrep/benchmarks/">Benchmarks</a> ·
+  <a href="AGENT_INTEGRATION.md">AI Agents</a> ·
   <a href="ARCHITECTURE.md">Architecture</a> ·
   <a href="CONTRIBUTING.md">Contributing</a>
 </p>
@@ -33,28 +34,22 @@
 
 **Install via Homebrew (recommended):**
 ```bash
-brew tap bvolpato/tap
 brew install bvolpato/tap/ivygrep
 ```
 
-**Install a pre-built binary:**
+**Linux / macOS:**
 ```bash
-tag=$(curl -fsSL https://api.github.com/repos/bvolpato/ivygrep/releases/latest | sed -n 's/.*"tag_name": "\(v[^"]*\)".*/\1/p')
-case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64) target=linux-x86_64-musl ;;
-  Linux-aarch64|Linux-arm64) target=linux-aarch64-musl ;;
-  Darwin-x86_64) target=macos-x86_64 ;;
-  Darwin-arm64) target=macos-aarch64 ;;
-  *) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
-esac
-curl -fsSL "https://github.com/bvolpato/ivygrep/releases/download/${tag}/ivygrep-${tag}-${target}.tar.gz" \
-  | tar xz --strip-components=1 "ivygrep-${tag}-${target}/ig"
-mkdir -p ~/.local/bin
-install -m 0755 ig ~/.local/bin/ig
+curl -fsSL https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.sh | sh
 ```
 
-Windows x86_64 releases include `ig.exe` in
-`ivygrep-${tag}-windows-x86_64.zip`. Extract it into a directory on `PATH`.
+**Windows PowerShell:**
+```powershell
+irm https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.ps1 | iex
+```
+
+The installers select the correct release archive, verify its published
+SHA-256 checksum, install `ig` in the standard user binary directory, and print
+the installed version. The PowerShell installer also updates the user `PATH`.
 Windows uses the same USearch approximate-nearest-neighbor backend as Linux and
 macOS, with Rust-managed persistence for Unicode paths and replaceable index
 files. The binary is long-path aware for deeply nested repositories on current
@@ -127,7 +122,11 @@ ivygrep is the **retrieval layer your coding agent is missing**. Instead of stuf
 ig --mcp    # starts MCP server on stdio
 ```
 
-### One-line setup for agents:
+Before connecting an agent, run `ig --version` in the same environment that
+launches it. GUI applications may not inherit your interactive shell's `PATH`;
+use the absolute path to `ig` or `ig.exe` in that case.
+
+### Setup for coding agents
 
 <details>
 <summary><b>Claude Code</b></summary>
@@ -152,7 +151,7 @@ Add to `.cursor/mcp.json` or `~/.cursor/mcp.json`:
 ```json
 {
   "mcpServers": {
-    "ig": { "command": "ig", "args": ["--mcp"] }
+    "ig": { "type": "stdio", "command": "ig", "args": ["--mcp"] }
   }
 }
 ```
@@ -176,12 +175,54 @@ Or add to `~/.gemini/settings.json`:
 </details>
 
 <details>
-<summary><b>OpenCode & Codex</b></summary>
+<summary><b>Codex</b></summary>
 
-**OpenCode:** `opencode mcp add` -> Choose `Local` and set command to `ig --mcp`.
+```bash
+codex mcp add ig -- ig --mcp
+codex mcp get ig --json
+```
 
-**Codex:** Run `codex mcp add ig -- ig --mcp` or add to `~/.codex/config.toml`.
+The CLI and IDE extension share `~/.codex/config.toml`. Trusted repositories
+can instead use a project-scoped `.codex/config.toml`.
 </details>
+
+<details>
+<summary><b>OpenCode</b></summary>
+
+Add to `opencode.json`:
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "ig": {
+      "type": "local",
+      "command": ["ig", "--mcp"],
+      "enabled": true
+    }
+  }
+}
+```
+</details>
+
+### Recommended agent behavior
+
+Give the agent this persistent instruction in `AGENTS.md`, `CLAUDE.md`,
+`GEMINI.md`, or the equivalent rules file:
+
+```text
+Use the ivygrep MCP tools for code discovery before broad filesystem scans.
+Pass the absolute current repository or worktree path to ig_search.
+Use natural-language queries for concepts and literal=true for exact identifiers.
+Use ig_status when indexing health is unclear.
+```
+
+`ig_search` is restricted to the supplied workspace, auto-indexes on first use,
+starts incremental watching, and accepts subdirectory or file paths for narrower
+scope. In a Git worktree, pass that worktree's root: ivygrep reuses the shared
+base index and stores only overlay deltas and tombstones.
+
+See [Coding agent integration](AGENT_INTEGRATION.md) for verified configs,
+tool-selection guidance, worktree behavior, and troubleshooting.
 
 ---
 

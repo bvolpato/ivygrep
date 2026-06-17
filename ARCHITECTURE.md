@@ -414,13 +414,18 @@ forbidden low-authority leakage, and unrelated-query suppression.
 
 ### 3. Daemon Architecture
 
-The daemon (`ig --daemon`) is a Tokio-based async server on a Unix domain
-socket. It provides:
+The daemon (`ig --daemon`) is a Tokio-based async server using an owner-only
+Unix socket or authenticated Windows loopback TCP. It provides:
 
 - **Shared model loading** — the Candle model loads once in a background thread
   (`OnceLock`). All CLI invocations share it.
 - **File watching** — `notify` watchers per workspace, triggering incremental
   re-index on file changes.
+- **Shared agent search** — MCP sessions ensure the selected workspace is
+  watched, then route searches through the daemon for live deltas, shared search
+  contexts, query caching, model reuse, and bounded concurrency. If daemon
+  spawning is unavailable, MCP reconciles the Merkle delta locally before
+  searching.
 - **Version-gated restart** — each status response includes `BUILD_VERSION`. On
   mismatch, the CLI sends `Restart` and auto-spawns the new binary.
 - **Bounded protocol framing** — each request carries an explicit protocol
@@ -436,7 +441,7 @@ socket. It provides:
 ```
 ~/.local/share/ivygrep/
 ├── daemon.log                          # Daemon stderr output
-├── daemon.sock                         # Unix domain socket (IPC)
+├── daemon.sock / daemon.port           # Unix socket / authenticated Windows endpoint
 └── indexes/
     └── <workspace-id>/                 # hex(xxh3(canonical_path))
         ├── workspace.json              # Workspace metadata

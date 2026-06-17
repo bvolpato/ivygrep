@@ -532,6 +532,18 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
 .agent-copy-btn.copied { background: rgba(16,185,129,0.15); border-color: #10b981; color: #10b981; }
 
 /* ─── MCP Workflow ─── */
+.agent-guidance {
+    display: grid;
+    gap: 0.8rem;
+}
+.agent-guidance p {
+    color: var(--text-muted);
+    line-height: 1.7;
+}
+.agent-guidance .btn {
+    justify-self: start;
+}
+
 .mcp-flow {
     display: flex; align-items: flex-start; justify-content: center;
     gap: 0.5rem; flex-wrap: wrap;
