@@ -18,10 +18,10 @@ use crate::config;
 use crate::embedding::{EmbeddingModel, create_hash_model, create_neural_model};
 use crate::indexer::{index_workspace, workspace_is_indexed};
 use crate::path_glob::parse_glob_csv;
-use crate::protocol::group_hits_by_file;
+use crate::protocol::{DaemonRequest, DaemonResponse, group_hits_by_file};
 use crate::regex_search::regex_search;
 use crate::search::{SearchOptions, hybrid_search, literal_search};
-use crate::workspace::{Workspace, resolve_workspace_and_scope};
+use crate::workspace::{Workspace, WorkspaceMetadata, resolve_workspace_and_scope};
 
 const JSONRPC_VERSION: &str = "2.0";
 const TOOL_IG_SEARCH: &str = "ig_search";
@@ -172,7 +172,7 @@ fn dispatch(method: &str, params: Value) -> Result<Value> {
                 "name": "ig",
                 "version": env!("CARGO_PKG_VERSION")
             },
-            "instructions": "Use ig_search(query, path) to run local semantic code search. If path is a subdirectory or file, results are restricted to that scope. Use ig_status() to see the indexing status of your workspaces."
+            "instructions": "Use ig_search with an absolute path to the active workspace so searches stay scoped to the intended repository. Use natural-language queries for discovery, literal=true for exact identifiers, and ig_status to inspect indexing health. Workspaces are indexed on first use and watched for incremental updates."
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools": [search_tool_schema(), status_tool_schema()]})),
@@ -329,6 +329,63 @@ fn mcp_search_model(workspace: &Workspace) -> Arc<dyn EmbeddingModel> {
     }
 }
 
+fn ensure_mcp_workspace_ready(workspace: &Workspace, include_ignored: bool) -> Result<()> {
+    let metadata = workspace.read_metadata()?;
+    let include_ignored = include_ignored
+        || metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.skip_gitignore);
+    let needs_ignored_refresh = include_ignored
+        && !metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.skip_gitignore);
+
+    if workspace_is_indexed(workspace) && workspace.is_watcher_alive() && !needs_ignored_refresh {
+        return Ok(());
+    }
+
+    let request = DaemonRequest::Index {
+        path: workspace.root.clone(),
+        watch: true,
+        skip_gitignore: include_ignored,
+    };
+    match crate::daemon::request_blocking(&request, true)? {
+        Some(DaemonResponse::Ack { .. }) => return Ok(()),
+        Some(DaemonResponse::Error { message }) => {
+            tracing::warn!("MCP daemon indexing unavailable, reconciling locally: {message}");
+        }
+        Some(response) => {
+            tracing::warn!("unexpected MCP daemon indexing response: {response:?}");
+        }
+        None => {}
+    }
+
+    workspace.ensure_dirs()?;
+    let mut metadata = workspace
+        .read_metadata()?
+        .unwrap_or_else(|| WorkspaceMetadata {
+            id: workspace.id.clone(),
+            root: workspace.root.clone(),
+            created_at_unix: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            last_indexed_at_unix: None,
+            watch_enabled: true,
+            skip_gitignore: include_ignored,
+            index_generation: 0,
+        });
+    metadata.watch_enabled = true;
+    if include_ignored {
+        metadata.skip_gitignore = true;
+    }
+    workspace.write_metadata(&metadata)?;
+
+    let index_model = create_hash_model();
+    index_workspace(workspace, index_model.as_ref())?;
+    Ok(())
+}
+
 fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
     let query = args
         .query
@@ -342,27 +399,72 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
 
     let (current_workspace, scope_filter) = resolve_workspace_and_scope(Path::new(&input_path))?;
 
-    // MCP search is intentionally scoped to a single workspace (the provided
-    // `path`). Cross-workspace ("all indices") search is not supported here:
-    // an agent could otherwise read source from unrelated indexed projects
-    // outside its intended working directory.
-    if !workspace_is_indexed(&current_workspace) {
-        // Auto-index with the fast HASH model (mirrors the daemon's Index
-        // handler). Neural embeddings are built later by a background
-        // subprocess, so the first query returns quickly even on very large
-        // repos instead of blocking on inline neural inference across the whole
-        // tree — which on big repos never completes in any usable time and,
-        // run by several MCP clients at once, saturates the host. See #56.
-        let index_model = create_hash_model();
-        let _summary = index_workspace(&current_workspace, index_model.as_ref())?;
-    }
+    // MCP search is intentionally scoped to one workspace. Ensure that
+    // workspace is indexed and watched before searching so edits made by a
+    // coding agent become searchable without restarting the MCP process.
+    ensure_mcp_workspace_ready(&current_workspace, args.skip_gitignore.unwrap_or(false))?;
     let workspace = current_workspace.clone();
     let _ = workspace.cleanup_stale_legacy_runtime_files();
 
     let include_globs = parse_glob_csv(args.include.as_deref());
     let exclude_globs = parse_glob_csv(args.exclude.as_deref());
 
-    let mut hits = if args.literal.unwrap_or(false) {
+    let literal = args.literal.unwrap_or(false);
+    let regex = args.regex.unwrap_or(false);
+    let daemon_request = if literal {
+        DaemonRequest::LiteralSearch {
+            path: Some(workspace.root.clone()),
+            query: query.to_string(),
+            limit: args.limit,
+            context: args.context.unwrap_or(2),
+            type_filter: args.type_filter.clone(),
+            include_globs: include_globs.clone(),
+            exclude_globs: exclude_globs.clone(),
+            scope_path: scope_filter.as_ref().map(|scope| scope.rel_path.clone()),
+            scope_is_file: scope_filter.as_ref().is_some_and(|scope| scope.is_file),
+            skip_gitignore: args.skip_gitignore.unwrap_or(false),
+        }
+    } else if regex {
+        DaemonRequest::RegexSearch {
+            path: Some(workspace.root.clone()),
+            pattern: query.to_string(),
+            limit: args.limit,
+            include_globs: include_globs.clone(),
+            exclude_globs: exclude_globs.clone(),
+            scope_path: scope_filter.as_ref().map(|scope| scope.rel_path.clone()),
+            scope_is_file: scope_filter.as_ref().is_some_and(|scope| scope.is_file),
+            skip_gitignore: args.skip_gitignore.unwrap_or(false),
+        }
+    } else {
+        DaemonRequest::Search {
+            path: Some(workspace.root.clone()),
+            query: query.to_string(),
+            limit: args.limit,
+            context: args.context.unwrap_or(2),
+            type_filter: args.type_filter.clone(),
+            include_globs: include_globs.clone(),
+            exclude_globs: exclude_globs.clone(),
+            scope_path: scope_filter.as_ref().map(|scope| scope.rel_path.clone()),
+            scope_is_file: scope_filter.as_ref().is_some_and(|scope| scope.is_file),
+            skip_gitignore: args.skip_gitignore.unwrap_or(false),
+        }
+    };
+    let daemon_hits = match crate::daemon::request_blocking(&daemon_request, false)? {
+        Some(DaemonResponse::SearchResults { hits }) => Some(hits),
+        Some(DaemonResponse::Error { message }) => {
+            tracing::warn!("MCP daemon search unavailable, searching locally: {message}");
+            None
+        }
+        Some(response) => {
+            tracing::warn!("unexpected MCP daemon search response: {response:?}");
+            None
+        }
+        None => None,
+    };
+
+    let mut hits = if let Some(hits) = daemon_hits {
+        hits
+    } else if literal {
         literal_search(
             &workspace,
             query,
@@ -378,7 +480,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
                 cancel_token: None,
             },
         )?
-    } else if args.regex.unwrap_or(false) {
+    } else if regex {
         regex_search(
             &workspace,
             query,
@@ -418,7 +520,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
         hits
     };
 
-    if !args.literal.unwrap_or(false) && !args.regex.unwrap_or(false) {
+    if !literal && !regex {
         hits.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
@@ -462,7 +564,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
             "scope_path": scope_filter.as_ref().map(|scope| scope.rel_path.clone()),
             "scope_is_file": scope_filter.as_ref().is_some_and(|scope| scope.is_file),
             "query": query,
-            "mode": if args.literal.unwrap_or(false) { "literal" } else if args.regex.unwrap_or(false) { "regex" } else { "hybrid" },
+            "mode": if literal { "literal" } else if regex { "regex" } else { "hybrid" },
             "result_count": grouped.len(),
             "include": include_globs,
             "exclude": exclude_globs,
@@ -474,7 +576,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
             "scope_path": scope_filter.as_ref().map(|scope| scope.rel_path.clone()),
             "scope_is_file": scope_filter.as_ref().is_some_and(|scope| scope.is_file),
             "query": query,
-            "mode": if args.literal.unwrap_or(false) { "literal" } else if args.regex.unwrap_or(false) { "regex" } else { "hybrid" },
+            "mode": if literal { "literal" } else if regex { "regex" } else { "hybrid" },
             "result_count": grouped.len(),
             "include": include_globs,
             "exclude": exclude_globs,

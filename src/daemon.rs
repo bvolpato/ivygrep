@@ -1633,6 +1633,31 @@ fn scope_from_request(scope_path: Option<PathBuf>, scope_is_file: bool) -> Optio
     })
 }
 
+fn is_ig_executable(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("ig"))
+}
+
+pub fn request_blocking(
+    daemon_request: &DaemonRequest,
+    autospawn: bool,
+) -> Result<Option<DaemonResponse>> {
+    let daemon_request = daemon_request.clone();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        runtime.block_on(crate::daemon::request::<fn(String, usize, usize)>(
+            &daemon_request,
+            autospawn,
+            None,
+        ))
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("daemon request thread panicked"))?
+}
+
 pub async fn request<F>(
     request: &DaemonRequest,
     autospawn: bool,
@@ -1651,53 +1676,48 @@ where
         && !crate::ipc::socket_exists()
         && std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
         && let Ok(exe) = std::env::current_exe()
+        && is_ig_executable(&exe)
     {
-        let is_ig = exe
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n == "ig");
-        if is_ig {
-            let mut cmd = std::process::Command::new(exe);
-            cmd.arg("--daemon");
+        let mut cmd = std::process::Command::new(exe);
+        cmd.arg("--daemon");
 
-            // Redirect daemon I/O to a log file to keep the CLI terminal clean.
-            if let Ok(mut log_file) = open_daemon_log_file() {
-                let _ = writeln!(log_file, "{} spawning daemon", daemon_timestamp());
-                let log_stderr = log_file.try_clone();
-                cmd.stdout(std::process::Stdio::from(log_file));
-                if let Ok(stderr_file) = log_stderr {
-                    cmd.stderr(std::process::Stdio::from(stderr_file));
-                } else {
-                    cmd.stderr(std::process::Stdio::null());
-                }
+        // Redirect daemon I/O to a log file to keep the CLI terminal clean.
+        if let Ok(mut log_file) = open_daemon_log_file() {
+            let _ = writeln!(log_file, "{} spawning daemon", daemon_timestamp());
+            let log_stderr = log_file.try_clone();
+            cmd.stdout(std::process::Stdio::from(log_file));
+            if let Ok(stderr_file) = log_stderr {
+                cmd.stderr(std::process::Stdio::from(stderr_file));
+            } else {
+                cmd.stderr(std::process::Stdio::null());
             }
+        }
 
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::CommandExt;
-                cmd.process_group(0);
-                unsafe {
-                    cmd.pre_exec(|| {
-                        libc::nice(5);
-                        Ok(())
-                    });
-                }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd.process_group(0);
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::nice(5);
+                    Ok(())
+                });
             }
+        }
 
-            #[cfg(not(unix))]
-            {
-                use std::os::windows::process::CommandExt;
-                const CREATE_NO_WINDOW: u32 = 0x08000000;
-                cmd.creation_flags(CREATE_NO_WINDOW);
-            }
+        #[cfg(not(unix))]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
 
-            let _ = cmd.spawn();
-            // Poll for socket readiness (up to 2s)
-            for _ in 0..20 {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                if crate::ipc::socket_exists() {
-                    break;
-                }
+        let _ = cmd.spawn();
+        // Poll for socket readiness (up to 2s)
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            if crate::ipc::socket_exists() {
+                break;
             }
         }
     }
@@ -1822,6 +1842,13 @@ mod tests {
             num_cpus::get().max(1),
             "cpu_permits should be sized to the CPU count"
         );
+    }
+
+    #[test]
+    fn daemon_autospawn_recognizes_unix_and_windows_binary_names() {
+        assert!(is_ig_executable(Path::new("/usr/local/bin/ig")));
+        assert!(is_ig_executable(Path::new("ig.exe")));
+        assert!(!is_ig_executable(Path::new("/usr/local/bin/ivygrep")));
     }
 
     #[test]
