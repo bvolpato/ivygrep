@@ -82,7 +82,7 @@ candle_embed = { version = "0.1.4", default-features = false, optional = true }
 candle-core = { version = "0.10.2", optional = true }
 hf-hub = { version = "0.3.2", optional = true }
 tokenizers = { version = "0.19.1", optional = true }
-usearch = { version = "2.25.3", default-features = false }
+usearch = { version = "=2.24.0", default-features = false, features = ["fp16lib"] }
 
 [dev-dependencies]
 assert_cmd = "2.2"

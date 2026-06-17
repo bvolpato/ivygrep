@@ -6,6 +6,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class WindowsManifestTest(unittest.TestCase):
+    def test_windows_usearch_portability_preserves_proven_backend(self) -> None:
+        manifest = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'usearch = { version = "=2.24.0", default-features = false, features = ["fp16lib"] }',
+            manifest,
+        )
+        self.assertNotIn('usearch = { version = "2.25', manifest)
+
     def test_msvc_binary_embeds_long_path_manifest(self) -> None:
         build_script = (ROOT / "build.rs").read_text(encoding="utf-8")
         manifest = (
@@ -25,6 +34,9 @@ class WindowsManifestTest(unittest.TestCase):
         usearch_build = (ROOT / "vendor" / "usearch" / "build.rs").read_text(
             encoding="utf-8"
         )
+        usearch_plugins = (
+            ROOT / "vendor" / "usearch" / "include" / "usearch" / "index_plugins.hpp"
+        ).read_text(encoding="utf-8")
         ci_workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
             encoding="utf-8"
         )
@@ -36,6 +48,7 @@ class WindowsManifestTest(unittest.TestCase):
         self.assertIn("target-feature=+crt-static", cargo_config)
         self.assertNotIn(".static_crt(", usearch_build)
         self.assertNotIn('.flag_if_supported("/MD")', usearch_build)
+        self.assertNotIn("new_arena == (byte_t*)MAP_FAILED", usearch_plugins)
         self.assertEqual(
             ci_workflow.count(
                 'rust_flags: "-D warnings -C target-feature=+crt-static"'

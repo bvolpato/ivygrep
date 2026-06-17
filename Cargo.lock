@@ -5620,7 +5620,7 @@ dependencies = [
 
 [[package]]
 name = "usearch"
-version = "2.25.3"
+version = "2.24.0"
 dependencies = [
  "cxx",
  "cxx-build",
