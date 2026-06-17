@@ -68,9 +68,8 @@ fn build_usearch() -> Result<(), Box<dyn Error>> {
             .flag_if_supported("-fcolor-diagnostics")
             .flag_if_supported("-g1"); // Simplify debugging
     } else if target_os == "windows" {
-        // Match ivygrep's crt-static target so release binaries need no VC redistributable.
+        // Let cc select /MT or /MD from Cargo's crt-static target feature.
         build
-            .static_crt(true)
             .flag_if_supported("/std:c++17")
             .flag_if_supported("/O2")
             .flag_if_supported("/fp:fast")

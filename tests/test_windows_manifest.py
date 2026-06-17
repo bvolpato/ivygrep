@@ -20,16 +20,34 @@ class WindowsManifestTest(unittest.TestCase):
         self.assertIn("<longPathAware", manifest)
         self.assertIn(">true</longPathAware>", manifest)
 
-    def test_windows_target_and_usearch_use_static_crt(self) -> None:
+    def test_windows_builds_use_consistent_static_crt(self) -> None:
         cargo_config = (ROOT / ".cargo" / "config.toml").read_text(encoding="utf-8")
         usearch_build = (ROOT / "vendor" / "usearch" / "build.rs").read_text(
             encoding="utf-8"
         )
+        ci_workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+            encoding="utf-8"
+        )
+        e2e_workflow = (
+            ROOT / ".github" / "workflows" / "e2e-cross-platform.yml"
+        ).read_text(encoding="utf-8")
 
         self.assertIn("[target.x86_64-pc-windows-msvc]", cargo_config)
         self.assertIn("target-feature=+crt-static", cargo_config)
-        self.assertIn(".static_crt(true)", usearch_build)
+        self.assertNotIn(".static_crt(", usearch_build)
         self.assertNotIn('.flag_if_supported("/MD")', usearch_build)
+        self.assertEqual(
+            ci_workflow.count(
+                'rust_flags: "-D warnings -C target-feature=+crt-static"'
+            ),
+            3,
+        )
+        self.assertEqual(
+            e2e_workflow.count(
+                'RUSTFLAGS: "-D warnings -C target-feature=+crt-static"'
+            ),
+            2,
+        )
 
 
 if __name__ == "__main__":

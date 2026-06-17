@@ -275,13 +275,13 @@ jobs:
       - name: Build neural release binary
         run: cargo build --locked --release
         env:
-          RUSTFLAGS: "-D warnings"
+          RUSTFLAGS: "-D warnings -C target-feature=+crt-static"
 
       - name: Run unit and integration tests
         if: github.event.inputs.test_scope != 'smoke'
         run: cargo test --locked --lib --bins --tests
         env:
-          RUSTFLAGS: "-D warnings"
+          RUSTFLAGS: "-D warnings -C target-feature=+crt-static"
 
       - name: E2E documented procedures
         shell: bash
