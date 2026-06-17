@@ -59,10 +59,11 @@ instead of scanning every file.
 
 ### Vector Backends
 
-[USearch](https://github.com/unum-cloud/usearch) is the optimized Linux/macOS
-approximate nearest-neighbor backend. Windows hash-only builds use a
-dependency-light pure-Rust backend with the same persistence/search contract
-and deterministic linear cosine ranking.
+[USearch](https://github.com/unum-cloud/usearch) is the approximate
+nearest-neighbor backend on Linux, macOS, and Windows. Windows routes
+serialization through Rust-owned byte buffers rather than USearch's native path
+APIs, preserving Unicode paths and allowing the active index file to be
+replaced while read-only search processes are open.
 
 Windows daemon IPC uses loopback TCP with a fresh per-daemon authentication
 token. Unix keeps the owner-only socket and peer-uid check.
@@ -80,12 +81,13 @@ token. Unix keeps the owner-only socket and peer-uid check.
   - `vectors_neural.usearch` — 384-dimensional F16 Candle neural embeddings,
     built asynchronously by a background subprocess. Higher quality, used when
     available.
-- **Memory-mapped reads** — search opens the vector index with `view()` (mmap)
-  instead of `load()`. On large indices (e.g. 4.66M vectors/chunks for the
-  Linux kernel), this keeps vector-store open time out of the hot path.
+- **Read-only views** — Unix search opens the vector index with `view()` (mmap)
+  instead of `load()`. Windows reads the file through Rust and gives USearch a
+  view over a retained immutable buffer, avoiding native narrow-path and file
+  locking constraints.
 - **Crash-safe writes** — vector saves write to a temporary file and replace
-  the active store. The portable backend keeps a recoverable backup during the
-  Windows replacement sequence.
+  the active store. Windows keeps a recoverable backup during its replacement
+  sequence because replacing an existing file is not an atomic rename there.
 
 **Why USearch and not FAISS/Qdrant:** USearch is a single embeddable C++ library
 with Rust bindings. No server process, no Python, no external dependencies.
@@ -162,8 +164,8 @@ with no Python service and no source-code upload.
 ### Model Evaluation Roadmap
 
 Keep `AllMiniLM-L6-v2` as the portable default until the opt-in code profile or
-another replacement wins public relevance and laptop-throughput gates on macOS,
-Linux, and Windows-compatible hash fallback.
+another replacement wins public relevance and laptop-throughput gates on
+macOS, Linux, and Windows neural execution.
 
 | Candidate | Fit | Required work before experiment |
 |---|---|---|

@@ -55,8 +55,10 @@ install -m 0755 ig ~/.local/bin/ig
 
 Windows x86_64 releases include `ig.exe` in
 `ivygrep-${tag}-windows-x86_64.zip`. Extract it into a directory on `PATH`.
-Windows uses the dependency-light portable vector backend; Linux and macOS use
-the faster USearch backend.
+Windows uses the same USearch approximate-nearest-neighbor backend as Linux and
+macOS, with Rust-managed persistence for Unicode paths and replaceable index
+files. The binary is long-path aware for deeply nested repositories on current
+Windows 10 and Windows 11 systems, and statically links the Visual C++ runtime.
 
 Every release publishes a SHA-256 checksum, SPDX JSON SBOM, and provenance
 sidecar for each archive. The release is created only after CI extracts and
@@ -68,14 +70,14 @@ runs those exact archive bytes:
 | Linux aarch64 musl | Static binary exercised under ARM64 QEMU in Alpine | Hash search, no model or service |
 | macOS Intel | Native archive with Accelerate-backed local neural inference | Hash search |
 | macOS Apple Silicon | Native archive with Accelerate-backed local neural inference | Hash search |
-| Windows x86_64 | Dependency-light portable vector backend | Hash-only release |
+| Windows x86_64 | Native USearch ANN plus local CPU neural inference | Hash search |
 
 The archive procedure covers startup, indexing, hybrid/hash/literal/regex
 search, daemon equivalence, status/doctor, stale-index rebuild, and removal.
 Running `ig` requires no Python, compiler, system database, or external
-service. Linux/macOS neural mode may download its pinned model once; a
-network-isolated acceptance check verifies that the cached model can then be
-imported locally.
+service. Neural mode may download its pinned model once; Linux and Windows
+acceptance checks verify that the cached model can then be imported without
+network access.
 
 Quality, latency, footprint, release-size history, unavailable comparisons,
 and the mechanically enforced claim policy are published in the
@@ -277,8 +279,8 @@ ivygrep deeply understands git. This is a core design decision, not an afterthou
 - **Content-based deduplication:** Byte-identical files are never re-indexed across branches.
 - **`.gitignore` native:** Respects rules automatically at every level.
 
-**Tech stack:** `tantivy` (BM25), `usearch` plus a pure-Rust portable vector
-backend, `tree-sitter` (AST), SQLite symbol/call graph storage,
+**Tech stack:** `tantivy` (BM25), `usearch` (ANN), `tree-sitter` (AST), SQLite
+symbol/call graph storage,
 `candle_embed` / `candle-core` (local neural embeddings), and `xxh3` hashes.
 
 ---
@@ -289,7 +291,7 @@ ivygrep runs search and embedding inference locally and never sends your code, q
 
 - **Where data lives:** the index stores compressed source chunks under `~/.local/share/ivygrep` (or `$XDG_DATA_HOME`/`$IVYGREP_HOME`). Unix uses an owner-only `0600` socket plus peer-uid verification. Windows uses loopback TCP with a per-daemon authentication token stored beside the user-owned index. Keep a custom `IVYGREP_HOME` private to your account.
 - **Model download:** neural mode uses `hf-hub` to download revision-pinned model assets on first use and caches them under `$HF_HOME` or `~/.cache/huggingface`. The default is `sentence-transformers/static-retrieval-mrl-en-v1`; `IVYGREP_MODEL_PROFILE=general`, `code`, and `code-hq` select optional transformer profiles. Cached assets work without network access. Use `--hash` or a `--no-default-features` build when model assets must never be downloaded.
-- **Inference backend:** macOS release binaries execute locally with Accelerate-backed CPU math; portable Linux release binaries execute locally on CPU. Source builds can opt into local Metal with `--features accelerate,metal` or CUDA with `--features cuda` on a compatible installation. The CUDA build does not require cuDNN. If `nvidia-smi` cannot report compute capability, `build.sh` and `test.sh` infer `CUDA_COMPUTE_CAP=120` for RTX 50/Blackwell hosts; set `CUDA_COMPUTE_CAP` explicitly for other affected GPUs. `ig --status` reports the recorded backend that last generated neural vectors.
+- **Inference backend:** macOS release binaries execute locally with Accelerate-backed CPU math; Linux and Windows release binaries execute locally on CPU. Source builds can opt into local Metal with `--features accelerate,metal` or CUDA with `--features cuda` on a compatible installation. The CUDA build does not require cuDNN. If `nvidia-smi` cannot report compute capability, `build.sh` and `test.sh` infer `CUDA_COMPUTE_CAP=120` for RTX 50/Blackwell hosts; set `CUDA_COMPUTE_CAP` explicitly for other affected GPUs. `ig --status` reports the recorded backend that last generated neural vectors.
 - **Secrets in your repo:** ivygrep indexes file *contents*, including config/dotfiles (e.g. `.env`) unless they're gitignored. Those contents are stored in the local index and can appear in search snippets. Keep secrets out of the workspace or in `.gitignore`.
 - **MCP scope:** the `ig_search` MCP tool only searches the workspace at the provided `path` — it cannot search across other indexed projects.
 

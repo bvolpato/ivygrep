@@ -78,3 +78,4 @@ CI tests all combinations of `neural` vs `hash-only` mode across:
 - Linux (ubuntu-latest)
 - macOS ARM (macos-latest)
 - macOS Intel (macos-15-intel)
+- Windows x86_64 (windows-latest)

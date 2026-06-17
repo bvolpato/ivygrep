@@ -11,6 +11,8 @@ enum Section {
 }
 
 fn main() {
+    configure_windows_manifest();
+
     let input = Path::new("assets/query_aliases.toml");
     println!("cargo:rerun-if-changed={}", input.display());
     println!("cargo:rerun-if-changed=build.rs");
@@ -23,6 +25,25 @@ fn main() {
     let out_path = Path::new(&out_dir).join("query_aliases.rs");
     fs::write(out_path, generate_alias_module(&aliases))
         .expect("failed to write generated query aliases");
+}
+
+fn configure_windows_manifest() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows")
+        || env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc")
+    {
+        return;
+    }
+
+    let manifest = Path::new(
+        &env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set by Cargo"),
+    )
+    .join("assets/windows/ivygrep.manifest");
+    println!("cargo:rerun-if-changed={}", manifest.display());
+    println!("cargo:rustc-link-arg-bin=ig=/MANIFEST:EMBED");
+    println!(
+        "cargo:rustc-link-arg-bin=ig=/MANIFESTINPUT:{}",
+        manifest.display()
+    );
 }
 
 #[derive(Default)]

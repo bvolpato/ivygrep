@@ -66,6 +66,24 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("*.spdx.json", workflow)
         self.assertIn("*.provenance.json", workflow)
 
+    def test_windows_release_includes_neural_offline_acceptance(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        windows_build = workflow.split(
+            "- target: x86_64-pc-windows-msvc", maxsplit=1
+        )[1].split("steps:", maxsplit=1)[0]
+        windows_acceptance = workflow.split(
+            "- name: Validate Windows neural backend and cached offline reuse",
+            maxsplit=1,
+        )[1].split("release:", maxsplit=1)[0]
+
+        self.assertNotIn("--no-default-features", windows_build)
+        self.assertIn('grep -aFq "longPathAware"', workflow)
+        self.assertIn("VCRUNTIME", workflow)
+        self.assertIn("MSVCP", workflow)
+        self.assertIn("scripts/e2e_cached_model.sh", windows_acceptance)
+        self.assertIn("StaticEmbedding token mean via Rust", windows_acceptance)
+        self.assertIn("HTTP_PROXY=http://127.0.0.1:9", windows_acceptance)
+
 
 if __name__ == "__main__":
     unittest.main()

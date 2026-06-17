@@ -13,13 +13,9 @@ pub struct VectorMatch {
     pub score: f32,
 }
 
-#[cfg(not(target_os = "windows"))]
 mod optimized;
-#[cfg(any(target_os = "windows", test))]
+#[cfg(test)]
 #[cfg_attr(test, allow(dead_code))]
 mod portable;
 
-#[cfg(not(target_os = "windows"))]
 pub use optimized::VectorStore;
-#[cfg(target_os = "windows")]
-pub use portable::VectorStore;
