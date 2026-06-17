@@ -62,6 +62,7 @@ jobs:
             archive_name: windows-x86_64
             archive: zip
             binary_name: ig.exe
+            cargo_flags: ""
 
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
@@ -391,7 +392,7 @@ jobs:
           HTTP_PROXY=http://127.0.0.1:9 \
           HTTPS_PROXY=http://127.0.0.1:9 \
           ALL_PROXY=http://127.0.0.1:9 \
-          NO_PROXY= \
+          NO_PROXY='' \
             ./scripts/e2e_cached_model.sh \
               --binary "$BINARY" \
               --cache "$CACHE" \
