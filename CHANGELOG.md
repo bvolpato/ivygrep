@@ -4,8 +4,11 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-06-18
+
 ### Fixed
 - **ARM64 tag E2E uses the required Git tooling.** The QEMU smoke lane now runs documented procedures in the same pinned Git-capable image used by release acceptance, then checks daemon equivalence in a separate Python image.
+- **Critical benchmark failures require confirmation.** A threshold breach is rerun in reverse order before CI fails, preserving the regression gate while filtering transient shared-runner spikes.
 
 ## [0.12.1] - 2026-06-17
 
