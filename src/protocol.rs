@@ -8,7 +8,7 @@ use crate::workspace::WorkspaceStatus;
 /// Compile-time version tag so the CLI can detect stale daemon processes.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Wire protocol version for daemon request compatibility.
-pub const DAEMON_PROTOCOL_VERSION: u32 = 1;
+pub const DAEMON_PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchHit {
@@ -25,6 +25,10 @@ pub struct SearchHit {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DaemonRequest {
+    Version,
+    RuntimeStatus {
+        path: Option<PathBuf>,
+    },
     Status,
     Index {
         path: PathBuf,
@@ -111,6 +115,16 @@ pub enum DaemonResponse {
         #[serde(default)]
         version: Option<String>,
     },
+    Version {
+        #[serde(default)]
+        version: Option<String>,
+    },
+    RuntimeStatus {
+        #[serde(default)]
+        version: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace: Option<WorkspaceRuntimeStatus>,
+    },
     SearchResults {
         hits: Vec<SearchHit>,
     },
@@ -122,6 +136,13 @@ pub enum DaemonResponse {
     Error {
         message: String,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceRuntimeStatus {
+    pub id: String,
+    pub watch_enabled: bool,
+    pub watcher_alive: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

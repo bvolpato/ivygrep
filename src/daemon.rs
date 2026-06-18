@@ -23,6 +23,7 @@ use crate::indexer::{
 use crate::jobs::{self, JobKind, JobUpdate};
 use crate::protocol::{
     BUILD_VERSION, DAEMON_PROTOCOL_VERSION, DaemonRequest, DaemonRequestEnvelope, DaemonResponse,
+    WorkspaceRuntimeStatus,
 };
 use crate::regex_search::regex_search;
 use crate::search::{
@@ -662,6 +663,37 @@ fn parse_daemon_request(line: &[u8]) -> std::result::Result<DaemonRequest, Daemo
 
 async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonResponse {
     match request {
+        DaemonRequest::Version => DaemonResponse::Version {
+            version: Some(BUILD_VERSION.to_string()),
+        },
+        DaemonRequest::RuntimeStatus { path } => {
+            let workspace = match path {
+                Some(path) => match Workspace::resolve(&path) {
+                    Ok(workspace) => {
+                        let watch_enabled = workspace
+                            .read_metadata()
+                            .ok()
+                            .flatten()
+                            .is_some_and(|metadata| metadata.watch_enabled);
+                        Some(WorkspaceRuntimeStatus {
+                            id: workspace.id.clone(),
+                            watch_enabled,
+                            watcher_alive: workspace.is_watcher_alive(),
+                        })
+                    }
+                    Err(err) => {
+                        return DaemonResponse::Error {
+                            message: err.to_string(),
+                        };
+                    }
+                },
+                None => None,
+            };
+            DaemonResponse::RuntimeStatus {
+                version: Some(BUILD_VERSION.to_string()),
+                workspace,
+            }
+        }
         DaemonRequest::Status => match list_workspaces() {
             Ok(workspaces) => DaemonResponse::Status {
                 workspaces,
@@ -1666,7 +1698,13 @@ pub async fn request<F>(
 where
     F: FnMut(String, usize, usize) + Send,
 {
-    if !matches!(request, DaemonRequest::Status | DaemonRequest::Restart) {
+    if !matches!(
+        request,
+        DaemonRequest::Version
+            | DaemonRequest::RuntimeStatus { .. }
+            | DaemonRequest::Status
+            | DaemonRequest::Restart
+    ) {
         ensure_compatible_daemon().await;
     }
 
@@ -1679,8 +1717,8 @@ async fn ensure_compatible_daemon() {
     }
 
     let compatible = matches!(
-        request_unchecked::<fn(String, usize, usize)>(&DaemonRequest::Status, false, None).await,
-        Ok(Some(DaemonResponse::Status { version, .. }))
+        request_unchecked::<fn(String, usize, usize)>(&DaemonRequest::Version, false, None).await,
+        Ok(Some(DaemonResponse::Version { version }))
             if version.as_deref() == Some(BUILD_VERSION)
     );
     if !compatible {
@@ -1807,7 +1845,10 @@ where
     // (large monorepos: 270K+ files), while Status should complete in seconds.
     let timeout_secs = match request {
         DaemonRequest::Index { .. } => 1800, // 30 min for large repos
-        DaemonRequest::Status | DaemonRequest::Restart => 5, // quick
+        DaemonRequest::Version
+        | DaemonRequest::RuntimeStatus { .. }
+        | DaemonRequest::Status
+        | DaemonRequest::Restart => 5, // quick
         DaemonRequest::Search { .. }
         | DaemonRequest::RegexSearch { .. }
         | DaemonRequest::LiteralSearch { .. } => 120, // 2 min for search
@@ -1916,10 +1957,10 @@ mod tests {
         ));
 
         let versioned =
-            serde_json::to_vec(&DaemonRequestEnvelope::new(DaemonRequest::Status)).unwrap();
+            serde_json::to_vec(&DaemonRequestEnvelope::new(DaemonRequest::Version)).unwrap();
         assert!(matches!(
             serde_json::from_slice::<DaemonRequest>(&versioned).unwrap(),
-            DaemonRequest::Status
+            DaemonRequest::Version
         ));
     }
 
@@ -1934,6 +1975,53 @@ mod tests {
             response,
             DaemonResponse::Error { message } if message.contains("exceeds maximum")
         ));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn lightweight_runtime_status_reports_version_without_full_status() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        workspace.ensure_dirs().unwrap();
+        workspace
+            .write_metadata(&WorkspaceMetadata {
+                id: workspace.id.clone(),
+                root: workspace.root.clone(),
+                created_at_unix: 1,
+                last_indexed_at_unix: Some(1),
+                watch_enabled: true,
+                skip_gitignore: false,
+                index_generation: 1,
+            })
+            .unwrap();
+
+        let version = handle_request(test_state(), DaemonRequest::Version).await;
+        assert!(matches!(
+            version,
+            DaemonResponse::Version { version } if version.as_deref() == Some(BUILD_VERSION)
+        ));
+
+        let runtime = handle_request(
+            test_state(),
+            DaemonRequest::RuntimeStatus {
+                path: Some(workspace.root.clone()),
+            },
+        )
+        .await;
+        let DaemonResponse::RuntimeStatus {
+            version,
+            workspace: Some(runtime_workspace),
+        } = runtime
+        else {
+            panic!("expected runtime status, got {runtime:?}");
+        };
+        assert_eq!(version.as_deref(), Some(BUILD_VERSION));
+        assert_eq!(runtime_workspace.id, workspace.id);
+        assert!(runtime_workspace.watch_enabled);
+        assert!(!runtime_workspace.watcher_alive);
     }
 
     #[tokio::test]
@@ -1966,9 +2054,8 @@ mod tests {
             let mut request_types = Vec::new();
             let responses = [
                 serde_json::json!({
-                    "type": "status",
-                    "version": "0.10.1",
-                    "workspaces": []
+                    "type": "version",
+                    "version": "0.10.1"
                 }),
                 serde_json::json!({
                     "type": "ack",
@@ -2010,7 +2097,7 @@ mod tests {
         .unwrap();
 
         assert!(response.is_none());
-        assert_eq!(server.await.unwrap(), ["status", "restart"]);
+        assert_eq!(server.await.unwrap(), ["version", "restart"]);
     }
 
     #[tokio::test]

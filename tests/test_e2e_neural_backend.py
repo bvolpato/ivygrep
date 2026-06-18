@@ -14,7 +14,7 @@ HELPER = ROOT / "scripts" / "e2e_neural_backend.sh"
 
 class NeuralBackendE2ETest(unittest.TestCase):
     def run_helper(
-        self, fake_body: str, attempts: int
+        self, fake_body: str, attempts: int, extra_args: list[str] | None = None
     ) -> tuple[subprocess.CompletedProcess[str], int]:
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -32,15 +32,19 @@ class NeuralBackendE2ETest(unittest.TestCase):
             env = os.environ.copy()
             env["IVYGREP_E2E_DOWNLOAD_ATTEMPTS"] = str(attempts)
             env["IVYGREP_E2E_RETRY_DELAY_SECONDS"] = "0"
+            command = [
+                "sh",
+                str(HELPER),
+                "--binary",
+                str(fake),
+                "--expect-backend",
+                "StaticEmbedding token mean via Rust",
+            ]
+            if extra_args:
+                command.extend(extra_args)
+
             result = subprocess.run(
-                [
-                    "sh",
-                    str(HELPER),
-                    "--binary",
-                    str(fake),
-                    "--expect-backend",
-                    "StaticEmbedding token mean via Rust",
-                ],
+                command,
                 cwd=ROOT,
                 env=env,
                 text=True,
@@ -81,6 +85,33 @@ class NeuralBackendE2ETest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(attempts, 3)
         self.assertIn("Transient model download failure", result.stderr)
+
+    def test_model_profile_option_sets_environment(self) -> None:
+        result, attempts = self.run_helper(
+            """
+            case "$1" in
+              --add)
+                [ "${IVYGREP_MODEL_PROFILE:-}" = "general" ] || exit 7
+                exit 0
+                ;;
+              --enhance-internal)
+                echo 1 > "$state"
+                [ "${IVYGREP_MODEL_PROFILE:-}" = "general" ] || exit 7
+                exit 0
+                ;;
+              --status)
+                echo "StaticEmbedding token mean via Rust"
+                exit 0
+                ;;
+            esac
+            exit 2
+            """,
+            attempts=1,
+            extra_args=["--model-profile", "general"],
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(attempts, 1)
 
     def test_does_not_retry_permanent_model_failures(self) -> None:
         result, attempts = self.run_helper(

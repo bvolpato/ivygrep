@@ -6,6 +6,7 @@ root=$(CDPATH='' cd "$script_dir/.." && pwd)
 ig_bin="$root/target/release/ig"
 expected_backend=""
 allowed_backend=""
+model_profile=""
 
 usage() {
   cat <<'EOF'
@@ -18,6 +19,7 @@ Options:
   --binary PATH          Use this ig binary (default: ./target/release/ig)
   --expect-backend TEXT  Status substring required after neural enhancement
   --allow-backend TEXT   Alternate accepted status substring
+  --model-profile NAME   Set IVYGREP_MODEL_PROFILE for this backend check
   -h, --help             Show help
 EOF
 }
@@ -42,6 +44,11 @@ while [ "$#" -gt 0 ]; do
     --allow-backend)
       [ "$#" -ge 2 ] || fail "--allow-backend needs text"
       allowed_backend=$2
+      shift 2
+      ;;
+    --model-profile)
+      [ "$#" -ge 2 ] || fail "--model-profile needs name"
+      model_profile=$2
       shift 2
       ;;
     -h|--help)
@@ -73,6 +80,9 @@ EOF
 
 export IVYGREP_HOME="$tmp_root/home"
 export IVYGREP_NO_AUTOSPAWN=1
+if [ -n "$model_profile" ]; then
+  export IVYGREP_MODEL_PROFILE="$model_profile"
+fi
 
 "$ig_bin" --add "$project" --force --json --no-watch --hash >/dev/null
 

@@ -874,24 +874,25 @@ async fn run_query(cli: Cli) -> Result<()> {
             // Also verify the daemon version matches — stale daemons silently break search.
             let _t = std::time::Instant::now();
             match daemon::request::<fn(String, usize, usize)>(
-                &DaemonRequest::Status,
+                &DaemonRequest::RuntimeStatus {
+                    path: query_path_opt.clone(),
+                },
                 watch_configured,
                 None,
             )
             .await?
             {
-                Some(DaemonResponse::Status {
+                Some(DaemonResponse::RuntimeStatus {
                     version,
-                    workspaces,
+                    workspace: runtime_status,
                 }) => {
                     if version.as_deref() == Some(BUILD_VERSION) {
                         let watcher_offline = watch_configured
-                            && workspaces
-                                .iter()
-                                .find(|status| status.id == workspace.id)
-                                .is_some_and(|status| {
-                                    status.watch_enabled && !status.watcher_alive
-                                });
+                            && runtime_status.as_ref().is_some_and(|status| {
+                                status.id == workspace.id
+                                    && status.watch_enabled
+                                    && !status.watcher_alive
+                            });
                         if watcher_offline {
                             tracing::warn!(
                                 "daemon online but watcher offline for {}, restarting",
@@ -899,7 +900,9 @@ async fn run_query(cli: Cli) -> Result<()> {
                             );
                             restart_daemon().await;
                             search_via_daemon = daemon::request::<fn(String, usize, usize)>(
-                                &DaemonRequest::Status,
+                                &DaemonRequest::RuntimeStatus {
+                                    path: query_path_opt.clone(),
+                                },
                                 true,
                                 None,
                             )
@@ -917,7 +920,9 @@ async fn run_query(cli: Cli) -> Result<()> {
                         restart_daemon().await;
                         // Re-check if the new daemon is up
                         search_via_daemon = daemon::request::<fn(String, usize, usize)>(
-                            &DaemonRequest::Status,
+                            &DaemonRequest::RuntimeStatus {
+                                path: query_path_opt.clone(),
+                            },
                             false,
                             None,
                         )
@@ -930,7 +935,9 @@ async fn run_query(cli: Cli) -> Result<()> {
                     tracing::warn!("daemon has no version field, restarting");
                     restart_daemon().await;
                     search_via_daemon = daemon::request::<fn(String, usize, usize)>(
-                        &DaemonRequest::Status,
+                        &DaemonRequest::RuntimeStatus {
+                            path: query_path_opt.clone(),
+                        },
                         false,
                         None,
                     )
@@ -941,7 +948,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             }
         }
     } else if daemon::request::<fn(String, usize, usize)>(
-        &DaemonRequest::Status,
+        &DaemonRequest::Version,
         !cli.no_watch,
         None,
     )
@@ -1466,6 +1473,7 @@ fn print_daemon_response(response: DaemonResponse, json: bool) -> Result<()> {
             }
             Ok(())
         }
+        DaemonResponse::Version { .. } | DaemonResponse::RuntimeStatus { .. } => Ok(()),
         DaemonResponse::SearchProgress { .. } => Ok(()),
     }
 }

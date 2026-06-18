@@ -403,11 +403,11 @@ python3 scripts/check_daemon_equivalence.py \
 
 # Opt-in macOS Metal backend validation (downloads local model artifacts on first run)
 ./build.sh --locked --features accelerate,metal
-./scripts/e2e_neural_backend.sh --binary ./target/release/ig --expect-backend "Candle Metal"
+./scripts/e2e_neural_backend.sh --binary ./target/release/ig --model-profile general --expect-backend "Candle Metal"
 
 # Opt-in Linux CUDA backend validation (downloads local model artifacts on first run)
 ./build.sh --locked --features cuda
-./scripts/e2e_neural_backend.sh --binary ./target/release/ig --expect-backend "Candle CUDA"
+./scripts/e2e_neural_backend.sh --binary ./target/release/ig --model-profile general --expect-backend "Candle CUDA"
 ```
 These smoke tests run against throwaway projects and isolated `IVYGREP_HOME` directories; the neural backend check embeds fixture text locally and verifies recorded backend reporting.
 
