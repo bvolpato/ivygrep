@@ -75,7 +75,39 @@ export IVYGREP_HOME="$tmp_root/home"
 export IVYGREP_NO_AUTOSPAWN=1
 
 "$ig_bin" --add "$project" --force --json --no-watch --hash >/dev/null
-"$ig_bin" --enhance-internal "$project" >/dev/null
+
+download_attempts=${IVYGREP_E2E_DOWNLOAD_ATTEMPTS:-5}
+retry_delay=${IVYGREP_E2E_RETRY_DELAY_SECONDS:-15}
+case "$download_attempts" in
+  ''|*[!0-9]*) fail "IVYGREP_E2E_DOWNLOAD_ATTEMPTS must be a positive integer" ;;
+esac
+[ "$download_attempts" -gt 0 ] ||
+  fail "IVYGREP_E2E_DOWNLOAD_ATTEMPTS must be a positive integer"
+case "$retry_delay" in
+  ''|*[!0-9]*) fail "IVYGREP_E2E_RETRY_DELAY_SECONDS must be a non-negative integer" ;;
+esac
+
+enhance_log="$tmp_root/enhance.log"
+attempt=1
+while ! "$ig_bin" --enhance-internal "$project" >"$enhance_log" 2>&1; do
+  cat "$enhance_log" >&2
+  if [ "$attempt" -ge "$download_attempts" ] ||
+    ! grep -Eiq \
+      'status code (429|500|502|503|504)([^0-9]|$)|connection (reset|refused|timed out)|operation timed out|temporary failure|dns error|failed to lookup address|network is unreachable' \
+      "$enhance_log"
+  then
+    fail "neural enhancement failed on attempt $attempt"
+  fi
+
+  echo "Transient model download failure; retrying in ${retry_delay}s (attempt $((attempt + 1))/$download_attempts)" >&2
+  sleep "$retry_delay"
+  attempt=$((attempt + 1))
+  if [ "$retry_delay" -lt 120 ]; then
+    retry_delay=$((retry_delay * 2))
+    [ "$retry_delay" -le 120 ] || retry_delay=120
+  fi
+done
+
 "$ig_bin" --status > "$tmp_root/status.txt"
 
 reported_backend=""
