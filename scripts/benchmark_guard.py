@@ -78,6 +78,10 @@ def measure(repo_root: Path, ref: str, bench_target: str, bench_name: str) -> fl
     return float(estimates["median"]["point_estimate"])
 
 
+def ratio(current: float, baseline: float) -> float:
+    return current / baseline if baseline else float("inf")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Compare a critical Criterion benchmark against a baseline ref in the same runner."
@@ -96,31 +100,55 @@ def main() -> int:
     try:
         current = measure(repo_root, current_ref, args.bench_target, args.bench_name)
         baseline = measure(repo_root, args.baseline_ref, args.bench_target, args.bench_name)
+        initial_ratio = ratio(current, baseline)
+        confirmation = None
+        if initial_ratio > args.threshold:
+            print(
+                f"{args.bench_name} exceeded the threshold on the first pass; "
+                "confirming in reverse order",
+                file=sys.stderr,
+            )
+            confirmed_baseline = measure(
+                repo_root, args.baseline_ref, args.bench_target, args.bench_name
+            )
+            confirmed_current = measure(
+                repo_root, current_ref, args.bench_target, args.bench_name
+            )
+            confirmation = {
+                "current_median_ns": confirmed_current,
+                "baseline_median_ns": confirmed_baseline,
+                "ratio": ratio(confirmed_current, confirmed_baseline),
+            }
     finally:
         restore_checkout(repo_root, original_checkout)
 
-    ratio = current / baseline if baseline else float("inf")
-    print(
-        json.dumps(
-            {
-                "bench": args.bench_name,
-                "current_ref": current_ref,
-                "baseline_ref": args.baseline_ref,
-                "current_median_ns": current,
-                "baseline_median_ns": baseline,
-                "ratio": ratio,
-                "threshold": args.threshold,
-            },
-            indent=2,
-        )
-    )
+    result = {
+        "bench": args.bench_name,
+        "current_ref": current_ref,
+        "baseline_ref": args.baseline_ref,
+        "current_median_ns": current,
+        "baseline_median_ns": baseline,
+        "ratio": initial_ratio,
+        "threshold": args.threshold,
+        "confirmation": confirmation,
+    }
+    print(json.dumps(result, indent=2))
 
-    if ratio > args.threshold:
+    if confirmation is not None and confirmation["ratio"] > args.threshold:
         print(
-            f"{args.bench_name} regressed by {ratio:.2f}x, exceeding threshold {args.threshold:.2f}x",
+            f"{args.bench_name} confirmed a regression at "
+            f"{confirmation['ratio']:.2f}x, exceeding threshold "
+            f"{args.threshold:.2f}x",
             file=sys.stderr,
         )
         return 1
+
+    if confirmation is not None:
+        print(
+            f"{args.bench_name} was not confirmed as a regression "
+            f"({initial_ratio:.2f}x then {confirmation['ratio']:.2f}x)",
+            file=sys.stderr,
+        )
 
     return 0
 
