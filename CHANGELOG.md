@@ -4,6 +4,17 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.12.6] - 2026-06-18
+
+### Performance
+- **Daemon hot queries avoid full workspace status scans.** CLI daemon routing now checks a lightweight protocol version and per-workspace runtime status instead of enumerating every indexed workspace before each query.
+
+### Fixed
+- **GPU backend smoke checks select the intended embedding profile.** The neural backend helper can set `IVYGREP_MODEL_PROFILE`, and the Metal/CUDA docs validate the Candle-backed `general` profile explicitly.
+
+### Testing
+- Added lightweight daemon runtime-status coverage and model-profile propagation coverage for neural backend validation.
+
 ## [0.12.5] - 2026-06-18
 
 ### Fixed
