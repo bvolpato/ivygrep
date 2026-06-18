@@ -4,6 +4,14 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.12.5] - 2026-06-18
+
+### Fixed
+- **Neural acceptance tolerates transient model-host throttling.** The E2E helper retries bounded HTTP 429 and transient server/network failures while permanent model or product errors still fail immediately.
+
+### Testing
+- Added executable recovery and fail-fast coverage for the neural E2E helper.
+
 ## [0.12.4] - 2026-06-18
 
 ### Fixed
