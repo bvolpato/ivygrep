@@ -9,6 +9,10 @@ use rayon::prelude::*;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 
+use tantivy::directory::error::{DeleteError, LockError, OpenReadError, OpenWriteError};
+use tantivy::directory::{
+    Directory, DirectoryLock, FileHandle, Lock, MmapDirectory, WatchCallback, WatchHandle, WritePtr,
+};
 use tantivy::schema::{
     Field, IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing, TextOptions, Value,
 };
@@ -26,6 +30,83 @@ use crate::vector_store::{
 use crate::workspace::{Workspace, WorkspaceMetadata, index_path_string};
 
 const ZSTD_MAGIC: &[u8] = &[0x28, 0xB5, 0x2F, 0xFD];
+const TANTIVY_WRITE_RETRY_ATTEMPTS: u32 = 12;
+const TANTIVY_WRITE_RETRY_MAX_DELAY_MS: u64 = 400;
+
+#[derive(Clone, Debug)]
+struct RetryingDirectory<D> {
+    inner: D,
+}
+
+impl<D> RetryingDirectory<D> {
+    fn new(inner: D) -> Self {
+        Self { inner }
+    }
+}
+
+fn open_write_with_retry<F>(mut open: F) -> Result<WritePtr, OpenWriteError>
+where
+    F: FnMut() -> Result<WritePtr, OpenWriteError>,
+{
+    for attempt in 0..TANTIVY_WRITE_RETRY_ATTEMPTS {
+        match open() {
+            Ok(writer) => return Ok(writer),
+            Err(OpenWriteError::IoError { io_error, .. })
+                if io_error.kind() == std::io::ErrorKind::PermissionDenied
+                    && attempt + 1 < TANTIVY_WRITE_RETRY_ATTEMPTS =>
+            {
+                let delay_ms = (25_u64 << attempt).min(TANTIVY_WRITE_RETRY_MAX_DELAY_MS);
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    unreachable!("the retry loop always returns on its final attempt")
+}
+
+impl<D> Directory for RetryingDirectory<D>
+where
+    D: Directory + Clone + std::fmt::Debug,
+{
+    fn get_file_handle(
+        &self,
+        path: &Path,
+    ) -> Result<std::sync::Arc<dyn FileHandle>, OpenReadError> {
+        self.inner.get_file_handle(path)
+    }
+
+    fn delete(&self, path: &Path) -> Result<(), DeleteError> {
+        self.inner.delete(path)
+    }
+
+    fn exists(&self, path: &Path) -> Result<bool, OpenReadError> {
+        self.inner.exists(path)
+    }
+
+    fn open_write(&self, path: &Path) -> Result<WritePtr, OpenWriteError> {
+        open_write_with_retry(|| self.inner.open_write(path))
+    }
+
+    fn atomic_read(&self, path: &Path) -> Result<Vec<u8>, OpenReadError> {
+        self.inner.atomic_read(path)
+    }
+
+    fn atomic_write(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
+        self.inner.atomic_write(path, data)
+    }
+
+    fn sync_directory(&self) -> std::io::Result<()> {
+        self.inner.sync_directory()
+    }
+
+    fn acquire_lock(&self, lock: &Lock) -> Result<DirectoryLock, LockError> {
+        self.inner.acquire_lock(lock)
+    }
+
+    fn watch(&self, watch_callback: WatchCallback) -> tantivy::Result<WatchHandle> {
+        self.inner.watch(watch_callback)
+    }
+}
 
 fn compress_text(text: &str) -> Vec<u8> {
     zstd::encode_all(text.as_bytes(), 1).unwrap_or_else(|_| text.as_bytes().to_vec())
@@ -2226,10 +2307,11 @@ pub fn open_tantivy_index(path: &Path) -> Result<(TantivyIndex, TantivyFields)> 
     fs::create_dir_all(path)?;
 
     let schema = build_schema();
+    let directory = RetryingDirectory::new(MmapDirectory::open(path)?);
     let index = if path.join("meta.json").exists() {
-        TantivyIndex::open_in_dir(path)?
+        TantivyIndex::open(directory)?
     } else {
-        TantivyIndex::create_in_dir(path, schema.clone())?
+        TantivyIndex::open_or_create(directory, schema)?
     };
 
     // Register the code-aware tokenizer so both indexing and querying use it.
@@ -3057,6 +3139,45 @@ mod tests {
         let compressed = super::compress_text(original);
         let decompressed = super::decompress_text(compressed);
         assert_eq!(decompressed, original);
+    }
+
+    #[test]
+    fn tantivy_segment_writes_retry_transient_permission_denials() {
+        use tantivy::directory::{Directory, RamDirectory, TerminatingWrite};
+
+        let directory = RamDirectory::create();
+        let attempts = std::cell::Cell::new(0);
+        let path = PathBuf::from("segment.term");
+
+        let writer = open_write_with_retry(|| {
+            let attempt = attempts.get();
+            attempts.set(attempt + 1);
+            if attempt < 2 {
+                return Err(OpenWriteError::wrap_io_error(
+                    std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                    path.clone(),
+                ));
+            }
+            directory.open_write(&path)
+        })
+        .unwrap();
+
+        writer.terminate().unwrap();
+        assert_eq!(attempts.get(), 3);
+    }
+
+    #[test]
+    fn tantivy_segment_writes_do_not_retry_non_permission_errors() {
+        let attempts = std::cell::Cell::new(0);
+        let path = PathBuf::from("segment.term");
+
+        let result = open_write_with_retry(|| {
+            attempts.set(attempts.get() + 1);
+            Err(OpenWriteError::FileAlreadyExists(path.clone()))
+        });
+
+        assert!(matches!(result, Err(OpenWriteError::FileAlreadyExists(_))));
+        assert_eq!(attempts.get(), 1);
     }
 
     #[test]
