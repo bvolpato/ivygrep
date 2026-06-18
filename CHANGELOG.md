@@ -4,6 +4,14 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-06-18
+
+### Fixed
+- **CLI upgrades replace stale daemons before dispatching work.** Legacy status payloads deserialize with conservative defaults, and every non-status daemon operation verifies the resident version before indexing, searching, or removing a workspace.
+
+### Testing
+- Added protocol compatibility and fake-daemon restart regressions, plus an installed-binary upgrade smoke test that rebuilds an outdated index and returns an indexed result.
+
 ## [0.12.2] - 2026-06-18
 
 ### Fixed

@@ -1661,6 +1661,45 @@ pub fn request_blocking(
 pub async fn request<F>(
     request: &DaemonRequest,
     autospawn: bool,
+    progress_cb: Option<F>,
+) -> Result<Option<DaemonResponse>>
+where
+    F: FnMut(String, usize, usize) + Send,
+{
+    if !matches!(request, DaemonRequest::Status | DaemonRequest::Restart) {
+        ensure_compatible_daemon().await;
+    }
+
+    request_unchecked(request, autospawn, progress_cb).await
+}
+
+async fn ensure_compatible_daemon() {
+    if !crate::ipc::socket_exists() {
+        return;
+    }
+
+    let compatible = matches!(
+        request_unchecked::<fn(String, usize, usize)>(&DaemonRequest::Status, false, None).await,
+        Ok(Some(DaemonResponse::Status { version, .. }))
+            if version.as_deref() == Some(BUILD_VERSION)
+    );
+    if !compatible {
+        restart_daemon_process().await;
+    }
+}
+
+pub(crate) async fn restart_daemon_process() {
+    let _ =
+        request_unchecked::<fn(String, usize, usize)>(&DaemonRequest::Restart, false, None).await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    if crate::ipc::socket_exists() {
+        crate::ipc::cleanup_socket();
+    }
+}
+
+async fn request_unchecked<F>(
+    request: &DaemonRequest,
+    autospawn: bool,
     mut progress_cb: Option<F>,
 ) -> Result<Option<DaemonResponse>>
 where
@@ -1913,6 +1952,65 @@ mod tests {
             Some(DaemonRequest::Status)
         ));
         assert!(read_daemon_request(&mut reader).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn non_status_request_restarts_outdated_daemon_before_dispatch() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        crate::config::ensure_app_dirs().unwrap();
+
+        let (listener, _) = crate::ipc::bind().await.unwrap();
+        let server = tokio::spawn(async move {
+            let mut request_types = Vec::new();
+            let responses = [
+                serde_json::json!({
+                    "type": "status",
+                    "version": "0.10.1",
+                    "workspaces": []
+                }),
+                serde_json::json!({
+                    "type": "ack",
+                    "message": "restarting"
+                }),
+            ];
+            while request_types.len() < responses.len() {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                if line.is_empty() {
+                    continue;
+                }
+                request_types.push(
+                    serde_json::from_str::<serde_json::Value>(&line).unwrap()["type"]
+                        .as_str()
+                        .unwrap()
+                        .to_string(),
+                );
+                reader
+                    .get_mut()
+                    .write_all(format!("{}\n", responses[request_types.len() - 1]).as_bytes())
+                    .await
+                    .unwrap();
+            }
+            crate::ipc::cleanup_socket();
+            request_types
+        });
+
+        let response = request::<fn(String, usize, usize)>(
+            &DaemonRequest::Remove {
+                path: home.path().join("workspace"),
+            },
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(response.is_none());
+        assert_eq!(server.await.unwrap(), ["status", "restart"]);
     }
 
     #[tokio::test]

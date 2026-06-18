@@ -188,6 +188,51 @@ mod tests {
     }
 
     #[test]
+    fn status_response_accepts_workspace_without_compaction_metadata() {
+        let response: DaemonResponse = serde_json::from_value(serde_json::json!({
+            "type": "status",
+            "version": "0.11.2",
+            "workspaces": [{
+                "id": "workspace",
+                "root": "/tmp/workspace",
+                "last_indexed_at_unix": 1,
+                "watch_enabled": true,
+                "chunk_count": 2,
+                "file_count": 1,
+                "index_size_bytes": 3,
+                "index_components": {
+                    "metadata_bytes": 1,
+                    "graph_bytes": 0,
+                    "lexical_bytes": 1,
+                    "hash_vectors_bytes": 1,
+                    "neural_vectors_bytes": 0,
+                    "other_bytes": 0
+                },
+                "vector_key_count": 2,
+                "has_neural_vectors": false,
+                "neural_vector_count": 0,
+                "neural_coverage_percent": 0.0,
+                "neural_dimensions": 0,
+                "reranker_candidate_limit": 100
+            }]
+        }))
+        .unwrap();
+
+        let DaemonResponse::Status {
+            version,
+            workspaces,
+        } = response
+        else {
+            panic!("expected status response");
+        };
+
+        assert_eq!(version.as_deref(), Some("0.11.2"));
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(workspaces[0].compaction.format_version, 0);
+        assert!(!workspaces[0].compaction.healthy);
+    }
+
+    #[test]
     fn groups_hits_by_file() {
         let hits = vec![
             hit("a.rs", 1.0, 10),
