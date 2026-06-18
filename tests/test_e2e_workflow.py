@@ -11,13 +11,26 @@ E2E_WORKFLOW = (
 
 
 class E2EWorkflowTest(unittest.TestCase):
-    def test_aarch64_procedure_checks_do_not_require_python(self) -> None:
+    def test_aarch64_smoke_uses_git_and_python_images(self) -> None:
         workflow = E2E_WORKFLOW.read_text(encoding="utf-8")
+        arm = workflow.split("cross-linux-aarch64:", maxsplit=1)[1].split(
+            "# ── Hash-only mode", maxsplit=1
+        )[0]
 
-        self.assertIn("alpine:latest sh -c", workflow)
-        procedure = workflow.index('sh scripts/e2e_procedures.sh --binary "$IG"')
-        python_install = workflow.index("apk add --no-cache python3")
-        self.assertLess(procedure, python_install)
+        self.assertIn("--network none", arm)
+        self.assertIn("--entrypoint sh", arm)
+        self.assertIn("alpine/git@sha256:", arm)
+        self.assertIn("python:3.13-alpine", arm)
+        self.assertNotIn("alpine:latest", arm)
+        self.assertNotIn("apk add", arm)
+        self.assertLess(
+            arm.index("alpine/git@sha256:"),
+            arm.index('sh scripts/e2e_procedures.sh --binary "$IG"'),
+        )
+        self.assertLess(
+            arm.index("python:3.13-alpine"),
+            arm.index("python3 scripts/check_daemon_equivalence.py"),
+        )
 
     def test_windows_runs_neural_and_unicode_path_acceptance(self) -> None:
         workflow = E2E_WORKFLOW.read_text(encoding="utf-8")

@@ -4,6 +4,9 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **ARM64 tag E2E uses the required Git tooling.** The QEMU smoke lane now runs documented procedures in the same pinned Git-capable image used by release acceptance, then checks daemon equivalence in a separate Python image.
+
 ## [0.12.1] - 2026-06-17
 
 ### Added
