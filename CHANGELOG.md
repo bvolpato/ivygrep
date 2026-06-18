@@ -4,6 +4,14 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.12.4] - 2026-06-18
+
+### Fixed
+- **Windows indexing tolerates transient filesystem sharing violations.** Tantivy segment creation retries bounded `PermissionDenied` failures while preserving its existing read, lock, delete, atomic metadata, and watch behavior.
+
+### Testing
+- Added deterministic retry coverage and retained concurrent search/reindex validation across the standard Windows matrix and cross-platform E2E workflow.
+
 ## [0.12.3] - 2026-06-18
 
 ### Fixed
