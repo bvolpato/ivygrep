@@ -75,6 +75,7 @@ pub struct WorkspaceStatus {
     pub file_count: u64,
     pub index_size_bytes: u64,
     pub index_components: IndexComponentSizes,
+    #[serde(default)]
     pub compaction: IndexCompactionHealth,
     pub vector_key_count: u64,
     pub has_neural_vectors: bool,

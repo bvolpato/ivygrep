@@ -1569,21 +1569,7 @@ fn maybe_run_legacy_mcp_stdio() -> Result<bool> {
 
 /// Ask the running daemon to shut down, then spawn a fresh one from the current binary.
 async fn restart_daemon() {
-    // Send a graceful restart request over the socket.
-    // The daemon cleans up its own socket and exits after replying.
-    let _ = daemon::request::<fn(String, usize, usize)>(&DaemonRequest::Restart, false, None).await;
-
-    // Give the old daemon a moment to exit
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-    // If the socket still exists, the old daemon didn't understand
-    // Restart (pre-upgrade binary). Remove the socket so the old daemon
-    // can't accept new connections, then auto-spawn a new one.
-    if crate::ipc::socket_exists() {
-        crate::ipc::cleanup_socket();
-    }
-
-    // Auto-spawn the new daemon via the standard request path
+    daemon::restart_daemon_process().await;
     let _ = daemon::request::<fn(String, usize, usize)>(&DaemonRequest::Status, true, None).await;
 }
 
