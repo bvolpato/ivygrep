@@ -80,6 +80,7 @@ class MillionBenchmarkTest(unittest.TestCase):
     def test_daemon_retry_excludes_stale_connection_from_latency(self):
         response = json.dumps({"type": "search_results", "hits": []}).encode() + b"\n"
         connections = []
+        payloads = []
         responses = [[response, b""], [response]]
 
         class FakeReader:
@@ -97,8 +98,8 @@ class MillionBenchmarkTest(unittest.TestCase):
                 self.closed = False
                 self.reader = FakeReader(values)
 
-            def sendall(self, _payload):
-                pass
+            def sendall(self, payload):
+                payloads.append(payload)
 
             def makefile(self, _mode):
                 return self.reader
@@ -124,6 +125,13 @@ class MillionBenchmarkTest(unittest.TestCase):
         self.assertEqual(len(connections), 2)
         self.assertTrue(all(connection.closed for connection in connections))
         self.assertAlmostEqual(result["elapsed_ms"], 2.0)
+        self.assertTrue(
+            all(
+                json.loads(payload.decode())["protocol_version"]
+                == benchmark.DAEMON_PROTOCOL_VERSION
+                for payload in payloads
+            )
+        )
 
     def test_dataset_provenance_ignores_unrelated_manifest_changes(self):
         matrix = {
