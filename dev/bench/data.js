@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1781891999148,
+  "lastUpdate": 1781895917337,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -22105,6 +22105,160 @@ window.BENCHMARK_DATA = {
           {
             "name": "critical_journeys/vector_search_in_50k_hot",
             "value": 37.97,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "c21a223cb2dc0b9bbf2f4067f2b73893ee849948",
+          "message": "chore(deps): bump the cargo group across 1 directory with 24 updates (#131)\n\n* chore(deps): bump the cargo group across 1 directory with 24 updates\n\nBumps the cargo group with 24 updates in the / directory:\n\n| Package | From | To |\n| --- | --- | --- |\n| [clap](https://github.com/clap-rs/clap) | `4.6.0` | `4.6.1` |\n| [regex](https://github.com/rust-lang/regex) | `1.12.3` | `1.12.4` |\n| [ignore](https://github.com/BurntSushi/ripgrep) | `0.4.25` | `0.4.26` |\n| [rayon](https://github.com/rayon-rs/rayon) | `1.11.0` | `1.12.0` |\n| [rusqlite](https://github.com/rusqlite/rusqlite) | `0.39.0` | `0.40.1` |\n| [serde_json](https://github.com/serde-rs/json) | `1.0.149` | `1.0.150` |\n| [tantivy](https://github.com/quickwit-oss/tantivy) | `0.26.0` | `0.26.1` |\n| [tokio](https://github.com/tokio-rs/tokio) | `1.51.0` | `1.52.3` |\n| [uuid](https://github.com/uuid-rs/uuid) | `1.23.0` | `1.23.3` |\n| [ratatui](https://github.com/ratatui/ratatui) | `0.30.0` | `0.30.1` |\n| [libc](https://github.com/rust-lang/libc) | `0.2.184` | `0.2.186` |\n| [tree-sitter](https://github.com/tree-sitter/tree-sitter) | `0.26.8` | `0.26.9` |\n| [tree-sitter-c-sharp](https://github.com/tree-sitter/tree-sitter-c-sharp) | `0.23.1` | `0.23.5` |\n| [tree-sitter-php](https://github.com/tree-sitter/tree-sitter-php) | `0.23.11` | `0.24.2` |\n| [tree-sitter-swift](https://github.com/alex-pinkus/tree-sitter-swift) | `0.7.1` | `0.7.3` |\n| [tree-sitter-c](https://github.com/tree-sitter/tree-sitter-c) | `0.24.1` | `0.24.2` |\n| [tree-sitter-scala](https://github.com/tree-sitter/tree-sitter-scala) | `0.25.0` | `0.26.0` |\n| [tree-sitter-ocaml](https://github.com/tree-sitter/tree-sitter-ocaml) | `0.24.2` | `0.25.0` |\n| [tree-sitter-dart](https://github.com/nielsenko/tree-sitter-dart) | `0.1.0` | `0.2.0` |\n| [tokenizers](https://github.com/huggingface/tokenizers) | `0.19.1` | `0.22.2` |\n| [openssl](https://github.com/rust-openssl/rust-openssl) | `0.10.80` | `0.10.81` |\n| [assert_cmd](https://github.com/assert-rs/assert_cmd) | `2.2.0` | `2.2.2` |\n| [insta](https://github.com/mitsuhiko/insta) | `1.47.2` | `1.48.0` |\n| [serial_test](https://github.com/palfrey/serial_test) | `3.4.0` | `3.5.0` |\n\n\n\nUpdates `clap` from 4.6.0 to 4.6.1\n- [Release notes](https://github.com/clap-rs/clap/releases)\n- [Changelog](https://github.com/clap-rs/clap/blob/master/CHANGELOG.md)\n- [Commits](https://github.com/clap-rs/clap/compare/clap_complete-v4.6.0...clap_complete-v4.6.1)\n\nUpdates `regex` from 1.12.3 to 1.12.4\n- [Release notes](https://github.com/rust-lang/regex/releases)\n- [Changelog](https://github.com/rust-lang/regex/blob/master/CHANGELOG.md)\n- [Commits](https://github.com/rust-lang/regex/compare/1.12.3...1.12.4)\n\nUpdates `ignore` from 0.4.25 to 0.4.26\n- [Release notes](https://github.com/BurntSushi/ripgrep/releases)\n- [Changelog](https://github.com/BurntSushi/ripgrep/blob/master/CHANGELOG.md)\n- [Commits](https://github.com/BurntSushi/ripgrep/compare/ignore-0.4.25...ignore-0.4.26)\n\nUpdates `rayon` from 1.11.0 to 1.12.0\n- [Changelog](https://github.com/rayon-rs/rayon/blob/main/RELEASES.md)\n- [Commits](https://github.com/rayon-rs/rayon/compare/rayon-core-v1.11.0...rayon-core-v1.12.0)\n\nUpdates `rusqlite` from 0.39.0 to 0.40.1\n- [Release notes](https://github.com/rusqlite/rusqlite/releases)\n- [Changelog](https://github.com/rusqlite/rusqlite/blob/master/Changelog.md)\n- [Commits](https://github.com/rusqlite/rusqlite/compare/v0.39.0...v0.40.1)\n\nUpdates `serde_json` from 1.0.149 to 1.0.150\n- [Release notes](https://github.com/serde-rs/json/releases)\n- [Commits](https://github.com/serde-rs/json/compare/v1.0.149...v1.0.150)\n\nUpdates `tantivy` from 0.26.0 to 0.26.1\n- [Release notes](https://github.com/quickwit-oss/tantivy/releases)\n- [Changelog](https://github.com/quickwit-oss/tantivy/blob/main/CHANGELOG.md)\n- [Commits](https://github.com/quickwit-oss/tantivy/compare/0.26.0...0.26.1)\n\nUpdates `tokio` from 1.51.0 to 1.52.3\n- [Release notes](https://github.com/tokio-rs/tokio/releases)\n- [Commits](https://github.com/tokio-rs/tokio/compare/tokio-1.51.0...tokio-1.52.3)\n\nUpdates `uuid` from 1.23.0 to 1.23.3\n- [Release notes](https://github.com/uuid-rs/uuid/releases)\n- [Commits](https://github.com/uuid-rs/uuid/compare/v1.23.0...v1.23.3)\n\nUpdates `ratatui` from 0.30.0 to 0.30.1\n- [Release notes](https://github.com/ratatui/ratatui/releases)\n- [Changelog](https://github.com/ratatui/ratatui/blob/main/CHANGELOG.md)\n- [Commits](https://github.com/ratatui/ratatui/compare/ratatui-v0.30.0...ratatui-v0.30.1)\n\nUpdates `libc` from 0.2.184 to 0.2.186\n- [Release notes](https://github.com/rust-lang/libc/releases)\n- [Changelog](https://github.com/rust-lang/libc/blob/0.2.186/CHANGELOG.md)\n- [Commits](https://github.com/rust-lang/libc/compare/0.2.184...0.2.186)\n\nUpdates `tree-sitter` from 0.26.8 to 0.26.9\n- [Release notes](https://github.com/tree-sitter/tree-sitter/releases)\n- [Commits](https://github.com/tree-sitter/tree-sitter/compare/v0.26.8...v0.26.9)\n\nUpdates `tree-sitter-c-sharp` from 0.23.1 to 0.23.5\n- [Release notes](https://github.com/tree-sitter/tree-sitter-c-sharp/releases)\n- [Commits](https://github.com/tree-sitter/tree-sitter-c-sharp/compare/v0.23.1...v0.23.5)\n\nUpdates `tree-sitter-php` from 0.23.11 to 0.24.2\n- [Release notes](https://github.com/tree-sitter/tree-sitter-php/releases)\n- [Commits](https://github.com/tree-sitter/tree-sitter-php/compare/v0.23.11...v0.24.2)\n\nUpdates `tree-sitter-swift` from 0.7.1 to 0.7.3\n- [Release notes](https://github.com/alex-pinkus/tree-sitter-swift/releases)\n- [Commits](https://github.com/alex-pinkus/tree-sitter-swift/compare/0.7.1...0.7.3)\n\nUpdates `tree-sitter-c` from 0.24.1 to 0.24.2\n- [Release notes](https://github.com/tree-sitter/tree-sitter-c/releases)\n- [Commits](https://github.com/tree-sitter/tree-sitter-c/compare/v0.24.1...v0.24.2)\n\nUpdates `tree-sitter-scala` from 0.25.0 to 0.26.0\n- [Release notes](https://github.com/tree-sitter/tree-sitter-scala/releases)\n- [Commits](https://github.com/tree-sitter/tree-sitter-scala/compare/v0.25.0...v0.26.0)\n\nUpdates `tree-sitter-ocaml` from 0.24.2 to 0.25.0\n- [Release notes](https://github.com/tree-sitter/tree-sitter-ocaml/releases)\n- [Commits](https://github.com/tree-sitter/tree-sitter-ocaml/compare/v0.24.2...v0.25.0)\n\nUpdates `tree-sitter-dart` from 0.1.0 to 0.2.0\n- [Changelog](https://github.com/nielsenko/tree-sitter-dart/blob/main/CHANGELOG.md)\n- [Commits](https://github.com/nielsenko/tree-sitter-dart/commits/v0.2.0)\n\nUpdates `tokenizers` from 0.19.1 to 0.22.2\n- [Release notes](https://github.com/huggingface/tokenizers/releases)\n- [Changelog](https://github.com/huggingface/tokenizers/blob/main/RELEASE.md)\n- [Commits](https://github.com/huggingface/tokenizers/compare/v0.19.1...v0.22.2)\n\nUpdates `openssl` from 0.10.80 to 0.10.81\n- [Release notes](https://github.com/rust-openssl/rust-openssl/releases)\n- [Commits](https://github.com/rust-openssl/rust-openssl/compare/openssl-v0.10.80...openssl-v0.10.81)\n\nUpdates `assert_cmd` from 2.2.0 to 2.2.2\n- [Changelog](https://github.com/assert-rs/assert_cmd/blob/master/CHANGELOG.md)\n- [Commits](https://github.com/assert-rs/assert_cmd/compare/v2.2.0...v2.2.2)\n\nUpdates `insta` from 1.47.2 to 1.48.0\n- [Release notes](https://github.com/mitsuhiko/insta/releases)\n- [Changelog](https://github.com/mitsuhiko/insta/blob/master/CHANGELOG.md)\n- [Commits](https://github.com/mitsuhiko/insta/compare/1.47.2...1.48.0)\n\nUpdates `serial_test` from 3.4.0 to 3.5.0\n- [Release notes](https://github.com/palfrey/serial_test/releases)\n- [Commits](https://github.com/palfrey/serial_test/compare/v3.4.0...v3.5.0)\n\n---\nupdated-dependencies:\n- dependency-name: assert_cmd\n  dependency-version: 2.2.2\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: clap\n  dependency-version: 4.6.1\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: ignore\n  dependency-version: 0.4.26\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: insta\n  dependency-version: 1.48.0\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n  dependency-group: cargo\n- dependency-name: libc\n  dependency-version: 0.2.186\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: openssl\n  dependency-version: 0.10.81\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: ratatui\n  dependency-version: 0.30.1\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: rayon\n  dependency-version: 1.12.0\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n  dependency-group: cargo\n- dependency-name: regex\n  dependency-version: 1.12.4\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: rusqlite\n  dependency-version: 0.40.1\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n  dependency-group: cargo\n- dependency-name: serde_json\n  dependency-version: 1.0.150\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: serial_test\n  dependency-version: 3.5.0\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n  dependency-group: cargo\n- dependency-name: tantivy\n  dependency-version: 0.26.1\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: tokenizers\n  dependency-version: 0.22.2\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n  dependency-group: cargo\n- dependency-name: tokio\n  dependency-version: 1.52.3\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n  dependency-group: cargo\n- dependency-name: tree-sitter\n  dependency-version: 0.26.9\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: tree-sitter-c\n  dependency-version: 0.24.2\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: tree-sitter-c-sharp\n  dependency-version: 0.23.5\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: tree-sitter-dart\n  dependency-version: 0.2.0\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n  dependency-group: cargo\n- dependency-name: tree-sitter-ocaml\n  dependency-version: 0.25.0\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n  dependency-group: cargo\n- dependency-name: tree-sitter-php\n  dependency-version: 0.24.2\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n  dependency-group: cargo\n- dependency-name: tree-sitter-scala\n  dependency-version: 0.26.0\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n  dependency-group: cargo\n- dependency-name: tree-sitter-swift\n  dependency-version: 0.7.3\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: uuid\n  dependency-version: 1.23.3\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>\n\n* fix benchmark daemon protocol version\n\n* fix windows tantivy write retry budget\n\n---------\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>\nCo-authored-by: bvolpato <brunocvcunha@gmail.com>",
+          "timestamp": "2026-06-19T14:40:22-04:00",
+          "tree_id": "3ed90f3d8681e304dd7cab5d1d05d133c5778825",
+          "url": "https://github.com/bvolpato/ivygrep/commit/c21a223cb2dc0b9bbf2f4067f2b73893ee849948"
+        },
+        "date": 1781895916684,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 56896.96,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 3809.22,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/worktree_overlay_one_file_delta",
+            "value": 48341.48,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer_bulk/fresh_index_30k_chunks",
+            "value": 577609.8,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_small_file",
+            "value": 13.55,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 2023.47,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 1692.78,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11085.65,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 10780.28,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 11.22,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 722.3,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 14961.83,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 3894.14,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 1345.4,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_simple_symbol_1000_files",
+            "value": 8271.29,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_complex_phrase_1000_files",
+            "value": 6970.98,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/bounded_rerank_100_candidates_1000_files",
+            "value": 5012.61,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/literal_simple_symbol_1000_files",
+            "value": 1615.41,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/regex_symbol_1000_files",
+            "value": 2158.92,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 449856.35,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 182.41,
+            "unit": "µs"
+          },
+          {
+            "name": "hash_vector_build/ingest_5k_hash_vectors",
+            "value": 391900.01,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_one_file_change_10k_chunks",
+            "value": 19967.05,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/quick_health_cached_10k_chunks",
+            "value": 370.1,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k",
+            "value": 1183.54,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k_hot",
+            "value": 37.78,
             "unit": "µs"
           }
         ]
