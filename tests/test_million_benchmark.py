@@ -133,6 +133,35 @@ class MillionBenchmarkTest(unittest.TestCase):
             )
         )
 
+    def test_daemon_client_uses_current_protocol_version(self):
+        response = json.dumps({"type": "search_results", "hits": []}).encode() + b"\n"
+        payloads = []
+
+        class FakeReader:
+            def readline(self):
+                return response
+
+            def close(self):
+                pass
+
+        class FakeConnection:
+            def sendall(self, payload):
+                payloads.append(json.loads(payload))
+
+            def makefile(self, _mode):
+                return FakeReader()
+
+            def close(self):
+                pass
+
+        client = benchmark.DaemonClient(Path("/tmp/home"), Path("/tmp/corpus"))
+        client.connection = FakeConnection()
+        client.reader = client.connection.makefile("rb")
+        with mock.patch.object(benchmark.time, "perf_counter", side_effect=[0.0, 0.001]):
+            client.query("first")
+
+        self.assertEqual(payloads[0]["protocol_version"], 2)
+
     def test_dataset_provenance_ignores_unrelated_manifest_changes(self):
         matrix = {
             "results": [
