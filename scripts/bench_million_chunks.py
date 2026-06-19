@@ -23,6 +23,7 @@ import time
 
 
 SCHEMA_VERSION = 1
+DAEMON_PROTOCOL_VERSION = 2
 DEFAULT_FILES = 10_000
 DEFAULT_CHUNKS_PER_FILE = 100
 QUERY_TEMPLATES = (
@@ -370,7 +371,7 @@ class DaemonClient:
 
     def query(self, query: str, type_filter: str | None = None) -> dict:
         request = {
-            "protocol_version": 1,
+            "protocol_version": DAEMON_PROTOCOL_VERSION,
             "type": "search",
             "path": str(self.corpus),
             "query": query,
