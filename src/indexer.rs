@@ -30,8 +30,8 @@ use crate::vector_store::{
 use crate::workspace::{Workspace, WorkspaceMetadata, index_path_string};
 
 const ZSTD_MAGIC: &[u8] = &[0x28, 0xB5, 0x2F, 0xFD];
-const TANTIVY_WRITE_RETRY_ATTEMPTS: u32 = 12;
-const TANTIVY_WRITE_RETRY_MAX_DELAY_MS: u64 = 400;
+const TANTIVY_WRITE_RETRY_ATTEMPTS: u32 = 16;
+const TANTIVY_WRITE_RETRY_MAX_DELAY_MS: u64 = 800;
 
 #[derive(Clone, Debug)]
 struct RetryingDirectory<D> {
