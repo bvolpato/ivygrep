@@ -58,7 +58,9 @@ class RetrievalMetricsTest(unittest.TestCase):
         self.assertEqual(eval_code_retrieval.query_args("lexical"), ["--lexical-only"])
         self.assertEqual(eval_code_retrieval.query_args("hash"), ["--hash"])
         self.assertEqual(eval_code_retrieval.query_args("hybrid"), [])
-        self.assertEqual(eval_code_retrieval.query_args("neural"), [])
+        self.assertEqual(
+            eval_code_retrieval.query_args("neural"), ["--force-neural"]
+        )
 
     def test_search_command_terminates_option_parsing_before_query(self):
         command = eval_code_retrieval.search_command(

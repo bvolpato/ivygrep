@@ -255,7 +255,7 @@ def query_args(mode: str) -> list[str]:
     if mode == "hybrid":
         return []
     if mode == "neural":
-        return []
+        return ["--force-neural"]
     raise ValueError(f"unsupported mode {mode}")
 
 
@@ -438,6 +438,10 @@ def evaluate(args: argparse.Namespace) -> dict:
             no_hit_queries = 0
             support_file_hits = 0
             support_file_candidates = 0
+            queries_with_hash_results = 0
+            queries_with_neural_results = 0
+            queries_with_neural_execution = 0
+            missing_neural_execution = []
             for query in queries:
                 query_id = str(query["_id"])
                 text = query.get("text") or query.get("query") or ""
@@ -448,6 +452,25 @@ def evaluate(args: argparse.Namespace) -> dict:
                 ranked = []
                 ranked_hits = []
                 seen: set[str] = set()
+                query_hits = [
+                    hit for item in warm_output for hit in item.get("hits", [])
+                ]
+                query_sources = {
+                    str(source)
+                    for hit in query_hits
+                    for source in hit.get("sources", [])
+                }
+                neural_executed = any(
+                    hit.get("neural_executed") is True for hit in query_hits
+                )
+                if "hash" in query_sources:
+                    queries_with_hash_results += 1
+                if "neural" in query_sources:
+                    queries_with_neural_results += 1
+                if neural_executed:
+                    queries_with_neural_execution += 1
+                elif args.mode == "neural":
+                    missing_neural_execution.append(query_id)
                 for item in warm_output:
                     result_path = Path(item["file_path"])
                     try:
@@ -498,6 +521,8 @@ def evaluate(args: argparse.Namespace) -> dict:
                 details.append(
                     {
                         "query_id": query_id,
+                        "retrieval_sources": sorted(query_sources),
+                        "neural_executed": neural_executed,
                         "ranked": ranked,
                         "ranked_hits": ranked_hits,
                         "cold_latency_ms": cold_ms,
@@ -506,6 +531,12 @@ def evaluate(args: argparse.Namespace) -> dict:
                         "support_file_hits_at_10": query_support_hits,
                         **query_score,
                     }
+                )
+
+            if missing_neural_execution:
+                raise RuntimeError(
+                    "neural mode did not execute neural retrieval for queries: "
+                    + ", ".join(missing_neural_execution)
                 )
 
             status, _ = run_json([str(binary), "--status", "--json"], repo, daemon_env)
@@ -551,6 +582,12 @@ def evaluate(args: argparse.Namespace) -> dict:
                 "daemon_startup_ms": daemon_startup_ms,
                 "neural_model_ready_ms": neural_model_ready_ms,
                 "warm_query_path": warm_query_path(args.mode),
+                "retrieval_provenance": {
+                    "force_neural": args.mode == "neural",
+                    "queries_with_hash_results": queries_with_hash_results,
+                    "queries_with_neural_results": queries_with_neural_results,
+                    "queries_with_neural_execution": queries_with_neural_execution,
+                },
                 "no_hit_rate": no_hit_queries / len(queries) if queries else 0.0,
                 "support_file_spam_rate_at_10": (
                     support_file_hits / support_file_candidates

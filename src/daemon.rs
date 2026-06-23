@@ -18,7 +18,7 @@ use crate::config;
 use crate::embedding::{EmbeddingModel, create_model};
 use crate::indexer::{
     index_workspace, index_workspace_for_watcher, index_workspace_paths_for_watcher,
-    remove_workspace_index,
+    reconcile_worktree_overlay, remove_workspace_index,
 };
 use crate::jobs::{self, JobKind, JobUpdate};
 use crate::protocol::{
@@ -230,6 +230,7 @@ struct QueryCacheKey {
     skip_gitignore: bool,
     emb_dim: usize,
     wants_neural: bool,
+    force_neural: bool,
     reranker: String,
 }
 
@@ -396,6 +397,10 @@ impl DaemonState {
         emb_dim: Option<usize>,
         wants_neural: bool,
     ) -> Result<SearchContextLease> {
+        let reconciliation_model = cached_hash_model();
+        if reconcile_worktree_overlay(workspace, reconciliation_model.as_ref())? {
+            self.clear_workspace_contexts(workspace);
+        }
         let key = SearchContextCacheKey {
             workspace_id: workspace.id.clone(),
             emb_dim,
@@ -788,6 +793,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             scope_path,
             scope_is_file,
             skip_gitignore,
+            force_neural,
         } => {
             let state_clone = state.clone();
 
@@ -823,6 +829,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 exclude_globs,
                 scope_filter: scope_from_request(scope_path, scope_is_file),
                 skip_gitignore,
+                force_neural,
                 progress_tx: None,
                 cancel_token: None,
             };
@@ -838,8 +845,28 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             let result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
                 let model = state_clone.get_model_or_fallback();
+                let reconciliation_model = cached_hash_model();
                 let mut all_hits = Vec::new();
                 let mut all_errors: Vec<String> = Vec::new();
+                let mut reconciled_workspaces = Vec::with_capacity(workspaces.len());
+                for workspace in workspaces {
+                    match reconcile_worktree_overlay(&workspace, reconciliation_model.as_ref()) {
+                        Ok(changed) => {
+                            if changed {
+                                state_clone.clear_workspace_contexts(&workspace);
+                            }
+                            reconciled_workspaces.push(workspace);
+                        }
+                        Err(err) => {
+                            warn!(
+                                "failed to reconcile worktree overlay for {}: {err:#}",
+                                workspace.root.display()
+                            );
+                            all_errors.push(format!("{}: {err:#}", workspace.root.display()));
+                        }
+                    }
+                }
+                let workspaces = reconciled_workspaces;
                 let ws_neural_missing: Vec<PathBuf> = workspaces
                     .iter()
                     .filter(|w| w.needs_neural_enhancement())
@@ -1071,6 +1098,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 exclude_globs,
                 scope_filter,
                 skip_gitignore,
+                force_neural: false,
                 progress_tx: None,
                 cancel_token: None,
             };
@@ -1542,6 +1570,7 @@ fn query_cache_key(
         skip_gitignore: options.skip_gitignore,
         emb_dim,
         wants_neural,
+        force_neural: options.force_neural,
         reranker: crate::reranker::cache_identity(),
     }
 }
@@ -2405,6 +2434,7 @@ mod tests {
                 scope_path: None,
                 scope_is_file: false,
                 skip_gitignore: false,
+                force_neural: false,
             },
         )
         .await;
@@ -2462,6 +2492,7 @@ mod tests {
             scope_path: None,
             scope_is_file: false,
             skip_gitignore: false,
+            force_neural: false,
         };
 
         let first = handle_request(state.clone(), request.clone()).await;
@@ -2521,6 +2552,7 @@ mod tests {
             scope_path: None,
             scope_is_file: false,
             skip_gitignore: false,
+            force_neural: false,
         };
         let all_request = DaemonRequest::Search {
             path: None,
@@ -2533,6 +2565,7 @@ mod tests {
             scope_path: None,
             scope_is_file: false,
             skip_gitignore: false,
+            force_neural: false,
         };
 
         let normal = handle_request(state.clone(), normal_request).await;

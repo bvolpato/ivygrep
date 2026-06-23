@@ -2673,6 +2673,78 @@ fn worktree_overlay_staleness_invalidation() {
 
 #[test]
 #[serial]
+fn worktree_search_reconciles_base_only_additions_before_loading_context() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    init_git_repo(root.path());
+    fs::write(root.path().join("shared.rs"), "pub fn shared_api() {}\n").unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base"]);
+    setup_and_index(root.path(), home.path());
+
+    git(root.path(), &["checkout", "-b", "worktree-branch"]);
+    fs::write(
+        root.path().join("worktree.rs"),
+        "pub fn worktree_only_api() {}\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "worktree"]);
+    git(root.path(), &["checkout", "main"]);
+
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_search_reconcile");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            wt_path.to_str().unwrap(),
+            "worktree-branch",
+        ],
+    );
+    setup_and_index(&wt_path, home.path());
+    let wt_workspace = workspace_for(&wt_path);
+
+    fs::write(
+        root.path().join("main_only.rs"),
+        "pub fn main_branch_generation_marker() {}\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "main-only addition"]);
+    setup_and_index(root.path(), home.path());
+
+    assert!(!wt_path.join("main_only.rs").exists());
+    assert!(wt_workspace.worktree_overlay_is_stale().unwrap());
+
+    let results = search_file_paths(&wt_workspace, "main_branch_generation_marker");
+    assert!(
+        results.iter().all(|path| !path.contains("main_only.rs")),
+        "search must not return a base-only file absent from the worktree: {results:?}"
+    );
+    assert!(
+        !wt_workspace.worktree_overlay_is_stale().unwrap(),
+        "search should reconcile the overlay before loading its context"
+    );
+
+    let worktree_results = search_file_paths(&wt_workspace, "worktree_only_api");
+    assert!(
+        worktree_results
+            .iter()
+            .any(|path| path.contains("worktree.rs")),
+        "reconciliation must preserve worktree-only content"
+    );
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+#[test]
+#[serial]
 fn worktree_overlay_auto_reindex_via_cli_e2e() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();

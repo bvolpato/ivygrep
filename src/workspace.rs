@@ -399,6 +399,54 @@ impl Workspace {
         self.index_dir.join("base_ref.json")
     }
 
+    /// Returns whether this worktree overlay references an older base index
+    /// generation. A malformed reference is an error: searching it could leak
+    /// paths that no longer exist in the worktree.
+    pub fn worktree_overlay_is_stale(&self) -> Result<bool> {
+        if !self.is_worktree() {
+            return Ok(false);
+        }
+
+        let base_ref_path = self.base_ref_path();
+        if !base_ref_path.exists() {
+            if self.has_overlay() {
+                anyhow::bail!(
+                    "worktree overlay is missing base reference {}",
+                    base_ref_path.display()
+                );
+            }
+            return Ok(false);
+        }
+
+        let base_ref: serde_json::Value = serde_json::from_slice(
+            &fs::read(&base_ref_path)
+                .with_context(|| format!("failed to read {}", base_ref_path.display()))?,
+        )
+        .with_context(|| format!("failed to parse {}", base_ref_path.display()))?;
+        let overlay_generation = base_ref
+            .get("base_generation")
+            .and_then(serde_json::Value::as_u64)
+            .with_context(|| {
+                format!(
+                    "worktree overlay reference {} has no base_generation",
+                    base_ref_path.display()
+                )
+            })?;
+
+        let base_dir = self
+            .base_index_dir
+            .as_ref()
+            .context("worktree has no base index directory")?;
+        let metadata_path = base_dir.join("workspace.json");
+        let metadata: WorkspaceMetadata = serde_json::from_slice(
+            &fs::read(&metadata_path)
+                .with_context(|| format!("failed to read {}", metadata_path.display()))?,
+        )
+        .with_context(|| format!("failed to parse {}", metadata_path.display()))?;
+
+        Ok(metadata.index_generation != overlay_generation)
+    }
+
     /// PID file written by the background `--enhance-internal` process.
     /// Contains the PID so `--status` can detect whether enhancement is in progress.
     pub fn enhancing_pid_path(&self) -> PathBuf {

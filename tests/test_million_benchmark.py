@@ -160,7 +160,9 @@ class MillionBenchmarkTest(unittest.TestCase):
         with mock.patch.object(benchmark.time, "perf_counter", side_effect=[0.0, 0.001]):
             client.query("first")
 
-        self.assertEqual(payloads[0]["protocol_version"], 2)
+        self.assertEqual(
+            payloads[0]["protocol_version"], benchmark.DAEMON_PROTOCOL_VERSION
+        )
 
     def test_dataset_provenance_ignores_unrelated_manifest_changes(self):
         matrix = {

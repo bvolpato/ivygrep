@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use anyhow::Result;
 use rusqlite::{Connection, params};
 
-use crate::indexer::{IndexedChunk, decompress_text, open_sqlite_readonly};
+use crate::indexer::{
+    IndexedChunk, decompress_text, open_sqlite_readonly, reconcile_worktree_overlay,
+};
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
 use crate::search::SearchOptions;
@@ -23,7 +25,7 @@ pub fn index_chunk_definition(
     chunk: &IndexedChunk,
     chunk_key: i64,
 ) -> Result<()> {
-    if let Some(name) = definition_name(chunk) {
+    for name in definition_names(chunk) {
         conn.prepare_cached(
             "INSERT OR REPLACE INTO symbols (
                 normalized_name, chunk_key
@@ -64,6 +66,9 @@ pub fn search_symbols_with_options(
     mode: SymbolSearchMode,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
+    let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+    reconcile_worktree_overlay(workspace, &model)?;
+
     let normalized = normalize_symbol(name);
     if normalized.is_empty() {
         return Ok(Vec::new());
@@ -202,6 +207,8 @@ fn query_workspace_db(
                 reason: "exact symbol match".to_string(),
                 score: 10.0,
                 sources: vec!["symbol".to_string()],
+                neural_requested: false,
+                neural_executed: false,
             },
             row.get::<_, String>(4)?,
             row.get::<_, bool>(5)?,
@@ -289,6 +296,8 @@ fn search_call_sites(
                     reason: format!("exact {source} match"),
                     score,
                     sources: vec![source.to_string()],
+                    neural_requested: false,
+                    neural_executed: false,
                 });
             } else {
                 for (line, preview) in call_lines {
@@ -300,6 +309,8 @@ fn search_call_sites(
                         reason: format!("exact {source} match"),
                         score,
                         sources: vec![source.to_string()],
+                        neural_requested: false,
+                        neural_executed: false,
                     });
                 }
             }
@@ -398,7 +409,20 @@ fn load_chunk_paths(path: &std::path::Path) -> Result<HashSet<String>> {
 fn definition_name(chunk: &IndexedChunk) -> Option<String> {
     if !matches!(
         chunk.kind.as_str(),
-        "Function" | "function" | "Class" | "class" | "Module" | "module"
+        "Function"
+            | "function"
+            | "Class"
+            | "class"
+            | "Struct"
+            | "struct"
+            | "Trait"
+            | "trait"
+            | "Interface"
+            | "interface"
+            | "Enum"
+            | "enum"
+            | "Module"
+            | "module"
     ) {
         return None;
     }
@@ -416,12 +440,79 @@ fn definition_name(chunk: &IndexedChunk) -> Option<String> {
 
     let keywords: &[&str] = match chunk.kind.as_str() {
         "Function" | "function" => &["fn", "def", "func", "function"],
-        "Class" | "class" => &["class", "struct", "trait", "enum", "interface", "type"],
+        "Class" | "class" | "Struct" | "struct" | "Trait" | "trait" | "Interface" | "interface"
+        | "Enum" | "enum" => &[
+            "class",
+            "struct",
+            "trait",
+            "enum",
+            "interface",
+            "type",
+            "union",
+        ],
         "Module" | "module" => &["module"],
         _ => &[],
     };
+    let allow_function_fallback = matches!(chunk.kind.as_str(), "Function" | "function");
+    let require_type_alias_assignment = chunk.language.eq_ignore_ascii_case("typescript");
+    definition_name_from_signature(
+        signature,
+        keywords,
+        allow_function_fallback,
+        require_type_alias_assignment,
+    )
+}
+
+fn definition_names(chunk: &IndexedChunk) -> Vec<String> {
+    if !matches!(chunk.kind.as_str(), "Module" | "module") {
+        return definition_name(chunk).into_iter().collect();
+    }
+
+    const MODULE_KEYWORDS: &[&str] = &[
+        "fn",
+        "def",
+        "func",
+        "function",
+        "class",
+        "struct",
+        "trait",
+        "enum",
+        "interface",
+        "type",
+        "union",
+        "module",
+    ];
+
+    let mut seen = HashSet::new();
+    chunk
+        .text
+        .lines()
+        .filter_map(|line| {
+            let signature = line.trim();
+            if signature.is_empty()
+                || signature.starts_with("//")
+                || signature.starts_with('#')
+                || signature.starts_with('@')
+            {
+                return None;
+            }
+            definition_name_from_signature(signature, MODULE_KEYWORDS, false, true)
+        })
+        .filter(|name| seen.insert(normalize_symbol(name)))
+        .collect()
+}
+
+fn definition_name_from_signature(
+    signature: &str,
+    keywords: &[&str],
+    allow_function_fallback: bool,
+    require_type_alias_assignment: bool,
+) -> Option<String> {
     let tokens = signature.split_whitespace().collect::<Vec<_>>();
     for keyword in keywords {
+        if *keyword == "type" && require_type_alias_assignment && !signature.contains('=') {
+            continue;
+        }
         if let Some(keyword_index) = tokens
             .iter()
             .position(|token| token.trim_end_matches('*') == *keyword)
@@ -447,6 +538,9 @@ fn definition_name(chunk: &IndexedChunk) -> Option<String> {
         }
     }
 
+    if !allow_function_fallback {
+        return None;
+    }
     let before_paren = signature.split('(').next()?.trim();
     let candidate = before_paren.split_whitespace().last()?;
     let candidate = identifier_prefix(candidate.trim_start_matches('*').trim_start_matches('&'));
@@ -520,29 +614,97 @@ mod tests {
             .as_deref(),
             Some("SendRequest")
         );
+        assert_eq!(
+            definition_name(&chunk(
+                "rust",
+                "Class",
+                "/// Main request router.\npub struct Router<S = ()> {"
+            ))
+            .as_deref(),
+            Some("Router")
+        );
+        assert_eq!(
+            definition_name(&chunk("rust", "Enum", "pub enum RouteKind {")).as_deref(),
+            Some("RouteKind")
+        );
+        assert_eq!(
+            definition_name(&chunk("rust", "Class", "impl<S> Router<S> {")),
+            None,
+            "implementation blocks are not canonical definitions"
+        );
+        assert_eq!(
+            definition_name(&chunk("rust", "Impl", "impl<S> Router<S> {")),
+            None,
+            "legacy implementation chunks are not canonical definitions"
+        );
+        assert_eq!(
+            definition_name(&chunk(
+                "typescript",
+                "Class",
+                "type MiddlewareBuilder as TRPCMiddlewareBuilder,"
+            )),
+            None,
+            "type re-exports are not canonical definitions"
+        );
+        assert_eq!(
+            definition_name(&chunk(
+                "typescript",
+                "Class",
+                "export type AnyRouter = Router<any, any>;"
+            ))
+            .as_deref(),
+            Some("AnyRouter")
+        );
+        assert_eq!(
+            definition_names(&chunk(
+                "rust",
+                "Module",
+                "// src/router.rs\n\npub struct Router<S = ()> {\n}\npub enum RouteKind { Static }\npub type RouteId = usize;"
+            )),
+            ["Router", "RouteKind", "RouteId"]
+        );
+        assert_eq!(
+            definition_names(&chunk(
+                "typescript",
+                "Module",
+                "export {\n  type AnyRouter as AnyTRPCRouter,\n};\nexport type AnyRouter = Router<any, any>;"
+            )),
+            ["AnyRouter"]
+        );
     }
 
     #[test]
-    fn definitions_store_only_normalized_name_and_chunk_identity() {
+    fn definitions_store_multiple_names_for_one_chunk() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE symbols (
                 normalized_name TEXT NOT NULL,
-                chunk_key INTEGER PRIMARY KEY
+                chunk_key INTEGER NOT NULL,
+                PRIMARY KEY (normalized_name, chunk_key)
              ) WITHOUT ROWID;",
         )
         .unwrap();
-        let function = chunk("rust", "Function", "fn run() { parse(); }");
-        index_chunk_definition(&conn, &function, 7).unwrap();
+        let module = chunk(
+            "rust",
+            "Module",
+            "pub struct Router;\npub enum RouteKind { Static }",
+        );
+        index_chunk_definition(&conn, &module, 7).unwrap();
 
-        let stored = conn
-            .query_row(
-                "SELECT normalized_name, chunk_key FROM symbols",
-                [],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
-            )
+        let mut stmt = conn
+            .prepare("SELECT normalized_name, chunk_key FROM symbols ORDER BY normalized_name")
             .unwrap();
-        assert_eq!(stored, ("run".to_string(), 7));
+        let stored = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            stored,
+            [("routekind".to_string(), 7), ("router".to_string(), 7)]
+        );
     }
 
     #[test]

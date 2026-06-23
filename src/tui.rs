@@ -595,6 +595,7 @@ fn build_search_options(cli: &Cli, scope_filter: Option<&WorkspaceScope>) -> Sea
             scope_filter.cloned()
         },
         skip_gitignore: cli.skip_gitignore,
+        force_neural: cli.force_neural,
         progress_tx: None,
         cancel_token: None,
     }
@@ -622,6 +623,7 @@ fn build_search_request(
         scope_path: scoped.map(|s| s.rel_path.clone()),
         scope_is_file: scoped.is_some_and(|s| s.is_file),
         skip_gitignore: cli.skip_gitignore,
+        force_neural: cli.force_neural,
     }
 }
 
@@ -1777,6 +1779,8 @@ mod tests {
             reason: String::new(),
             score,
             sources: vec![],
+            neural_requested: false,
+            neural_executed: false,
         }
     }
 

@@ -287,10 +287,17 @@ class PublicBenchmarkTest(unittest.TestCase):
         self.assertEqual(run["warm_latency_p95_ms"], 1.0)
 
     def test_publication_result_omits_per_query_details(self):
-        result = {"dataset": "public", "details": [{"query_id": "q1"}]}
+        result = {
+            "dataset": "public",
+            "retrieval_provenance": {"queries_with_neural_execution": 10},
+            "details": [{"query_id": "q1"}],
+        }
         self.assertEqual(
             matrix_runner.publication_result(result),
-            {"dataset": "public"},
+            {
+                "dataset": "public",
+                "retrieval_provenance": {"queries_with_neural_execution": 10},
+            },
         )
 
     def test_embedding_partial_must_match_selected_binary(self):

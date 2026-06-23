@@ -142,6 +142,15 @@ pub struct Cli {
     #[arg(long, global = true, conflicts_with_all = ["hash", "literal", "regex"])]
     pub lexical_only: bool,
 
+    /// Force neural retrieval for benchmarking and diagnostics.
+    #[arg(
+        long,
+        global = true,
+        hide = true,
+        conflicts_with_all = ["hash", "lexical_only", "literal", "regex"]
+    )]
+    pub force_neural: bool,
+
     #[arg(long, hide = true, value_name = "PATH")]
     pub enhance_internal: Option<PathBuf>,
 
@@ -1098,6 +1107,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             exclude_globs: cli.exclude.clone(),
             scope_filter: scope_filter.clone(),
             skip_gitignore: cli.skip_gitignore,
+            force_neural: false,
             progress_tx: None,
             cancel_token: None,
         };
@@ -1123,6 +1133,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             exclude_globs: cli.exclude.clone(),
             scope_filter: scope_filter.clone(),
             skip_gitignore: cli.skip_gitignore,
+            force_neural: cli.force_neural,
             progress_tx: None,
             cancel_token: None,
         };
@@ -1165,6 +1176,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             exclude_globs: cli.exclude.clone(),
             scope_filter: scope_filter.clone(),
             skip_gitignore: cli.skip_gitignore,
+            force_neural: false,
             progress_tx: None,
             cancel_token: None,
         };
@@ -1195,6 +1207,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             scope_path: scope_path.clone(),
             scope_is_file,
             skip_gitignore: cli.skip_gitignore,
+            force_neural: cli.force_neural,
         };
         let local_options = SearchOptions {
             limit: backend_limit,
@@ -1204,6 +1217,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             exclude_globs: cli.exclude.clone(),
             scope_filter: scope_filter.clone(),
             skip_gitignore: cli.skip_gitignore,
+            force_neural: cli.force_neural,
             progress_tx: None,
             cancel_token: None,
         };
@@ -1270,8 +1284,13 @@ async fn run_query(cli: Cli) -> Result<()> {
             } else {
                 vec![workspace.clone()]
             };
-            let search_model =
-                local_hybrid_search_model(&workspaces, query, cli.hash, cli.lexical_only);
+            let search_model = local_hybrid_search_model(
+                &workspaces,
+                query,
+                cli.hash,
+                cli.lexical_only,
+                cli.force_neural,
+            );
             for ws in workspaces {
                 let _ = ws.cleanup_stale_legacy_runtime_files();
                 let _t_search = std::time::Instant::now();
@@ -1601,7 +1620,8 @@ fn local_fallback_search(
         vec![workspace.clone()]
     };
 
-    let model = local_hybrid_search_model(&workspaces, query, use_hash, false);
+    let model =
+        local_hybrid_search_model(&workspaces, query, use_hash, false, options.force_neural);
 
     for ws in workspaces {
         match hybrid_search(&ws, query, model.as_deref(), options) {
@@ -1904,8 +1924,9 @@ fn local_hybrid_search_model(
     query: &str,
     use_hash: bool,
     lexical_only: bool,
+    force_neural: bool,
 ) -> Option<Box<dyn crate::embedding::EmbeddingModel>> {
-    if lexical_only || is_single_word_symbol_query(query) {
+    if lexical_only || (!force_neural && is_single_word_symbol_query(query)) {
         return None;
     }
 
@@ -2039,7 +2060,7 @@ mod tests {
         index_workspace(&workspace, hash_model.as_ref()).unwrap();
 
         let model =
-            local_hybrid_search_model(&[workspace], "semantic query", false, false).unwrap();
+            local_hybrid_search_model(&[workspace], "semantic query", false, false, false).unwrap();
         assert_eq!(model.dimensions(), 256);
     }
 

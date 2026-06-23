@@ -323,6 +323,45 @@ pub fn index_workspace_paths_for_watcher(
     index_workspace_with_options(workspace, embedding_model, false, Some(changed_paths))
 }
 
+/// Rebuild a worktree overlay when its referenced base generation moved.
+///
+/// Searches call this before opening stores so stale tombstones and shadow
+/// sets can never expose base-only files that are absent from the worktree.
+pub fn reconcile_worktree_overlay(
+    workspace: &Workspace,
+    embedding_model: &dyn EmbeddingModel,
+) -> Result<bool> {
+    match workspace.worktree_overlay_is_stale() {
+        Ok(false) => return Ok(false),
+        Ok(true) => {}
+        Err(err) if workspace.is_worktree() => {
+            tracing::warn!(
+                "invalid worktree overlay reference for {}: {err:#}; rebuilding",
+                workspace.root.display()
+            );
+            clear_worktree_overlay_storage(workspace);
+        }
+        Err(err) => return Err(err),
+    }
+
+    index_workspace_for_watcher(workspace, embedding_model)?;
+    if workspace.worktree_overlay_is_stale()? {
+        anyhow::bail!(
+            "worktree overlay remained stale after reconciliation: {}",
+            workspace.root.display()
+        );
+    }
+    Ok(true)
+}
+
+fn clear_worktree_overlay_storage(workspace: &Workspace) {
+    let _ = fs::remove_file(workspace.overlay_sqlite_path());
+    let _ = fs::remove_dir_all(workspace.overlay_tantivy_dir());
+    let _ = fs::remove_file(workspace.overlay_vector_path());
+    let _ = fs::remove_file(workspace.base_ref_path());
+    let _ = fs::remove_file(workspace.merkle_snapshot_path());
+}
+
 fn index_workspace_with_options(
     workspace: &Workspace,
     embedding_model: &dyn EmbeddingModel,
@@ -537,11 +576,7 @@ fn index_workspace_inner(
                     }
                     base_refreshed = true;
                     if workspace.has_overlay() {
-                        let _ = fs::remove_file(workspace.overlay_sqlite_path());
-                        let _ = fs::remove_dir_all(workspace.overlay_tantivy_dir());
-                        let _ = fs::remove_file(workspace.overlay_vector_path());
-                        let _ = fs::remove_file(workspace.base_ref_path());
-                        let _ = fs::remove_file(workspace.merkle_snapshot_path());
+                        clear_worktree_overlay_storage(workspace);
                         return index_workspace_inner(
                             workspace,
                             embedding_model,
@@ -571,11 +606,7 @@ fn index_workspace_inner(
             base_refreshed = true;
             if workspace.has_overlay() {
                 // Existing overlay references the now-migrated base; rebuild it.
-                let _ = fs::remove_file(workspace.overlay_sqlite_path());
-                let _ = fs::remove_dir_all(workspace.overlay_tantivy_dir());
-                let _ = fs::remove_file(workspace.overlay_vector_path());
-                let _ = fs::remove_file(workspace.base_ref_path());
-                let _ = fs::remove_file(workspace.merkle_snapshot_path());
+                clear_worktree_overlay_storage(workspace);
                 return index_workspace_inner(workspace, embedding_model, trust_live_watcher, None);
             }
         }
@@ -667,12 +698,7 @@ fn index_workspace_inner(
                 eprintln!(
                     "  ⚠ base index has changed since overlay was created — rebuilding overlay..."
                 );
-                // Delete stale overlay stores to force fresh creation
-                let _ = fs::remove_file(workspace.overlay_sqlite_path());
-                let _ = fs::remove_dir_all(workspace.overlay_tantivy_dir());
-                let _ = fs::remove_file(workspace.overlay_vector_path());
-                let _ = fs::remove_file(workspace.base_ref_path());
-                let _ = fs::remove_file(workspace.merkle_snapshot_path());
+                clear_worktree_overlay_storage(workspace);
                 // Re-enter this function to take the fresh overlay creation path
                 return index_workspace_inner(workspace, embedding_model, trust_live_watcher, None);
             }
@@ -2258,7 +2284,8 @@ fn create_tables(conn: &Connection) -> Result<()> {
 
         CREATE TABLE IF NOT EXISTS symbols (
             normalized_name TEXT NOT NULL,
-            chunk_key INTEGER PRIMARY KEY
+            chunk_key INTEGER NOT NULL,
+            PRIMARY KEY (normalized_name, chunk_key)
         ) WITHOUT ROWID;
 
         CREATE INDEX IF NOT EXISTS idx_chunks_file_path ON chunks(file_path);
@@ -2272,6 +2299,39 @@ fn create_tables(conn: &Connection) -> Result<()> {
         "ALTER TABLE chunks ADD COLUMN is_ignored INTEGER NOT NULL DEFAULT 0;",
         [],
     );
+
+    let mut table_info = conn.prepare("PRAGMA table_info(symbols)")?;
+    let columns = table_info
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let legacy_single_symbol_schema = columns
+        .iter()
+        .any(|(name, primary_key)| name == "chunk_key" && *primary_key == 1)
+        && columns
+            .iter()
+            .any(|(name, primary_key)| name == "normalized_name" && *primary_key == 0);
+    drop(table_info);
+
+    if legacy_single_symbol_schema {
+        conn.execute_batch(
+            r#"
+            BEGIN IMMEDIATE;
+            DROP TABLE IF EXISTS symbols_legacy;
+            ALTER TABLE symbols RENAME TO symbols_legacy;
+            CREATE TABLE symbols (
+                normalized_name TEXT NOT NULL,
+                chunk_key INTEGER NOT NULL,
+                PRIMARY KEY (normalized_name, chunk_key)
+            ) WITHOUT ROWID;
+            INSERT OR IGNORE INTO symbols (normalized_name, chunk_key)
+                SELECT normalized_name, chunk_key FROM symbols_legacy;
+            DROP TABLE symbols_legacy;
+            COMMIT;
+            "#,
+        )?;
+    }
 
     Ok(())
 }
@@ -2567,6 +2627,35 @@ mod tests {
         fn model_identity(&self) -> Option<&crate::embedding::NeuralModelIdentity> {
             Some(&self.identity)
         }
+    }
+
+    #[test]
+    fn create_tables_migrates_symbols_to_many_names_per_chunk() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE symbols (
+                normalized_name TEXT NOT NULL,
+                chunk_key INTEGER PRIMARY KEY
+             ) WITHOUT ROWID;
+             INSERT INTO symbols (normalized_name, chunk_key) VALUES ('router', 7);",
+        )
+        .unwrap();
+
+        create_tables(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO symbols (normalized_name, chunk_key) VALUES (?1, ?2)",
+            params!["routekind", 7],
+        )
+        .unwrap();
+
+        let count = conn
+            .query_row(
+                "SELECT COUNT(*) FROM symbols WHERE chunk_key = 7",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2);
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]

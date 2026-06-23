@@ -447,6 +447,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
             scope_path: scope_filter.as_ref().map(|scope| scope.rel_path.clone()),
             scope_is_file: scope_filter.as_ref().is_some_and(|scope| scope.is_file),
             skip_gitignore: args.skip_gitignore.unwrap_or(false),
+            force_neural: false,
         }
     };
     let daemon_hits = match crate::daemon::request_blocking(&daemon_request, false)? {
@@ -476,6 +477,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
                 exclude_globs: exclude_globs.clone(),
                 scope_filter: scope_filter.clone(),
                 skip_gitignore: args.skip_gitignore.unwrap_or(false),
+                force_neural: false,
                 progress_tx: None,
                 cancel_token: None,
             },
@@ -506,6 +508,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
                 exclude_globs: exclude_globs.clone(),
                 scope_filter: scope_filter.clone(),
                 skip_gitignore: args.skip_gitignore.unwrap_or(false),
+                force_neural: false,
                 progress_tx: None,
                 cancel_token: None,
             },

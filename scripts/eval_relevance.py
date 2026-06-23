@@ -195,6 +195,7 @@ def main() -> int:
         raise SystemExit(f"missing binary at {binary} (build first or pass --binary)")
 
     mode = [] if args.neural else ["--hash"]
+    query_mode = ["--force-neural"] if args.neural else mode
 
     with tempfile.TemporaryDirectory(prefix="ivygrep-eval-") as home:
         env["IVYGREP_HOME"] = home
@@ -237,15 +238,31 @@ def main() -> int:
                 )
 
         rows: list[dict[str, Any]] = []
+        neural_queries_with_results = 0
+        neural_queries_executed = 0
         t0 = time.perf_counter()
         for case in cases:
             stdout = run(
-                [str(binary), *mode, "--json", "--no-watch", "-n", str(args.limit),
+                [str(binary), *query_mode, "--json", "--no-watch", "-n", str(args.limit),
                  case.query, str(repo)],
                 cwd=REPO_ROOT,
                 env=env,
             )
             paths = ranked_paths(stdout)
+            parsed = json.loads(stdout)
+            hits = [hit for item in parsed for hit in item.get("hits", [])]
+            sources = {
+                source
+                for hit in hits
+                for source in hit.get("sources", [])
+            }
+            neural_executed = any(
+                hit.get("neural_executed") is True for hit in hits
+            )
+            if "neural" in sources:
+                neural_queries_with_results += 1
+            if neural_executed:
+                neural_queries_executed += 1
             grades = graded(paths, case.judgments)
             ideal = [j.grade for j in case.judgments]
             row = {
@@ -257,6 +274,8 @@ def main() -> int:
                 "ndcg10": ndcg_at(grades, ideal, 10),
                 "top3": paths[:3],
                 "hits": len(paths),
+                "retrieval_sources": sorted(sources),
+                "neural_executed": neural_executed,
             }
             rows.append(row)
             if args.details:
@@ -281,8 +300,16 @@ def main() -> int:
             "mean_recall5": mean([r["recall5"] for r in rows]),
             "mean_ndcg10": mean([r["ndcg10"] for r in rows]),
             "no_hit_queries": sum(1 for r in rows if r["hits"] == 0),
+            "neural_queries_with_results": neural_queries_with_results,
+            "neural_queries_executed": neural_queries_executed,
             "elapsed_ms": (time.perf_counter() - t0) * 1000.0,
         }
+        if args.neural and neural_queries_executed != len(rows):
+            missing = [row["id"] for row in rows if not row["neural_executed"]]
+            raise SystemExit(
+                "neural evaluation did not execute neural retrieval for: "
+                + ", ".join(missing)
+            )
 
     if args.json:
         print(json.dumps(agg, sort_keys=True))

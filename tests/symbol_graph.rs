@@ -44,7 +44,10 @@ fn multilingual_symbols_references_and_incremental_deletion() {
     fs::create_dir(root.path().join(".git")).unwrap();
     fs::write(
         root.path().join("payments.rs"),
-        "pub fn charge_card() {}\npub fn run_checkout() { charge_card(); }\n",
+        "pub struct PaymentRouter { routes: usize }\n\
+         pub enum PaymentStatus { Pending, Complete }\n\
+         pub fn charge_card() {}\n\
+         pub fn run_checkout() { charge_card(); }\n",
     )
     .unwrap();
     fs::write(
@@ -74,6 +77,8 @@ fn multilingual_symbols_references_and_incremental_deletion() {
     let workspace = index(root.path(), home.path());
     for (symbol, expected_file) in [
         ("charge_card", "payments.rs"),
+        ("PaymentRouter", "payments.rs"),
+        ("PaymentStatus", "payments.rs"),
         ("authorize_payment", "payments.py"),
         ("shouldSampleTrace", "trace.go"),
         ("KeepTrace", "trace.go"),

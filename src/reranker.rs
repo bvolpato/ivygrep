@@ -561,6 +561,8 @@ mod tests {
             reason: String::new(),
             score,
             sources: sources.iter().map(|source| (*source).to_string()).collect(),
+            neural_requested: false,
+            neural_executed: false,
         }
     }
 
