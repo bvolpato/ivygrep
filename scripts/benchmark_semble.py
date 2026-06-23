@@ -587,6 +587,25 @@ def render_markdown(payload: dict[str, Any]) -> str:
     refresh_ratio = (
         refresh["semble_full_refresh_ms"] / refresh["ivygrep_full_refresh_ms"]
     )
+    faster_indexing_repos = [
+        repo
+        for repo, metrics in payload["indexing"].items()
+        if metrics["ivygrep"]["ready_ms"] < metrics["semble"]["index_ms"]
+    ]
+    if len(faster_indexing_repos) == len(payload["indexing"]):
+        indexing_verdict = (
+            "ivygrep hybrid-ready indexing is faster on every benchmark "
+            "repository in this run."
+        )
+    elif faster_indexing_repos:
+        indexing_verdict = (
+            "ivygrep hybrid-ready indexing is faster on "
+            f"{', '.join(faster_indexing_repos)} in this run."
+        )
+    else:
+        indexing_verdict = (
+            "Semble indexing is faster on every benchmark repository in this run."
+        )
     dirty = " + dirty worktree" if payload["ivygrep"]["dirty"] else ""
     return f"""# ivygrep vs Semble
 
@@ -628,7 +647,7 @@ Full hybrid-ready time includes ivygrep lexical, hash, and neural phases.
 - Semble leads overall retrieval quality by {abs(quality_delta):.3f} nDCG@10 and warm p50 latency by {latency_ratio:.1f}x.
 - ivygrep returns {token_ratio:.1f}x fewer tokens in top-10 results.
 - ivygrep full one-file refresh is {refresh_ratio:.1f}x faster and exposes lexical changes before neural refresh completes.
-- ivygrep hybrid-ready indexing is faster on Axum and FastAPI here; tRPC is near parity.
+- {indexing_verdict}
 - Largest remaining quality gap is architecture retrieval. Exact symbol quality is much closer.
 
 ## Notes

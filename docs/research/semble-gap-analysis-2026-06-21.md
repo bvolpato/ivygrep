@@ -1,6 +1,6 @@
 # Semble gap analysis
 
-Date: 2026-06-21
+Date: 2026-06-23
 
 ## Executive verdict
 
@@ -14,11 +14,11 @@ quality:
 
 | Metric | Before | Current | Semble |
 |---|---:|---:|---:|
-| Overall nDCG@10 | 0.657 | 0.692 | 0.801 |
+| Overall nDCG@10 | 0.657 | 0.688 | 0.801 |
 | Symbol nDCG@10 | 0.770 | 0.914 | 0.949 |
 | Architecture nDCG@10 | 0.544 | 0.544 | 0.745 |
-| Semantic nDCG@10 | 0.687 | 0.695 | 0.770 |
-| Warm query p50 | 16.49 ms | 16.95 ms | 4.91 ms |
+| Semantic nDCG@10 | 0.687 | 0.687 | 0.770 |
+| Warm query p50 | 16.49 ms | 16.17 ms | 4.90 ms |
 | Mean top-10 tokens | 251 | 252 | 1,593 |
 
 Current bottleneck is architecture retrieval, followed by latency. Exact symbol
@@ -33,7 +33,8 @@ Raw data and methodology:
 
 ## Method
 
-Representative benchmark uses Semble's pinned Axum, FastAPI, and tRPC tasks:
+Representative benchmark uses Semble v0.4.1's pinned Axum, FastAPI, and tRPC
+tasks:
 
 - 60 annotated queries, 20 per repository.
 - Same source files, labels, top-10 cutoff, and binary nDCG calculation.
@@ -98,10 +99,9 @@ setup automation have clear user value.
 Measured:
 
 - Returns 6.3x fewer top-10 tokens on this benchmark.
-- Full one-file hybrid refresh is about 2.6x faster.
-- Lexical updates become searchable in roughly 115 ms before neural refresh.
-- Hybrid-ready indexing beats Semble on Axum and FastAPI here; tRPC is near
-  parity.
+- Full one-file hybrid refresh is about 3.0x faster.
+- Lexical updates become searchable in roughly 65 ms before neural refresh.
+- Hybrid-ready indexing is faster on all three repositories in this run.
 
 Product and engineering:
 
