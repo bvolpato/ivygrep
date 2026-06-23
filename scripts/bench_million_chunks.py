@@ -341,6 +341,7 @@ class DaemonClient:
     def __init__(self, home: Path, corpus: Path):
         self.home = home
         self.corpus = corpus
+        self.protocol_version = DAEMON_PROTOCOL_VERSION
         self.connection: socket.socket | None = None
         self.reader = None
 
@@ -369,21 +370,7 @@ class DaemonClient:
             self.connection.close()
             self.connection = None
 
-    def query(self, query: str, type_filter: str | None = None) -> dict:
-        request = {
-            "protocol_version": DAEMON_PROTOCOL_VERSION,
-            "type": "search",
-            "path": str(self.corpus),
-            "query": query,
-            "limit": 20,
-            "context": 2,
-            "type_filter": type_filter,
-            "include_globs": [],
-            "exclude_globs": [],
-            "scope_path": None,
-            "scope_is_file": False,
-            "skip_gitignore": False,
-        }
+    def _send(self, request: dict) -> tuple[dict, float]:
         payload = json.dumps(request).encode() + b"\n"
         response_bytes = b""
         for attempt in range(2):
@@ -405,9 +392,48 @@ class DaemonClient:
         if not response_bytes:
             raise RuntimeError("daemon closed the connection without a response")
         elapsed_ms = (time.perf_counter() - started) * 1000.0
-        response = json.loads(response_bytes)
-        if response.get("type") == "error":
-            raise RuntimeError(response.get("message", "daemon search failed"))
+        return json.loads(response_bytes), elapsed_ms
+
+    @staticmethod
+    def _expected_protocol_version(message: str) -> int | None:
+        marker = "; expected "
+        if (
+            not message.startswith("unsupported daemon protocol version ")
+            or marker not in message
+        ):
+            return None
+        try:
+            return int(message.rsplit(marker, 1)[1])
+        except ValueError:
+            return None
+
+    def query(self, query: str, type_filter: str | None = None) -> dict:
+        for protocol_attempt in range(2):
+            request = {
+                "protocol_version": self.protocol_version,
+                "type": "search",
+                "path": str(self.corpus),
+                "query": query,
+                "limit": 20,
+                "context": 2,
+                "type_filter": type_filter,
+                "include_globs": [],
+                "exclude_globs": [],
+                "scope_path": None,
+                "scope_is_file": False,
+                "skip_gitignore": False,
+            }
+            response, elapsed_ms = self._send(request)
+            if response.get("type") != "error":
+                break
+            message = response.get("message", "daemon search failed")
+            expected = self._expected_protocol_version(message)
+            if protocol_attempt == 0 and expected is not None:
+                self.protocol_version = expected
+                continue
+            raise RuntimeError(message)
+        else:
+            raise RuntimeError("daemon protocol negotiation failed")
         hits = response.get("hits", [])
         paths = list(dict.fromkeys(hit["file_path"] for hit in hits))
         return {
