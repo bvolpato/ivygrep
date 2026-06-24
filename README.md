@@ -285,11 +285,12 @@ claim. Benchmark writeups and charts live under
 Indexing commits BM25/literal search first. A load-aware background subprocess
 builds hash ANN vectors, then upgrades to the portable 256-dimensional
 `static-retrieval-v1` model selected by the public embedding bake-off. Set
-`IVYGREP_MODEL_PROFILE=general` for the pinned general MiniLM profile or
-`IVYGREP_MODEL_PROFILE=code` for the CodeSearchNet-trained MiniLM profile.
-Both transformer profiles are retained for comparison and compatibility rather
-than recommended laptop defaults. Model identity is persisted with the index so
-incompatible vectors are rebuilt rather than silently reused.
+`IVYGREP_MODEL_PROFILE=potion-code` for the pinned code-specialized Model2Vec
+profile, `general` for the pinned general MiniLM profile, or `code` for the
+CodeSearchNet-trained MiniLM profile. Optional profiles are retained for
+comparison and compatibility rather than recommended laptop defaults. Model
+identity is persisted with the index so incompatible vectors are rebuilt rather
+than silently reused.
 
 Relevance evaluation separates foreground readiness from post-background hash
 quality:
@@ -331,7 +332,7 @@ symbol/call graph storage,
 ivygrep runs search and embedding inference locally and never sends your code, queries, or index data to an external service. A few things worth knowing:
 
 - **Where data lives:** the index stores compressed source chunks under `~/.local/share/ivygrep` (or `$XDG_DATA_HOME`/`$IVYGREP_HOME`). Unix uses an owner-only `0600` socket plus peer-uid verification. Windows uses loopback TCP with a per-daemon authentication token stored beside the user-owned index. Keep a custom `IVYGREP_HOME` private to your account.
-- **Model download:** neural mode uses `hf-hub` to download revision-pinned model assets on first use and caches them under `$HF_HOME` or `~/.cache/huggingface`. The default is `sentence-transformers/static-retrieval-mrl-en-v1`; `IVYGREP_MODEL_PROFILE=general`, `code`, and `code-hq` select optional transformer profiles. Cached assets work without network access. Use `--hash` or a `--no-default-features` build when model assets must never be downloaded.
+- **Model download:** neural mode uses `hf-hub` to download revision-pinned model assets on first use and caches them under `$HF_HOME` or `~/.cache/huggingface`. The default is `sentence-transformers/static-retrieval-mrl-en-v1`; `IVYGREP_MODEL_PROFILE=potion-code` selects an optional code-specialized static profile, while `general`, `code`, and `code-hq` select optional transformer profiles. Cached assets work without network access. Use `--hash` or a `--no-default-features` build when model assets must never be downloaded.
 - **Inference backend:** macOS release binaries execute locally with Accelerate-backed CPU math; Linux and Windows release binaries execute locally on CPU. Source builds can opt into local Metal with `--features accelerate,metal` or CUDA with `--features cuda` on a compatible installation. The CUDA build does not require cuDNN. If `nvidia-smi` cannot report compute capability, `build.sh` and `test.sh` infer `CUDA_COMPUTE_CAP=120` for RTX 50/Blackwell hosts; set `CUDA_COMPUTE_CAP` explicitly for other affected GPUs. `ig --status` reports the recorded backend that last generated neural vectors.
 - **Secrets in your repo:** ivygrep indexes file *contents*, including config/dotfiles (e.g. `.env`) unless they're gitignored. Those contents are stored in the local index and can appear in search snippets. Keep secrets out of the workspace or in `.gitignore`.
 - **MCP scope:** the `ig_search` MCP tool only searches the workspace at the provided `path` — it cannot search across other indexed projects.

@@ -1771,6 +1771,10 @@ pub fn enhance_workspace_neural(
         return Ok(0);
     }
 
+    let index_generation = workspace
+        .read_metadata()?
+        .map(|metadata| metadata.index_generation)
+        .unwrap_or(0);
     let profile = neural_model.profile_info().unwrap_or("general");
     let model_identity = neural_model.model_identity();
     let identity_matches = match (workspace.neural_model_identity(), model_identity) {
@@ -1788,6 +1792,7 @@ pub fn enhance_workspace_neural(
         let _ = fs::remove_file(workspace.vector_neural_path());
         let _ = fs::remove_file(workspace.neural_tombstones_path());
         let _ = fs::remove_file(workspace.neural_tombstones_processing_path());
+        let _ = fs::remove_file(workspace.neural_enhanced_generation_path());
     }
     fs::write(workspace.neural_profile_path(), profile)?;
     if let Some(identity) = model_identity {
@@ -1939,6 +1944,15 @@ pub fn enhance_workspace_neural(
         && let Some(backend) = neural_model.backend_info()
     {
         fs::write(workspace.neural_backend_path(), backend)?;
+    }
+    if workspace
+        .read_metadata()?
+        .is_some_and(|metadata| metadata.index_generation == index_generation)
+    {
+        fs::write(
+            workspace.neural_enhanced_generation_path(),
+            index_generation.to_string(),
+        )?;
     }
     Ok(newly_processed)
 }
@@ -3069,6 +3083,15 @@ mod tests {
             fs::read_to_string(workspace.neural_profile_path()).unwrap(),
             "static"
         );
+        assert_eq!(
+            fs::read_to_string(workspace.neural_enhanced_generation_path()).unwrap(),
+            workspace
+                .read_metadata()
+                .unwrap()
+                .unwrap()
+                .index_generation
+                .to_string()
+        );
         let status = crate::workspace::list_workspaces()
             .unwrap()
             .into_iter()
@@ -3213,6 +3236,15 @@ mod tests {
         );
         assert!(!workspace.neural_tombstones_path().exists());
         assert!(!workspace.neural_tombstones_processing_path().exists());
+        assert_eq!(
+            fs::read_to_string(workspace.neural_enhanced_generation_path()).unwrap(),
+            workspace
+                .read_metadata()
+                .unwrap()
+                .unwrap()
+                .index_generation
+                .to_string()
+        );
         assert!(!workspace.needs_neural_enhancement());
     }
 

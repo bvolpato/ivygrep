@@ -17,6 +17,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum NeuralProfile {
     Static,
+    PotionCode,
     General,
     Code,
     CodeHighQuality,
@@ -50,6 +51,7 @@ impl NeuralProfile {
             .as_str()
         {
             "static" | "portable" | "static-retrieval" | "static-retrieval-v1" => Self::Static,
+            "potion" | "potion-code" | "potion-code-16m" | "model2vec-code" => Self::PotionCode,
             "general" | "minilm" | "all-minilm-l6-v2" => Self::General,
             "code" | "codesearchnet" | "code-minilm-l6-v1" => Self::Code,
             "code-hq" | "code-high-quality" | "code-minilm-l12-v1" => Self::CodeHighQuality,
@@ -60,6 +62,7 @@ impl NeuralProfile {
     pub fn name(self) -> &'static str {
         match self {
             Self::Static => "static-retrieval-v1",
+            Self::PotionCode => "potion-code-16m-v1",
             Self::General => "general",
             Self::Code => "code-minilm-l6-v1",
             Self::CodeHighQuality => "code-minilm-l12-v1",
@@ -68,7 +71,7 @@ impl NeuralProfile {
 
     pub fn dimensions(self) -> usize {
         match self {
-            Self::Static => 256,
+            Self::Static | Self::PotionCode => 256,
             Self::General | Self::Code | Self::CodeHighQuality => 384,
         }
     }
@@ -77,6 +80,7 @@ impl NeuralProfile {
     fn model_id(self) -> &'static str {
         match self {
             Self::Static => "sentence-transformers/static-retrieval-mrl-en-v1",
+            Self::PotionCode => "minishlab/potion-code-16M",
             Self::General => "sentence-transformers/all-MiniLM-L6-v2",
             Self::Code => "isuruwijesiri/all-MiniLM-L6-v2-code-search-512",
             Self::CodeHighQuality => "isuruwijesiri/all-MiniLM-L12-v2-code-search-512",
@@ -86,6 +90,7 @@ impl NeuralProfile {
     pub fn model_revision(self) -> &'static str {
         match self {
             Self::Static => "f60985c706f192d45d218078e49e5a8b6f15283a",
+            Self::PotionCode => "86848193a842865570d9c8d3e7d268b66ab52752",
             Self::General => "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
             Self::Code => "13b266a617039c16d924b49a56ae978dbd8727ff",
             Self::CodeHighQuality => "0574cd81b67ad333192c62bb5da302bec71818fe",
@@ -95,6 +100,7 @@ impl NeuralProfile {
     pub fn model_asset_bytes(self) -> u64 {
         match self {
             Self::Static => 125_729_604,
+            Self::PotionCode => 65_360_349,
             Self::General => 91_335_235,
             Self::Code => 91_576_452,
             Self::CodeHighQuality => 134_174_389,
@@ -104,6 +110,7 @@ impl NeuralProfile {
     pub fn model_weights_sha256(self) -> &'static str {
         match self {
             Self::Static => "164fc63ee9f9267be7378fcbd7df99d09788a2f45244c92aa99ae5a574925716",
+            Self::PotionCode => "ca6159081a6e96cebe4ad878e5e8437bfccc761e8db16223370149cd2faa6c0b",
             Self::General => "53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db",
             Self::Code => "c71b7305a842dc64189c1e2c7b8e58aa0d430d8181afdb1a95db6d0a3617c90b",
             Self::CodeHighQuality => {
@@ -113,41 +120,61 @@ impl NeuralProfile {
     }
 
     pub fn identity(self) -> NeuralModelIdentity {
-        let (model_id, architecture, dimensions, max_input_tokens, pooling, parameter_count) =
-            match self {
-                Self::Static => (
-                    "sentence-transformers/static-retrieval-mrl-en-v1",
-                    "static-embedding",
-                    256,
-                    0,
-                    "token-mean",
-                    31_254_528,
-                ),
-                Self::General => (
-                    "sentence-transformers/all-MiniLM-L6-v2",
-                    "bert",
-                    384,
-                    256,
-                    "attention-mask-mean",
-                    22_713_728,
-                ),
-                Self::Code => (
-                    "isuruwijesiri/all-MiniLM-L6-v2-code-search-512",
-                    "bert",
-                    384,
-                    512,
-                    "attention-mask-mean",
-                    22_713_216,
-                ),
-                Self::CodeHighQuality => (
-                    "isuruwijesiri/all-MiniLM-L12-v2-code-search-512",
-                    "bert",
-                    384,
-                    512,
-                    "attention-mask-mean",
-                    33_360_000,
-                ),
-            };
+        let (
+            model_id,
+            architecture,
+            dimensions,
+            max_input_tokens,
+            pooling,
+            parameter_count,
+            license,
+        ) = match self {
+            Self::Static => (
+                "sentence-transformers/static-retrieval-mrl-en-v1",
+                "static-embedding",
+                256,
+                0,
+                "token-mean",
+                31_254_528,
+                "Apache-2.0",
+            ),
+            Self::PotionCode => (
+                "minishlab/potion-code-16M",
+                "model2vec-static",
+                256,
+                512,
+                "weighted-token-mean",
+                15_827_456,
+                "MIT",
+            ),
+            Self::General => (
+                "sentence-transformers/all-MiniLM-L6-v2",
+                "bert",
+                384,
+                256,
+                "attention-mask-mean",
+                22_713_728,
+                "Apache-2.0",
+            ),
+            Self::Code => (
+                "isuruwijesiri/all-MiniLM-L6-v2-code-search-512",
+                "bert",
+                384,
+                512,
+                "attention-mask-mean",
+                22_713_216,
+                "Apache-2.0",
+            ),
+            Self::CodeHighQuality => (
+                "isuruwijesiri/all-MiniLM-L12-v2-code-search-512",
+                "bert",
+                384,
+                512,
+                "attention-mask-mean",
+                33_360_000,
+                "Apache-2.0",
+            ),
+        };
         NeuralModelIdentity {
             schema_version: 1,
             profile: self.name().to_string(),
@@ -161,7 +188,7 @@ impl NeuralProfile {
             normalize_embeddings: true,
             model_weight_dtype: "f32".to_string(),
             vector_quantization: "f16".to_string(),
-            license: "Apache-2.0".to_string(),
+            license: license.to_string(),
             parameter_count,
             model_asset_bytes: self.model_asset_bytes(),
             model_weights_sha256: self.model_weights_sha256().to_string(),
@@ -284,9 +311,11 @@ pub fn create_neural_model_background() -> anyhow::Result<Box<dyn EmbeddingModel
 fn create_configured_neural_model(is_background: bool) -> anyhow::Result<ConfiguredNeuralModel> {
     let profile = NeuralProfile::configured();
     match profile {
-        NeuralProfile::Static => StaticEmbeddingModel::new(profile, is_background)
-            .map(Box::new)
-            .map(ConfiguredNeuralModel::Static),
+        NeuralProfile::Static | NeuralProfile::PotionCode => {
+            StaticEmbeddingModel::new(profile, is_background)
+                .map(Box::new)
+                .map(ConfiguredNeuralModel::Static)
+        }
         NeuralProfile::General | NeuralProfile::Code | NeuralProfile::CodeHighQuality => {
             CandleEmbeddingModel::new_internal(is_background)
                 .map(Box::new)
@@ -477,7 +506,10 @@ impl EmbeddingModel for ConfiguredNeuralModel {
 #[cfg(feature = "neural")]
 struct StaticEmbeddingModel {
     tokenizer: tokenizers::Tokenizer,
-    weights: Vec<f32>,
+    embeddings: Vec<f32>,
+    token_mapping: Option<Vec<usize>>,
+    token_weights: Option<Vec<f32>>,
+    unknown_token_id: Option<u32>,
     dimensions: usize,
     profile: NeuralProfile,
     identity: NeuralModelIdentity,
@@ -497,20 +529,49 @@ impl StaticEmbeddingModel {
             profile.model_revision().to_string(),
         );
         let repo = Api::new()?.repo(repo);
-        let tokenizer_path = repo.get("0_StaticEmbedding/tokenizer.json")?;
-        let weights_path = repo.get("0_StaticEmbedding/model.safetensors")?;
+        let (tokenizer_asset, weights_asset, embedding_tensor) = match profile {
+            NeuralProfile::Static => (
+                "0_StaticEmbedding/tokenizer.json",
+                "0_StaticEmbedding/model.safetensors",
+                "embedding.weight",
+            ),
+            NeuralProfile::PotionCode => ("tokenizer.json", "model.safetensors", "embeddings"),
+            _ => anyhow::bail!("transformer profile must use the Candle embedding backend"),
+        };
+        let tokenizer_path = repo.get(tokenizer_asset)?;
+        let weights_path = repo.get(weights_asset)?;
         let tokenizer =
             tokenizers::Tokenizer::from_file(tokenizer_path).map_err(anyhow::Error::msg)?;
         // SAFETY: the immutable model file remains mapped only while the
         // tensor is copied into owned memory below.
         let tensors = unsafe { MmapedSafetensors::new(weights_path)? };
         let dimensions = profile.dimensions();
-        let weights = tensors
-            .load("embedding.weight", &Device::Cpu)?
+        let embeddings = tensors
+            .load(embedding_tensor, &Device::Cpu)?
             .narrow(1, 0, dimensions)?
             .contiguous()?
             .flatten_all()?
             .to_vec1::<f32>()?;
+        let (token_mapping, token_weights) = if profile == NeuralProfile::PotionCode {
+            let mapping = tensors
+                .load("mapping", &Device::Cpu)?
+                .flatten_all()?
+                .to_vec1::<i64>()?
+                .into_iter()
+                .map(|value| usize::try_from(value).map_err(anyhow::Error::msg))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let token_weights = tensors
+                .load("weights", &Device::Cpu)?
+                .flatten_all()?
+                .to_vec1::<f64>()?
+                .into_iter()
+                .map(|value| value as f32)
+                .collect();
+            (Some(mapping), Some(token_weights))
+        } else {
+            (None, None)
+        };
+        let unknown_token_id = tokenizer.token_to_id("[UNK]");
         let thread_count = neural_thread_budget(is_background);
         let thread_pool = rayon::ThreadPoolBuilder::new()
             .num_threads(thread_count)
@@ -518,7 +579,10 @@ impl StaticEmbeddingModel {
         tracing::info!("static neural pool limited to {thread_count} thread(s)");
         Ok(Self {
             tokenizer,
-            weights,
+            embeddings,
+            token_mapping,
+            token_weights,
+            unknown_token_id,
             dimensions,
             profile,
             identity: profile.identity(),
@@ -538,12 +602,28 @@ impl StaticEmbeddingModel {
         let mut embedding = vec![0.0f32; self.dimensions];
         let mut token_count = 0usize;
         for &id in ids {
-            let start = id as usize * self.dimensions;
-            let Some(row) = self.weights.get(start..start + self.dimensions) else {
+            if self.unknown_token_id == Some(id) {
+                continue;
+            }
+            let token_id = id as usize;
+            let embedding_id = self
+                .token_mapping
+                .as_ref()
+                .and_then(|mapping| mapping.get(token_id))
+                .copied()
+                .unwrap_or(token_id);
+            let start = embedding_id * self.dimensions;
+            let Some(row) = self.embeddings.get(start..start + self.dimensions) else {
                 continue;
             };
+            let token_weight = self
+                .token_weights
+                .as_ref()
+                .and_then(|weights| weights.get(token_id))
+                .copied()
+                .unwrap_or(1.0);
             for (value, token_value) in embedding.iter_mut().zip(row) {
-                *value += token_value;
+                *value += token_value * token_weight;
             }
             token_count += 1;
         }
@@ -589,7 +669,10 @@ impl EmbeddingModel for StaticEmbeddingModel {
     }
 
     fn backend_info(&self) -> Option<&'static str> {
-        Some("StaticEmbedding token mean via Rust")
+        Some(match self.profile {
+            NeuralProfile::PotionCode => "Model2Vec weighted token mean via Rust",
+            _ => "StaticEmbedding token mean via Rust",
+        })
     }
 
     fn profile_info(&self) -> Option<&'static str> {
@@ -760,7 +843,7 @@ impl CandleEmbeddingModel {
             NeuralBackend,
         )> {
             let builder = match profile {
-                NeuralProfile::Static => {
+                NeuralProfile::Static | NeuralProfile::PotionCode => {
                     anyhow::bail!("static profile must use the static embedding backend")
                 }
                 NeuralProfile::General => {
@@ -947,6 +1030,11 @@ mod tests {
         assert_eq!(NeuralProfile::General.name(), "general");
         assert_eq!(NeuralProfile::General.dimensions(), 384);
 
+        unsafe { std::env::set_var("IVYGREP_MODEL_PROFILE", "potion-code") };
+        assert_eq!(NeuralProfile::configured(), NeuralProfile::PotionCode);
+        assert_eq!(NeuralProfile::PotionCode.name(), "potion-code-16m-v1");
+        assert_eq!(NeuralProfile::PotionCode.dimensions(), 256);
+
         unsafe { std::env::set_var("IVYGREP_MODEL_PROFILE", "code") };
         assert_eq!(NeuralProfile::configured(), NeuralProfile::Code);
         assert_eq!(NeuralProfile::Code.name(), "code-minilm-l6-v1");
@@ -964,6 +1052,14 @@ mod tests {
         assert_eq!(
             NeuralProfile::General.model_revision(),
             "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
+        );
+        assert_eq!(
+            NeuralProfile::PotionCode.model_id(),
+            "minishlab/potion-code-16M"
+        );
+        assert_eq!(
+            NeuralProfile::PotionCode.model_revision(),
+            "86848193a842865570d9c8d3e7d268b66ab52752"
         );
         assert_eq!(
             NeuralProfile::Code.model_id(),
@@ -998,6 +1094,11 @@ mod tests {
         assert_eq!(identity.pooling, "attention-mask-mean");
         assert!(identity.normalize_embeddings);
         assert_eq!(identity.vector_quantization, "f16");
+
+        let potion = NeuralProfile::PotionCode.identity();
+        assert_eq!(potion.dimensions, 256);
+        assert_eq!(potion.pooling, "weighted-token-mean");
+        assert_eq!(potion.license, "MIT");
     }
 
     /// `parallel_embed` must return vectors in input order no matter how the

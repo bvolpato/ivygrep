@@ -360,6 +360,7 @@ struct DaemonState {
     search_contexts: Arc<Mutex<HashMap<SearchContextCacheKey, CachedSearchContext>>>,
     idle_search_context_count: Arc<AtomicUsize>,
     query_results: Arc<Mutex<QueryResultCache>>,
+    query_result_cache_enabled: bool,
     /// Bounds concurrent CPU-heavy work (hybrid/literal/regex search + index).
     /// Without this, a burst of clients each spawn a `spawn_blocking` task on
     /// Tokio's blocking pool (default cap 512), oversubscribing CPU and memory
@@ -482,10 +483,16 @@ impl DaemonState {
     }
 
     fn cached_query_results(&self, key: &QueryCacheKey) -> Option<Vec<crate::protocol::SearchHit>> {
+        if !self.query_result_cache_enabled {
+            return None;
+        }
         self.query_results.lock().get(key)
     }
 
     fn store_query_results(&self, key: QueryCacheKey, hits: &[crate::protocol::SearchHit]) {
+        if !self.query_result_cache_enabled {
+            return;
+        }
         // Don't cache very large result sets (e.g. --no-limit / file_name_only
         // on a big repo): with up to MAX_QUERY_CACHE_ENTRIES of them, each
         // carrying preview/reason strings, this would bloat daemon memory.
@@ -528,6 +535,7 @@ pub async fn run_daemon() -> Result<()> {
         search_contexts: Arc::new(Mutex::new(HashMap::new())),
         idle_search_context_count: Arc::new(AtomicUsize::new(0)),
         query_results: Arc::new(Mutex::new(QueryResultCache::default())),
+        query_result_cache_enabled: config::query_result_cache_enabled(),
         cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
     };
 
@@ -1605,7 +1613,7 @@ fn query_cache_key(
             .collect(),
         signatures,
         all_indices,
-        query: query.to_string(),
+        query: query.trim().to_string(),
         limit: options.limit,
         context: options.context,
         type_filter: options.type_filter.clone(),
@@ -1629,6 +1637,14 @@ fn file_stamp(path: &Path) -> Option<FileStamp> {
 }
 
 fn dir_stamp(path: &Path) -> Option<DirStamp> {
+    if let Some(manifest) = file_stamp(&path.join("meta.json")) {
+        return Some(DirStamp {
+            files: 1,
+            len: manifest.len,
+            newest_modified_nanos: manifest.modified_nanos,
+        });
+    }
+
     let entries = std::fs::read_dir(path).ok()?;
     let mut files = 0u64;
     let mut len = 0u64;
@@ -1982,6 +1998,7 @@ mod tests {
             search_contexts: Arc::new(Mutex::new(HashMap::new())),
             idle_search_context_count: Arc::new(AtomicUsize::new(0)),
             query_results: Arc::new(Mutex::new(QueryResultCache::default())),
+            query_result_cache_enabled: true,
             cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
         }
     }
@@ -2676,7 +2693,12 @@ mod tests {
         assert_eq!(state.query_results.lock().results.len(), 1);
 
         state.search_contexts.lock().clear();
-        let second = handle_request(state.clone(), request).await;
+        let mut equivalent_request = request;
+        let DaemonRequest::Search { query, .. } = &mut equivalent_request else {
+            unreachable!("test request is a search")
+        };
+        query.push_str("  ");
+        let second = handle_request(state.clone(), equivalent_request).await;
         let second_count = match second {
             DaemonResponse::SearchResults { hits } => hits.len(),
             other => panic!("expected SearchResults, got {other:?}"),
@@ -2689,6 +2711,32 @@ mod tests {
         );
 
         state.clear_workspace_contexts(&workspace);
+        assert!(state.query_results.lock().results.is_empty());
+    }
+
+    #[test]
+    fn daemon_query_cache_can_be_disabled() {
+        let mut state = test_state();
+        state.query_result_cache_enabled = false;
+        let key = QueryCacheKey {
+            workspace_ids: Vec::new(),
+            signatures: Vec::new(),
+            all_indices: false,
+            query: "needle".to_string(),
+            limit: Some(10),
+            context: 2,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_filter: None,
+            skip_gitignore: false,
+            emb_dim: 256,
+            wants_neural: true,
+            force_neural: true,
+            reranker: crate::reranker::cache_identity(),
+        };
+        state.store_query_results(key.clone(), &[]);
+        assert!(state.cached_query_results(&key).is_none());
         assert!(state.query_results.lock().results.is_empty());
     }
 
