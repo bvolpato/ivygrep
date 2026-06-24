@@ -305,14 +305,14 @@ pub fn index_workspace(
     workspace: &Workspace,
     embedding_model: &dyn EmbeddingModel,
 ) -> Result<IndexingSummary> {
-    index_workspace_with_options(workspace, embedding_model, true, None)
+    index_workspace_with_options(workspace, embedding_model, true, None, false)
 }
 
 pub fn index_workspace_for_watcher(
     workspace: &Workspace,
     embedding_model: &dyn EmbeddingModel,
 ) -> Result<IndexingSummary> {
-    index_workspace_with_options(workspace, embedding_model, false, None)
+    index_workspace_with_options(workspace, embedding_model, false, None, false)
 }
 
 pub fn index_workspace_paths_for_watcher(
@@ -320,7 +320,13 @@ pub fn index_workspace_paths_for_watcher(
     embedding_model: &dyn EmbeddingModel,
     changed_paths: &[PathBuf],
 ) -> Result<IndexingSummary> {
-    index_workspace_with_options(workspace, embedding_model, false, Some(changed_paths))
+    index_workspace_with_options(
+        workspace,
+        embedding_model,
+        false,
+        Some(changed_paths),
+        false,
+    )
 }
 
 /// Rebuild a worktree overlay when its referenced base generation moved.
@@ -331,20 +337,20 @@ pub fn reconcile_worktree_overlay(
     workspace: &Workspace,
     embedding_model: &dyn EmbeddingModel,
 ) -> Result<bool> {
-    match workspace.worktree_overlay_is_stale() {
+    let reset_overlay = match workspace.worktree_overlay_is_stale() {
         Ok(false) => return Ok(false),
-        Ok(true) => {}
+        Ok(true) => true,
         Err(err) if workspace.is_worktree() => {
             tracing::warn!(
                 "invalid worktree overlay reference for {}: {err:#}; rebuilding",
                 workspace.root.display()
             );
-            clear_worktree_overlay_storage(workspace);
+            true
         }
         Err(err) => return Err(err),
-    }
+    };
 
-    index_workspace_for_watcher(workspace, embedding_model)?;
+    index_workspace_with_options(workspace, embedding_model, false, None, reset_overlay)?;
     if workspace.worktree_overlay_is_stale()? {
         anyhow::bail!(
             "worktree overlay remained stale after reconciliation: {}",
@@ -367,6 +373,7 @@ fn index_workspace_with_options(
     embedding_model: &dyn EmbeddingModel,
     trust_live_watcher: bool,
     watcher_paths: Option<&[PathBuf]>,
+    reset_worktree_overlay: bool,
 ) -> Result<IndexingSummary> {
     workspace.ensure_dirs()?;
 
@@ -398,6 +405,9 @@ fn index_workspace_with_options(
     let preserved_metadata = workspace.read_metadata().ok().flatten();
     if workspace.quick_index_health().needs_rebuild() {
         rebuild_index_storage(workspace, preserved_metadata.as_ref())?;
+    }
+    if reset_worktree_overlay {
+        clear_worktree_overlay_storage(workspace);
     }
 
     let pid_path = workspace.indexing_pid_path();

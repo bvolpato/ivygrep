@@ -18,7 +18,7 @@ use tempfile::tempdir;
 
 use ivygrep::EMBEDDING_DIMENSIONS;
 use ivygrep::embedding::HashEmbeddingModel;
-use ivygrep::indexer::{index_workspace, open_sqlite};
+use ivygrep::indexer::{index_workspace, open_sqlite, reconcile_worktree_overlay};
 use ivygrep::search::{SearchOptions, hybrid_search};
 use ivygrep::workspace::Workspace;
 
@@ -2736,6 +2736,38 @@ fn worktree_search_reconciles_base_only_additions_before_loading_context() {
             .any(|path| path.contains("worktree.rs")),
         "reconciliation must preserve worktree-only content"
     );
+
+    fs::write(wt_workspace.base_ref_path(), b"{malformed").unwrap();
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(wt_workspace.lock_path())
+        .unwrap();
+    fs2::FileExt::lock_exclusive(&lock_file).unwrap();
+
+    let reconcile_workspace = wt_workspace.clone();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let reconcile = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        reconcile_worktree_overlay(&reconcile_workspace, &model)
+    });
+    started_rx.recv().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    assert!(
+        wt_workspace.overlay_sqlite_path().exists(),
+        "reconciliation must not clear overlay storage before acquiring index.lock"
+    );
+    assert!(
+        wt_workspace.base_ref_path().exists(),
+        "reconciliation must not clear the base reference before acquiring index.lock"
+    );
+
+    fs2::FileExt::unlock(&lock_file).unwrap();
+    assert!(reconcile.join().unwrap().unwrap());
+    assert!(!wt_workspace.worktree_overlay_is_stale().unwrap());
 
     git(
         root.path(),

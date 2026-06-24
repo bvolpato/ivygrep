@@ -81,6 +81,112 @@ class SembleBenchmarkTest(unittest.TestCase):
             },
         )
 
+    def test_verdict_tracks_inverted_winners(self):
+        payload = {
+            "generated_at": "2026-06-24T00:00:00+00:00",
+            "ivygrep": {"sha": "ivy", "dirty": False},
+            "semble": {"sha": "semble", "version": "test"},
+            "summary": {
+                "ivygrep": {
+                    "ndcg_at_10": 0.9,
+                    "latency_p50_ms": 4.0,
+                    "latency_p95_ms": 8.0,
+                    "mean_returned_tokens": 200,
+                    "by_category": {
+                        "architecture": 0.9,
+                        "semantic": 0.9,
+                        "symbol": 0.9,
+                    },
+                },
+                "semble": {
+                    "ndcg_at_10": 0.8,
+                    "latency_p50_ms": 8.0,
+                    "latency_p95_ms": 12.0,
+                    "mean_returned_tokens": 100,
+                    "by_category": {
+                        "architecture": 0.8,
+                        "semantic": 0.8,
+                        "symbol": 0.8,
+                    },
+                },
+            },
+            "indexing": {
+                "repo": {
+                    "ivygrep": {"ready_ms": 200},
+                    "semble": {"index_ms": 100},
+                }
+            },
+            "refresh": {
+                "ivygrep_lexical_refresh_ms": 25,
+                "ivygrep_full_refresh_ms": 100,
+                "semble_full_refresh_ms": 50,
+            },
+        }
+
+        rendered = benchmark.render_markdown(payload)
+        self.assertIn(
+            "ivygrep leads overall retrieval quality by 0.100 nDCG@10 and warm "
+            "p50 latency by 2.0x.",
+            rendered,
+        )
+        self.assertIn(
+            "Semble returns 2.0x fewer tokens in top-10 results.",
+            rendered,
+        )
+        self.assertIn(
+            "Semble full one-file refresh is 2.0x faster",
+            rendered,
+        )
+        self.assertIn(
+            "Semble indexing is faster on every benchmark repository",
+            rendered,
+        )
+        self.assertIn("ivygrep leads every measured quality category.", rendered)
+
+    def test_verdict_reports_ties_without_inventing_a_winner(self):
+        payload = {
+            "generated_at": "2026-06-24T00:00:00+00:00",
+            "ivygrep": {"sha": "ivy", "dirty": False},
+            "semble": {"sha": "semble", "version": "test"},
+            "summary": {
+                tool: {
+                    "ndcg_at_10": 0.8,
+                    "latency_p50_ms": 5.0,
+                    "latency_p95_ms": 10.0,
+                    "mean_returned_tokens": 100,
+                    "by_category": {
+                        "architecture": 0.8,
+                        "semantic": 0.8,
+                        "symbol": 0.8,
+                    },
+                }
+                for tool in ("ivygrep", "semble")
+            },
+            "indexing": {
+                "repo": {
+                    "ivygrep": {"ready_ms": 100},
+                    "semble": {"index_ms": 100},
+                }
+            },
+            "refresh": {
+                "ivygrep_lexical_refresh_ms": 25,
+                "ivygrep_full_refresh_ms": 100,
+                "semble_full_refresh_ms": 100,
+            },
+        }
+
+        rendered = benchmark.render_markdown(payload)
+        self.assertIn(
+            "Overall retrieval quality and warm p50 latency are tied.", rendered
+        )
+        self.assertIn(
+            "Both tools return the same mean token count in top-10 results.", rendered
+        )
+        self.assertIn("Full one-file refresh time is tied", rendered)
+        self.assertIn("Initial indexing time is tied", rendered)
+        self.assertIn("Every measured quality category is tied.", rendered)
+        self.assertIn("| nDCG@10 | 0.800 | 0.800 | Tie |", rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

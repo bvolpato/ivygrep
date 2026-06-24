@@ -566,6 +566,12 @@ def benchmark_refresh(
 
 
 def render_markdown(payload: dict[str, Any]) -> str:
+    def winner(left: float, right: float, *, lower_is_better: bool) -> str:
+        if left == right:
+            return "Tie"
+        left_wins = left < right if lower_is_better else left > right
+        return "ivygrep" if left_wins else "Semble"
+
     summary = payload["summary"]
     ivy = summary["ivygrep"]
     semble = summary["semble"]
@@ -582,30 +588,139 @@ def render_markdown(payload: dict[str, Any]) -> str:
         f"{metrics['semble']['index_ms'] / metrics['ivygrep']['ready_ms']:.2f}x |"
         for repo, metrics in payload["indexing"].items()
     )
-    token_ratio = semble["mean_returned_tokens"] / ivy["mean_returned_tokens"]
-    latency_ratio = ivy["latency_p50_ms"] / semble["latency_p50_ms"]
-    refresh_ratio = (
-        refresh["semble_full_refresh_ms"] / refresh["ivygrep_full_refresh_ms"]
+    quality_leader = winner(
+        ivy["ndcg_at_10"], semble["ndcg_at_10"], lower_is_better=False
     )
+    latency_leader = winner(
+        ivy["latency_p50_ms"], semble["latency_p50_ms"], lower_is_better=True
+    )
+    latency_ratio = max(ivy["latency_p50_ms"], semble["latency_p50_ms"]) / min(
+        ivy["latency_p50_ms"], semble["latency_p50_ms"]
+    )
+    if quality_leader == "Tie" and latency_leader == "Tie":
+        quality_latency_verdict = (
+            "Overall retrieval quality and warm p50 latency are tied."
+        )
+    elif quality_leader == "Tie":
+        quality_latency_verdict = (
+            "Overall retrieval quality is tied; "
+            f"{latency_leader} leads warm p50 latency by {latency_ratio:.1f}x."
+        )
+    elif latency_leader == "Tie":
+        quality_latency_verdict = (
+            f"{quality_leader} leads overall retrieval quality by "
+            f"{abs(quality_delta):.3f} nDCG@10; warm p50 latency is tied."
+        )
+    elif quality_leader == latency_leader:
+        quality_latency_verdict = (
+            f"{quality_leader} leads overall retrieval quality by "
+            f"{abs(quality_delta):.3f} nDCG@10 and warm p50 latency by "
+            f"{latency_ratio:.1f}x."
+        )
+    else:
+        quality_latency_verdict = (
+            f"{quality_leader} leads overall retrieval quality by "
+            f"{abs(quality_delta):.3f} nDCG@10; {latency_leader} leads warm p50 "
+            f"latency by {latency_ratio:.1f}x."
+        )
+    token_leader = winner(
+        ivy["mean_returned_tokens"],
+        semble["mean_returned_tokens"],
+        lower_is_better=True,
+    )
+    if token_leader == "Tie":
+        token_verdict = "Both tools return the same mean token count in top-10 results."
+    else:
+        token_ratio = max(
+            ivy["mean_returned_tokens"], semble["mean_returned_tokens"]
+        ) / min(ivy["mean_returned_tokens"], semble["mean_returned_tokens"])
+        token_verdict = (
+            f"{token_leader} returns {token_ratio:.1f}x fewer tokens in top-10 results."
+        )
+    refresh_leader = winner(
+        refresh["ivygrep_full_refresh_ms"],
+        refresh["semble_full_refresh_ms"],
+        lower_is_better=True,
+    )
+    if refresh_leader == "Tie":
+        refresh_verdict = (
+            "Full one-file refresh time is tied; ivygrep exposes lexical changes "
+            "before neural refresh completes."
+        )
+    elif refresh_leader == "ivygrep":
+        refresh_ratio = (
+            refresh["semble_full_refresh_ms"] / refresh["ivygrep_full_refresh_ms"]
+        )
+        refresh_verdict = (
+            f"ivygrep full one-file refresh is {refresh_ratio:.1f}x faster and "
+            "exposes lexical changes before neural refresh completes."
+        )
+    else:
+        refresh_ratio = (
+            refresh["ivygrep_full_refresh_ms"] / refresh["semble_full_refresh_ms"]
+        )
+        refresh_verdict = (
+            f"Semble full one-file refresh is {refresh_ratio:.1f}x faster; "
+            "ivygrep still exposes lexical changes before neural refresh completes."
+        )
     faster_indexing_repos = [
         repo
         for repo, metrics in payload["indexing"].items()
         if metrics["ivygrep"]["ready_ms"] < metrics["semble"]["index_ms"]
+    ]
+    slower_indexing_repos = [
+        repo
+        for repo, metrics in payload["indexing"].items()
+        if metrics["ivygrep"]["ready_ms"] > metrics["semble"]["index_ms"]
+    ]
+    tied_indexing_repos = [
+        repo
+        for repo, metrics in payload["indexing"].items()
+        if metrics["ivygrep"]["ready_ms"] == metrics["semble"]["index_ms"]
     ]
     if len(faster_indexing_repos) == len(payload["indexing"]):
         indexing_verdict = (
             "ivygrep hybrid-ready indexing is faster on every benchmark "
             "repository in this run."
         )
-    elif faster_indexing_repos:
-        indexing_verdict = (
-            "ivygrep hybrid-ready indexing is faster on "
-            f"{', '.join(faster_indexing_repos)} in this run."
-        )
-    else:
+    elif len(slower_indexing_repos) == len(payload["indexing"]):
         indexing_verdict = (
             "Semble indexing is faster on every benchmark repository in this run."
         )
+    elif len(tied_indexing_repos) == len(payload["indexing"]):
+        indexing_verdict = (
+            "Initial indexing time is tied on every benchmark repository in this run."
+        )
+    else:
+        outcomes = []
+        if faster_indexing_repos:
+            outcomes.append(f"ivygrep leads on {', '.join(faster_indexing_repos)}")
+        if slower_indexing_repos:
+            outcomes.append(f"Semble leads on {', '.join(slower_indexing_repos)}")
+        if tied_indexing_repos:
+            outcomes.append(f"{', '.join(tied_indexing_repos)} tied")
+        indexing_verdict = (
+            f"Initial indexing is mixed: {'; '.join(outcomes)} in this run."
+        )
+    category_deltas = {
+        category: semble["by_category"][category] - ivy["by_category"][category]
+        for category in ivy["by_category"]
+    }
+    if any(delta > 0 for delta in category_deltas.values()):
+        largest_gap_category = max(category_deltas, key=category_deltas.get)
+        closest_gap_category = min(
+            category_deltas, key=lambda category: abs(category_deltas[category])
+        )
+        quality_gap_verdict = (
+            f"Largest remaining quality gap is {largest_gap_category} retrieval. "
+            f"Exact {closest_gap_category} quality is much closer."
+        )
+    elif all(delta < 0 for delta in category_deltas.values()):
+        quality_gap_verdict = "ivygrep leads every measured quality category."
+    elif any(delta < 0 for delta in category_deltas.values()):
+        quality_gap_verdict = "ivygrep leads or ties every measured quality category."
+    else:
+        quality_gap_verdict = "Every measured quality category is tied."
     dirty = " + dirty worktree" if payload["ivygrep"]["dirty"] else ""
     return f"""# ivygrep vs Semble
 
@@ -616,10 +731,10 @@ ivygrep: `{payload["ivygrep"]["sha"]}`{dirty}
 
 | Metric | ivygrep | Semble | Winner |
 |---|---:|---:|---|
-| nDCG@10 | {ivy["ndcg_at_10"]:.3f} | {semble["ndcg_at_10"]:.3f} | {"ivygrep" if quality_delta > 0 else "Semble"} |
-| Warm query p50 | {ivy["latency_p50_ms"]:.2f} ms | {semble["latency_p50_ms"]:.2f} ms | {"ivygrep" if ivy["latency_p50_ms"] < semble["latency_p50_ms"] else "Semble"} |
-| Warm query p95 | {ivy["latency_p95_ms"]:.2f} ms | {semble["latency_p95_ms"]:.2f} ms | {"ivygrep" if ivy["latency_p95_ms"] < semble["latency_p95_ms"] else "Semble"} |
-| Mean returned tokens | {ivy["mean_returned_tokens"]:.0f} | {semble["mean_returned_tokens"]:.0f} | {"ivygrep" if ivy["mean_returned_tokens"] < semble["mean_returned_tokens"] else "Semble"} |
+| nDCG@10 | {ivy["ndcg_at_10"]:.3f} | {semble["ndcg_at_10"]:.3f} | {quality_leader} |
+| Warm query p50 | {ivy["latency_p50_ms"]:.2f} ms | {semble["latency_p50_ms"]:.2f} ms | {latency_leader} |
+| Warm query p95 | {ivy["latency_p95_ms"]:.2f} ms | {semble["latency_p95_ms"]:.2f} ms | {winner(ivy["latency_p95_ms"], semble["latency_p95_ms"], lower_is_better=True)} |
+| Mean returned tokens | {ivy["mean_returned_tokens"]:.0f} | {semble["mean_returned_tokens"]:.0f} | {token_leader} |
 
 ## Quality by query type
 
@@ -644,11 +759,11 @@ Full hybrid-ready time includes ivygrep lexical, hash, and neural phases.
 
 ## Verdict
 
-- Semble leads overall retrieval quality by {abs(quality_delta):.3f} nDCG@10 and warm p50 latency by {latency_ratio:.1f}x.
-- ivygrep returns {token_ratio:.1f}x fewer tokens in top-10 results.
-- ivygrep full one-file refresh is {refresh_ratio:.1f}x faster and exposes lexical changes before neural refresh completes.
+- {quality_latency_verdict}
+- {token_verdict}
+- {refresh_verdict}
 - {indexing_verdict}
-- Largest remaining quality gap is architecture retrieval. Exact symbol quality is much closer.
+- {quality_gap_verdict}
 
 ## Notes
 
