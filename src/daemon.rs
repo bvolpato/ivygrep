@@ -850,13 +850,12 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             };
             let all_indices = path.is_none();
 
-            let has_neural_vectors = workspaces.iter().any(Workspace::has_neural_vectors);
-            if force_neural && !has_neural_vectors {
+            if let Err(err) = validate_forced_neural_workspaces(&workspaces, force_neural) {
                 return DaemonResponse::Error {
-                    message: "neural search was required, but no neural vectors are available"
-                        .to_string(),
+                    message: err.to_string(),
                 };
             }
+            let has_neural_vectors = workspaces.iter().any(Workspace::has_neural_vectors);
             if has_neural_vectors {
                 state_clone.maybe_start_model_load();
             }
@@ -1567,6 +1566,25 @@ fn search_context_signature(
     }
 }
 
+fn validate_forced_neural_workspaces(workspaces: &[Workspace], force_neural: bool) -> Result<()> {
+    if !force_neural {
+        return Ok(());
+    }
+
+    let missing = workspaces
+        .iter()
+        .filter(|workspace| !workspace.has_neural_vectors())
+        .map(|workspace| workspace.root.display().to_string())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "neural search was required, but these workspaces have no neural vectors: {}",
+            missing.join(", ")
+        );
+    }
+    Ok(())
+}
+
 fn query_cache_key(
     workspaces: &[Workspace],
     query: &str,
@@ -1974,7 +1992,9 @@ mod tests {
         }
 
         fn embed(&self, _text: &str) -> Vec<f32> {
-            vec![0.0; self.dimensions()]
+            let mut vector = vec![0.0; self.dimensions()];
+            vector[0] = 1.0;
+            vector
         }
 
         fn model_identity(&self) -> Option<&crate::embedding::NeuralModelIdentity> {
@@ -2012,6 +2032,43 @@ mod tests {
         let state = test_state();
         assert!(state.lazy_model.set(cached_hash_model()).is_ok());
         assert!(state.get_model_for_search(true).is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn force_neural_requires_vectors_in_every_workspace() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let neural_repo = tempdir().unwrap();
+        std::fs::write(
+            neural_repo.path().join("neural.rs"),
+            "pub fn neural_ready() {}\n",
+        )
+        .unwrap();
+        let neural_workspace = Workspace::resolve(neural_repo.path()).unwrap();
+        let hash_model = create_hash_model();
+        index_workspace(&neural_workspace, hash_model.as_ref()).unwrap();
+        crate::indexer::enhance_workspace_neural(&neural_workspace, &TestNeuralModel).unwrap();
+        assert!(neural_workspace.has_neural_vectors());
+
+        let hash_repo = tempdir().unwrap();
+        std::fs::write(hash_repo.path().join("hash.rs"), "pub fn hash_only() {}\n").unwrap();
+        let hash_workspace = Workspace::resolve(hash_repo.path()).unwrap();
+        index_workspace(&hash_workspace, hash_model.as_ref()).unwrap();
+        assert!(!hash_workspace.has_neural_vectors());
+
+        assert!(
+            validate_forced_neural_workspaces(std::slice::from_ref(&neural_workspace), true)
+                .is_ok()
+        );
+        let err =
+            validate_forced_neural_workspaces(&[neural_workspace, hash_workspace.clone()], true)
+                .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&hash_workspace.root.display().to_string())
+        );
     }
 
     #[test]
