@@ -2072,6 +2072,25 @@ mod tests {
             err.to_string()
                 .contains(&hash_workspace.root.display().to_string())
         );
+
+        let overlay_root = tempdir().unwrap();
+        let overlay_index = tempdir().unwrap();
+        std::fs::write(
+            overlay_index.path().join("neural_model.json"),
+            serde_json::to_vec_pretty(&crate::embedding::configured_neural_model_identity())
+                .unwrap(),
+        )
+        .unwrap();
+        let overlay_workspace = Workspace {
+            id: "overlay".to_string(),
+            root: overlay_root.path().to_path_buf(),
+            index_dir: overlay_index.path().to_path_buf(),
+            repo_id: None,
+            base_index_dir: Some(hash_workspace.index_dir.clone()),
+        };
+        let err = validate_forced_neural_workspaces(std::slice::from_ref(&overlay_workspace), true)
+            .unwrap_err();
+        assert!(err.to_string().contains("incompatible neural model"));
     }
 
     #[test]

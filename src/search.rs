@@ -77,10 +77,14 @@ pub fn validate_forced_neural_workspaces(
         return Ok(());
     }
 
-    let missing = workspaces
+    let identities = workspaces
         .iter()
-        .filter(|workspace| !workspace.has_neural_vectors())
-        .map(|workspace| workspace.root.display().to_string())
+        .map(|workspace| (workspace, workspace_neural_model_identity(workspace)))
+        .collect::<Vec<_>>();
+    let missing = identities
+        .iter()
+        .filter(|(_, identity)| identity.is_none())
+        .map(|(workspace, _)| workspace.root.display().to_string())
         .collect::<Vec<_>>();
     if !missing.is_empty() {
         anyhow::bail!(
@@ -90,12 +94,10 @@ pub fn validate_forced_neural_workspaces(
     }
 
     let expected_identity = crate::embedding::configured_neural_model_identity();
-    let incompatible = workspaces
+    let incompatible = identities
         .iter()
-        .filter(|workspace| {
-            workspace_neural_model_identity(workspace).as_ref() != Some(&expected_identity)
-        })
-        .map(|workspace| workspace.root.display().to_string())
+        .filter(|(_, identity)| identity.as_ref() != Some(&expected_identity))
+        .map(|(workspace, _)| workspace.root.display().to_string())
         .collect::<Vec<_>>();
     if !incompatible.is_empty() {
         anyhow::bail!(
@@ -109,11 +111,22 @@ pub fn validate_forced_neural_workspaces(
 fn workspace_neural_model_identity(
     workspace: &Workspace,
 ) -> Option<crate::embedding::NeuralModelIdentity> {
-    workspace.neural_model_identity().or_else(|| {
-        let path = workspace.base_index_dir.as_ref()?.join("neural_model.json");
-        let contents = fs::read_to_string(path).ok()?;
-        serde_json::from_str(&contents).ok()
-    })
+    neural_model_identity_from_index_dir(&workspace.index_dir)
+        .or_else(|| neural_model_identity_from_index_dir(workspace.base_index_dir.as_ref()?))
+}
+
+fn neural_model_identity_from_index_dir(
+    index_dir: &Path,
+) -> Option<crate::embedding::NeuralModelIdentity> {
+    let contents = fs::read_to_string(index_dir.join("neural_model.json")).ok()?;
+    let identity = serde_json::from_str::<crate::embedding::NeuralModelIdentity>(&contents).ok()?;
+    let store = VectorStore::open_readonly(
+        &index_dir.join("vectors_neural.usearch"),
+        identity.dimensions,
+        NEURAL_VECTOR_QUANTIZATION,
+    )
+    .ok()?;
+    (store.size() > 0).then_some(identity)
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
