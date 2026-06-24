@@ -464,41 +464,113 @@ fn definition_name(chunk: &IndexedChunk) -> Option<String> {
 }
 
 fn definition_names(chunk: &IndexedChunk) -> Vec<String> {
-    if !matches!(chunk.kind.as_str(), "Module" | "module") {
-        return definition_name(chunk).into_iter().collect();
+    let mut seen = HashSet::new();
+    let mut names = if matches!(chunk.kind.as_str(), "Module" | "module") {
+        const MODULE_KEYWORDS: &[&str] = &[
+            "fn",
+            "def",
+            "func",
+            "function",
+            "class",
+            "struct",
+            "trait",
+            "enum",
+            "interface",
+            "type",
+            "union",
+            "module",
+        ];
+        chunk
+            .text
+            .lines()
+            .filter_map(|line| {
+                let signature = line.trim();
+                if signature.is_empty()
+                    || signature.starts_with("//")
+                    || signature.starts_with('#')
+                    || signature.starts_with('@')
+                {
+                    return None;
+                }
+                definition_name_from_signature(signature, MODULE_KEYWORDS, false, true)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        definition_name(chunk).into_iter().collect()
+    };
+    names.extend(public_reexport_names(chunk));
+    names
+        .into_iter()
+        .filter(|name| seen.insert(normalize_symbol(name)))
+        .collect()
+}
+
+fn public_reexport_names(chunk: &IndexedChunk) -> Vec<String> {
+    let mut names = Vec::new();
+
+    if chunk.language.eq_ignore_ascii_case("rust") {
+        for statement in chunk.text.split(';') {
+            let Some(offset) = statement.rfind("pub use ") else {
+                continue;
+            };
+            names.extend(exported_names_from_clause(
+                &statement[offset + "pub use ".len()..],
+            ));
+        }
     }
 
-    const MODULE_KEYWORDS: &[&str] = &[
-        "fn",
-        "def",
-        "func",
-        "function",
-        "class",
-        "struct",
-        "trait",
-        "enum",
-        "interface",
-        "type",
-        "union",
-        "module",
-    ];
+    if matches!(
+        chunk.language.to_ascii_lowercase().as_str(),
+        "javascript" | "typescript" | "tsx" | "jsx"
+    ) {
+        for statement in chunk.text.split(';') {
+            let Some(offset) = statement.rfind("export {") else {
+                continue;
+            };
+            names.extend(exported_names_from_clause(
+                &statement[offset + "export ".len()..],
+            ));
+        }
+    }
 
-    let mut seen = HashSet::new();
-    chunk
-        .text
-        .lines()
-        .filter_map(|line| {
-            let signature = line.trim();
-            if signature.is_empty()
-                || signature.starts_with("//")
-                || signature.starts_with('#')
-                || signature.starts_with('@')
-            {
+    if chunk.language.eq_ignore_ascii_case("python")
+        && chunk.file_path.file_name().and_then(|name| name.to_str()) == Some("__init__.py")
+    {
+        for line in chunk.text.lines().map(str::trim) {
+            let Some((_, imported)) = line.split_once(" import ") else {
+                continue;
+            };
+            if line.starts_with("from ") {
+                names.extend(exported_names_from_clause(imported));
+            }
+        }
+    }
+
+    names
+}
+
+fn exported_names_from_clause(clause: &str) -> Vec<String> {
+    let list = clause
+        .split_once('{')
+        .and_then(|(_, rest)| rest.rsplit_once('}').map(|(inner, _)| inner))
+        .unwrap_or(clause);
+    list.split(',')
+        .filter_map(|item| {
+            let item = item.trim().trim_matches(['{', '}', '(', ')']);
+            if item.is_empty() || item == "self" || item == "*" {
                 return None;
             }
-            definition_name_from_signature(signature, MODULE_KEYWORDS, false, true)
+            let public_name = item
+                .rsplit_once(" as ")
+                .map(|(_, alias)| alias)
+                .unwrap_or(item)
+                .rsplit("::")
+                .next()?
+                .trim();
+            let name = public_name
+                .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '$');
+            (!name.is_empty()).then(|| name.to_string())
         })
-        .filter(|name| seen.insert(normalize_symbol(name)))
         .collect()
 }
 
@@ -659,9 +731,15 @@ mod tests {
             definition_names(&chunk(
                 "rust",
                 "Module",
-                "// src/router.rs\n\npub struct Router<S = ()> {\n}\npub enum RouteKind { Static }\npub type RouteId = usize;"
+                "// src/router.rs\n\npub struct Router<S = ()> {\n}\npub enum RouteKind { Static }\npub type RouteId = usize;\npub use axum_core::extract::{FromRequest, FromRequestParts};"
             )),
-            ["Router", "RouteKind", "RouteId"]
+            [
+                "Router",
+                "RouteKind",
+                "RouteId",
+                "FromRequest",
+                "FromRequestParts"
+            ]
         );
         assert_eq!(
             definition_names(&chunk(
@@ -669,7 +747,7 @@ mod tests {
                 "Module",
                 "export {\n  type AnyRouter as AnyTRPCRouter,\n};\nexport type AnyRouter = Router<any, any>;"
             )),
-            ["AnyRouter"]
+            ["AnyRouter", "AnyTRPCRouter"]
         );
     }
 

@@ -326,6 +326,22 @@ def directory_size(path: Path) -> int:
     return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
 
 
+def ivygrep_benchmark_env() -> dict[str, str]:
+    return os.environ.copy() | {
+        "IVYGREP_NO_AUTOSPAWN": "1",
+        "IVYGREP_ENHANCE_MAX_LOAD_RATIO": "0",
+        "IVYGREP_DISABLE_BACKGROUND_ENHANCEMENT": "1",
+        "IVYGREP_DISABLE_QUERY_CACHE": "1",
+    }
+
+
+def public_binary_label(binary: Path, root: Path) -> str:
+    try:
+        return binary.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return binary.name
+
+
 def materialize_indexed_files(source: Path, destination: Path, index: Any) -> None:
     for relative in sorted({chunk.file_path for chunk in index.chunks}):
         source_file = source / relative
@@ -775,6 +791,7 @@ Full hybrid-ready time includes ivygrep lexical, hash, and neural phases.
 - Same pinned repositories, queries, labels, top-k, and nDCG implementation as Semble.
 - Semble runs in-process, matching its official benchmark.
 - ivygrep runs through its persistent daemon protocol, excluding CLI process startup.
+- Timed ivygrep queries disable daemon result-cache replay.
 - Model load is reported separately from per-repository indexing.
 - ANN construction can move a small number of semantic ranks between runs; compare repeated builds before treating small deltas as signal.
 """
@@ -818,10 +835,7 @@ def main() -> int:
         "DEFAULT_MODEL_NAME": DEFAULT_MODEL_NAME,
     }
 
-    env = os.environ.copy()
-    env["IVYGREP_NO_AUTOSPAWN"] = "1"
-    env["IVYGREP_ENHANCE_MAX_LOAD_RATIO"] = "0"
-    env["IVYGREP_DISABLE_BACKGROUND_ENHANCEMENT"] = "1"
+    env = ivygrep_benchmark_env()
 
     if not args.skip_sync:
         sync = [
@@ -949,7 +963,7 @@ def main() -> int:
         "ivygrep": {
             "sha": git_sha(root),
             "dirty": git_dirty(root),
-            "binary": str(binary),
+            "binary": public_binary_label(binary, root),
         },
         "semble": {
             "sha": git_sha(semble_repo),

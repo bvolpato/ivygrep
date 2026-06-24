@@ -71,6 +71,10 @@ pub fn background_enhancement_enabled() -> bool {
         && env::var_os("IVYGREP_DISABLE_BACKGROUND_ENHANCEMENT").is_none()
 }
 
+pub fn query_result_cache_enabled() -> bool {
+    env::var_os("IVYGREP_DISABLE_QUERY_CACHE").is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

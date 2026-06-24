@@ -44,7 +44,8 @@ pub struct Workspace {
 ///   9 — Neural vector storage uses F16 quantization
 ///  10 — Symbol graph persistence, F16 vectors, and portable relative paths
 ///  11 — Deduplicated chunk metadata, compact symbols, and on-demand call-site lookup
-pub const INDEX_FORMAT_VERSION: u32 = 11;
+///  12 — Public re-exports are persisted as symbol definitions
+pub const INDEX_FORMAT_VERSION: u32 = 12;
 const COMPACTION_FREE_BYTES_THRESHOLD: u64 = 16 * 1024 * 1024;
 const COMPACTION_FREE_PERCENT_THRESHOLD: f64 = 20.0;
 
@@ -485,6 +486,10 @@ impl Workspace {
         self.index_dir.join(".hash_enhanced_generation")
     }
 
+    pub fn neural_enhanced_generation_path(&self) -> PathBuf {
+        self.index_dir.join(".neural_enhanced_generation")
+    }
+
     pub fn indexing_pid_path(&self) -> PathBuf {
         self.index_dir.join(".indexing.pid")
     }
@@ -529,12 +534,6 @@ impl Workspace {
         }
 
         let use_overlay = self.has_overlay() || self.base_ref_path().exists();
-        let (chunk_count, _) = read_sqlite_counts(&self.index_dir);
-        if chunk_count == 0 {
-            return false;
-        }
-        let vector_key_count = read_sqlite_vector_key_count(&self.index_dir);
-
         let hash_path = if use_overlay {
             self.overlay_vector_path()
         } else {
@@ -550,10 +549,39 @@ impl Workspace {
             std::fs::read_to_string(self.hash_enhanced_generation_path())
                 .ok()
                 .and_then(|value| value.trim().parse::<u64>().ok());
-        if hash_enhanced_generation != Some(index_generation)
-            || self.hash_tombstones_path().exists()
-            || self.hash_tombstones_processing_path().exists()
-        {
+        let hash_tombstones_pending =
+            self.hash_tombstones_path().exists() || self.hash_tombstones_processing_path().exists();
+        let hash_generation_current =
+            hash_enhanced_generation == Some(index_generation) && !hash_tombstones_pending;
+
+        if hash_generation_current && hash_path.exists() {
+            if use_overlay {
+                return false;
+            }
+
+            let neural_enhanced_generation =
+                std::fs::read_to_string(self.neural_enhanced_generation_path())
+                    .ok()
+                    .and_then(|value| value.trim().parse::<u64>().ok());
+            let neural_tombstones_pending = self.neural_tombstones_path().exists()
+                || self.neural_tombstones_processing_path().exists();
+            if neural_enhanced_generation == Some(index_generation)
+                && !neural_tombstones_pending
+                && self.vector_neural_path().exists()
+                && self.neural_model_identity().as_ref()
+                    == Some(&crate::embedding::configured_neural_model_identity())
+            {
+                return false;
+            }
+        }
+
+        let (chunk_count, _) = read_sqlite_counts(&self.index_dir);
+        if chunk_count == 0 {
+            return false;
+        }
+        let vector_key_count = read_sqlite_vector_key_count(&self.index_dir);
+
+        if !hash_generation_current {
             return true;
         }
         if vector_store_size(
@@ -2147,6 +2175,8 @@ mod tests {
 
         // 2 vectors == 2 chunks with matching identity → false
         assert!(ws.has_neural_vectors());
+        assert!(!ws.needs_neural_enhancement());
+        std::fs::write(ws.neural_enhanced_generation_path(), "0").unwrap();
         assert!(!ws.needs_neural_enhancement());
 
         unsafe { std::env::set_var("IVYGREP_MODEL_PROFILE", "code") };

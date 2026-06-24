@@ -69,6 +69,22 @@ class SembleBenchmarkTest(unittest.TestCase):
         hits = benchmark.flatten_ivygrep_hits(response)
         self.assertEqual([hit.file_path for hit in hits], ["high.rs", "low.rs"])
 
+    def test_ivygrep_benchmark_disables_query_result_cache(self):
+        env = benchmark.ivygrep_benchmark_env()
+        self.assertEqual(env["IVYGREP_DISABLE_QUERY_CACHE"], "1")
+        self.assertEqual(env["IVYGREP_DISABLE_BACKGROUND_ENHANCEMENT"], "1")
+
+    def test_public_binary_label_omits_local_parent_paths(self):
+        root = Path("/workspace/ivygrep")
+        self.assertEqual(
+            benchmark.public_binary_label(root / "target/release/ig", root),
+            "target/release/ig",
+        )
+        self.assertEqual(
+            benchmark.public_binary_label(Path("/tmp/custom/ig"), root),
+            "ig",
+        )
+
     def test_persisted_hits_omit_retrieved_source(self):
         hit = benchmark.RankedHit("src/auth.rs", 10, 20, "secret body", 1.0)
         self.assertEqual(
