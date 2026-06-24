@@ -630,6 +630,11 @@ def render_markdown(payload: dict[str, Any]) -> str:
     )
     if token_leader == "Tie":
         token_verdict = "Both tools return the same mean token count in top-10 results."
+    elif min(ivy["mean_returned_tokens"], semble["mean_returned_tokens"]) == 0:
+        token_verdict = (
+            f"{token_leader} returns no tokens in top-10 results; "
+            "a multiplicative token ratio is undefined."
+        )
     else:
         token_ratio = max(
             ivy["mean_returned_tokens"], semble["mean_returned_tokens"]

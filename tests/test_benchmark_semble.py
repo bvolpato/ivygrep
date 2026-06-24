@@ -187,6 +187,55 @@ class SembleBenchmarkTest(unittest.TestCase):
         self.assertIn("Every measured quality category is tied.", rendered)
         self.assertIn("| nDCG@10 | 0.800 | 0.800 | Tie |", rendered)
 
+    def test_verdict_handles_zero_returned_tokens(self):
+        payload = {
+            "generated_at": "2026-06-24T00:00:00+00:00",
+            "ivygrep": {"sha": "ivy", "dirty": False},
+            "semble": {"sha": "semble", "version": "test"},
+            "summary": {
+                "ivygrep": {
+                    "ndcg_at_10": 0.0,
+                    "latency_p50_ms": 5.0,
+                    "latency_p95_ms": 10.0,
+                    "mean_returned_tokens": 0,
+                    "by_category": {
+                        "architecture": 0.0,
+                        "semantic": 0.0,
+                        "symbol": 0.0,
+                    },
+                },
+                "semble": {
+                    "ndcg_at_10": 0.8,
+                    "latency_p50_ms": 5.0,
+                    "latency_p95_ms": 10.0,
+                    "mean_returned_tokens": 100,
+                    "by_category": {
+                        "architecture": 0.8,
+                        "semantic": 0.8,
+                        "symbol": 0.8,
+                    },
+                },
+            },
+            "indexing": {
+                "repo": {
+                    "ivygrep": {"ready_ms": 100},
+                    "semble": {"index_ms": 100},
+                }
+            },
+            "refresh": {
+                "ivygrep_lexical_refresh_ms": 25,
+                "ivygrep_full_refresh_ms": 100,
+                "semble_full_refresh_ms": 100,
+            },
+        }
+
+        rendered = benchmark.render_markdown(payload)
+        self.assertIn(
+            "ivygrep returns no tokens in top-10 results; "
+            "a multiplicative token ratio is undefined.",
+            rendered,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
