@@ -376,6 +376,21 @@ impl DaemonState {
         }
     }
 
+    fn get_model_for_search(&self, force_neural: bool) -> Result<Arc<dyn EmbeddingModel>> {
+        if !force_neural {
+            return Ok(self.get_model_or_fallback());
+        }
+
+        let model = self
+            .lazy_model
+            .get_or_init(|| Arc::from(create_model(false)))
+            .clone();
+        if model.model_identity().is_none() {
+            anyhow::bail!("neural search was required, but the neural model is unavailable");
+        }
+        Ok(model)
+    }
+
     fn maybe_start_model_load(&self) {
         if self.lazy_model.get().is_some() || self.model_loading.swap(true, Ordering::Relaxed) {
             return;
@@ -835,7 +850,14 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             };
             let all_indices = path.is_none();
 
-            if workspaces.iter().any(Workspace::has_neural_vectors) {
+            let has_neural_vectors = workspaces.iter().any(Workspace::has_neural_vectors);
+            if force_neural && !has_neural_vectors {
+                return DaemonResponse::Error {
+                    message: "neural search was required, but no neural vectors are available"
+                        .to_string(),
+                };
+            }
+            if has_neural_vectors {
                 state_clone.maybe_start_model_load();
             }
 
@@ -844,7 +866,10 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             let permit = state_clone.cpu_permits.clone().acquire_owned().await.ok();
             let result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                let model = state_clone.get_model_or_fallback();
+                let model = match state_clone.get_model_for_search(force_neural) {
+                    Ok(model) => model,
+                    Err(err) => return (Vec::new(), vec![err.to_string()]),
+                };
                 let reconciliation_model = cached_hash_model();
                 let mut all_hits = Vec::new();
                 let mut all_errors: Vec<String> = Vec::new();
@@ -1939,6 +1964,54 @@ mod tests {
             query_results: Arc::new(Mutex::new(QueryResultCache::default())),
             cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
         }
+    }
+
+    struct TestNeuralModel;
+
+    impl EmbeddingModel for TestNeuralModel {
+        fn dimensions(&self) -> usize {
+            384
+        }
+
+        fn embed(&self, _text: &str) -> Vec<f32> {
+            vec![0.0; self.dimensions()]
+        }
+
+        fn model_identity(&self) -> Option<&crate::embedding::NeuralModelIdentity> {
+            static IDENTITY: std::sync::OnceLock<crate::embedding::NeuralModelIdentity> =
+                std::sync::OnceLock::new();
+            Some(IDENTITY.get_or_init(crate::embedding::configured_neural_model_identity))
+        }
+    }
+
+    #[test]
+    fn force_neural_waits_for_an_inflight_model_load() {
+        let state = test_state();
+        let lazy_model = state.lazy_model.clone();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let loader_barrier = barrier.clone();
+        let loader = std::thread::spawn(move || {
+            lazy_model.get_or_init(|| {
+                loader_barrier.wait();
+                std::thread::sleep(Duration::from_millis(50));
+                Arc::new(TestNeuralModel) as Arc<dyn EmbeddingModel>
+            });
+        });
+
+        barrier.wait();
+        let started = std::time::Instant::now();
+        let model = state.get_model_for_search(true).unwrap();
+        loader.join().unwrap();
+
+        assert!(started.elapsed() >= Duration::from_millis(40));
+        assert!(model.model_identity().is_some());
+    }
+
+    #[test]
+    fn force_neural_rejects_a_hash_model() {
+        let state = test_state();
+        assert!(state.lazy_model.set(cached_hash_model()).is_ok());
+        assert!(state.get_model_for_search(true).is_err());
     }
 
     #[test]

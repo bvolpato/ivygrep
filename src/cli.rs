@@ -1250,6 +1250,9 @@ async fn run_query(cli: Cli) -> Result<()> {
 
             match daemon_result {
                 Some(DaemonResponse::SearchResults { hits }) => hits,
+                Some(DaemonResponse::Error { message }) if cli.force_neural => {
+                    bail!(message)
+                }
                 Some(DaemonResponse::Error { message }) => {
                     // Daemon search failed — fall back to local search instead
                     // of showing "No results." to the user.
@@ -1290,7 +1293,7 @@ async fn run_query(cli: Cli) -> Result<()> {
                 cli.hash,
                 cli.lexical_only,
                 cli.force_neural,
-            );
+            )?;
             for ws in workspaces {
                 let _ = ws.cleanup_stale_legacy_runtime_files();
                 let _t_search = std::time::Instant::now();
@@ -1621,7 +1624,7 @@ fn local_fallback_search(
     };
 
     let model =
-        local_hybrid_search_model(&workspaces, query, use_hash, false, options.force_neural);
+        local_hybrid_search_model(&workspaces, query, use_hash, false, options.force_neural)?;
 
     for ws in workspaces {
         match hybrid_search(&ws, query, model.as_deref(), options) {
@@ -1925,15 +1928,23 @@ fn local_hybrid_search_model(
     use_hash: bool,
     lexical_only: bool,
     force_neural: bool,
-) -> Option<Box<dyn crate::embedding::EmbeddingModel>> {
+) -> Result<Option<Box<dyn crate::embedding::EmbeddingModel>>> {
     if lexical_only || (!force_neural && is_single_word_symbol_query(query)) {
-        return None;
+        return Ok(None);
     }
 
-    if use_hash || !workspaces.iter().any(Workspace::has_neural_vectors) {
-        Some(crate::embedding::create_hash_model())
+    let has_neural_vectors = workspaces.iter().any(Workspace::has_neural_vectors);
+    if force_neural {
+        if !has_neural_vectors {
+            bail!("neural search was required, but no neural vectors are available");
+        }
+        return crate::embedding::create_neural_model().map(Some);
+    }
+
+    if use_hash || !has_neural_vectors {
+        Ok(Some(crate::embedding::create_hash_model()))
     } else {
-        Some(create_model(false))
+        Ok(Some(create_model(false)))
     }
 }
 
@@ -2059,9 +2070,27 @@ mod tests {
         let hash_model = create_hash_model();
         index_workspace(&workspace, hash_model.as_ref()).unwrap();
 
-        let model =
-            local_hybrid_search_model(&[workspace], "semantic query", false, false, false).unwrap();
+        let model = local_hybrid_search_model(&[workspace], "semantic query", false, false, false)
+            .unwrap()
+            .unwrap();
         assert_eq!(model.dimensions(), 256);
+    }
+
+    #[test]
+    #[serial]
+    fn forced_neural_local_search_rejects_missing_vectors() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn marker() {}\n").unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let hash_model = create_hash_model();
+        index_workspace(&workspace, hash_model.as_ref()).unwrap();
+
+        assert!(
+            local_hybrid_search_model(&[workspace], "semantic query", false, false, true).is_err()
+        );
     }
 
     #[test]
