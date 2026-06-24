@@ -1692,6 +1692,9 @@ fn should_run_literal_pass(query_text: &str) -> bool {
     if query.is_empty() {
         return false;
     }
+    if QueryRouting::classify(query).intent == QueryIntent::LiteralOrError {
+        return true;
+    }
 
     let tokens = tokenize_query(query);
     tokens.len() <= 2
@@ -4317,6 +4320,12 @@ mod tests {
         ));
         assert!(!should_run_literal_pass(
             "how IntoResponse converts handler return values"
+        ));
+        assert!(should_run_literal_pass(
+            "Error: failed to open database connection after retrying the primary endpoint"
+        ));
+        assert!(should_run_literal_pass(
+            "Traceback (most recent call last):\nconnection pool initialization failed"
         ));
     }
 
