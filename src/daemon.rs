@@ -1582,7 +1582,32 @@ fn validate_forced_neural_workspaces(workspaces: &[Workspace], force_neural: boo
             missing.join(", ")
         );
     }
+
+    let expected_identity = crate::embedding::configured_neural_model_identity();
+    let incompatible = workspaces
+        .iter()
+        .filter(|workspace| {
+            workspace_neural_model_identity(workspace).as_ref() != Some(&expected_identity)
+        })
+        .map(|workspace| workspace.root.display().to_string())
+        .collect::<Vec<_>>();
+    if !incompatible.is_empty() {
+        anyhow::bail!(
+            "neural search was required, but these workspaces use an incompatible neural model: {}",
+            incompatible.join(", ")
+        );
+    }
     Ok(())
+}
+
+fn workspace_neural_model_identity(
+    workspace: &Workspace,
+) -> Option<crate::embedding::NeuralModelIdentity> {
+    workspace.neural_model_identity().or_else(|| {
+        let path = workspace.base_index_dir.as_ref()?.join("neural_model.json");
+        let contents = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&contents).ok()
+    })
 }
 
 fn query_cache_key(
@@ -2062,9 +2087,30 @@ mod tests {
             validate_forced_neural_workspaces(std::slice::from_ref(&neural_workspace), true)
                 .is_ok()
         );
+        let err = validate_forced_neural_workspaces(
+            &[neural_workspace.clone(), hash_workspace.clone()],
+            true,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&hash_workspace.root.display().to_string())
+        );
+
+        crate::indexer::enhance_workspace_neural(&hash_workspace, &TestNeuralModel).unwrap();
+        let mut incompatible_identity = hash_workspace.neural_model_identity().unwrap();
+        incompatible_identity.model_id = "incompatible/test-model".to_string();
+        std::fs::write(
+            hash_workspace.neural_model_path(),
+            serde_json::to_vec_pretty(&incompatible_identity).unwrap(),
+        )
+        .unwrap();
+        assert!(hash_workspace.has_neural_vectors());
+
         let err =
             validate_forced_neural_workspaces(&[neural_workspace, hash_workspace.clone()], true)
                 .unwrap_err();
+        assert!(err.to_string().contains("incompatible neural model"));
         assert!(
             err.to_string()
                 .contains(&hash_workspace.root.display().to_string())
