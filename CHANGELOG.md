@@ -4,6 +4,26 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.12.7] - 2026-06-24
+
+### Added
+- **Optional code-specialized static embeddings.** `IVYGREP_MODEL_PROFILE=potion-code` runs the revision-pinned PotionCode Model2Vec profile through native Rust weighted pooling.
+
+### Changed
+- **Hybrid retrieval is more precise and more diverse.** Public re-exports, mixed-case symbols embedded in natural-language queries, conservative code-word roots, one-result-per-file diversity, and authority-gated backfill improve definition and architecture discovery without expanding result payloads.
+- **Search work is deferred until candidates need it.** Literal variants share one bounded pass, lexical and path text loading is limited to rerank candidates, and pooled search contexts reuse validated file contents.
+
+### Performance
+- **The pinned 60-query comparison now leads on aggregate, architecture, and symbol relevance.** Cache-bypassed results report `0.813` nDCG@10, `1.000` symbol nDCG, `11.93 ms` p95, and 392 mean returned tokens. The full reproducible evidence is in `docs/benchmarks/ivygrep-vs-semble.{json,md}`.
+- **Completed indexes avoid repeated completeness scans.** Generation sentinels and Tantivy manifest stamps remove unnecessary vector-cardinality and directory audits from hot queries.
+
+### Fixed
+- **Equivalent whitespace produces equivalent search behavior and cache keys.** Query normalization now applies before routing, retrieval, fusion, and reranking.
+- **Comparison latency excludes result-cache replay.** The public harness explicitly disables the daemon result cache for timed queries; its `9.09 ms` p50 remains the next optimization target rather than being hidden by replay.
+
+### Testing
+- Added cache-disable, whitespace-equivalence, re-export symbol, Model2Vec profile, search-context cache, authoritative backfill, and benchmark fairness coverage.
+
 ## [0.12.6] - 2026-06-18
 
 ### Performance
