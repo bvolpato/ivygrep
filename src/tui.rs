@@ -30,7 +30,7 @@ use crate::daemon;
 use crate::protocol::{
     DaemonRequest, DaemonResponse, FileSearchResult, SearchHit, group_hits_by_file,
 };
-use crate::search::SearchOptions;
+use crate::search::{SearchOptions, validate_forced_neural_workspaces};
 use crate::workspace::{Workspace, WorkspaceScope, list_workspaces, resolve_workspace_and_scope};
 
 // ---------------------------------------------------------------------------
@@ -398,6 +398,9 @@ impl App {
             let daemon_result = daemon::request(&request, watch, progress_cb).await;
             let result = match daemon_result {
                 Ok(Some(DaemonResponse::SearchResults { hits })) => Ok(hits),
+                Ok(Some(DaemonResponse::Error { message })) if cli.force_neural => {
+                    Err(anyhow::anyhow!(message))
+                }
                 Ok(Some(DaemonResponse::Error { message })) => {
                     tracing::warn!("daemon TUI search failed ({message}), falling back to local");
                     local_search_detached(
@@ -456,11 +459,7 @@ fn local_search_detached(
     } else {
         vec![workspace.clone()]
     };
-    let model = if cli.hash || !workspaces.iter().any(Workspace::has_neural_vectors) {
-        crate::embedding::create_hash_model()
-    } else {
-        crate::embedding::create_model(false)
-    };
+    let model = local_search_model(cli, &workspaces)?;
 
     let (std_tx, std_rx) = std::sync::mpsc::channel();
     let ui_tx = progress_tx.clone();
@@ -497,6 +496,24 @@ fn local_search_detached(
     }
 
     Ok(all_hits)
+}
+
+fn local_search_model(
+    cli: &Cli,
+    workspaces: &[Workspace],
+) -> Result<Box<dyn crate::embedding::EmbeddingModel>> {
+    if cli.force_neural {
+        validate_forced_neural_workspaces(workspaces, true)?;
+        return crate::embedding::create_neural_model();
+    }
+
+    Ok(
+        if cli.hash || !workspaces.iter().any(Workspace::has_neural_vectors) {
+            crate::embedding::create_hash_model()
+        } else {
+            crate::embedding::create_model(false)
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1782,6 +1799,22 @@ mod tests {
             neural_requested: false,
             neural_executed: false,
         }
+    }
+
+    #[test]
+    fn forced_neural_tui_local_model_rejects_missing_vectors() {
+        let root = tempfile::tempdir().unwrap();
+        let index = tempfile::tempdir().unwrap();
+        let workspace = Workspace {
+            id: "tui-force-neural".to_string(),
+            root: root.path().to_path_buf(),
+            index_dir: index.path().to_path_buf(),
+            repo_id: None,
+            base_index_dir: None,
+        };
+        let cli = Cli::parse_from(["ig", "--interactive", "--force-neural", "test"]);
+
+        assert!(local_search_model(&cli, &[workspace]).is_err());
     }
 
     /// Build a minimal `App` state *without* a real workspace or runtime.
