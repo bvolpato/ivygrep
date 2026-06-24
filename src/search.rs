@@ -1692,12 +1692,16 @@ fn should_run_literal_pass(query_text: &str) -> bool {
     if query.is_empty() {
         return false;
     }
+    if QueryRouting::classify(query).intent == QueryIntent::LiteralOrError {
+        return true;
+    }
 
     let tokens = tokenize_query(query);
     tokens.len() <= 2
-        || query
-            .chars()
-            .any(|c| c == '_' || c == '-' || c == '/' || c == ':' || c.is_ascii_uppercase())
+        || (tokens.len() <= 3
+            && query
+                .chars()
+                .any(|c| c == '_' || c == '-' || c == '/' || c == ':' || c.is_ascii_uppercase()))
 }
 
 fn should_use_conjunctive_numeric_query(query_text: &str) -> bool {
@@ -2734,7 +2738,7 @@ pub fn rerank_candidate_limit() -> usize {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
-        .unwrap_or(100)
+        .unwrap_or(30)
 }
 
 fn filter_meaningful_scores(
@@ -4311,6 +4315,18 @@ mod tests {
         assert!(should_run_literal_pass("calculate_tax_for_region"));
         assert!(should_run_literal_pass("KernelMemoryAllocation"));
         assert!(!should_run_literal_pass("kernel memory allocation"));
+        assert!(!should_run_literal_pass(
+            "how are nested and sub-dependencies resolved"
+        ));
+        assert!(!should_run_literal_pass(
+            "how IntoResponse converts handler return values"
+        ));
+        assert!(should_run_literal_pass(
+            "Error: failed to open database connection after retrying the primary endpoint"
+        ));
+        assert!(should_run_literal_pass(
+            "Traceback (most recent call last):\nconnection pool initialization failed"
+        ));
     }
 
     #[test]
@@ -4959,7 +4975,7 @@ export function registerCommands(p: Plugin) {
         unsafe { std::env::set_var("IVYGREP_RERANK_LIMIT", "7") };
         assert_eq!(rerank_candidate_limit(), 7);
         unsafe { std::env::set_var("IVYGREP_RERANK_LIMIT", "0") };
-        assert_eq!(rerank_candidate_limit(), 100);
+        assert_eq!(rerank_candidate_limit(), 30);
         unsafe { std::env::remove_var("IVYGREP_RERANK_LIMIT") };
     }
 
