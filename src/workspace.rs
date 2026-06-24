@@ -1141,7 +1141,7 @@ pub fn repo_id_from_common_dir(common_dir: &Path) -> String {
 /// Returns `None` if not a git repository.
 pub fn git_common_dir(root: &Path) -> Option<PathBuf> {
     let git_dir = root.join(".git");
-    if git_dir.is_dir() && is_git_dir(&git_dir) {
+    if git_dir.is_dir() && !git_dir.join("commondir").is_file() && is_git_dir(&git_dir) {
         return git_dir.canonicalize().ok().or(Some(git_dir));
     }
 
@@ -2000,6 +2000,30 @@ mod tests {
         assert_eq!(
             detect_workspace_root(&project).unwrap(),
             config::canonicalize_lossy(&project).unwrap()
+        );
+    }
+
+    #[test]
+    fn git_common_dir_honors_directory_commondir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let status = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let git_dir = tmp.path().join(".git");
+        let common_dir = tmp.path().join("common");
+        std::fs::create_dir(&common_dir).unwrap();
+        for entry in ["objects", "refs", "config"] {
+            std::fs::rename(git_dir.join(entry), common_dir.join(entry)).unwrap();
+        }
+        std::fs::write(git_dir.join("commondir"), "../common\n").unwrap();
+
+        assert_eq!(
+            git_common_dir(tmp.path()),
+            Some(common_dir.canonicalize().unwrap())
         );
     }
 
