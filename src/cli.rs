@@ -18,7 +18,9 @@ use crate::protocol::{
     BUILD_VERSION, DaemonRequest, DaemonResponse, SearchHit, group_hits_by_file,
 };
 use crate::regex_search::regex_search;
-use crate::search::{SearchOptions, hybrid_search, literal_search};
+use crate::search::{
+    SearchOptions, hybrid_search, literal_search, validate_forced_neural_workspaces,
+};
 use crate::workspace::{
     Workspace, WorkspaceIndexState, list_workspaces, resolve_workspace_and_scope,
 };
@@ -141,6 +143,15 @@ pub struct Cli {
     /// Use BM25/path/signature retrieval without vector search.
     #[arg(long, global = true, conflicts_with_all = ["hash", "literal", "regex"])]
     pub lexical_only: bool,
+
+    /// Force neural retrieval for benchmarking and diagnostics.
+    #[arg(
+        long,
+        global = true,
+        hide = true,
+        conflicts_with_all = ["hash", "lexical_only", "literal", "regex"]
+    )]
+    pub force_neural: bool,
 
     #[arg(long, hide = true, value_name = "PATH")]
     pub enhance_internal: Option<PathBuf>,
@@ -1098,6 +1109,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             exclude_globs: cli.exclude.clone(),
             scope_filter: scope_filter.clone(),
             skip_gitignore: cli.skip_gitignore,
+            force_neural: false,
             progress_tx: None,
             cancel_token: None,
         };
@@ -1123,6 +1135,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             exclude_globs: cli.exclude.clone(),
             scope_filter: scope_filter.clone(),
             skip_gitignore: cli.skip_gitignore,
+            force_neural: cli.force_neural,
             progress_tx: None,
             cancel_token: None,
         };
@@ -1165,6 +1178,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             exclude_globs: cli.exclude.clone(),
             scope_filter: scope_filter.clone(),
             skip_gitignore: cli.skip_gitignore,
+            force_neural: false,
             progress_tx: None,
             cancel_token: None,
         };
@@ -1195,6 +1209,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             scope_path: scope_path.clone(),
             scope_is_file,
             skip_gitignore: cli.skip_gitignore,
+            force_neural: cli.force_neural,
         };
         let local_options = SearchOptions {
             limit: backend_limit,
@@ -1204,6 +1219,7 @@ async fn run_query(cli: Cli) -> Result<()> {
             exclude_globs: cli.exclude.clone(),
             scope_filter: scope_filter.clone(),
             skip_gitignore: cli.skip_gitignore,
+            force_neural: cli.force_neural,
             progress_tx: None,
             cancel_token: None,
         };
@@ -1236,6 +1252,9 @@ async fn run_query(cli: Cli) -> Result<()> {
 
             match daemon_result {
                 Some(DaemonResponse::SearchResults { hits }) => hits,
+                Some(DaemonResponse::Error { message }) if cli.force_neural => {
+                    bail!(message)
+                }
                 Some(DaemonResponse::Error { message }) => {
                     // Daemon search failed — fall back to local search instead
                     // of showing "No results." to the user.
@@ -1270,8 +1289,13 @@ async fn run_query(cli: Cli) -> Result<()> {
             } else {
                 vec![workspace.clone()]
             };
-            let search_model =
-                local_hybrid_search_model(&workspaces, query, cli.hash, cli.lexical_only);
+            let search_model = local_hybrid_search_model(
+                &workspaces,
+                query,
+                cli.hash,
+                cli.lexical_only,
+                cli.force_neural,
+            )?;
             for ws in workspaces {
                 let _ = ws.cleanup_stale_legacy_runtime_files();
                 let _t_search = std::time::Instant::now();
@@ -1601,7 +1625,8 @@ fn local_fallback_search(
         vec![workspace.clone()]
     };
 
-    let model = local_hybrid_search_model(&workspaces, query, use_hash, false);
+    let model =
+        local_hybrid_search_model(&workspaces, query, use_hash, false, options.force_neural)?;
 
     for ws in workspaces {
         match hybrid_search(&ws, query, model.as_deref(), options) {
@@ -1904,15 +1929,22 @@ fn local_hybrid_search_model(
     query: &str,
     use_hash: bool,
     lexical_only: bool,
-) -> Option<Box<dyn crate::embedding::EmbeddingModel>> {
-    if lexical_only || is_single_word_symbol_query(query) {
-        return None;
+    force_neural: bool,
+) -> Result<Option<Box<dyn crate::embedding::EmbeddingModel>>> {
+    if lexical_only || (!force_neural && is_single_word_symbol_query(query)) {
+        return Ok(None);
     }
 
-    if use_hash || !workspaces.iter().any(Workspace::has_neural_vectors) {
-        Some(crate::embedding::create_hash_model())
+    if force_neural {
+        validate_forced_neural_workspaces(workspaces, true)?;
+        return crate::embedding::create_neural_model().map(Some);
+    }
+
+    let has_neural_vectors = workspaces.iter().any(Workspace::has_neural_vectors);
+    if use_hash || !has_neural_vectors {
+        Ok(Some(crate::embedding::create_hash_model()))
     } else {
-        Some(create_model(false))
+        Ok(Some(create_model(false)))
     }
 }
 
@@ -2038,9 +2070,27 @@ mod tests {
         let hash_model = create_hash_model();
         index_workspace(&workspace, hash_model.as_ref()).unwrap();
 
-        let model =
-            local_hybrid_search_model(&[workspace], "semantic query", false, false).unwrap();
+        let model = local_hybrid_search_model(&[workspace], "semantic query", false, false, false)
+            .unwrap()
+            .unwrap();
         assert_eq!(model.dimensions(), 256);
+    }
+
+    #[test]
+    #[serial]
+    fn forced_neural_local_search_rejects_missing_vectors() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn marker() {}\n").unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let hash_model = create_hash_model();
+        index_workspace(&workspace, hash_model.as_ref()).unwrap();
+
+        assert!(
+            local_hybrid_search_model(&[workspace], "semantic query", false, false, true).is_err()
+        );
     }
 
     #[test]

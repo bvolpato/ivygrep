@@ -18,7 +18,7 @@ use tempfile::tempdir;
 
 use ivygrep::EMBEDDING_DIMENSIONS;
 use ivygrep::embedding::HashEmbeddingModel;
-use ivygrep::indexer::{index_workspace, open_sqlite};
+use ivygrep::indexer::{index_workspace, open_sqlite, reconcile_worktree_overlay};
 use ivygrep::search::{SearchOptions, hybrid_search};
 use ivygrep::workspace::Workspace;
 
@@ -2664,6 +2664,110 @@ fn worktree_overlay_staleness_invalidation() {
         r3.iter().any(|p| p.contains("wt.rs")),
         "Worktree overlay must still find its own files after invalidation rebuild"
     );
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+#[test]
+#[serial]
+fn worktree_search_reconciles_base_only_additions_before_loading_context() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    init_git_repo(root.path());
+    fs::write(root.path().join("shared.rs"), "pub fn shared_api() {}\n").unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base"]);
+    setup_and_index(root.path(), home.path());
+
+    git(root.path(), &["checkout", "-b", "worktree-branch"]);
+    fs::write(
+        root.path().join("worktree.rs"),
+        "pub fn worktree_only_api() {}\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "worktree"]);
+    git(root.path(), &["checkout", "main"]);
+
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_search_reconcile");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            wt_path.to_str().unwrap(),
+            "worktree-branch",
+        ],
+    );
+    setup_and_index(&wt_path, home.path());
+    let wt_workspace = workspace_for(&wt_path);
+
+    fs::write(
+        root.path().join("main_only.rs"),
+        "pub fn main_branch_generation_marker() {}\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "main-only addition"]);
+    setup_and_index(root.path(), home.path());
+
+    assert!(!wt_path.join("main_only.rs").exists());
+    assert!(wt_workspace.worktree_overlay_is_stale().unwrap());
+
+    let results = search_file_paths(&wt_workspace, "main_branch_generation_marker");
+    assert!(
+        results.iter().all(|path| !path.contains("main_only.rs")),
+        "search must not return a base-only file absent from the worktree: {results:?}"
+    );
+    assert!(
+        !wt_workspace.worktree_overlay_is_stale().unwrap(),
+        "search should reconcile the overlay before loading its context"
+    );
+
+    let worktree_results = search_file_paths(&wt_workspace, "worktree_only_api");
+    assert!(
+        worktree_results
+            .iter()
+            .any(|path| path.contains("worktree.rs")),
+        "reconciliation must preserve worktree-only content"
+    );
+
+    fs::write(wt_workspace.base_ref_path(), b"{malformed").unwrap();
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(wt_workspace.lock_path())
+        .unwrap();
+    fs2::FileExt::lock_exclusive(&lock_file).unwrap();
+
+    let reconcile_workspace = wt_workspace.clone();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let reconcile = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        reconcile_worktree_overlay(&reconcile_workspace, &model)
+    });
+    started_rx.recv().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    assert!(
+        wt_workspace.overlay_sqlite_path().exists(),
+        "reconciliation must not clear overlay storage before acquiring index.lock"
+    );
+    assert!(
+        wt_workspace.base_ref_path().exists(),
+        "reconciliation must not clear the base reference before acquiring index.lock"
+    );
+
+    fs2::FileExt::unlock(&lock_file).unwrap();
+    assert!(reconcile.join().unwrap().unwrap());
+    assert!(!wt_workspace.worktree_overlay_is_stale().unwrap());
 
     git(
         root.path(),

@@ -14,7 +14,7 @@ use tantivy::schema::IndexRecordOption;
 use crate::embedding::EmbeddingModel;
 use crate::indexer::{
     IndexedChunk, fetch_chunk_by_id, fetch_chunk_by_vector_key, fetch_chunks_by_vector_keys_batch,
-    open_sqlite_readonly, open_tantivy_index,
+    open_sqlite_readonly, open_tantivy_index, reconcile_worktree_overlay,
 };
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
@@ -63,9 +63,70 @@ pub struct SearchOptions {
     pub exclude_globs: Vec<String>,
     pub scope_filter: Option<WorkspaceScope>,
     pub skip_gitignore: bool,
+    pub force_neural: bool,
     pub progress_tx: Option<std::sync::mpsc::Sender<(String, usize, usize)>>,
     /// When set to `true`, the search should bail out as soon as possible.
     pub cancel_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
+
+pub fn validate_forced_neural_workspaces(
+    workspaces: &[Workspace],
+    force_neural: bool,
+) -> Result<()> {
+    if !force_neural {
+        return Ok(());
+    }
+
+    let identities = workspaces
+        .iter()
+        .map(|workspace| (workspace, workspace_neural_model_identity(workspace)))
+        .collect::<Vec<_>>();
+    let missing = identities
+        .iter()
+        .filter(|(_, identity)| identity.is_none())
+        .map(|(workspace, _)| workspace.root.display().to_string())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "neural search was required, but these workspaces have no neural vectors: {}",
+            missing.join(", ")
+        );
+    }
+
+    let expected_identity = crate::embedding::configured_neural_model_identity();
+    let incompatible = identities
+        .iter()
+        .filter(|(_, identity)| identity.as_ref() != Some(&expected_identity))
+        .map(|(workspace, _)| workspace.root.display().to_string())
+        .collect::<Vec<_>>();
+    if !incompatible.is_empty() {
+        anyhow::bail!(
+            "neural search was required, but these workspaces use an incompatible neural model: {}",
+            incompatible.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn workspace_neural_model_identity(
+    workspace: &Workspace,
+) -> Option<crate::embedding::NeuralModelIdentity> {
+    neural_model_identity_from_index_dir(&workspace.index_dir)
+        .or_else(|| neural_model_identity_from_index_dir(workspace.base_index_dir.as_ref()?))
+}
+
+fn neural_model_identity_from_index_dir(
+    index_dir: &Path,
+) -> Option<crate::embedding::NeuralModelIdentity> {
+    let contents = fs::read_to_string(index_dir.join("neural_model.json")).ok()?;
+    let identity = serde_json::from_str::<crate::embedding::NeuralModelIdentity>(&contents).ok()?;
+    let store = VectorStore::open_readonly(
+        &index_dir.join("vectors_neural.usearch"),
+        identity.dimensions,
+        NEURAL_VECTOR_QUANTIZATION,
+    )
+    .ok()?;
+    (store.size() > 0).then_some(identity)
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -209,7 +270,7 @@ impl QueryRouting {
             },
             QueryIntent::Mixed => Self {
                 intent,
-                use_neural: false,
+                use_neural: true,
                 lexical_multiplier: 5,
                 literal_multiplier: 5,
                 semantic_multiplier: 1,
@@ -237,6 +298,7 @@ impl Default for SearchOptions {
             exclude_globs: vec![],
             scope_filter: None,
             skip_gitignore: false,
+            force_neural: false,
             progress_tx: None,
             cancel_token: None,
         }
@@ -281,6 +343,11 @@ impl SearchContext {
         emb_dim: Option<usize>,
         wants_neural_vectors: bool,
     ) -> Result<Self> {
+        anyhow::ensure!(
+            !workspace.worktree_overlay_is_stale()?,
+            "worktree overlay is stale for {}",
+            workspace.root.display()
+        );
         let wants_hash_vectors = emb_dim.is_some();
         let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
         if use_overlay {
@@ -480,6 +547,8 @@ pub fn literal_search(
     query_text: &str,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
+    let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+    reconcile_worktree_overlay(workspace, &model)?;
     let ctx = SearchContext::load(workspace, None, false)?;
     literal_search_with_context(&ctx, workspace, query_text, options)
 }
@@ -557,6 +626,8 @@ pub fn literal_search_with_context(
                         reason: format!("literal match: {}", truncate_for_reason(line.trim())),
                         score: 1.0,
                         sources: vec!["literal".to_string()],
+                        neural_requested: false,
+                        neural_executed: false,
                     });
 
                     if hits.len() >= max_hits {
@@ -731,6 +802,14 @@ pub fn hybrid_search(
     embedding_model: Option<&dyn EmbeddingModel>,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
+    let fallback_model;
+    let reconciliation_model = if let Some(model) = embedding_model {
+        model
+    } else {
+        fallback_model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        &fallback_model
+    };
+    reconcile_worktree_overlay(workspace, reconciliation_model)?;
     let ctx = SearchContext::load(
         workspace,
         embedding_model.map(|model| model.dimensions()),
@@ -755,7 +834,10 @@ pub fn hybrid_search_with_context(
 
     let t0 = std::time::Instant::now();
     let output_limit = options.limit.unwrap_or(50);
-    let routing = QueryRouting::classify(query_text);
+    let mut routing = QueryRouting::classify(query_text);
+    if options.force_neural {
+        routing.use_neural = true;
+    }
     let corpus_multiplier =
         corpus_candidate_multiplier(ctx.searchers.iter().map(tantivy::Searcher::num_docs).sum());
     // Tantivy lexical candidates: enough headroom for post-hoc filters
@@ -994,31 +1076,67 @@ pub fn hybrid_search_with_context(
     // Exact persisted symbol definitions provide a separate bounded rank
     // signal. This avoids inferring every definition solely from text while
     // keeping symbol lookup independent from the main candidate volume.
-    let mut symbol_names = lexical_queries.clone();
-    symbol_names.push(trimmed.to_string());
-    let mut symbol_chunks =
-        crate::symbols::definition_candidates(&ctx.sqlite, &symbol_names, symbol_candidate_limit)?;
+    let exact_symbol_names = [trimmed.to_string()];
+    let mut exact_symbol_chunks = crate::symbols::definition_candidates(
+        &ctx.sqlite,
+        &exact_symbol_names,
+        symbol_candidate_limit,
+    )?;
     if let Some(base_sqlite) = &ctx.base_sqlite {
-        let remaining = symbol_candidate_limit.saturating_sub(symbol_chunks.len());
+        let remaining = symbol_candidate_limit.saturating_sub(exact_symbol_chunks.len());
         if remaining > 0 {
-            symbol_chunks.extend(
-                crate::symbols::definition_candidates(base_sqlite, &symbol_names, remaining)?
+            exact_symbol_chunks.extend(
+                crate::symbols::definition_candidates(base_sqlite, &exact_symbol_names, remaining)?
                     .into_iter()
                     .filter(|chunk| !ctx.is_shadowed_base_file(1, &chunk.file_path)),
             );
         }
     }
-    symbol_chunks.retain(|chunk| {
+    exact_symbol_chunks.retain(|chunk| {
         type_matches(chunk, options.type_filter.as_deref())
             && scope_matches(chunk, options.scope_filter.as_ref())
             && path_matches(chunk, &path_matcher)
             && (options.skip_gitignore || !chunk.is_ignored)
     });
-    symbol_chunks.truncate(symbol_candidate_limit);
-    let symbol_chunks = symbol_chunks
+    exact_symbol_chunks.truncate(symbol_candidate_limit);
+    let exact_symbol_ids = exact_symbol_chunks
+        .iter()
+        .map(|chunk| chunk.chunk_id.clone())
+        .collect::<HashSet<_>>();
+
+    let remaining = symbol_candidate_limit.saturating_sub(exact_symbol_chunks.len());
+    let mut alias_symbol_chunks = if remaining > 0 {
+        crate::symbols::definition_candidates(&ctx.sqlite, &lexical_queries, remaining)?
+    } else {
+        Vec::new()
+    };
+    if let Some(base_sqlite) = &ctx.base_sqlite {
+        let base_remaining = remaining.saturating_sub(alias_symbol_chunks.len());
+        if base_remaining > 0 {
+            alias_symbol_chunks.extend(
+                crate::symbols::definition_candidates(
+                    base_sqlite,
+                    &lexical_queries,
+                    base_remaining,
+                )?
+                .into_iter()
+                .filter(|chunk| !ctx.is_shadowed_base_file(1, &chunk.file_path)),
+            );
+        }
+    }
+    alias_symbol_chunks.retain(|chunk| {
+        !exact_symbol_ids.contains(&chunk.chunk_id)
+            && type_matches(chunk, options.type_filter.as_deref())
+            && scope_matches(chunk, options.scope_filter.as_ref())
+            && path_matches(chunk, &path_matcher)
+            && (options.skip_gitignore || !chunk.is_ignored)
+    });
+    alias_symbol_chunks.truncate(remaining);
+
+    let symbol_chunks = exact_symbol_chunks
         .into_iter()
-        .enumerate()
-        .map(|(rank, chunk)| (chunk, 1.0 / (rank as f32 + 1.0)))
+        .map(|chunk| (chunk, true))
+        .chain(alias_symbol_chunks.into_iter().map(|chunk| (chunk, false)))
         .collect::<Vec<_>>();
 
     // ── Path-match pass ──────────────────────────────────────────────────
@@ -1139,6 +1257,7 @@ pub fn hybrid_search_with_context(
     }
 
     let mut semantic_chunks = Vec::new();
+    let mut neural_executed = false;
     let has_hash_vectors = ctx.hash_vectors.as_ref().map_or(0, |v| v.size()) > 0
         || ctx.base_hash_vectors.as_ref().map_or(0, |v| v.size()) > 0;
     let has_neural_vectors = ctx.neural_vectors.as_ref().map_or(0, |v| v.size()) > 0
@@ -1187,7 +1306,8 @@ pub fn hybrid_search_with_context(
         semantic_hash_weight(neural_available, neural_vector_count, hash_vector_count);
 
     if embedding_model.is_some() && (has_hash_vectors || has_neural_vectors) {
-        let mut semantic_by_id = HashMap::<String, (IndexedChunk, f32)>::new();
+        let mut semantic_by_id =
+            HashMap::<String, (IndexedChunk, f32, HashSet<&'static str>)>::new();
         let semantic_query_text = build_semantic_query_text(trimmed);
 
         if has_hash_vectors {
@@ -1207,7 +1327,7 @@ pub fn hybrid_search_with_context(
                 ctx.hash_vectors.as_ref(),
                 ctx.base_hash_vectors.as_ref(),
             )?;
-            merge_semantic_candidates(&mut semantic_by_id, hash_hits, hash_weight);
+            merge_semantic_candidates(&mut semantic_by_id, hash_hits, hash_weight, "hash");
         }
 
         if let Some(model) = embedding_model
@@ -1216,6 +1336,7 @@ pub fn hybrid_search_with_context(
             && has_neural_vectors
             && neural_profile_matches
         {
+            neural_executed = true;
             let neural_query_vector = model.embed(query_text);
             let neural_hits = collect_semantic_candidates(
                 ctx,
@@ -1226,7 +1347,7 @@ pub fn hybrid_search_with_context(
                 ctx.neural_vectors.as_ref(),
                 ctx.base_neural_vectors.as_ref(),
             )?;
-            merge_semantic_candidates(&mut semantic_by_id, neural_hits, 1.08);
+            merge_semantic_candidates(&mut semantic_by_id, neural_hits, 1.08, "neural");
         }
 
         semantic_chunks = semantic_by_id.into_values().collect::<Vec<_>>();
@@ -1285,6 +1406,7 @@ pub fn hybrid_search_with_context(
                     context_lines: options.context,
                     pre_read_content: file_content.as_deref(),
                     routing,
+                    neural_executed,
                 },
             )?);
         }
@@ -1331,6 +1453,7 @@ fn to_hit(
         context_lines,
         pre_read_content,
         routing,
+        neural_executed,
     } = presentation;
     // Use Cow to avoid cloning the file content when the caller already read it.
     let content: std::borrow::Cow<'_, str> = match pre_read_content {
@@ -1346,12 +1469,15 @@ fn to_hit(
                         end_line: chunk.end_line,
                         preview: chunk.text,
                         reason: format!(
-                            "route={} neural={}; file no longer on disk",
+                            "route={} neural_requested={} neural_executed={}; file no longer on disk",
                             routing.intent.name(),
-                            routing.use_neural
+                            routing.use_neural,
+                            neural_executed
                         ),
                         score,
                         sources,
+                        neural_requested: routing.use_neural,
+                        neural_executed,
                     });
                 }
             }
@@ -1366,12 +1492,15 @@ fn to_hit(
             end_line: chunk.start_line,
             preview: String::new(),
             reason: format!(
-                "route={} neural={}; empty file",
+                "route={} neural_requested={} neural_executed={}; empty file",
                 routing.intent.name(),
-                routing.use_neural
+                routing.use_neural,
+                neural_executed
             ),
             score,
             sources,
+            neural_requested: routing.use_neural,
+            neural_executed,
         });
     }
 
@@ -1386,9 +1515,10 @@ fn to_hit(
             .unwrap_or_default(),
     );
     let reason = format!(
-        "route={} neural={}; {ranking_reason}",
+        "route={} neural_requested={} neural_executed={}; {ranking_reason}",
         routing.intent.name(),
-        routing.use_neural
+        routing.use_neural,
+        neural_executed
     );
 
     Ok(SearchHit {
@@ -1399,6 +1529,8 @@ fn to_hit(
         reason,
         score,
         sources,
+        neural_requested: routing.use_neural,
+        neural_executed,
     })
 }
 
@@ -1406,6 +1538,7 @@ struct HitPresentation<'a> {
     context_lines: usize,
     pre_read_content: Option<&'a str>,
     routing: QueryRouting,
+    neural_executed: bool,
 }
 
 fn find_focus_line(chunk: &IndexedChunk, query_text: &str, lines: &[&str]) -> usize {
@@ -2258,25 +2391,29 @@ fn score_filtered_semantic_candidates(
 }
 
 fn merge_semantic_candidates(
-    semantic_by_id: &mut HashMap<String, (IndexedChunk, f32)>,
+    semantic_by_id: &mut HashMap<String, (IndexedChunk, f32, HashSet<&'static str>)>,
     hits: Vec<(IndexedChunk, f32)>,
     score_multiplier: f32,
+    source: &'static str,
 ) {
     for (chunk, score) in hits {
         let adjusted = score * score_multiplier;
         semantic_by_id
             .entry(chunk.chunk_id.clone())
-            .and_modify(|(_, best_score)| *best_score = best_score.max(adjusted))
-            .or_insert((chunk, adjusted));
+            .and_modify(|(_, best_score, sources)| {
+                *best_score = best_score.max(adjusted);
+                sources.insert(source);
+            })
+            .or_insert_with(|| (chunk, adjusted, HashSet::from([source])));
     }
 }
 
 struct FusionCandidates {
     lexical: Vec<(IndexedChunk, f32)>,
-    semantic: Vec<(IndexedChunk, f32)>,
+    semantic: Vec<(IndexedChunk, f32, HashSet<&'static str>)>,
     literal: Vec<(IndexedChunk, f32)>,
     path: Vec<(IndexedChunk, f32)>,
-    symbols: Vec<(IndexedChunk, f32)>,
+    symbols: Vec<(IndexedChunk, bool)>,
 }
 
 fn fuse_rrf(
@@ -2362,7 +2499,7 @@ fn fuse_rrf(
         );
     }
 
-    for (rank, (chunk, semantic_score)) in semantic.into_iter().enumerate() {
+    for (rank, (chunk, semantic_score, semantic_sources)) in semantic.into_iter().enumerate() {
         // Hash vectors are a cheap provisional recall tier. Keep full strength
         // for semantic-only discovery, but do not let hash collisions overrule
         // direct evidence. Neural vectors use semantic_direct_weight=1.0.
@@ -2371,6 +2508,9 @@ fn fuse_rrf(
         } else {
             1.0
         };
+        for source in semantic_sources {
+            add_entry(chunk.clone(), 0.0, source);
+        }
         add_entry(
             chunk,
             direct_weight * SEMANTIC_WEIGHT / (K + rank as f32 + 1.0)
@@ -2391,8 +2531,12 @@ fn fuse_rrf(
         add_entry(chunk, PATH_WEIGHT / (K + rank as f32 + 1.0), "path");
     }
 
-    for (rank, (chunk, _)) in symbols.into_iter().enumerate() {
-        add_entry(chunk, SYMBOL_WEIGHT / (K + rank as f32 + 1.0), "symbol");
+    for (rank, (chunk, exact)) in symbols.into_iter().enumerate() {
+        add_entry(
+            chunk,
+            SYMBOL_WEIGHT / (K + rank as f32 + 1.0),
+            if exact { "exact-symbol" } else { "symbol" },
+        );
     }
 
     let rerank_limit = rerank_candidate_limit();
@@ -2545,6 +2689,17 @@ fn fuse_rrf(
             (chunk, score, source_list)
         })
         .collect::<Vec<_>>();
+
+    if is_precise_lookup_query(query_text)
+        && raw_query_terms(query_text).len() == 1
+        && let Some(max_score) = ranked.iter().map(|(_, score, _)| *score).reduce(f32::max)
+        && let Some((_, exact_score, _)) = ranked
+            .iter_mut()
+            .filter(|(_, _, sources)| sources.iter().any(|source| source == "exact-symbol"))
+            .max_by(|left, right| left.1.total_cmp(&right.1))
+    {
+        *exact_score = max_score + (max_score * 0.01).max(0.01);
+    }
 
     ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
 
@@ -2706,7 +2861,7 @@ fn has_direct_source(sources: &[String]) -> bool {
     has_literal_source(sources)
         || sources
             .iter()
-            .any(|source| source == "lexical" || source == "path")
+            .any(|source| source == "lexical" || source == "path" || source == "exact-symbol")
 }
 
 fn has_literal_source(sources: &[String]) -> bool {
@@ -3370,7 +3525,7 @@ mod tests {
                 QueryIntent::DocsTestsExamples,
                 true,
             ),
-            ("python sort list descending", QueryIntent::Mixed, false),
+            ("python sort list descending", QueryIntent::Mixed, true),
         ];
         for (query, expected_intent, expected_neural) in cases {
             let routing = QueryRouting::classify(query);
@@ -3437,6 +3592,16 @@ mod tests {
             }
             vector
         }
+
+        fn profile_info(&self) -> Option<&'static str> {
+            Some("general")
+        }
+
+        fn model_identity(&self) -> Option<&crate::embedding::NeuralModelIdentity> {
+            static IDENTITY: std::sync::OnceLock<crate::embedding::NeuralModelIdentity> =
+                std::sync::OnceLock::new();
+            Some(IDENTITY.get_or_init(|| crate::embedding::NeuralProfile::General.identity()))
+        }
     }
 
     fn assert_hybrid_search_scope_filter(scope_dir: &str, out_of_scope_dirs: &[&str]) {
@@ -3481,6 +3646,7 @@ mod tests {
                     is_file: false,
                 }),
                 skip_gitignore: false,
+                force_neural: false,
                 progress_tx: None,
                 cancel_token: None,
             },
@@ -3490,6 +3656,7 @@ mod tests {
         assert!(!hits.is_empty());
         assert!(hits[0].sources.iter().any(|source| source == "lexical"));
         assert!(hits[0].sources.iter().any(|source| source == "semantic"));
+        assert!(hits[0].sources.iter().any(|source| source == "hash"));
 
         let files = hits
             .iter()
@@ -3746,7 +3913,7 @@ mod tests {
         assert!(
             hits_before
                 .iter()
-                .any(|hit| hit.sources.iter().any(|source| source == "semantic")),
+                .any(|hit| hit.sources.iter().any(|source| source == "hash")),
             "384-dim search should still use hash vectors before neural vectors exist"
         );
 
@@ -3762,6 +3929,43 @@ mod tests {
         .unwrap();
         assert!(!hits_after.is_empty());
         assert!(hits_after[0].preview.contains("authenticate_user"));
+        assert!(
+            hits_after
+                .iter()
+                .any(|hit| hit.sources.iter().any(|source| source == "neural")),
+            "neural vectors should be visible in result provenance"
+        );
+
+        let exact_default = hybrid_search(
+            &workspace,
+            "authenticate_user",
+            Some(&neural_model),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            exact_default
+                .iter()
+                .all(|hit| hit.sources.iter().all(|source| source != "neural")),
+            "exact identifiers should keep neural disabled by default"
+        );
+
+        let exact_forced = hybrid_search(
+            &workspace,
+            "authenticate_user",
+            Some(&neural_model),
+            &SearchOptions {
+                force_neural: true,
+                ..SearchOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            exact_forced
+                .iter()
+                .any(|hit| hit.sources.iter().any(|source| source == "neural")),
+            "forced neural routing must execute neural retrieval"
+        );
     }
 
     #[test]
@@ -3856,7 +4060,7 @@ mod tests {
             .find(|h| h.preview.contains("process_payment_refund"));
         assert!(b_hit.is_some(), "payment.rs should be found");
         assert!(
-            b_hit.unwrap().sources.iter().any(|s| s == "semantic"),
+            b_hit.unwrap().sources.iter().any(|s| s == "hash"),
             "a chunk without a neural vector should still get a semantic candidate via the hash fallback"
         );
     }
@@ -4736,7 +4940,7 @@ export function registerCommands(p: Plugin) {
                 semantic: vec![],
                 literal: vec![],
                 path: vec![],
-                symbols: vec![(definition, 1.0)],
+                symbols: vec![(definition, true)],
             },
             1.0,
             "handle_error",
@@ -4746,7 +4950,7 @@ export function registerCommands(p: Plugin) {
 
         assert_eq!(without_symbols[0].0.chunk_id, "usage");
         assert_eq!(with_symbols[0].0.chunk_id, "definition");
-        assert!(with_symbols[0].2.contains(&"symbol".to_string()));
+        assert!(with_symbols[0].2.contains(&"exact-symbol".to_string()));
     }
 
     #[test]

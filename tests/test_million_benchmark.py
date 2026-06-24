@@ -160,7 +160,56 @@ class MillionBenchmarkTest(unittest.TestCase):
         with mock.patch.object(benchmark.time, "perf_counter", side_effect=[0.0, 0.001]):
             client.query("first")
 
-        self.assertEqual(payloads[0]["protocol_version"], 2)
+        self.assertEqual(
+            payloads[0]["protocol_version"], benchmark.DAEMON_PROTOCOL_VERSION
+        )
+
+    def test_daemon_client_negotiates_an_older_protocol_version(self):
+        responses = [
+            json.dumps(
+                {
+                    "type": "error",
+                    "message": "unsupported daemon protocol version 3; expected 2",
+                }
+            ).encode()
+            + b"\n",
+            json.dumps({"type": "search_results", "hits": []}).encode() + b"\n",
+        ]
+        payloads = []
+
+        class FakeReader:
+            def readline(self):
+                return responses.pop(0)
+
+            def close(self):
+                pass
+
+        class FakeConnection:
+            def sendall(self, payload):
+                payloads.append(json.loads(payload))
+
+            def makefile(self, _mode):
+                return FakeReader()
+
+            def close(self):
+                pass
+
+        client = benchmark.DaemonClient(Path("/tmp/home"), Path("/tmp/corpus"))
+        client.connection = FakeConnection()
+        client.reader = client.connection.makefile("rb")
+        with mock.patch.object(
+            benchmark.time,
+            "perf_counter",
+            side_effect=[0.0, 0.001, 10.0, 10.002],
+        ):
+            result = client.query("first")
+
+        self.assertEqual(
+            [payload["protocol_version"] for payload in payloads],
+            [benchmark.DAEMON_PROTOCOL_VERSION, 2],
+        )
+        self.assertEqual(client.protocol_version, 2)
+        self.assertAlmostEqual(result["elapsed_ms"], 2.0)
 
     def test_dataset_provenance_ignores_unrelated_manifest_changes(self):
         matrix = {

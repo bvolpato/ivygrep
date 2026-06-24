@@ -58,7 +58,9 @@ class RetrievalMetricsTest(unittest.TestCase):
         self.assertEqual(eval_code_retrieval.query_args("lexical"), ["--lexical-only"])
         self.assertEqual(eval_code_retrieval.query_args("hash"), ["--hash"])
         self.assertEqual(eval_code_retrieval.query_args("hybrid"), [])
-        self.assertEqual(eval_code_retrieval.query_args("neural"), [])
+        self.assertEqual(
+            eval_code_retrieval.query_args("neural"), ["--force-neural"]
+        )
 
     def test_search_command_terminates_option_parsing_before_query(self):
         command = eval_code_retrieval.search_command(
@@ -99,6 +101,19 @@ class RetrievalMetricsTest(unittest.TestCase):
         self.assertEqual(
             eval_code_retrieval.process_cold_queries("hash", queries),
             queries,
+        )
+
+    def test_neural_execution_is_unobservable_without_hits(self):
+        self.assertIsNone(eval_code_retrieval.neural_execution_status([]))
+        self.assertTrue(
+            eval_code_retrieval.neural_execution_status(
+                [{"neural_executed": True}]
+            )
+        )
+        self.assertFalse(
+            eval_code_retrieval.neural_execution_status(
+                [{"neural_executed": False}]
+            )
         )
 
     def test_peak_rss_is_sampled_after_daemon_wait(self):

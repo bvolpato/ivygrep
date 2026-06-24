@@ -18,7 +18,7 @@ use crate::config;
 use crate::embedding::{EmbeddingModel, create_model};
 use crate::indexer::{
     index_workspace, index_workspace_for_watcher, index_workspace_paths_for_watcher,
-    remove_workspace_index,
+    reconcile_worktree_overlay, remove_workspace_index,
 };
 use crate::jobs::{self, JobKind, JobUpdate};
 use crate::protocol::{
@@ -28,6 +28,7 @@ use crate::protocol::{
 use crate::regex_search::regex_search;
 use crate::search::{
     SearchContext, SearchOptions, hybrid_search_with_context, literal_search_with_context,
+    validate_forced_neural_workspaces,
 };
 use crate::workspace::{Workspace, WorkspaceScope, list_workspaces};
 
@@ -230,6 +231,7 @@ struct QueryCacheKey {
     skip_gitignore: bool,
     emb_dim: usize,
     wants_neural: bool,
+    force_neural: bool,
     reranker: String,
 }
 
@@ -375,6 +377,21 @@ impl DaemonState {
         }
     }
 
+    fn get_model_for_search(&self, force_neural: bool) -> Result<Arc<dyn EmbeddingModel>> {
+        if !force_neural {
+            return Ok(self.get_model_or_fallback());
+        }
+
+        let model = self
+            .lazy_model
+            .get_or_init(|| Arc::from(create_model(false)))
+            .clone();
+        if model.model_identity().is_none() {
+            anyhow::bail!("neural search was required, but the neural model is unavailable");
+        }
+        Ok(model)
+    }
+
     fn maybe_start_model_load(&self) {
         if self.lazy_model.get().is_some() || self.model_loading.swap(true, Ordering::Relaxed) {
             return;
@@ -396,6 +413,10 @@ impl DaemonState {
         emb_dim: Option<usize>,
         wants_neural: bool,
     ) -> Result<SearchContextLease> {
+        let reconciliation_model = cached_hash_model();
+        if reconcile_worktree_overlay(workspace, reconciliation_model.as_ref())? {
+            self.clear_workspace_contexts(workspace);
+        }
         let key = SearchContextCacheKey {
             workspace_id: workspace.id.clone(),
             emb_dim,
@@ -788,6 +809,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             scope_path,
             scope_is_file,
             skip_gitignore,
+            force_neural,
         } => {
             let state_clone = state.clone();
 
@@ -823,12 +845,19 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 exclude_globs,
                 scope_filter: scope_from_request(scope_path, scope_is_file),
                 skip_gitignore,
+                force_neural,
                 progress_tx: None,
                 cancel_token: None,
             };
             let all_indices = path.is_none();
 
-            if workspaces.iter().any(Workspace::has_neural_vectors) {
+            if let Err(err) = validate_forced_neural_workspaces(&workspaces, force_neural) {
+                return DaemonResponse::Error {
+                    message: err.to_string(),
+                };
+            }
+            let has_neural_vectors = workspaces.iter().any(Workspace::has_neural_vectors);
+            if has_neural_vectors {
                 state_clone.maybe_start_model_load();
             }
 
@@ -837,9 +866,32 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             let permit = state_clone.cpu_permits.clone().acquire_owned().await.ok();
             let result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                let model = state_clone.get_model_or_fallback();
+                let model = match state_clone.get_model_for_search(force_neural) {
+                    Ok(model) => model,
+                    Err(err) => return (Vec::new(), vec![err.to_string()]),
+                };
+                let reconciliation_model = cached_hash_model();
                 let mut all_hits = Vec::new();
                 let mut all_errors: Vec<String> = Vec::new();
+                let mut reconciled_workspaces = Vec::with_capacity(workspaces.len());
+                for workspace in workspaces {
+                    match reconcile_worktree_overlay(&workspace, reconciliation_model.as_ref()) {
+                        Ok(changed) => {
+                            if changed {
+                                state_clone.clear_workspace_contexts(&workspace);
+                            }
+                            reconciled_workspaces.push(workspace);
+                        }
+                        Err(err) => {
+                            warn!(
+                                "failed to reconcile worktree overlay for {}: {err:#}",
+                                workspace.root.display()
+                            );
+                            all_errors.push(format!("{}: {err:#}", workspace.root.display()));
+                        }
+                    }
+                }
+                let workspaces = reconciled_workspaces;
                 let ws_neural_missing: Vec<PathBuf> = workspaces
                     .iter()
                     .filter(|w| w.needs_neural_enhancement())
@@ -1071,6 +1123,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 exclude_globs,
                 scope_filter,
                 skip_gitignore,
+                force_neural: false,
                 progress_tx: None,
                 cancel_token: None,
             };
@@ -1542,6 +1595,7 @@ fn query_cache_key(
         skip_gitignore: options.skip_gitignore,
         emb_dim,
         wants_neural,
+        force_neural: options.force_neural,
         reranker: crate::reranker::cache_identity(),
     }
 }
@@ -1910,6 +1964,133 @@ mod tests {
             query_results: Arc::new(Mutex::new(QueryResultCache::default())),
             cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
         }
+    }
+
+    struct TestNeuralModel;
+
+    impl EmbeddingModel for TestNeuralModel {
+        fn dimensions(&self) -> usize {
+            384
+        }
+
+        fn embed(&self, _text: &str) -> Vec<f32> {
+            let mut vector = vec![0.0; self.dimensions()];
+            vector[0] = 1.0;
+            vector
+        }
+
+        fn model_identity(&self) -> Option<&crate::embedding::NeuralModelIdentity> {
+            static IDENTITY: std::sync::OnceLock<crate::embedding::NeuralModelIdentity> =
+                std::sync::OnceLock::new();
+            Some(IDENTITY.get_or_init(crate::embedding::configured_neural_model_identity))
+        }
+    }
+
+    #[test]
+    fn force_neural_waits_for_an_inflight_model_load() {
+        let state = test_state();
+        let lazy_model = state.lazy_model.clone();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let loader_barrier = barrier.clone();
+        let loader = std::thread::spawn(move || {
+            lazy_model.get_or_init(|| {
+                loader_barrier.wait();
+                std::thread::sleep(Duration::from_millis(50));
+                Arc::new(TestNeuralModel) as Arc<dyn EmbeddingModel>
+            });
+        });
+
+        barrier.wait();
+        let started = std::time::Instant::now();
+        let model = state.get_model_for_search(true).unwrap();
+        loader.join().unwrap();
+
+        assert!(started.elapsed() >= Duration::from_millis(40));
+        assert!(model.model_identity().is_some());
+    }
+
+    #[test]
+    fn force_neural_rejects_a_hash_model() {
+        let state = test_state();
+        assert!(state.lazy_model.set(cached_hash_model()).is_ok());
+        assert!(state.get_model_for_search(true).is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn force_neural_requires_vectors_in_every_workspace() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let neural_repo = tempdir().unwrap();
+        std::fs::write(
+            neural_repo.path().join("neural.rs"),
+            "pub fn neural_ready() {}\n",
+        )
+        .unwrap();
+        let neural_workspace = Workspace::resolve(neural_repo.path()).unwrap();
+        let hash_model = create_hash_model();
+        index_workspace(&neural_workspace, hash_model.as_ref()).unwrap();
+        crate::indexer::enhance_workspace_neural(&neural_workspace, &TestNeuralModel).unwrap();
+        assert!(neural_workspace.has_neural_vectors());
+
+        let hash_repo = tempdir().unwrap();
+        std::fs::write(hash_repo.path().join("hash.rs"), "pub fn hash_only() {}\n").unwrap();
+        let hash_workspace = Workspace::resolve(hash_repo.path()).unwrap();
+        index_workspace(&hash_workspace, hash_model.as_ref()).unwrap();
+        assert!(!hash_workspace.has_neural_vectors());
+
+        assert!(
+            validate_forced_neural_workspaces(std::slice::from_ref(&neural_workspace), true)
+                .is_ok()
+        );
+        let err = validate_forced_neural_workspaces(
+            &[neural_workspace.clone(), hash_workspace.clone()],
+            true,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&hash_workspace.root.display().to_string())
+        );
+
+        crate::indexer::enhance_workspace_neural(&hash_workspace, &TestNeuralModel).unwrap();
+        let mut incompatible_identity = hash_workspace.neural_model_identity().unwrap();
+        incompatible_identity.model_id = "incompatible/test-model".to_string();
+        std::fs::write(
+            hash_workspace.neural_model_path(),
+            serde_json::to_vec_pretty(&incompatible_identity).unwrap(),
+        )
+        .unwrap();
+        assert!(hash_workspace.has_neural_vectors());
+
+        let err =
+            validate_forced_neural_workspaces(&[neural_workspace, hash_workspace.clone()], true)
+                .unwrap_err();
+        assert!(err.to_string().contains("incompatible neural model"));
+        assert!(
+            err.to_string()
+                .contains(&hash_workspace.root.display().to_string())
+        );
+
+        let overlay_root = tempdir().unwrap();
+        let overlay_index = tempdir().unwrap();
+        std::fs::write(
+            overlay_index.path().join("neural_model.json"),
+            serde_json::to_vec_pretty(&crate::embedding::configured_neural_model_identity())
+                .unwrap(),
+        )
+        .unwrap();
+        let overlay_workspace = Workspace {
+            id: "overlay".to_string(),
+            root: overlay_root.path().to_path_buf(),
+            index_dir: overlay_index.path().to_path_buf(),
+            repo_id: None,
+            base_index_dir: Some(hash_workspace.index_dir.clone()),
+        };
+        let err = validate_forced_neural_workspaces(std::slice::from_ref(&overlay_workspace), true)
+            .unwrap_err();
+        assert!(err.to_string().contains("incompatible neural model"));
     }
 
     #[test]
@@ -2405,6 +2586,7 @@ mod tests {
                 scope_path: None,
                 scope_is_file: false,
                 skip_gitignore: false,
+                force_neural: false,
             },
         )
         .await;
@@ -2462,6 +2644,7 @@ mod tests {
             scope_path: None,
             scope_is_file: false,
             skip_gitignore: false,
+            force_neural: false,
         };
 
         let first = handle_request(state.clone(), request.clone()).await;
@@ -2521,6 +2704,7 @@ mod tests {
             scope_path: None,
             scope_is_file: false,
             skip_gitignore: false,
+            force_neural: false,
         };
         let all_request = DaemonRequest::Search {
             path: None,
@@ -2533,6 +2717,7 @@ mod tests {
             scope_path: None,
             scope_is_file: false,
             skip_gitignore: false,
+            force_neural: false,
         };
 
         let normal = handle_request(state.clone(), normal_request).await;

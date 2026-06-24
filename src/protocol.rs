@@ -5,10 +5,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::workspace::WorkspaceStatus;
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Compile-time version tag so the CLI can detect stale daemon processes.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Wire protocol version for daemon request compatibility.
-pub const DAEMON_PROTOCOL_VERSION: u32 = 2;
+pub const DAEMON_PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchHit {
@@ -20,6 +24,10 @@ pub struct SearchHit {
     pub reason: String,
     pub score: f32,
     pub sources: Vec<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub neural_requested: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub neural_executed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +59,8 @@ pub enum DaemonRequest {
         scope_is_file: bool,
         #[serde(default)]
         skip_gitignore: bool,
+        #[serde(default)]
+        force_neural: bool,
     },
     RegexSearch {
         path: Option<PathBuf>,
@@ -205,6 +215,8 @@ mod tests {
             reason: String::new(),
             score,
             sources: vec!["test".to_string()],
+            neural_requested: false,
+            neural_executed: false,
         }
     }
 

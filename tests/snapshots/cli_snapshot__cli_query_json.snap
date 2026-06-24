@@ -1,6 +1,6 @@
 ---
 source: tests/cli_snapshot.rs
-assertion_line: 122
+assertion_line: 134
 expression: value
 ---
 - file_path: rust_repo/src/lib.rs
@@ -8,6 +8,7 @@ expression: value
   hits:
     - end_line: 3
       file_path: rust_repo/src/lib.rs
+      neural_requested: true
       preview: "pub fn calculate_tax(amount: f64, rate: f64) -> f64 {\n    amount * rate\n}"
       score: "<score>"
       sources:

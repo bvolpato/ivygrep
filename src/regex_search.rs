@@ -299,6 +299,8 @@ fn regex_search_parallel(
                     reason: "regex line match".to_string(),
                     score: 1.0,
                     sources: vec!["regex".to_string()],
+                    neural_requested: false,
+                    neural_executed: false,
                 });
                 Ok(!done.load(Ordering::Relaxed))
             }),
@@ -376,6 +378,8 @@ fn regex_search_walk(
                     reason: "regex line match".to_string(),
                     score: 1.0,
                     sources: vec!["regex".to_string()],
+                    neural_requested: false,
+                    neural_executed: false,
                 });
                 Ok(true)
             }),
