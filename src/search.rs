@@ -69,6 +69,53 @@ pub struct SearchOptions {
     pub cancel_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
+pub fn validate_forced_neural_workspaces(
+    workspaces: &[Workspace],
+    force_neural: bool,
+) -> Result<()> {
+    if !force_neural {
+        return Ok(());
+    }
+
+    let missing = workspaces
+        .iter()
+        .filter(|workspace| !workspace.has_neural_vectors())
+        .map(|workspace| workspace.root.display().to_string())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "neural search was required, but these workspaces have no neural vectors: {}",
+            missing.join(", ")
+        );
+    }
+
+    let expected_identity = crate::embedding::configured_neural_model_identity();
+    let incompatible = workspaces
+        .iter()
+        .filter(|workspace| {
+            workspace_neural_model_identity(workspace).as_ref() != Some(&expected_identity)
+        })
+        .map(|workspace| workspace.root.display().to_string())
+        .collect::<Vec<_>>();
+    if !incompatible.is_empty() {
+        anyhow::bail!(
+            "neural search was required, but these workspaces use an incompatible neural model: {}",
+            incompatible.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn workspace_neural_model_identity(
+    workspace: &Workspace,
+) -> Option<crate::embedding::NeuralModelIdentity> {
+    workspace.neural_model_identity().or_else(|| {
+        let path = workspace.base_index_dir.as_ref()?.join("neural_model.json");
+        let contents = fs::read_to_string(path).ok()?;
+        serde_json::from_str(&contents).ok()
+    })
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 enum QueryIntent {
     ExactIdentifier,

@@ -18,7 +18,9 @@ use crate::protocol::{
     BUILD_VERSION, DaemonRequest, DaemonResponse, SearchHit, group_hits_by_file,
 };
 use crate::regex_search::regex_search;
-use crate::search::{SearchOptions, hybrid_search, literal_search};
+use crate::search::{
+    SearchOptions, hybrid_search, literal_search, validate_forced_neural_workspaces,
+};
 use crate::workspace::{
     Workspace, WorkspaceIndexState, list_workspaces, resolve_workspace_and_scope,
 };
@@ -1933,14 +1935,12 @@ fn local_hybrid_search_model(
         return Ok(None);
     }
 
-    let has_neural_vectors = workspaces.iter().any(Workspace::has_neural_vectors);
     if force_neural {
-        if !has_neural_vectors {
-            bail!("neural search was required, but no neural vectors are available");
-        }
+        validate_forced_neural_workspaces(workspaces, true)?;
         return crate::embedding::create_neural_model().map(Some);
     }
 
+    let has_neural_vectors = workspaces.iter().any(Workspace::has_neural_vectors);
     if use_hash || !has_neural_vectors {
         Ok(Some(crate::embedding::create_hash_model()))
     } else {
