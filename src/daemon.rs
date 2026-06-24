@@ -417,12 +417,22 @@ impl DaemonState {
         if reconcile_worktree_overlay(workspace, reconciliation_model.as_ref())? {
             self.clear_workspace_contexts(workspace);
         }
+        let signature = search_context_signature(workspace, emb_dim, wants_neural);
+        self.cached_search_context_for_signature(workspace, emb_dim, wants_neural, signature)
+    }
+
+    fn cached_search_context_for_signature(
+        &self,
+        workspace: &Workspace,
+        emb_dim: Option<usize>,
+        wants_neural: bool,
+        signature: SearchContextSignature,
+    ) -> Result<SearchContextLease> {
         let key = SearchContextCacheKey {
             workspace_id: workspace.id.clone(),
             emb_dim,
             wants_neural,
         };
-        let signature = search_context_signature(workspace, emb_dim, wants_neural);
 
         let pool = {
             let mut cache = self.search_contexts.lock();
@@ -897,9 +907,20 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     .filter(|w| w.needs_neural_enhancement())
                     .map(|w| w.root.clone())
                     .collect();
+                let workspace_signatures = workspaces
+                    .iter()
+                    .map(|workspace| {
+                        search_context_signature(
+                            workspace,
+                            Some(model.dimensions()),
+                            model.model_identity().is_some(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
 
                 let cache_key = query_cache_key(
                     &workspaces,
+                    workspace_signatures.clone(),
                     &query,
                     &options,
                     model.dimensions(),
@@ -917,11 +938,12 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     return (cached_hits, all_errors);
                 }
 
-                for workspace in &workspaces {
-                    let context = match state_clone.cached_search_context(
+                for (workspace, signature) in workspaces.iter().zip(workspace_signatures) {
+                    let context = match state_clone.cached_search_context_for_signature(
                         workspace,
                         Some(model.dimensions()),
                         model.model_identity().is_some(),
+                        signature,
                     ) {
                         Ok(context) => context,
                         Err(err) => {
@@ -1569,6 +1591,7 @@ fn search_context_signature(
 
 fn query_cache_key(
     workspaces: &[Workspace],
+    signatures: Vec<SearchContextSignature>,
     query: &str,
     options: &SearchOptions,
     emb_dim: usize,
@@ -1580,10 +1603,7 @@ fn query_cache_key(
             .iter()
             .map(|workspace| workspace.id.clone())
             .collect(),
-        signatures: workspaces
-            .iter()
-            .map(|workspace| search_context_signature(workspace, Some(emb_dim), wants_neural))
-            .collect(),
+        signatures,
         all_indices,
         query: query.to_string(),
         limit: options.limit,

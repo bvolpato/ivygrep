@@ -1140,6 +1140,11 @@ pub fn repo_id_from_common_dir(common_dir: &Path) -> String {
 /// For regular repos this is `<root>/.git`, for worktrees this is the main repo's `.git`.
 /// Returns `None` if not a git repository.
 pub fn git_common_dir(root: &Path) -> Option<PathBuf> {
+    let git_dir = root.join(".git");
+    if git_dir.is_dir() && is_git_dir(&git_dir) {
+        return git_dir.canonicalize().ok().or(Some(git_dir));
+    }
+
     let output = Command::new("git")
         .args(["rev-parse", "--git-common-dir"])
         .current_dir(root)
