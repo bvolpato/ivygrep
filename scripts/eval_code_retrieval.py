@@ -279,6 +279,12 @@ def warm_query_path(mode: str) -> str:
     return "local-process" if mode == "lexical" else "daemon"
 
 
+def neural_execution_status(hits: list[dict]) -> bool | None:
+    if not hits:
+        return None
+    return any(hit.get("neural_executed") is True for hit in hits)
+
+
 def process_cold_queries(mode: str, queries: list[dict]) -> list[dict]:
     # Neural process startup includes loading model weights. Measuring that for
     # every quality query turns a retrieval benchmark into a model-load loop.
@@ -441,6 +447,7 @@ def evaluate(args: argparse.Namespace) -> dict:
             queries_with_hash_results = 0
             queries_with_neural_results = 0
             queries_with_neural_execution = 0
+            queries_with_unobservable_neural_execution = 0
             missing_neural_execution = []
             for query in queries:
                 query_id = str(query["_id"])
@@ -460,15 +467,16 @@ def evaluate(args: argparse.Namespace) -> dict:
                     for hit in query_hits
                     for source in hit.get("sources", [])
                 }
-                neural_executed = any(
-                    hit.get("neural_executed") is True for hit in query_hits
-                )
+                execution_status = neural_execution_status(query_hits)
+                neural_executed = execution_status is True
                 if "hash" in query_sources:
                     queries_with_hash_results += 1
                 if "neural" in query_sources:
                     queries_with_neural_results += 1
-                if neural_executed:
+                if execution_status is True:
                     queries_with_neural_execution += 1
+                elif execution_status is None:
+                    queries_with_unobservable_neural_execution += 1
                 elif args.mode == "neural":
                     missing_neural_execution.append(query_id)
                 for item in warm_output:
@@ -523,6 +531,7 @@ def evaluate(args: argparse.Namespace) -> dict:
                         "query_id": query_id,
                         "retrieval_sources": sorted(query_sources),
                         "neural_executed": neural_executed,
+                        "neural_execution_observable": execution_status is not None,
                         "ranked": ranked,
                         "ranked_hits": ranked_hits,
                         "cold_latency_ms": cold_ms,
@@ -587,6 +596,9 @@ def evaluate(args: argparse.Namespace) -> dict:
                     "queries_with_hash_results": queries_with_hash_results,
                     "queries_with_neural_results": queries_with_neural_results,
                     "queries_with_neural_execution": queries_with_neural_execution,
+                    "queries_with_unobservable_neural_execution": (
+                        queries_with_unobservable_neural_execution
+                    ),
                 },
                 "no_hit_rate": no_hit_queries / len(queries) if queries else 0.0,
                 "support_file_spam_rate_at_10": (

@@ -96,6 +96,12 @@ def ranked_paths(stdout: str) -> list[str]:
     return paths
 
 
+def neural_execution_status(hits: list[dict[str, Any]]) -> bool | None:
+    if not hits:
+        return None
+    return any(hit.get("neural_executed") is True for hit in hits)
+
+
 def graded(paths: list[str], judgments: list[Judgment]) -> list[int]:
     """Grade each ranked path by its best-matching, not-yet-consumed judgment."""
     used: set[int] = set()
@@ -240,6 +246,7 @@ def main() -> int:
         rows: list[dict[str, Any]] = []
         neural_queries_with_results = 0
         neural_queries_executed = 0
+        neural_queries_unobservable = 0
         t0 = time.perf_counter()
         for case in cases:
             stdout = run(
@@ -256,13 +263,14 @@ def main() -> int:
                 for hit in hits
                 for source in hit.get("sources", [])
             }
-            neural_executed = any(
-                hit.get("neural_executed") is True for hit in hits
-            )
+            execution_status = neural_execution_status(hits)
+            neural_executed = execution_status is True
             if "neural" in sources:
                 neural_queries_with_results += 1
-            if neural_executed:
+            if execution_status is True:
                 neural_queries_executed += 1
+            elif execution_status is None:
+                neural_queries_unobservable += 1
             grades = graded(paths, case.judgments)
             ideal = [j.grade for j in case.judgments]
             row = {
@@ -276,6 +284,7 @@ def main() -> int:
                 "hits": len(paths),
                 "retrieval_sources": sorted(sources),
                 "neural_executed": neural_executed,
+                "neural_execution_observable": execution_status is not None,
             }
             rows.append(row)
             if args.details:
@@ -302,10 +311,19 @@ def main() -> int:
             "no_hit_queries": sum(1 for r in rows if r["hits"] == 0),
             "neural_queries_with_results": neural_queries_with_results,
             "neural_queries_executed": neural_queries_executed,
+            "neural_queries_unobservable": neural_queries_unobservable,
             "elapsed_ms": (time.perf_counter() - t0) * 1000.0,
         }
-        if args.neural and neural_queries_executed != len(rows):
-            missing = [row["id"] for row in rows if not row["neural_executed"]]
+        if args.neural:
+            missing = [
+                row["id"]
+                for row in rows
+                if row["neural_execution_observable"]
+                and not row["neural_executed"]
+            ]
+        else:
+            missing = []
+        if missing:
             raise SystemExit(
                 "neural evaluation did not execute neural retrieval for: "
                 + ", ".join(missing)

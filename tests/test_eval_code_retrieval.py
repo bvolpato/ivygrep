@@ -103,6 +103,19 @@ class RetrievalMetricsTest(unittest.TestCase):
             queries,
         )
 
+    def test_neural_execution_is_unobservable_without_hits(self):
+        self.assertIsNone(eval_code_retrieval.neural_execution_status([]))
+        self.assertTrue(
+            eval_code_retrieval.neural_execution_status(
+                [{"neural_executed": True}]
+            )
+        )
+        self.assertFalse(
+            eval_code_retrieval.neural_execution_status(
+                [{"neural_executed": False}]
+            )
+        )
+
     def test_peak_rss_is_sampled_after_daemon_wait(self):
         events = []
 
