@@ -1182,7 +1182,7 @@ fn index_workspace_inner(
         );
     }
 
-    create_graph_indexes(&tx)?;
+    finalize_graph_indexes(&tx)?;
 
     // Update cached stats before committing so status reads are O(1).
     let chunk_count: i64 = tx
@@ -1968,17 +1968,11 @@ fn build_indexed_chunk(chunk: Chunk, is_ignored: bool) -> IndexedChunk {
         &chunk.content_hash,
     );
     let kind = format!("{:?}", chunk.kind);
-    let chunk_id = logical_chunk_id(
-        &chunk.file_path,
-        chunk.start_line,
-        chunk.end_line,
-        &chunk.language,
-        &kind,
-        vector_key,
-    );
 
     IndexedChunk {
-        chunk_id,
+        // Search deduplicates by the persisted vector key. Computing a second
+        // formatted identity here would be pure indexing overhead.
+        chunk_id: String::new(),
         file_path: chunk.file_path,
         start_line: chunk.start_line,
         end_line: chunk.end_line,
@@ -1989,28 +1983,6 @@ fn build_indexed_chunk(chunk: Chunk, is_ignored: bool) -> IndexedChunk {
         vector_key,
         is_ignored,
     }
-}
-
-pub(crate) fn logical_chunk_id(
-    file_path: &Path,
-    start_line: usize,
-    end_line: usize,
-    language: &str,
-    kind: &str,
-    vector_key: u64,
-) -> String {
-    let mut identity =
-        Vec::with_capacity(file_path.as_os_str().len() + language.len() + kind.len() + 48);
-    identity.extend_from_slice(index_path_string(file_path).as_bytes());
-    identity.push(0);
-    identity.extend_from_slice(&start_line.to_le_bytes());
-    identity.extend_from_slice(&end_line.to_le_bytes());
-    identity.extend_from_slice(language.as_bytes());
-    identity.push(0);
-    identity.extend_from_slice(kind.as_bytes());
-    identity.push(0);
-    identity.extend_from_slice(&vector_key.to_le_bytes());
-    format!("{:032x}", xxhash_rust::xxh3::xxh3_128(&identity))
 }
 
 fn vector_key_for_chunk(
@@ -2360,8 +2332,12 @@ fn create_tables(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn create_graph_indexes(conn: &Connection) -> Result<()> {
-    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_symbols_name ON symbols(normalized_name);")?;
+fn finalize_graph_indexes(conn: &Connection) -> Result<()> {
+    // `symbols` is WITHOUT ROWID with PRIMARY KEY (normalized_name, chunk_key),
+    // so its table B-tree already serves normalized-name prefix lookups.
+    // Remove the legacy duplicate index to avoid extra finalization I/O and
+    // nearly doubling symbol graph storage.
+    conn.execute_batch("DROP INDEX IF EXISTS idx_symbols_name;")?;
     Ok(())
 }
 
@@ -2442,9 +2418,7 @@ pub fn fetch_chunk_by_vector_key(
         let kind = row.get::<_, String>(4)?;
         let vector_key = row.get::<_, i64>(6)? as u64;
         let chunk = IndexedChunk {
-            chunk_id: logical_chunk_id(
-                &file_path, start_line, end_line, &language, &kind, vector_key,
-            ),
+            chunk_id: String::new(),
             file_path,
             start_line,
             end_line,
@@ -2504,9 +2478,7 @@ pub fn fetch_chunks_by_vector_keys_batch(
             let kind = row.get::<_, String>(4)?;
             let vector_key = row.get::<_, i64>(6)? as u64;
             let chunk = IndexedChunk {
-                chunk_id: logical_chunk_id(
-                    &file_path, start_line, end_line, &language, &kind, vector_key,
-                ),
+                chunk_id: String::new(),
                 file_path,
                 start_line,
                 end_line,
@@ -2579,12 +2551,8 @@ pub fn fetch_chunk_by_id(
         .and_then(|v| v.as_u64())
         .unwrap_or(0)
         > 0;
-    let chunk_id = logical_chunk_id(
-        &file_path, start_line, end_line, &language, &kind, vector_key,
-    );
-
     Some(IndexedChunk {
-        chunk_id,
+        chunk_id: String::new(),
         file_path,
         start_line,
         end_line,
@@ -2680,6 +2648,26 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn graph_finalization_removes_redundant_symbol_name_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_tables(&conn).unwrap();
+        conn.execute_batch("CREATE INDEX idx_symbols_name ON symbols(normalized_name);")
+            .unwrap();
+
+        finalize_graph_indexes(&conn).unwrap();
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_symbols_name'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]

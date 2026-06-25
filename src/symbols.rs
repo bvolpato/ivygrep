@@ -159,9 +159,7 @@ pub fn definition_candidates(
             let kind = row.get::<_, String>(4)?;
             let vector_key = row.get::<_, i64>(6)? as u64;
             Ok(IndexedChunk {
-                chunk_id: crate::indexer::logical_chunk_id(
-                    &file_path, start_line, end_line, &language, &kind, vector_key,
-                ),
+                chunk_id: String::new(),
                 file_path,
                 start_line,
                 end_line,
@@ -175,7 +173,7 @@ pub fn definition_candidates(
         })?;
         for row in rows {
             let chunk = row?;
-            if seen_chunks.insert(chunk.chunk_id.clone()) {
+            if seen_chunks.insert(chunk.vector_key) {
                 chunks.push(chunk);
             }
         }
