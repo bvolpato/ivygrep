@@ -910,11 +910,17 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     }
                 }
                 let workspaces = reconciled_workspaces;
-                let ws_neural_missing: Vec<PathBuf> = workspaces
-                    .iter()
-                    .filter(|w| w.needs_neural_enhancement())
-                    .map(|w| w.root.clone())
-                    .collect();
+                let background_enhancement_enabled =
+                    crate::config::background_enhancement_enabled();
+                let ws_neural_missing = if background_enhancement_enabled {
+                    workspaces
+                        .iter()
+                        .filter(|workspace| workspace.needs_neural_enhancement())
+                        .map(|workspace| workspace.root.clone())
+                        .collect::<Vec<PathBuf>>()
+                } else {
+                    Vec::new()
+                };
                 let workspace_signatures = workspaces
                     .iter()
                     .map(|workspace| {
@@ -936,7 +942,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     all_indices,
                 );
                 if let Some(cached_hits) = state_clone.cached_query_results(&cache_key) {
-                    if crate::config::background_enhancement_enabled() {
+                    if background_enhancement_enabled {
                         for root in ws_neural_missing {
                             if let Ok(ws) = Workspace::resolve(&root) {
                                 let _ = ws.trigger_background_enhancement();
@@ -999,7 +1005,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     state_clone.store_query_results(cache_key, &all_hits);
                 }
                 // Spawn background hash and neural enhancement for workspaces that need it.
-                if crate::config::background_enhancement_enabled() {
+                if background_enhancement_enabled {
                     for root in ws_neural_missing {
                         if let Ok(ws) = Workspace::resolve(&root) {
                             let _ = ws.trigger_background_enhancement();

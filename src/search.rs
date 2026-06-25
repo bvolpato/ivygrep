@@ -23,7 +23,9 @@ use crate::indexer::{
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
 use crate::text::{singularize_token, split_identifier_segments};
-use crate::vector_store::{HASH_VECTOR_QUANTIZATION, NEURAL_VECTOR_QUANTIZATION, VectorStore};
+use crate::vector_store::{
+    HASH_VECTOR_QUANTIZATION, NEURAL_VECTOR_QUANTIZATION, VectorMatch, VectorStore,
+};
 use crate::workspace::{Workspace, WorkspaceScope, index_path_string};
 
 #[derive(Debug, Clone)]
@@ -347,6 +349,15 @@ struct CachedFileContent {
     len: u64,
     modified_nanos: u128,
     content: Arc<str>,
+    lines: Arc<[LineSpan]>,
+}
+
+type SemanticCandidatesById = HashMap<u64, (IndexedChunk, f32, HashSet<&'static str>)>;
+
+#[derive(Clone, Copy)]
+struct LineSpan {
+    start: usize,
+    end: usize,
 }
 
 impl SearchContext {
@@ -549,7 +560,7 @@ impl SearchContext {
         Ok(result)
     }
 
-    fn read_file_content(&self, path: &Path) -> Option<Arc<str>> {
+    fn read_file_content(&self, path: &Path) -> Option<CachedFileContent> {
         const MAX_CACHED_FILES: usize = 256;
 
         let metadata = match fs::metadata(path) {
@@ -571,23 +582,23 @@ impl SearchContext {
             && cached.len == len
             && cached.modified_nanos == modified_nanos
         {
-            return Some(cached.content.clone());
+            return Some(cached.clone());
         }
 
         let content = Arc::<str>::from(fs::read_to_string(path).ok()?);
+        let lines = line_spans(&content).into();
+        let cached = CachedFileContent {
+            len,
+            modified_nanos,
+            content,
+            lines,
+        };
         let mut cache = self.file_contents.borrow_mut();
         if cache.len() >= MAX_CACHED_FILES && !cache.contains_key(path) {
             cache.clear();
         }
-        cache.insert(
-            path.to_path_buf(),
-            CachedFileContent {
-                len,
-                modified_nanos,
-                content: content.clone(),
-            },
-        );
-        Some(content)
+        cache.insert(path.to_path_buf(), cached.clone());
+        Some(cached)
     }
 }
 
@@ -1341,49 +1352,86 @@ pub fn hybrid_search_with_context(
             .map_or(0, VectorStore::size);
     let hash_weight =
         semantic_hash_weight(neural_available, neural_vector_count, hash_vector_count);
+    let neural_model = embedding_model.filter(|model| {
+        routing.use_neural
+            && model.model_identity().is_some()
+            && has_neural_vectors
+            && neural_profile_matches
+    });
 
     if embedding_model.is_some() && (has_hash_vectors || has_neural_vectors) {
-        let mut semantic_by_id = HashMap::<u64, (IndexedChunk, f32, HashSet<&'static str>)>::new();
+        let mut semantic_by_id = SemanticCandidatesById::new();
         let semantic_query_text = build_semantic_query_text(trimmed);
-
-        if has_hash_vectors {
-            // Reuse the caller's embedding_model to embed the query for hash
-            // vector search — avoids rebuilding a HashEmbeddingModel per search.
+        let semantic_filters_active = has_semantic_filters(options);
+        let hash_query_vector = if has_hash_vectors {
+            // Reuse a single hash model for query embedding rather than
+            // rebuilding the 256-bucket model for every search.
             static SEARCH_HASH_MODEL: std::sync::OnceLock<crate::embedding::HashEmbeddingModel> =
                 std::sync::OnceLock::new();
             let hash_model =
                 SEARCH_HASH_MODEL.get_or_init(|| crate::embedding::HashEmbeddingModel::new(256));
-            let hash_query_vector = hash_model.embed(&semantic_query_text);
-            let hash_hits = collect_semantic_candidates(
-                ctx,
-                &path_matcher,
-                options,
-                &hash_query_vector,
+            Some(hash_model.embed(&semantic_query_text))
+        } else {
+            None
+        };
+
+        let can_share_hydration = has_hash_vectors && !semantic_filters_active;
+        if let Some(model) = neural_model.filter(|_| can_share_hydration) {
+            // Hash and neural ANN candidates are immediately fused. Fetch their
+            // union once instead of making two identical SQLite hydration passes.
+            let hash_matches = collect_semantic_vector_matches(
+                hash_query_vector
+                    .as_deref()
+                    .expect("shared hydration requires hash vectors"),
                 semantic_limit,
                 ctx.hash_vectors.as_ref(),
                 ctx.base_hash_vectors.as_ref(),
-            )?;
-            merge_semantic_candidates(&mut semantic_by_id, hash_hits, hash_weight, "hash");
-        }
+            );
 
-        if let Some(model) = embedding_model
-            && routing.use_neural
-            && model.model_identity().is_some()
-            && has_neural_vectors
-            && neural_profile_matches
-        {
             neural_executed = true;
             let neural_query_vector = model.embed(query_text);
-            let neural_hits = collect_semantic_candidates(
-                ctx,
-                &path_matcher,
-                options,
+            let neural_matches = collect_semantic_vector_matches(
                 &neural_query_vector,
                 semantic_limit,
                 ctx.neural_vectors.as_ref(),
                 ctx.base_neural_vectors.as_ref(),
+            );
+            semantic_by_id = collect_unfiltered_semantic_candidates(
+                ctx,
+                options,
+                vec![
+                    (hash_matches, hash_weight, "hash"),
+                    (neural_matches, 1.08, "neural"),
+                ],
             )?;
-            merge_semantic_candidates(&mut semantic_by_id, neural_hits, 1.08, "neural");
+        } else {
+            if let Some(hash_query_vector) = hash_query_vector.as_deref() {
+                let hash_hits = collect_semantic_candidates(
+                    ctx,
+                    &path_matcher,
+                    options,
+                    hash_query_vector,
+                    semantic_limit,
+                    ctx.hash_vectors.as_ref(),
+                    ctx.base_hash_vectors.as_ref(),
+                )?;
+                merge_semantic_candidates(&mut semantic_by_id, hash_hits, hash_weight, "hash");
+            }
+
+            if let Some(model) = neural_model {
+                neural_executed = true;
+                let neural_query_vector = model.embed(query_text);
+                let neural_hits = collect_semantic_candidates(
+                    ctx,
+                    &path_matcher,
+                    options,
+                    &neural_query_vector,
+                    semantic_limit,
+                    ctx.neural_vectors.as_ref(),
+                    ctx.base_neural_vectors.as_ref(),
+                )?;
+                merge_semantic_candidates(&mut semantic_by_id, neural_hits, 1.08, "neural");
+            }
         }
 
         semantic_chunks = semantic_by_id.into_values().collect::<Vec<_>>();
@@ -1418,7 +1466,9 @@ pub fn hybrid_search_with_context(
     );
     tracing::trace!("fuse_rrf={:?} merged={}", t0.elapsed(), merged.len());
 
-    // Group hits by file path so we read each file only once
+    let presentation_query = PresentationQuery::new(query_text);
+
+    // Group hits by file path so we read and index each source file only once.
     let merged_len = merged.len();
     let mut hits_by_file: HashMap<PathBuf, Vec<(IndexedChunk, f32, Vec<String>)>> = HashMap::new();
     for (chunk, score, sources) in merged {
@@ -1436,12 +1486,12 @@ pub fn hybrid_search_with_context(
             hits.push(to_hit(
                 workspace,
                 chunk,
-                query_text,
                 score,
                 sources,
+                file_content.as_ref(),
                 HitPresentation {
                     context_lines: options.context,
-                    pre_read_content: file_content.as_deref(),
+                    query: &presentation_query,
                     routing,
                     neural_executed,
                 },
@@ -1482,49 +1532,99 @@ fn semantic_hash_weight(
 fn to_hit(
     workspace: &Workspace,
     chunk: IndexedChunk,
-    query_text: &str,
     score: f32,
     sources: Vec<String>,
+    pre_read_file: Option<&CachedFileContent>,
     presentation: HitPresentation<'_>,
 ) -> Result<SearchHit> {
+    if let Some(file) = pre_read_file {
+        return Ok(to_hit_from_file(
+            chunk,
+            score,
+            sources,
+            &file.content,
+            &file.lines,
+            presentation,
+        ));
+    }
+
+    let file_path = workspace.root.join(&chunk.file_path);
+    match fs::read_to_string(&file_path) {
+        Ok(content) => {
+            let lines = line_spans(&content);
+            Ok(to_hit_from_file(
+                chunk,
+                score,
+                sources,
+                &content,
+                &lines,
+                presentation,
+            ))
+        }
+        Err(_) => Ok(SearchHit {
+            file_path: chunk.file_path,
+            start_line: chunk.start_line,
+            end_line: chunk.end_line,
+            preview: chunk.text,
+            reason: format!(
+                "route={} neural_requested={} neural_executed={}; file no longer on disk",
+                presentation.routing.intent.name(),
+                presentation.routing.use_neural,
+                presentation.neural_executed
+            ),
+            score,
+            sources,
+            neural_requested: presentation.routing.use_neural,
+            neural_executed: presentation.neural_executed,
+        }),
+    }
+}
+
+struct HitPresentation<'a> {
+    context_lines: usize,
+    query: &'a PresentationQuery,
+    routing: QueryRouting,
+    neural_executed: bool,
+}
+
+struct PresentationQuery {
+    text: String,
+    lower: String,
+    compact: String,
+    compact_matching: bool,
+    tokens: Vec<String>,
+}
+
+impl PresentationQuery {
+    fn new(query_text: &str) -> Self {
+        let text = query_text.trim().to_string();
+        let primary_tokens = tokenize_query(&text);
+        Self {
+            lower: text.to_ascii_lowercase(),
+            compact: singularize_token(&compact_identifier(&text)),
+            compact_matching: should_use_compact_identifier_matching(&text, &primary_tokens),
+            tokens: expanded_query_tokens(&text),
+            text,
+        }
+    }
+}
+
+fn to_hit_from_file(
+    chunk: IndexedChunk,
+    score: f32,
+    sources: Vec<String>,
+    content: &str,
+    lines: &[LineSpan],
+    presentation: HitPresentation<'_>,
+) -> SearchHit {
     let HitPresentation {
         context_lines,
-        pre_read_content,
+        query,
         routing,
         neural_executed,
     } = presentation;
-    // Use Cow to avoid cloning the file content when the caller already read it.
-    let content: std::borrow::Cow<'_, str> = match pre_read_content {
-        Some(c) => std::borrow::Cow::Borrowed(c),
-        None => {
-            let file_path = workspace.root.join(&chunk.file_path);
-            match fs::read_to_string(&file_path) {
-                Ok(c) => std::borrow::Cow::Owned(c),
-                Err(_) => {
-                    return Ok(SearchHit {
-                        file_path: chunk.file_path,
-                        start_line: chunk.start_line,
-                        end_line: chunk.end_line,
-                        preview: chunk.text,
-                        reason: format!(
-                            "route={} neural_requested={} neural_executed={}; file no longer on disk",
-                            routing.intent.name(),
-                            routing.use_neural,
-                            neural_executed
-                        ),
-                        score,
-                        sources,
-                        neural_requested: routing.use_neural,
-                        neural_executed,
-                    });
-                }
-            }
-        }
-    };
-
-    let lines = content.lines().collect::<Vec<_>>();
     if lines.is_empty() {
-        return Ok(SearchHit {
+        return SearchHit {
             file_path: chunk.file_path,
             start_line: chunk.start_line,
             end_line: chunk.start_line,
@@ -1539,19 +1639,13 @@ fn to_hit(
             sources,
             neural_requested: routing.use_neural,
             neural_executed,
-        });
+        };
     }
 
-    let focus_line = find_focus_line(&chunk, query_text, &lines);
+    let focus_line = find_focus_line(&chunk, query, content, lines);
     let (snippet_start, snippet_end) = snippet_bounds(focus_line, context_lines, lines.len());
-    let preview = lines[snippet_start.saturating_sub(1)..snippet_end].join("\n");
-    let ranking_reason = summarize_reason(
-        query_text,
-        lines
-            .get(focus_line.saturating_sub(1))
-            .copied()
-            .unwrap_or_default(),
-    );
+    let preview = preview_from_lines(content, lines, snippet_start, snippet_end);
+    let ranking_reason = summarize_reason(query, line_at(content, lines, focus_line));
     let reason = format!(
         "route={} neural_requested={} neural_executed={}; {ranking_reason}",
         routing.intent.name(),
@@ -1559,7 +1653,7 @@ fn to_hit(
         neural_executed
     );
 
-    Ok(SearchHit {
+    SearchHit {
         file_path: chunk.file_path,
         start_line: snippet_start,
         end_line: snippet_end,
@@ -1569,52 +1663,90 @@ fn to_hit(
         sources,
         neural_requested: routing.use_neural,
         neural_executed,
-    })
+    }
 }
 
-struct HitPresentation<'a> {
-    context_lines: usize,
-    pre_read_content: Option<&'a str>,
-    routing: QueryRouting,
-    neural_executed: bool,
+fn line_spans(content: &str) -> Vec<LineSpan> {
+    let bytes = content.as_bytes();
+    let mut spans = Vec::new();
+    let mut start = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte != b'\n' {
+            continue;
+        }
+        let end = if index > start && bytes[index - 1] == b'\r' {
+            index - 1
+        } else {
+            index
+        };
+        spans.push(LineSpan { start, end });
+        start = index + 1;
+    }
+    if start < bytes.len() {
+        spans.push(LineSpan {
+            start,
+            end: bytes.len(),
+        });
+    }
+    spans
 }
 
-fn find_focus_line(chunk: &IndexedChunk, query_text: &str, lines: &[&str]) -> usize {
+fn line_at<'a>(content: &'a str, lines: &[LineSpan], line_number: usize) -> &'a str {
+    let span = lines
+        .get(line_number.saturating_sub(1))
+        .expect("line number must be in bounds");
+    &content[span.start..span.end]
+}
+
+fn preview_from_lines(
+    content: &str,
+    lines: &[LineSpan],
+    snippet_start: usize,
+    snippet_end: usize,
+) -> String {
+    lines[snippet_start.saturating_sub(1)..snippet_end]
+        .iter()
+        .map(|span| &content[span.start..span.end])
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn find_focus_line(
+    chunk: &IndexedChunk,
+    query: &PresentationQuery,
+    content: &str,
+    lines: &[LineSpan],
+) -> usize {
     let line_count = lines.len();
     let window_start = chunk.start_line.max(1).min(line_count);
     let window_end = chunk.end_line.max(window_start).min(line_count);
-    let query = query_text.trim();
-    if query.is_empty() {
+    if query.text.is_empty() {
         return window_start;
     }
-
-    let query_lower = query.to_ascii_lowercase();
-    let query_compact = singularize_token(&compact_identifier(query));
-    let query_tokens = expanded_query_tokens(query);
 
     let mut best_line = window_start;
     let mut best_score = 0.0f32;
 
     for line_no in window_start..=window_end {
-        let line = lines[line_no - 1];
+        let line = line_at(content, lines, line_no);
         let line_lower = line.to_ascii_lowercase();
         let mut line_score = 0.0f32;
 
-        if line.contains(query) {
+        if line.contains(&query.text) {
             line_score += 8.0;
-        } else if line_lower.contains(&query_lower) {
+        } else if line_lower.contains(&query.lower) {
             line_score += 5.0;
         }
 
-        for token in &query_tokens {
+        for token in &query.tokens {
             if line_lower.contains(token) {
                 line_score += 1.5;
             }
         }
 
-        if !query_compact.is_empty() {
+        if query.compact_matching && !query.compact.is_empty() {
             let line_compact = compact_identifier(line);
-            if line_compact.contains(&query_compact) {
+            if line_compact.contains(&query.compact) {
                 line_score += 3.0;
             }
         }
@@ -1628,29 +1760,34 @@ fn find_focus_line(chunk: &IndexedChunk, query_text: &str, lines: &[&str]) -> us
     best_line
 }
 
+fn should_use_compact_identifier_matching(query_text: &str, primary_tokens: &[String]) -> bool {
+    primary_tokens.len() <= 2
+        || query_text
+            .chars()
+            .any(|ch| ch == '_' || ch == '-' || ch == '/' || ch == ':' || ch.is_ascii_uppercase())
+}
+
 fn snippet_bounds(focus_line: usize, context_lines: usize, line_count: usize) -> (usize, usize) {
     let start = focus_line.saturating_sub(context_lines).max(1);
     let end = (focus_line + context_lines).min(line_count);
     (start, end)
 }
 
-fn summarize_reason(query_text: &str, focus_line: &str) -> String {
+fn summarize_reason(query: &PresentationQuery, focus_line: &str) -> String {
     let focus = focus_line.trim();
     if focus.is_empty() {
         return "top hybrid relevance in this file".to_string();
     }
 
-    let query = query_text.trim();
-    if !query.is_empty() {
+    if !query.text.is_empty() {
         let focus_lower = focus.to_ascii_lowercase();
-        let query_lower = query.to_ascii_lowercase();
 
-        if focus.contains(query) || focus_lower.contains(&query_lower) {
+        if focus.contains(&query.text) || focus_lower.contains(&query.lower) {
             return format!("line contains query terms: {}", truncate_for_reason(focus));
         }
 
-        for token in expanded_query_tokens(query) {
-            if focus_lower.contains(&token) {
+        for token in &query.tokens {
+            if focus_lower.contains(token) {
                 return format!(
                     "line matches token `{}`: {}",
                     token,
@@ -2342,10 +2479,7 @@ fn collect_semantic_candidates(
 ) -> Result<Vec<(IndexedChunk, f32)>> {
     const MAX_EXACT_FILTERED_CANDIDATES: usize = 50_000;
 
-    let has_filters = !options.include_globs.is_empty()
-        || !options.exclude_globs.is_empty()
-        || options.scope_filter.is_some()
-        || options.type_filter.is_some();
+    let has_filters = has_semantic_filters(options);
 
     // ANN cannot push path filters into the graph. For focused searches, exact
     // scoring over the filtered subset is both complete and cheap. This avoids
@@ -2384,17 +2518,8 @@ fn collect_semantic_candidates(
         candidate_limit
     };
 
-    let mut matches = Vec::new();
-    if let Some(store) = primary_store {
-        matches.extend(store.search(query_vector, ann_limit));
-    }
-    if let Some(store) = base_store {
-        matches.extend(store.search(query_vector, ann_limit));
-    }
-    matches.sort_by(|a, b| b.score.total_cmp(&a.score));
-    let mut seen_keys = HashSet::new();
-    matches.retain(|vector_match| seen_keys.insert(vector_match.key));
-    matches.truncate(ann_limit);
+    let matches =
+        collect_semantic_vector_matches(query_vector, ann_limit, primary_store, base_store);
 
     // Batch-fetch all candidate chunks in one SQL round-trip.
     let keys: Vec<u64> = matches.iter().map(|m| m.key).collect();
@@ -2424,6 +2549,65 @@ fn collect_semantic_candidates(
     }
 
     Ok(semantic_chunks)
+}
+
+fn has_semantic_filters(options: &SearchOptions) -> bool {
+    !options.include_globs.is_empty()
+        || !options.exclude_globs.is_empty()
+        || options.scope_filter.is_some()
+        || options.type_filter.is_some()
+}
+
+fn collect_semantic_vector_matches(
+    query_vector: &[f32],
+    candidate_limit: usize,
+    primary_store: Option<&VectorStore>,
+    base_store: Option<&VectorStore>,
+) -> Vec<VectorMatch> {
+    let mut matches = Vec::new();
+    if let Some(store) = primary_store {
+        matches.extend(store.search(query_vector, candidate_limit));
+    }
+    if let Some(store) = base_store {
+        matches.extend(store.search(query_vector, candidate_limit));
+    }
+    matches.sort_by(|a, b| b.score.total_cmp(&a.score));
+    let mut seen_keys = HashSet::new();
+    matches.retain(|vector_match| seen_keys.insert(vector_match.key));
+    matches.truncate(candidate_limit);
+    matches
+}
+
+fn collect_unfiltered_semantic_candidates(
+    ctx: &SearchContext,
+    options: &SearchOptions,
+    sources: Vec<(Vec<VectorMatch>, f32, &'static str)>,
+) -> Result<SemanticCandidatesById> {
+    debug_assert!(!has_semantic_filters(options));
+
+    let mut by_key = HashMap::<u64, (f32, HashSet<&'static str>)>::new();
+    for (matches, multiplier, source) in sources {
+        for vector_match in matches {
+            let adjusted = vector_match.score * multiplier;
+            by_key
+                .entry(vector_match.key)
+                .and_modify(|(score, source_set)| {
+                    *score = score.max(adjusted);
+                    source_set.insert(source);
+                })
+                .or_insert_with(|| (adjusted, HashSet::from([source])));
+        }
+    }
+
+    let keys = by_key.keys().copied().collect::<Vec<_>>();
+    let chunks = ctx.fetch_chunks_by_vector_keys_batch(&keys)?;
+    Ok(by_key
+        .into_iter()
+        .filter_map(|(key, (score, sources))| {
+            let chunk = chunks.get(&key)?.clone();
+            (options.skip_gitignore || !chunk.is_ignored).then_some((key, (chunk, score, sources)))
+        })
+        .collect())
 }
 
 fn score_filtered_semantic_candidates(
@@ -2457,7 +2641,7 @@ fn score_filtered_semantic_candidates(
 }
 
 fn merge_semantic_candidates(
-    semantic_by_id: &mut HashMap<u64, (IndexedChunk, f32, HashSet<&'static str>)>,
+    semantic_by_id: &mut SemanticCandidatesById,
     hits: Vec<(IndexedChunk, f32)>,
     score_multiplier: f32,
     source: &'static str,
@@ -2471,6 +2655,51 @@ fn merge_semantic_candidates(
                 sources.insert(source);
             })
             .or_insert_with(|| (chunk, adjusted, HashSet::from([source])));
+    }
+}
+
+struct FusionQuery<'a> {
+    text: &'a str,
+    lower: String,
+    compact: String,
+    path_candidates: [String; 4],
+    tokens: Vec<String>,
+    primary_tokens: Vec<String>,
+    token_compacts: Vec<String>,
+    location_intent: bool,
+    secondary_intent: bool,
+    compact_candidate_text: bool,
+}
+
+impl<'a> FusionQuery<'a> {
+    fn new(query_text: &'a str) -> Self {
+        let text = query_text.trim();
+        let lower = text.to_ascii_lowercase();
+        let primary_tokens = tokenize_query(text);
+        let tokens = expanded_query_tokens(text);
+        let token_compacts = tokens
+            .iter()
+            .map(|token| compact_identifier(token))
+            .collect();
+        let compact_candidate_text = should_use_compact_identifier_matching(text, &primary_tokens);
+        let path_candidates = [
+            lower.clone(),
+            lower.replace(' ', "-"),
+            lower.replace(' ', "_"),
+            lower.replace(' ', ""),
+        ];
+        Self {
+            text,
+            compact: compact_identifier(text),
+            tokens,
+            location_intent: has_location_intent(text),
+            secondary_intent: query_targets_secondary_sources(text),
+            lower,
+            path_candidates,
+            primary_tokens,
+            token_compacts,
+            compact_candidate_text,
+        }
     }
 }
 
@@ -2573,9 +2802,10 @@ fn fuse_rrf_with_context(
         symbols,
     } = candidates;
 
-    let query_tokens = expanded_query_tokens(query_text);
-    let location_intent = has_location_intent(query_text);
-    let secondary_intent = query_targets_secondary_sources(query_text);
+    let query = FusionQuery::new(query_text);
+    let query_tokens = query.tokens.as_slice();
+    let location_intent = query.location_intent;
+    let secondary_intent = query.secondary_intent;
     let direct_ids = lexical
         .iter()
         .map(|(chunk, _)| chunk.vector_key)
@@ -2698,14 +2928,14 @@ fn fuse_rrf_with_context(
         }
     }
 
-    let primary_query_tokens = tokenize_query(query_text);
+    let primary_query_tokens = query.primary_tokens.as_slice();
     let mut file_query_matches: HashMap<u64, HashSet<usize>> = HashMap::new();
     let mut boost_contexts = HashMap::with_capacity(entries.len());
     for (vector_key, entry) in &entries {
         if !rerank_ids.contains(vector_key) {
             continue;
         }
-        let bctx = ChunkBoostContext::new(&entry.chunk);
+        let bctx = ChunkBoostContext::new_with_compact(&entry.chunk, query.compact_candidate_text);
         if primary_query_tokens.len() >= 3 {
             let matches = file_query_matches
                 .entry(path_key(&entry.chunk.file_path))
@@ -2755,28 +2985,31 @@ fn fuse_rrf_with_context(
             // be bounded. Previously these were added directly and several were
             // 10-60x the base RRF score (~0.05), so a single boost could
             // override the fused rank signal entirely.
-            let mut additive_boost = literal_match_boost(query_text, &bctx);
+            let mut additive_boost = literal_match_boost_with_query(&query, &bctx);
 
             let coverage = if !query_tokens.is_empty() {
-                term_coverage_boost(&query_tokens, &bctx)
+                term_coverage_boost(query_tokens, &bctx)
             } else {
                 0.0
             };
             additive_boost += coverage * TERM_COVERAGE_WEIGHT;
 
             if !query_tokens.is_empty() {
-                additive_boost += path_segment_boost(&query_tokens, &bctx) * PATH_SEGMENT_WEIGHT;
+                additive_boost += path_segment_boost(query_tokens, &bctx) * PATH_SEGMENT_WEIGHT;
             }
 
-            additive_boost += path_exact_match_boost(query_text, &bctx) * PATH_EXACT_MATCH_WEIGHT;
+            additive_boost +=
+                path_exact_match_boost_with_query(&query, &bctx) * PATH_EXACT_MATCH_WEIGHT;
 
             if !query_tokens.is_empty() {
-                additive_boost += file_stem_boost(&query_tokens, &bctx) * FILE_STEM_WEIGHT;
+                additive_boost +=
+                    file_stem_boost_with_compact_tokens(query_tokens, &query.token_compacts, &bctx)
+                        * FILE_STEM_WEIGHT;
             }
 
             if !query_tokens.is_empty() {
                 additive_boost +=
-                    definition_name_boost(&query_tokens, &bctx) * DEFINITION_NAME_BONUS;
+                    definition_name_boost(query_tokens, &bctx) * DEFINITION_NAME_BONUS;
             }
 
             if location_intent {
@@ -2818,7 +3051,7 @@ fn fuse_rrf_with_context(
             }
 
             score *= chunk_kind_boost(&chunk);
-            score *= effective_authority_score_with_intent(&query_tokens, &bctx, secondary_intent);
+            score *= effective_authority_score_with_intent(query_tokens, &bctx, secondary_intent);
 
             // Apply chunk-density normalization: 1/n^x where n is the number
             // of chunks this file has in the candidate set. Primary
@@ -3216,14 +3449,20 @@ struct ChunkBoostContext {
     file_stem: Option<String>,
     /// First meaningful line of the chunk (lowercased) — used for definition name boost.
     first_line: String,
-    /// compact_identifier of the full chunk text (for literal_match_boost).
-    text_compact: String,
-    /// compact_identifier of the file path (for literal_match_boost).
-    path_compact: String,
+    /// compact_identifier of the full chunk text, needed only for
+    /// identifier-shaped literal matching.
+    text_compact: Option<String>,
+    /// compact_identifier of the file path, needed only for
+    /// identifier-shaped literal matching.
+    path_compact: Option<String>,
 }
 
 impl ChunkBoostContext {
     fn new(chunk: &IndexedChunk) -> Self {
+        Self::new_with_compact(chunk, true)
+    }
+
+    fn new_with_compact(chunk: &IndexedChunk, include_compact: bool) -> Self {
         let text_lower = chunk.text.to_ascii_lowercase();
         let path_string = index_path_string(&chunk.file_path);
         let path_lower = path_string.to_ascii_lowercase();
@@ -3244,8 +3483,14 @@ impl ChunkBoostContext {
             .unwrap_or_default()
             .to_ascii_lowercase();
 
-        let text_compact = compact_identifier(&chunk.text);
-        let path_compact = compact_identifier(&path_string);
+        let (text_compact, path_compact) = if include_compact {
+            (
+                Some(compact_identifier(&chunk.text)),
+                Some(compact_identifier(&path_string)),
+            )
+        } else {
+            (None, None)
+        };
 
         Self {
             text_lower,
@@ -3291,20 +3536,17 @@ fn path_segment_boost(query_tokens: &[String], bctx: &ChunkBoostContext) -> f32 
 /// file name). Searching "my-service" should rank files under a directory
 /// literally named "my-service/" far above random code mentions.
 fn path_exact_match_boost(query: &str, bctx: &ChunkBoostContext) -> f32 {
-    let query_lower = query.trim().to_ascii_lowercase();
-    if query_lower.is_empty() {
+    let query_context = FusionQuery::new(query);
+    path_exact_match_boost_with_query(&query_context, bctx)
+}
+
+fn path_exact_match_boost_with_query(query: &FusionQuery<'_>, bctx: &ChunkBoostContext) -> f32 {
+    if query.lower.is_empty() {
         return 0.0;
     }
 
-    // Also build variants: "my service" -> "my-service", "my_service"
-    let hyphenated = query_lower.replace(' ', "-");
-    let underscored = query_lower.replace(' ', "_");
-    let compacted = query_lower.replace(' ', "");
-
-    let candidates = [&query_lower, &hyphenated, &underscored, &compacted];
-
     for seg in &bctx.path_segments {
-        for candidate in &candidates {
+        for candidate in &query.path_candidates {
             // Exact segment match: dir name IS the query
             if seg == candidate.as_str() {
                 return 1.0;
@@ -3320,7 +3562,7 @@ fn path_exact_match_boost(query: &str, bctx: &ChunkBoostContext) -> f32 {
 
     // Check if the full path contains the query as a substring
     // (e.g. path has "my-service" embedded in a longer segment)
-    for candidate in &candidates {
+    for candidate in &query.path_candidates {
         if candidate.len() >= 4 && bctx.path_lower.contains(candidate.as_str()) {
             return 0.4;
         }
@@ -3330,6 +3572,18 @@ fn path_exact_match_boost(query: &str, bctx: &ChunkBoostContext) -> f32 {
 }
 
 fn file_stem_boost(query_tokens: &[String], bctx: &ChunkBoostContext) -> f32 {
+    let compact_tokens = query_tokens
+        .iter()
+        .map(|token| compact_identifier(token))
+        .collect::<Vec<_>>();
+    file_stem_boost_with_compact_tokens(query_tokens, &compact_tokens, bctx)
+}
+
+fn file_stem_boost_with_compact_tokens(
+    query_tokens: &[String],
+    compact_tokens: &[String],
+    bctx: &ChunkBoostContext,
+) -> f32 {
     if query_tokens.is_empty() {
         return 0.0;
     }
@@ -3341,7 +3595,8 @@ fn file_stem_boost(query_tokens: &[String], bctx: &ChunkBoostContext) -> f32 {
     let compact_stem = compact_identifier(stem);
     let exact_match = query_tokens
         .iter()
-        .any(|token| *stem == *token || compact_stem == compact_identifier(token));
+        .zip(compact_tokens)
+        .any(|(token, compact_token)| *stem == *token || compact_stem == *compact_token);
     let partial_match = query_tokens
         .iter()
         .any(|token| stem.contains(token.as_str()));
@@ -3394,25 +3649,35 @@ fn definition_name_boost(query_tokens: &[String], bctx: &ChunkBoostContext) -> f
 }
 
 fn literal_match_boost(query_text: &str, bctx: &ChunkBoostContext) -> f32 {
+    let query = FusionQuery::new(query_text);
+    literal_match_boost_with_query(&query, bctx)
+}
+
+fn literal_match_boost_with_query(query: &FusionQuery<'_>, bctx: &ChunkBoostContext) -> f32 {
     const LITERAL_MATCH_BOOST: f32 = 0.20;
     const NORMALIZED_IDENTIFIER_BOOST: f32 = 0.10;
 
-    let query = query_text.trim();
-    if query.is_empty() {
+    if query.text.is_empty() {
         return 0.0;
     }
 
-    let query_lower = query.to_ascii_lowercase();
-    if bctx.text_lower.contains(&query_lower) || bctx.path_lower.contains(&query_lower) {
+    if bctx.text_lower.contains(&query.lower) || bctx.path_lower.contains(&query.lower) {
         return LITERAL_MATCH_BOOST;
     }
 
-    let query_compact = compact_identifier(query);
-    if query_compact.is_empty() {
+    if query.compact.is_empty() {
         return 0.0;
     }
 
-    if bctx.text_compact.contains(&query_compact) || bctx.path_compact.contains(&query_compact) {
+    let text_matches = bctx
+        .text_compact
+        .as_deref()
+        .is_some_and(|text| text.contains(&query.compact));
+    let path_matches = bctx
+        .path_compact
+        .as_deref()
+        .is_some_and(|path| path.contains(&query.compact));
+    if text_matches || path_matches {
         NORMALIZED_IDENTIFIER_BOOST
     } else {
         0.0
@@ -3824,6 +4089,17 @@ mod tests {
         assert_eq!(semantic_hash_weight(true, 100, 100), 0.3);
     }
 
+    #[test]
+    fn fusion_query_compacts_only_identifier_shaped_candidates() {
+        assert!(FusionQuery::new("Router").compact_candidate_text);
+        assert!(FusionQuery::new("path_router").compact_candidate_text);
+        assert!(FusionQuery::new("error handling").compact_candidate_text);
+        assert!(FusionQuery::new("how Router stores matching routes").compact_candidate_text);
+        assert!(!FusionQuery::new("how routes are stored and matched").compact_candidate_text);
+        assert!(PresentationQuery::new("apply filters").compact_matching);
+        assert!(!PresentationQuery::new("how routes are stored and matched").compact_matching);
+    }
+
     struct TestEmbeddingModel384;
 
     impl EmbeddingModel for TestEmbeddingModel384 {
@@ -4217,6 +4493,108 @@ mod tests {
 
     #[test]
     #[serial]
+    fn shared_semantic_hydration_matches_separate_unfiltered_passes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(
+            tmp.path().join("auth.rs"),
+            "pub fn authenticate_user(token: &str) -> bool { !token.is_empty() }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("payment.rs"),
+            "pub fn process_payment(amount: u64) -> u64 { amount }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let hash_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        let neural_model = TestEmbeddingModel384;
+        index_workspace(&workspace, &hash_model).unwrap();
+        enhance_workspace_hash(&workspace, &hash_model).unwrap();
+        crate::indexer::enhance_workspace_neural(&workspace, &neural_model).unwrap();
+
+        let context =
+            SearchContext::load(&workspace, Some(neural_model.dimensions()), true).unwrap();
+        let options = SearchOptions::default();
+        let path_matcher =
+            PathGlobMatcher::new(&options.include_globs, &options.exclude_globs).unwrap();
+        let query = "authenticate user";
+        let candidate_limit = 50;
+        let hash_query_model = HashEmbeddingModel::new(256);
+        let hash_query_vector = hash_query_model.embed(&build_semantic_query_text(query));
+        let neural_query_vector = neural_model.embed(query);
+        let hash_count = context.hash_vectors.as_ref().map_or(0, VectorStore::size);
+        let neural_count = context.neural_vectors.as_ref().map_or(0, VectorStore::size);
+        let hash_weight = semantic_hash_weight(true, neural_count, hash_count);
+
+        let mut separate = HashMap::new();
+        let hash_hits = collect_semantic_candidates(
+            &context,
+            &path_matcher,
+            &options,
+            &hash_query_vector,
+            candidate_limit,
+            context.hash_vectors.as_ref(),
+            context.base_hash_vectors.as_ref(),
+        )
+        .unwrap();
+        merge_semantic_candidates(&mut separate, hash_hits, hash_weight, "hash");
+        let neural_hits = collect_semantic_candidates(
+            &context,
+            &path_matcher,
+            &options,
+            &neural_query_vector,
+            candidate_limit,
+            context.neural_vectors.as_ref(),
+            context.base_neural_vectors.as_ref(),
+        )
+        .unwrap();
+        merge_semantic_candidates(&mut separate, neural_hits, 1.08, "neural");
+
+        let shared = collect_unfiltered_semantic_candidates(
+            &context,
+            &options,
+            vec![
+                (
+                    collect_semantic_vector_matches(
+                        &hash_query_vector,
+                        candidate_limit,
+                        context.hash_vectors.as_ref(),
+                        context.base_hash_vectors.as_ref(),
+                    ),
+                    hash_weight,
+                    "hash",
+                ),
+                (
+                    collect_semantic_vector_matches(
+                        &neural_query_vector,
+                        candidate_limit,
+                        context.neural_vectors.as_ref(),
+                        context.base_neural_vectors.as_ref(),
+                    ),
+                    1.08,
+                    "neural",
+                ),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(shared.len(), separate.len());
+        for (key, (separate_chunk, separate_score, separate_sources)) in separate {
+            let (shared_chunk, shared_score, shared_sources) = shared
+                .get(&key)
+                .expect("shared hydration must preserve every key");
+            assert_eq!(shared_chunk.chunk_id, separate_chunk.chunk_id);
+            assert_eq!(*shared_score, separate_score);
+            assert_eq!(shared_sources, &separate_sources);
+        }
+    }
+
+    #[test]
+    #[serial]
     fn search_uses_neural_vectors_when_available() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
@@ -4566,17 +4944,43 @@ mod tests {
         index_workspace(&workspace, &model).unwrap();
         let context = SearchContext::load(&workspace, None, false).unwrap();
 
-        assert_eq!(
-            context.read_file_content(&path).as_deref(),
-            Some("fn first() {}\n")
-        );
+        let first = context.read_file_content(&path).unwrap();
+        assert_eq!(&*first.content, "fn first() {}\n");
+        assert_eq!(first.lines.len(), 1);
+        assert_eq!(line_at(&first.content, &first.lines, 1), "fn first() {}");
+
         std::fs::write(&path, "fn second_version() {}\n").unwrap();
+        let second = context.read_file_content(&path).unwrap();
+        assert_eq!(&*second.content, "fn second_version() {}\n");
         assert_eq!(
-            context.read_file_content(&path).as_deref(),
-            Some("fn second_version() {}\n")
+            line_at(&second.content, &second.lines, 1),
+            "fn second_version() {}"
         );
+
         std::fs::remove_file(&path).unwrap();
         assert!(context.read_file_content(&path).is_none());
+    }
+
+    #[test]
+    fn cached_line_spans_match_str_lines() {
+        for content in [
+            "",
+            "one",
+            "one\n",
+            "one\ntwo\n",
+            "one\r\ntwo\r\n",
+            "\n",
+            "\r\n",
+            "one\n\ntwo\r\nthree\r",
+            "first\nmultibyte: cafe\u{301}\nlast",
+        ] {
+            let spans = line_spans(content);
+            let actual = spans
+                .iter()
+                .map(|span| &content[span.start..span.end])
+                .collect::<Vec<_>>();
+            assert_eq!(actual, content.lines().collect::<Vec<_>>(), "{content:?}");
+        }
     }
 
     #[test]
@@ -5608,8 +6012,8 @@ export function registerCommands(p: Plugin) {
     fn boost_context_computes_compact_identifiers() {
         let chunk = make_test_chunk("a", "src/my-service.rs", "fn foo_bar() {}", "Function");
         let bctx = ChunkBoostContext::new(&chunk);
-        assert_eq!(bctx.text_compact, "fnfoobar");
-        assert_eq!(bctx.path_compact, "srcmyservicers");
+        assert_eq!(bctx.text_compact.as_deref(), Some("fnfoobar"));
+        assert_eq!(bctx.path_compact.as_deref(), Some("srcmyservicers"));
     }
 
     #[test]
@@ -5618,7 +6022,7 @@ export function registerCommands(p: Plugin) {
         let bctx = ChunkBoostContext::new(&chunk);
         assert!(bctx.text_lower.is_empty());
         assert!(bctx.first_line.is_empty());
-        assert!(bctx.text_compact.is_empty());
+        assert_eq!(bctx.text_compact.as_deref(), Some(""));
     }
 
     #[test]
