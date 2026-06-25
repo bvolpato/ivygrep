@@ -32,6 +32,8 @@ use crate::workspace::{Workspace, WorkspaceMetadata, index_path_string};
 const ZSTD_MAGIC: &[u8] = &[0x28, 0xB5, 0x2F, 0xFD];
 const TANTIVY_WRITE_RETRY_ATTEMPTS: u32 = 16;
 const TANTIVY_WRITE_RETRY_MAX_DELAY_MS: u64 = 800;
+const TANTIVY_INDEX_RETRY_ATTEMPTS: u32 = 3;
+const TANTIVY_INDEX_RETRY_BASE_DELAY_MS: u64 = 250;
 
 #[derive(Clone, Debug)]
 struct RetryingDirectory<D> {
@@ -459,12 +461,14 @@ fn index_workspace_with_options(
     let clean_git_state_before = tracks_reusable_base_state
         .then(|| clean_git_checkout_state(&workspace.root))
         .flatten();
-    let result = index_workspace_inner(
-        workspace,
-        embedding_model,
-        trust_live_watcher,
-        watcher_paths,
-    );
+    let result = retry_transient_tantivy_writes(|| {
+        index_workspace_inner(
+            workspace,
+            embedding_model,
+            trust_live_watcher,
+            watcher_paths,
+        )
+    });
     if result.is_ok() && tracks_reusable_base_state {
         record_indexed_git_state(workspace, clean_git_state_before.as_deref());
     }
@@ -498,6 +502,43 @@ fn index_workspace_with_options(
         }
     }
     result
+}
+
+fn retry_transient_tantivy_writes<T>(mut operation: impl FnMut() -> Result<T>) -> Result<T> {
+    for attempt in 0..TANTIVY_INDEX_RETRY_ATTEMPTS {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(error)
+                if is_transient_tantivy_write_error(&error)
+                    && attempt + 1 < TANTIVY_INDEX_RETRY_ATTEMPTS =>
+            {
+                let delay_ms = TANTIVY_INDEX_RETRY_BASE_DELAY_MS << attempt;
+                tracing::warn!(
+                    attempt = attempt + 1,
+                    delay_ms,
+                    "retrying index after transient Tantivy write denial"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the retry loop always returns on its final attempt")
+}
+
+fn is_transient_tantivy_write_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|source| {
+        matches!(
+            source.downcast_ref::<tantivy::TantivyError>(),
+            Some(
+                tantivy::TantivyError::OpenWriteError(OpenWriteError::IoError {
+                    io_error,
+                    ..
+                })
+            ) | Some(tantivy::TantivyError::IoError(io_error))
+                if io_error.kind() == std::io::ErrorKind::PermissionDenied
+        )
+    })
 }
 
 fn index_workspace_inner(
@@ -3297,6 +3338,47 @@ mod tests {
 
         assert!(matches!(result, Err(OpenWriteError::FileAlreadyExists(_))));
         assert_eq!(attempts.get(), 1);
+    }
+
+    #[test]
+    fn transient_tantivy_write_denial_is_retryable() {
+        let denied = anyhow::Error::from(tantivy::TantivyError::OpenWriteError(
+            OpenWriteError::wrap_io_error(
+                std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                PathBuf::from("segment.fast"),
+            ),
+        ));
+        let missing = anyhow::Error::from(tantivy::TantivyError::OpenWriteError(
+            OpenWriteError::wrap_io_error(
+                std::io::Error::from(std::io::ErrorKind::NotFound),
+                PathBuf::from("segment.fast"),
+            ),
+        ));
+
+        assert!(is_transient_tantivy_write_error(&denied));
+        assert!(!is_transient_tantivy_write_error(&missing));
+    }
+
+    #[test]
+    fn whole_index_retry_retries_transient_tantivy_write_denial() {
+        let attempts = std::cell::Cell::new(0);
+
+        let result: Result<()> = retry_transient_tantivy_writes(|| {
+            let attempt = attempts.get();
+            attempts.set(attempt + 1);
+            if attempt == 0 {
+                return Err(anyhow::Error::from(tantivy::TantivyError::OpenWriteError(
+                    OpenWriteError::wrap_io_error(
+                        std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+                        PathBuf::from("segment.fast"),
+                    ),
+                )));
+            }
+            Ok(())
+        });
+
+        assert!(result.is_ok());
+        assert_eq!(attempts.get(), 2);
     }
 
     #[test]
