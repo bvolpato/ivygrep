@@ -644,7 +644,7 @@ pub fn literal_search_with_context(
             a.start_line
                 .cmp(&b.start_line)
                 .then_with(|| a.end_line.cmp(&b.end_line))
-                .then_with(|| a.chunk_id.cmp(&b.chunk_id))
+                .then_with(|| a.vector_key.cmp(&b.vector_key))
         });
     }
 
@@ -802,7 +802,7 @@ fn collect_literal_candidates_for_queries(
     let mut parser = QueryParser::for_index(&ctx.indexes[0], search_fields);
     parser.set_conjunction_by_default();
 
-    let mut found_ids = HashSet::<String>::new();
+    let mut found_ids = HashSet::<u64>::new();
 
     // Phase 1: Collect candidate chunks from Tantivy (metadata only, no text).
     let mut candidates: Vec<IndexedChunk> = Vec::new();
@@ -830,7 +830,7 @@ fn collect_literal_candidates_for_queries(
                     .filter(|c| scope_matches(c, options.scope_filter.as_ref()))
                     .filter(|c| path_matches(c, path_matcher))
                     .filter(|c| options.skip_gitignore || !c.is_ignored)
-                    && found_ids.insert(chunk.chunk_id.clone())
+                    && found_ids.insert(chunk.vector_key)
                 {
                     candidates.push(chunk);
                     if candidates.len() >= candidate_limit {
@@ -1062,7 +1062,7 @@ pub fn hybrid_search_with_context(
         }
     }
 
-    let mut lexical_by_id = HashMap::<String, (IndexedChunk, f32)>::new();
+    let mut lexical_by_id = HashMap::<u64, (IndexedChunk, f32)>::new();
     let lexical_search_queries = if conjunctive_numeric_query {
         &lexical_queries[..1]
     } else {
@@ -1121,7 +1121,7 @@ pub fn hybrid_search_with_context(
                         score
                     };
                     lexical_by_id
-                        .entry(chunk.chunk_id.clone())
+                        .entry(chunk.vector_key)
                         .and_modify(|(_, best)| *best = best.max(boosted))
                         .or_insert((chunk, boosted));
                 }
@@ -1178,7 +1178,7 @@ pub fn hybrid_search_with_context(
     exact_symbol_chunks.truncate(symbol_candidate_limit);
     let exact_symbol_ids = exact_symbol_chunks
         .iter()
-        .map(|chunk| chunk.chunk_id.clone())
+        .map(|chunk| chunk.vector_key)
         .collect::<HashSet<_>>();
 
     let symbol_query_names = lexical_queries.clone();
@@ -1203,7 +1203,7 @@ pub fn hybrid_search_with_context(
         }
     }
     alias_symbol_chunks.retain(|chunk| {
-        !exact_symbol_ids.contains(&chunk.chunk_id)
+        !exact_symbol_ids.contains(&chunk.vector_key)
             && type_matches(chunk, options.type_filter.as_deref())
             && scope_matches(chunk, options.scope_filter.as_ref())
             && path_matches(chunk, &path_matcher)
@@ -1236,17 +1236,14 @@ pub fn hybrid_search_with_context(
         let path_query_variants = &lexical_queries;
         // Chunks already in the lexical pool are excluded from the path list
         // (they are ranked there); path-only candidates feed the path pass.
-        let lexical_ids: HashSet<String> = lexical_chunks
-            .iter()
-            .map(|(c, _)| c.chunk_id.clone())
-            .collect();
+        let lexical_ids: HashSet<u64> = lexical_chunks.iter().map(|(c, _)| c.vector_key).collect();
 
         // Phase 1: collect path-match candidates from Tantivy. The same chunk
         // can match across multiple query variants/searchers with different
-        // path-field BM25 scores; dedupe by chunk_id and keep the *highest*
+        // path-field BM25 scores; dedupe by vector key and keep the *highest*
         // score, since path ranking (the path RRF pass) depends on it. Keeping
         // the first-seen score would mis-rank depending on iteration order.
-        let mut path_by_id: HashMap<String, (IndexedChunk, f32)> = HashMap::new();
+        let mut path_by_id: HashMap<u64, (IndexedChunk, f32)> = HashMap::new();
         for pq in path_query_variants {
             if let Ok(parsed) = path_parser.parse_query(pq)
                 && let Ok(parsed) =
@@ -1265,10 +1262,10 @@ pub fn hybrid_search_with_context(
                                     .filter(|c| scope_matches(c, options.scope_filter.as_ref()))
                                     .filter(|c| path_matches(c, &path_matcher))
                                     .filter(|c| options.skip_gitignore || !c.is_ignored)
-                                && !lexical_ids.contains(&chunk.chunk_id)
+                                && !lexical_ids.contains(&chunk.vector_key)
                             {
                                 path_by_id
-                                    .entry(chunk.chunk_id.clone())
+                                    .entry(chunk.vector_key)
                                     .and_modify(|(_, s)| {
                                         if score > *s {
                                             *s = score;
@@ -1346,8 +1343,7 @@ pub fn hybrid_search_with_context(
         semantic_hash_weight(neural_available, neural_vector_count, hash_vector_count);
 
     if embedding_model.is_some() && (has_hash_vectors || has_neural_vectors) {
-        let mut semantic_by_id =
-            HashMap::<String, (IndexedChunk, f32, HashSet<&'static str>)>::new();
+        let mut semantic_by_id = HashMap::<u64, (IndexedChunk, f32, HashSet<&'static str>)>::new();
         let semantic_query_text = build_semantic_query_text(trimmed);
 
         if has_hash_vectors {
@@ -2313,9 +2309,7 @@ fn query_filtered_chunks(
         let vector_key = row.get::<_, i64>(7)? as u64;
         let raw_text: Vec<u8> = row.get(5)?;
         Ok(RawIndexedChunk {
-            chunk_id: crate::indexer::logical_chunk_id(
-                &file_path, start_line, end_line, &language, &kind, vector_key,
-            ),
+            chunk_id: String::new(),
             file_path,
             start_line,
             end_line,
@@ -2463,7 +2457,7 @@ fn score_filtered_semantic_candidates(
 }
 
 fn merge_semantic_candidates(
-    semantic_by_id: &mut HashMap<String, (IndexedChunk, f32, HashSet<&'static str>)>,
+    semantic_by_id: &mut HashMap<u64, (IndexedChunk, f32, HashSet<&'static str>)>,
     hits: Vec<(IndexedChunk, f32)>,
     score_multiplier: f32,
     source: &'static str,
@@ -2471,7 +2465,7 @@ fn merge_semantic_candidates(
     for (chunk, score) in hits {
         let adjusted = score * score_multiplier;
         semantic_by_id
-            .entry(chunk.chunk_id.clone())
+            .entry(chunk.vector_key)
             .and_modify(|(_, best_score, sources)| {
                 *best_score = best_score.max(adjusted);
                 sources.insert(source);
@@ -2536,6 +2530,41 @@ fn fuse_rrf_with_context(
     const MAX_BOOST_RATIO: f32 = 3.0;
     const MAX_BOOST_FLOOR: f32 = 0.25;
 
+    fn source_bit(source: &str) -> u16 {
+        match source {
+            "exact-symbol" => 1 << 0,
+            "hash" => 1 << 1,
+            "lexical" => 1 << 2,
+            "literal" => 1 << 3,
+            "neural" => 1 << 4,
+            "path" => 1 << 5,
+            "semantic" => 1 << 6,
+            "symbol" => 1 << 7,
+            _ => 0,
+        }
+    }
+
+    fn source_list(mask: u16) -> Vec<String> {
+        [
+            "exact-symbol",
+            "hash",
+            "lexical",
+            "literal",
+            "neural",
+            "path",
+            "semantic",
+            "symbol",
+        ]
+        .into_iter()
+        .filter(|source| mask & source_bit(source) != 0)
+        .map(str::to_string)
+        .collect()
+    }
+
+    fn path_key(path: &Path) -> u64 {
+        xxhash_rust::xxh3::xxh3_64(path.as_os_str().as_encoded_bytes())
+    }
+
     let FusionCandidates {
         lexical,
         semantic,
@@ -2549,29 +2578,28 @@ fn fuse_rrf_with_context(
     let secondary_intent = query_targets_secondary_sources(query_text);
     let direct_ids = lexical
         .iter()
-        .map(|(chunk, _)| chunk.chunk_id.clone())
-        .chain(literal.iter().map(|(chunk, _)| chunk.chunk_id.clone()))
-        .chain(path.iter().map(|(chunk, _)| chunk.chunk_id.clone()))
-        .chain(symbols.iter().map(|(chunk, _)| chunk.chunk_id.clone()))
+        .map(|(chunk, _)| chunk.vector_key)
+        .chain(literal.iter().map(|(chunk, _)| chunk.vector_key))
+        .chain(path.iter().map(|(chunk, _)| chunk.vector_key))
+        .chain(symbols.iter().map(|(chunk, _)| chunk.vector_key))
         .collect::<HashSet<_>>();
 
     struct RrfEntry {
         score: f32,
         chunk: IndexedChunk,
-        sources: HashSet<&'static str>,
+        sources: u16,
     }
 
-    let mut entries: HashMap<String, RrfEntry> = HashMap::new();
-    let mut add_entry = |chunk: IndexedChunk, score: f32, source: &'static str| {
-        let entry = entries
-            .entry(chunk.chunk_id.clone())
-            .or_insert_with(|| RrfEntry {
-                score: 0.0,
-                chunk,
-                sources: HashSet::new(),
-            });
+    let mut entries: HashMap<u64, RrfEntry> = HashMap::new();
+    let mut add_entry = |chunk: IndexedChunk, score: f32, sources: u16| {
+        let vector_key = chunk.vector_key;
+        let entry = entries.entry(vector_key).or_insert_with(|| RrfEntry {
+            score: 0.0,
+            chunk,
+            sources: 0,
+        });
         entry.score += score;
-        entry.sources.insert(source);
+        entry.sources |= sources;
     };
 
     for (rank, (chunk, lexical_score)) in lexical.into_iter().enumerate() {
@@ -2579,7 +2607,7 @@ fn fuse_rrf_with_context(
             chunk,
             LEXICAL_WEIGHT / (K + rank as f32 + 1.0)
                 + normalize_lexical_score(lexical_score) * LEXICAL_SCORE_WEIGHT,
-            "lexical",
+            source_bit("lexical"),
         );
     }
 
@@ -2587,32 +2615,42 @@ fn fuse_rrf_with_context(
         // Hash vectors are a cheap provisional recall tier. Keep full strength
         // for semantic-only discovery, but do not let hash collisions overrule
         // direct evidence. Neural vectors use semantic_direct_weight=1.0.
-        let direct_weight = if direct_ids.contains(&chunk.chunk_id) {
+        let direct_weight = if direct_ids.contains(&chunk.vector_key) {
             semantic_direct_weight
         } else {
             1.0
         };
-        for source in semantic_sources {
-            add_entry(chunk.clone(), 0.0, source);
-        }
+        let semantic_source_mask = semantic_sources
+            .into_iter()
+            .fold(source_bit("semantic"), |mask, source| {
+                mask | source_bit(source)
+            });
         add_entry(
             chunk,
             direct_weight * SEMANTIC_WEIGHT / (K + rank as f32 + 1.0)
                 + direct_weight * normalize_semantic_score(semantic_score) * SEMANTIC_SCORE_WEIGHT,
-            "semantic",
+            semantic_source_mask,
         );
     }
 
     // Literal pass: verified exact substring matches get a strong boost
     for (rank, (chunk, _)) in literal.into_iter().enumerate() {
-        add_entry(chunk, LITERAL_WEIGHT / (K + rank as f32 + 1.0), "literal");
+        add_entry(
+            chunk,
+            LITERAL_WEIGHT / (K + rank as f32 + 1.0),
+            source_bit("literal"),
+        );
     }
 
     // Path pass: chunks whose file path matches the query, ranked by their
     // path-field BM25 score. Rank-based only — no raw-score magnitude term —
     // so a path match can't dominate via an out-of-scale score.
     for (rank, (chunk, _)) in path.into_iter().enumerate() {
-        add_entry(chunk, PATH_WEIGHT / (K + rank as f32 + 1.0), "path");
+        add_entry(
+            chunk,
+            PATH_WEIGHT / (K + rank as f32 + 1.0),
+            source_bit("path"),
+        );
     }
 
     for (rank, (chunk, exact)) in symbols.into_iter().enumerate() {
@@ -2623,14 +2661,14 @@ fn fuse_rrf_with_context(
             } else {
                 SYMBOL_WEIGHT
             }) / (K + rank as f32 + 1.0),
-            if exact { "exact-symbol" } else { "symbol" },
+            source_bit(if exact { "exact-symbol" } else { "symbol" }),
         );
     }
 
     let rerank_limit = rerank_candidate_limit();
     let mut rerank_order = entries
         .iter()
-        .map(|(chunk_id, entry)| (chunk_id.clone(), entry.score))
+        .map(|(vector_key, entry)| (*vector_key, entry.score))
         .collect::<Vec<_>>();
     rerank_order.sort_by(|left, right| right.1.total_cmp(&left.1));
     let rerank_ids = rerank_order
@@ -2642,15 +2680,15 @@ fn fuse_rrf_with_context(
     if let Some(ctx) = ctx {
         let empty_text_keys = rerank_ids
             .iter()
-            .filter_map(|chunk_id| entries.get(chunk_id))
+            .filter_map(|vector_key| entries.get(vector_key))
             .filter(|entry| entry.chunk.text.is_empty())
             .map(|entry| entry.chunk.vector_key)
             .collect::<Vec<_>>();
         if !empty_text_keys.is_empty()
             && let Ok(batch) = ctx.fetch_chunks_by_vector_keys_batch(&empty_text_keys)
         {
-            for chunk_id in &rerank_ids {
-                if let Some(entry) = entries.get_mut(chunk_id)
+            for vector_key in &rerank_ids {
+                if let Some(entry) = entries.get_mut(vector_key)
                     && entry.chunk.text.is_empty()
                     && let Some(full) = batch.get(&entry.chunk.vector_key)
                 {
@@ -2661,16 +2699,16 @@ fn fuse_rrf_with_context(
     }
 
     let primary_query_tokens = tokenize_query(query_text);
-    let mut file_query_matches: HashMap<PathBuf, HashSet<usize>> = HashMap::new();
+    let mut file_query_matches: HashMap<u64, HashSet<usize>> = HashMap::new();
     let mut boost_contexts = HashMap::with_capacity(entries.len());
-    for (chunk_id, entry) in &entries {
-        if !rerank_ids.contains(chunk_id) {
+    for (vector_key, entry) in &entries {
+        if !rerank_ids.contains(vector_key) {
             continue;
         }
         let bctx = ChunkBoostContext::new(&entry.chunk);
         if primary_query_tokens.len() >= 3 {
             let matches = file_query_matches
-                .entry(entry.chunk.file_path.clone())
+                .entry(path_key(&entry.chunk.file_path))
                 .or_default();
             for (idx, token) in primary_query_tokens.iter().enumerate() {
                 if bctx.text_lower.contains(token.as_str())
@@ -2680,16 +2718,16 @@ fn fuse_rrf_with_context(
                 }
             }
         }
-        boost_contexts.insert(chunk_id.clone(), bctx);
+        boost_contexts.insert(*vector_key, bctx);
     }
 
     // Count how many candidate chunks each file contributes. Secondary-source
     // files with many chunks get a density penalty so they cannot dominate by
     // contributing more candidates; primary implementation files are exempt.
-    let mut file_chunk_counts: HashMap<PathBuf, usize> = HashMap::new();
+    let mut file_chunk_counts: HashMap<u64, usize> = HashMap::new();
     for e in entries.values() {
         *file_chunk_counts
-            .entry(e.chunk.file_path.clone())
+            .entry(path_key(&e.chunk.file_path))
             .or_insert(0) += 1;
     }
 
@@ -2701,20 +2739,16 @@ fn fuse_rrf_with_context(
                 chunk,
                 sources: source_set,
             } = e;
-            let mut source_list = source_set
-                .iter()
-                .map(|source| (*source).to_string())
-                .collect::<Vec<_>>();
-            source_list.sort();
+            let source_list = source_list(source_set);
 
-            if !rerank_ids.contains(&chunk.chunk_id) {
+            if !rerank_ids.contains(&chunk.vector_key) {
                 return (chunk, base_score, source_list);
             }
 
             // Precompute lowercased text/path once per candidate instead of
             // redundantly in every boost function.
             let bctx = boost_contexts
-                .remove(&chunk.chunk_id)
+                .remove(&chunk.vector_key)
                 .unwrap_or_else(|| ChunkBoostContext::new(&chunk));
 
             // Accumulate signal boosts separately from the RRF base so they can
@@ -2756,14 +2790,14 @@ fn fuse_rrf_with_context(
             let boost_cap = (base_score * MAX_BOOST_RATIO).max(MAX_BOOST_FLOOR);
             let mut score = base_score + additive_boost.min(boost_cap);
 
-            if let Some(matches) = file_query_matches.get(&chunk.file_path)
+            if let Some(matches) = file_query_matches.get(&path_key(&chunk.file_path))
                 && matches.len() >= 2
             {
                 let file_coverage = matches.len() as f32 / primary_query_tokens.len() as f32;
                 score *= 1.0 + file_coverage * file_coverage * FILE_COVERAGE_WEIGHT;
             }
 
-            if source_set.contains("literal") {
+            if source_set & source_bit("literal") != 0 {
                 score *= if should_run_literal_pass(query_text) {
                     EXACT_LITERAL_MULTIPLIER
                 } else {
@@ -2771,14 +2805,14 @@ fn fuse_rrf_with_context(
                 };
             }
 
-            if !source_set.contains("lexical") && !source_set.contains("literal") {
+            if source_set & (source_bit("lexical") | source_bit("literal")) == 0 {
                 score *= SEMANTIC_ONLY_PENALTY;
             }
 
             // Chunks with zero query term overlap despite having text are noise
             if !query_tokens.is_empty()
                 && coverage < f32::EPSILON
-                && !source_set.contains("literal")
+                && source_set & source_bit("literal") == 0
             {
                 score *= 0.5;
             }
@@ -2790,7 +2824,7 @@ fn fuse_rrf_with_context(
             // of chunks this file has in the candidate set. Primary
             // implementation files use x=0 and are unaffected.
             let n_file_chunks = file_chunk_counts
-                .get(&chunk.file_path)
+                .get(&path_key(&chunk.file_path))
                 .copied()
                 .unwrap_or(1) as f32;
             score /= n_file_chunks.powf(chunk_density_exponent(&bctx));
@@ -2804,7 +2838,11 @@ fn fuse_rrf_with_context(
         && let Some((_, exact_score, _)) = ranked
             .iter_mut()
             .filter(|(_, _, sources)| sources.iter().any(|source| source == "exact-symbol"))
-            .max_by(|left, right| left.1.total_cmp(&right.1))
+            .max_by(|left, right| {
+                is_definition_kind(&left.0.kind)
+                    .cmp(&is_definition_kind(&right.0.kind))
+                    .then_with(|| left.1.total_cmp(&right.1))
+            })
     {
         *exact_score = max_score + (max_score * 0.01).max(0.01);
     }
@@ -2815,9 +2853,11 @@ fn fuse_rrf_with_context(
     // then aggressively decay. This mirrors web-search result diversity: a
     // second snippet from the same file can still show up, but should not crowd
     // out another authoritative file.
-    let mut file_hit_counts: HashMap<PathBuf, usize> = HashMap::new();
+    let mut file_hit_counts: HashMap<u64, usize> = HashMap::new();
     for item in &mut ranked {
-        let count = file_hit_counts.entry(item.0.file_path.clone()).or_insert(0);
+        let count = file_hit_counts
+            .entry(path_key(&item.0.file_path))
+            .or_insert(0);
         *count += 1;
         match *count {
             1 => {}
@@ -2833,7 +2873,7 @@ fn fuse_rrf_with_context(
         QueryIntent::NaturalLanguage | QueryIntent::DocsTestsExamples | QueryIntent::Mixed
     ) {
         let mut seen_files = HashSet::new();
-        ranked.retain(|(chunk, _, _)| seen_files.insert(chunk.file_path.clone()));
+        ranked.retain(|(chunk, _, _)| seen_files.insert(path_key(&chunk.file_path)));
     }
 
     let mut filtered = filter_meaningful_scores(ranked, query_text);
@@ -2949,14 +2989,14 @@ fn filter_meaningful_scores(
     if enable_backfill && filtered.len() < MIN_FILTERED_RESULTS {
         let mut selected = filtered
             .iter()
-            .map(|(chunk, _, _)| chunk.chunk_id.clone())
+            .map(|(chunk, _, _)| chunk.vector_key)
             .collect::<HashSet<_>>();
         let mut next_backfill_score = filtered
             .last()
             .map(|(_, score, _)| *score * 0.99)
             .unwrap_or(f32::MAX);
         for mut item in backfill {
-            if selected.insert(item.0.chunk_id.clone()) {
+            if selected.insert(item.0.vector_key) {
                 item.1 = item.1.min(next_backfill_score);
                 next_backfill_score = item.1 * 0.99;
                 item.2.push("backfill".to_string());
@@ -5189,7 +5229,7 @@ export function registerCommands(p: Plugin) {
             kind: "function".to_string(),
             text: format!("fn {id}() {{}}"),
             content_hash: id.to_string(),
-            vector_key: 0,
+            vector_key: xxhash_rust::xxh3::xxh3_64(id.as_bytes()),
             is_ignored: false,
         }
     }
@@ -5204,7 +5244,7 @@ export function registerCommands(p: Plugin) {
             kind: "function".to_string(),
             text: text.to_string(),
             content_hash: format!("hash-{id}"),
-            vector_key: 0,
+            vector_key: xxhash_rust::xxh3::xxh3_64(id.as_bytes()),
             is_ignored: false,
         }
     }
@@ -5223,6 +5263,12 @@ export function registerCommands(p: Plugin) {
             "src/error.rs",
             "pub fn handle_error(code: i32) { log(code); }",
         );
+        let mut reexport = make_chunk_with_path(
+            "reexport",
+            "src/lib.rs",
+            "pub use crate::error::handle_error;",
+        );
+        reexport.kind = "Text".to_string();
         let without_symbols = fuse_rrf(
             FusionCandidates {
                 lexical: vec![(usage.clone(), 1.0), (definition.clone(), 1.0)],
@@ -5241,7 +5287,7 @@ export function registerCommands(p: Plugin) {
                 semantic: vec![],
                 literal: vec![],
                 path: vec![],
-                symbols: vec![(definition, true)],
+                symbols: vec![(reexport, true), (definition, true)],
             },
             1.0,
             "handle_error",

@@ -4,6 +4,19 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.12.8] - 2026-06-25
+
+### Performance
+- **Hybrid search avoids repeated identity and provenance allocations.** Candidate deduplication, fusion, and result filtering use persisted vector keys and compact source masks instead of formatted logical IDs and per-candidate hash sets. Criterion improves exact-symbol queries by 4.7%, complex phrases by 2.5%, and bounded reranking by 7.4%.
+- **Symbol indexing uses its existing primary-key B-tree.** The redundant legacy `normalized_name` index is removed, reducing a 100k-chunk index by 3.6 MiB and improving fresh-index timing by 1.3%.
+- **The cache-bypassed 60-query comparison now measures 8.98 ms p50 and 11.70 ms p95 while retaining 1.000 symbol nDCG.**
+
+### Fixed
+- **Exact symbol promotion prefers canonical definitions over re-export text.** This makes precise symbol lookup deterministic when a public re-export and a definition are both candidates.
+
+### Testing
+- Added regression coverage for redundant symbol-index cleanup and canonical-definition promotion.
+
 ## [0.12.7] - 2026-06-24
 
 ### Added
