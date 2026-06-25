@@ -770,7 +770,7 @@
       "label": "Release artifact acceptance gate",
       "path": ".github/workflows/release.yml",
       "publication_commit": "030e32e275494896d4b5e348c6c370f205c0bb69",
-      "sha256": "d38c54ca4f5b2a1917e8f2a6165ab5c573a1e2667dbb688eabff09b37032798e",
+      "sha256": "25c310a3fc4aac43222270098556bd0beade9006498b08708b60cb28ade7ebb8",
       "source_commit": null,
       "summary": {
         "artifact_acceptance": true,
