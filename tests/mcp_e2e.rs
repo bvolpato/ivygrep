@@ -22,6 +22,8 @@ impl Drop for DaemonGuard {
         #[cfg(windows)]
         let _ = Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status();
     }
 }
