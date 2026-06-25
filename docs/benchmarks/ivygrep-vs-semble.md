@@ -1,16 +1,16 @@
 # ivygrep vs Semble
 
-Generated: 2026-06-24T20:21:50.031783+00:00
+Generated: 2026-06-25T02:56:53.971549+00:00
 
 Semble: `41c36f789c007171a1c5d5638f7f4f88573ee9ce` (0.4.1)
-ivygrep: `22a57cd3a48cc233afad719daf8c5c29caf975b1`
+ivygrep: `20c3d3295bc47a09e81ef32ba234917ed241e0c6` + dirty worktree
 
 | Metric | ivygrep | Semble | Winner |
 |---|---:|---:|---|
 | nDCG@10 | 0.813 | 0.801 | ivygrep |
-| Warm query p50 | 9.09 ms | 4.94 ms | Semble |
-| Warm query p95 | 11.93 ms | 21.43 ms | ivygrep |
-| Mean returned tokens | 392 | 1593 | ivygrep |
+| Warm query p50 | 8.98 ms | 4.99 ms | Semble |
+| Warm query p95 | 11.70 ms | 21.60 ms | ivygrep |
+| Mean returned tokens | 393 | 1593 | ivygrep |
 
 ## Quality by query type
 
@@ -26,16 +26,16 @@ Full hybrid-ready time includes ivygrep lexical, hash, and neural phases.
 
 | Repository | ivygrep | Semble | Semble / ivygrep |
 |---|---:|---:|---:|
-| axum | 737 ms | 852 ms | 1.16x |
-| fastapi | 495 ms | 1069 ms | 2.16x |
-| trpc | 620 ms | 568 ms | 0.92x |
+| axum | 740 ms | 851 ms | 1.15x |
+| fastapi | 485 ms | 1072 ms | 2.21x |
+| trpc | 612 ms | 575 ms | 0.94x |
 
 ## One-file refresh
 
 | Metric | ivygrep | Semble |
 |---|---:|---:|
-| Searchable lexical refresh | 65.19 ms | n/a |
-| Full hybrid refresh | 276.20 ms | 819.44 ms |
+| Searchable lexical refresh | 63.80 ms | n/a |
+| Full hybrid refresh | 273.83 ms | 823.67 ms |
 
 ## Verdict
 
