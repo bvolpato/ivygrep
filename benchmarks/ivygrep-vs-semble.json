@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-06-24T20:21:50.031783+00:00",
+  "generated_at": "2026-06-25T02:56:53.971549+00:00",
   "runtime": {
     "system": "Linux",
     "machine": "aarch64",
@@ -8,15 +8,15 @@
     "logical_cpus": 16
   },
   "ivygrep": {
-    "sha": "22a57cd3a48cc233afad719daf8c5c29caf975b1",
-    "dirty": false,
+    "sha": "20c3d3295bc47a09e81ef32ba234917ed241e0c6",
+    "dirty": true,
     "binary": "target/release/ig"
   },
   "semble": {
     "sha": "41c36f789c007171a1c5d5638f7f4f88573ee9ce",
     "version": "0.4.1",
     "model": "minishlab/potion-code-16M",
-    "model_load_ms": 532.6101350074168
+    "model_load_ms": 528.4813710022718
   },
   "repos": [
     "axum",
@@ -30,9 +30,9 @@
     "ivygrep": {
       "queries": 60,
       "ndcg_at_10": 0.8128279428683017,
-      "latency_p50_ms": 9.091851999983191,
-      "latency_p95_ms": 11.927649000426754,
-      "mean_returned_tokens": 392.0833333333333,
+      "latency_p50_ms": 8.981590013718233,
+      "latency_p95_ms": 11.695677996613085,
+      "mean_returned_tokens": 392.51666666666665,
       "by_category": {
         "architecture": 0.7507454939565478,
         "semantic": 0.768695062702487,
@@ -42,8 +42,8 @@
     "semble": {
       "queries": 60,
       "ndcg_at_10": 0.8006351148582128,
-      "latency_p50_ms": 4.941122024320066,
-      "latency_p95_ms": 21.42926599481143,
+      "latency_p50_ms": 4.98829799471423,
+      "latency_p95_ms": 21.59876300720498,
       "mean_returned_tokens": 1593,
       "by_category": {
         "architecture": 0.7451414700929939,
@@ -55,46 +55,46 @@
   "indexing": {
     "axum": {
       "semble": {
-        "index_ms": 851.7813739890698,
-        "index_bytes": 2285380,
+        "index_ms": 851.2267369951587,
+        "index_bytes": 2285381,
         "chunks": 1034
       },
       "ivygrep": {
-        "lexical_ms": 102.9811259941198,
-        "hash_ms": 204.94261401472613,
-        "neural_ms": 428.91781200887635,
-        "ready_ms": 736.8415520177223,
-        "index_bytes": 3478000,
+        "lexical_ms": 107.60345601011068,
+        "hash_ms": 206.01036099833436,
+        "neural_ms": 426.29873898113146,
+        "ready_ms": 739.9125559895765,
+        "index_bytes": 3438761,
         "chunks": 1877
       }
     },
     "fastapi": {
       "semble": {
-        "index_ms": 1068.9897470001597,
+        "index_ms": 1072.3549919785,
         "index_bytes": 2567125,
         "chunks": 1188
       },
       "ivygrep": {
-        "lexical_ms": 116.84036502265371,
-        "hash_ms": 123.58908000169322,
-        "neural_ms": 254.21563399140723,
-        "ready_ms": 494.64507901575416,
-        "index_bytes": 1427521,
+        "lexical_ms": 117.2551600029692,
+        "hash_ms": 122.43627800489776,
+        "neural_ms": 245.68351099151187,
+        "ready_ms": 485.37494899937883,
+        "index_bytes": 1411331,
         "chunks": 509
       }
     },
     "trpc": {
       "semble": {
-        "index_ms": 568.1910949933808,
+        "index_ms": 574.5682470151223,
         "index_bytes": 1561937,
         "chunks": 690
       },
       "ivygrep": {
-        "lexical_ms": 100.20255998824723,
-        "hash_ms": 161.5795809775591,
-        "neural_ms": 357.83282201737165,
-        "ready_ms": 619.614962983178,
-        "index_bytes": 2604430,
+        "lexical_ms": 97.33035101089627,
+        "hash_ms": 162.3979019932449,
+        "neural_ms": 352.28349300450645,
+        "ready_ms": 612.0117460086476,
+        "index_bytes": 2585367,
         "chunks": 1370
       }
     }
@@ -102,10 +102,10 @@
   "refresh": {
     "repo": "axum",
     "mutated_file": "body/mod.rs",
-    "ivygrep_initial_ready_ms": 748.6292620014865,
-    "ivygrep_lexical_refresh_ms": 65.1934240013361,
-    "ivygrep_full_refresh_ms": 276.1966789839789,
-    "semble_full_refresh_ms": 819.4383700028993,
+    "ivygrep_initial_ready_ms": 738.5935960046481,
+    "ivygrep_lexical_refresh_ms": 63.79792798543349,
+    "ivygrep_full_refresh_ms": 273.8250329857692,
+    "semble_full_refresh_ms": 823.6690229969099,
     "semble_chunks": 1034
   },
   "details": [
@@ -116,7 +116,7 @@
       "query": "how axum Handler trait dispatches requests to async handler functions",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 3.7729069881606847,
+      "latency_ms": 3.9480339910369366,
       "returned_tokens": 1811,
       "relevant_ranks": [
         1
@@ -191,7 +191,7 @@
       "query": "Router path_router implementation for storing and matching routes",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 3.76116597908549,
+      "latency_ms": 3.726584982359782,
       "returned_tokens": 1774,
       "relevant_ranks": [
         1
@@ -266,7 +266,7 @@
       "query": "how extractors implement FromRequest and FromRequestParts",
       "engine": "semble",
       "ndcg_at_10": 0.5,
-      "latency_ms": 25.3364079981111,
+      "latency_ms": 25.576253014151007,
       "returned_tokens": 1602,
       "relevant_ranks": [
         3
@@ -341,7 +341,7 @@
       "query": "Path extractor for capturing URL path parameters",
       "engine": "semble",
       "ndcg_at_10": 0.6309297535714575,
-      "latency_ms": 3.4971570130437613,
+      "latency_ms": 3.5748070222325623,
       "returned_tokens": 1602,
       "relevant_ranks": [
         2
@@ -416,7 +416,7 @@
       "query": "State extractor for sharing application state across handlers",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 3.510892012855038,
+      "latency_ms": 3.490531991701573,
       "returned_tokens": 1855,
       "relevant_ranks": [
         1
@@ -491,7 +491,7 @@
       "query": "Json extractor and response for deserializing and serializing JSON bodies",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 3.2107799779623747,
+      "latency_ms": 3.382690978469327,
       "returned_tokens": 1745,
       "relevant_ranks": [
         1
@@ -566,7 +566,7 @@
       "query": "how IntoResponse converts handler return values to HTTP responses",
       "engine": "semble",
       "ndcg_at_10": 0.5,
-      "latency_ms": 21.42926599481143,
+      "latency_ms": 21.76426097867079,
       "returned_tokens": 1801,
       "relevant_ranks": [
         3
@@ -641,7 +641,7 @@
       "query": "from_fn middleware for wrapping handlers with async functions",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 4.147019993979484,
+      "latency_ms": 4.1179620020557195,
       "returned_tokens": 1747,
       "relevant_ranks": [
         1
@@ -716,7 +716,7 @@
       "query": "error handling and how errors are converted to responses",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 4.002937988843769,
+      "latency_ms": 4.0605670074000955,
       "returned_tokens": 1800,
       "relevant_ranks": [
         1
@@ -791,7 +791,7 @@
       "query": "how axum nests routers and merges router trees",
       "engine": "semble",
       "ndcg_at_10": 0.6309297535714575,
-      "latency_ms": 3.9802340033929795,
+      "latency_ms": 4.096529999515042,
       "returned_tokens": 1734,
       "relevant_ranks": [
         2
@@ -866,7 +866,7 @@
       "query": "Form extractor for parsing URL-encoded request bodies",
       "engine": "semble",
       "ndcg_at_10": 0.6309297535714575,
-      "latency_ms": 3.7668100267183036,
+      "latency_ms": 3.7991350109223276,
       "returned_tokens": 1609,
       "relevant_ranks": [
         2
@@ -941,7 +941,7 @@
       "query": "WebSocket upgrade and handler",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 18.258394993608817,
+      "latency_ms": 18.291024985956028,
       "returned_tokens": 1639,
       "relevant_ranks": [
         1
@@ -1016,7 +1016,7 @@
       "query": "how MethodRouter dispatches GET POST PUT DELETE by HTTP method",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 20.648406993132085,
+      "latency_ms": 20.76831299928017,
       "returned_tokens": 1744,
       "relevant_ranks": [
         1
@@ -1091,7 +1091,7 @@
       "query": "BoxedIntoRoute and type-erased route storage",
       "engine": "semble",
       "ndcg_at_10": 0.3010299956639812,
-      "latency_ms": 19.08302801894024,
+      "latency_ms": 19.231031008530408,
       "returned_tokens": 1367,
       "relevant_ranks": [
         9
@@ -1166,7 +1166,7 @@
       "query": "parsing uploaded binary file parts from HTTP requests",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 4.257338994648308,
+      "latency_ms": 4.398363991640508,
       "returned_tokens": 1722,
       "relevant_ranks": [
         1
@@ -1241,7 +1241,7 @@
       "query": "how axum maps Tower middleware layers onto the router",
       "engine": "semble",
       "ndcg_at_10": 0.0,
-      "latency_ms": 4.12908400176093,
+      "latency_ms": 4.276041989214718,
       "returned_tokens": 1817,
       "relevant_ranks": [],
       "hits": [
@@ -1314,7 +1314,7 @@
       "query": "rejection types and rejection responses for failed extractions",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 3.4615949844010174,
+      "latency_ms": 3.540918987710029,
       "returned_tokens": 1723,
       "relevant_ranks": [
         1
@@ -1389,7 +1389,7 @@
       "query": "Router",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 16.49615098722279,
+      "latency_ms": 16.59819099586457,
       "returned_tokens": 1643,
       "relevant_ranks": [
         1
@@ -1464,7 +1464,7 @@
       "query": "IntoResponse",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 17.12662697536871,
+      "latency_ms": 17.058277007890865,
       "returned_tokens": 1421,
       "relevant_ranks": [
         1
@@ -1539,7 +1539,7 @@
       "query": "FromRequest",
       "engine": "semble",
       "ndcg_at_10": 0.3333333333333333,
-      "latency_ms": 16.99426901177503,
+      "latency_ms": 17.055463016731665,
       "returned_tokens": 1548,
       "relevant_ranks": [
         7
@@ -1614,7 +1614,7 @@
       "query": "how does dependency injection work",
       "engine": "semble",
       "ndcg_at_10": 0.46927872602275644,
-      "latency_ms": 2.887038019252941,
+      "latency_ms": 2.986695006256923,
       "returned_tokens": 1598,
       "relevant_ranks": [
         1
@@ -1689,7 +1689,7 @@
       "query": "request validation and error handling",
       "engine": "semble",
       "ndcg_at_10": 0.5437713091520254,
-      "latency_ms": 2.9155270021874458,
+      "latency_ms": 3.0519750143866986,
       "returned_tokens": 1524,
       "relevant_ranks": [
         3,
@@ -1765,7 +1765,7 @@
       "query": "how are routes registered",
       "engine": "semble",
       "ndcg_at_10": 0.9197207891481876,
-      "latency_ms": 2.66193799325265,
+      "latency_ms": 2.8108260012231767,
       "returned_tokens": 1380,
       "relevant_ranks": [
         1,
@@ -1841,7 +1841,7 @@
       "query": "websocket endpoint implementation",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 2.56644599721767,
+      "latency_ms": 2.6501120009925216,
       "returned_tokens": 1521,
       "relevant_ranks": [
         1,
@@ -1917,7 +1917,7 @@
       "query": "OpenAPI schema generation",
       "engine": "semble",
       "ndcg_at_10": 0.5012658353418871,
-      "latency_ms": 17.26095299818553,
+      "latency_ms": 17.728292994434014,
       "returned_tokens": 1522,
       "relevant_ranks": [
         5,
@@ -1993,7 +1993,7 @@
       "query": "middleware stack and CORS",
       "engine": "semble",
       "ndcg_at_10": 0.8315546295836225,
-      "latency_ms": 2.9350959812290967,
+      "latency_ms": 3.078601002926007,
       "returned_tokens": 844,
       "relevant_ranks": [
         1,
@@ -2069,7 +2069,7 @@
       "query": "file upload handling",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 2.897861006204039,
+      "latency_ms": 2.957140008220449,
       "returned_tokens": 1618,
       "relevant_ranks": [
         1
@@ -2144,7 +2144,7 @@
       "query": "response model serialization",
       "engine": "semble",
       "ndcg_at_10": 0.6131471927654584,
-      "latency_ms": 2.3945809807628393,
+      "latency_ms": 2.446058002533391,
       "returned_tokens": 1948,
       "relevant_ranks": [
         1
@@ -2219,7 +2219,7 @@
       "query": "running work after returning an HTTP response without blocking",
       "engine": "semble",
       "ndcg_at_10": 0.3562071871080222,
-      "latency_ms": 3.44136098283343,
+      "latency_ms": 3.5308680089656264,
       "returned_tokens": 1828,
       "relevant_ranks": [
         6
@@ -2294,7 +2294,7 @@
       "query": "security and OAuth2 authentication",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 2.7428909961599857,
+      "latency_ms": 2.7777260111179203,
       "returned_tokens": 2028,
       "relevant_ranks": [
         1,
@@ -2370,7 +2370,7 @@
       "query": "how is response validation and serialization applied before sending",
       "engine": "semble",
       "ndcg_at_10": 0.8065735963827293,
-      "latency_ms": 3.1009709928184748,
+      "latency_ms": 3.0811449978500605,
       "returned_tokens": 2692,
       "relevant_ranks": [
         1,
@@ -2446,7 +2446,7 @@
       "query": "how are nested and sub-dependencies resolved",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 2.8747630130965263,
+      "latency_ms": 2.901664993260056,
       "returned_tokens": 1466,
       "relevant_ranks": [
         1
@@ -2521,7 +2521,7 @@
       "query": "how does FastAPI run sync route functions without blocking",
       "engine": "semble",
       "ndcg_at_10": 0.5109559939712153,
-      "latency_ms": 21.45696699153632,
+      "latency_ms": 21.59876300720498,
       "returned_tokens": 1356,
       "relevant_ranks": [
         7,
@@ -2597,7 +2597,7 @@
       "query": "how are path parameters extracted and type-converted",
       "engine": "semble",
       "ndcg_at_10": 0.5012658353418871,
-      "latency_ms": 3.5379439941607416,
+      "latency_ms": 3.528300003381446,
       "returned_tokens": 1613,
       "relevant_ranks": [
         5,
@@ -2673,7 +2673,7 @@
       "query": "how does exception propagation work through dependency injection",
       "engine": "semble",
       "ndcg_at_10": 0.9197207891481876,
-      "latency_ms": 3.2754039857536554,
+      "latency_ms": 3.3827809966169298,
       "returned_tokens": 1498,
       "relevant_ranks": [
         1,
@@ -2749,7 +2749,7 @@
       "query": "Depends",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 16.22949301963672,
+      "latency_ms": 16.671945981215686,
       "returned_tokens": 1404,
       "relevant_ranks": [
         1,
@@ -2825,7 +2825,7 @@
       "query": "HTTPException",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 16.518723976332694,
+      "latency_ms": 16.754761018091813,
       "returned_tokens": 1426,
       "relevant_ranks": [
         1
@@ -2900,7 +2900,7 @@
       "query": "APIRouter",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 16.85024399193935,
+      "latency_ms": 16.801891004433855,
       "returned_tokens": 1154,
       "relevant_ranks": [
         1
@@ -2975,7 +2975,7 @@
       "query": "BackgroundTasks",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 15.8001089876052,
+      "latency_ms": 15.95760800410062,
       "returned_tokens": 1704,
       "relevant_ranks": [
         1
@@ -3050,7 +3050,7 @@
       "query": "OAuth2PasswordBearer",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 17.24509199266322,
+      "latency_ms": 17.308797017904,
       "returned_tokens": 2021,
       "relevant_ranks": [
         1
@@ -3125,7 +3125,7 @@
       "query": "how a tRPC router is created and procedures are registered",
       "engine": "semble",
       "ndcg_at_10": 0.6131471927654584,
-      "latency_ms": 17.21506199100986,
+      "latency_ms": 17.33468400198035,
       "returned_tokens": 1669,
       "relevant_ranks": [
         1
@@ -3162,15 +3162,15 @@
           "score": 0.01387566730319011
         },
         {
-          "file_path": "adapters/aws-lambda/index.ts",
-          "start_line": 1,
-          "end_line": 23,
-          "score": 0.013797801254268428
-        },
-        {
           "file_path": "adapters/fetch/fetchRequestHandler.ts",
           "start_line": 1,
           "end_line": 15,
+          "score": 0.013797801254268428
+        },
+        {
+          "file_path": "adapters/aws-lambda/index.ts",
+          "start_line": 1,
+          "end_line": 23,
           "score": 0.013797801254268428
         },
         {
@@ -3200,7 +3200,7 @@
       "query": "how middleware chains context transformations between procedures",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 4.565220995573327,
+      "latency_ms": 4.439020995050669,
       "returned_tokens": 1618,
       "relevant_ranks": [
         1
@@ -3275,7 +3275,7 @@
       "query": "how input validation and parsing works for procedures",
       "engine": "semble",
       "ndcg_at_10": 0.6240505200038379,
-      "latency_ms": 5.315285990945995,
+      "latency_ms": 5.072982981801033,
       "returned_tokens": 1552,
       "relevant_ranks": [
         5,
@@ -3351,7 +3351,7 @@
       "query": "how HTTP requests are resolved to tRPC procedures",
       "engine": "semble",
       "ndcg_at_10": 0.21840743681816419,
-      "latency_ms": 16.22026099357754,
+      "latency_ms": 16.23240500339307,
       "returned_tokens": 1440,
       "relevant_ranks": [
         6
@@ -3426,7 +3426,7 @@
       "query": "how error formatting and serialization works",
       "engine": "semble",
       "ndcg_at_10": 0.21840743681816419,
-      "latency_ms": 5.145676987012848,
+      "latency_ms": 5.210639996221289,
       "returned_tokens": 1394,
       "relevant_ranks": [
         6
@@ -3501,7 +3501,7 @@
       "query": "how server-sent events and subscriptions are streamed to the client",
       "engine": "semble",
       "ndcg_at_10": 0.8503449055347546,
-      "latency_ms": 4.4670710049103945,
+      "latency_ms": 4.510833008680493,
       "returned_tokens": 1688,
       "relevant_ranks": [
         1,
@@ -3577,7 +3577,7 @@
       "query": "how the observable pattern is used for subscriptions",
       "engine": "semble",
       "ndcg_at_10": 0.9197207891481876,
-      "latency_ms": 3.9918620022945106,
+      "latency_ms": 4.0045180066954345,
       "returned_tokens": 1398,
       "relevant_ranks": [
         1,
@@ -3653,7 +3653,7 @@
       "query": "how type inference extracts input and output types from procedures",
       "engine": "semble",
       "ndcg_at_10": 0.6309297535714575,
-      "latency_ms": 4.941122024320066,
+      "latency_ms": 4.98829799471423,
       "returned_tokens": 1723,
       "relevant_ranks": [
         2
@@ -3728,7 +3728,7 @@
       "query": "adapting tRPC to run as a Node.js HTTP server handler",
       "engine": "semble",
       "ndcg_at_10": 0.8315546295836225,
-      "latency_ms": 15.403858007630333,
+      "latency_ms": 15.469885023776442,
       "returned_tokens": 1632,
       "relevant_ranks": [
         1,
@@ -3804,7 +3804,7 @@
       "query": "WebSocket adapter for real-time subscriptions",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 17.306836001807824,
+      "latency_ms": 17.31717400252819,
       "returned_tokens": 1428,
       "relevant_ranks": [
         1
@@ -3879,7 +3879,7 @@
       "query": "how tRPC is initialized with root config and context factory",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 17.074622999643907,
+      "latency_ms": 17.104686005041003,
       "returned_tokens": 1592,
       "relevant_ranks": [
         1,
@@ -3955,7 +3955,7 @@
       "query": "how data transformer is applied to serialize and deserialize procedure payloads",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 4.343764012446627,
+      "latency_ms": 4.455234011402354,
       "returned_tokens": 1368,
       "relevant_ranks": [
         1
@@ -4030,7 +4030,7 @@
       "query": "TRPCError",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 13.82066699443385,
+      "latency_ms": 13.657838018843904,
       "returned_tokens": 1278,
       "relevant_ranks": [
         1
@@ -4105,7 +4105,7 @@
       "query": "AnyRouter",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 13.193966005928814,
+      "latency_ms": 13.260455016279593,
       "returned_tokens": 1173,
       "relevant_ranks": [
         1
@@ -4180,7 +4180,7 @@
       "query": "MiddlewareBuilder",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 13.117231021169573,
+      "latency_ms": 13.072130008367822,
       "returned_tokens": 1608,
       "relevant_ranks": [
         1
@@ -4255,7 +4255,7 @@
       "query": "inferProcedureInput",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 13.286912988405675,
+      "latency_ms": 13.39478199952282,
       "returned_tokens": 1496,
       "relevant_ranks": [
         1
@@ -4330,7 +4330,7 @@
       "query": "fetchRequestHandler",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 12.919332017190754,
+      "latency_ms": 12.917324027512223,
       "returned_tokens": 1041,
       "relevant_ranks": [
         1
@@ -4405,7 +4405,7 @@
       "query": "WebSocket adapter for real-time tRPC subscriptions",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 22.36627700040117,
+      "latency_ms": 22.450029995525256,
       "returned_tokens": 1520,
       "relevant_ranks": [
         1
@@ -4480,7 +4480,7 @@
       "query": "how tRPC procedures are defined and chained with input and output validation",
       "engine": "semble",
       "ndcg_at_10": 0.6309297535714575,
-      "latency_ms": 17.687498009763658,
+      "latency_ms": 17.697752977255732,
       "returned_tokens": 1516,
       "relevant_ranks": [
         2
@@ -4555,7 +4555,7 @@
       "query": "how tRPC routers are created and merged",
       "engine": "semble",
       "ndcg_at_10": 1.0,
-      "latency_ms": 16.568488004850224,
+      "latency_ms": 16.595524008153006,
       "returned_tokens": 1597,
       "relevant_ranks": [
         1
@@ -4630,7 +4630,7 @@
       "query": "how axum Handler trait dispatches requests to async handler functions",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 9.211327007506043,
+      "latency_ms": 9.341893979581073,
       "returned_tokens": 337,
       "relevant_ranks": [
         1
@@ -4670,7 +4670,7 @@
           "file_path": "middleware/from_extractor.rs",
           "start_line": 341,
           "end_line": 345,
-          "score": 1.0153482
+          "score": 1.0128355
         },
         {
           "file_path": "extract/matched_path.rs",
@@ -4705,7 +4705,7 @@
       "query": "Router path_router implementation for storing and matching routes",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 9.786951006390154,
+      "latency_ms": 9.962014009943232,
       "returned_tokens": 420,
       "relevant_ranks": [
         1
@@ -4780,7 +4780,7 @@
       "query": "how extractors implement FromRequest and FromRequestParts",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 9.15210199309513,
+      "latency_ms": 9.112741012359038,
       "returned_tokens": 294,
       "relevant_ranks": [
         1
@@ -4855,7 +4855,7 @@
       "query": "Path extractor for capturing URL path parameters",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 8.976512006483972,
+      "latency_ms": 8.733146998565644,
       "returned_tokens": 358,
       "relevant_ranks": [
         1
@@ -4930,7 +4930,7 @@
       "query": "State extractor for sharing application state across handlers",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 9.203088993672282,
+      "latency_ms": 9.305348998168483,
       "returned_tokens": 385,
       "relevant_ranks": [
         1
@@ -5005,7 +5005,7 @@
       "query": "Json extractor and response for deserializing and serializing JSON bodies",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 9.25534698762931,
+      "latency_ms": 9.242407017154619,
       "returned_tokens": 369,
       "relevant_ranks": [
         1
@@ -5039,7 +5039,7 @@
           "file_path": "test_helpers/test_client.rs",
           "start_line": 166,
           "end_line": 170,
-          "score": 0.37411335
+          "score": 0.37411326
         },
         {
           "file_path": "response/mod.rs",
@@ -5080,7 +5080,7 @@
       "query": "how IntoResponse converts handler return values to HTTP responses",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 8.947858994361013,
+      "latency_ms": 9.145988005911931,
       "returned_tokens": 341,
       "relevant_ranks": [
         1
@@ -5155,7 +5155,7 @@
       "query": "from_fn middleware for wrapping handlers with async functions",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 8.775460999459028,
+      "latency_ms": 8.58145800884813,
       "returned_tokens": 331,
       "relevant_ranks": [
         1
@@ -5230,7 +5230,7 @@
       "query": "error handling and how errors are converted to responses",
       "engine": "ivygrep",
       "ndcg_at_10": 0.6309297535714575,
-      "latency_ms": 9.72061199718155,
+      "latency_ms": 9.115162014495581,
       "returned_tokens": 528,
       "relevant_ranks": [
         2
@@ -5305,7 +5305,7 @@
       "query": "how axum nests routers and merges router trees",
       "engine": "ivygrep",
       "ndcg_at_10": 0.6309297535714575,
-      "latency_ms": 9.047872998053208,
+      "latency_ms": 8.807116013485938,
       "returned_tokens": 426,
       "relevant_ranks": [
         2
@@ -5380,7 +5380,7 @@
       "query": "Form extractor for parsing URL-encoded request bodies",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 10.19971101777628,
+      "latency_ms": 9.537317004287615,
       "returned_tokens": 430,
       "relevant_ranks": [
         1
@@ -5436,8 +5436,8 @@
         },
         {
           "file_path": "test_helpers/test_client.rs",
-          "start_line": 49,
-          "end_line": 53,
+          "start_line": 61,
+          "end_line": 65,
           "score": 0.28504086
         },
         {
@@ -5455,8 +5455,8 @@
       "query": "WebSocket upgrade and handler",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 8.245563978562132,
-      "returned_tokens": 337,
+      "latency_ms": 8.213163004256785,
+      "returned_tokens": 341,
       "relevant_ranks": [
         1
       ],
@@ -5469,8 +5469,8 @@
         },
         {
           "file_path": "extract/connect_info.rs",
-          "start_line": 376,
-          "end_line": 380,
+          "start_line": 393,
+          "end_line": 397,
           "score": 1.4976587
         },
         {
@@ -5530,7 +5530,7 @@
       "query": "how MethodRouter dispatches GET POST PUT DELETE by HTTP method",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 9.560185018926859,
+      "latency_ms": 9.661402989877388,
       "returned_tokens": 380,
       "relevant_ranks": [
         1
@@ -5574,8 +5574,8 @@
         },
         {
           "file_path": "routing/tests/get_to_head.rs",
-          "start_line": 7,
-          "end_line": 11,
+          "start_line": 41,
+          "end_line": 45,
           "score": 0.29306033
         },
         {
@@ -5605,7 +5605,7 @@
       "query": "BoxedIntoRoute and type-erased route storage",
       "engine": "ivygrep",
       "ndcg_at_10": 0.6309297535714575,
-      "latency_ms": 8.368486975086853,
+      "latency_ms": 8.508400991559029,
       "returned_tokens": 393,
       "relevant_ranks": [
         2
@@ -5680,7 +5680,7 @@
       "query": "parsing uploaded binary file parts from HTTP requests",
       "engine": "ivygrep",
       "ndcg_at_10": 0.5,
-      "latency_ms": 9.278026991523802,
+      "latency_ms": 9.13851402583532,
       "returned_tokens": 314,
       "relevant_ranks": [
         3
@@ -5755,7 +5755,7 @@
       "query": "how axum maps Tower middleware layers onto the router",
       "engine": "ivygrep",
       "ndcg_at_10": 0.0,
-      "latency_ms": 9.389263985212892,
+      "latency_ms": 9.069286985322833,
       "returned_tokens": 415,
       "relevant_ranks": [],
       "hits": [
@@ -5828,7 +5828,7 @@
       "query": "rejection types and rejection responses for failed extractions",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 8.953266980824992,
+      "latency_ms": 8.789500017883256,
       "returned_tokens": 417,
       "relevant_ranks": [
         1
@@ -5903,7 +5903,7 @@
       "query": "Router",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 10.324970004148781,
+      "latency_ms": 10.466121981153265,
       "returned_tokens": 314,
       "relevant_ranks": [
         1
@@ -5978,7 +5978,7 @@
       "query": "IntoResponse",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 11.768452008254826,
+      "latency_ms": 11.695677996613085,
       "returned_tokens": 395,
       "relevant_ranks": [
         1
@@ -6018,7 +6018,7 @@
           "file_path": "extract/path/mod.rs",
           "start_line": 587,
           "end_line": 591,
-          "score": 2.7156534
+          "score": 2.7170882
         },
         {
           "file_path": "handler/mod.rs",
@@ -6053,7 +6053,7 @@
       "query": "FromRequest",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 11.927649000426754,
+      "latency_ms": 11.40245099668391,
       "returned_tokens": 246,
       "relevant_ranks": [
         1
@@ -6128,7 +6128,7 @@
       "query": "how does dependency injection work",
       "engine": "ivygrep",
       "ndcg_at_10": 0.5307212739772434,
-      "latency_ms": 8.626407012343407,
+      "latency_ms": 8.801635005511343,
       "returned_tokens": 455,
       "relevant_ranks": [
         3,
@@ -6163,7 +6163,7 @@
           "file_path": "security/api_key.py",
           "start_line": 60,
           "end_line": 64,
-          "score": 0.6084591
+          "score": 0.6065391
         },
         {
           "file_path": "routing.py",
@@ -6204,7 +6204,7 @@
       "query": "request validation and error handling",
       "engine": "ivygrep",
       "ndcg_at_10": 0.9197207891481876,
-      "latency_ms": 9.329579974291846,
+      "latency_ms": 8.981590013718233,
       "returned_tokens": 415,
       "relevant_ranks": [
         3,
@@ -6280,7 +6280,7 @@
       "query": "how are routes registered",
       "engine": "ivygrep",
       "ndcg_at_10": 0.8772153153380493,
-      "latency_ms": 11.229440977331251,
+      "latency_ms": 10.628772026393563,
       "returned_tokens": 303,
       "relevant_ranks": [
         1,
@@ -6356,7 +6356,7 @@
       "query": "websocket endpoint implementation",
       "engine": "ivygrep",
       "ndcg_at_10": 0.7903864795495061,
-      "latency_ms": 8.097510988591239,
+      "latency_ms": 8.031993987970054,
       "returned_tokens": 499,
       "relevant_ranks": [
         10,
@@ -6432,7 +6432,7 @@
       "query": "OpenAPI schema generation",
       "engine": "ivygrep",
       "ndcg_at_10": 0.6052602440527057,
-      "latency_ms": 10.506074002478272,
+      "latency_ms": 10.590518999379128,
       "returned_tokens": 529,
       "relevant_ranks": [
         6,
@@ -6467,7 +6467,7 @@
           "file_path": "security/api_key.py",
           "start_line": 238,
           "end_line": 242,
-          "score": 2.2825136
+          "score": 2.2812696
         },
         {
           "file_path": "openapi/utils.py",
@@ -6508,7 +6508,7 @@
       "query": "middleware stack and CORS",
       "engine": "ivygrep",
       "ndcg_at_10": 0.6509209298071326,
-      "latency_ms": 11.04267401387915,
+      "latency_ms": 10.820074996445328,
       "returned_tokens": 380,
       "relevant_ranks": [
         4,
@@ -6584,7 +6584,7 @@
       "query": "file upload handling",
       "engine": "ivygrep",
       "ndcg_at_10": 0.6309297535714575,
-      "latency_ms": 10.014184023020789,
+      "latency_ms": 10.169579007197171,
       "returned_tokens": 423,
       "relevant_ranks": [
         2
@@ -6659,7 +6659,7 @@
       "query": "response model serialization",
       "engine": "ivygrep",
       "ndcg_at_10": 0.3065735963827292,
-      "latency_ms": 8.908146992325783,
+      "latency_ms": 8.677499979967251,
       "returned_tokens": 405,
       "relevant_ranks": [
         3
@@ -6734,7 +6734,7 @@
       "query": "running work after returning an HTTP response without blocking",
       "engine": "ivygrep",
       "ndcg_at_10": 0.3010299956639812,
-      "latency_ms": 10.374267003498971,
+      "latency_ms": 10.104364977451041,
       "returned_tokens": 468,
       "relevant_ranks": [
         9
@@ -6809,7 +6809,7 @@
       "query": "security and OAuth2 authentication",
       "engine": "ivygrep",
       "ndcg_at_10": 0.7977228895450266,
-      "latency_ms": 9.256643999833614,
+      "latency_ms": 9.335723996628076,
       "returned_tokens": 399,
       "relevant_ranks": [
         1,
@@ -6885,7 +6885,7 @@
       "query": "how is response validation and serialization applied before sending",
       "engine": "ivygrep",
       "ndcg_at_10": 0.38685280723454163,
-      "latency_ms": 9.657728020101786,
+      "latency_ms": 9.815363999223337,
       "returned_tokens": 310,
       "relevant_ranks": [
         2
@@ -6960,8 +6960,8 @@
       "query": "how are nested and sub-dependencies resolved",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 8.778498013271019,
-      "returned_tokens": 453,
+      "latency_ms": 8.722522004973143,
+      "returned_tokens": 484,
       "relevant_ranks": [
         1
       ],
@@ -7000,7 +7000,7 @@
           "file_path": "security/api_key.py",
           "start_line": 60,
           "end_line": 64,
-          "score": 0.51405275
+          "score": 0.51445633
         },
         {
           "file_path": "params.py",
@@ -7010,21 +7010,21 @@
         },
         {
           "file_path": "_compat/shared.py",
-          "start_line": 171,
-          "end_line": 175,
-          "score": 0.35254508
-        },
-        {
-          "file_path": "openapi/docs.py",
-          "start_line": 195,
-          "end_line": 199,
-          "score": 0.17179593
+          "start_line": 156,
+          "end_line": 160,
+          "score": 0.17172143
         },
         {
           "file_path": "security/http.py",
           "start_line": 226,
           "end_line": 230,
           "score": 0.16811493
+        },
+        {
+          "file_path": "security/oauth2.py",
+          "start_line": 653,
+          "end_line": 657,
+          "score": 0.1643509
         }
       ]
     },
@@ -7035,7 +7035,7 @@
       "query": "how does FastAPI run sync route functions without blocking",
       "engine": "ivygrep",
       "ndcg_at_10": 0.3065735963827292,
-      "latency_ms": 16.238772019278258,
+      "latency_ms": 15.70038401405327,
       "returned_tokens": 346,
       "relevant_ranks": [
         3
@@ -7075,7 +7075,7 @@
           "file_path": "security/api_key.py",
           "start_line": 163,
           "end_line": 167,
-          "score": 1.5960673
+          "score": 1.5967911
         },
         {
           "file_path": "exceptions.py",
@@ -7110,7 +7110,7 @@
       "query": "how are path parameters extracted and type-converted",
       "engine": "ivygrep",
       "ndcg_at_10": 0.8175295903539445,
-      "latency_ms": 11.085849982919171,
+      "latency_ms": 10.885692026931792,
       "returned_tokens": 411,
       "relevant_ranks": [
         1,
@@ -7121,13 +7121,13 @@
           "file_path": "routing.py",
           "start_line": 3186,
           "end_line": 3190,
-          "score": 2.263085
+          "score": 2.2603047
         },
         {
           "file_path": "applications.py",
           "start_line": 2910,
           "end_line": 2914,
-          "score": 2.2429597
+          "score": 2.2405794
         },
         {
           "file_path": "openapi/models.py",
@@ -7186,7 +7186,7 @@
       "query": "how does exception propagation work through dependency injection",
       "engine": "ivygrep",
       "ndcg_at_10": 0.6240505200038379,
-      "latency_ms": 17.276058992138132,
+      "latency_ms": 17.22798400442116,
       "returned_tokens": 478,
       "relevant_ranks": [
         2,
@@ -7215,7 +7215,7 @@
           "file_path": "exception_handlers.py",
           "start_line": 18,
           "end_line": 22,
-          "score": 1.0199748
+          "score": 1.0200673
         },
         {
           "file_path": "routing.py",
@@ -7262,7 +7262,7 @@
       "query": "Depends",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 10.379419982200488,
+      "latency_ms": 10.711766983149573,
       "returned_tokens": 380,
       "relevant_ranks": [
         2,
@@ -7279,7 +7279,7 @@
           "file_path": "params.py",
           "start_line": 744,
           "end_line": 748,
-          "score": 10.803414
+          "score": 10.801611
         },
         {
           "file_path": "__init__.py",
@@ -7297,7 +7297,7 @@
           "file_path": "exceptions.py",
           "start_line": 167,
           "end_line": 171,
-          "score": 2.8453915
+          "score": 2.8526037
         },
         {
           "file_path": "routing.py",
@@ -7315,13 +7315,13 @@
           "file_path": "security/api_key.py",
           "start_line": 64,
           "end_line": 68,
-          "score": 2.1258276
+          "score": 2.1273553
         },
         {
           "file_path": "applications.py",
           "start_line": 1315,
           "end_line": 1319,
-          "score": 2.0142188
+          "score": 2.0158615
         },
         {
           "file_path": "dependencies/utils.py",
@@ -7338,7 +7338,7 @@
       "query": "HTTPException",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 8.991634007543325,
+      "latency_ms": 9.328978980192915,
       "returned_tokens": 505,
       "relevant_ranks": [
         1
@@ -7413,7 +7413,7 @@
       "query": "APIRouter",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 16.37808801024221,
+      "latency_ms": 16.18263398995623,
       "returned_tokens": 389,
       "relevant_ranks": [
         1
@@ -7488,7 +7488,7 @@
       "query": "BackgroundTasks",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 10.718537989305332,
+      "latency_ms": 10.752086993306875,
       "returned_tokens": 497,
       "relevant_ranks": [
         1
@@ -7563,7 +7563,7 @@
       "query": "OAuth2PasswordBearer",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 9.437100001377985,
+      "latency_ms": 9.335125010693446,
       "returned_tokens": 419,
       "relevant_ranks": [
         1
@@ -7638,8 +7638,8 @@
       "query": "how a tRPC router is created and procedures are registered",
       "engine": "ivygrep",
       "ndcg_at_10": 0.9197207891481876,
-      "latency_ms": 9.091851999983191,
-      "returned_tokens": 393,
+      "latency_ms": 8.358140010386705,
+      "returned_tokens": 383,
       "relevant_ranks": [
         1,
         3
@@ -7665,9 +7665,9 @@
         },
         {
           "file_path": "unstable-core-do-not-import/procedure.ts",
-          "start_line": 56,
-          "end_line": 60,
-          "score": 1.4863786
+          "start_line": 53,
+          "end_line": 57,
+          "score": 1.4871253
         },
         {
           "file_path": "unstable-core-do-not-import/router.test.ts",
@@ -7714,7 +7714,7 @@
       "query": "how middleware chains context transformations between procedures",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 8.499876013956964,
+      "latency_ms": 7.8806910023558885,
       "returned_tokens": 397,
       "relevant_ranks": [
         1
@@ -7745,22 +7745,22 @@
           "score": 1.0892363
         },
         {
-          "file_path": "shared.ts",
-          "start_line": 3,
-          "end_line": 7,
-          "score": 0.5683551
-        },
-        {
           "file_path": "adapters/node-http/types.ts",
           "start_line": 74,
           "end_line": 78,
-          "score": 0.56267154
+          "score": 0.56804913
+        },
+        {
+          "file_path": "shared.ts",
+          "start_line": 3,
+          "end_line": 7,
+          "score": 0.56236863
         },
         {
           "file_path": "unstable-core-do-not-import/initTRPC.ts",
           "start_line": 120,
           "end_line": 124,
-          "score": 0.5569268
+          "score": 0.55674493
         },
         {
           "file_path": "__tests__/trpcServerResource.ts",
@@ -7789,7 +7789,7 @@
       "query": "how input validation and parsing works for procedures",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 8.963589003542438,
+      "latency_ms": 8.43562898808159,
       "returned_tokens": 374,
       "relevant_ranks": [
         1,
@@ -7818,7 +7818,7 @@
           "file_path": "unstable-core-do-not-import/procedure.ts",
           "start_line": 53,
           "end_line": 57,
-          "score": 1.4031942
+          "score": 1.4023523
         },
         {
           "file_path": "unstable-core-do-not-import/http/contentTypeParsers.ts",
@@ -7865,7 +7865,7 @@
       "query": "how HTTP requests are resolved to tRPC procedures",
       "engine": "ivygrep",
       "ndcg_at_10": 0.38685280723454163,
-      "latency_ms": 9.023396007250994,
+      "latency_ms": 8.476087998133153,
       "returned_tokens": 377,
       "relevant_ranks": [
         2
@@ -7923,7 +7923,7 @@
           "file_path": "@trpc/server/index.ts",
           "start_line": 45,
           "end_line": 49,
-          "score": 1.3341699
+          "score": 1.3331667
         },
         {
           "file_path": "unstable-core-do-not-import/rpc/envelopes.ts",
@@ -7940,8 +7940,8 @@
       "query": "how error formatting and serialization works",
       "engine": "ivygrep",
       "ndcg_at_10": 0.6131471927654584,
-      "latency_ms": 8.100448991172016,
-      "returned_tokens": 442,
+      "latency_ms": 7.885006023570895,
+      "returned_tokens": 443,
       "relevant_ranks": [
         1
       ],
@@ -7978,9 +7978,9 @@
         },
         {
           "file_path": "observable/operators.ts",
-          "start_line": 17,
-          "end_line": 21,
-          "score": 0.73650384
+          "start_line": 101,
+          "end_line": 105,
+          "score": 0.7363767
         },
         {
           "file_path": "observable/observable.ts",
@@ -8015,8 +8015,8 @@
       "query": "how server-sent events and subscriptions are streamed to the client",
       "engine": "ivygrep",
       "ndcg_at_10": 0.19342640361727081,
-      "latency_ms": 9.153488994343206,
-      "returned_tokens": 400,
+      "latency_ms": 8.865512994816527,
+      "returned_tokens": 399,
       "relevant_ranks": [
         8
       ],
@@ -8035,8 +8035,8 @@
         },
         {
           "file_path": "@trpc/server/index.ts",
-          "start_line": 14,
-          "end_line": 18,
+          "start_line": 15,
+          "end_line": 19,
           "score": 1.3780656
         },
         {
@@ -8090,7 +8090,7 @@
       "query": "how the observable pattern is used for subscriptions",
       "engine": "ivygrep",
       "ndcg_at_10": 0.8772153153380493,
-      "latency_ms": 7.454302016412839,
+      "latency_ms": 7.69979998585768,
       "returned_tokens": 369,
       "relevant_ranks": [
         1,
@@ -8101,7 +8101,7 @@
           "file_path": "observable/observable.ts",
           "start_line": 159,
           "end_line": 163,
-          "score": 1.4478695
+          "score": 1.4475825
         },
         {
           "file_path": "observable/index.ts",
@@ -8166,7 +8166,7 @@
       "query": "how type inference extracts input and output types from procedures",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 8.509934996254742,
+      "latency_ms": 8.438499993644655,
       "returned_tokens": 340,
       "relevant_ranks": [
         1
@@ -8188,13 +8188,13 @@
           "file_path": "shared.ts",
           "start_line": 3,
           "end_line": 7,
-          "score": 2.2405243
+          "score": 2.2407348
         },
         {
           "file_path": "@trpc/server/index.ts",
           "start_line": 12,
           "end_line": 16,
-          "score": 2.2352884
+          "score": 2.2354622
         },
         {
           "file_path": "unstable-core-do-not-import/http/contentTypeParsers.ts",
@@ -8241,7 +8241,7 @@
       "query": "adapting tRPC to run as a Node.js HTTP server handler",
       "engine": "ivygrep",
       "ndcg_at_10": 0.7903864795495061,
-      "latency_ms": 8.184970007278025,
+      "latency_ms": 8.287951990496367,
       "returned_tokens": 364,
       "relevant_ranks": [
         1,
@@ -8317,8 +8317,8 @@
       "query": "WebSocket adapter for real-time subscriptions",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 8.369494986254722,
-      "returned_tokens": 386,
+      "latency_ms": 8.350189018528908,
+      "returned_tokens": 385,
       "relevant_ranks": [
         1
       ],
@@ -8343,8 +8343,8 @@
         },
         {
           "file_path": "@trpc/server/index.ts",
-          "start_line": 14,
-          "end_line": 18,
+          "start_line": 15,
+          "end_line": 19,
           "score": 0.5931738
         },
         {
@@ -8392,7 +8392,7 @@
       "query": "how tRPC is initialized with root config and context factory",
       "engine": "ivygrep",
       "ndcg_at_10": 0.9197207891481876,
-      "latency_ms": 8.151549991453066,
+      "latency_ms": 8.308637014124542,
       "returned_tokens": 394,
       "relevant_ranks": [
         1,
@@ -8468,8 +8468,8 @@
       "query": "how data transformer is applied to serialize and deserialize procedure payloads",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 8.686485001817346,
-      "returned_tokens": 421,
+      "latency_ms": 8.884269976988435,
+      "returned_tokens": 408,
       "relevant_ranks": [
         1
       ],
@@ -8518,8 +8518,8 @@
         },
         {
           "file_path": "unstable-core-do-not-import/procedure.ts",
-          "start_line": 59,
-          "end_line": 63,
+          "start_line": 53,
+          "end_line": 57,
           "score": 0.25138336
         },
         {
@@ -8543,7 +8543,7 @@
       "query": "TRPCError",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 8.385428984183818,
+      "latency_ms": 8.246426994446665,
       "returned_tokens": 347,
       "relevant_ranks": [
         1
@@ -8618,7 +8618,7 @@
       "query": "AnyRouter",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 10.015595995355397,
+      "latency_ms": 9.907523985020816,
       "returned_tokens": 396,
       "relevant_ranks": [
         1
@@ -8640,7 +8640,7 @@
           "file_path": "unstable-core-do-not-import/clientish/inference.ts",
           "start_line": 53,
           "end_line": 57,
-          "score": 3.2362635
+          "score": 3.2345598
         },
         {
           "file_path": "unstable-core-do-not-import/http/types.ts",
@@ -8693,7 +8693,7 @@
       "query": "MiddlewareBuilder",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 8.506406011292711,
+      "latency_ms": 8.449396991636604,
       "returned_tokens": 366,
       "relevant_ranks": [
         1
@@ -8768,7 +8768,7 @@
       "query": "inferProcedureInput",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 8.08751699514687,
+      "latency_ms": 8.097987971268594,
       "returned_tokens": 415,
       "relevant_ranks": [
         1
@@ -8843,7 +8843,7 @@
       "query": "fetchRequestHandler",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 8.490102016367018,
+      "latency_ms": 8.713700983207673,
       "returned_tokens": 354,
       "relevant_ranks": [
         1
@@ -8918,7 +8918,7 @@
       "query": "WebSocket adapter for real-time tRPC subscriptions",
       "engine": "ivygrep",
       "ndcg_at_10": 0.5,
-      "latency_ms": 7.867150998208672,
+      "latency_ms": 7.8576749947387725,
       "returned_tokens": 346,
       "relevant_ranks": [
         3
@@ -8934,7 +8934,7 @@
           "file_path": "unstable-core-do-not-import/rpc/envelopes.ts",
           "start_line": 71,
           "end_line": 75,
-          "score": 1.2839357
+          "score": 1.2825942
         },
         {
           "file_path": "adapters/ws.ts",
@@ -8970,19 +8970,19 @@
           "file_path": "adapters/fetch/fetchRequestHandler.ts",
           "start_line": 1,
           "end_line": 4,
-          "score": 0.55265623
+          "score": 0.5523392
         },
         {
           "file_path": "adapters/standalone.ts",
           "start_line": 1,
           "end_line": 4,
-          "score": 0.5471297
+          "score": 0.5468158
         },
         {
           "file_path": "adapters/node-http/nodeHTTPRequestHandler.ts",
           "start_line": 1,
           "end_line": 4,
-          "score": 0.5416584
+          "score": 0.5413477
         }
       ]
     },
@@ -8993,7 +8993,7 @@
       "query": "how tRPC procedures are defined and chained with input and output validation",
       "engine": "ivygrep",
       "ndcg_at_10": 0.6309297535714575,
-      "latency_ms": 8.798099996056408,
+      "latency_ms": 8.568577002733946,
       "returned_tokens": 405,
       "relevant_ranks": [
         2
@@ -9068,8 +9068,8 @@
       "query": "how tRPC routers are created and merged",
       "engine": "ivygrep",
       "ndcg_at_10": 1.0,
-      "latency_ms": 8.21834898670204,
-      "returned_tokens": 345,
+      "latency_ms": 7.77936598751694,
+      "returned_tokens": 360,
       "relevant_ranks": [
         1
       ],
@@ -9118,8 +9118,8 @@
         },
         {
           "file_path": "unstable-core-do-not-import/createProxy.test.ts",
-          "start_line": 32,
-          "end_line": 36,
+          "start_line": 22,
+          "end_line": 26,
           "score": 0.25931114
         },
         {
