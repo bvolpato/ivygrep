@@ -509,14 +509,14 @@ fn retry_transient_tantivy_writes<T>(mut operation: impl FnMut() -> Result<T>) -
         match operation() {
             Ok(value) => return Ok(value),
             Err(error)
-                if is_transient_tantivy_write_error(&error)
+                if is_retryable_tantivy_write_error(&error)
                     && attempt + 1 < TANTIVY_INDEX_RETRY_ATTEMPTS =>
             {
                 let delay_ms = TANTIVY_INDEX_RETRY_BASE_DELAY_MS << attempt;
                 tracing::warn!(
                     attempt = attempt + 1,
                     delay_ms,
-                    "retrying index after transient Tantivy write denial"
+                    "retrying index after retryable Tantivy write error"
                 );
                 std::thread::sleep(std::time::Duration::from_millis(delay_ms));
             }
@@ -526,18 +526,22 @@ fn retry_transient_tantivy_writes<T>(mut operation: impl FnMut() -> Result<T>) -
     unreachable!("the retry loop always returns on its final attempt")
 }
 
-fn is_transient_tantivy_write_error(error: &anyhow::Error) -> bool {
+fn is_retryable_tantivy_write_error(error: &anyhow::Error) -> bool {
     error.chain().any(|source| {
-        matches!(
-            source.downcast_ref::<tantivy::TantivyError>(),
-            Some(
-                tantivy::TantivyError::OpenWriteError(OpenWriteError::IoError {
-                    io_error,
-                    ..
-                })
-            ) | Some(tantivy::TantivyError::IoError(io_error))
-                if io_error.kind() == std::io::ErrorKind::PermissionDenied
-        )
+        let Some(error) = source.downcast_ref::<tantivy::TantivyError>() else {
+            return false;
+        };
+
+        match error {
+            tantivy::TantivyError::OpenWriteError(OpenWriteError::IoError { io_error, .. })
+            | tantivy::TantivyError::IoError(io_error) => {
+                io_error.kind() == std::io::ErrorKind::PermissionDenied
+            }
+            tantivy::TantivyError::ErrorInThread(message) => {
+                message.contains("index writer was killed") && message.contains("io::Error")
+            }
+            _ => false,
+        }
     })
 }
 
@@ -3341,7 +3345,7 @@ mod tests {
     }
 
     #[test]
-    fn transient_tantivy_write_denial_is_retryable() {
+    fn retryable_tantivy_write_errors_are_classified() {
         let denied = anyhow::Error::from(tantivy::TantivyError::OpenWriteError(
             OpenWriteError::wrap_io_error(
                 std::io::Error::from(std::io::ErrorKind::PermissionDenied),
@@ -3354,24 +3358,33 @@ mod tests {
                 PathBuf::from("segment.fast"),
             ),
         ));
+        let worker_io = anyhow::Error::from(tantivy::TantivyError::ErrorInThread(
+            "An index writer was killed.. A worker thread encountered an error \
+             (io::Error most likely) or panicked."
+                .to_owned(),
+        ));
+        let worker_panic = anyhow::Error::from(tantivy::TantivyError::ErrorInThread(
+            "worker panicked while indexing".to_owned(),
+        ));
 
-        assert!(is_transient_tantivy_write_error(&denied));
-        assert!(!is_transient_tantivy_write_error(&missing));
+        assert!(is_retryable_tantivy_write_error(&denied));
+        assert!(is_retryable_tantivy_write_error(&worker_io));
+        assert!(!is_retryable_tantivy_write_error(&missing));
+        assert!(!is_retryable_tantivy_write_error(&worker_panic));
     }
 
     #[test]
-    fn whole_index_retry_retries_transient_tantivy_write_denial() {
+    fn whole_index_retry_retries_tantivy_worker_io_error() {
         let attempts = std::cell::Cell::new(0);
 
         let result: Result<()> = retry_transient_tantivy_writes(|| {
             let attempt = attempts.get();
             attempts.set(attempt + 1);
             if attempt == 0 {
-                return Err(anyhow::Error::from(tantivy::TantivyError::OpenWriteError(
-                    OpenWriteError::wrap_io_error(
-                        std::io::Error::from(std::io::ErrorKind::PermissionDenied),
-                        PathBuf::from("segment.fast"),
-                    ),
+                return Err(anyhow::Error::from(tantivy::TantivyError::ErrorInThread(
+                    "An index writer was killed.. A worker thread encountered an error \
+                     (io::Error most likely) or panicked."
+                        .to_owned(),
                 )));
             }
             Ok(())
