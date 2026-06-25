@@ -37,6 +37,13 @@ Examples:
   ./test.sh --filter query_aliases --nocapture
   ./scripts/bootstrap_stress_fixtures.sh && ./test.sh --stress
 EOF
+  cat <<'EOF'
+
+Environment:
+  CARGO_BUILD_JOBS=N                 Override local Cargo build parallelism.
+  RUST_TEST_THREADS=N                Override local Rust test parallelism.
+  IVYGREP_UNBOUNDED_LOCAL_TESTS=1    Keep Cargo/Rust default parallelism outside CI.
+EOF
   echo
   echo "Available sessions:"
   echo "  ./build.sh      Build ivygrep binary with selected profile/features."
@@ -110,6 +117,32 @@ configure_build_profile() {
     ((!hash_only)); then
     profile_flags=(--release)
     echo "Using release profile for neural tests on Linux ARM64"
+  fi
+}
+
+configure_local_resource_limits() {
+  [[ "${CI:-}" == "true" ]] && return 0
+  [[ "${IVYGREP_UNBOUNDED_LOCAL_TESTS:-}" == "1" ]] && return 0
+
+  local cpus jobs
+  cpus="$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || printf '1\n')"
+  if ! [[ "$cpus" =~ ^[0-9]+$ ]] || ((cpus < 1)); then
+    cpus=1
+  fi
+
+  jobs="$cpus"
+  if ((jobs > 4)); then
+    jobs=4
+  fi
+
+  if [[ -z "${CARGO_BUILD_JOBS:-}" ]]; then
+    export CARGO_BUILD_JOBS="$jobs"
+    echo "CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS (local default; set CARGO_BUILD_JOBS or IVYGREP_UNBOUNDED_LOCAL_TESTS=1 to override)"
+  fi
+
+  if [[ -z "${RUST_TEST_THREADS:-}" ]] && ((${#test_args[@]} == 0)); then
+    export RUST_TEST_THREADS="$jobs"
+    echo "RUST_TEST_THREADS=$RUST_TEST_THREADS (local default; pass --test-threads, set RUST_TEST_THREADS, or set IVYGREP_UNBOUNDED_LOCAL_TESTS=1 to override)"
   fi
 }
 
@@ -204,6 +237,7 @@ export IVYGREP_ENHANCE_MAX_LOAD_RATIO="${IVYGREP_ENHANCE_MAX_LOAD_RATIO:-0}"
 export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-always}"
 configure_cuda_compute_cap
 configure_build_profile
+configure_local_resource_limits
 
 if ((do_fmt)); then
   run cargo fmt -- --check
