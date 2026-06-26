@@ -175,6 +175,17 @@ fn stored_chunk_text(workspace: &Workspace, file_path: &str) -> Option<String> {
     .ok()
 }
 
+fn stored_chunk_texts_at(sqlite_path: &std::path::Path, file_path: &str) -> Vec<String> {
+    let conn = open_sqlite(sqlite_path).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT text FROM chunks WHERE file_path = ?1 ORDER BY chunk_key")
+        .unwrap();
+    stmt.query_map([file_path], |row| row.get::<_, Vec<u8>>(0))
+        .unwrap()
+        .map(|row| ivygrep::indexer::decompress_text(row.unwrap()))
+        .collect()
+}
+
 /// Helper: search for a query and return file paths in the results.
 fn search_file_paths(workspace: &Workspace, query: &str) -> Vec<String> {
     let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
@@ -2249,6 +2260,105 @@ fn worktree_incremental_overlay_update() {
     assert!(
         stable.iter().any(|p| p.contains("stable.rs")),
         "inherited stable_func should still be searchable"
+    );
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+#[test]
+#[serial]
+fn worktree_doc_include_change_reindexes_base_owned_rust_module() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    init_git_repo(root.path());
+    fs::create_dir_all(root.path().join("src")).unwrap();
+    fs::create_dir_all(root.path().join("docs")).unwrap();
+    fs::write(
+        root.path().join("src/lib.rs"),
+        "#![doc = include_str!(\"../docs/router.md\")]\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("docs/router.md"),
+        "baseonlyzephyr router layering explanation\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base doc include"]);
+    setup_and_index(root.path(), home.path());
+
+    git(root.path(), &["checkout", "-b", "wt-doc-include"]);
+    git(root.path(), &["checkout", "main"]);
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_doc_include");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            wt_path.to_str().unwrap(),
+            "wt-doc-include",
+        ],
+    );
+    setup_and_index(&wt_path, home.path());
+
+    fs::write(
+        wt_path.join("docs/router.md"),
+        "worktreeonlynebula router layering replacement\n",
+    )
+    .unwrap();
+    let refresh = setup_and_index(&wt_path, home.path());
+    assert!(
+        refresh.indexed_files >= 2,
+        "the changed include and inherited owner should enter the overlay"
+    );
+    let workspace = workspace_for(&wt_path);
+    assert!(
+        search_file_paths(&workspace, "worktreeonlynebula")
+            .iter()
+            .any(|path| path == "src/lib.rs"),
+        "worktree include content should be searchable through its Rust owner"
+    );
+    let overlay_owner_text =
+        stored_chunk_texts_at(&workspace.overlay_sqlite_path(), "src/lib.rs").join("\n");
+    assert!(
+        overlay_owner_text.contains("worktreeonlynebula")
+            && !overlay_owner_text.contains("baseonlyzephyr"),
+        "overlay owner must contain only current dependency text: {overlay_owner_text}"
+    );
+    let conn = open_sqlite(&workspace.overlay_sqlite_path()).unwrap();
+    let owner_tombstoned = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM tombstones WHERE file_path = 'src/lib.rs')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap();
+    assert!(owner_tombstoned, "overlay owner must hide the base owner");
+    drop(conn);
+
+    fs::write(
+        wt_path.join("docs/router.md"),
+        "baseonlyzephyr router layering explanation\n",
+    )
+    .unwrap();
+    setup_and_index(&wt_path, home.path());
+    assert!(
+        search_file_paths(&workspace, "baseonlyzephyr")
+            .iter()
+            .any(|path| path == "src/lib.rs"),
+        "returning the dependency to base content should refresh the owner"
+    );
+    let restored_owner_text =
+        stored_chunk_texts_at(&workspace.overlay_sqlite_path(), "src/lib.rs").join("\n");
+    assert!(
+        restored_owner_text.contains("baseonlyzephyr")
+            && !restored_owner_text.contains("worktreeonlynebula"),
+        "restored owner must replace stale overlay dependency text: {restored_owner_text}"
     );
 
     git(

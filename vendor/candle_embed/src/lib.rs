@@ -8,9 +8,11 @@ pub use models::WithModel;
 use std::{
     cell::RefCell,
     panic::{self, AssertUnwindSafe},
+    sync::Arc,
 };
 use tokenizers::{Encoding, Tokenizer};
 
+#[derive(Clone)]
 pub enum WithDevice {
     AnyCudaDevice,
     SpecificCudaDevice(usize),
@@ -181,7 +183,7 @@ impl CandleEmbedBuilder {
 pub struct BasedBertEmbedder {
     config: Config,
     mean_pooling: bool,
-    model: RefCell<Option<BertModel>>,
+    model: RefCell<Option<Arc<BertModel>>>,
     normalize_embeddings: bool,
     pub model_dimensions: usize,
     pub model_id: WithModel,
@@ -211,8 +213,49 @@ impl BasedBertEmbedder {
         let weights_filename = self.weights_filename.clone(); // Clone the weights_filename
         let vb =
             unsafe { VarBuilder::from_mmaped_safetensors(&[weights_filename], DTYPE, &device)? };
-        *self.model.borrow_mut() = Some(BertModel::load(vb, &self.config)?);
+        *self.model.borrow_mut() = Some(Arc::new(BertModel::load(vb, &self.config)?));
         Ok(())
+    }
+
+    /// Creates an independent inference handle that shares immutable model
+    /// tensors with this embedder. Tokenizer state remains per-handle so the
+    /// returned value can run concurrently behind a separate lock.
+    pub fn fork_shared(&self) -> Result<Self> {
+        if self.model.borrow().is_none() {
+            self.load_model()?;
+        }
+        if self.tokenizer.borrow().is_none() {
+            self.load_tokenizer()?;
+        }
+
+        let model = self
+            .model
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| Error::msg("CandleEmbed error: model did not load"))?;
+        let tokenizer = self
+            .tokenizer
+            .borrow()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| Error::msg("CandleEmbed error: tokenizer did not load"))?;
+
+        Ok(Self {
+            config: self.config.clone(),
+            mean_pooling: self.mean_pooling,
+            model: RefCell::new(Some(model)),
+            normalize_embeddings: self.normalize_embeddings,
+            model_dimensions: self.model_dimensions,
+            model_id: self.model_id.clone(),
+            model_max_input: self.model_max_input,
+            model_rev: self.model_rev.clone(),
+            tokenizer_filename: self.tokenizer_filename.clone(),
+            tokenizer: RefCell::new(Some(tokenizer)),
+            truncate_text_len_overflow: self.truncate_text_len_overflow,
+            weights_filename: self.weights_filename.clone(),
+            with_device: self.with_device.clone(),
+        })
     }
 
     /// Unloads the BERT model and tokenizer, freeing up memory. Call this when you are done using the model.

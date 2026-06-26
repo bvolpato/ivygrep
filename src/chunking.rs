@@ -25,6 +25,7 @@ pub enum ChunkKind {
     Function,
     Class,
     Module,
+    Documentation,
     Text,
 }
 
@@ -38,6 +39,18 @@ pub struct Chunk {
     pub language: String,
     pub kind: ChunkKind,
     pub content_hash: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub(crate) struct RustDocInclude {
+    pub source_line: usize,
+    pub path: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ChunkedSource {
+    pub chunks: Vec<Chunk>,
+    pub rust_doc_includes: Vec<RustDocInclude>,
 }
 
 // ── Language Registry ──────────────────────────────────────────────────────
@@ -559,19 +572,26 @@ fn is_leading_doc_line(trimmed: &str, language: &str) -> bool {
 }
 
 pub fn chunk_source(rel_path: &Path, text: &str) -> Vec<Chunk> {
+    chunk_source_with_metadata(rel_path, text).chunks
+}
+
+pub(crate) fn chunk_source_with_metadata(rel_path: &Path, text: &str) -> ChunkedSource {
     let lang_def = find_language_def(rel_path);
     let language = lang_def.map(|d| d.name).unwrap_or("text").to_string();
     let lines: Vec<&str> = text.lines().collect();
 
     if lines.is_empty() {
-        return vec![];
+        return ChunkedSource {
+            chunks: Vec::new(),
+            rust_doc_includes: Vec::new(),
+        };
     }
 
     // Attempt 100% accurate AST chunking via Tree-sitter for supported languages
-    if let Some(chunks) = try_tree_sitter_chunk_source(rel_path, text, &language, &lines)
-        && !chunks.is_empty()
+    if let Some(chunked) = try_tree_sitter_chunk_source(rel_path, text, &language, &lines)
+        && !chunked.chunks.is_empty()
     {
-        return chunks;
+        return chunked;
     }
 
     // Fall back to regex-based heuristic chunking
@@ -581,7 +601,10 @@ pub fn chunk_source(rel_path: &Path, text: &str) -> Vec<Chunk> {
     };
 
     if signatures.is_empty() {
-        return fallback_chunks(rel_path, &language, &lines);
+        return ChunkedSource {
+            chunks: fallback_chunks(rel_path, &language, &lines),
+            rust_doc_includes: Vec::new(),
+        };
     }
 
     let mut chunks = Vec::new();
@@ -609,19 +632,22 @@ pub fn chunk_source(rel_path: &Path, text: &str) -> Vec<Chunk> {
         ));
     }
 
-    chunks
+    ChunkedSource {
+        chunks,
+        rust_doc_includes: Vec::new(),
+    }
 }
 
 /// Uses Tree-sitter to reliably extract accurately bounded functions and classes
 /// for supported languages (Rust, Python, Go, JS, TS/TSX, Java, C#, PHP, Ruby,
-/// Swift, C, C++, Scala, Bash, Haskell, OCaml, Lua, Dart, Objective-C, Perl,
-/// and Starlark macro sources).
+/// Swift, C, C++, Scala, Kotlin, Elixir, Zig, Bash, Haskell, OCaml, Lua, Dart,
+/// Objective-C, Perl, and Starlark macro sources).
 fn try_tree_sitter_chunk_source(
     rel_path: &Path,
     text: &str,
     language: &str,
     lines: &[&str],
-) -> Option<Vec<Chunk>> {
+) -> Option<ChunkedSource> {
     try_tree_sitter_chunk_source_with_timeout(
         rel_path,
         text,
@@ -637,7 +663,7 @@ fn try_tree_sitter_chunk_source_with_timeout(
     language: &str,
     lines: &[&str],
     parse_timeout: std::time::Duration,
-) -> Option<Vec<Chunk>> {
+) -> Option<ChunkedSource> {
     use streaming_iterator::StreamingIterator;
     use tree_sitter::QueryCursor;
 
@@ -680,19 +706,36 @@ fn try_tree_sitter_chunk_source_with_timeout(
     let mut cursor = QueryCursor::new();
 
     let mut ranges = Vec::new();
+    let mut rust_doc_includes = Vec::new();
     let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
 
     while let Some(m) = matches.next() {
         for capture in m.captures {
+            let capture_name = query.capture_names()[capture.index as usize];
+            if capture_name == "doc_include" {
+                if let Some(include) = rust_doc_include(capture.node, text) {
+                    rust_doc_includes.push(include);
+                }
+                continue;
+            }
+            if capture_name.starts_with('_') {
+                continue;
+            }
+
             let start_line = capture.node.start_position().row;
             let end_line = capture.node.end_position().row;
 
-            let kind = match capture.node.kind() {
+            let kind = match capture_name {
+                "module" => ChunkKind::Module,
+                "class" => ChunkKind::Class,
+                _ => match capture.node.kind() {
                 "class_definition"
                 | "impl_item"
                 | "trait_item"
                 | "class_declaration"
+                | "abstract_class_declaration"
                 | "interface_declaration"
+                | "type_alias_declaration"
                 | "type_declaration"
                 | "enum_declaration"
                 | "annotation_type_declaration"
@@ -726,6 +769,7 @@ fn try_tree_sitter_chunk_source_with_timeout(
                 // Perl
                 | "package_statement" => ChunkKind::Class,
                 _ => ChunkKind::Function,
+                },
             };
 
             // Convert to 1-indexed bounds, end_line is inclusive in tree-sitter rows
@@ -733,7 +777,7 @@ fn try_tree_sitter_chunk_source_with_timeout(
         }
     }
 
-    if ranges.is_empty() {
+    if ranges.is_empty() && rust_doc_includes.is_empty() {
         return None;
     }
 
@@ -785,7 +829,6 @@ fn try_tree_sitter_chunk_source_with_timeout(
             rel_path.to_string_lossy(),
             block_lines.join("\n")
         );
-
         chunks.push(make_chunk(
             rel_path,
             start,
@@ -846,7 +889,118 @@ fn try_tree_sitter_chunk_source_with_timeout(
 
     chunks.sort_by_key(|c| c.start_line);
 
-    Some(chunks)
+    rust_doc_includes.sort_by(|left, right| {
+        left.source_line
+            .cmp(&right.source_line)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    rust_doc_includes.dedup();
+
+    Some(ChunkedSource {
+        chunks,
+        rust_doc_includes,
+    })
+}
+
+fn rust_doc_include(node: tree_sitter::Node<'_>, text: &str) -> Option<RustDocInclude> {
+    let attribute = node.named_child(0)?;
+    if attribute.kind() != "attribute" {
+        return None;
+    }
+    let attribute_name = attribute.named_child(0)?.utf8_text(text.as_bytes()).ok()?;
+    if attribute_name != "doc" {
+        return None;
+    }
+
+    let value = attribute.child_by_field_name("value")?;
+    if value.kind() != "macro_invocation" {
+        return None;
+    }
+    let macro_name = value
+        .child_by_field_name("macro")?
+        .utf8_text(text.as_bytes())
+        .ok()?;
+    if macro_name != "include_str" {
+        return None;
+    }
+
+    let mut value_cursor = value.walk();
+    let token_tree = value
+        .named_children(&mut value_cursor)
+        .find(|child| child.kind() == "token_tree")?;
+    let mut cursor = token_tree.walk();
+    let mut arguments = token_tree.named_children(&mut cursor);
+    let literal = arguments.next()?;
+    if arguments.next().is_some()
+        || !matches!(literal.kind(), "string_literal" | "raw_string_literal")
+    {
+        return None;
+    }
+    let literal_text = literal.utf8_text(text.as_bytes()).ok()?;
+    let path = decode_rust_string_literal(literal_text)?;
+    Some(RustDocInclude {
+        source_line: node.start_position().row + 1,
+        path: PathBuf::from(path),
+    })
+}
+
+fn decode_rust_string_literal(literal: &str) -> Option<String> {
+    if literal.starts_with('"') {
+        return serde_json::from_str::<String>(literal).ok();
+    }
+
+    let quote = literal.find('"')?;
+    if !literal[..quote].starts_with('r') {
+        return None;
+    }
+    let hashes = &literal[1..quote];
+    if !hashes.chars().all(|ch| ch == '#') {
+        return None;
+    }
+    let suffix = format!("\"{hashes}");
+    let value = literal.strip_suffix(&suffix)?;
+    Some(value[quote + 1..].to_string())
+}
+
+pub(crate) fn chunk_rust_doc_include(
+    owner_path: &Path,
+    source_line: usize,
+    included_path: &Path,
+    text: &str,
+) -> Vec<Chunk> {
+    let lines = text.lines().collect::<Vec<_>>();
+    if lines.is_empty() {
+        return Vec::new();
+    }
+
+    const WINDOW: usize = 80;
+    const OVERLAP: usize = 20;
+    const MAX_CHUNKS: usize = 64;
+    let mut chunks = Vec::new();
+    let mut start = 0usize;
+    while start < lines.len() && chunks.len() < MAX_CHUNKS {
+        let end = (start + WINDOW).min(lines.len());
+        let block = lines[start..end].join("\n");
+        let text = format!(
+            "// {}\n// Rust documentation included from {}\n\n{}",
+            owner_path.to_string_lossy(),
+            included_path.to_string_lossy(),
+            block
+        );
+        chunks.push(make_chunk(
+            owner_path,
+            source_line,
+            source_line,
+            text,
+            "rust".to_string(),
+            ChunkKind::Documentation,
+        ));
+        if end == lines.len() {
+            break;
+        }
+        start = end.saturating_sub(OVERLAP);
+    }
+    chunks
 }
 
 thread_local! {
@@ -880,7 +1034,7 @@ fn tree_sitter_query(
         "rust" => cached_query!(
             RUST_QUERY,
             tree_sitter_rust::LANGUAGE,
-            "(function_item) @fn (impl_item) @class (trait_item) @class"
+            "(function_item) @fn (impl_item) @class (trait_item) @class (inner_attribute_item) @doc_include (attribute_item) @doc_include"
         ),
         "python" => cached_query!(
             PYTHON_QUERY,
@@ -906,13 +1060,13 @@ fn tree_sitter_query(
             cached_query!(
                 TSX_QUERY,
                 tree_sitter_typescript::LANGUAGE_TSX,
-                "(function_declaration) @fn (method_definition) @fn (class_declaration) @class (interface_declaration) @class"
+                "(function_declaration) @fn (method_definition) @fn (class_declaration) @class (abstract_class_declaration) @class (interface_declaration) @class (type_alias_declaration) @class (enum_declaration) @class"
             )
         }
         "typescript" => cached_query!(
             TYPESCRIPT_QUERY,
             tree_sitter_typescript::LANGUAGE_TYPESCRIPT,
-            "(function_declaration) @fn (method_definition) @fn (class_declaration) @class (interface_declaration) @class"
+            "(function_declaration) @fn (method_definition) @fn (class_declaration) @class (abstract_class_declaration) @class (interface_declaration) @class (type_alias_declaration) @class (enum_declaration) @class"
         ),
         "java" => cached_query!(
             JAVA_QUERY,
@@ -953,6 +1107,21 @@ fn tree_sitter_query(
             SCALA_QUERY,
             tree_sitter_scala::LANGUAGE,
             "(class_definition) @class (trait_definition) @class (object_definition) @class (function_definition) @fn (val_definition) @fn"
+        ),
+        "kotlin" => cached_query!(
+            KOTLIN_QUERY,
+            tree_sitter_kotlin_ng::LANGUAGE,
+            "(function_declaration) @fn (class_declaration) @class (object_declaration) @class (type_alias) @class"
+        ),
+        "elixir" => cached_query!(
+            ELIXIR_QUERY,
+            tree_sitter_elixir::LANGUAGE,
+            "((call target: (identifier) @_module_keyword (arguments (alias)) (do_block)) @module (#any-of? @_module_keyword \"defmodule\" \"defprotocol\" \"defimpl\")) ((call target: (identifier) @_function_keyword (arguments [(identifier) (call target: (identifier)) (binary_operator left: (call target: (identifier)) operator: \"when\")]) (do_block)?) @fn (#any-of? @_function_keyword \"def\" \"defp\" \"defdelegate\" \"defguard\" \"defguardp\" \"defmacro\" \"defmacrop\" \"defn\" \"defnp\"))"
+        ),
+        "zig" => cached_query!(
+            ZIG_QUERY,
+            tree_sitter_zig::LANGUAGE,
+            "(function_declaration) @fn (test_declaration) @fn (variable_declaration (struct_declaration)) @class (variable_declaration (enum_declaration)) @class (variable_declaration (union_declaration)) @class (variable_declaration (opaque_declaration)) @class (variable_declaration (error_set_declaration)) @class"
         ),
         "bash" | "shell" => cached_query!(
             BASH_QUERY,
@@ -1361,40 +1530,32 @@ fn detect_lua(trimmed: &str) -> Option<ChunkKind> {
 // ── Apple / mobile ─────────────────────────────────────────────────────
 
 fn detect_swift(trimmed: &str) -> Option<ChunkKind> {
-    if starts_with_any(
-        trimmed,
-        &[
-            "func ",
-            "private func ",
-            "public func ",
-            "internal func ",
-            "static func ",
-            "override func ",
-            "mutating func ",
-            "init(",
-            "deinit ",
-        ],
-    ) {
-        Some(ChunkKind::Function)
-    } else if starts_with_any(
-        trimmed,
-        &[
-            "class ",
-            "struct ",
-            "enum ",
-            "protocol ",
-            "extension ",
-            "public class ",
-            "public struct ",
-            "public enum ",
-            "private class ",
-            "final class ",
-        ],
-    ) {
-        Some(ChunkKind::Class)
-    } else {
-        None
+    let tokens = trimmed.split_whitespace().collect::<Vec<_>>();
+    for (index, raw_token) in tokens.iter().enumerate() {
+        let token = raw_token.split(['(', ':', '{']).next().unwrap_or(raw_token);
+        match token {
+            "func" | "init" | "deinit" | "subscript" => return Some(ChunkKind::Function),
+            "class"
+                if tokens.get(index + 1).is_some_and(|next| {
+                    matches!(
+                        next.split(['(', ':', '{']).next().unwrap_or(next),
+                        "func" | "var" | "let" | "subscript"
+                    )
+                }) =>
+            {
+                continue;
+            }
+            "class" | "struct" | "enum" | "protocol" | "extension" | "actor" => {
+                return Some(ChunkKind::Class);
+            }
+            "public" | "private" | "fileprivate" | "internal" | "package" | "open" | "final"
+            | "indirect" | "override" | "required" | "convenience" | "static" | "mutating"
+            | "nonmutating" | "isolated" | "nonisolated" | "distributed" | "lazy" => {}
+            _ if token.starts_with('@') => {}
+            _ => return None,
+        }
     }
+    None
 }
 
 fn detect_dart(trimmed: &str) -> Option<ChunkKind> {
@@ -1749,6 +1910,76 @@ pub fn calculate_total(amount: f64) -> f64 {
     }
 
     #[test]
+    fn rust_doc_include_attributes_are_parser_derived() {
+        let src = r###"
+#![doc = include_str!("../docs/middleware.md")]
+#[doc = include_str!(r#"route-layer.md"#)]
+pub fn configure_router() {}
+
+const TEMPLATE: &str = include_str!("not-doc.md");
+#[doc = include_str!(concat!("not-", "literal.md"))]
+pub fn unsupported_dynamic_include() {}
+"###;
+
+        let chunked = chunk_source_with_metadata(Path::new("src/middleware/mod.rs"), src);
+        assert_eq!(
+            chunked.rust_doc_includes,
+            vec![
+                RustDocInclude {
+                    source_line: 2,
+                    path: PathBuf::from("../docs/middleware.md"),
+                },
+                RustDocInclude {
+                    source_line: 3,
+                    path: PathBuf::from("route-layer.md"),
+                },
+            ]
+        );
+        assert!(
+            chunked
+                .chunks
+                .iter()
+                .any(|chunk| chunk.text.contains("configure_router"))
+        );
+    }
+
+    #[test]
+    fn rust_doc_include_chunks_are_bounded_and_owned_by_module() {
+        let documentation = (0..181)
+            .map(|line| format!("Tower middleware routing detail {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let chunks = chunk_rust_doc_include(
+            Path::new("src/middleware/mod.rs"),
+            7,
+            Path::new("src/docs/middleware.md"),
+            &documentation,
+        );
+
+        assert_eq!(chunks.len(), 3);
+        assert!(chunks.iter().all(|chunk| {
+            chunk.file_path == Path::new("src/middleware/mod.rs")
+                && chunk.start_line == 7
+                && chunk.end_line == 7
+                && chunk.language == "rust"
+                && chunk.kind == ChunkKind::Documentation
+                && chunk.text.contains("src/docs/middleware.md")
+        }));
+
+        let huge_documentation = "bounded documentation line\n".repeat(10_000);
+        assert_eq!(
+            chunk_rust_doc_include(
+                Path::new("src/lib.rs"),
+                1,
+                Path::new("docs/huge.md"),
+                &huge_documentation,
+            )
+            .len(),
+            64
+        );
+    }
+
+    #[test]
     fn fallback_chunker_splits_large_text() {
         let src = (0..250)
             .map(|i| format!("line_{i}"))
@@ -1800,6 +2031,23 @@ pub fn calculate_total(amount: f64) -> f64 {
     }
 
     #[test]
+    fn swift_fallback_detects_stacked_declaration_modifiers() {
+        assert_eq!(
+            detect_swift("public final class Application: Sendable {"),
+            Some(ChunkKind::Class)
+        );
+        assert_eq!(
+            detect_swift("public convenience init(environment: Environment) {"),
+            Some(ChunkKind::Function)
+        );
+        assert_eq!(
+            detect_swift("public class func bootstrap() {"),
+            Some(ChunkKind::Function)
+        );
+        assert_eq!(detect_swift("public var application: Application {"), None);
+    }
+
+    #[test]
     fn shell_chunker_detects_functions() {
         let src =
             "#!/bin/bash\n\nsetup() {\n  echo setup\n}\n\nfunction teardown {\n  echo done\n}\n";
@@ -1821,6 +2069,21 @@ pub fn calculate_total(amount: f64) -> f64 {
         let chunks = chunk_source(Path::new("User.kt"), src);
         assert!(chunks.iter().any(|c| c.kind == ChunkKind::Class));
         assert!(chunks.iter().any(|c| c.kind == ChunkKind::Function));
+    }
+
+    #[test]
+    fn kotlin_tree_sitter_detects_modified_interfaces_and_type_aliases() {
+        let src = "public interface Flow<out T> {\n    suspend fun collect(value: T)\n}\n\npublic typealias Channel<T> = Flow<T>\n";
+        let chunks = chunk_source(Path::new("Flow.kt"), src);
+        assert!(chunks.iter().any(|chunk| {
+            chunk.kind == ChunkKind::Class && chunk.text.contains("interface Flow")
+        }));
+        assert!(chunks.iter().any(|chunk| {
+            chunk.kind == ChunkKind::Class && chunk.text.contains("typealias Channel")
+        }));
+        assert!(chunks.iter().any(|chunk| {
+            chunk.kind == ChunkKind::Function && chunk.text.contains("suspend fun collect")
+        }));
     }
 
     #[test]
@@ -1851,6 +2114,42 @@ pub fn calculate_total(amount: f64) -> f64 {
         let chunks = chunk_source(Path::new("math.ex"), src);
         assert!(chunks.iter().any(|c| c.kind == ChunkKind::Module));
         assert!(chunks.iter().any(|c| c.kind == ChunkKind::Function));
+    }
+
+    #[test]
+    fn elixir_tree_sitter_detects_qualified_modules_and_guarded_functions() {
+        let src = "defmodule Phoenix.Channel do\n  def join(topic, socket) when is_binary(topic) do\n    {:ok, socket}\n  end\n\n  defp authorize(socket), do: socket\nend\n";
+        let chunks = chunk_source(Path::new("channel.ex"), src);
+        assert!(chunks.iter().any(|chunk| {
+            chunk.kind == ChunkKind::Module && chunk.text.contains("Phoenix.Channel")
+        }));
+        assert!(
+            chunks.iter().any(|chunk| {
+                chunk.kind == ChunkKind::Function && chunk.text.contains("def join")
+            })
+        );
+        assert!(chunks.iter().any(|chunk| {
+            chunk.kind == ChunkKind::Function && chunk.text.contains("defp authorize")
+        }));
+    }
+
+    #[test]
+    fn zig_tree_sitter_detects_containers_and_functions() {
+        let src = "pub const Client = struct {\n    pub fn send(self: *Client) void {\n        _ = self;\n    }\n};\n\npub const State = enum { ready, stopped };\n";
+        let chunks = chunk_source(Path::new("client.zig"), src);
+        assert!(chunks.iter().any(|chunk| {
+            chunk.kind == ChunkKind::Class && chunk.text.contains("const Client")
+        }));
+        assert!(
+            chunks.iter().any(|chunk| {
+                chunk.kind == ChunkKind::Class && chunk.text.contains("const State")
+            })
+        );
+        assert!(
+            chunks.iter().any(|chunk| {
+                chunk.kind == ChunkKind::Function && chunk.text.contains("fn send")
+            })
+        );
     }
 
     #[test]
@@ -2030,6 +2329,22 @@ pub fn calculate_total(amount: f64) -> f64 {
             chunks.iter().any(|c| c.text.contains("greet")),
             "TS chunker should detect greet function"
         );
+    }
+
+    #[test]
+    fn typescript_chunker_detects_type_enum_and_abstract_class_definitions() {
+        let src = "export type WSSHandlerOptions<T> = {\n  socket: T;\n};\n\nexport enum Transport {\n  WebSocket,\n}\n\nexport abstract class Adapter {\n  abstract run(): void;\n}\n";
+        for path in ["service.ts", "service.tsx"] {
+            let chunks = chunk_source(Path::new(path), src);
+            for name in ["WSSHandlerOptions", "Transport", "Adapter"] {
+                assert!(
+                    chunks.iter().any(|chunk| {
+                        chunk.kind == ChunkKind::Class && chunk.text.contains(name)
+                    }),
+                    "{path} should index {name} as a definition: {chunks:#?}"
+                );
+            }
+        }
     }
 
     #[test]

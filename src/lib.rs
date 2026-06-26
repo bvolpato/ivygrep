@@ -16,6 +16,7 @@ pub mod regex_search;
 pub(crate) mod reranker;
 pub mod search;
 pub mod symbols;
+pub(crate) mod system_resources;
 pub mod text;
 pub mod tui;
 pub mod vector_store;

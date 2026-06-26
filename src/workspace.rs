@@ -45,7 +45,11 @@ pub struct Workspace {
 ///  10 — Symbol graph persistence, F16 vectors, and portable relative paths
 ///  11 — Deduplicated chunk metadata, compact symbols, and on-demand call-site lookup
 ///  12 — Public re-exports are persisted as symbol definitions
-pub const INDEX_FORMAT_VERSION: u32 = 12;
+///  13 — Rust doc include chunks and dependency-aware incremental refresh
+///  14 — TypeScript/TSX type aliases, enums, and abstract classes are structural chunks
+///  15 — Kotlin, Elixir, and Zig declarations use Tree-sitter structural chunks
+///  16 — Declaration signatures skip leading documentation and attributes
+pub const INDEX_FORMAT_VERSION: u32 = 16;
 const COMPACTION_FREE_BYTES_THRESHOLD: u64 = 16 * 1024 * 1024;
 const COMPACTION_FREE_PERCENT_THRESHOLD: f64 = 20.0;
 

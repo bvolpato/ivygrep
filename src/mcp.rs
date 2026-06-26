@@ -172,7 +172,7 @@ fn dispatch(method: &str, params: Value) -> Result<Value> {
                 "name": "ig",
                 "version": env!("CARGO_PKG_VERSION")
             },
-            "instructions": "Use ig_search with an absolute path to the active workspace so searches stay scoped to the intended repository. Use natural-language queries for discovery, literal=true for exact identifiers, and ig_status to inspect indexing health. Workspaces are indexed on first use and watched for incremental updates."
+            "instructions": "Use ig_search with an absolute path to the active workspace so searches stay scoped to the intended repository. Use natural-language queries for discovery and literal=true for exact identifiers. Set limit explicitly; start with limit=5-10 and context=2. Increase context when a promising hit needs more evidence; increase limit when you need more candidate files. Use ig_status to inspect indexing health. Workspaces are indexed on first use and watched for incremental updates."
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools": [search_tool_schema(), status_tool_schema()]})),
@@ -186,21 +186,30 @@ fn dispatch(method: &str, params: Value) -> Result<Value> {
 fn search_tool_schema() -> Value {
     json!({
         "name": TOOL_IG_SEARCH,
-        "description": "Hybrid semantic+lexical code search. Auto-indexes on first query. Respects .gitignore and restricts results to the provided path scope.",
+        "description": "Hybrid semantic+lexical code search. Auto-indexes on first query. Respects .gitignore and restricts results to the provided path scope. Use limit for result-file count and context for snippet radius.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Natural-language or keyword query."},
                 "path": {"type": "string", "description": "Workspace path, subdirectory, or file path. Defaults to current directory."},
-                "limit": {"type": "integer", "minimum": 1, "description": "Max number of returned files."},
-                "context": {"type": "integer", "minimum": 0, "description": "Context lines around focused line."},
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Retrieval breadth and maximum number of ranked result files, not a token, line, or confidence limit. Larger values search a deeper candidate pool and may improve recall while adding lower-ranked matches. If omitted, normal candidate budgets remain bounded but no explicit final file cap is applied."
+                },
+                "context": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "default": 2,
+                    "description": "Lines before and after each focused match. Changes snippet size, not retrieval ranking."
+                },
                 "type": {"type": "string", "description": "Language filter - accepts names (rust, python), extensions (rs, py, md), or aliases (c++, bash, js)."},
                 "regex": {"type": "boolean", "description": "Use regex mode (index-prefiltered when possible; otherwise walks raw files). Prefer 'literal' for exact matches."},
                 "literal": {"type": "boolean", "description": "Fast exact-match search backed by the index. Deterministic, orders of magnitude faster than regex."},
                 "include": {"type": "string", "description": "Comma-separated include globs, e.g. \"*.md,src/**/*.rs\"."},
                 "exclude": {"type": "string", "description": "Comma-separated exclude globs, e.g. \"target/**,*.lock\"."},
-                "first_line_only": {"type": "boolean", "description": "Return only the first non-empty preview line for each hit."},
-                "file_name_only": {"type": "boolean", "description": "Return only file paths (no hit details)."},
+                "first_line_only": {"type": "boolean", "description": "Return only the first non-empty preview line for each hit. Ranking is unchanged."},
+                "file_name_only": {"type": "boolean", "description": "Return only file paths (no hit details). Ranking is unchanged."},
                 "verbose": {"type": "boolean", "description": "Include reason pointers in JSON output."},
                 "skip_gitignore": {"type": "boolean", "description": "Include files ignored by .gitignore."}
             },
@@ -941,6 +950,9 @@ mod tests {
         let schema = &tools[0]["inputSchema"];
         assert!(schema["properties"]["query"].is_object());
         assert!(schema["properties"]["regex"].is_object());
+        assert_eq!(schema["properties"]["limit"]["minimum"], 1);
+        assert_eq!(schema["properties"]["context"]["minimum"], 0);
+        assert_eq!(schema["properties"]["context"]["default"], 2);
         let required = schema["required"].as_array().unwrap();
         assert!(required.contains(&json!("query")));
         assert_eq!(tools[1]["name"], "ig_status");

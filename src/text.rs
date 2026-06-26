@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use pluralizer::pluralize;
 
 use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
@@ -180,6 +182,55 @@ pub fn singularize_token(token: &str) -> String {
     }
 }
 
+/// Returns the first source line after generated path headers, documentation
+/// comments, and declaration attributes.
+pub fn first_code_line_range(text: &str) -> Option<Range<usize>> {
+    let mut offset = 0;
+    let mut in_block_comment = false;
+
+    for line in text.split_inclusive('\n') {
+        let line_without_newline = line.strip_suffix('\n').unwrap_or(line);
+        let line_without_newline = line_without_newline
+            .strip_suffix('\r')
+            .unwrap_or(line_without_newline);
+        let trimmed = line_without_newline.trim();
+
+        if in_block_comment {
+            if trimmed.contains("*/") {
+                in_block_comment = false;
+            }
+            offset += line.len();
+            continue;
+        }
+
+        if trimmed.starts_with("/*") {
+            if !trimmed.contains("*/") {
+                in_block_comment = true;
+            }
+            offset += line.len();
+            continue;
+        }
+
+        if trimmed.is_empty()
+            || trimmed.starts_with("//")
+            || trimmed.starts_with('#')
+            || trimmed.starts_with('*')
+            || trimmed.starts_with('@')
+            || trimmed.starts_with("*/")
+            || trimmed.starts_with('[') && trimmed.ends_with(']')
+        {
+            offset += line.len();
+            continue;
+        }
+
+        let leading_bytes = line_without_newline.len() - line_without_newline.trim_start().len();
+        let trailing_bytes = line_without_newline.len() - line_without_newline.trim_end().len();
+        return Some(offset + leading_bytes..offset + line_without_newline.len() - trailing_bytes);
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,6 +279,25 @@ mod tests {
     #[test]
     fn singularize_non_alpha_passthrough() {
         assert_eq!(singularize_token("test123"), "test123");
+    }
+
+    #[test]
+    fn first_code_line_skips_java_doc_and_annotation() {
+        let text = "// src/GsonBuilder.java\n\n/**\n * Registers an adapter.\n */\n@CanIgnoreReturnValue\npublic GsonBuilder registerTypeAdapter(Type type, Object adapter) {\n";
+        let range = first_code_line_range(text).unwrap();
+
+        assert_eq!(
+            &text[range],
+            "public GsonBuilder registerTypeAdapter(Type type, Object adapter) {"
+        );
+    }
+
+    #[test]
+    fn first_code_line_skips_csharp_attribute() {
+        let text = "// Example.cs\n\n/// Docs\n[Obsolete]\npublic void RegisterHandler() {}\n";
+        let range = first_code_line_range(text).unwrap();
+
+        assert_eq!(&text[range], "public void RegisterHandler() {}");
     }
 
     fn collect_tokens(text: &str) -> Vec<String> {

@@ -1,6 +1,6 @@
 [package]
 name = "ivygrep"
-version = "0.12.8"
+version = "0.12.9"
 edition = "2024"
 description = "Semantic grep that stays local — hybrid BM25 + vector search for code"
 license = "MIT"
@@ -75,6 +75,9 @@ tree-sitter-dart = "0.2.0"
 tree-sitter-objc = "3.0.2"
 tree-sitter-perl = "1.1.2"
 tree-sitter-starlark = "1.3.0"
+tree-sitter-kotlin-ng = "1.1.0"
+tree-sitter-elixir = "0.3.5"
+tree-sitter-zig = "1.1.2"
 streaming-iterator = "0.1.9"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 zstd = "0.13"
@@ -100,6 +103,7 @@ openssl = { version = "0.10", features = ["vendored"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
 ] }
 
@@ -116,3 +120,4 @@ harness = false
 hf-hub = { path = "vendor/hf-hub" }
 candle_embed = { path = "vendor/candle_embed" }
 usearch = { path = "vendor/usearch" }
+tree-sitter-haskell = { path = "vendor/tree-sitter-haskell" }

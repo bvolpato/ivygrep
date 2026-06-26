@@ -10,6 +10,8 @@
 //!
 //! Use [`create_model`] to build the right model based on the `neural` flag.
 
+#[cfg(feature = "neural")]
+use crate::system_resources::available_memory_bytes;
 use crate::text::{singularize_token, split_identifier_segments};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -345,6 +347,47 @@ fn neural_thread_budget_for(
         logical_cpus.clamp(1, 8)
     };
     requested.unwrap_or(default_threads).clamp(1, 32)
+}
+
+#[cfg(feature = "neural")]
+const MIB: u64 = 1024 * 1024;
+#[cfg(feature = "neural")]
+const TRANSFORMER_RUNTIME_BASE_BYTES: u64 = 128 * MIB;
+#[cfg(feature = "neural")]
+const TRANSFORMER_WORKER_BYTES: u64 = 16 * MIB;
+
+#[cfg(feature = "neural")]
+fn configured_neural_memory_budget_bytes() -> Option<u64> {
+    std::env::var("IVYGREP_NEURAL_MEMORY_MB")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .and_then(|value| value.checked_mul(MIB))
+}
+
+#[cfg(feature = "neural")]
+fn transformer_pool_size(
+    profile: NeuralProfile,
+    requested_workers: usize,
+    available_bytes: Option<u64>,
+    configured_budget_bytes: Option<u64>,
+) -> usize {
+    let requested_workers = requested_workers.max(1);
+    let budget = configured_budget_bytes.or_else(|| available_bytes.map(|bytes| bytes / 4));
+    let Some(budget) = budget else {
+        return requested_workers;
+    };
+
+    let shared_model_bytes = profile
+        .model_asset_bytes()
+        .saturating_add(TRANSFORMER_RUNTIME_BASE_BYTES);
+    if budget <= shared_model_bytes {
+        return 1;
+    }
+
+    let additional_workers = ((budget - shared_model_bytes) / TRANSFORMER_WORKER_BYTES)
+        .min(requested_workers.saturating_sub(1) as u64) as usize;
+    1 + additional_workers
 }
 
 // ── Hash-based embedding (always available) ────────────────────────────────
@@ -738,9 +781,10 @@ fn preferred_neural_backend() -> NeuralBackend {
 
 #[cfg(feature = "neural")]
 pub struct CandleEmbeddingModel {
-    /// Pool of independent embedder instances. `candle_embed`'s `embed_batch`
+    /// Pool of per-worker embedder handles. The handles share immutable model
+    /// tensors but retain independent tokenizer state. `candle_embed`'s `embed_batch`
     /// is a sequential `for text in texts` loop of single-text, single-threaded
-    /// forward passes, so a lone instance behind a mutex uses ~1 core regardless
+    /// forward passes, so a lone handle behind a mutex uses ~1 core regardless
     /// of the thread budget. To actually use the allotted cores we run forwards
     /// in parallel — one embedder per worker thread, so there is no mutex
     /// contention. Foreground (query) embedding only ever needs one.
@@ -829,14 +873,32 @@ impl CandleEmbeddingModel {
         // across every logical CPU on large hosts. Keep a laptop-sized default
         // and allow controlled benchmark overrides.
         let neural_threads = neural_thread_budget(is_background);
+        let profile = NeuralProfile::configured();
+        let requested_pool_size = if is_background { neural_threads } else { 1 };
+        let available_bytes = available_memory_bytes();
+        let configured_budget_bytes = configured_neural_memory_budget_bytes();
+        let cpu_pool_size = transformer_pool_size(
+            profile,
+            requested_pool_size,
+            available_bytes,
+            configured_budget_bytes,
+        );
+        if cpu_pool_size < requested_pool_size {
+            tracing::info!(
+                "transformer worker pool capped from {requested_pool_size} to {cpu_pool_size} by memory budget"
+            );
+        }
+        let rayon_threads = if is_background {
+            cpu_pool_size
+        } else {
+            neural_threads
+        };
         let _ = rayon::ThreadPoolBuilder::new()
-            .num_threads(neural_threads)
+            .num_threads(rayon_threads)
             .build_global();
-        tracing::info!("neural rayon pool limited to {neural_threads} thread(s)");
-        let cpu_pool_size = if is_background { neural_threads } else { 1 };
+        tracing::info!("neural rayon pool limited to {rayon_threads} thread(s)");
 
         use candle_embed::{CandleEmbedBuilder, WithModel};
-        let profile = NeuralProfile::configured();
 
         let build_one = |requested: NeuralBackend| -> anyhow::Result<(
             candle_embed::BasedBertEmbedder,
@@ -886,46 +948,31 @@ impl CandleEmbeddingModel {
             }
             Err(error) => return Err(error),
         };
-        // CPU throughput benefits from independent model instances. For GPU
-        // inference, replicate only after a measured win: each copy uploads
-        // the full model and can needlessly consume unified memory or VRAM.
+        // CPU throughput benefits from per-worker handles with shared model
+        // tensors. GPU inference remains single-handle until concurrent
+        // forwards show a measured benefit.
         let pool_size = if backend.accelerator() {
             1
         } else {
             cpu_pool_size
         };
-        let mut pool = Vec::with_capacity(pool_size);
-        pool.push(parking_lot::Mutex::new(first));
+        let mut embedders = Vec::with_capacity(pool_size);
+        embedders.push(first);
 
-        for i in 1..pool_size {
-            match build_one(backend) {
-                Ok((embedder, actual)) if actual == backend => {
-                    pool.push(parking_lot::Mutex::new(embedder));
-                }
-                Ok((_embedder, actual)) => {
-                    tracing::warn!(
-                        "neural embedder pool: worker {} selected {} instead of {}; continuing with {} instance(s)",
-                        i + 1,
-                        actual.label(),
-                        backend.label(),
-                        pool.len()
-                    );
-                    break;
-                }
-                // Already have at least one working embedder: degrade to fewer
-                // workers rather than disabling neural enhancement entirely if a
-                // later copy can't be allocated (e.g. OOM / limited VRAM loading
-                // the Nth instance).
+        for _ in 1..pool_size {
+            match embedders[0].fork_shared() {
+                Ok(embedder) => embedders.push(embedder),
                 Err(e) => {
                     tracing::warn!(
-                        "neural embedder pool: loaded {} of {} instances; continuing with fewer ({e:#})",
-                        pool.len(),
+                        "neural embedder pool: created {} of {} shared workers; continuing with fewer ({e:#})",
+                        embedders.len(),
                         pool_size
                     );
                     break;
                 }
             }
         }
+        let pool = embedders.into_iter().map(parking_lot::Mutex::new).collect();
 
         Ok(Self {
             pool,
@@ -1083,6 +1130,28 @@ mod tests {
         assert_eq!(neural_thread_budget_for(false, 32, None), 8);
         assert_eq!(neural_thread_budget_for(true, 32, Some(20)), 20);
         assert_eq!(neural_thread_budget_for(true, 32, Some(64)), 32);
+    }
+
+    #[cfg(feature = "neural")]
+    #[test]
+    fn transformer_pool_is_capped_by_available_memory() {
+        let gib = 1024 * MIB;
+        assert_eq!(
+            transformer_pool_size(NeuralProfile::General, 8, Some(gib), None),
+            3
+        );
+        assert_eq!(
+            transformer_pool_size(NeuralProfile::General, 8, Some(2 * gib), None),
+            8
+        );
+        assert_eq!(
+            transformer_pool_size(NeuralProfile::General, 8, Some(64 * gib), Some(256 * MIB)),
+            3
+        );
+        assert_eq!(
+            transformer_pool_size(NeuralProfile::General, 8, None, None),
+            8
+        );
     }
 
     #[test]

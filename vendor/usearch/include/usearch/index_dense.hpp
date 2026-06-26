@@ -905,18 +905,20 @@ class index_dense_gt {
      *  ! No update or search operations should be running during this operation.
      */
     bool try_reserve(index_limits_t limits) {
+        // `reserve` is monotonic. A smaller request may be used when only
+        // changing thread limits and must never shrink member-addressed arrays.
+        limits.members = (std::max)(limits.members, typed_->capacity());
 
         // The slot lookup system will generally prefer power-of-two sizes.
         if (config_.enable_key_lookups) {
             unique_lock_t lock(slot_lookup_mutex_);
             if (!slot_lookup_.try_reserve(limits.members))
                 return false;
-            limits.members = slot_lookup_.capacity();
         }
 
-        // Once the `slot_lookup_` grows, let's use its capacity as the new
-        // target for the `vectors_lookup_` to synchronize allocations and
-        // expensive index re-organizations.
+        // The keyed lookup reserves extra power-of-two/load-factor slack.
+        // Keep that implementation detail out of the vector and graph
+        // capacities, which only need to address the requested member slots.
         if (limits.members != vectors_lookup_.size()) {
             vectors_lookup_t new_vectors_lookup(limits.members);
             if (!new_vectors_lookup)

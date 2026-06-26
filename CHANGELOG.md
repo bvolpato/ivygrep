@@ -4,6 +4,38 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.12.9] - 2026-06-26
+
+### Added
+- **Rust modules now index parser-derived `#[doc = include_str!(...)]` documentation under the owning source file.** Included documentation participates in hybrid retrieval, dependency edits refresh the owner incrementally, worktree overlays remain current, and traversal, symlink escape, ignored-file, binary, and size limits bound the feature.
+- **Tree-sitter structural chunking now covers Kotlin, Elixir, and Zig.** Kotlin classes, objects, functions, and type aliases; Elixir modules, protocols, implementations, functions, and macros; and Zig containers, functions, and tests are ranked as declarations instead of fallback text windows.
+- **TypeScript and TSX structural chunking now covers type aliases, enums, and abstract classes.** Language-aware retrieval can rank these declarations directly instead of relying on a surrounding module chunk. Existing indexes rebuild once under format version 16.
+
+### Changed
+- **Result count and snippet size are now documented as independent controls.** CLI help, MCP schema guidance, the agent integration guide, and benchmark notes distinguish `limit` from `context` and explicitly state that a smaller snippet payload is not itself a relevance improvement.
+- **Natural-language code concepts now map to conservative canonical vocabulary without widening global candidate budgets.** Bounded phrase aliases cover multipart payloads, server-sent events, and error formatting. Mixed long aliases and precise acronyms use specificity ranking only when generic acronym density would hide the canonical file.
+- **Exact symbol fusion prefers case-exact canonical declarations and less-qualified module names.** This resolves collisions such as Kotlin `Flow` versus `flow` and Elixir `Ecto.Schema` versus `Ecto.Repo.Schema`.
+- **Exact-symbol candidates are ordered before truncation.** Case-exact declarations and canonical file stems now outrank partial definitions such as `SqlMapper.Async.cs`, while focused snippets skip leading documentation and center the source declaration.
+- **Path ranking recognizes conservative code-word roots.** Identifier-aware path terms connect queries such as `validation`, `reflection`, `resolution`, and `connection` to canonical `Validate`, `Reflective`, `resolver`, and `connector` files without enabling broad fuzzy matching.
+- **Natural-language path recall is file-aware and bounded.** A 20-file path pass removes language-extension noise, overfetches documents before file deduplication, and applies path evidence to the best lexical chunk without widening the global rerank budget.
+- **Primary C and C++ headers are no longer density-demoted.** Public API declarations in `.h`, `.hh`, and `.hpp` files receive the same primary-source treatment as implementation files.
+- **Result backfill now requires ten distinct candidate files.** Chunk-heavy matches in one file can no longer authorize unrelated filler results, preserving result breadth as a relevance decision instead of a benchmark artifact.
+
+### Performance
+- **The daemon removes repeated workspace and neural-readiness setup from hot queries.** Exact workspace roots and stamp-validated neural model/vector status are cached with bounded entries and invalidated when index artifacts change.
+- **Semantic retrieval defers stored-text decompression until fusion knows its rerank set.** ANN candidates first load only ranking metadata, then the existing bounded top-30 pass hydrates full text. Query analysis is also reused across fusion, filtering, and presentation.
+- **The built-in 23-query relevance suite improves first-result precision without trading away recall.** Five paired runs against `main` move precision@1 from `0.391` to `0.478`, MRR from `0.590` to `0.616`, and nDCG@10 from `0.627` to `0.647`, while recall@5 remains `0.739`.
+- **The independent retrieval fixture preserves exact output quality while reducing warm median latency.** Five paired hash-mode runs retain `1.000` nDCG@10, MRR, and recall@20 with exactly one relevant file returned per query; warm p50 moves from `17.38 ms` to `14.42 ms`.
+
+### Fixed
+- **Declaration signature indexing now skips leading documentation comments and attributes.** JavaDoc, C-style documentation, Java annotations, and C# attributes no longer occupy the boosted signature field instead of the declaration. The field now uses its intended 5x BM25 boost, and existing indexes rebuild once under format version 16.
+- **Haskell structural indexing no longer risks native heap corruption on Linux ARM64.** The vendored `tree-sitter-haskell` 0.23.1 grammar carries the upstream strict-aliasing fix proposed in tree-sitter/tree-sitter-haskell#157, replacing stale-pointer array growth in its external scanner.
+- **Bulk ANN enhancement no longer bypasses bounded capacity growth.** Hash and neural stores translate a 128 MiB estimated per-entry memory budget into a growth cap using vector dimensions, quantization, and graph connectivity. The vendored USearch allocator now keeps hash-table slack from amplifying vector, mutex, and HNSW capacity. Million-chunk enhancement can no longer pre-reserve native capacity for the entire remaining corpus before low-memory checks run.
+- **Optional transformer workers share one immutable model instead of reloading weights per thread.** An eight-worker MiniLM probe reduced peak RSS from 869.7 MB to 217.2 MB with equivalent median throughput. Background worker count is also capped by cgroup-aware available memory on Linux and native memory reporting on macOS and Windows.
+
+### Testing
+- Added parser, Haskell external-scanner safety, dependency invalidation, gitignore, resource-bound, worktree-overlay, Kotlin/Elixir/Zig and TypeScript structural-declaration, exact-case symbol, namespace-specificity, canonical-file ordering, definition-centered preview, primary-header density, path-morphology, canonical vocabulary, and acronym-specificity coverage.
+
 ## [0.12.8] - 2026-06-25
 
 ### Performance
@@ -27,7 +59,7 @@ All notable changes to ivygrep are documented in this file.
 - **Search work is deferred until candidates need it.** Literal variants share one bounded pass, lexical and path text loading is limited to rerank candidates, and pooled search contexts reuse validated file contents.
 
 ### Performance
-- **The pinned 60-query comparison now leads on aggregate, architecture, and symbol relevance.** Cache-bypassed results report `0.813` nDCG@10, `1.000` symbol nDCG, `11.93 ms` p95, and 392 mean returned tokens. The full reproducible evidence is in `docs/benchmarks/ivygrep-vs-semble.{json,md}`.
+- **The pinned 60-query relevance suite improved aggregate, architecture, and symbol ranking.** Cache-bypassed results report `0.813` nDCG@10, `1.000` symbol nDCG, `11.93 ms` p95, and 392 approximate top-10 snippet tokens. Payload size is reported separately from relevance.
 - **Completed indexes avoid repeated completeness scans.** Generation sentinels and Tantivy manifest stamps remove unnecessary vector-cardinality and directory audits from hot queries.
 
 ### Fixed
