@@ -1,7 +1,9 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -18,22 +20,36 @@ use tantivy::schema::{
 };
 use tantivy::{Index as TantivyIndex, TantivyDocument, Term};
 
-use crate::text::{CODE_TOKENIZER_NAME, build_code_analyzer};
+use crate::text::{CODE_TOKENIZER_NAME, build_code_analyzer, first_code_line_range};
 
-use crate::chunking::{Chunk, chunk_source, is_indexable_file};
+use crate::chunking::{
+    Chunk, RustDocInclude, chunk_rust_doc_include, chunk_source_with_metadata, is_indexable_file,
+};
 use crate::embedding::EmbeddingModel;
 use crate::jobs::{self, JobKind, JobUpdate};
 use crate::merkle::{MerkleDiff, MerkleSnapshot, normalized_indexable_content};
+use crate::system_resources::available_memory_bytes;
 use crate::vector_store::{
     HASH_VECTOR_QUANTIZATION, NEURAL_VECTOR_QUANTIZATION, ScalarKind, VectorStore,
 };
 use crate::workspace::{Workspace, WorkspaceMetadata, index_path_string};
 
 const ZSTD_MAGIC: &[u8] = &[0x28, 0xB5, 0x2F, 0xFD];
+const MIN_COMPRESSED_TEXT_BYTES: usize = 128;
 const TANTIVY_WRITE_RETRY_ATTEMPTS: u32 = 16;
 const TANTIVY_WRITE_RETRY_MAX_DELAY_MS: u64 = 800;
 const TANTIVY_INDEX_RETRY_ATTEMPTS: u32 = 3;
 const TANTIVY_INDEX_RETRY_BASE_DELAY_MS: u64 = 250;
+const MIB: u64 = 1024 * 1024;
+const MAX_RUST_DOC_INCLUDES_PER_SOURCE: usize = 16;
+const MAX_RUST_DOC_INCLUDE_BYTES: u64 = MIB;
+const MAX_RUST_DOC_INCLUDE_TOTAL_BYTES: u64 = 2 * MIB;
+const MAX_RUST_DOC_INCLUDE_CHUNKS_PER_SOURCE: usize = 128;
+
+thread_local! {
+    static TEXT_COMPRESSOR: RefCell<Option<zstd::bulk::Compressor<'static>>> =
+        RefCell::new(zstd::bulk::Compressor::new(1).ok());
+}
 
 #[derive(Clone, Debug)]
 struct RetryingDirectory<D> {
@@ -111,7 +127,19 @@ where
 }
 
 fn compress_text(text: &str) -> Vec<u8> {
-    zstd::encode_all(text.as_bytes(), 1).unwrap_or_else(|_| text.as_bytes().to_vec())
+    let raw = text.as_bytes();
+    if raw.len() < MIN_COMPRESSED_TEXT_BYTES {
+        return raw.to_vec();
+    }
+
+    TEXT_COMPRESSOR
+        .with_borrow_mut(|compressor| {
+            compressor
+                .as_mut()
+                .and_then(|value| value.compress(raw).ok())
+        })
+        .filter(|compressed| compressed.len() < raw.len())
+        .unwrap_or_else(|| raw.to_vec())
 }
 
 pub fn decompress_text(raw: Vec<u8>) -> String {
@@ -171,7 +199,13 @@ fn prepare_indexed_chunk(chunk: IndexedChunk) -> PreparedIndexedChunk {
     }
 }
 
-type IndexedFileBatch = Vec<(PathBuf, Vec<PreparedIndexedChunk>)>;
+struct IndexedFile {
+    rel_path: PathBuf,
+    chunks: Vec<PreparedIndexedChunk>,
+    included_paths: Vec<PathBuf>,
+}
+
+type IndexedFileBatch = Vec<IndexedFile>;
 
 struct IndexBatchProducer {
     receiver: Option<std::sync::mpsc::Receiver<IndexedFileBatch>>,
@@ -379,10 +413,8 @@ fn index_workspace_with_options(
 ) -> Result<IndexingSummary> {
     workspace.ensure_dirs()?;
 
-    // On Linux, refuse to start indexing if available memory is critically low.
-    // This prevents the OOM killer from randomly stopping the computer.
-    #[cfg(target_os = "linux")]
-    check_linux_memory_before_index()?;
+    // Refuse to start indexing if available memory is critically low.
+    check_memory_before_index()?;
 
     // Acquire an exclusive file lock to prevent concurrent writes to the
     // vector store (usearch) and other index files. The lock is advisory
@@ -789,7 +821,8 @@ fn index_workspace_inner(
     // store commits complete. Saving it earlier creates a crash window where
     // the snapshot claims files are indexed but the actual stores are empty/partial.
     // See: snapshot must be a high-water mark of persisted state, not of intent.
-    let (diff, pending_snapshot, clear_overlay_paths) = if let Some(overlay_diff) = overlay_mode {
+    let (mut diff, pending_snapshot, clear_overlay_paths) = if let Some(overlay_diff) = overlay_mode
+    {
         (overlay_diff, None, Vec::new())
     } else if workspace.has_overlay() {
         // Incremental update to existing overlay
@@ -894,6 +927,19 @@ fn index_workspace_inner(
         }
         (d, Some(new), Vec::new())
     };
+
+    let pending_snapshot = pending_snapshot.map(Arc::new);
+    let current_snapshot = pending_snapshot.clone().or_else(|| {
+        MerkleSnapshot::load(&workspace.merkle_snapshot_path())
+            .ok()
+            .map(Arc::new)
+    });
+    add_included_file_dependents(
+        workspace,
+        &mut diff,
+        &clear_overlay_paths,
+        current_snapshot.as_deref(),
+    )?;
 
     let discovery_ms = index_started.elapsed().as_secs_f64() * 1_000.0;
     let persist_started = std::time::Instant::now();
@@ -1062,6 +1108,7 @@ fn index_workspace_inner(
 
     let progress_counter_clone = progress_counter.clone();
     let root_clone = workspace.root.clone();
+    let current_snapshot_clone = current_snapshot.clone();
     let progress_path_clone = workspace.indexing_progress_path();
     let diff_paths: Vec<_> = diff.added_or_modified.clone();
 
@@ -1082,7 +1129,11 @@ fn index_workspace_inner(
                         if is_fresh_index {
                             None
                         } else {
-                            Some((rel.to_path_buf(), Vec::new()))
+                            Some(IndexedFile {
+                                rel_path: rel.to_path_buf(),
+                                chunks: Vec::new(),
+                                included_paths: Vec::new(),
+                            })
                         }
                     };
 
@@ -1106,9 +1157,17 @@ fn index_workspace_inner(
                         Err(err) => String::from_utf8_lossy(&err.into_bytes()).into_owned(),
                     };
 
-                    let chunks = chunk_source(rel_path, &content);
+                    let mut chunked = chunk_source_with_metadata(rel_path, &content);
+                    let (included_chunks, included_paths) = load_rust_doc_includes(
+                        &root_clone,
+                        rel_path,
+                        &chunked.rust_doc_includes,
+                        current_snapshot_clone.as_deref(),
+                    );
+                    chunked.chunks.extend(included_chunks);
                     let mut seen_vector_keys = HashSet::new();
-                    let indexed: Vec<_> = chunks
+                    let indexed: Vec<_> = chunked
+                        .chunks
                         .into_iter()
                         .map(|c| build_indexed_chunk(c, *is_ignored))
                         .filter(|chunk| seen_vector_keys.insert(chunk.vector_key))
@@ -1125,10 +1184,14 @@ fn index_workspace_inner(
                         let _ = fs::write(&progress_path_clone, format!("{n}/{total}"));
                     }
 
-                    if indexed.is_empty() {
+                    if indexed.is_empty() && included_paths.is_empty() {
                         return nothing(rel_path);
                     }
-                    Some((rel_path.clone(), indexed))
+                    Some(IndexedFile {
+                        rel_path: rel_path.clone(),
+                        chunks: indexed,
+                        included_paths,
+                    })
                 })
                 .collect();
 
@@ -1159,7 +1222,9 @@ fn index_workspace_inner(
         // deferred to background enhancement: on multi-million chunk repos the
         // provisional graph dominated first-index latency and delayed usable
         // BM25/literal results by minutes.
-        for (rel_path, indexed_chunks) in &file_chunks {
+        for indexed_file in &file_chunks {
+            let rel_path = &indexed_file.rel_path;
+            let indexed_chunks = &indexed_file.chunks;
             let rel_path_string = index_path_string(rel_path);
             touched_files.insert(rel_path_string.clone());
             total_chunks_processed += indexed_chunks.len();
@@ -1173,6 +1238,15 @@ fn index_workspace_inner(
                     &hash_tombstones_path,
                     neural_tombstones_path.as_deref(),
                     rel_path,
+                ));
+            }
+
+            for included_path in &indexed_file.included_paths {
+                persist_or_stop!(tx.execute(
+                    "INSERT OR IGNORE INTO included_file_dependencies (
+                        owner_path, included_path
+                    ) VALUES (?1, ?2)",
+                    params![rel_path_string, index_path_string(included_path)],
                 ));
             }
 
@@ -1195,7 +1269,7 @@ fn index_workspace_inner(
                     &mut writer,
                     &fields,
                     indexed,
-                    &rel_path_string
+                    &rel_path_string,
                 ));
             }
         }
@@ -1312,6 +1386,212 @@ fn index_workspace_inner(
             finalize_ms: finalize_started.elapsed().as_secs_f64() * 1_000.0,
         },
     })
+}
+
+fn add_included_file_dependents(
+    workspace: &Workspace,
+    diff: &mut MerkleDiff,
+    clear_overlay_paths: &[PathBuf],
+    current_snapshot: Option<&MerkleSnapshot>,
+) -> Result<()> {
+    let Some(current_snapshot) = current_snapshot else {
+        return Ok(());
+    };
+
+    let mut changed_paths = diff
+        .added_or_modified
+        .iter()
+        .map(|(path, _)| index_path_string(path))
+        .chain(diff.deleted.iter().map(|path| index_path_string(path)))
+        .chain(
+            clear_overlay_paths
+                .iter()
+                .map(|path| index_path_string(path)),
+        )
+        .collect::<HashSet<_>>();
+    if changed_paths.is_empty() {
+        return Ok(());
+    }
+
+    let mut sqlite_paths = vec![workspace.sqlite_path(), workspace.overlay_sqlite_path()];
+    if let Some(base_index_dir) = &workspace.base_index_dir {
+        sqlite_paths.push(base_index_dir.join("metadata.sqlite3"));
+    }
+    sqlite_paths.sort();
+    sqlite_paths.dedup();
+
+    let mut owners = HashSet::new();
+    for sqlite_path in sqlite_paths {
+        if !sqlite_path.is_file() {
+            continue;
+        }
+        let Ok(conn) = Connection::open_with_flags(
+            &sqlite_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) else {
+            continue;
+        };
+        let table_exists = conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table' AND name = 'included_file_dependencies'
+                )",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap_or(false);
+        if !table_exists {
+            continue;
+        }
+
+        let Ok(mut stmt) = conn.prepare(
+            "SELECT owner_path
+             FROM included_file_dependencies
+             WHERE included_path = ?1",
+        ) else {
+            continue;
+        };
+        for changed_path in &changed_paths {
+            let Ok(rows) = stmt.query_map(params![changed_path], |row| row.get::<_, String>(0))
+            else {
+                continue;
+            };
+            owners.extend(rows.filter_map(Result::ok));
+        }
+    }
+
+    let deleted = diff
+        .deleted
+        .iter()
+        .map(|path| index_path_string(path))
+        .collect::<HashSet<_>>();
+    let mut owners = owners.into_iter().collect::<Vec<_>>();
+    owners.sort();
+    for owner in owners {
+        if changed_paths.contains(&owner) || deleted.contains(&owner) {
+            continue;
+        }
+        let Some(snapshot_hash) = current_snapshot.files.get(&owner) else {
+            continue;
+        };
+        let owner_path = PathBuf::from(&owner);
+        if !workspace.root.join(&owner_path).is_file() {
+            continue;
+        }
+        diff.added_or_modified
+            .push((owner_path, snapshot_hash.ends_with("-1")));
+        changed_paths.insert(owner);
+    }
+
+    Ok(())
+}
+
+fn load_rust_doc_includes(
+    root: &Path,
+    owner_rel_path: &Path,
+    includes: &[RustDocInclude],
+    current_snapshot: Option<&MerkleSnapshot>,
+) -> (Vec<Chunk>, Vec<PathBuf>) {
+    let canonical_root = fs::canonicalize(root).ok();
+    let mut chunks = Vec::new();
+    let mut dependencies = Vec::new();
+    let mut seen = HashSet::new();
+    let mut total_bytes = 0u64;
+
+    for include in includes.iter().take(MAX_RUST_DOC_INCLUDES_PER_SOURCE) {
+        let Some(included_rel_path) =
+            normalize_workspace_relative_include(owner_rel_path, &include.path)
+        else {
+            continue;
+        };
+        if included_rel_path == owner_rel_path || !seen.insert(included_rel_path.clone()) {
+            continue;
+        }
+        dependencies.push(included_rel_path.clone());
+
+        let included_key = index_path_string(&included_rel_path);
+        if !current_snapshot.is_some_and(|snapshot| snapshot.files.contains_key(&included_key)) {
+            continue;
+        }
+        if chunks.len() >= MAX_RUST_DOC_INCLUDE_CHUNKS_PER_SOURCE {
+            continue;
+        }
+
+        let Some(canonical_root) = canonical_root.as_ref() else {
+            continue;
+        };
+        let Ok(canonical_target) = fs::canonicalize(root.join(&included_rel_path)) else {
+            continue;
+        };
+        if !canonical_target.starts_with(canonical_root) {
+            continue;
+        }
+        let Ok(metadata) = canonical_target.metadata() else {
+            continue;
+        };
+        if !metadata.is_file()
+            || metadata.len() > MAX_RUST_DOC_INCLUDE_BYTES
+            || total_bytes.saturating_add(metadata.len()) > MAX_RUST_DOC_INCLUDE_TOTAL_BYTES
+        {
+            continue;
+        }
+        let Ok(bytes) = fs::read(&canonical_target) else {
+            continue;
+        };
+        if !is_indexable_file(&included_rel_path, &bytes) {
+            continue;
+        }
+        total_bytes += bytes.len() as u64;
+        let text = String::from_utf8(bytes)
+            .unwrap_or_else(|err| String::from_utf8_lossy(&err.into_bytes()).into_owned());
+        let remaining = MAX_RUST_DOC_INCLUDE_CHUNKS_PER_SOURCE.saturating_sub(chunks.len());
+        chunks.extend(
+            chunk_rust_doc_include(
+                owner_rel_path,
+                include.source_line,
+                &included_rel_path,
+                &text,
+            )
+            .into_iter()
+            .take(remaining),
+        );
+    }
+
+    (chunks, dependencies)
+}
+
+fn normalize_workspace_relative_include(owner_rel_path: &Path, include: &Path) -> Option<PathBuf> {
+    if include.is_absolute() {
+        return None;
+    }
+
+    let mut normalized = PathBuf::new();
+    for component in owner_rel_path
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .components()
+    {
+        match component {
+            Component::Normal(component) => normalized.push(component),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    for component in include.components() {
+        match component {
+            Component::Normal(component) => normalized.push(component),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+
+    (!normalized.as_os_str().is_empty()).then_some(normalized)
 }
 
 fn files_have_same_contents(left: &Path, right: &Path) -> bool {
@@ -1574,6 +1854,10 @@ fn check_system_constraints() -> Option<String> {
 
     use std::process::Command;
 
+    if let Some(reason) = low_available_memory_reason(1024 * MIB) {
+        return Some(reason);
+    }
+
     // 1. Check battery power
     if let Ok(output) = Command::new("pmset").arg("-g").arg("batt").output() {
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1619,41 +1903,27 @@ fn check_system_constraints() -> Option<String> {
         }
     }
 
-    if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo")
-        && let Some(kb) = meminfo.lines().find_map(|line| {
-            line.strip_prefix("MemAvailable:")
-                .and_then(|rest| rest.split_whitespace().next())
-                .and_then(|value| value.parse::<u64>().ok())
-        })
-        && kb < 1_048_576
-    {
-        return Some(format!("Low Available Memory ({} MiB)", kb / 1024));
+    if let Some(reason) = low_available_memory_reason(1024 * MIB) {
+        return Some(reason);
     }
 
     None
 }
 
 /// Guard for the indexer: refuse to start indexing when available memory
-/// is dangerously low. This prevents the OOM killer from firing during
-/// heavy workloads on Linux machines with limited RAM.
-#[cfg(target_os = "linux")]
-fn check_linux_memory_before_index() -> Result<()> {
+/// is dangerously low.
+fn check_memory_before_index() -> Result<()> {
     if cfg!(test) || std::env::var("CI").is_ok() {
         return Ok(());
     }
 
-    if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo")
-        && let Some(kb) = meminfo.lines().find_map(|line| {
-            line.strip_prefix("MemAvailable:")
-                .and_then(|rest| rest.split_whitespace().next())
-                .and_then(|value| value.parse::<u64>().ok())
-        })
-        && kb < 524_288
+    if let Some(bytes) = available_memory_bytes()
+        && bytes < 512 * MIB
     {
         anyhow::bail!(
             "refusing to index: only {} MiB of memory available (need at least 512 MiB). \
              Close other applications or free memory before re-indexing.",
-            kb / 1024
+            bytes / MIB
         );
     }
 
@@ -1662,7 +1932,13 @@ fn check_linux_memory_before_index() -> Result<()> {
 
 #[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
 fn check_system_constraints() -> Option<String> {
-    None
+    low_available_memory_reason(1024 * MIB)
+}
+
+fn low_available_memory_reason(minimum_bytes: u64) -> Option<String> {
+    available_memory_bytes()
+        .filter(|available| *available < minimum_bytes)
+        .map(|available| format!("Low Available Memory ({} MiB)", available / MIB))
 }
 
 /// Compute lightweight hash embeddings for all chunks and save as the first
@@ -2106,6 +2382,10 @@ fn remove_file_chunks(
 
     crate::symbols::remove_file_graph(sqlite, &rel_str)?;
     sqlite.execute("DELETE FROM chunks WHERE file_path = ?1", params![rel_str])?;
+    sqlite.execute(
+        "DELETE FROM included_file_dependencies WHERE owner_path = ?1",
+        params![rel_str],
+    )?;
     Ok(())
 }
 
@@ -2145,6 +2425,22 @@ fn claim_vector_tombstones(
 }
 
 fn extract_signature(chunk: &IndexedChunk) -> String {
+    if matches!(chunk.kind.as_str(), "Documentation" | "documentation") {
+        return chunk
+            .text
+            .lines()
+            .skip(2)
+            .map(str::trim)
+            .map(|line| line.trim_start_matches('#').trim())
+            .filter(|line| !line.is_empty() && !line.starts_with("```"))
+            .take(12)
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(512)
+            .collect();
+    }
+
     let is_definition = matches!(
         chunk.kind.as_str(),
         "Function"
@@ -2165,15 +2461,9 @@ fn extract_signature(chunk: &IndexedChunk) -> String {
     if !is_definition {
         return String::new();
     }
-    chunk
-        .text
-        .lines()
-        .find(|l| {
-            let t = l.trim();
-            !t.is_empty() && !t.starts_with("//") && !t.starts_with('#')
-        })
+    first_code_line_range(&chunk.text)
+        .map(|range| chunk.text[range].to_string())
         .unwrap_or_default()
-        .to_string()
 }
 
 fn add_chunk_doc(
@@ -2329,9 +2619,17 @@ fn create_tables(conn: &Connection) -> Result<()> {
             PRIMARY KEY (normalized_name, chunk_key)
         ) WITHOUT ROWID;
 
+        CREATE TABLE IF NOT EXISTS included_file_dependencies (
+            owner_path TEXT NOT NULL,
+            included_path TEXT NOT NULL,
+            PRIMARY KEY (owner_path, included_path)
+        ) WITHOUT ROWID;
+
         CREATE INDEX IF NOT EXISTS idx_chunks_file_path ON chunks(file_path);
         CREATE INDEX IF NOT EXISTS idx_chunks_vector_key ON chunks(vector_key);
         CREATE INDEX IF NOT EXISTS idx_chunks_language ON chunks(language);
+        CREATE INDEX IF NOT EXISTS idx_included_file_dependencies_path
+            ON included_file_dependencies(included_path);
         "#,
     )?;
 
@@ -2488,6 +2786,18 @@ pub fn fetch_chunks_by_vector_keys_batch(
     conn: &Connection,
     keys: &[u64],
 ) -> Result<HashMap<u64, IndexedChunk>> {
+    fetch_chunks_by_vector_keys_batch_impl(conn, keys, true)
+}
+
+/// Batch-fetch only stored chunk text by vector key.
+///
+/// Reranking already has candidate metadata from Tantivy or the metadata-only
+/// ANN hydration pass. Avoid selecting and rebuilding that metadata a second
+/// time when only the compressed text blob is needed.
+pub fn fetch_chunk_texts_by_vector_keys_batch(
+    conn: &Connection,
+    keys: &[u64],
+) -> Result<HashMap<u64, String>> {
     let mut result = HashMap::with_capacity(keys.len());
     if keys.is_empty() {
         return Ok(result);
@@ -2496,11 +2806,59 @@ pub fn fetch_chunks_by_vector_keys_batch(
     // SQLite supports up to 999 bind parameters; batch in groups of 500.
     for batch in keys.chunks(500) {
         let placeholders = batch.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let query =
+            format!("SELECT vector_key, text FROM chunks WHERE vector_key IN ({placeholders})",);
+        let mut stmt = conn.prepare(&query)?;
+
+        let params: Vec<rusqlite::types::Value> = batch
+            .iter()
+            .map(|key| rusqlite::types::Value::Integer(*key as i64))
+            .collect();
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
+            .iter()
+            .map(|value| value as &dyn rusqlite::types::ToSql)
+            .collect();
+
+        let mut rows = stmt.query(param_refs.as_slice())?;
+        while let Some(row) = rows.next()? {
+            let vector_key = row.get::<_, i64>(0)? as u64;
+            let raw_text: Vec<u8> = row.get(1)?;
+            result.insert(vector_key, decompress_text(raw_text));
+        }
+    }
+
+    Ok(result)
+}
+
+/// Batch-fetch chunk metadata without reading or decompressing stored text.
+///
+/// Search fusion only needs text for its bounded rerank set, so ANN candidate
+/// discovery can defer the larger blob work until those candidates are known.
+pub fn fetch_chunk_metadata_by_vector_keys_batch(
+    conn: &Connection,
+    keys: &[u64],
+) -> Result<HashMap<u64, IndexedChunk>> {
+    fetch_chunks_by_vector_keys_batch_impl(conn, keys, false)
+}
+
+fn fetch_chunks_by_vector_keys_batch_impl(
+    conn: &Connection,
+    keys: &[u64],
+    include_text: bool,
+) -> Result<HashMap<u64, IndexedChunk>> {
+    let mut result = HashMap::with_capacity(keys.len());
+    if keys.is_empty() {
+        return Ok(result);
+    }
+
+    // SQLite supports up to 999 bind parameters; batch in groups of 500.
+    for batch in keys.chunks(500) {
+        let placeholders = batch.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let text_column = if include_text { "text" } else { "x''" };
         let query = format!(
-            "SELECT file_path, start_line, end_line, language, kind, text, \
+            "SELECT file_path, start_line, end_line, language, kind, {text_column}, \
              vector_key, is_ignored \
-             FROM chunks WHERE vector_key IN ({})",
-            placeholders
+             FROM chunks WHERE vector_key IN ({placeholders})",
         );
         let mut stmt = conn.prepare(&query)?;
 
@@ -2529,7 +2887,11 @@ pub fn fetch_chunks_by_vector_keys_batch(
                 end_line,
                 language,
                 kind,
-                text: decompress_text(raw_text),
+                text: if include_text {
+                    decompress_text(raw_text)
+                } else {
+                    String::new()
+                },
                 content_hash: String::new(),
                 vector_key,
                 is_ignored: row.get::<_, bool>(7)?,
@@ -2622,6 +2984,7 @@ pub fn diff_for_workspace(workspace: &Workspace) -> Result<MerkleDiff> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fs;
 
     use serial_test::serial;
@@ -2633,6 +2996,17 @@ mod tests {
     use crate::workspace::Workspace;
 
     use super::*;
+
+    fn indexed_texts_for_file(workspace: &Workspace, file_path: &str) -> Vec<String> {
+        let conn = open_sqlite(&workspace.sqlite_path()).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT text FROM chunks WHERE file_path = ?1 ORDER BY start_line, chunk_key")
+            .unwrap();
+        stmt.query_map(params![file_path], |row| row.get::<_, Vec<u8>>(0))
+            .unwrap()
+            .map(|row| decompress_text(row.unwrap()))
+            .collect()
+    }
 
     struct RecordedTestEmbedding {
         model: HashEmbeddingModel,
@@ -2782,6 +3156,46 @@ mod tests {
     }
 
     #[test]
+    fn rust_doc_include_uses_concise_module_description_signature() {
+        let chunk = chunk_rust_doc_include(
+            Path::new("src/middleware/mod.rs"),
+            3,
+            Path::new("src/docs/middleware.md"),
+            "# Intro\n\naxum integrates with Tower middleware.\n\n# Applying middleware\n\nRouter layers wrap routes.\n",
+        )
+        .into_iter()
+        .next()
+        .unwrap();
+        let indexed = build_indexed_chunk(chunk, false);
+        let signature = extract_signature(&indexed);
+
+        assert!(signature.contains("axum integrates with Tower middleware"));
+        assert!(signature.contains("Router layers wrap routes"));
+        assert!(signature.len() <= 512);
+    }
+
+    #[test]
+    fn java_signature_skips_documentation_and_annotations() {
+        let chunk = Chunk {
+            id: uuid::Uuid::new_v4(),
+            file_path: PathBuf::from("src/GsonBuilder.java"),
+            start_line: 10,
+            end_line: 20,
+            text: "// src/GsonBuilder.java\n\n/**\n * Registers an adapter.\n */\n@CanIgnoreReturnValue\npublic GsonBuilder registerTypeAdapter(Type type, Object adapter) {\n}\n"
+                .to_string(),
+            language: "java".to_string(),
+            kind: ChunkKind::Function,
+            content_hash: "java-signature".to_string(),
+        };
+        let indexed = build_indexed_chunk(chunk, false);
+
+        assert_eq!(
+            extract_signature(&indexed),
+            "public GsonBuilder registerTypeAdapter(Type type, Object adapter) {"
+        );
+    }
+
+    #[test]
     fn dropping_index_batch_producer_cancels_blocked_sender() {
         let (sender, receiver) = std::sync::mpsc::sync_channel::<IndexedFileBatch>(0);
         let handle = std::thread::spawn(move || {
@@ -2828,6 +3242,179 @@ mod tests {
         assert!(summary.total_chunks >= 1);
         assert!(workspace_is_indexed(&workspace));
         assert!(workspace.vector_path().metadata().unwrap().len() > 0);
+    }
+
+    #[test]
+    #[serial]
+    fn rust_doc_include_is_indexed_into_owner_and_refreshed_with_dependency() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src/middleware")).unwrap();
+        fs::create_dir_all(root.path().join("src/docs")).unwrap();
+        fs::write(
+            root.path().join("src/middleware/mod.rs"),
+            "#![doc = include_str!(\"../docs/middleware.md\")]\n\
+             pub fn router() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("src/docs/middleware.md"),
+            "Axum maps Tower middleware layers onto the router.\n",
+        )
+        .unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let original = indexed_texts_for_file(&workspace, "src/middleware/mod.rs");
+        assert!(
+            original
+                .iter()
+                .any(|text| text.contains("maps Tower middleware layers"))
+        );
+        let conn = open_sqlite(&workspace.sqlite_path()).unwrap();
+        let dependency: String = conn
+            .query_row(
+                "SELECT included_path FROM included_file_dependencies
+                 WHERE owner_path = 'src/middleware/mod.rs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dependency, "src/docs/middleware.md");
+        drop(conn);
+
+        fs::write(
+            root.path().join("src/docs/middleware.md"),
+            "Router layers now use a replacement cardinal middleware explanation.\n",
+        )
+        .unwrap();
+        let refresh = index_workspace(&workspace, &model).unwrap();
+        assert!(
+            refresh.indexed_files >= 2,
+            "the included document and its owner should refresh"
+        );
+        let updated = indexed_texts_for_file(&workspace, "src/middleware/mod.rs");
+        assert!(
+            updated
+                .iter()
+                .any(|text| text.contains("replacement cardinal middleware"))
+        );
+        assert!(
+            updated
+                .iter()
+                .all(|text| !text.contains("maps Tower middleware layers"))
+        );
+
+        fs::remove_file(root.path().join("src/docs/middleware.md")).unwrap();
+        index_workspace(&workspace, &model).unwrap();
+        let deleted = indexed_texts_for_file(&workspace, "src/middleware/mod.rs");
+        assert!(
+            deleted
+                .iter()
+                .all(|text| !text.contains("replacement cardinal middleware"))
+        );
+
+        fs::write(
+            root.path().join("src/docs/middleware.md"),
+            "Recreated cardinal middleware dependency content.\n",
+        )
+        .unwrap();
+        index_workspace(&workspace, &model).unwrap();
+        let recreated = indexed_texts_for_file(&workspace, "src/middleware/mod.rs");
+        assert!(
+            recreated
+                .iter()
+                .any(|text| text.contains("Recreated cardinal middleware"))
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn rust_doc_include_respects_gitignore_until_dependency_becomes_visible() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(root.path())
+            .output()
+            .unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::create_dir_all(root.path().join("docs")).unwrap();
+        fs::write(
+            root.path().join("src/lib.rs"),
+            "#![doc = include_str!(\"../docs/private.md\")]\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("docs/private.md"),
+            "private cardinal documentation must remain ignored\n",
+        )
+        .unwrap();
+        fs::write(root.path().join(".gitignore"), "docs/private.md\n").unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        assert!(
+            indexed_texts_for_file(&workspace, "src/lib.rs")
+                .iter()
+                .all(|text| !text.contains("private cardinal documentation"))
+        );
+
+        fs::write(root.path().join(".gitignore"), "").unwrap();
+        index_workspace(&workspace, &model).unwrap();
+        assert!(
+            indexed_texts_for_file(&workspace, "src/lib.rs")
+                .iter()
+                .any(|text| text.contains("private cardinal documentation"))
+        );
+    }
+
+    #[test]
+    fn rust_doc_include_rejects_workspace_escape_and_oversized_file() {
+        assert_eq!(
+            normalize_workspace_relative_include(
+                Path::new("src/lib.rs"),
+                Path::new("../../outside.md")
+            ),
+            None
+        );
+        assert_eq!(
+            normalize_workspace_relative_include(
+                Path::new("src/lib.rs"),
+                Path::new("../docs/guide.md")
+            ),
+            Some(PathBuf::from("docs/guide.md"))
+        );
+
+        let root = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::create_dir_all(root.path().join("docs")).unwrap();
+        fs::write(
+            root.path().join("docs/large.md"),
+            vec![b'a'; MAX_RUST_DOC_INCLUDE_BYTES as usize + 1],
+        )
+        .unwrap();
+        let snapshot = MerkleSnapshot {
+            root_hash: String::new(),
+            files: BTreeMap::from([("docs/large.md".to_string(), "test-metadata-0".to_string())]),
+        };
+        let (chunks, dependencies) = load_rust_doc_includes(
+            root.path(),
+            Path::new("src/lib.rs"),
+            &[RustDocInclude {
+                source_line: 1,
+                path: PathBuf::from("../docs/large.md"),
+            }],
+            Some(&snapshot),
+        );
+        assert!(chunks.is_empty());
+        assert_eq!(dependencies, vec![PathBuf::from("docs/large.md")]);
     }
 
     #[test]
@@ -3298,11 +3885,21 @@ mod tests {
     }
 
     #[test]
-    fn decompress_text_roundtrips_zstd() {
+    fn compress_text_keeps_small_chunks_plain() {
         let original = "pub fn hello() -> &str { \"world\" }\n";
         let compressed = super::compress_text(original);
+        assert!(!compressed.starts_with(ZSTD_MAGIC));
         let decompressed = super::decompress_text(compressed);
         assert_eq!(decompressed, original);
+    }
+
+    #[test]
+    fn compress_text_roundtrips_large_chunks_with_zstd() {
+        let original = "pub fn hello() -> &str { \"world\" }\n".repeat(64);
+        let compressed = super::compress_text(&original);
+        assert!(compressed.starts_with(ZSTD_MAGIC));
+        assert!(compressed.len() < original.len());
+        assert_eq!(super::decompress_text(compressed), original);
     }
 
     #[test]
@@ -3420,6 +4017,33 @@ mod tests {
         let plain = b"plain text, not zstd";
         let decompressed = super::decompress_text(plain.to_vec());
         assert_eq!(decompressed, "plain text, not zstd");
+    }
+
+    #[test]
+    fn batch_text_fetch_reads_only_requested_chunk_text() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chunks (
+                vector_key INTEGER PRIMARY KEY,
+                text BLOB NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chunks (vector_key, text) VALUES (?1, ?2)",
+            params![7_i64, super::compress_text("requested chunk")],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chunks (vector_key, text) VALUES (?1, ?2)",
+            params![8_i64, super::compress_text("other chunk")],
+        )
+        .unwrap();
+
+        let texts = fetch_chunk_texts_by_vector_keys_batch(&conn, &[7, 99]).unwrap();
+
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts.get(&7).map(String::as_str), Some("requested chunk"));
     }
 
     #[test]

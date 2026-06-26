@@ -135,9 +135,69 @@ Important arguments:
 | `regex` | Regex search; prefer `literal` when regex syntax is unnecessary |
 | `type` | Language name, extension, or alias such as `rust`, `rs`, or `python` |
 | `include` / `exclude` | Comma-separated path globs |
-| `limit` | Maximum number of returned files |
-| `context` | Context lines around the focused match |
+| `limit` | Retrieval breadth and maximum result files; larger values search deeper and may improve recall |
+| `context` | Lines before and after each focused match; changes snippet size, not ranking |
+| `first_line_only` | Keep one preview line per hit without changing ranking |
 | `file_name_only` | Return paths without snippets |
+
+### Result Count and Context
+
+`limit` and `context` are independent controls. `limit` chooses retrieval
+breadth and caps ranked files; `context` changes source text per hit. Neither is
+a relevance threshold:
+
+| Control | What it changes | Ranking |
+|---|---|---|
+| `limit=N` | Searches a candidate pool sized for the request and returns at most `N` ranked files | The same relevance signals apply; a deeper pool can slightly change ranks |
+| omitted `limit` | Uses normal bounded candidate budgets without an explicit final file cap | Normal ranking |
+| `context=N` | Shows up to `N` source lines before and after each focused match | Unchanged |
+| `first_line_only` / `file_name_only` | Reduces output text after retrieval | Unchanged |
+
+- `limit=5` returns at most five result files. It is a cap, not a confidence
+  threshold, so fewer files may be returned after relevance filtering. Exact
+  modes can also group multiple matches into one file.
+- The ranker always optimizes the same relevance signals. A larger limit
+  improves recall opportunity by searching deeper, but progressively
+  lower-ranked candidates can also enter the response.
+- Results remain score-ordered. A smaller limit truncates the response to the
+  highest-ranked files found for that request; a relevant file below the cutoff
+  is not shown. `limit` is not a line, token, or confidence budget.
+- If `limit` is omitted, normal candidate retrieval remains bounded but no
+  explicit final result-file cap is applied. Agents should set it explicitly.
+- Increasing `limit` searches a deeper lexical, literal, semantic, and symbol
+  candidate pool. Deeper results are usually less confident, and the larger
+  pool can slightly change the top ranks.
+- `context=2` returns up to two lines before and two lines after the focused
+  line, for at most five lines per hit when file boundaries allow.
+- Increasing `context` does not alter retrieval scoring or ranking. It only
+  returns more surrounding source for the selected hits.
+- `first_line_only` and `file_name_only` are presentation controls. They do not
+  change retrieval or ranking.
+
+Recommended agent flow:
+
+1. Start with `limit=5` to `10` and `context=2`.
+2. Use `literal=true` for an exact identifier, and use `type`, `path`,
+   `include`, or `exclude` to remove known noise.
+3. Increase `context` when the right file is present but its snippet lacks
+   enough evidence.
+4. Increase `limit` when the result set lacks enough distinct implementations
+   or supporting files. Narrow `path`, `type`, `include`, or `exclude` when the
+   results are topically correct but too broad.
+
+There is no total `max_tokens` parameter today. Result count and per-hit context
+must be controlled separately. A smaller response is cheaper to place in an
+agent context window, but it is only better when the returned snippets remain
+sufficient for the task.
+
+Fewer snippet tokens do not mean fewer result files, better relevance, or worse
+relevance. They mean less source text was returned for the selected files.
+Evaluate relevance from the ranking and task outcome, not payload size alone.
+
+Do not use the internal fused score as a cross-query confidence threshold. It
+orders one query's candidates, but it is not calibrated across queries or
+repositories. Prefer rank, path/type filters, and whether the returned evidence
+is sufficient for the task.
 
 Always pass `path`. Relying on the MCP process working directory is less
 portable across desktop clients, terminals, containers, and remote workspaces.
@@ -163,6 +223,9 @@ Place this in the repository's persistent instruction file:
 Use the ivygrep MCP tools for code discovery before broad filesystem scans.
 Pass the absolute current repository or worktree path to ig_search.
 Use natural-language queries for concepts and literal=true for exact identifiers.
+Use limit to choose retrieval breadth and context to choose source lines per hit.
+Start with limit=5-10 and context=2. Increase context when a promising hit needs
+more evidence; increase limit when you need more candidate files.
 Use ig_status when indexing health is unclear.
 ```
 

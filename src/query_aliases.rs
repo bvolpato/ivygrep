@@ -17,20 +17,41 @@ pub(crate) fn phrase_aliases(tokens: &[String]) -> Vec<&'static str> {
     let mut aliases = Vec::new();
 
     for entry in PHRASE_ALIASES {
-        let terms_len = entry.terms.len();
-        if terms_len > 0
-            && tokens.windows(terms_len).any(|window| {
-                window
-                    .iter()
-                    .zip(entry.terms.iter())
-                    .all(|(token, term)| token == term)
-            })
-        {
+        if phrase_matches(entry, tokens) {
             aliases.extend_from_slice(entry.aliases);
         }
     }
 
     aliases
+}
+
+pub(crate) fn literal_phrase_aliases(tokens: &[String]) -> Vec<&'static str> {
+    let mut aliases = Vec::new();
+
+    for entry in PHRASE_ALIASES {
+        if phrase_matches(entry, tokens) {
+            aliases.extend(entry.aliases.iter().copied().filter(|alias| {
+                alias.len() >= 5
+                    || alias.contains('_')
+                    || (entry.terms.len() >= 3
+                        && alias.len() == 3
+                        && alias.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+            }));
+        }
+    }
+
+    aliases
+}
+
+fn phrase_matches(entry: &PhraseAlias, tokens: &[String]) -> bool {
+    let terms_len = entry.terms.len();
+    terms_len > 0
+        && tokens.windows(terms_len).any(|window| {
+            window
+                .iter()
+                .zip(entry.terms.iter())
+                .all(|(token, term)| token == term)
+        })
 }
 
 #[cfg(test)]
@@ -48,6 +69,9 @@ mod tests {
     fn token_aliases_load_from_generated_table() {
         assert_eq!(token_aliases("choose"), &["pick", "select"]);
         assert_eq!(token_aliases("scoring"), &["score", "rank"]);
+        assert_eq!(token_aliases("composition"), &["compose"]);
+        assert_eq!(token_aliases("resolution"), &["resolve", "resolver"]);
+        assert_eq!(token_aliases("storage"), &["store"]);
         assert!(token_aliases("flags").is_empty());
         assert!(token_aliases("output").is_empty());
         assert!(token_aliases("walker").is_empty());
@@ -64,11 +88,43 @@ mod tests {
             phrase_aliases(&tokens),
             vec!["job", "queue", "worker", "workqueue"]
         );
+
+        let tokens = vec!["binary".to_string(), "part".to_string()];
+        assert_eq!(phrase_aliases(&tokens), vec!["multipart"]);
+
+        let tokens = vec!["error".to_string(), "formatting".to_string()];
+        assert_eq!(phrase_aliases(&tokens), vec!["formatter"]);
+
+        let tokens = vec!["form".to_string(), "data".to_string()];
+        assert_eq!(phrase_aliases(&tokens), vec!["multipart"]);
+
+        let tokens = vec![
+            "server".to_string(),
+            "sent".to_string(),
+            "event".to_string(),
+        ];
+        assert_eq!(phrase_aliases(&tokens), vec!["sse", "server_sent_events"]);
     }
 
     #[test]
     fn phrase_aliases_non_contiguous() {
         let tokens = vec!["command".to_string(), "run".to_string(), "line".to_string()];
         assert!(phrase_aliases(&tokens).is_empty());
+    }
+
+    #[test]
+    fn literal_phrase_aliases_allow_precise_acronyms_only() {
+        let sse = vec![
+            "server".to_string(),
+            "sent".to_string(),
+            "event".to_string(),
+        ];
+        assert_eq!(
+            literal_phrase_aliases(&sse),
+            vec!["sse", "server_sent_events"]
+        );
+
+        let packet_receive = vec!["packet".to_string(), "receive".to_string()];
+        assert_eq!(literal_phrase_aliases(&packet_receive), vec!["ingress"]);
     }
 }

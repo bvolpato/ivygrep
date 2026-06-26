@@ -95,7 +95,15 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub json: bool,
 
-    #[arg(short = 'C', long, default_value_t = 2, global = true)]
+    /// Lines before and after the focused match to include in each snippet.
+    /// This changes output size, not retrieval ranking.
+    #[arg(
+        short = 'C',
+        long,
+        value_name = "LINES",
+        default_value_t = 2,
+        global = true
+    )]
     pub context: usize,
 
     #[arg(
@@ -114,18 +122,25 @@ pub struct Cli {
     #[arg(long, value_name = "GLOBS", value_delimiter = ',', global = true)]
     pub exclude: Vec<String>,
 
-    #[arg(short = 'n', long, global = true)]
+    /// Retrieval breadth and maximum ranked result files, not a token, line, or
+    /// confidence limit. Larger values search deeper and may improve recall.
+    #[arg(short = 'n', long, value_name = "FILES", global = true)]
     pub limit: Option<usize>,
 
+    /// Use maximum candidate budgets and return all surviving results. This can
+    /// produce large, slower responses.
     #[arg(long, global = true, conflicts_with = "limit")]
     pub no_limit: bool,
 
     #[arg(long, global = true)]
     pub no_watch: bool,
 
+    /// Return only the first non-empty preview line. Ranking is unchanged.
     #[arg(long, global = true)]
     pub first_line_only: bool,
 
+    /// Return only file paths. Without --limit, this also uses maximum candidate
+    /// budgets; combine with --limit for a bounded path list.
     #[arg(long, global = true)]
     pub file_name_only: bool,
 

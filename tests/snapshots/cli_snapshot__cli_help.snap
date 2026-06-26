@@ -27,16 +27,16 @@ Options:
       --refs                  Find exact symbol references
       --callers               Find functions or methods that call the named symbol
       --json                  
-  -C, --context <CONTEXT>     [default: 2]
+  -C, --context <LINES>       Lines before and after the focused match to include in each snippet. This changes output size, not retrieval ranking [default: 2]
       --type <TYPE_FILTER>    Filter by language name, extension, or alias (e.g. rust, rs, py, python, c++, bash, md)
       --all-indices           
       --include <GLOBS>       
       --exclude <GLOBS>       
-  -n, --limit <LIMIT>         
-      --no-limit              
+  -n, --limit <FILES>         Retrieval breadth and maximum ranked result files, not a token, line, or confidence limit. Larger values search deeper and may improve recall
+      --no-limit              Use maximum candidate budgets and return all surviving results. This can produce large, slower responses
       --no-watch              
-      --first-line-only       
-      --file-name-only        
+      --first-line-only       Return only the first non-empty preview line. Ranking is unchanged
+      --file-name-only        Return only file paths. Without --limit, this also uses maximum candidate budgets; combine with --limit for a bounded path list
       --verbose               
       --skip-gitignore        
       --hash                  Use lightweight hash-based embeddings instead of the default neural model. Faster startup, no model download, lower quality

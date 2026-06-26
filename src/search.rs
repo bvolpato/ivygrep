@@ -17,8 +17,10 @@ use tantivy::schema::IndexRecordOption;
 
 use crate::embedding::EmbeddingModel;
 use crate::indexer::{
-    IndexedChunk, fetch_chunk_by_id, fetch_chunk_by_vector_key, fetch_chunks_by_vector_keys_batch,
-    open_sqlite_readonly, open_tantivy_index, reconcile_worktree_overlay,
+    IndexedChunk, fetch_chunk_by_id, fetch_chunk_by_vector_key,
+    fetch_chunk_metadata_by_vector_keys_batch, fetch_chunk_texts_by_vector_keys_batch,
+    fetch_chunks_by_vector_keys_batch, open_sqlite_readonly, open_tantivy_index,
+    reconcile_worktree_overlay,
 };
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
@@ -114,7 +116,7 @@ pub fn validate_forced_neural_workspaces(
     Ok(())
 }
 
-fn workspace_neural_model_identity(
+pub(crate) fn workspace_neural_model_identity(
     workspace: &Workspace,
 ) -> Option<crate::embedding::NeuralModelIdentity> {
     neural_model_identity_from_index_dir(&workspace.index_dir)
@@ -560,6 +562,52 @@ impl SearchContext {
         Ok(result)
     }
 
+    /// Batch-fetch stored text for candidates whose metadata is already loaded.
+    fn fetch_chunk_texts_by_vector_keys_batch(&self, keys: &[u64]) -> Result<HashMap<u64, String>> {
+        let mut result = fetch_chunk_texts_by_vector_keys_batch(&self.sqlite, keys)?;
+        if let Some(base_sqlite) = &self.base_sqlite {
+            let missing = keys
+                .iter()
+                .filter(|key| !result.contains_key(key))
+                .copied()
+                .collect::<Vec<_>>();
+            if !missing.is_empty() {
+                // Worktree overlays need the base file path to reject chunks
+                // shadowed by an edited or deleted file.
+                let base_chunks = fetch_chunks_by_vector_keys_batch(base_sqlite, &missing)?;
+                for (key, chunk) in base_chunks {
+                    if !self.is_shadowed_base_file(1, &chunk.file_path) {
+                        result.insert(key, chunk.text);
+                    }
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    fn fetch_chunk_metadata_by_vector_keys_batch(
+        &self,
+        keys: &[u64],
+    ) -> Result<HashMap<u64, IndexedChunk>> {
+        let mut result = fetch_chunk_metadata_by_vector_keys_batch(&self.sqlite, keys)?;
+        if let Some(base_sqlite) = &self.base_sqlite {
+            let missing: Vec<u64> = keys
+                .iter()
+                .filter(|key| !result.contains_key(key))
+                .copied()
+                .collect();
+            if !missing.is_empty() {
+                let base_chunks = fetch_chunk_metadata_by_vector_keys_batch(base_sqlite, &missing)?;
+                for (key, chunk) in base_chunks {
+                    if !self.is_shadowed_base_file(1, &chunk.file_path) {
+                        result.insert(key, chunk);
+                    }
+                }
+            }
+        }
+        Ok(result)
+    }
+
     fn read_file_content(&self, path: &Path) -> Option<CachedFileContent> {
         const MAX_CACHED_FILES: usize = 256;
 
@@ -870,8 +918,28 @@ fn collect_literal_candidates_for_queries(
         }
     }
 
-    // Phase 3: Verify exact substring match.
-    let mut verified = Vec::<IndexedChunk>::new();
+    // Phase 3: Verify exact substring matches. Mixed long aliases and short
+    // acronyms need specificity ranking because a dense canonical file can
+    // otherwise fall behind the first target_hits generic acronym matches.
+    if literal_queries_need_specificity_ranking(candidate_queries) {
+        let mut verified = Vec::new();
+        for chunk in candidates {
+            if let Some((longest, count)) = literal_match_specificity(matcher, &chunk.text) {
+                verified.push((longest, count, chunk));
+            }
+        }
+        verified.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| right.1.cmp(&left.1))
+                .then_with(|| left.2.vector_key.cmp(&right.2.vector_key))
+        });
+        verified.truncate(target_hits);
+        return Ok(verified.into_iter().map(|(_, _, chunk)| chunk).collect());
+    }
+
+    let mut verified = Vec::new();
     for chunk in candidates {
         if matcher.is_match(&chunk.text) {
             verified.push(chunk);
@@ -880,8 +948,24 @@ fn collect_literal_candidates_for_queries(
             }
         }
     }
-
     Ok(verified)
+}
+
+fn literal_queries_need_specificity_ranking(queries: &[String]) -> bool {
+    queries
+        .iter()
+        .any(|query| query.len() == 3 && query.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+        && queries.iter().any(|query| query.len() >= 5)
+}
+
+fn literal_match_specificity(matcher: &regex::Regex, text: &str) -> Option<(usize, usize)> {
+    let mut count = 0;
+    let mut longest = 0;
+    for matched in matcher.find_iter(text) {
+        count += 1;
+        longest = longest.max(matched.as_str().len());
+    }
+    (count > 0).then_some((longest, count))
 }
 
 pub fn hybrid_search(
@@ -935,7 +1019,7 @@ pub fn hybrid_search_with_context(
     let candidate_limit = if output_limit == usize::MAX {
         50_000
     } else {
-        (output_limit * routing.lexical_multiplier).clamp(100, 50_000)
+        (output_limit * routing.lexical_multiplier).clamp(150, 50_000)
     };
     // Literal pass needs exact substring verification via SQLite (text not
     // stored in Tantivy), so cap tighter: default → 250, scales up with limit.
@@ -1037,7 +1121,7 @@ pub fn hybrid_search_with_context(
         parser.set_field_boost(f, 5.0);
     }
     if let Some(f) = ctx.fields.signature {
-        parser.set_field_boost(f, 10.0);
+        parser.set_field_boost(f, 5.0);
     }
     let conjunctive_numeric_query = should_use_conjunctive_numeric_query(trimmed);
     if conjunctive_numeric_query {
@@ -1079,7 +1163,11 @@ pub fn hybrid_search_with_context(
     } else {
         lexical_queries.as_slice()
     };
-    for lexical_query in lexical_search_queries {
+    let lexical_query_limits =
+        lexical_query_candidate_limits(candidate_limit, lexical_search_queries.len());
+    for (lexical_query, query_candidate_limit) in
+        lexical_search_queries.iter().zip(lexical_query_limits)
+    {
         let mut parsed_query = match parser.parse_query(lexical_query) {
             Ok(query) => query,
             Err(_) => continue,
@@ -1114,7 +1202,7 @@ pub fn hybrid_search_with_context(
         for (i, searcher) in ctx.searchers.iter().enumerate() {
             let lexical_docs = searcher.search(
                 &parsed_query,
-                &TopDocs::with_limit(candidate_limit).order_by_score(),
+                &TopDocs::with_limit(query_candidate_limit).order_by_score(),
             )?;
 
             for (score, addr) in lexical_docs {
@@ -1144,27 +1232,24 @@ pub fn hybrid_search_with_context(
     // — we only fetch text for the top-scoring candidates that will survive
     // RRF fusion.
     let mut lexical_chunks = lexical_by_id.into_values().collect::<Vec<_>>();
-    lexical_chunks.sort_by(|a, b| b.1.total_cmp(&a.1));
+    lexical_chunks.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.vector_key.cmp(&right.0.vector_key))
+    });
     lexical_chunks.truncate(candidate_limit);
+    tracing::trace!(
+        "lexical_bm25={:?} candidates={} expansions={}",
+        t0.elapsed(),
+        lexical_chunks.len(),
+        lexical_search_queries.len()
+    );
 
     // Exact persisted symbol definitions provide a separate bounded rank
     // signal. This avoids inferring every definition solely from text while
     // keeping symbol lookup independent from the main candidate volume.
-    let mut exact_symbol_names = vec![trimmed.to_string()];
-    if raw_query_terms(trimmed).len() > 1 {
-        exact_symbol_names.extend(
-            trimmed
-                .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
-                .filter(|term| {
-                    term.len() >= 3
-                        && term.chars().any(|ch| ch.is_ascii_lowercase())
-                        && term.chars().skip(1).any(|ch| ch.is_ascii_uppercase())
-                })
-                .map(str::to_string),
-        );
-    }
-    exact_symbol_names.sort();
-    exact_symbol_names.dedup();
+    let exact_symbol_names = exact_symbol_query_names(trimmed);
     let mut exact_symbol_chunks = crate::symbols::definition_candidates(
         &ctx.sqlite,
         &exact_symbol_names,
@@ -1192,10 +1277,43 @@ pub fn hybrid_search_with_context(
         .map(|chunk| chunk.vector_key)
         .collect::<HashSet<_>>();
 
-    let symbol_query_names = lexical_queries.clone();
     let remaining = symbol_candidate_limit.saturating_sub(exact_symbol_chunks.len());
+    let inferred_symbol_names = natural_language_symbol_queries(trimmed);
+    let mut inferred_symbol_chunks = if remaining > 0 && !inferred_symbol_names.is_empty() {
+        crate::symbols::definition_candidates(&ctx.sqlite, &inferred_symbol_names, remaining)?
+    } else {
+        Vec::new()
+    };
+    if let Some(base_sqlite) = &ctx.base_sqlite {
+        let base_remaining = remaining.saturating_sub(inferred_symbol_chunks.len());
+        if base_remaining > 0 {
+            inferred_symbol_chunks.extend(
+                crate::symbols::definition_candidates(
+                    base_sqlite,
+                    &inferred_symbol_names,
+                    base_remaining,
+                )?
+                .into_iter()
+                .filter(|chunk| !ctx.is_shadowed_base_file(1, &chunk.file_path)),
+            );
+        }
+    }
+    inferred_symbol_chunks.retain(|chunk| {
+        !exact_symbol_ids.contains(&chunk.vector_key)
+            && type_matches(chunk, options.type_filter.as_deref())
+            && scope_matches(chunk, options.scope_filter.as_ref())
+            && path_matches(chunk, &path_matcher)
+            && (options.skip_gitignore || !chunk.is_ignored)
+    });
+    inferred_symbol_chunks.truncate(remaining);
+    let inferred_symbol_ids = inferred_symbol_chunks
+        .iter()
+        .map(|chunk| chunk.vector_key)
+        .collect::<HashSet<_>>();
+
+    let remaining = remaining.saturating_sub(inferred_symbol_chunks.len());
     let mut alias_symbol_chunks = if remaining > 0 {
-        crate::symbols::definition_candidates(&ctx.sqlite, &symbol_query_names, remaining)?
+        crate::symbols::definition_candidates(&ctx.sqlite, &lexical_queries, remaining)?
     } else {
         Vec::new()
     };
@@ -1205,7 +1323,7 @@ pub fn hybrid_search_with_context(
             alias_symbol_chunks.extend(
                 crate::symbols::definition_candidates(
                     base_sqlite,
-                    &symbol_query_names,
+                    &lexical_queries,
                     base_remaining,
                 )?
                 .into_iter()
@@ -1215,6 +1333,7 @@ pub fn hybrid_search_with_context(
     }
     alias_symbol_chunks.retain(|chunk| {
         !exact_symbol_ids.contains(&chunk.vector_key)
+            && !inferred_symbol_ids.contains(&chunk.vector_key)
             && type_matches(chunk, options.type_filter.as_deref())
             && scope_matches(chunk, options.scope_filter.as_ref())
             && path_matches(chunk, &path_matcher)
@@ -1224,9 +1343,23 @@ pub fn hybrid_search_with_context(
 
     let symbol_chunks = exact_symbol_chunks
         .into_iter()
-        .map(|chunk| (chunk, true))
-        .chain(alias_symbol_chunks.into_iter().map(|chunk| (chunk, false)))
+        .map(|chunk| (chunk, SymbolCandidateKind::Exact))
+        .chain(
+            inferred_symbol_chunks
+                .into_iter()
+                .map(|chunk| (chunk, SymbolCandidateKind::Inferred)),
+        )
+        .chain(
+            alias_symbol_chunks
+                .into_iter()
+                .map(|chunk| (chunk, SymbolCandidateKind::Alias)),
+        )
         .collect::<Vec<_>>();
+    tracing::trace!(
+        "lexical_symbols={:?} candidates={}",
+        t0.elapsed(),
+        symbol_chunks.len()
+    );
 
     // ── Path-match pass ──────────────────────────────────────────────────
     // Collect chunks whose file_path contains the query as a directory/file
@@ -1236,35 +1369,43 @@ pub fn hybrid_search_with_context(
     // their own ranked list in fusion (see fuse_rrf) rather than being
     // injected into the lexical pool with a fake score.
     let mut path_chunks: Vec<(IndexedChunk, f32)> = Vec::new();
-    let run_path_pass = matches!(
+    let exact_path_pass = matches!(
         routing.intent,
         QueryIntent::ExactIdentifier | QueryIntent::Path
     ) || raw_query_terms(trimmed).len() <= 3;
-    if run_path_pass && let Some(fpt_field) = ctx.fields.file_path_text {
+    let path_query_variants = if exact_path_pass {
+        lexical_queries.clone()
+    } else {
+        natural_language_path_recall_query(trimmed)
+            .into_iter()
+            .collect()
+    };
+    if !path_query_variants.is_empty()
+        && let Some(fpt_field) = ctx.fields.file_path_text
+    {
         let mut path_parser = QueryParser::for_index(&ctx.indexes[0], vec![fpt_field]);
-        path_parser.set_conjunction_by_default();
-        // Reuse the lexical_queries computed at the start of hybrid_search.
-        let path_query_variants = &lexical_queries;
-        // Chunks already in the lexical pool are excluded from the path list
-        // (they are ranked there); path-only candidates feed the path pass.
+        let path_candidate_limit = if exact_path_pass {
+            100
+        } else {
+            NATURAL_LANGUAGE_PATH_FILE_LIMIT * NATURAL_LANGUAGE_PATH_DOCUMENT_OVERFETCH
+        };
+        if exact_path_pass {
+            path_parser.set_conjunction_by_default();
+        }
         let lexical_ids: HashSet<u64> = lexical_chunks.iter().map(|(c, _)| c.vector_key).collect();
-
-        // Phase 1: collect path-match candidates from Tantivy. The same chunk
-        // can match across multiple query variants/searchers with different
-        // path-field BM25 scores; dedupe by vector key and keep the *highest*
-        // score, since path ranking (the path RRF pass) depends on it. Keeping
-        // the first-seen score would mis-rank depending on iteration order.
         let mut path_by_id: HashMap<u64, (IndexedChunk, f32)> = HashMap::new();
-        for pq in path_query_variants {
+        let mut path_by_file: HashMap<PathBuf, (IndexedChunk, f32)> = HashMap::new();
+        for pq in &path_query_variants {
             if let Ok(parsed) = path_parser.parse_query(pq)
                 && let Ok(parsed) =
                     constrain_query_to_scope(parsed, &ctx.fields, options.scope_filter.as_ref())
             {
                 let parsed = constrain_query_to_glob_paths(parsed, &ctx.fields, &glob_path_filter);
                 for (i, searcher) in ctx.searchers.iter().enumerate() {
-                    if let Ok(docs) =
-                        searcher.search(&parsed, &TopDocs::with_limit(100).order_by_score())
-                    {
+                    if let Ok(docs) = searcher.search(
+                        &parsed,
+                        &TopDocs::with_limit(path_candidate_limit).order_by_score(),
+                    ) {
                         for (score, addr) in docs {
                             if let Ok(doc) = searcher.doc::<TantivyDocument>(addr)
                                 && let Some(chunk) = fetch_chunk_by_id(doc, &ctx.fields)
@@ -1273,29 +1414,56 @@ pub fn hybrid_search_with_context(
                                     .filter(|c| scope_matches(c, options.scope_filter.as_ref()))
                                     .filter(|c| path_matches(c, &path_matcher))
                                     .filter(|c| options.skip_gitignore || !c.is_ignored)
-                                && !lexical_ids.contains(&chunk.vector_key)
                             {
-                                path_by_id
-                                    .entry(chunk.vector_key)
-                                    .and_modify(|(_, s)| {
-                                        if score > *s {
-                                            *s = score;
-                                        }
-                                    })
-                                    .or_insert((chunk, score));
+                                if exact_path_pass {
+                                    if !lexical_ids.contains(&chunk.vector_key) {
+                                        path_by_id
+                                            .entry(chunk.vector_key)
+                                            .and_modify(|(_, best)| *best = best.max(score))
+                                            .or_insert((chunk, score));
+                                    }
+                                } else {
+                                    path_by_file
+                                        .entry(chunk.file_path.clone())
+                                        .and_modify(|(_, best)| *best = best.max(score))
+                                        .or_insert((chunk, score));
+                                }
                             }
                         }
                     }
                 }
             }
         }
-        let mut path_candidates: Vec<(IndexedChunk, f32)> = path_by_id.into_values().collect();
 
-        // Rank path matches by their path-field BM25 score; they feed their
-        // own ranked list in fuse_rrf with a bounded weight.
-        path_candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
-        path_chunks = path_candidates;
+        if exact_path_pass {
+            path_chunks = path_by_id.into_values().collect();
+        } else {
+            path_chunks = path_by_file
+                .into_iter()
+                .map(|(file_path, (fallback, score))| {
+                    lexical_chunks
+                        .iter()
+                        .find(|(chunk, _)| chunk.file_path == file_path)
+                        .map(|(chunk, _)| (chunk.clone(), score))
+                        .unwrap_or((fallback, score))
+                })
+                .collect();
+        }
+        path_chunks.sort_by(|left, right| {
+            right
+                .1
+                .total_cmp(&left.1)
+                .then_with(|| left.0.vector_key.cmp(&right.0.vector_key))
+        });
+        if !exact_path_pass {
+            path_chunks.truncate(NATURAL_LANGUAGE_PATH_FILE_LIMIT);
+        }
     }
+    tracing::trace!(
+        "lexical_path={:?} candidates={}",
+        t0.elapsed(),
+        path_chunks.len()
+    );
     tracing::trace!("lexical={:?} found={}", t0.elapsed(), lexical_chunks.len());
 
     tracing::trace!("open_vector={:?}", t0.elapsed());
@@ -1311,14 +1479,8 @@ pub fn hybrid_search_with_context(
     let has_neural_vectors = ctx.neural_vectors.as_ref().map_or(0, |v| v.size()) > 0
         || ctx.base_neural_vectors.as_ref().map_or(0, |v| v.size()) > 0;
 
-    // Neural (MiniLM, 384-dim) embeddings are far higher quality than the
-    // 256-bucket hash embeddings, so when neural vectors exist they should
-    // dominate. But neural enhancement is incremental/resumable, so a partial
-    // neural store is a normal state: dropping hash entirely would lose
-    // semantic coverage for chunks not yet neural-embedded. Instead, keep hash
-    // as a low-weight fallback whenever neural is present (the per-chunk merge
-    // takes the max, so neural wins wherever it covers a chunk), and use hash
-    // at full weight only when there is no neural store at all.
+    // Neural embeddings are far higher quality than the provisional hash
+    // vectors. Keep full hash recall while neural enhancement is partial.
     let neural_profile_matches = embedding_model.is_none_or(|model| {
         let Some(active_identity) = model.model_identity() else {
             let Some(active_profile) = model.profile_info() else {
@@ -1358,59 +1520,72 @@ pub fn hybrid_search_with_context(
             && has_neural_vectors
             && neural_profile_matches
     });
+    let direct_ids = lexical_chunks
+        .iter()
+        .map(|(chunk, _)| chunk.vector_key)
+        .chain(literal_chunks.iter().map(|(chunk, _)| chunk.vector_key))
+        .chain(path_chunks.iter().map(|(chunk, _)| chunk.vector_key))
+        .chain(symbol_chunks.iter().map(|(chunk, _)| chunk.vector_key))
+        .collect::<HashSet<_>>();
 
-    if embedding_model.is_some() && (has_hash_vectors || has_neural_vectors) {
+    if embedding_model.is_some() && (has_hash_vectors || neural_model.is_some()) {
+        let semantic_started = std::time::Instant::now();
         let mut semantic_by_id = SemanticCandidatesById::new();
-        let semantic_query_text = build_semantic_query_text(trimmed);
         let semantic_filters_active = has_semantic_filters(options);
-        let hash_query_vector = if has_hash_vectors {
-            // Reuse a single hash model for query embedding rather than
-            // rebuilding the 256-bucket model for every search.
-            static SEARCH_HASH_MODEL: std::sync::OnceLock<crate::embedding::HashEmbeddingModel> =
-                std::sync::OnceLock::new();
-            let hash_model =
-                SEARCH_HASH_MODEL.get_or_init(|| crate::embedding::HashEmbeddingModel::new(256));
-            Some(hash_model.embed(&semantic_query_text))
-        } else {
-            None
-        };
 
-        let can_share_hydration = has_hash_vectors && !semantic_filters_active;
-        if let Some(model) = neural_model.filter(|_| can_share_hydration) {
-            // Hash and neural ANN candidates are immediately fused. Fetch their
-            // union once instead of making two identical SQLite hydration passes.
-            let hash_matches = collect_semantic_vector_matches(
-                hash_query_vector
-                    .as_deref()
-                    .expect("shared hydration requires hash vectors"),
-                semantic_limit,
-                ctx.hash_vectors.as_ref(),
-                ctx.base_hash_vectors.as_ref(),
-            );
+        if !semantic_filters_active {
+            let mut sources = Vec::with_capacity(2);
+            let neural_matches = if let Some(model) = neural_model {
+                neural_executed = true;
+                let neural_query_vector = model.embed(query_text);
+                tracing::trace!("semantic_neural_embed={:?}", semantic_started.elapsed());
+                let matches = collect_semantic_vector_matches(
+                    &neural_query_vector,
+                    semantic_limit,
+                    ctx.neural_vectors.as_ref(),
+                    ctx.base_neural_vectors.as_ref(),
+                );
+                tracing::trace!("semantic_neural_ann={:?}", semantic_started.elapsed());
+                Some(matches)
+            } else {
+                None
+            };
 
-            neural_executed = true;
-            let neural_query_vector = model.embed(query_text);
-            let neural_matches = collect_semantic_vector_matches(
-                &neural_query_vector,
-                semantic_limit,
-                ctx.neural_vectors.as_ref(),
-                ctx.base_neural_vectors.as_ref(),
-            );
-            semantic_by_id = collect_unfiltered_semantic_candidates(
-                ctx,
-                options,
-                vec![
-                    (hash_matches, hash_weight, "hash"),
-                    (neural_matches, 1.08, "neural"),
-                ],
-            )?;
+            let skip_hash = neural_available
+                && neural_vector_count >= hash_vector_count
+                && neural_matches.as_ref().is_some_and(|matches| {
+                    neural_direct_overlap_allows_hash_skip(matches, &direct_ids)
+                });
+
+            if has_hash_vectors && !skip_hash {
+                let hash_query_vector = embed_hash_query(trimmed);
+                tracing::trace!("semantic_hash_embed={:?}", semantic_started.elapsed());
+                sources.push((
+                    collect_semantic_vector_matches(
+                        &hash_query_vector,
+                        semantic_limit,
+                        ctx.hash_vectors.as_ref(),
+                        ctx.base_hash_vectors.as_ref(),
+                    ),
+                    hash_weight,
+                    "hash",
+                ));
+                tracing::trace!("semantic_hash_ann={:?}", semantic_started.elapsed());
+            }
+            if let Some(neural_matches) = neural_matches {
+                sources.push((neural_matches, 1.08, "neural"));
+            }
+            semantic_by_id = collect_unfiltered_semantic_candidates(ctx, options, sources)?;
+            tracing::trace!("semantic_hydrate={:?}", semantic_started.elapsed());
         } else {
-            if let Some(hash_query_vector) = hash_query_vector.as_deref() {
+            if has_hash_vectors {
+                let hash_query_vector = embed_hash_query(trimmed);
+                tracing::trace!("semantic_hash_embed={:?}", semantic_started.elapsed());
                 let hash_hits = collect_semantic_candidates(
                     ctx,
                     &path_matcher,
                     options,
-                    hash_query_vector,
+                    &hash_query_vector,
                     semantic_limit,
                     ctx.hash_vectors.as_ref(),
                     ctx.base_hash_vectors.as_ref(),
@@ -1435,7 +1610,12 @@ pub fn hybrid_search_with_context(
         }
 
         semantic_chunks = semantic_by_id.into_values().collect::<Vec<_>>();
-        semantic_chunks.sort_by(|a, b| b.1.total_cmp(&a.1));
+        semantic_chunks.sort_by(|left, right| {
+            right
+                .1
+                .total_cmp(&left.1)
+                .then_with(|| left.0.vector_key.cmp(&right.0.vector_key))
+        });
     }
     tracing::trace!(
         "semantic={:?} found={}",
@@ -1447,6 +1627,7 @@ pub fn hybrid_search_with_context(
         return Ok(Vec::new());
     }
 
+    let fusion_query = FusionQuery::new(query_text);
     let merged = fuse_rrf_with_context(
         Some(ctx),
         FusionCandidates {
@@ -1454,19 +1635,22 @@ pub fn hybrid_search_with_context(
             semantic: semantic_chunks,
             literal: literal_chunks,
             path: path_chunks,
+            path_weight: if exact_path_pass { 1.5 } else { 3.0 },
             symbols: symbol_chunks,
         },
+        Some(direct_ids),
         if neural_available || query_targets_secondary_sources(query_text) {
             1.0
         } else {
             0.25
         },
-        query_text,
+        &fusion_query,
+        routing,
         options.limit,
     );
     tracing::trace!("fuse_rrf={:?} merged={}", t0.elapsed(), merged.len());
 
-    let presentation_query = PresentationQuery::new(query_text);
+    let presentation_query = PresentationQuery::from_fusion(&fusion_query);
 
     // Group hits by file path so we read and index each source file only once.
     let merged_len = merged.len();
@@ -1499,7 +1683,14 @@ pub fn hybrid_search_with_context(
         }
     }
     // Re-sort since grouping by file changed the order
-    hits.sort_by(|a, b| b.score.total_cmp(&a.score));
+    hits.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.file_path.cmp(&right.file_path))
+            .then_with(|| left.start_line.cmp(&right.start_line))
+            .then_with(|| left.end_line.cmp(&right.end_line))
+    });
     if matches!(routing.intent, QueryIntent::LiteralOrError) {
         let accepted_len = hits
             .iter()
@@ -1517,6 +1708,41 @@ pub fn hybrid_search_with_context(
     Ok(hits)
 }
 
+fn natural_language_path_recall_query(query_text: &str) -> Option<String> {
+    natural_language_path_recall_terms(query_text).map(|terms| terms.join(" "))
+}
+
+fn natural_language_path_recall_terms(query_text: &str) -> Option<Vec<String>> {
+    if raw_query_terms(query_text).len() <= 3 {
+        return None;
+    }
+
+    let mut seen = HashSet::new();
+    let mut terms = Vec::new();
+    for raw in raw_query_terms(query_text) {
+        if raw.len() < 3
+            || is_query_stopword(&raw)
+            || crate::chunking::resolve_type_alias(&raw).is_some()
+        {
+            continue;
+        }
+
+        let singular = singularize_token(&raw);
+        for candidate in [singular, raw] {
+            if candidate.len() >= 3 && seen.insert(candidate.clone()) {
+                terms.push(candidate);
+                if terms.len() == 12 {
+                    break;
+                }
+            }
+        }
+        if terms.len() == 12 {
+            break;
+        }
+    }
+    (terms.len() >= 2).then_some(terms)
+}
+
 fn semantic_hash_weight(
     neural_available: bool,
     neural_vector_count: usize,
@@ -1527,6 +1753,31 @@ fn semantic_hash_weight(
     }
     let coverage = (neural_vector_count as f32 / hash_vector_count as f32).clamp(0.0, 1.0);
     (1.0 - coverage).clamp(0.3, 1.0)
+}
+
+fn embed_hash_query(query_text: &str) -> Vec<f32> {
+    static SEARCH_HASH_MODEL: std::sync::OnceLock<crate::embedding::HashEmbeddingModel> =
+        std::sync::OnceLock::new();
+    let hash_model =
+        SEARCH_HASH_MODEL.get_or_init(|| crate::embedding::HashEmbeddingModel::new(256));
+    hash_model.embed(&build_semantic_query_text(query_text))
+}
+
+fn neural_direct_overlap_allows_hash_skip(
+    neural_matches: &[VectorMatch],
+    direct_ids: &HashSet<u64>,
+) -> bool {
+    // Lower overlap thresholds were faster but regressed broad retrieval.
+    // Require complete agreement before treating the hash tier as redundant.
+    const OVERLAP_WINDOW: usize = 10;
+    const MIN_DIRECT_OVERLAP: usize = 10;
+
+    neural_matches
+        .iter()
+        .take(OVERLAP_WINDOW)
+        .filter(|vector_match| direct_ids.contains(&vector_match.key))
+        .count()
+        >= MIN_DIRECT_OVERLAP
 }
 
 fn to_hit(
@@ -1596,15 +1847,19 @@ struct PresentationQuery {
 }
 
 impl PresentationQuery {
+    #[cfg(test)]
     fn new(query_text: &str) -> Self {
-        let text = query_text.trim().to_string();
-        let primary_tokens = tokenize_query(&text);
+        let query = FusionQuery::new(query_text);
+        Self::from_fusion(&query)
+    }
+
+    fn from_fusion(query: &FusionQuery<'_>) -> Self {
         Self {
-            lower: text.to_ascii_lowercase(),
-            compact: singularize_token(&compact_identifier(&text)),
-            compact_matching: should_use_compact_identifier_matching(&text, &primary_tokens),
-            tokens: expanded_query_tokens(&text),
-            text,
+            text: query.text.to_string(),
+            lower: query.lower.clone(),
+            compact: singularize_token(&query.compact),
+            compact_matching: query.compact_candidate_text,
+            tokens: query.tokens.clone(),
         }
     }
 }
@@ -1724,9 +1979,21 @@ fn find_focus_line(
         return window_start;
     }
 
+    let symbol_name = query
+        .text
+        .rsplit([':', '\\', '.', '/', '#'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(query.text.as_str());
+    if is_definition_kind(&chunk.kind)
+        && (crate::symbols::chunk_defines_exact_name(chunk, &query.text)
+            || crate::symbols::chunk_defines_exact_name(chunk, symbol_name))
+        && let Some(line) = first_source_definition_line(content, lines, window_start, window_end)
+    {
+        return line;
+    }
+
     let mut best_line = window_start;
     let mut best_score = 0.0f32;
-
     for line_no in window_start..=window_end {
         let line = line_at(content, lines, line_no);
         let line_lower = line.to_ascii_lowercase();
@@ -1758,6 +2025,41 @@ fn find_focus_line(
     }
 
     best_line
+}
+
+fn first_source_definition_line(
+    content: &str,
+    lines: &[LineSpan],
+    window_start: usize,
+    window_end: usize,
+) -> Option<usize> {
+    let mut in_block_comment = false;
+    for line_no in window_start..=window_end {
+        let line = line_at(content, lines, line_no).trim();
+        if in_block_comment {
+            if line.contains("*/") {
+                in_block_comment = false;
+            }
+            continue;
+        }
+        if line.starts_with("/*") {
+            if !line.contains("*/") {
+                in_block_comment = true;
+            }
+            continue;
+        }
+        if line.is_empty()
+            || line.starts_with("//")
+            || line.starts_with('#')
+            || line.starts_with('@')
+            || line.starts_with('*')
+            || line.starts_with('[') && line.ends_with(']')
+        {
+            continue;
+        }
+        return Some(line_no);
+    }
+    None
 }
 
 fn should_use_compact_identifier_matching(query_text: &str, primary_tokens: &[String]) -> bool {
@@ -1883,9 +2185,123 @@ fn build_lexical_queries(query_text: &str) -> Vec<String> {
         }
     }
 
-    queries.sort();
-    queries.dedup();
+    let mut seen = HashSet::new();
+    queries.retain(|query| seen.insert(query.clone()));
     queries
+}
+
+fn natural_language_symbol_queries(query_text: &str) -> Vec<String> {
+    if raw_query_terms(query_text).len() <= 1 || !query_text.chars().any(char::is_whitespace) {
+        return Vec::new();
+    }
+
+    const MAX_SYMBOL_QUERIES: usize = 16;
+
+    let mut queries = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push = |candidate: String| {
+        let normalized = candidate.to_ascii_lowercase();
+        if candidate.len() >= 3
+            && !is_query_stopword(&normalized)
+            && seen.insert(normalized)
+            && queries.len() < MAX_SYMBOL_QUERIES
+        {
+            queries.push(candidate);
+        }
+    };
+
+    // Preserve source-style identifiers only near the subject of the query,
+    // not a trailing language name or incidental type deep in the sentence.
+    let meaningful = query_text
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '$')
+        .filter(|token| !token.is_empty())
+        .filter_map(|raw| {
+            let lower = raw.to_ascii_lowercase();
+            (!is_query_stopword(&lower) && crate::chunking::resolve_type_alias(&lower).is_none())
+                .then_some((raw, lower))
+        })
+        .collect::<Vec<_>>();
+    let mut explicit = meaningful
+        .iter()
+        .take(2)
+        .filter_map(|(raw, lower)| {
+            let source_shaped = raw.contains(['_', '$'])
+                || raw.chars().any(|ch| ch.is_ascii_uppercase())
+                    && raw.chars().any(|ch| ch.is_ascii_lowercase());
+            source_shaped.then_some(((*raw).to_string(), lower.clone()))
+        })
+        .collect::<Vec<_>>();
+    let raw_terms = raw_query_terms(query_text);
+    if raw_terms.iter().any(|term| term == "definitions") && explicit.len() >= 2 {
+        explicit.clear();
+    }
+    for (name, _) in explicit {
+        push(name);
+    }
+
+    // Bridge common prose operations to implementation-role definitions.
+    for (index, (_, token)) in meaningful.iter().enumerate() {
+        let role = match token.as_str() {
+            "parse" | "parses" if index < 2 => Some("Parser"),
+            "route" | "routed" | "routes" | "routing" | "router" => Some("Router"),
+            _ => None,
+        };
+        if let Some(role) = role {
+            push(role.to_string());
+        }
+    }
+
+    queries
+}
+
+fn exact_symbol_query_names(query_text: &str) -> Vec<String> {
+    let query = query_text.trim();
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    let mut names = vec![query.to_string()];
+    if !query.chars().any(char::is_whitespace)
+        && let Some(leaf) = query
+            .rsplit([':', '\\', '.', '/', '#'])
+            .find(|part| !part.is_empty())
+        && leaf != query
+    {
+        names.push(leaf.to_string());
+    }
+    if raw_query_terms(query).len() > 1 {
+        names.extend(
+            query
+                .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+                .filter(|term| {
+                    term.len() >= 3
+                        && term.chars().any(|ch| ch.is_ascii_lowercase())
+                        && term.chars().skip(1).any(|ch| ch.is_ascii_uppercase())
+                })
+                .map(str::to_string),
+        );
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn lexical_query_candidate_limits(total: usize, query_count: usize) -> Vec<usize> {
+    match query_count {
+        0 => Vec::new(),
+        1 => vec![total],
+        _ => {
+            let primary = total.saturating_mul(3) / 4;
+            let expansion_total = total.saturating_sub(primary);
+            let expansion_count = query_count - 1;
+            let base = expansion_total / expansion_count;
+            let remainder = expansion_total % expansion_count;
+
+            std::iter::once(primary)
+                .chain((0..expansion_count).map(|index| base + usize::from(index < remainder)))
+                .collect()
+        }
+    }
 }
 
 fn should_run_literal_pass(query_text: &str) -> bool {
@@ -1927,14 +2343,39 @@ fn build_literal_queries(query_text: &str, lexical_queries: &[String]) -> Vec<St
     }
 
     let primary = tokenize_query(query_text);
-    let mut aliases = crate::query_aliases::phrase_aliases(&primary)
+    let mut aliases = crate::query_aliases::literal_phrase_aliases(&primary)
         .into_iter()
-        .filter(|alias| alias.len() >= 5 || alias.contains('_'))
         .map(str::to_string)
         .collect::<Vec<_>>();
+    aliases.extend(
+        aliases
+            .iter()
+            .filter(|alias| alias.contains('_'))
+            .flat_map(|alias| {
+                [
+                    alias.replace('_', "-"),
+                    alias.replace('_', " "),
+                    snake_to_camel_case(alias),
+                ]
+            })
+            .collect::<Vec<_>>(),
+    );
     aliases.sort();
     aliases.dedup();
     aliases
+}
+
+fn snake_to_camel_case(value: &str) -> String {
+    let mut words = value.split('_');
+    let mut camel = words.next().unwrap_or_default().to_string();
+    for word in words {
+        let mut chars = word.chars();
+        if let Some(first) = chars.next() {
+            camel.push(first.to_ascii_uppercase());
+            camel.extend(chars);
+        }
+    }
+    camel
 }
 
 fn tokenize_query(query: &str) -> Vec<String> {
@@ -2571,7 +3012,12 @@ fn collect_semantic_vector_matches(
     if let Some(store) = base_store {
         matches.extend(store.search(query_vector, candidate_limit));
     }
-    matches.sort_by(|a, b| b.score.total_cmp(&a.score));
+    matches.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.key.cmp(&right.key))
+    });
     let mut seen_keys = HashSet::new();
     matches.retain(|vector_match| seen_keys.insert(vector_match.key));
     matches.truncate(candidate_limit);
@@ -2600,7 +3046,7 @@ fn collect_unfiltered_semantic_candidates(
     }
 
     let keys = by_key.keys().copied().collect::<Vec<_>>();
-    let chunks = ctx.fetch_chunks_by_vector_keys_batch(&keys)?;
+    let chunks = ctx.fetch_chunk_metadata_by_vector_keys_batch(&keys)?;
     Ok(by_key
         .into_iter()
         .filter_map(|(key, (score, sources))| {
@@ -2629,7 +3075,12 @@ fn score_filtered_semantic_candidates(
             Some((chunk.vector_key, score))
         })
         .collect::<Vec<_>>();
-    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    scored.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
     scored.truncate(candidate_limit);
 
     let keys = scored.iter().map(|(key, _)| *key).collect::<Vec<_>>();
@@ -2708,7 +3159,148 @@ struct FusionCandidates {
     semantic: Vec<(IndexedChunk, f32, HashSet<&'static str>)>,
     literal: Vec<(IndexedChunk, f32)>,
     path: Vec<(IndexedChunk, f32)>,
-    symbols: Vec<(IndexedChunk, bool)>,
+    path_weight: f32,
+    symbols: Vec<(IndexedChunk, SymbolCandidateKind)>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum SymbolCandidateKind {
+    Exact,
+    Inferred,
+    Alias,
+}
+
+const MIN_FILTERED_RESULTS: usize = 10;
+const REPRESENTATIVE_SPAN_MIN_COVERAGE: f32 = 0.75;
+const FILE_COHERENCE_WEIGHT: f32 = 0.22;
+const FILE_COHERENCE_CANDIDATES: usize = 50;
+const NATURAL_LANGUAGE_PATH_FILE_LIMIT: usize = 20;
+const NATURAL_LANGUAGE_PATH_DOCUMENT_OVERFETCH: usize = 4;
+
+fn path_key(path: &Path) -> u64 {
+    xxhash_rust::xxh3::xxh3_64(path.as_os_str().as_encoded_bytes())
+}
+
+fn backfill_enabled(ranked: &[(IndexedChunk, f32, Vec<String>)]) -> bool {
+    let mut files = HashSet::with_capacity(MIN_FILTERED_RESULTS);
+    ranked.iter().any(|(chunk, _, _)| {
+        files.insert(path_key(&chunk.file_path)) && files.len() >= MIN_FILTERED_RESULTS
+    })
+}
+
+fn apply_file_coherence_boost(
+    ranked: &mut [(IndexedChunk, f32, Vec<String>)],
+    weight: f32,
+    secondary_intent: bool,
+) {
+    if weight <= 0.0 || ranked.is_empty() {
+        return;
+    }
+
+    let max_score = ranked
+        .iter()
+        .take(FILE_COHERENCE_CANDIDATES)
+        .map(|(_, score, _)| *score)
+        .reduce(f32::max)
+        .unwrap_or(0.0);
+    if max_score <= 0.0 {
+        return;
+    }
+
+    // Corroborating chunks are file-level evidence. Boost only the best chunk
+    // per file, and discount secondary sources unless the query requests them.
+    let mut file_sums = HashMap::<u64, f32>::with_capacity(FILE_COHERENCE_CANDIDATES);
+    let mut file_authorities = HashMap::<u64, f32>::with_capacity(FILE_COHERENCE_CANDIDATES);
+    let mut best_indices = HashMap::<u64, usize>::with_capacity(FILE_COHERENCE_CANDIDATES);
+    for (index, (chunk, score, _)) in ranked.iter().take(FILE_COHERENCE_CANDIDATES).enumerate() {
+        let file = path_key(&chunk.file_path);
+        *file_sums.entry(file).or_default() += *score;
+        file_authorities.entry(file).or_insert_with(|| {
+            if secondary_intent {
+                1.0
+            } else {
+                file_authority_score_for_path(lower_index_path(&chunk.file_path).as_ref())
+            }
+        });
+        best_indices
+            .entry(file)
+            .and_modify(|best| {
+                if *score > ranked[*best].1 {
+                    *best = index;
+                }
+            })
+            .or_insert(index);
+    }
+
+    let max_file_sum = file_sums.values().copied().reduce(f32::max).unwrap_or(0.0);
+    if max_file_sum <= 0.0 {
+        return;
+    }
+
+    let boost_unit = max_score * weight;
+    for (file, index) in best_indices {
+        ranked[index].1 += boost_unit * file_sums[&file] / max_file_sum * file_authorities[&file];
+    }
+}
+
+fn local_term_coverage(query_tokens: &[String], text: &str) -> f32 {
+    if query_tokens.is_empty() {
+        return 0.0;
+    }
+    let text = text.as_bytes();
+    let matched = query_tokens
+        .iter()
+        .filter(|token| {
+            let token = token.as_bytes();
+            token.len() <= text.len()
+                && text
+                    .windows(token.len())
+                    .any(|window| window.eq_ignore_ascii_case(token))
+        })
+        .count();
+    matched as f32 / query_tokens.len() as f32
+}
+
+fn promote_representative_span(
+    ranked: &mut [(IndexedChunk, f32, Vec<String>)],
+    query_tokens: &[String],
+    min_coverage: f32,
+) {
+    const MIN_QUERY_TOKENS: usize = 4;
+    const MIN_COVERAGE_GAIN: f32 = 0.25;
+    const MAX_CANDIDATES_TO_SCAN: usize = 48;
+
+    if query_tokens.len() < MIN_QUERY_TOKENS
+        || ranked.is_empty()
+        || !has_direct_source(&ranked[0].2)
+    {
+        return;
+    }
+
+    let first_path = path_key(&ranked[0].0.file_path);
+    let first_coverage = local_term_coverage(query_tokens, &ranked[0].0.text);
+    let mut best_index = 0;
+    let mut best_coverage = first_coverage;
+    for (index, (chunk, _, sources)) in ranked.iter().take(MAX_CANDIDATES_TO_SCAN).enumerate() {
+        if path_key(&chunk.file_path) != first_path || !has_direct_source(sources) {
+            continue;
+        }
+        let coverage = local_term_coverage(query_tokens, &chunk.text);
+        if coverage > best_coverage {
+            best_index = index;
+            best_coverage = coverage;
+        }
+    }
+
+    if best_index == 0
+        || best_coverage < min_coverage
+        || best_coverage < first_coverage + MIN_COVERAGE_GAIN
+    {
+        return;
+    }
+
+    let (first, rest) = ranked.split_at_mut(best_index);
+    std::mem::swap(&mut first[0].0, &mut rest[0].0);
 }
 
 #[cfg(test)]
@@ -2718,18 +3310,30 @@ fn fuse_rrf(
     query_text: &str,
     limit: Option<usize>,
 ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
-    fuse_rrf_with_context(None, candidates, semantic_direct_weight, query_text, limit)
+    let query = FusionQuery::new(query_text);
+    let routing = QueryRouting::classify(query_text);
+    fuse_rrf_with_context(
+        None,
+        candidates,
+        None,
+        semantic_direct_weight,
+        &query,
+        routing,
+        limit,
+    )
 }
 
 fn fuse_rrf_with_context(
     ctx: Option<&SearchContext>,
     candidates: FusionCandidates,
+    direct_ids: Option<HashSet<u64>>,
     semantic_direct_weight: f32,
-    query_text: &str,
+    query: &FusionQuery<'_>,
+    routing: QueryRouting,
     limit: Option<usize>,
 ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
+    let fuse_started = std::time::Instant::now();
     const K: f32 = 60.0;
-    const LEXICAL_WEIGHT: f32 = 3.2;
     const SEMANTIC_WEIGHT: f32 = 1.0;
     const LITERAL_WEIGHT: f32 = 4.0;
     // Path matches (file_path contains the query) are a useful but bounded
@@ -2737,7 +3341,6 @@ fn fuse_rrf_with_context(
     // file whose path matches the query when content candidates are weak,
     // without overriding strong content matches. The path-aware boosts below
     // (path_exact_match/path_segment/file_stem) still apply on top.
-    const PATH_WEIGHT: f32 = 1.5;
     const SYMBOL_WEIGHT: f32 = 10.0;
     const LEXICAL_SCORE_WEIGHT: f32 = 0.05;
     const SEMANTIC_SCORE_WEIGHT: f32 = 0.08;
@@ -2769,6 +3372,7 @@ fn fuse_rrf_with_context(
             "path" => 1 << 5,
             "semantic" => 1 << 6,
             "symbol" => 1 << 7,
+            "inferred-symbol" => 1 << 8,
             _ => 0,
         }
     }
@@ -2783,6 +3387,7 @@ fn fuse_rrf_with_context(
             "path",
             "semantic",
             "symbol",
+            "inferred-symbol",
         ]
         .into_iter()
         .filter(|source| mask & source_bit(source) != 0)
@@ -2790,29 +3395,28 @@ fn fuse_rrf_with_context(
         .collect()
     }
 
-    fn path_key(path: &Path) -> u64 {
-        xxhash_rust::xxh3::xxh3_64(path.as_os_str().as_encoded_bytes())
-    }
-
     let FusionCandidates {
         lexical,
         semantic,
         literal,
         path,
+        path_weight,
         symbols,
     } = candidates;
 
-    let query = FusionQuery::new(query_text);
+    const LEXICAL_WEIGHT: f32 = 3.2;
     let query_tokens = query.tokens.as_slice();
     let location_intent = query.location_intent;
     let secondary_intent = query.secondary_intent;
-    let direct_ids = lexical
-        .iter()
-        .map(|(chunk, _)| chunk.vector_key)
-        .chain(literal.iter().map(|(chunk, _)| chunk.vector_key))
-        .chain(path.iter().map(|(chunk, _)| chunk.vector_key))
-        .chain(symbols.iter().map(|(chunk, _)| chunk.vector_key))
-        .collect::<HashSet<_>>();
+    let direct_ids = direct_ids.unwrap_or_else(|| {
+        lexical
+            .iter()
+            .map(|(chunk, _)| chunk.vector_key)
+            .chain(literal.iter().map(|(chunk, _)| chunk.vector_key))
+            .chain(path.iter().map(|(chunk, _)| chunk.vector_key))
+            .chain(symbols.iter().map(|(chunk, _)| chunk.vector_key))
+            .collect()
+    });
 
     struct RrfEntry {
         score: f32,
@@ -2878,35 +3482,54 @@ fn fuse_rrf_with_context(
     for (rank, (chunk, _)) in path.into_iter().enumerate() {
         add_entry(
             chunk,
-            PATH_WEIGHT / (K + rank as f32 + 1.0),
+            path_weight / (K + rank as f32 + 1.0),
             source_bit("path"),
         );
     }
 
-    for (rank, (chunk, exact)) in symbols.into_iter().enumerate() {
+    for (rank, (chunk, kind)) in symbols.into_iter().enumerate() {
+        let weight = match kind {
+            SymbolCandidateKind::Exact => SYMBOL_WEIGHT * 20.0,
+            SymbolCandidateKind::Inferred => SYMBOL_WEIGHT * 5.0,
+            SymbolCandidateKind::Alias => SYMBOL_WEIGHT,
+        };
         add_entry(
             chunk,
-            (if exact {
-                SYMBOL_WEIGHT * 20.0
-            } else {
-                SYMBOL_WEIGHT
-            }) / (K + rank as f32 + 1.0),
-            source_bit(if exact { "exact-symbol" } else { "symbol" }),
+            weight / (K + rank as f32 + 1.0),
+            source_bit(match kind {
+                SymbolCandidateKind::Exact => "exact-symbol",
+                SymbolCandidateKind::Inferred => "inferred-symbol",
+                SymbolCandidateKind::Alias => "symbol",
+            }),
         );
     }
+
+    tracing::trace!(
+        "fuse_collect={:?} entries={}",
+        fuse_started.elapsed(),
+        entries.len()
+    );
 
     let rerank_limit = rerank_candidate_limit();
     let mut rerank_order = entries
         .iter()
         .map(|(vector_key, entry)| (*vector_key, entry.score))
         .collect::<Vec<_>>();
-    rerank_order.sort_by(|left, right| right.1.total_cmp(&left.1));
+    rerank_order.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.cmp(&right.0))
+    });
     let rerank_ids = rerank_order
         .into_iter()
         .take(rerank_limit)
         .map(|(chunk_id, _)| chunk_id)
         .collect::<HashSet<_>>();
 
+    let hydrate_started = std::time::Instant::now();
+    let mut empty_text_candidates = 0;
+    let mut hydrated_candidates = 0;
     if let Some(ctx) = ctx {
         let empty_text_keys = rerank_ids
             .iter()
@@ -2914,19 +3537,29 @@ fn fuse_rrf_with_context(
             .filter(|entry| entry.chunk.text.is_empty())
             .map(|entry| entry.chunk.vector_key)
             .collect::<Vec<_>>();
+        empty_text_candidates = empty_text_keys.len();
         if !empty_text_keys.is_empty()
-            && let Ok(batch) = ctx.fetch_chunks_by_vector_keys_batch(&empty_text_keys)
+            && let Ok(batch) = ctx.fetch_chunk_texts_by_vector_keys_batch(&empty_text_keys)
         {
             for vector_key in &rerank_ids {
                 if let Some(entry) = entries.get_mut(vector_key)
                     && entry.chunk.text.is_empty()
-                    && let Some(full) = batch.get(&entry.chunk.vector_key)
+                    && let Some(text) = batch.get(&entry.chunk.vector_key)
                 {
-                    entry.chunk.text.clone_from(&full.text);
+                    entry.chunk.text.clone_from(text);
+                    hydrated_candidates += 1;
                 }
             }
         }
     }
+    tracing::trace!(
+        "fuse_hydrate={:?} hydrate_io={:?} rerank_candidates={} empty_text_candidates={} hydrated_candidates={}",
+        fuse_started.elapsed(),
+        hydrate_started.elapsed(),
+        rerank_ids.len(),
+        empty_text_candidates,
+        hydrated_candidates
+    );
 
     let primary_query_tokens = query.primary_tokens.as_slice();
     let mut file_query_matches: HashMap<u64, HashSet<usize>> = HashMap::new();
@@ -2960,6 +3593,7 @@ fn fuse_rrf_with_context(
             .entry(path_key(&e.chunk.file_path))
             .or_insert(0) += 1;
     }
+    tracing::trace!("fuse_context={:?}", fuse_started.elapsed());
 
     let mut ranked = entries
         .into_values()
@@ -2985,7 +3619,7 @@ fn fuse_rrf_with_context(
             // be bounded. Previously these were added directly and several were
             // 10-60x the base RRF score (~0.05), so a single boost could
             // override the fused rank signal entirely.
-            let mut additive_boost = literal_match_boost_with_query(&query, &bctx);
+            let mut additive_boost = literal_match_boost_with_query(query, &bctx);
 
             let coverage = if !query_tokens.is_empty() {
                 term_coverage_boost(query_tokens, &bctx)
@@ -2999,7 +3633,7 @@ fn fuse_rrf_with_context(
             }
 
             additive_boost +=
-                path_exact_match_boost_with_query(&query, &bctx) * PATH_EXACT_MATCH_WEIGHT;
+                path_exact_match_boost_with_query(query, &bctx) * PATH_EXACT_MATCH_WEIGHT;
 
             if !query_tokens.is_empty() {
                 additive_boost +=
@@ -3031,21 +3665,27 @@ fn fuse_rrf_with_context(
             }
 
             if source_set & source_bit("literal") != 0 {
-                score *= if should_run_literal_pass(query_text) {
+                score *= if should_run_literal_pass(query.text) {
                     EXACT_LITERAL_MULTIPLIER
                 } else {
                     ALIAS_LITERAL_MULTIPLIER
                 };
             }
 
-            if source_set & (source_bit("lexical") | source_bit("literal")) == 0 {
+            if source_set
+                & (source_bit("lexical")
+                    | source_bit("literal")
+                    | source_bit("path")
+                    | source_bit("inferred-symbol"))
+                == 0
+            {
                 score *= SEMANTIC_ONLY_PENALTY;
             }
 
             // Chunks with zero query term overlap despite having text are noise
             if !query_tokens.is_empty()
                 && coverage < f32::EPSILON
-                && source_set & source_bit("literal") == 0
+                && source_set & (source_bit("literal") | source_bit("path")) == 0
             {
                 score *= 0.5;
             }
@@ -3065,22 +3705,80 @@ fn fuse_rrf_with_context(
             (chunk, score, source_list)
         })
         .collect::<Vec<_>>();
+    tracing::trace!("fuse_score={:?}", fuse_started.elapsed());
 
-    if is_precise_lookup_query(query_text)
+    if is_precise_lookup_query_with_tokens(query.text, &query.primary_tokens)
         && let Some(max_score) = ranked.iter().map(|(_, score, _)| *score).reduce(f32::max)
-        && let Some((_, exact_score, _)) = ranked
+    {
+        let exact_depths = ranked
+            .iter()
+            .filter(|(_, _, sources)| sources.iter().any(|source| source == "exact-symbol"))
+            .map(|(chunk, _, _)| {
+                (
+                    chunk.vector_key,
+                    crate::symbols::exact_name_namespace_depth(chunk, query.text),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        if let Some((_, exact_score, _)) = ranked
             .iter_mut()
             .filter(|(_, _, sources)| sources.iter().any(|source| source == "exact-symbol"))
             .max_by(|left, right| {
-                is_definition_kind(&left.0.kind)
-                    .cmp(&is_definition_kind(&right.0.kind))
+                let left_depth = exact_depths
+                    .get(&left.0.vector_key)
+                    .copied()
+                    .flatten()
+                    .unwrap_or(usize::MAX);
+                let right_depth = exact_depths
+                    .get(&right.0.vector_key)
+                    .copied()
+                    .flatten()
+                    .unwrap_or(usize::MAX);
+                (left_depth != usize::MAX)
+                    .cmp(&(right_depth != usize::MAX))
+                    .then_with(|| right_depth.cmp(&left_depth))
+                    .then_with(|| {
+                        is_definition_kind(&left.0.kind).cmp(&is_definition_kind(&right.0.kind))
+                    })
                     .then_with(|| left.1.total_cmp(&right.1))
+                    .then_with(|| right.0.vector_key.cmp(&left.0.vector_key))
             })
-    {
-        *exact_score = max_score + (max_score * 0.01).max(0.01);
+        {
+            *exact_score = max_score + (max_score * 0.01).max(0.01);
+        }
     }
 
-    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.vector_key.cmp(&right.0.vector_key))
+    });
+    if query.primary_tokens.len() >= 4 {
+        apply_file_coherence_boost(&mut ranked, FILE_COHERENCE_WEIGHT, query.secondary_intent);
+        ranked.sort_by(|left, right| {
+            right
+                .1
+                .total_cmp(&left.1)
+                .then_with(|| left.0.vector_key.cmp(&right.0.vector_key))
+        });
+    }
+    // "How" queries are architecture-oriented; term-dense prose can be less
+    // useful than the implementation span already selected by the ranker.
+    if matches!(
+        routing.intent,
+        QueryIntent::NaturalLanguage | QueryIntent::DocsTestsExamples | QueryIntent::Mixed
+    ) && !query.lower.starts_with("how ")
+    {
+        // File-level evidence determines rank. For descriptive queries, show
+        // the strongest local evidence from the top file without changing its
+        // score, source signals, or position.
+        promote_representative_span(
+            &mut ranked,
+            &query.primary_tokens,
+            REPRESENTATIVE_SPAN_MIN_COVERAGE,
+        );
+    }
 
     // Per-file hit diversity cap: keep the best chunk per file at full score,
     // then aggressively decay. This mirrors web-search result diversity: a
@@ -3099,21 +3797,32 @@ fn fuse_rrf_with_context(
             _ => item.1 *= 0.05,
         }
     }
-    ranked.sort_by(|a, b| b.1.total_cmp(&a.1));
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| left.0.vector_key.cmp(&right.0.vector_key))
+    });
+    let enable_backfill = backfill_enabled(&ranked);
 
     if matches!(
-        QueryRouting::classify(query_text).intent,
+        routing.intent,
         QueryIntent::NaturalLanguage | QueryIntent::DocsTestsExamples | QueryIntent::Mixed
     ) {
         let mut seen_files = HashSet::new();
         ranked.retain(|(chunk, _, _)| seen_files.insert(path_key(&chunk.file_path)));
     }
 
-    let mut filtered = filter_meaningful_scores(ranked, query_text);
+    let mut filtered = filter_meaningful_scores_with_query(ranked, query, enable_backfill);
 
     if let Some(limit) = limit {
         filtered.truncate(limit);
     }
+    tracing::trace!(
+        "fuse_filter={:?} results={}",
+        fuse_started.elapsed(),
+        filtered.len()
+    );
 
     filtered
 }
@@ -3126,15 +3835,28 @@ pub fn rerank_candidate_limit() -> usize {
         .unwrap_or(30)
 }
 
+#[cfg(test)]
 fn filter_meaningful_scores(
     ranked: Vec<(IndexedChunk, f32, Vec<String>)>,
     query_text: &str,
 ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
-    let precise_query = is_precise_lookup_query(query_text);
-    let query_tokens = expanded_query_tokens(query_text);
-    let secondary_intent = query_targets_secondary_sources(query_text);
-    let implementation_intent = query_targets_implementation(&query_tokens);
-    let short_literal_lookup = is_short_literal_lookup_query(query_text);
+    let query = FusionQuery::new(query_text);
+    let enable_backfill = backfill_enabled(&ranked);
+    filter_meaningful_scores_with_query(ranked, &query, enable_backfill)
+}
+
+fn filter_meaningful_scores_with_query(
+    ranked: Vec<(IndexedChunk, f32, Vec<String>)>,
+    query: &FusionQuery<'_>,
+    enable_backfill: bool,
+) -> Vec<(IndexedChunk, f32, Vec<String>)> {
+    let precise_query = is_precise_lookup_query_with_tokens(query.text, &query.primary_tokens);
+    let query_tokens = query.tokens.as_slice();
+    let secondary_intent = query.secondary_intent;
+    let implementation_intent = query_targets_implementation(query_tokens);
+    let raw_terms = raw_query_terms(query.text);
+    let short_literal_lookup =
+        !raw_terms.is_empty() && raw_terms.len() <= 2 && !query.location_intent;
     if ranked.is_empty() {
         return vec![];
     }
@@ -3144,7 +3866,7 @@ fn filter_meaningful_scores(
         .iter()
         .any(|(_, _, sources)| has_direct_source(sources));
     if !has_direct_candidate {
-        return filter_semantic_only_scores(ranked, query_text, &query_tokens, precise_query);
+        return filter_semantic_only_scores(ranked, query, precise_query);
     }
 
     if ranked.len() == 1 {
@@ -3152,7 +3874,7 @@ fn filter_meaningful_scores(
         if direct_candidate_has_enough_authority(
             chunk,
             sources,
-            &query_tokens,
+            query_tokens,
             precise_query,
             secondary_intent,
             implementation_intent,
@@ -3178,11 +3900,8 @@ fn filter_meaningful_scores(
 
     let candidate_authority = |chunk: &IndexedChunk, sources: &[String]| -> (f32, f32) {
         let path_lower = lower_index_path(&chunk.file_path);
-        let authority = effective_authority_score_for_path(
-            &query_tokens,
-            path_lower.as_ref(),
-            secondary_intent,
-        );
+        let authority =
+            effective_authority_score_for_path(query_tokens, path_lower.as_ref(), secondary_intent);
         let authority_floor = recommendation_authority_floor(
             sources,
             precise_query,
@@ -3192,15 +3911,17 @@ fn filter_meaningful_scores(
         );
         (authority, authority_floor)
     };
-    const MIN_FILTERED_RESULTS: usize = 10;
-    let enable_backfill = ranked.len() >= MIN_FILTERED_RESULTS;
     let mut fallback = None;
     let mut filtered = Vec::new();
     let mut backfill = Vec::new();
     for (index, item) in ranked.into_iter().enumerate() {
         let (authority, authority_floor) = candidate_authority(&item.0, &item.2);
         let enough_authority = authority >= authority_floor;
-        let meaningful = if has_literal_source(&item.2) {
+        let strong_path_match = has_path_source(&item.2)
+            && file_stem_boost(query_tokens, &ChunkBoostContext::new(&item.0)) >= 0.5;
+        let meaningful = if strong_path_match {
+            enough_authority
+        } else if has_literal_source(&item.2) {
             enough_authority && (precise_query || item.1 >= adaptive_threshold * 0.7)
         } else {
             item.1 >= adaptive_threshold && enough_authority
@@ -3246,8 +3967,7 @@ fn filter_meaningful_scores(
 
 fn filter_semantic_only_scores(
     ranked: Vec<(IndexedChunk, f32, Vec<String>)>,
-    query_text: &str,
-    query_tokens: &[String],
+    query: &FusionQuery<'_>,
     precise_query: bool,
 ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
     let Some(best) = ranked.first() else {
@@ -3255,11 +3975,11 @@ fn filter_semantic_only_scores(
     };
 
     let bctx = ChunkBoostContext::new(&best.0);
-    let support = support_signals(query_text, query_tokens, &bctx);
-    let secondary_intent = query_targets_secondary_sources(query_text);
-    let authority = effective_authority_score_with_intent(query_tokens, &bctx, secondary_intent);
+    let support = support_signals(query.text, &query.tokens, &bctx);
+    let authority =
+        effective_authority_score_with_intent(&query.tokens, &bctx, query.secondary_intent);
     let second_score = ranked.get(1).map(|(_, score, _)| *score).unwrap_or(0.0);
-    let authority_floor = if secondary_intent || precise_query {
+    let authority_floor = if query.secondary_intent || precise_query {
         0.5
     } else {
         0.65
@@ -3291,13 +4011,20 @@ fn filter_semantic_only_scores(
 
 fn has_direct_source(sources: &[String]) -> bool {
     has_literal_source(sources)
-        || sources
-            .iter()
-            .any(|source| source == "lexical" || source == "path" || source == "exact-symbol")
+        || sources.iter().any(|source| {
+            source == "lexical"
+                || source == "path"
+                || source == "exact-symbol"
+                || source == "inferred-symbol"
+        })
 }
 
 fn has_literal_source(sources: &[String]) -> bool {
     sources.iter().any(|source| source == "literal")
+}
+
+fn has_path_source(sources: &[String]) -> bool {
+    sources.iter().any(|source| source == "path")
 }
 
 fn direct_candidate_has_enough_authority(
@@ -3347,11 +4074,6 @@ fn recommendation_authority_floor(
     }
 }
 
-fn is_short_literal_lookup_query(query_text: &str) -> bool {
-    let terms = raw_query_terms(query_text);
-    !terms.is_empty() && terms.len() <= 2 && !has_location_intent(query_text)
-}
-
 fn support_signals(
     query_text: &str,
     query_tokens: &[String],
@@ -3367,10 +4089,9 @@ fn support_signals(
     }
 }
 
-fn is_precise_lookup_query(query_text: &str) -> bool {
-    let query = query_text.trim();
+fn is_precise_lookup_query_with_tokens(query: &str, tokens: &[String]) -> bool {
     !query.is_empty()
-        && (tokenize_query(query).len() == 1
+        && (tokens.len() == 1
             || query.chars().any(|ch| {
                 ch == '_' || ch == '-' || ch == '/' || ch == ':' || ch.is_ascii_uppercase()
             }))
@@ -3443,12 +4164,12 @@ impl SupportSignals {
 struct ChunkBoostContext {
     text_lower: String,
     path_lower: String,
-    /// Path split on '/', owned for lifetime independence.
-    path_segments: Vec<String>,
+    /// Identifier-aware path terms used for conservative morphology matching.
+    path_terms: Vec<String>,
     /// Lowercased file stem (e.g. "search" from "search.rs").
     file_stem: Option<String>,
-    /// First meaningful line of the chunk (lowercased) — used for definition name boost.
-    first_line: String,
+    /// Byte range of the first meaningful line within `text_lower`.
+    first_line_range: Option<std::ops::Range<usize>>,
     /// compact_identifier of the full chunk text, needed only for
     /// identifier-shaped literal matching.
     text_compact: Option<String>,
@@ -3466,22 +4187,29 @@ impl ChunkBoostContext {
         let text_lower = chunk.text.to_ascii_lowercase();
         let path_string = index_path_string(&chunk.file_path);
         let path_lower = path_string.to_ascii_lowercase();
-        let path_segments: Vec<String> = path_lower.split('/').map(String::from).collect();
+        let path_terms = path_string
+            .split('/')
+            .flat_map(split_identifier_segments)
+            .collect::<Vec<_>>();
         let file_stem = chunk
             .file_path
             .file_stem()
             .and_then(|s| s.to_str())
             .map(|s| s.to_ascii_lowercase());
 
-        let first_line = chunk
-            .text
-            .lines()
-            .find(|l| {
-                let t = l.trim();
-                !t.is_empty() && !t.starts_with("//") && !t.starts_with('#')
-            })
-            .unwrap_or_default()
-            .to_ascii_lowercase();
+        let mut offset = 0;
+        let first_line_range = text_lower.split_inclusive('\n').find_map(|line| {
+            let line_without_newline = line.strip_suffix('\n').unwrap_or(line);
+            let line_without_newline = line_without_newline
+                .strip_suffix('\r')
+                .unwrap_or(line_without_newline);
+            let trimmed = line_without_newline.trim();
+            let range =
+                (!trimmed.is_empty() && !trimmed.starts_with("//") && !trimmed.starts_with('#'))
+                    .then_some(offset..offset + line_without_newline.len());
+            offset += line.len();
+            range
+        });
 
         let (text_compact, path_compact) = if include_compact {
             (
@@ -3495,12 +4223,18 @@ impl ChunkBoostContext {
         Self {
             text_lower,
             path_lower,
-            path_segments,
+            path_terms,
             file_stem,
-            first_line,
+            first_line_range,
             text_compact,
             path_compact,
         }
+    }
+
+    fn first_line(&self) -> &str {
+        self.first_line_range
+            .as_ref()
+            .map_or("", |range| &self.text_lower[range.clone()])
     }
 }
 
@@ -3524,12 +4258,25 @@ fn path_segment_boost(query_tokens: &[String], bctx: &ChunkBoostContext) -> f32 
     let matched = query_tokens
         .iter()
         .filter(|t| {
-            bctx.path_segments
+            bctx.path_terms
                 .iter()
-                .any(|seg| seg.contains(t.as_str()))
+                .any(|term| code_term_matches(t, term))
         })
         .count();
     matched as f32 / query_tokens.len() as f32
+}
+
+fn code_term_matches(left: &str, right: &str) -> bool {
+    if left == right || left.contains(right) || right.contains(left) {
+        return true;
+    }
+    let common = left
+        .bytes()
+        .zip(right.bytes())
+        .take_while(|(left, right)| left == right)
+        .count();
+    let shorter = left.len().min(right.len());
+    common >= 5 && common * 3 >= shorter * 2
 }
 
 /// Massive boost when the full query appears as a path segment (directory or
@@ -3545,10 +4292,10 @@ fn path_exact_match_boost_with_query(query: &FusionQuery<'_>, bctx: &ChunkBoostC
         return 0.0;
     }
 
-    for seg in &bctx.path_segments {
+    for seg in bctx.path_lower.split('/') {
         for candidate in &query.path_candidates {
             // Exact segment match: dir name IS the query
-            if seg == candidate.as_str() {
+            if seg == candidate {
                 return 1.0;
             }
             // Segment starts/ends with query (e.g. "my-service-v2")
@@ -3597,9 +4344,12 @@ fn file_stem_boost_with_compact_tokens(
         .iter()
         .zip(compact_tokens)
         .any(|(token, compact_token)| *stem == *token || compact_stem == *compact_token);
-    let partial_match = query_tokens
-        .iter()
-        .any(|token| stem.contains(token.as_str()));
+    let stem_terms = split_identifier_segments(stem);
+    let partial_match = query_tokens.iter().any(|token| {
+        stem_terms
+            .iter()
+            .any(|stem_term| code_term_matches(token, stem_term))
+    });
 
     if exact_match {
         1.0
@@ -3637,13 +4387,14 @@ fn location_intent_boost(chunk: &IndexedChunk, bctx: &ChunkBoostContext) -> f32 
 /// This is the "are we looking at the definition site?" signal — e.g., query "handle error"
 /// should strongly prefer `fn handle_error()` over a comment mentioning errors.
 fn definition_name_boost(query_tokens: &[String], bctx: &ChunkBoostContext) -> f32 {
-    if query_tokens.is_empty() || bctx.first_line.is_empty() {
+    let first_line = bctx.first_line();
+    if query_tokens.is_empty() || first_line.is_empty() {
         return 0.0;
     }
 
     let matched = query_tokens
         .iter()
-        .filter(|t| bctx.first_line.contains(t.as_str()))
+        .filter(|t| first_line.contains(t.as_str()))
         .count();
     matched as f32 / query_tokens.len() as f32
 }
@@ -3701,6 +4452,9 @@ fn chunk_kind_boost(chunk: &IndexedChunk) -> f32 {
             1.4
         }
         "Impl" | "impl" | "Enum" | "enum" => 1.25,
+        // Parser-derived module documentation is authoritative for conceptual
+        // and architecture queries, while remaining below definition sites.
+        "Documentation" | "documentation" => 1.2,
 
         // Imports and comments are rarely the target of a search
         "Comment" | "comment" => 0.6,
@@ -3915,17 +4669,11 @@ fn path_query_overlap_for_path(query_tokens: &[String], path_lower: &str) -> usi
 }
 
 fn chunk_density_exponent(bctx: &ChunkBoostContext) -> f32 {
-    if path_role(&bctx.path_lower) == PathRole::PrimarySource
-        && !is_header_like_path(&bctx.path_lower)
-    {
+    if path_role(&bctx.path_lower) == PathRole::PrimarySource {
         0.0
     } else {
         0.3
     }
-}
-
-fn is_header_like_path(path: &str) -> bool {
-    path.ends_with(".h") || path.ends_with(".hpp") || path.ends_with(".hh")
 }
 
 fn query_targets_implementation(query_tokens: &[String]) -> bool {
@@ -4087,6 +4835,27 @@ mod tests {
         assert!((semantic_hash_weight(true, 1, 100) - 0.99).abs() < 0.001);
         assert!((semantic_hash_weight(true, 50, 100) - 0.5).abs() < 0.001);
         assert_eq!(semantic_hash_weight(true, 100, 100), 0.3);
+    }
+
+    #[test]
+    fn hash_skip_requires_all_direct_matches_in_the_top_ten() {
+        let direct_ids = (1..=10).collect::<HashSet<_>>();
+        let matches = (1..=10)
+            .map(|key| VectorMatch {
+                key,
+                score: key as f32,
+            })
+            .collect::<Vec<_>>();
+        assert!(neural_direct_overlap_allows_hash_skip(
+            &matches,
+            &direct_ids
+        ));
+
+        let direct_ids = (1..=9).collect::<HashSet<_>>();
+        assert!(!neural_direct_overlap_allows_hash_skip(
+            &matches,
+            &direct_ids
+        ));
     }
 
     #[test]
@@ -4458,7 +5227,6 @@ mod tests {
                 .any(|hit| hit.sources.iter().any(|source| source == "neural")),
             "neural vectors should be visible in result provenance"
         );
-
         let exact_default = hybrid_search(
             &workspace,
             "authenticate_user",
@@ -4588,6 +5356,14 @@ mod tests {
                 .get(&key)
                 .expect("shared hydration must preserve every key");
             assert_eq!(shared_chunk.chunk_id, separate_chunk.chunk_id);
+            assert!(
+                !separate_chunk.text.is_empty(),
+                "the full-fetch control should include stored chunk text"
+            );
+            assert!(
+                shared_chunk.text.is_empty(),
+                "shared ANN discovery should defer text hydration to fusion"
+            );
             assert_eq!(*shared_score, separate_score);
             assert_eq!(shared_sources, &separate_sources);
         }
@@ -5127,6 +5903,93 @@ mod tests {
         let literals = build_literal_queries(query, &build_lexical_queries(query));
         assert!(literals.iter().any(|literal| literal == "ingress"));
         assert!(!literals.iter().any(|literal| literal == "rx"));
+
+        let query = "parsing uploaded binary file parts from HTTP requests";
+        let literals = build_literal_queries(query, &build_lexical_queries(query));
+        assert!(literals.iter().any(|literal| literal == "multipart"));
+
+        let query = "how server-sent events are streamed to the client";
+        let lexical = build_lexical_queries(query);
+        assert!(lexical.iter().any(|variant| variant == "sse"));
+        let literals = build_literal_queries(query, &lexical);
+        assert!(literals.iter().any(|literal| literal == "sse"));
+        assert!(
+            literals
+                .iter()
+                .any(|literal| literal == "server-sent-events")
+        );
+        assert!(
+            literals
+                .iter()
+                .any(|literal| literal == "server_sent_events")
+        );
+        assert!(
+            literals
+                .iter()
+                .any(|literal| literal == "server sent events")
+        );
+    }
+
+    #[test]
+    fn mixed_long_alias_and_short_acronym_use_specificity_ranking() {
+        assert!(literal_queries_need_specificity_ranking(&[
+            "sse".to_string(),
+            "server-sent-events".to_string(),
+        ]));
+        assert!(!literal_queries_need_specificity_ranking(&[
+            "multipart".to_string(),
+        ]));
+
+        let matcher = regex::RegexBuilder::new("sse|server-sent-events")
+            .case_insensitive(true)
+            .build()
+            .unwrap();
+        assert!(
+            literal_match_specificity(&matcher, "server-sent-events")
+                > literal_match_specificity(&matcher, "SSE SSE")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn multipart_vocabulary_finds_the_canonical_implementation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(
+            tmp.path().join("multipart.rs"),
+            "pub struct Multipart;\nimpl Multipart { pub fn next_field(&mut self) {} }\n",
+        )
+        .unwrap();
+        for index in 0..12 {
+            std::fs::write(
+                tmp.path().join(format!("request_parts_{index}.rs")),
+                format!("pub fn parse_http_request_parts_{index}() {{}}\n"),
+            )
+            .unwrap();
+        }
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = hybrid_search(
+            &workspace,
+            "parsing uploaded binary file parts from HTTP requests",
+            Some(&model),
+            &SearchOptions {
+                limit: Some(10),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(
+            hits.iter()
+                .any(|hit| hit.file_path == Path::new("multipart.rs")),
+            "canonical multipart implementation should survive the top-10 candidate set"
+        );
     }
 
     #[test]
@@ -5219,6 +6082,7 @@ mod tests {
     #[test]
     fn lexical_query_expansion_adds_code_word_roots() {
         let queries = build_lexical_queries("extractors resolved and streamed");
+        assert_eq!(queries[0], "extractors resolved and streamed");
         let roots = queries
             .iter()
             .flat_map(|query| query.split_whitespace())
@@ -5226,6 +6090,79 @@ mod tests {
         assert!(roots.contains("extract"));
         assert!(roots.contains("resolve"));
         assert!(roots.contains("stream"));
+    }
+
+    #[test]
+    fn natural_language_symbol_queries_are_bounded_and_definition_shaped() {
+        let visitor =
+            natural_language_symbol_queries("Visitor pattern for deserializer implementations");
+        assert_eq!(visitor.first().map(String::as_str), Some("Visitor"));
+        assert!(visitor.len() <= 16);
+
+        let parser = natural_language_symbol_queries("parse a JSON string into a value");
+        assert!(parser.contains(&"Parser".to_string()));
+
+        let router = natural_language_symbol_queries("routing HTTP requests to controllers");
+        assert!(router.contains(&"Router".to_string()));
+
+        assert!(
+            natural_language_symbol_queries(
+                "how serde_derive generates Serialize impl with serialize_field"
+            )
+            .iter()
+            .all(|query| query != "Serialize")
+        );
+        assert!(
+            natural_language_symbol_queries(
+                "how the mapper resolves a deserializer for a given Java type"
+            )
+            .iter()
+            .all(|query| query != "Java")
+        );
+        assert!(
+            natural_language_symbol_queries("Deserialize and Deserializer trait definitions")
+                .is_empty()
+        );
+        assert!(
+            natural_language_symbol_queries(
+                "deserialization context and error accumulation during parsing"
+            )
+            .iter()
+            .all(|query| query != "Parser")
+        );
+        assert!(
+            natural_language_symbol_queries("exception types for parse and type errors")
+                .iter()
+                .all(|query| query != "Parser")
+        );
+
+        assert!(natural_language_symbol_queries("Visitor").is_empty());
+        assert!(natural_language_symbol_queries("Sinatra::Helpers").is_empty());
+        assert!(
+            natural_language_symbol_queries(
+                "HTTP TLS JSON request handling implementation details"
+            )
+            .iter()
+            .all(|query| !matches!(query.as_str(), "HTTP" | "TLS" | "JSON"))
+        );
+    }
+
+    #[test]
+    fn exact_symbol_queries_include_qualified_leaf_names() {
+        assert_eq!(
+            exact_symbol_query_names("Rack::Response"),
+            ["Rack::Response", "Response"]
+        );
+        assert_eq!(exact_symbol_query_names("Visitor"), ["Visitor"]);
+    }
+
+    #[test]
+    fn lexical_candidate_budget_prioritizes_the_original_query() {
+        let limits = lexical_query_candidate_limits(250, 6);
+        assert_eq!(limits.iter().sum::<usize>(), 250);
+        assert_eq!(limits[0], 187);
+        assert!(limits[1..].iter().all(|limit| *limit >= 12));
+        assert!(limits[1..].iter().all(|limit| *limit < limits[0]));
     }
 
     #[test]
@@ -5314,6 +6251,116 @@ mod tests {
             hits[0].file_path.to_string_lossy().contains("auth"),
             "auth.rs should rank first due to path boost, got: {}",
             hits[0].file_path.display()
+        );
+    }
+
+    #[test]
+    fn natural_language_path_recall_is_bounded_and_identifier_aware() {
+        assert_eq!(
+            natural_language_path_recall_query(
+                "how code traverses the Zig AST to resolve symbol scopes"
+            )
+            .as_deref(),
+            Some("traverse traverses ast resolve symbol scope scopes")
+        );
+        assert!(natural_language_path_recall_query("auth login").is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn natural_language_path_recall_survives_content_heavy_lexical_competition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(
+            tmp.path().join("src/ast.zig"),
+            "pub fn inspect(value: usize) void { _ = value; }\n",
+        )
+        .unwrap();
+        for index in 0..120 {
+            std::fs::write(
+                tmp.path().join(format!("src/distractor_{index}.zig")),
+                format!(
+                    "pub fn distractor_{index}() void {{ // code traverses zig to resolve symbol scopes\n}}\n"
+                ),
+            )
+            .unwrap();
+        }
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = hybrid_search(
+            &workspace,
+            "how code traverses the Zig AST to resolve symbol scopes",
+            Some(&model),
+            &SearchOptions {
+                limit: Some(10),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(
+            hits.iter()
+                .any(|hit| hit.file_path == Path::new("src/ast.zig")),
+            "path-matched module should survive content-heavy lexical competition: {hits:#?}"
+        );
+        assert!(
+            hits.iter()
+                .find(|hit| hit.file_path == Path::new("src/ast.zig"))
+                .is_some_and(|hit| hit.sources.iter().any(|source| source == "path")),
+            "ast.zig should carry path evidence: {hits:#?}"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn natural_language_path_recall_fills_the_distinct_file_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        let distractor = (0..48)
+            .map(|index| format!("def helper_{index}():\n    return {index}\n"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(tmp.path().join("src/model_fields_helpers.py"), distractor).unwrap();
+        std::fs::write(
+            tmp.path().join("src/fields.py"),
+            "def construct_value():\n    return None\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = hybrid_search(
+            &workspace,
+            "how are model fields declared and constrained",
+            Some(&model),
+            &SearchOptions {
+                limit: Some(10),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(
+            hits.iter()
+                .any(|hit| hit.file_path == Path::new("src/fields.py")),
+            "a chunk-heavy matching file must not exhaust the path-file budget: {hits:#?}"
+        );
+        assert!(
+            hits.iter()
+                .find(|hit| hit.file_path == Path::new("src/fields.py"))
+                .is_some_and(|hit| hit.sources.iter().any(|source| source == "path")),
+            "fields.py should carry path evidence: {hits:#?}"
         );
     }
 
@@ -5679,6 +6726,7 @@ export function registerCommands(p: Plugin) {
                 semantic: vec![],
                 literal: vec![],
                 path: vec![],
+                path_weight: 1.5,
                 symbols: vec![],
             },
             1.0,
@@ -5691,17 +6739,202 @@ export function registerCommands(p: Plugin) {
                 semantic: vec![],
                 literal: vec![],
                 path: vec![],
-                symbols: vec![(reexport, true), (definition, true)],
+                path_weight: 1.5,
+                symbols: vec![
+                    (reexport, SymbolCandidateKind::Exact),
+                    (definition, SymbolCandidateKind::Exact),
+                ],
             },
             1.0,
             "handle_error",
             Some(10),
         );
-        unsafe { std::env::remove_var("IVYGREP_RERANK_LIMIT") };
 
         assert_eq!(without_symbols[0].0.chunk_id, "usage");
         assert_eq!(with_symbols[0].0.chunk_id, "definition");
         assert!(with_symbols[0].2.contains(&"exact-symbol".to_string()));
+
+        let mut lowercase_function = make_chunk_with_path(
+            "lowercase-function",
+            "lib/ecto/query/planner.ex",
+            "def query(meta, prepared, cache, params) do",
+        );
+        lowercase_function.language = "elixir".to_string();
+        let mut exact_module = make_chunk_with_path(
+            "exact-module",
+            "lib/ecto/query.ex",
+            "defmodule Ecto.Query do\n  defstruct [:from, :joins]\nend",
+        );
+        exact_module.language = "elixir".to_string();
+        exact_module.kind = "Module".to_string();
+        let mut nested_module = make_chunk_with_path(
+            "nested-module",
+            "lib/ecto/repo/query.ex",
+            "defmodule Ecto.Repo.Query do\n  def load(meta), do: meta\nend",
+        );
+        nested_module.language = "elixir".to_string();
+        nested_module.kind = "Module".to_string();
+        let exact_case = fuse_rrf(
+            FusionCandidates {
+                lexical: vec![
+                    (lowercase_function.clone(), 1.0),
+                    (exact_module.clone(), 0.5),
+                    (nested_module.clone(), 2.0),
+                ],
+                semantic: vec![],
+                literal: vec![],
+                path: vec![],
+                path_weight: 1.5,
+                symbols: vec![
+                    (lowercase_function, SymbolCandidateKind::Exact),
+                    (nested_module, SymbolCandidateKind::Exact),
+                    (exact_module, SymbolCandidateKind::Exact),
+                ],
+            },
+            1.0,
+            "Query",
+            Some(10),
+        );
+        unsafe { std::env::remove_var("IVYGREP_RERANK_LIMIT") };
+
+        assert_eq!(exact_case[0].0.chunk_id, "exact-module");
+        assert!(exact_case[0].2.contains(&"exact-symbol".to_string()));
+    }
+
+    #[test]
+    fn inferred_symbol_survives_architecture_distractors() {
+        let mut router = make_chunk_with_path(
+            "router",
+            "src/Routing/Router.php",
+            "class Router { public function dispatch(Request $request) { return $this->dispatchToRoute($request); } }",
+        );
+        router.language = "php".to_string();
+        router.kind = "Class".to_string();
+
+        let lexical = (0..12)
+            .map(|index| {
+                (
+                    make_chunk_with_path(
+                        &format!("controller-{index}"),
+                        &format!("src/Routing/Controller{index}.php"),
+                        "class Controller { public function handle(Request $request) {} }",
+                    ),
+                    20.0 - index as f32,
+                )
+            })
+            .collect();
+        let ranked = fuse_rrf(
+            FusionCandidates {
+                lexical,
+                semantic: vec![],
+                literal: vec![],
+                path: vec![],
+                path_weight: 1.5,
+                symbols: vec![(router, SymbolCandidateKind::Inferred)],
+            },
+            1.0,
+            "routing HTTP requests to controllers",
+            Some(20),
+        );
+
+        let router_rank = ranked.iter().position(|(chunk, _, sources)| {
+            chunk.chunk_id == "router" && sources.contains(&"inferred-symbol".to_string())
+        });
+        assert!(
+            router_rank.is_some_and(|rank| rank < 10),
+            "inferred Router definition should survive lexical distractors: {ranked:#?}"
+        );
+    }
+
+    #[test]
+    fn deep_pool_backfill_survives_file_diversity() {
+        let top = make_chunk_with_path(
+            "top",
+            "src/top.rs",
+            "binary file detection handles binary files",
+        );
+        let low = make_chunk_with_path("low", "src/low.rs", "supporting implementation");
+        let query = FusionQuery::new("binary file detection");
+        let mut ranked = vec![
+            (top, 2.0, vec!["lexical".to_string()]),
+            (low, 0.1, vec!["lexical".to_string()]),
+        ];
+
+        let filtered =
+            filter_meaningful_scores_with_query(std::mem::take(&mut ranked), &query, true);
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[1].0.chunk_id, "low");
+        assert!(filtered[1].2.contains(&"backfill".to_string()));
+    }
+
+    #[test]
+    fn representative_span_promotion_preserves_file_rank() {
+        let top = make_chunk_with_path("top", "src/shared.rs", "JSON serialization");
+        let evidence = make_chunk_with_path(
+            "evidence",
+            "src/shared.rs",
+            "JSON response JSONP callback support",
+        );
+        let other = make_chunk_with_path("other", "src/other.rs", "JSON response");
+        let mut ranked = vec![
+            (top, 5.0, vec!["lexical".to_string()]),
+            (evidence, 4.0, vec!["path".to_string()]),
+            (other, 3.0, vec!["lexical".to_string()]),
+        ];
+        let query_tokens = tokenize_query("JSON response serialization and JSONP callback support");
+
+        promote_representative_span(&mut ranked, &query_tokens, 0.67);
+
+        assert_eq!(ranked[0].0.chunk_id, "evidence");
+        assert_eq!(ranked[0].1, 5.0);
+        assert_eq!(ranked[0].2, vec!["lexical".to_string()]);
+        assert_eq!(ranked[1].0.chunk_id, "top");
+        assert_eq!(ranked[1].1, 4.0);
+        assert_eq!(ranked[1].2, vec!["path".to_string()]);
+        assert_eq!(ranked[2].0.chunk_id, "other");
+        assert_eq!(ranked[2].1, 3.0);
+    }
+
+    #[test]
+    fn local_term_coverage_is_ascii_case_insensitive() {
+        let tokens = vec!["json".to_string(), "callback".to_string()];
+        assert_eq!(local_term_coverage(&tokens, "JSON Callback"), 1.0);
+    }
+
+    #[test]
+    fn file_coherence_promotes_the_best_chunk_from_supported_files() {
+        let primary = make_chunk_with_path("primary", "src/primary.rs", "primary");
+        let support = make_chunk_with_path("support", "src/primary.rs", "support");
+        let alternate = make_chunk_with_path("alternate", "src/alternate.rs", "alternate");
+        let mut ranked = vec![
+            (alternate, 1.0, vec![]),
+            (primary, 0.95, vec![]),
+            (support, 0.90, vec![]),
+        ];
+
+        apply_file_coherence_boost(&mut ranked, 0.2, false);
+
+        assert_eq!(ranked[0].1, 1.0 + 0.2 / 1.85);
+        assert_eq!(ranked[1].1, 0.95 + 0.2);
+        assert_eq!(ranked[2].1, 0.90);
+    }
+
+    #[test]
+    fn file_coherence_respects_source_authority() {
+        let primary = make_chunk_with_path("primary", "src/primary_test.rs", "primary");
+        let support = make_chunk_with_path("support", "src/primary_test.rs", "support");
+        let alternate = make_chunk_with_path("alternate", "src/alternate.rs", "alternate");
+        let mut ranked = vec![
+            (alternate, 1.0, vec![]),
+            (primary, 0.95, vec![]),
+            (support, 0.90, vec![]),
+        ];
+
+        apply_file_coherence_boost(&mut ranked, 0.2, false);
+
+        assert_eq!(ranked[0].1, 1.0 + 0.2 / 1.85);
+        assert_eq!(ranked[1].1, 0.95 + 0.2 * 0.6);
+        assert_eq!(ranked[2].1, 0.90);
     }
 
     #[test]
@@ -5857,6 +7090,25 @@ export function registerCommands(p: Plugin) {
     }
 
     #[test]
+    fn backfill_requires_ten_distinct_candidate_files() {
+        let ranked = (0..12)
+            .map(|index| {
+                (
+                    make_chunk_with_path(
+                        &format!("chunk-{index}"),
+                        &format!("src/file-{}.rs", index % 5),
+                        "pub fn candidate() {}",
+                    ),
+                    1.0 - index as f32 * 0.01,
+                    vec!["semantic".to_string()],
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert!(!backfill_enabled(&ranked));
+    }
+
+    #[test]
     fn filter_keeps_literal_sources_even_below_threshold() {
         // Even a below-threshold result should be kept if it has a "literal" source
         let ranked = make_ranked(&[
@@ -5983,10 +7235,10 @@ export function registerCommands(p: Plugin) {
     }
 
     #[test]
-    fn boost_context_splits_path_segments() {
+    fn boost_context_matches_path_segments_without_storing_copies() {
         let chunk = make_test_chunk("a", "src/my-service/handler.rs", "code", "Function");
         let bctx = ChunkBoostContext::new(&chunk);
-        assert_eq!(bctx.path_segments, vec!["src", "my-service", "handler.rs"]);
+        assert_eq!(path_exact_match_boost("my-service", &bctx), 1.0);
     }
 
     #[test]
@@ -6005,7 +7257,7 @@ export function registerCommands(p: Plugin) {
             "Function",
         );
         let bctx = ChunkBoostContext::new(&chunk);
-        assert_eq!(bctx.first_line, "pub fn handle_error() {}");
+        assert_eq!(bctx.first_line(), "pub fn handle_error() {}");
     }
 
     #[test]
@@ -6021,7 +7273,7 @@ export function registerCommands(p: Plugin) {
         let chunk = make_test_chunk("a", "src/empty.rs", "", "Block");
         let bctx = ChunkBoostContext::new(&chunk);
         assert!(bctx.text_lower.is_empty());
-        assert!(bctx.first_line.is_empty());
+        assert!(bctx.first_line().is_empty());
         assert_eq!(bctx.text_compact.as_deref(), Some(""));
     }
 
@@ -6105,6 +7357,31 @@ export function registerCommands(p: Plugin) {
     }
 
     #[test]
+    fn path_boost_matches_conservative_derivational_roots() {
+        let validate = make_test_chunk("a", "src/Validate.java", "code", "Class");
+        let reflective = make_test_chunk(
+            "b",
+            "internal/ReflectiveTypeAdapterFactory.java",
+            "code",
+            "Class",
+        );
+
+        assert!(
+            path_segment_boost(
+                &["validation".to_string()],
+                &ChunkBoostContext::new(&validate)
+            ) > 0.0
+        );
+        assert!(
+            file_stem_boost(
+                &["reflection".to_string()],
+                &ChunkBoostContext::new(&reflective)
+            ) > 0.0
+        );
+        assert!(!code_term_matches("request", "response"));
+    }
+
+    #[test]
     fn definition_name_boost_matches_function_signature() {
         let chunk = make_test_chunk(
             "a",
@@ -6135,6 +7412,23 @@ export function registerCommands(p: Plugin) {
         assert!(
             boost < f32::EPSILON,
             "definition name is 'pub fn unrelated()', should not match, got {boost}"
+        );
+    }
+
+    #[test]
+    fn parser_derived_documentation_gets_bounded_authority_boost() {
+        let documentation = make_test_chunk(
+            "docs",
+            "src/middleware/mod.rs",
+            "axum integrates Tower middleware with Router layers",
+            "Documentation",
+        );
+        let function = make_test_chunk("function", "src/lib.rs", "fn router() {}", "Function");
+
+        assert_eq!(chunk_kind_boost(&documentation), 1.2);
+        assert!(
+            chunk_kind_boost(&documentation) < chunk_kind_boost(&function),
+            "module documentation should remain below definition sites"
         );
     }
 
@@ -6257,14 +7551,30 @@ export function registerCommands(p: Plugin) {
     }
 
     #[test]
-    fn chunk_density_penalty_is_softer_for_primary_source_than_headers() {
+    fn chunk_density_penalty_does_not_demote_primary_headers() {
         let source = make_test_chunk("a", "src/search.rs", "code", "Function");
         let header = make_test_chunk("b", "include/search.h", "code", "Function");
+        let benchmark = make_test_chunk("c", "benchmarks/search_benchmark.cc", "code", "Function");
 
-        assert!(
-            chunk_density_exponent(&ChunkBoostContext::new(&source))
-                < chunk_density_exponent(&ChunkBoostContext::new(&header))
+        assert_eq!(
+            chunk_density_exponent(&ChunkBoostContext::new(&source)),
+            chunk_density_exponent(&ChunkBoostContext::new(&header))
         );
+        assert!(
+            chunk_density_exponent(&ChunkBoostContext::new(&header))
+                < chunk_density_exponent(&ChunkBoostContext::new(&benchmark))
+        );
+    }
+
+    #[test]
+    fn exact_symbol_preview_centers_the_definition_after_documentation() {
+        let content =
+            "/**\n * Create an Axios instance.\n */\nclass Axios {\n  constructor() {}\n}\n";
+        let lines = line_spans(content);
+        let chunk = make_test_chunk("axios", "core/Axios.js", content, "Class");
+        let query = PresentationQuery::new("Axios");
+
+        assert_eq!(find_focus_line(&chunk, &query, content, &lines), 4);
     }
 
     #[test]

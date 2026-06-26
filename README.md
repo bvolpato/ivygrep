@@ -213,6 +213,9 @@ Give the agent this persistent instruction in `AGENTS.md`, `CLAUDE.md`,
 Use the ivygrep MCP tools for code discovery before broad filesystem scans.
 Pass the absolute current repository or worktree path to ig_search.
 Use natural-language queries for concepts and literal=true for exact identifiers.
+Use limit to choose retrieval breadth and context to choose source lines per hit.
+Start with limit=5-10 and context=2. Increase context when a promising hit needs
+more evidence; increase limit when you need more candidate files.
 Use ig_status when indexing health is unclear.
 ```
 
@@ -247,7 +250,7 @@ Traditional tools require you to know _exactly_ what you're looking for. ivygrep
 ### 🌍 45 Language/File Types Supported
 ivygrep indexes and structurally chunks 45 language/file types today:
 
-- **Tree-sitter AST chunking (21 languages):** Rust, Python, Go, JavaScript, TypeScript/TSX, Java, C, C++, C#, Scala, PHP, Ruby, Swift, Bash, Haskell, OCaml, Lua, Dart, Objective-C, Perl, Starlark macros and targets in very large BUILD-like sources
+- **Tree-sitter AST chunking (24 languages):** Rust, Python, Go, JavaScript, TypeScript/TSX, Java, C, C++, C#, Scala, Kotlin, PHP, Ruby, Swift, Elixir, Zig, Bash, Haskell, OCaml, Lua, Dart, Objective-C, Perl, Starlark macros and targets in very large BUILD-like sources
 - **Heuristic structural chunking:** the remaining supported languages below
 
 - **Systems:** Rust, C, C++, Zig, Nim
@@ -276,11 +279,11 @@ Fresh release-readiness validation used a **Linux kernel** checkout with 93,502 
 | Lexical-first scoped stress probe | 10,501 files | ~3 sec |
 | Warm daemon correctness guard | daemon/local hits | 20 / 20 |
 
-The daemon benchmark now reports warmed distinct-query latency separately from
-identical-query cache replay. Latency depends on CPU, storage, and virtualization;
-the single-digit result is a retained dedicated-host benchmark, not a universal
-claim. Benchmark writeups and charts live under
-[`docs/benchmarks/`](docs/benchmarks/).
+The daemon benchmark reports warmed distinct-query latency separately from
+identical-query cache replay. Latency depends on CPU, storage, repository
+shape, index state, and virtualization; dedicated-host measurements are not
+universal claims. Reproducible public quality, latency, indexing, refresh, and
+resource evidence lives under [`docs/benchmarks/`](docs/benchmarks/).
 
 Indexing commits BM25/literal search first. A load-aware background subprocess
 builds hash ANN vectors, then upgrades to the portable 256-dimensional
@@ -291,6 +294,15 @@ CodeSearchNet-trained MiniLM profile. Optional profiles are retained for
 comparison and compatibility rather than recommended laptop defaults. Model
 identity is persisted with the index so incompatible vectors are rebuilt rather
 than silently reused.
+
+Optional transformer profiles share one immutable model across background
+workers. `IVYGREP_NEURAL_THREADS` sets the desired worker ceiling; ivygrep
+automatically lowers additional workers after accounting for the required
+shared model and one quarter of currently available memory. Set
+`IVYGREP_NEURAL_MEMORY_MB` to impose a smaller explicit worker-sizing budget.
+At least one model handle is still required, so this setting is not an OS-level
+hard memory cap. Linux accounting honors the process's effective cgroup
+hierarchy, including containers.
 
 Relevance evaluation separates foreground readiness from post-background hash
 quality:
@@ -334,6 +346,7 @@ ivygrep runs search and embedding inference locally and never sends your code, q
 - **Where data lives:** the index stores compressed source chunks under `~/.local/share/ivygrep` (or `$XDG_DATA_HOME`/`$IVYGREP_HOME`). Unix uses an owner-only `0600` socket plus peer-uid verification. Windows uses loopback TCP with a per-daemon authentication token stored beside the user-owned index. Keep a custom `IVYGREP_HOME` private to your account.
 - **Model download:** neural mode uses `hf-hub` to download revision-pinned model assets on first use and caches them under `$HF_HOME` or `~/.cache/huggingface`. The default is `sentence-transformers/static-retrieval-mrl-en-v1`; `IVYGREP_MODEL_PROFILE=potion-code` selects an optional code-specialized static profile, while `general`, `code`, and `code-hq` select optional transformer profiles. Cached assets work without network access. Use `--hash` or a `--no-default-features` build when model assets must never be downloaded.
 - **Inference backend:** macOS release binaries execute locally with Accelerate-backed CPU math; Linux and Windows release binaries execute locally on CPU. Source builds can opt into local Metal with `--features accelerate,metal` or CUDA with `--features cuda` on a compatible installation. The CUDA build does not require cuDNN. If `nvidia-smi` cannot report compute capability, `build.sh` and `test.sh` infer `CUDA_COMPUTE_CAP=120` for RTX 50/Blackwell hosts; set `CUDA_COMPUTE_CAP` explicitly for other affected GPUs. `ig --status` reports the recorded backend that last generated neural vectors.
+- **Resource controls:** indexing refuses to start below 512 MiB available memory, background enhancement pauses below 1 GiB, and optional transformer workers share model weights plus an adaptive memory budget. These checks use native available-memory reporting on macOS and Windows and cgroup-aware reporting on Linux.
 - **Secrets in your repo:** ivygrep indexes file *contents*, including config/dotfiles (e.g. `.env`) unless they're gitignored. Those contents are stored in the local index and can appear in search snippets. Keep secrets out of the workspace or in `.gitignore`.
 - **MCP scope:** the `ig_search` MCP tool only searches the workspace at the provided `path` — it cannot search across other indexed projects.
 
@@ -362,8 +375,9 @@ ig --refs calculate_tax            # indexed references/calls
 ig --callers calculate_tax         # caller chunks
 
 # Output control
-ig -n 5 "query"                    # limit to 5 files
-ig -C 4 "query"                    # 4 lines of context
+ig -n 5 "query"                    # at most 5 ranked result files
+ig -C 4 "query"                    # up to 4 lines before and after each match
+ig -n 5 -C 8 "query"               # 5 files with richer snippets
 ig --type rust "query"             # filter by language
 ig --include "*.rs,*.go" "query"   # include globs
 ig --exclude "vendor/**" "query"   # exclude globs
@@ -375,6 +389,58 @@ ig --file-name-only "query"        # file paths only
 ig --daemon                        # start background watcher
 ig --mcp                           # start MCP server (stdio)
 ```
+
+`--limit` and `--context` are independent controls:
+
+**Use `--limit` to choose how broadly ivygrep searches and how many ranked files
+it may return. Use `--context` to choose how much source text appears around
+each hit. Neither option is a relevance threshold.**
+
+| Control | What it changes | Ranking |
+|---|---|---|
+| `-n N`, `--limit N` | Searches a candidate pool sized for the request and returns at most `N` ranked files | The same relevance signals apply; a deeper pool can slightly change ranks |
+| `--no-limit` | Uses maximum candidate budgets and returns every result that survives relevance filtering | Can change ranks and is slower |
+| `-C N`, `--context N` | Shows up to `N` source lines before and after each focused match | Unchanged |
+| `--first-line-only` | Reduces each result to one preview line after retrieval | Unchanged |
+| `--file-name-only` | Returns paths only; without `-n`, the CLI also uses maximum candidate budgets | Unchanged with `-n`; without `-n`, the deeper pool can change ranks |
+
+- `--limit` controls breadth, not the ranker's relevance objective. A larger
+  value searches deeper, which improves the chance of finding additional
+  relevant files but also includes progressively lower-ranked candidates.
+- Results remain score-ordered. A smaller limit truncates the response to the
+  highest-ranked files found for that request. It does not deliberately return
+  less-relevant files, but a relevant file below the cutoff will not be shown.
+- Because ivygrep sizes its candidate pool from the requested limit, increasing
+  the limit can introduce candidates that slightly rerank the top results.
+  `--limit` is a maximum file count, not a line, token, or confidence budget.
+- Without `--limit`, normal candidate retrieval remains bounded, but no
+  explicit final result-file cap is applied. `--no-limit` expands retrieval to
+  the maximum candidate budgets and can be much slower.
+- `--context N` returns up to `N` lines before and after each focused match.
+  It changes snippet size only, not retrieval or ranking. For example, `-C 4`
+  returns at most nine lines per hit when file boundaries allow.
+- `--first-line-only` changes presentation only. `--file-name-only -n N` also
+  keeps retrieval bounded by `N`. For grep-style path discovery,
+  `--file-name-only` without `-n` uses maximum candidate budgets; add `-n` when
+  you need a predictable result count and latency.
+
+Fewer snippet tokens do not mean fewer result files, better relevance, or worse
+relevance. They mean less source text was returned for the selected files.
+Relevance is measured separately with ranking metrics such as nDCG and,
+ultimately, whether the returned evidence is sufficient for the task.
+
+For agents, set an explicit limit: start with `-n 5` to `-n 10` and `-C 2`.
+Increase context when the right file is present but the snippet is too small.
+Increase the result limit when the result set does not contain enough distinct
+files. Narrow `path`, `--type`, `--include`, or `--exclude` when results are
+topically correct but too broad.
+ivygrep does not currently expose a total token-budget parameter.
+
+Do not treat the internal fused score as a globally calibrated confidence
+value. Scores are meaningful for ordering one query's results, but a fixed
+minimum-score threshold would not transfer reliably across queries or
+repositories. Use rank, path/type filters, and task evidence to decide whether
+the returned set is sufficient.
 
 ---
 
@@ -420,7 +486,7 @@ These smoke tests run against throwaway projects and isolated `IVYGREP_HOME` dir
 
 ## Roadmap
 
-- **More Tree-sitter languages:** expand the AST pipeline to Kotlin, SQL, and additional grammars as high-quality tree-sitter parsers mature.
+- **More Tree-sitter languages:** expand the AST pipeline to SQL and additional grammars as high-quality tree-sitter parsers mature.
 - **Evidence-backed search program:** track the quality,
   latency, footprint, and portability work in
   [#128](https://github.com/bvolpato/ivygrep/issues/128).

@@ -16,12 +16,16 @@ const HASH_EXPANSION_SEARCH: usize = 64;
 const SERIALIZED_DIMENSIONS_BYTES: u64 = 8;
 const SERIALIZED_HEADER_BYTES: u64 = 64;
 const SERIALIZED_MAGIC: &[u8] = b"usearch";
+const MIN_CAPACITY: usize = 1_024;
+const MAX_CAPACITY_GROWTH: usize = 262_144;
+const MAX_CAPACITY_GROWTH_BYTES: usize = 128 * 1024 * 1024;
 #[cfg(target_os = "windows")]
 const BACKUP_EXTENSION: &str = "usearch.bak";
 
 pub struct VectorStore {
     path: PathBuf,
     index: Index,
+    quantization: ScalarKind,
     // USearch retains a pointer to the buffer passed to view_from_buffer().
     // Keep the index field first so it is dropped before its backing storage.
     #[cfg(target_os = "windows")]
@@ -129,18 +133,19 @@ impl VectorStore {
                             .context("vector path contains invalid UTF-8")?;
                         fallback.load(path_str)?;
                     }
-                    return Ok(Self::new(path, fallback));
+                    return Ok(Self::new(path, fallback, ScalarKind::F32));
                 }
             }
         }
 
-        Ok(Self::new(path, index))
+        Ok(Self::new(path, index, quantization))
     }
 
-    fn new(path: &Path, index: Index) -> Self {
+    fn new(path: &Path, index: Index, quantization: ScalarKind) -> Self {
         Self {
             path: path.to_path_buf(),
             index,
+            quantization,
             #[cfg(target_os = "windows")]
             _readonly_buffer: None,
         }
@@ -154,7 +159,7 @@ impl VectorStore {
     pub fn open_readonly(path: &Path, dimensions: usize, quantization: ScalarKind) -> Result<Self> {
         let index = create_index(dimensions, quantization)?;
         let Some(load_path) = existing_index_path(path) else {
-            return Ok(Self::new(path, index));
+            return Ok(Self::new(path, index, quantization));
         };
         validate_existing_index_file(&load_path)?;
 
@@ -168,6 +173,7 @@ impl VectorStore {
                 Ok(()) => Ok(Self {
                     path: path.to_path_buf(),
                     index,
+                    quantization,
                     _readonly_buffer: Some(buffer),
                 }),
                 Err(err) => {
@@ -180,6 +186,7 @@ impl VectorStore {
                     Ok(Self {
                         path: path.to_path_buf(),
                         index: fallback,
+                        quantization: ScalarKind::F32,
                         _readonly_buffer: Some(buffer),
                     })
                 }
@@ -199,10 +206,10 @@ impl VectorStore {
                     }
                     let fallback = create_index(dimensions, ScalarKind::F32)?;
                     fallback.view(path_str)?;
-                    return Ok(Self::new(path, fallback));
+                    return Ok(Self::new(path, fallback, ScalarKind::F32));
                 }
             }
-            Ok(Self::new(path, index))
+            Ok(Self::new(path, index, quantization))
         }
     }
 
@@ -249,15 +256,13 @@ impl VectorStore {
         let _ = self.index.remove(key);
     }
 
-    /// Reserve space for `additional` entries upfront, avoiding repeated
-    /// capacity doublings during bulk enhancement.
+    /// Reserve a bounded portion of `additional` entries upfront. Bulk
+    /// enhancement can request millions of entries, but USearch allocates
+    /// native graph metadata during `reserve`; reserving the whole corpus at
+    /// once can trigger the OOM killer before background pressure checks run.
     pub fn reserve_additional(&mut self, additional: usize) -> Result<()> {
-        if additional == 0 {
-            return Ok(());
-        }
-        let needed = self.index.size() + additional;
-        if needed > self.index.capacity() {
-            self.index.reserve(needed)?;
+        if let Some(target) = self.next_capacity(additional) {
+            self.index.reserve(target)?;
         }
         Ok(())
     }
@@ -338,26 +343,63 @@ impl VectorStore {
     }
 
     fn ensure_capacity_for_insert(&mut self) -> Result<()> {
-        let size = self.index.size();
-        let capacity = self.index.capacity();
-
-        if size < capacity {
-            return Ok(());
+        if let Some(target) = self.next_capacity(1) {
+            self.index.reserve(target)?;
         }
-
-        // Cap growth to avoid unbounded memory allocation. Each vector
-        // entry costs ~(dimensions * 2) bytes for F16 quantization, so
-        // 1M entries × 256 dims × 2 bytes = 512 MB. Capping at 256K
-        // increments keeps each reallocation under 128 MB.
-        const MAX_GROWTH: usize = 262_144;
-        let next_capacity = match capacity {
-            0 => 1024,
-            n => n.saturating_add(n.min(MAX_GROWTH)),
-        };
-
-        self.index.reserve(next_capacity)?;
         Ok(())
     }
+
+    fn next_capacity(&self, additional: usize) -> Option<usize> {
+        let size = self.index.size();
+        let capacity = self.index.capacity();
+        let needed = size.saturating_add(additional);
+        if needed <= capacity {
+            return None;
+        }
+
+        let growth_limit = capacity_growth_limit(
+            self.index.dimensions(),
+            self.quantization,
+            self.index.connectivity(),
+        );
+        Some(bounded_capacity_target(needed, capacity, growth_limit))
+    }
+}
+
+fn capacity_growth_limit(
+    dimensions: usize,
+    quantization: ScalarKind,
+    connectivity: usize,
+) -> usize {
+    let scalar_bytes = match quantization {
+        ScalarKind::F16 => 2,
+        ScalarKind::F32 => 4,
+    };
+    let vector_bytes = dimensions.saturating_mul(scalar_bytes);
+    // Include a conservative graph/lookup allowance. USearch's exact native
+    // layout is implementation-specific, but this keeps the bound responsive
+    // to both vector width and HNSW connectivity.
+    let graph_bytes = connectivity
+        .saturating_mul(2)
+        .saturating_mul(std::mem::size_of::<u32>());
+    let lookup_and_node_bytes = std::mem::size_of::<u64>() + 2 * std::mem::size_of::<usize>() + 64;
+    let estimated_entry_bytes = vector_bytes
+        .saturating_add(graph_bytes)
+        .saturating_add(lookup_and_node_bytes)
+        .max(1);
+
+    (MAX_CAPACITY_GROWTH_BYTES / estimated_entry_bytes).clamp(MIN_CAPACITY, MAX_CAPACITY_GROWTH)
+}
+
+fn bounded_capacity_target(needed: usize, capacity: usize, growth_limit: usize) -> usize {
+    let geometric_target = match capacity {
+        0 => MIN_CAPACITY,
+        current => current.saturating_add(current.min(growth_limit)),
+    };
+    let requested_target = needed.min(capacity.saturating_add(growth_limit));
+    geometric_target
+        .max(requested_target)
+        .max(needed.min(MIN_CAPACITY))
 }
 
 fn existing_index_path(path: &Path) -> Option<PathBuf> {
@@ -617,6 +659,45 @@ mod tests {
             store.upsert(i, vec![i as f32, 0.0, 0.0, 0.0]).unwrap();
         }
         assert_eq!(store.size(), 1100);
+    }
+
+    #[test]
+    fn bulk_capacity_target_does_not_reserve_the_remaining_corpus() {
+        let growth_limit = capacity_growth_limit(384, ScalarKind::F16, 16);
+
+        assert!(growth_limit < 1_000_000);
+        assert_eq!(
+            bounded_capacity_target(1_000_000, 0, growth_limit),
+            growth_limit
+        );
+        assert_eq!(
+            bounded_capacity_target(1_000_000, growth_limit, growth_limit),
+            growth_limit * 2
+        );
+    }
+
+    #[test]
+    fn capacity_budget_accounts_for_vector_storage_cost() {
+        let hash_f16 = capacity_growth_limit(256, ScalarKind::F16, 8);
+        let neural_f16 = capacity_growth_limit(384, ScalarKind::F16, 16);
+        let neural_f32 = capacity_growth_limit(384, ScalarKind::F32, 16);
+
+        assert!(hash_f16 > neural_f16);
+        assert!(neural_f16 > neural_f32);
+        assert!(hash_f16 <= MAX_CAPACITY_GROWTH);
+        assert!(neural_f32 >= MIN_CAPACITY);
+    }
+
+    #[test]
+    fn native_reservation_does_not_amplify_the_bounded_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        let requested = 5_000;
+
+        store.reserve_additional(requested).unwrap();
+
+        assert_eq!(store.index.capacity(), requested);
     }
 
     #[test]

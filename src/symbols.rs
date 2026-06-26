@@ -150,7 +150,8 @@ pub fn definition_candidates(
         if remaining == 0 {
             break;
         }
-        let rows = stmt.query_map(params![normalized, remaining as i64], |row| {
+        let candidate_limit = remaining.saturating_mul(8).clamp(remaining, 256);
+        let rows = stmt.query_map(params![normalized, candidate_limit as i64], |row| {
             let raw: Vec<u8> = row.get(5)?;
             let file_path = PathBuf::from(row.get::<_, String>(0)?);
             let start_line = row.get::<_, i64>(1)? as usize;
@@ -171,11 +172,27 @@ pub fn definition_candidates(
                 is_ignored: row.get(7)?,
             })
         })?;
+        let mut name_candidates = Vec::new();
+        let mut name_seen = HashSet::new();
         for row in rows {
             let chunk = row?;
-            if seen_chunks.insert(chunk.vector_key) {
-                chunks.push(chunk);
+            if !seen_chunks.contains(&chunk.vector_key) && name_seen.insert(chunk.vector_key) {
+                let exact_case = chunk_defines_exact_name(&chunk, name);
+                let canonical_file = file_stem_matches_symbol(&chunk, name);
+                name_candidates.push((exact_case, canonical_file, chunk));
             }
+        }
+        name_candidates.sort_by(|left, right| {
+            right
+                .0
+                .cmp(&left.0)
+                .then_with(|| right.1.cmp(&left.1))
+                .then_with(|| left.2.file_path.cmp(&right.2.file_path))
+                .then_with(|| left.2.start_line.cmp(&right.2.start_line))
+        });
+        for (_, _, chunk) in name_candidates.into_iter().take(remaining) {
+            seen_chunks.insert(chunk.vector_key);
+            chunks.push(chunk);
         }
     }
     Ok(chunks)
@@ -424,20 +441,17 @@ fn definition_name(chunk: &IndexedChunk) -> Option<String> {
     ) {
         return None;
     }
-    let signature = chunk
-        .text
-        .lines()
-        .find(|line| {
-            let line = line.trim();
-            !line.is_empty()
-                && !line.starts_with("//")
-                && !line.starts_with('#')
-                && !line.starts_with('@')
-        })?
-        .trim();
+    if chunk.language.eq_ignore_ascii_case("haskell")
+        && matches!(chunk.kind.as_str(), "Class" | "class")
+        && let Some(name) = haskell_class_definition_name(&chunk.text)
+    {
+        return Some(name);
+    }
+
+    let signature = first_definition_signature(&chunk.text)?;
 
     let keywords: &[&str] = match chunk.kind.as_str() {
-        "Function" | "function" => &["fn", "def", "func", "function"],
+        "Function" | "function" => &["fn", "def", "func", "function", "fun"],
         "Class" | "class" | "Struct" | "struct" | "Trait" | "trait" | "Interface" | "interface"
         | "Enum" | "enum" => &[
             "class",
@@ -446,6 +460,7 @@ fn definition_name(chunk: &IndexedChunk) -> Option<String> {
             "enum",
             "interface",
             "type",
+            "typealias",
             "union",
         ],
         "Module" | "module" => &["module"],
@@ -453,6 +468,14 @@ fn definition_name(chunk: &IndexedChunk) -> Option<String> {
     };
     let allow_function_fallback = matches!(chunk.kind.as_str(), "Function" | "function");
     let require_type_alias_assignment = chunk.language.eq_ignore_ascii_case("typescript");
+    if chunk.language.eq_ignore_ascii_case("zig")
+        && matches!(
+            chunk.kind.as_str(),
+            "Class" | "class" | "Struct" | "struct" | "Enum" | "enum"
+        )
+    {
+        return definition_name_from_signature(signature, &["const", "var"], false, false);
+    }
     definition_name_from_signature(
         signature,
         keywords,
@@ -461,46 +484,213 @@ fn definition_name(chunk: &IndexedChunk) -> Option<String> {
     )
 }
 
+fn first_definition_signature(text: &str) -> Option<&str> {
+    let mut in_block_comment = false;
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if in_block_comment {
+            if line.contains("*/") {
+                in_block_comment = false;
+            }
+            continue;
+        }
+        if line.starts_with("/*") {
+            if !line.contains("*/") {
+                in_block_comment = true;
+            }
+            continue;
+        }
+        if line.is_empty()
+            || line.starts_with("//")
+            || line.starts_with('#')
+            || line.starts_with('@')
+            || line.starts_with('*')
+        {
+            continue;
+        }
+        return Some(line);
+    }
+    None
+}
+
 fn definition_names(chunk: &IndexedChunk) -> Vec<String> {
     let mut seen = HashSet::new();
-    let mut names = if matches!(chunk.kind.as_str(), "Module" | "module") {
-        const MODULE_KEYWORDS: &[&str] = &[
-            "fn",
-            "def",
-            "func",
-            "function",
-            "class",
-            "struct",
-            "trait",
-            "enum",
-            "interface",
-            "type",
-            "union",
-            "module",
-        ];
-        chunk
-            .text
-            .lines()
-            .filter_map(|line| {
-                let signature = line.trim();
-                if signature.is_empty()
-                    || signature.starts_with("//")
-                    || signature.starts_with('#')
-                    || signature.starts_with('@')
-                {
-                    return None;
-                }
-                definition_name_from_signature(signature, MODULE_KEYWORDS, false, true)
-            })
-            .collect::<Vec<_>>()
+    let is_module = matches!(chunk.kind.as_str(), "Module" | "module");
+    let mut names = Vec::new();
+    if chunk.language.eq_ignore_ascii_case("elixir") && is_module {
+        // Keep the declared module name ahead of case-colliding nested
+        // functions such as Ecto.Query's `query/6`.
+        names.extend(elixir_module_definition_names(&chunk.text));
+    }
+    if is_module {
+        if chunk.language.eq_ignore_ascii_case("haskell") {
+            names.extend(haskell_module_definition_names(&chunk.text));
+        } else {
+            const MODULE_KEYWORDS: &[&str] = &[
+                "fn",
+                "def",
+                "func",
+                "function",
+                "class",
+                "struct",
+                "trait",
+                "enum",
+                "interface",
+                "type",
+                "union",
+                "module",
+            ];
+            names.extend(
+                chunk
+                    .text
+                    .lines()
+                    .filter_map(|line| {
+                        let signature = line.trim();
+                        if signature.is_empty()
+                            || signature.starts_with("//")
+                            || signature.starts_with('#')
+                            || signature.starts_with('@')
+                        {
+                            return None;
+                        }
+                        definition_name_from_signature(signature, MODULE_KEYWORDS, false, true)
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
     } else {
-        definition_name(chunk).into_iter().collect()
-    };
+        names.extend(definition_name(chunk));
+    }
     names.extend(public_reexport_names(chunk));
     names
         .into_iter()
         .filter(|name| seen.insert(normalize_symbol(name)))
         .collect()
+}
+
+pub(crate) fn chunk_defines_exact_name(chunk: &IndexedChunk, name: &str) -> bool {
+    exact_name_namespace_depth(chunk, name).is_some()
+}
+
+pub(crate) fn exact_name_namespace_depth(chunk: &IndexedChunk, name: &str) -> Option<usize> {
+    if chunk.language.eq_ignore_ascii_case("elixir")
+        && matches!(chunk.kind.as_str(), "Module" | "module")
+    {
+        let module_names = elixir_module_definition_names(&chunk.text);
+        if let Some(depth) = module_names
+            .iter()
+            .filter(|definition| definition.contains('.'))
+            .filter(|definition| {
+                definition.as_str() == name
+                    || definition
+                        .rsplit('.')
+                        .next()
+                        .is_some_and(|leaf| leaf == name)
+            })
+            .map(|definition| definition.split('.').count())
+            .min()
+        {
+            return Some(depth);
+        }
+        if module_names.iter().any(|definition| definition == name) {
+            return Some(1);
+        }
+    }
+    definition_names(chunk)
+        .iter()
+        .any(|definition| definition == name)
+        .then_some(1)
+}
+
+fn elixir_module_definition_names(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in text.lines().map(str::trim) {
+        let mut tokens = line.split_whitespace();
+        let Some(keyword) = tokens.next() else {
+            continue;
+        };
+        if !matches!(keyword, "defmodule" | "defprotocol" | "defimpl") {
+            continue;
+        }
+        let Some(raw_name) = tokens.next() else {
+            continue;
+        };
+        let full_name = raw_name.trim_end_matches(',');
+        if full_name.is_empty()
+            || !full_name.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '.' | '_')
+            })
+        {
+            continue;
+        }
+        names.push(full_name.to_string());
+        if let Some(leaf) = full_name.rsplit('.').next()
+            && leaf != full_name
+        {
+            names.push(leaf.to_string());
+        }
+    }
+    names
+}
+
+fn haskell_module_definition_names(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with("--") || line.starts_with("{-") {
+            continue;
+        }
+        let candidate = line.trim_start_matches([',', '(']).trim_start();
+        let Some(rest) = candidate.strip_prefix("module ") else {
+            continue;
+        };
+        let full_name = rest
+            .chars()
+            .take_while(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '.' | '_')
+            })
+            .collect::<String>();
+        if full_name.is_empty() {
+            continue;
+        }
+        names.push(full_name.clone());
+        if let Some(leaf) = full_name.rsplit('.').next()
+            && leaf != full_name
+        {
+            names.push(leaf.to_string());
+        }
+    }
+    names
+}
+
+fn haskell_class_definition_name(text: &str) -> Option<String> {
+    let mut declaration = String::new();
+    let mut collecting = false;
+    for line in text.lines().map(str::trim) {
+        if !collecting {
+            let Some(rest) = line.strip_prefix("class ") else {
+                continue;
+            };
+            declaration.push_str(rest);
+            collecting = true;
+        } else {
+            declaration.push(' ');
+            declaration.push_str(line);
+        }
+        if line == "where" || line.ends_with(" where") {
+            break;
+        }
+    }
+    if declaration.is_empty() {
+        return None;
+    }
+    let head = declaration
+        .rsplit_once("=>")
+        .map(|(_, head)| head)
+        .unwrap_or(&declaration)
+        .trim();
+    let candidate = head.split_whitespace().next()?;
+    let name = identifier_prefix(candidate);
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 fn public_reexport_names(chunk: &IndexedChunk) -> Vec<String> {
@@ -587,7 +777,13 @@ fn definition_name_from_signature(
             .iter()
             .position(|token| token.trim_end_matches('*') == *keyword)
         {
-            let candidate = if *keyword == "func"
+            let candidate = if *keyword == "fun" {
+                signature
+                    .split('(')
+                    .next()
+                    .and_then(|prefix| prefix.split_whitespace().last())
+                    .and_then(|name| name.rsplit('.').next())
+            } else if *keyword == "func"
                 && tokens
                     .get(keyword_index + 1)
                     .is_some_and(|token| token.starts_with('('))
@@ -596,8 +792,9 @@ fn definition_name_from_signature(
                     .iter()
                     .position(|token| token.contains(')'))
                     .and_then(|offset| tokens.get(keyword_index + offset + 2))
+                    .copied()
             } else {
-                tokens.get(keyword_index + 1)
+                tokens.get(keyword_index + 1).copied()
             };
             let name = candidate
                 .map(|candidate| identifier_prefix(candidate.trim_start_matches('*')))
@@ -621,7 +818,8 @@ fn identifier_prefix(value: &str) -> &str {
     let end = value
         .char_indices()
         .find_map(|(index, character)| {
-            (!character.is_ascii_alphanumeric() && character != '_').then_some(index)
+            (!character.is_ascii_alphanumeric() && character != '_' && character != '$')
+                .then_some(index)
         })
         .unwrap_or(value.len());
     &value[..end]
@@ -632,6 +830,18 @@ fn normalize_symbol(value: &str) -> String {
         .trim()
         .trim_matches(|character: char| !character.is_ascii_alphanumeric() && character != '_')
         .to_ascii_lowercase()
+}
+
+fn file_stem_matches_symbol(chunk: &IndexedChunk, name: &str) -> bool {
+    let symbol = name
+        .rsplit([':', '\\', '.', '/', '#'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(name);
+    chunk
+        .file_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.eq_ignore_ascii_case(symbol))
 }
 
 #[cfg(test)]
@@ -726,6 +936,78 @@ mod tests {
             Some("AnyRouter")
         );
         assert_eq!(
+            definition_name(&chunk(
+                "kotlin",
+                "Class",
+                "public typealias Channel<T> = Flow<T>"
+            ))
+            .as_deref(),
+            Some("Channel")
+        );
+        assert_eq!(
+            definition_name(&chunk(
+                "kotlin",
+                "Function",
+                "private fun <T> Flow<T>.debounceInternal(timeout: Long): Flow<T> = this"
+            ))
+            .as_deref(),
+            Some("debounceInternal")
+        );
+        assert_eq!(
+            definition_name(&chunk(
+                "kotlin",
+                "Class",
+                "* A cold asynchronous stream.\n */\npublic interface Flow<out T> {"
+            ))
+            .as_deref(),
+            Some("Flow")
+        );
+        assert_eq!(
+            definition_name(&chunk("zig", "Class", "pub const Client = struct {")).as_deref(),
+            Some("Client")
+        );
+        assert_eq!(
+            definition_name(&chunk(
+                "typescript",
+                "Class",
+                "export interface $ZodType<Input = unknown> {"
+            ))
+            .as_deref(),
+            Some("$ZodType")
+        );
+        assert_eq!(
+            definition_name(&chunk(
+                "haskell",
+                "Class",
+                "class (Functor m, Applicative m, Monad m)\n  => PandocMonad m where"
+            ))
+            .as_deref(),
+            Some("PandocMonad")
+        );
+        assert_eq!(
+            definition_names(&chunk(
+                "elixir",
+                "Module",
+                "defmodule Phoenix.Channel do\n  def join(topic), do: topic\nend"
+            )),
+            ["Phoenix.Channel", "Channel", "join"]
+        );
+        let elixir_case_collision = chunk(
+            "elixir",
+            "Module",
+            "defmodule Ecto.Query do\n  def query(meta), do: meta\nend",
+        );
+        assert_eq!(
+            definition_names(&elixir_case_collision),
+            ["Ecto.Query", "Query"]
+        );
+        assert!(chunk_defines_exact_name(&elixir_case_collision, "Query"));
+        assert!(!chunk_defines_exact_name(&elixir_case_collision, "query"));
+        assert_eq!(
+            exact_name_namespace_depth(&elixir_case_collision, "Query"),
+            Some(2)
+        );
+        assert_eq!(
             definition_names(&chunk(
                 "rust",
                 "Module",
@@ -747,6 +1029,34 @@ mod tests {
             )),
             ["AnyRouter", "AnyTRPCRouter"]
         );
+    }
+
+    #[test]
+    fn haskell_modules_index_declared_and_reexported_names() {
+        let module = chunk(
+            "haskell",
+            "Module",
+            "module Text.Pandoc.Class\n  ( module Text.Pandoc.Class.PandocMonad\n  , Translations\n  ) where",
+        );
+        let names = definition_names(&module);
+        for expected in [
+            "Text.Pandoc.Class",
+            "Class",
+            "Text.Pandoc.Class.PandocMonad",
+            "PandocMonad",
+        ] {
+            assert!(
+                names.iter().any(|name| name == expected),
+                "missing {expected}: {names:?}"
+            );
+        }
+        assert!(!names.iter().any(|name| name == "Text"));
+    }
+
+    #[test]
+    fn sigiled_javascript_identifiers_share_the_unsigiled_lookup_key() {
+        assert_eq!(identifier_prefix("$ZodType<Input>"), "$ZodType");
+        assert_eq!(normalize_symbol("$ZodType"), normalize_symbol("ZodType"));
     }
 
     #[test]
@@ -781,6 +1091,117 @@ mod tests {
             stored,
             [("routekind".to_string(), 7), ("router".to_string(), 7)]
         );
+    }
+
+    #[test]
+    fn definition_candidates_prefer_exact_case_before_case_folded_names() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chunks (
+                chunk_key INTEGER PRIMARY KEY,
+                file_path TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                language TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                text BLOB NOT NULL,
+                vector_key INTEGER NOT NULL,
+                is_ignored INTEGER NOT NULL
+             );
+             CREATE TABLE symbols (
+                normalized_name TEXT NOT NULL,
+                chunk_key INTEGER NOT NULL,
+                PRIMARY KEY (normalized_name, chunk_key)
+             ) WITHOUT ROWID;",
+        )
+        .unwrap();
+
+        let lower = chunk(
+            "kotlin",
+            "Function",
+            "public fun <T> flow(block: suspend () -> T): Flow<T> = TODO()",
+        );
+        let upper = chunk(
+            "kotlin",
+            "Class",
+            "public interface Flow<out T> {\n    suspend fun collect(value: T)\n}",
+        );
+        for (chunk_key, vector_key, path, candidate) in [
+            (1_i64, 1_i64, "src/Builders.kt", &lower),
+            (2_i64, 2_i64, "src/Flow.kt", &upper),
+        ] {
+            conn.execute(
+                "INSERT INTO chunks (
+                    chunk_key, file_path, start_line, end_line, language, kind,
+                    text, vector_key, is_ignored
+                 ) VALUES (?1, ?2, 1, 3, ?3, ?4, ?5, ?6, 0)",
+                params![
+                    chunk_key,
+                    path,
+                    candidate.language,
+                    candidate.kind,
+                    candidate.text.as_bytes(),
+                    vector_key
+                ],
+            )
+            .unwrap();
+            index_chunk_definition(&conn, candidate, chunk_key).unwrap();
+        }
+
+        let candidates = definition_candidates(&conn, &["Flow".to_string()], 1).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].file_path, PathBuf::from("src/Flow.kt"));
+    }
+
+    #[test]
+    fn definition_candidates_prefer_canonical_file_over_partial_definitions() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chunks (
+                chunk_key INTEGER PRIMARY KEY,
+                file_path TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                language TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                text BLOB NOT NULL,
+                vector_key INTEGER NOT NULL,
+                is_ignored INTEGER NOT NULL
+             );
+             CREATE TABLE symbols (
+                normalized_name TEXT NOT NULL,
+                chunk_key INTEGER NOT NULL,
+                PRIMARY KEY (normalized_name, chunk_key)
+             ) WITHOUT ROWID;",
+        )
+        .unwrap();
+
+        let definition = chunk("csharp", "Class", "public static partial class SqlMapper {");
+        for (chunk_key, path) in [
+            (1_i64, "SqlMapper.Async.cs"),
+            (2_i64, "SqlMapper.CacheInfo.cs"),
+            (3_i64, "SqlMapper.cs"),
+        ] {
+            conn.execute(
+                "INSERT INTO chunks (
+                    chunk_key, file_path, start_line, end_line, language, kind,
+                    text, vector_key, is_ignored
+                 ) VALUES (?1, ?2, 1, 3, ?3, ?4, ?5, ?1, 0)",
+                params![
+                    chunk_key,
+                    path,
+                    definition.language,
+                    definition.kind,
+                    definition.text.as_bytes(),
+                ],
+            )
+            .unwrap();
+            index_chunk_definition(&conn, &definition, chunk_key).unwrap();
+        }
+
+        let candidates = definition_candidates(&conn, &["SqlMapper".to_string()], 1).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].file_path, PathBuf::from("SqlMapper.cs"));
     }
 
     #[test]

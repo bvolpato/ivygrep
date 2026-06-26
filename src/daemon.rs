@@ -28,7 +28,7 @@ use crate::protocol::{
 use crate::regex_search::regex_search;
 use crate::search::{
     SearchContext, SearchOptions, hybrid_search_with_context, literal_search_with_context,
-    validate_forced_neural_workspaces,
+    workspace_neural_model_identity,
 };
 use crate::workspace::{Workspace, WorkspaceScope, list_workspaces};
 
@@ -47,6 +47,11 @@ const MAX_SEARCH_CONTEXTS: usize = 32;
 const MAX_IDLE_SEARCH_CONTEXTS_PER_KEY: usize = 4;
 /// Preserve the original worst-case retained context bound across all pools.
 const MAX_IDLE_SEARCH_CONTEXTS: usize = 32;
+/// Workspace resolution canonicalizes paths and inspects Git metadata. Cache
+/// exact absolute roots so repeated daemon searches avoid reconstructing the
+/// same immutable path-derived workspace descriptor.
+const MAX_RESOLVED_WORKSPACES: usize = 128;
+const MAX_NEURAL_STATUSES: usize = 128;
 /// Don't cache result sets larger than this (each hit carries preview/reason
 /// strings; large `--no-limit` results would bloat the query cache).
 const MAX_CACHEABLE_HITS: usize = 2_000;
@@ -151,6 +156,20 @@ struct DirStamp {
 struct CachedSearchContext {
     signature: SearchContextSignature,
     pool: Arc<SearchContextPool>,
+}
+
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+struct NeuralStatusSignature {
+    model: Option<FileStamp>,
+    vectors: Option<FileStamp>,
+    base_model: Option<FileStamp>,
+    base_vectors: Option<FileStamp>,
+}
+
+#[derive(Clone)]
+struct CachedNeuralStatus {
+    signature: NeuralStatusSignature,
+    identity: Option<crate::embedding::NeuralModelIdentity>,
 }
 
 struct SearchContextPool {
@@ -357,6 +376,8 @@ struct DaemonState {
     lazy_model: Arc<std::sync::OnceLock<Arc<dyn EmbeddingModel>>>,
     model_loading: Arc<AtomicBool>,
     watchers: Arc<Mutex<HashMap<String, WatchRegistration>>>,
+    resolved_workspaces: Arc<Mutex<HashMap<PathBuf, Workspace>>>,
+    neural_statuses: Arc<Mutex<HashMap<String, CachedNeuralStatus>>>,
     search_contexts: Arc<Mutex<HashMap<SearchContextCacheKey, CachedSearchContext>>>,
     idle_search_context_count: Arc<AtomicUsize>,
     query_results: Arc<Mutex<QueryResultCache>>,
@@ -369,6 +390,89 @@ struct DaemonState {
 }
 
 impl DaemonState {
+    fn resolve_workspace(&self, path: &Path) -> Result<Workspace> {
+        if path.is_absolute()
+            && let Some(workspace) = self.resolved_workspaces.lock().get(path).cloned()
+        {
+            return Ok(workspace);
+        }
+
+        let workspace = Workspace::resolve(path)?;
+        if path == workspace.root {
+            let mut cache = self.resolved_workspaces.lock();
+            if cache.len() >= MAX_RESOLVED_WORKSPACES && !cache.contains_key(path) {
+                cache.clear();
+            }
+            cache.insert(path.to_path_buf(), workspace.clone());
+        }
+        Ok(workspace)
+    }
+
+    fn cached_neural_identity(
+        &self,
+        workspace: &Workspace,
+    ) -> Option<crate::embedding::NeuralModelIdentity> {
+        let signature = neural_status_signature(workspace);
+        if let Some(status) = self.neural_statuses.lock().get(&workspace.id)
+            && status.signature == signature
+        {
+            return status.identity.clone();
+        }
+
+        let identity = workspace_neural_model_identity(workspace);
+        let mut cache = self.neural_statuses.lock();
+        if cache.len() >= MAX_NEURAL_STATUSES && !cache.contains_key(&workspace.id) {
+            cache.clear();
+        }
+        cache.insert(
+            workspace.id.clone(),
+            CachedNeuralStatus {
+                signature,
+                identity: identity.clone(),
+            },
+        );
+        identity
+    }
+
+    fn validate_forced_neural_workspaces(
+        &self,
+        workspaces: &[Workspace],
+        identities: &[Option<crate::embedding::NeuralModelIdentity>],
+        force_neural: bool,
+    ) -> Result<()> {
+        if !force_neural {
+            return Ok(());
+        }
+
+        let missing = workspaces
+            .iter()
+            .zip(identities)
+            .filter(|(_, identity)| identity.is_none())
+            .map(|(workspace, _)| workspace.root.display().to_string())
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            anyhow::bail!(
+                "neural search was required, but these workspaces have no neural vectors: {}",
+                missing.join(", ")
+            );
+        }
+
+        let expected = crate::embedding::configured_neural_model_identity();
+        let incompatible = workspaces
+            .iter()
+            .zip(identities)
+            .filter(|(_, identity)| identity.as_ref() != Some(&expected))
+            .map(|(workspace, _)| workspace.root.display().to_string())
+            .collect::<Vec<_>>();
+        if !incompatible.is_empty() {
+            anyhow::bail!(
+                "neural search was required, but these workspaces use an incompatible neural model: {}",
+                incompatible.join(", ")
+            );
+        }
+        Ok(())
+    }
+
     /// Try to get the neural model without blocking. If it is not loaded yet,
     /// return a fast hash-based model so searches don't stall during startup.
     fn get_model_or_fallback(&self) -> Arc<dyn EmbeddingModel> {
@@ -479,6 +583,7 @@ impl DaemonState {
         self.search_contexts
             .lock()
             .retain(|key, _| key.workspace_id != workspace.id);
+        self.neural_statuses.lock().remove(&workspace.id);
         self.query_results.lock().clear();
     }
 
@@ -532,6 +637,8 @@ pub async fn run_daemon() -> Result<()> {
         lazy_model: lazy_model.clone(),
         model_loading: Arc::new(AtomicBool::new(false)),
         watchers: Arc::new(Mutex::new(HashMap::new())),
+        resolved_workspaces: Arc::new(Mutex::new(HashMap::new())),
+        neural_statuses: Arc::new(Mutex::new(HashMap::new())),
         search_contexts: Arc::new(Mutex::new(HashMap::new())),
         idle_search_context_count: Arc::new(AtomicUsize::new(0)),
         query_results: Arc::new(Mutex::new(QueryResultCache::default())),
@@ -829,10 +936,11 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             skip_gitignore,
             force_neural,
         } => {
+            let request_started = std::time::Instant::now();
             let state_clone = state.clone();
 
             let workspaces = if let Some(ref p) = path {
-                match Workspace::resolve(p) {
+                match state_clone.resolve_workspace(p) {
                     Ok(workspace) => vec![workspace],
                     Err(err) => {
                         return DaemonResponse::Error {
@@ -845,7 +953,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     Ok(ws) => ws
                         .into_iter()
                         .filter(|w| w.last_indexed_at_unix.is_some())
-                        .filter_map(|w| Workspace::resolve(&w.root).ok())
+                        .filter_map(|w| state_clone.resolve_workspace(&w.root).ok())
                         .collect(),
                     Err(err) => {
                         return DaemonResponse::Error {
@@ -868,26 +976,47 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 cancel_token: None,
             };
             let all_indices = path.is_none();
+            tracing::trace!(
+                "daemon_search_resolve={:?} workspaces={}",
+                request_started.elapsed(),
+                workspaces.len()
+            );
 
-            if let Err(err) = validate_forced_neural_workspaces(&workspaces, force_neural) {
+            let neural_identities = workspaces
+                .iter()
+                .map(|workspace| state_clone.cached_neural_identity(workspace))
+                .collect::<Vec<_>>();
+            if let Err(err) = state_clone.validate_forced_neural_workspaces(
+                &workspaces,
+                &neural_identities,
+                force_neural,
+            ) {
                 return DaemonResponse::Error {
                     message: err.to_string(),
                 };
             }
-            let has_neural_vectors = workspaces.iter().any(Workspace::has_neural_vectors);
+            let has_neural_vectors = neural_identities.iter().any(Option::is_some);
             if has_neural_vectors {
                 state_clone.maybe_start_model_load();
             }
+            tracing::trace!(
+                "daemon_search_validate={:?} neural={}",
+                request_started.elapsed(),
+                has_neural_vectors
+            );
 
             // Bound concurrent heavy search work (see #58). The permit is held
             // for the whole blocking task and released when it completes.
             let permit = state_clone.cpu_permits.clone().acquire_owned().await.ok();
+            tracing::trace!("daemon_search_permit={:?}", request_started.elapsed());
             let result = tokio::task::spawn_blocking(move || {
+                let task_started = std::time::Instant::now();
                 let _permit = permit;
                 let model = match state_clone.get_model_for_search(force_neural) {
                     Ok(model) => model,
                     Err(err) => return (Vec::new(), vec![err.to_string()]),
                 };
+                tracing::trace!("daemon_search_model={:?}", task_started.elapsed());
                 let reconciliation_model = cached_hash_model();
                 let mut all_hits = Vec::new();
                 let mut all_errors: Vec<String> = Vec::new();
@@ -910,6 +1039,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     }
                 }
                 let workspaces = reconciled_workspaces;
+                tracing::trace!("daemon_search_reconcile={:?}", task_started.elapsed());
                 let background_enhancement_enabled =
                     crate::config::background_enhancement_enabled();
                 let ws_neural_missing = if background_enhancement_enabled {
@@ -931,6 +1061,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                         )
                     })
                     .collect::<Vec<_>>();
+                tracing::trace!("daemon_search_signature={:?}", task_started.elapsed());
 
                 let cache_key = query_cache_key(
                     &workspaces,
@@ -969,6 +1100,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                             continue;
                         }
                     };
+                    tracing::trace!("daemon_search_context={:?}", task_started.elapsed());
                     match hybrid_search_with_context(
                         &context,
                         workspace,
@@ -992,6 +1124,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                             all_errors.push(format!("{}: {err:#}", workspace.root.display()));
                         }
                     }
+                    tracing::trace!("daemon_search_hybrid={:?}", task_started.elapsed());
                 }
                 all_hits.sort_by(|a, b| {
                     b.score
@@ -1012,6 +1145,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                         }
                     }
                 }
+                tracing::trace!("daemon_search_task_total={:?}", task_started.elapsed());
                 (all_hits, all_errors)
             })
             .await
@@ -1022,6 +1156,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     vec![format!("search task panicked: {join_err:#}")],
                 )
             });
+            tracing::trace!("daemon_search_total={:?}", request_started.elapsed());
 
             // If ALL workspaces failed (no hits and at least one error),
             // propagate as Error so the CLI can fall back to local search.
@@ -1603,6 +1738,16 @@ fn search_context_signature(
     }
 }
 
+fn neural_status_signature(workspace: &Workspace) -> NeuralStatusSignature {
+    let base_dir = workspace.base_index_dir.as_ref();
+    NeuralStatusSignature {
+        model: file_stamp(&workspace.neural_model_path()),
+        vectors: file_stamp(&workspace.vector_neural_path()),
+        base_model: base_dir.and_then(|dir| file_stamp(&dir.join("neural_model.json"))),
+        base_vectors: base_dir.and_then(|dir| file_stamp(&dir.join("vectors_neural.usearch"))),
+    }
+}
+
 fn query_cache_key(
     workspaces: &[Workspace],
     signatures: Vec<SearchContextSignature>,
@@ -1993,7 +2138,7 @@ mod tests {
 
     use crate::embedding::create_hash_model;
     use crate::indexer::index_workspace;
-    use crate::search::{SearchOptions, hybrid_search};
+    use crate::search::{SearchOptions, hybrid_search, validate_forced_neural_workspaces};
     use crate::workspace::WorkspaceMetadata;
 
     fn test_state() -> DaemonState {
@@ -2001,6 +2146,8 @@ mod tests {
             lazy_model: Arc::new(std::sync::OnceLock::new()),
             model_loading: Arc::new(AtomicBool::new(false)),
             watchers: Arc::new(Mutex::new(HashMap::new())),
+            resolved_workspaces: Arc::new(Mutex::new(HashMap::new())),
+            neural_statuses: Arc::new(Mutex::new(HashMap::new())),
             search_contexts: Arc::new(Mutex::new(HashMap::new())),
             idle_search_context_count: Arc::new(AtomicUsize::new(0)),
             query_results: Arc::new(Mutex::new(QueryResultCache::default())),
@@ -2027,6 +2174,62 @@ mod tests {
                 std::sync::OnceLock::new();
             Some(IDENTITY.get_or_init(crate::embedding::configured_neural_model_identity))
         }
+    }
+
+    #[test]
+    #[serial]
+    fn daemon_caches_only_exact_absolute_workspace_roots() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        let git_dir = repo.path().join(".git");
+        std::fs::create_dir_all(git_dir.join("objects")).unwrap();
+        std::fs::create_dir(git_dir.join("refs")).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        let repo_root = repo.path().canonicalize().unwrap();
+        let nested = repo_root.join("src");
+        std::fs::create_dir(&nested).unwrap();
+
+        let state = test_state();
+        let workspace = state.resolve_workspace(&repo_root).unwrap();
+        assert_eq!(workspace.root, repo_root);
+        assert_eq!(state.resolved_workspaces.lock().len(), 1);
+
+        state.resolved_workspaces.lock().clear();
+        let nested_workspace = state.resolve_workspace(&nested).unwrap();
+        assert_eq!(nested_workspace.root, repo_root);
+        assert!(
+            state.resolved_workspaces.lock().is_empty(),
+            "subpaths must still perform full workspace resolution"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn daemon_neural_status_cache_tracks_vector_store_changes() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        std::fs::write(
+            repo.path().join("search.rs"),
+            "pub fn cached_neural_search() {}\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let hash_model = create_hash_model();
+        index_workspace(&workspace, hash_model.as_ref()).unwrap();
+        crate::indexer::enhance_workspace_neural(&workspace, &TestNeuralModel).unwrap();
+
+        let state = test_state();
+        assert!(state.cached_neural_identity(&workspace).is_some());
+        assert_eq!(state.neural_statuses.lock().len(), 1);
+
+        std::fs::remove_file(workspace.vector_neural_path()).unwrap();
+        assert!(
+            state.cached_neural_identity(&workspace).is_none(),
+            "vector-store deletion must invalidate cached neural readiness"
+        );
     }
 
     #[test]
