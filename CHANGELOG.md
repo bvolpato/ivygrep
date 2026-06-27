@@ -4,6 +4,18 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.12.10] - 2026-06-27
+
+### Changed
+- **Natural-language member queries now resolve structural definitions more precisely.** Object-qualified references such as `app.handle` and `res.sendFile`, plus bounded `... internals` phrases, use the existing parser-derived symbol index while preserving the winning file and score and centering the exact member definition.
+
+### Performance
+- **The paired 63-repository, 1,251-query retrieval suite improves overall nDCG@10 from `0.8238` to `0.8254` and architecture nDCG@10 from `0.7681` to `0.7736`.** All 11 queries eligible for the new structural rules show three improvements and no regressions, while warm p50 remains effectively flat at `4.24 ms`.
+- **The generated-corpus CI gate reports no recall loss or significant performance regression.** Warm distinct-query p95 measures `0.792x` the baseline, with index throughput at `1.021x` and unchanged expected recall@20.
+
+### Testing
+- Added end-to-end and unit coverage for object-qualified prose, exact-case member selection, bounded compound-symbol inference, and namespace, package, path, and type-shaped false-positive rejection.
+
 ## [0.12.9] - 2026-06-26
 
 ### Added
