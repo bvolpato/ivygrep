@@ -2251,7 +2251,78 @@ fn natural_language_symbol_queries(query_text: &str) -> Vec<String> {
         }
     }
 
+    // "X Y internals" often names a source symbol in separated prose, such
+    // as "reflection equals internals" referring to `reflectionEquals`.
+    if meaningful.iter().any(|(_, token)| token == "internals") {
+        let subject = meaningful
+            .iter()
+            .take_while(|(_, token)| token != "internals")
+            .take(4)
+            .collect::<Vec<_>>();
+        for pair in subject.windows(2) {
+            let (_, left) = pair[0];
+            let (_, right) = pair[1];
+            if left.len() < 3 || right.len() < 3 {
+                continue;
+            }
+            let mut compound = left.clone();
+            let mut right_chars = right.chars();
+            if let Some(first) = right_chars.next() {
+                compound.push(first.to_ascii_uppercase());
+                compound.extend(right_chars);
+                push(compound);
+            }
+        }
+    }
+
     queries
+}
+
+fn qualified_symbol_leaf_names(query_text: &str) -> Vec<String> {
+    const MAX_QUALIFIED_NAMES: usize = 4;
+
+    let mut names = Vec::new();
+    let mut seen = HashSet::new();
+    for candidate in query_text
+        .split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '$' && ch != '.')
+        .map(|candidate| candidate.trim_matches('.'))
+        .filter(|candidate| candidate.contains('.'))
+    {
+        let mut parts = candidate.split('.');
+        let (Some(owner), Some(leaf), None) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let valid_owner = owner
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_lowercase())
+            && owner
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$');
+        let valid_leaf = leaf
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_' || ch == '$')
+            && leaf
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '$');
+        let object_shaped = (2..=3).contains(&owner.len())
+            || leaf.chars().skip(1).any(|ch| ch.is_ascii_uppercase());
+        let normalized = leaf.to_ascii_lowercase();
+        if valid_owner
+            && valid_leaf
+            && object_shaped
+            && leaf.len() >= 2
+            && crate::chunking::resolve_type_alias(&normalized).is_none()
+            && seen.insert(normalized)
+        {
+            names.push(leaf.to_string());
+            if names.len() == MAX_QUALIFIED_NAMES {
+                break;
+            }
+        }
+    }
+    names
 }
 
 fn exact_symbol_query_names(query_text: &str) -> Vec<String> {
@@ -2261,6 +2332,7 @@ fn exact_symbol_query_names(query_text: &str) -> Vec<String> {
     }
 
     let mut names = vec![query.to_string()];
+    names.extend(qualified_symbol_leaf_names(query));
     if !query.chars().any(char::is_whitespace)
         && let Some(leaf) = query
             .rsplit([':', '\\', '.', '/', '#'])
@@ -3303,6 +3375,38 @@ fn promote_representative_span(
     std::mem::swap(&mut first[0].0, &mut rest[0].0);
 }
 
+fn promote_qualified_symbol_span(
+    ranked: &mut [(IndexedChunk, f32, Vec<String>)],
+    query_text: &str,
+) {
+    if ranked.is_empty() {
+        return;
+    }
+
+    let names = qualified_symbol_leaf_names(query_text);
+    if names.is_empty() {
+        return;
+    }
+
+    let first_path = path_key(&ranked[0].0.file_path);
+    for name in names {
+        if crate::symbols::chunk_defines_exact_name(&ranked[0].0, &name) {
+            return;
+        }
+        let Some(best_index) = ranked.iter().position(|(chunk, _, sources)| {
+            path_key(&chunk.file_path) == first_path
+                && sources.iter().any(|source| source == "exact-symbol")
+                && crate::symbols::chunk_defines_exact_name(chunk, &name)
+        }) else {
+            continue;
+        };
+
+        let (first, rest) = ranked.split_at_mut(best_index);
+        std::mem::swap(&mut first[0].0, &mut rest[0].0);
+        return;
+    }
+}
+
 #[cfg(test)]
 fn fuse_rrf(
     candidates: FusionCandidates,
@@ -3763,6 +3867,10 @@ fn fuse_rrf_with_context(
                 .then_with(|| left.0.vector_key.cmp(&right.0.vector_key))
         });
     }
+    // A qualified member in prose is an explicit request for that definition.
+    // Keep the winning file and score, but center its preview on the exact
+    // member instead of a nearby helper with stronger prose overlap.
+    promote_qualified_symbol_span(&mut ranked, query.text);
     // "How" queries are architecture-oriented; term-dense prose can be less
     // useful than the implementation span already selected by the ranker.
     if matches!(
@@ -5891,6 +5999,49 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn hybrid_search_centers_qualified_prose_queries_on_the_member_definition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(
+            tmp.path().join("response.js"),
+            r#"
+res.sendFile = function sendFile(path, options, callback) {
+  return sendfile(this, path, options, callback);
+};
+
+function sendfile(res, path, options, callback) {
+  return streamFile(res, path, options, callback);
+}
+"#,
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        let hits = hybrid_search(
+            &workspace,
+            "static file serving with res.sendFile",
+            Some(&model),
+            &SearchOptions {
+                limit: Some(10),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(hits[0].file_path, PathBuf::from("response.js"));
+        assert!(
+            hits[0].preview.contains("res.sendFile = function sendFile"),
+            "qualified prose query should focus the public member, got: {}",
+            hits[0].preview
+        );
+    }
+
+    #[test]
     fn query_tokenization_filters_stopwords_before_singularizing() {
         let tokens = tokenize_query("where does packet processing enter the stack");
         assert!(!tokens.iter().any(|token| token == "doe"));
@@ -6105,6 +6256,10 @@ mod tests {
         let router = natural_language_symbol_queries("routing HTTP requests to controllers");
         assert!(router.contains(&"Router".to_string()));
 
+        let internals = natural_language_symbol_queries("reflection equals builder internals");
+        assert!(internals.contains(&"reflectionEquals".to_string()));
+        assert!(internals.contains(&"equalsBuilder".to_string()));
+
         assert!(
             natural_language_symbol_queries(
                 "how serde_derive generates Serialize impl with serialize_field"
@@ -6154,6 +6309,25 @@ mod tests {
             ["Rack::Response", "Response"]
         );
         assert_eq!(exact_symbol_query_names("Visitor"), ["Visitor"]);
+        assert_eq!(
+            qualified_symbol_leaf_names(
+                "how app.handle dispatches requests and res.sendFile() serves content"
+            ),
+            ["handle", "sendFile"]
+        );
+        assert!(
+            exact_symbol_query_names("how app.handle dispatches requests")
+                .contains(&"handle".to_string())
+        );
+        assert_eq!(
+            qualified_symbol_leaf_names("client.sendRequest dispatch"),
+            ["sendRequest"]
+        );
+        assert!(qualified_symbol_leaf_names("z.record and z.map schemas").is_empty());
+        assert!(qualified_symbol_leaf_names("how mini.files opens buffers").is_empty());
+        assert!(qualified_symbol_leaf_names("Plug.Session cookie store").is_empty());
+        assert!(qualified_symbol_leaf_names("absl::Mutex locking").is_empty());
+        assert!(qualified_symbol_leaf_names("read config.toml").is_empty());
     }
 
     #[test]
@@ -6893,6 +7067,47 @@ export function registerCommands(p: Plugin) {
         assert_eq!(ranked[1].2, vec!["path".to_string()]);
         assert_eq!(ranked[2].0.chunk_id, "other");
         assert_eq!(ranked[2].1, 3.0);
+    }
+
+    #[test]
+    fn qualified_symbol_span_promotion_prefers_the_exact_cased_member() {
+        let mut helper = make_chunk_with_path(
+            "helper",
+            "lib/response.js",
+            "function sendfile(res, file, options, callback) {}",
+        );
+        helper.language = "javascript".to_string();
+        helper.kind = "Function".to_string();
+        let mut member = make_chunk_with_path(
+            "member",
+            "lib/response.js",
+            "res.sendFile = function sendFile(path, options, callback) {}",
+        );
+        member.language = "javascript".to_string();
+        member.kind = "Module".to_string();
+        let other = make_chunk_with_path("other", "lib/static.js", "function serveStatic(path) {}");
+        let mut ranked = vec![
+            (
+                helper,
+                5.0,
+                vec!["exact-symbol".to_string(), "lexical".to_string()],
+            ),
+            (member, 4.0, vec!["exact-symbol".to_string()]),
+            (other, 3.0, vec!["lexical".to_string()]),
+        ];
+
+        promote_qualified_symbol_span(&mut ranked, "static file serving with res.sendFile()");
+
+        assert_eq!(ranked[0].0.chunk_id, "member");
+        assert_eq!(ranked[0].1, 5.0);
+        assert_eq!(
+            ranked[0].2,
+            vec!["exact-symbol".to_string(), "lexical".to_string()]
+        );
+        assert_eq!(ranked[1].0.chunk_id, "helper");
+        assert_eq!(ranked[1].1, 4.0);
+        assert_eq!(ranked[1].2, vec!["exact-symbol".to_string()]);
+        assert_eq!(ranked[2].0.chunk_id, "other");
     }
 
     #[test]
