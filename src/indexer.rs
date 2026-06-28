@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use rayon::prelude::*;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 
 use tantivy::directory::error::{DeleteError, LockError, OpenReadError, OpenWriteError};
@@ -2937,22 +2937,15 @@ pub fn fetch_chunk_texts_by_vector_keys_batch(
     }
 
     // SQLite supports up to 999 bind parameters; batch in groups of 500.
+    let mut query = String::new();
     for batch in keys.chunks(500) {
-        let placeholders = batch.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let query =
-            format!("SELECT vector_key, text FROM chunks WHERE vector_key IN ({placeholders})",);
+        query.clear();
+        query.push_str("SELECT vector_key, text FROM chunks WHERE vector_key IN (");
+        push_sql_placeholders(&mut query, batch.len());
+        query.push(')');
         let mut stmt = conn.prepare(&query)?;
 
-        let params: Vec<rusqlite::types::Value> = batch
-            .iter()
-            .map(|key| rusqlite::types::Value::Integer(*key as i64))
-            .collect();
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
-            .iter()
-            .map(|value| value as &dyn rusqlite::types::ToSql)
-            .collect();
-
-        let mut rows = stmt.query(param_refs.as_slice())?;
+        let mut rows = stmt.query(params_from_iter(batch.iter().map(|key| *key as i64)))?;
         while let Some(row) = rows.next()? {
             let vector_key = row.get::<_, i64>(0)? as u64;
             let raw_text: Vec<u8> = row.get(1)?;
@@ -2961,6 +2954,15 @@ pub fn fetch_chunk_texts_by_vector_keys_batch(
     }
 
     Ok(result)
+}
+
+fn push_sql_placeholders(query: &mut String, count: usize) {
+    for idx in 0..count {
+        if idx > 0 {
+            query.push(',');
+        }
+        query.push('?');
+    }
 }
 
 /// Batch-fetch chunk metadata without reading or decompressing stored text.
@@ -2985,26 +2987,18 @@ fn fetch_chunks_by_vector_keys_batch_impl(
     }
 
     // SQLite supports up to 999 bind parameters; batch in groups of 500.
+    let mut query = String::new();
+    let text_column = if include_text { "text" } else { "x''" };
     for batch in keys.chunks(500) {
-        let placeholders = batch.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let text_column = if include_text { "text" } else { "x''" };
-        let query = format!(
-            "SELECT file_path, start_line, end_line, language, kind, {text_column}, \
-             vector_key, is_ignored \
-             FROM chunks WHERE vector_key IN ({placeholders})",
-        );
+        query.clear();
+        query.push_str("SELECT file_path, start_line, end_line, language, kind, ");
+        query.push_str(text_column);
+        query.push_str(", vector_key, is_ignored FROM chunks WHERE vector_key IN (");
+        push_sql_placeholders(&mut query, batch.len());
+        query.push(')');
         let mut stmt = conn.prepare(&query)?;
 
-        let params: Vec<rusqlite::types::Value> = batch
-            .iter()
-            .map(|k| rusqlite::types::Value::Integer(*k as i64))
-            .collect();
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params
-            .iter()
-            .map(|v| v as &dyn rusqlite::types::ToSql)
-            .collect();
-
-        let mut rows = stmt.query(param_refs.as_slice())?;
+        let mut rows = stmt.query(params_from_iter(batch.iter().map(|key| *key as i64)))?;
         while let Some(row) = rows.next()? {
             let raw_text: Vec<u8> = row.get(5)?;
             let file_path = PathBuf::from(row.get::<_, String>(0)?);
@@ -4276,6 +4270,34 @@ mod tests {
 
         assert_eq!(texts.len(), 1);
         assert_eq!(texts.get(&7).map(String::as_str), Some("requested chunk"));
+    }
+
+    #[test]
+    fn batch_text_fetch_handles_multiple_sqlite_parameter_batches() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chunks (
+                vector_key INTEGER PRIMARY KEY,
+                text BLOB NOT NULL
+            );",
+        )
+        .unwrap();
+        {
+            let mut stmt = conn
+                .prepare("INSERT INTO chunks (vector_key, text) VALUES (?1, ?2)")
+                .unwrap();
+            for key in 1_i64..=501 {
+                stmt.execute(params![key, super::compress_text(&format!("chunk {key}"))])
+                    .unwrap();
+            }
+        }
+
+        let keys = (1_u64..=501).collect::<Vec<_>>();
+        let texts = fetch_chunk_texts_by_vector_keys_batch(&conn, &keys).unwrap();
+
+        assert_eq!(texts.len(), 501);
+        assert_eq!(texts.get(&1).map(String::as_str), Some("chunk 1"));
+        assert_eq!(texts.get(&501).map(String::as_str), Some("chunk 501"));
     }
 
     #[test]
