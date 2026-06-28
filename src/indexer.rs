@@ -47,7 +47,8 @@ const MAX_RUST_DOC_INCLUDE_BYTES: u64 = MIB;
 const MAX_RUST_DOC_INCLUDE_TOTAL_BYTES: u64 = 2 * MIB;
 const MAX_RUST_DOC_INCLUDE_CHUNKS_PER_SOURCE: usize = 128;
 const NEURAL_CPU_BATCH_SIZE: usize = 64;
-const NEURAL_ACCELERATOR_BATCH_SIZE: usize = 256;
+const NEURAL_CUDA_BATCH_SIZE: usize = 8;
+const NEURAL_METAL_BATCH_SIZE: usize = 256;
 const NEURAL_MIN_ACCELERATOR_FREE_BYTES: u64 = 1024 * MIB;
 const NEURAL_TARGET_ACCELERATOR_FREE_BYTES: u64 = 2 * 1024 * MIB;
 const MAX_CONFIGURED_NEURAL_BATCH_SIZE: usize = 4096;
@@ -124,17 +125,25 @@ fn neural_enhance_batch_size_for(
     let Some(backend) = backend else {
         return NEURAL_CPU_BATCH_SIZE;
     };
-    let accelerator = backend.contains("Candle CUDA") || backend.contains("Candle Metal");
-    if !accelerator {
+    let default_batch_size = if backend.contains("Candle CUDA") {
+        NEURAL_CUDA_BATCH_SIZE
+    } else if backend.contains("Candle Metal") {
+        NEURAL_METAL_BATCH_SIZE
+    } else {
+        NEURAL_CPU_BATCH_SIZE
+    };
+    if default_batch_size == NEURAL_CPU_BATCH_SIZE {
         return NEURAL_CPU_BATCH_SIZE;
     }
 
     match accelerator_free_bytes {
-        Some(bytes) if bytes < NEURAL_MIN_ACCELERATOR_FREE_BYTES => NEURAL_CPU_BATCH_SIZE,
-        Some(bytes) if bytes < NEURAL_TARGET_ACCELERATOR_FREE_BYTES => {
-            NEURAL_ACCELERATOR_BATCH_SIZE / 2
+        Some(bytes) if bytes < NEURAL_MIN_ACCELERATOR_FREE_BYTES => {
+            default_batch_size.min(NEURAL_CPU_BATCH_SIZE)
         }
-        _ => NEURAL_ACCELERATOR_BATCH_SIZE,
+        Some(bytes) if bytes < NEURAL_TARGET_ACCELERATOR_FREE_BYTES => {
+            (default_batch_size / 2).max(1)
+        }
+        _ => default_batch_size,
     }
 }
 
@@ -3192,7 +3201,7 @@ mod tests {
                 Some(512 * MIB),
                 None,
             ),
-            NEURAL_CPU_BATCH_SIZE
+            NEURAL_CUDA_BATCH_SIZE
         );
         assert_eq!(
             neural_enhance_batch_size_for(
@@ -3200,7 +3209,7 @@ mod tests {
                 Some(1536 * MIB),
                 None,
             ),
-            NEURAL_ACCELERATOR_BATCH_SIZE / 2
+            NEURAL_CUDA_BATCH_SIZE / 2
         );
         assert_eq!(
             neural_enhance_batch_size_for(
@@ -3208,11 +3217,19 @@ mod tests {
                 Some(4 * 1024 * MIB),
                 None,
             ),
-            NEURAL_ACCELERATOR_BATCH_SIZE
+            NEURAL_CUDA_BATCH_SIZE
         );
         assert_eq!(
             neural_enhance_batch_size_for(Some("BERT embedding via Candle Metal"), None, None),
-            NEURAL_ACCELERATOR_BATCH_SIZE
+            NEURAL_METAL_BATCH_SIZE
+        );
+        assert_eq!(
+            neural_enhance_batch_size_for(
+                Some("BERT embedding via Candle Metal"),
+                Some(1536 * MIB),
+                None,
+            ),
+            NEURAL_METAL_BATCH_SIZE / 2
         );
     }
 
