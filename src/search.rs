@@ -1176,11 +1176,8 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     }
 
     let mut lexical_by_id = HashMap::<u64, (IndexedChunk, f32)>::new();
-    let lexical_search_queries = if conjunctive_numeric_query {
-        &lexical_queries[..1]
-    } else {
-        lexical_queries.as_slice()
-    };
+    let lexical_search_queries =
+        lexical_search_queries_for_routing(&lexical_queries, routing, conjunctive_numeric_query);
     let lexical_query_limits =
         lexical_query_candidate_limits(candidate_limit, lexical_search_queries.len());
     for (lexical_query, query_candidate_limit) in
@@ -2407,6 +2404,42 @@ fn lexical_query_candidate_limits(total: usize, query_count: usize) -> Vec<usize
     }
 }
 
+fn lexical_search_queries_for_routing(
+    lexical_queries: &[String],
+    routing: QueryRouting,
+    conjunctive_numeric_query: bool,
+) -> Vec<String> {
+    if conjunctive_numeric_query {
+        return lexical_queries.iter().take(1).cloned().collect();
+    }
+    if !routing.use_neural
+        || matches!(
+            routing.intent,
+            QueryIntent::ExactIdentifier | QueryIntent::Path | QueryIntent::LiteralOrError
+        )
+        || lexical_queries.len() <= 2
+    {
+        return lexical_queries.to_vec();
+    }
+
+    let mut queries = Vec::with_capacity(2);
+    queries.push(lexical_queries[0].clone());
+
+    let mut expansion_terms = Vec::new();
+    let mut seen = HashSet::new();
+    for query in &lexical_queries[1..] {
+        for term in query.split_whitespace() {
+            if seen.insert(term.to_string()) {
+                expansion_terms.push(term.to_string());
+            }
+        }
+    }
+    if !expansion_terms.is_empty() {
+        queries.push(expansion_terms.join(" "));
+    }
+    queries
+}
+
 fn should_run_literal_pass(query_text: &str) -> bool {
     let query = query_text.trim();
     if query.is_empty() {
@@ -3290,6 +3323,74 @@ enum SymbolCandidateKind {
     Alias,
 }
 
+type SourceMask = u16;
+
+const SOURCE_EXACT_SYMBOL: SourceMask = 1 << 0;
+const SOURCE_HASH: SourceMask = 1 << 1;
+const SOURCE_LEXICAL: SourceMask = 1 << 2;
+const SOURCE_LITERAL: SourceMask = 1 << 3;
+const SOURCE_NEURAL: SourceMask = 1 << 4;
+const SOURCE_PATH: SourceMask = 1 << 5;
+const SOURCE_SEMANTIC: SourceMask = 1 << 6;
+const SOURCE_SYMBOL: SourceMask = 1 << 7;
+const SOURCE_INFERRED_SYMBOL: SourceMask = 1 << 8;
+const SOURCE_BACKFILL: SourceMask = 1 << 9;
+
+#[derive(Clone)]
+struct RankedCandidate {
+    chunk: IndexedChunk,
+    score: f32,
+    sources: SourceMask,
+}
+
+impl RankedCandidate {
+    fn into_tuple(self) -> (IndexedChunk, f32, Vec<String>) {
+        (self.chunk, self.score, source_list(self.sources))
+    }
+}
+
+fn source_bit(source: &str) -> SourceMask {
+    match source {
+        "exact-symbol" => SOURCE_EXACT_SYMBOL,
+        "hash" => SOURCE_HASH,
+        "lexical" => SOURCE_LEXICAL,
+        "literal" => SOURCE_LITERAL,
+        "neural" => SOURCE_NEURAL,
+        "path" => SOURCE_PATH,
+        "semantic" => SOURCE_SEMANTIC,
+        "symbol" => SOURCE_SYMBOL,
+        "inferred-symbol" => SOURCE_INFERRED_SYMBOL,
+        "backfill" => SOURCE_BACKFILL,
+        _ => 0,
+    }
+}
+
+fn source_list(mask: SourceMask) -> Vec<String> {
+    [
+        ("exact-symbol", SOURCE_EXACT_SYMBOL),
+        ("hash", SOURCE_HASH),
+        ("lexical", SOURCE_LEXICAL),
+        ("literal", SOURCE_LITERAL),
+        ("neural", SOURCE_NEURAL),
+        ("path", SOURCE_PATH),
+        ("semantic", SOURCE_SEMANTIC),
+        ("symbol", SOURCE_SYMBOL),
+        ("inferred-symbol", SOURCE_INFERRED_SYMBOL),
+        ("backfill", SOURCE_BACKFILL),
+    ]
+    .into_iter()
+    .filter(|(_, bit)| mask & *bit != 0)
+    .map(|(source, _)| source.to_string())
+    .collect()
+}
+
+#[cfg(test)]
+fn source_mask(sources: &[String]) -> SourceMask {
+    sources
+        .iter()
+        .fold(0, |mask, source| mask | source_bit(source))
+}
+
 const MIN_FILTERED_RESULTS: usize = 10;
 const REPRESENTATIVE_SPAN_MIN_COVERAGE: f32 = 0.75;
 const FILE_COHERENCE_WEIGHT: f32 = 0.22;
@@ -3301,18 +3402,14 @@ fn path_key(path: &Path) -> u64 {
     xxhash_rust::xxh3::xxh3_64(path.as_os_str().as_encoded_bytes())
 }
 
-fn backfill_enabled(ranked: &[(IndexedChunk, f32, Vec<String>)]) -> bool {
+fn backfill_enabled(ranked: &[RankedCandidate]) -> bool {
     let mut files = HashSet::with_capacity(MIN_FILTERED_RESULTS);
-    ranked.iter().any(|(chunk, _, _)| {
-        files.insert(path_key(&chunk.file_path)) && files.len() >= MIN_FILTERED_RESULTS
+    ranked.iter().any(|item| {
+        files.insert(path_key(&item.chunk.file_path)) && files.len() >= MIN_FILTERED_RESULTS
     })
 }
 
-fn apply_file_coherence_boost(
-    ranked: &mut [(IndexedChunk, f32, Vec<String>)],
-    weight: f32,
-    secondary_intent: bool,
-) {
+fn apply_file_coherence_boost(ranked: &mut [RankedCandidate], weight: f32, secondary_intent: bool) {
     if weight <= 0.0 || ranked.is_empty() {
         return;
     }
@@ -3320,7 +3417,7 @@ fn apply_file_coherence_boost(
     let max_score = ranked
         .iter()
         .take(FILE_COHERENCE_CANDIDATES)
-        .map(|(_, score, _)| *score)
+        .map(|item| item.score)
         .reduce(f32::max)
         .unwrap_or(0.0);
     if max_score <= 0.0 {
@@ -3332,20 +3429,20 @@ fn apply_file_coherence_boost(
     let mut file_sums = HashMap::<u64, f32>::with_capacity(FILE_COHERENCE_CANDIDATES);
     let mut file_authorities = HashMap::<u64, f32>::with_capacity(FILE_COHERENCE_CANDIDATES);
     let mut best_indices = HashMap::<u64, usize>::with_capacity(FILE_COHERENCE_CANDIDATES);
-    for (index, (chunk, score, _)) in ranked.iter().take(FILE_COHERENCE_CANDIDATES).enumerate() {
-        let file = path_key(&chunk.file_path);
-        *file_sums.entry(file).or_default() += *score;
+    for (index, item) in ranked.iter().take(FILE_COHERENCE_CANDIDATES).enumerate() {
+        let file = path_key(&item.chunk.file_path);
+        *file_sums.entry(file).or_default() += item.score;
         file_authorities.entry(file).or_insert_with(|| {
             if secondary_intent {
                 1.0
             } else {
-                file_authority_score_for_path(lower_index_path(&chunk.file_path).as_ref())
+                file_authority_score_for_path(lower_index_path(&item.chunk.file_path).as_ref())
             }
         });
         best_indices
             .entry(file)
             .and_modify(|best| {
-                if *score > ranked[*best].1 {
+                if item.score > ranked[*best].score {
                     *best = index;
                 }
             })
@@ -3359,7 +3456,8 @@ fn apply_file_coherence_boost(
 
     let boost_unit = max_score * weight;
     for (file, index) in best_indices {
-        ranked[index].1 += boost_unit * file_sums[&file] / max_file_sum * file_authorities[&file];
+        ranked[index].score +=
+            boost_unit * file_sums[&file] / max_file_sum * file_authorities[&file];
     }
 }
 
@@ -3382,7 +3480,7 @@ fn local_term_coverage(query_tokens: &[String], text: &str) -> f32 {
 }
 
 fn promote_representative_span(
-    ranked: &mut [(IndexedChunk, f32, Vec<String>)],
+    ranked: &mut [RankedCandidate],
     query_tokens: &[String],
     min_coverage: f32,
 ) {
@@ -3392,20 +3490,20 @@ fn promote_representative_span(
 
     if query_tokens.len() < MIN_QUERY_TOKENS
         || ranked.is_empty()
-        || !has_direct_source(&ranked[0].2)
+        || !has_direct_source(ranked[0].sources)
     {
         return;
     }
 
-    let first_path = path_key(&ranked[0].0.file_path);
-    let first_coverage = local_term_coverage(query_tokens, &ranked[0].0.text);
+    let first_path = path_key(&ranked[0].chunk.file_path);
+    let first_coverage = local_term_coverage(query_tokens, &ranked[0].chunk.text);
     let mut best_index = 0;
     let mut best_coverage = first_coverage;
-    for (index, (chunk, _, sources)) in ranked.iter().take(MAX_CANDIDATES_TO_SCAN).enumerate() {
-        if path_key(&chunk.file_path) != first_path || !has_direct_source(sources) {
+    for (index, item) in ranked.iter().take(MAX_CANDIDATES_TO_SCAN).enumerate() {
+        if path_key(&item.chunk.file_path) != first_path || !has_direct_source(item.sources) {
             continue;
         }
-        let coverage = local_term_coverage(query_tokens, &chunk.text);
+        let coverage = local_term_coverage(query_tokens, &item.chunk.text);
         if coverage > best_coverage {
             best_index = index;
             best_coverage = coverage;
@@ -3420,13 +3518,10 @@ fn promote_representative_span(
     }
 
     let (first, rest) = ranked.split_at_mut(best_index);
-    std::mem::swap(&mut first[0].0, &mut rest[0].0);
+    std::mem::swap(&mut first[0].chunk, &mut rest[0].chunk);
 }
 
-fn promote_qualified_symbol_span(
-    ranked: &mut [(IndexedChunk, f32, Vec<String>)],
-    query_text: &str,
-) {
+fn promote_qualified_symbol_span(ranked: &mut [RankedCandidate], query_text: &str) {
     if ranked.is_empty() {
         return;
     }
@@ -3436,21 +3531,21 @@ fn promote_qualified_symbol_span(
         return;
     }
 
-    let first_path = path_key(&ranked[0].0.file_path);
+    let first_path = path_key(&ranked[0].chunk.file_path);
     for name in names {
-        if crate::symbols::chunk_defines_exact_name(&ranked[0].0, &name) {
+        if crate::symbols::chunk_defines_exact_name(&ranked[0].chunk, &name) {
             return;
         }
-        let Some(best_index) = ranked.iter().position(|(chunk, _, sources)| {
-            path_key(&chunk.file_path) == first_path
-                && sources.iter().any(|source| source == "exact-symbol")
-                && crate::symbols::chunk_defines_exact_name(chunk, &name)
+        let Some(best_index) = ranked.iter().position(|item| {
+            path_key(&item.chunk.file_path) == first_path
+                && item.sources & SOURCE_EXACT_SYMBOL != 0
+                && crate::symbols::chunk_defines_exact_name(&item.chunk, &name)
         }) else {
             continue;
         };
 
         let (first, rest) = ranked.split_at_mut(best_index);
-        std::mem::swap(&mut first[0].0, &mut rest[0].0);
+        std::mem::swap(&mut first[0].chunk, &mut rest[0].chunk);
         return;
     }
 }
@@ -3514,39 +3609,6 @@ fn fuse_rrf_with_context(
     const MAX_BOOST_RATIO: f32 = 3.0;
     const MAX_BOOST_FLOOR: f32 = 0.25;
 
-    fn source_bit(source: &str) -> u16 {
-        match source {
-            "exact-symbol" => 1 << 0,
-            "hash" => 1 << 1,
-            "lexical" => 1 << 2,
-            "literal" => 1 << 3,
-            "neural" => 1 << 4,
-            "path" => 1 << 5,
-            "semantic" => 1 << 6,
-            "symbol" => 1 << 7,
-            "inferred-symbol" => 1 << 8,
-            _ => 0,
-        }
-    }
-
-    fn source_list(mask: u16) -> Vec<String> {
-        [
-            "exact-symbol",
-            "hash",
-            "lexical",
-            "literal",
-            "neural",
-            "path",
-            "semantic",
-            "symbol",
-            "inferred-symbol",
-        ]
-        .into_iter()
-        .filter(|source| mask & source_bit(source) != 0)
-        .map(str::to_string)
-        .collect()
-    }
-
     let FusionCandidates {
         lexical,
         semantic,
@@ -3573,11 +3635,11 @@ fn fuse_rrf_with_context(
     struct RrfEntry {
         score: f32,
         chunk: IndexedChunk,
-        sources: u16,
+        sources: SourceMask,
     }
 
     let mut entries: HashMap<u64, RrfEntry> = HashMap::new();
-    let mut add_entry = |chunk: IndexedChunk, score: f32, sources: u16| {
+    let mut add_entry = |chunk: IndexedChunk, score: f32, sources: SourceMask| {
         let vector_key = chunk.vector_key;
         let entry = entries.entry(vector_key).or_insert_with(|| RrfEntry {
             score: 0.0,
@@ -3755,10 +3817,12 @@ fn fuse_rrf_with_context(
                 chunk,
                 sources: source_set,
             } = e;
-            let source_list = source_list(source_set);
-
             if !rerank_ids.contains(&chunk.vector_key) {
-                return (chunk, base_score, source_list);
+                return RankedCandidate {
+                    chunk,
+                    score: base_score,
+                    sources: source_set,
+                };
             }
 
             // Precompute lowercased text/path once per candidate instead of
@@ -3854,35 +3918,39 @@ fn fuse_rrf_with_context(
                 .unwrap_or(1) as f32;
             score /= n_file_chunks.powf(chunk_density_exponent(&bctx));
 
-            (chunk, score, source_list)
+            RankedCandidate {
+                chunk,
+                score,
+                sources: source_set,
+            }
         })
         .collect::<Vec<_>>();
     tracing::trace!("fuse_score={:?}", fuse_started.elapsed());
 
     if is_precise_lookup_query_with_tokens(query.text, &query.primary_tokens)
-        && let Some(max_score) = ranked.iter().map(|(_, score, _)| *score).reduce(f32::max)
+        && let Some(max_score) = ranked.iter().map(|item| item.score).reduce(f32::max)
     {
         let exact_depths = ranked
             .iter()
-            .filter(|(_, _, sources)| sources.iter().any(|source| source == "exact-symbol"))
-            .map(|(chunk, _, _)| {
+            .filter(|item| item.sources & SOURCE_EXACT_SYMBOL != 0)
+            .map(|item| {
                 (
-                    chunk.vector_key,
-                    crate::symbols::exact_name_namespace_depth(chunk, query.text),
+                    item.chunk.vector_key,
+                    crate::symbols::exact_name_namespace_depth(&item.chunk, query.text),
                 )
             })
             .collect::<HashMap<_, _>>();
-        if let Some((_, exact_score, _)) = ranked
+        if let Some(exact) = ranked
             .iter_mut()
-            .filter(|(_, _, sources)| sources.iter().any(|source| source == "exact-symbol"))
+            .filter(|item| item.sources & SOURCE_EXACT_SYMBOL != 0)
             .max_by(|left, right| {
                 let left_depth = exact_depths
-                    .get(&left.0.vector_key)
+                    .get(&left.chunk.vector_key)
                     .copied()
                     .flatten()
                     .unwrap_or(usize::MAX);
                 let right_depth = exact_depths
-                    .get(&right.0.vector_key)
+                    .get(&right.chunk.vector_key)
                     .copied()
                     .flatten()
                     .unwrap_or(usize::MAX);
@@ -3890,29 +3958,30 @@ fn fuse_rrf_with_context(
                     .cmp(&(right_depth != usize::MAX))
                     .then_with(|| right_depth.cmp(&left_depth))
                     .then_with(|| {
-                        is_definition_kind(&left.0.kind).cmp(&is_definition_kind(&right.0.kind))
+                        is_definition_kind(&left.chunk.kind)
+                            .cmp(&is_definition_kind(&right.chunk.kind))
                     })
-                    .then_with(|| left.1.total_cmp(&right.1))
-                    .then_with(|| right.0.vector_key.cmp(&left.0.vector_key))
+                    .then_with(|| left.score.total_cmp(&right.score))
+                    .then_with(|| right.chunk.vector_key.cmp(&left.chunk.vector_key))
             })
         {
-            *exact_score = max_score + (max_score * 0.01).max(0.01);
+            exact.score = max_score + (max_score * 0.01).max(0.01);
         }
     }
 
     ranked.sort_by(|left, right| {
         right
-            .1
-            .total_cmp(&left.1)
-            .then_with(|| left.0.vector_key.cmp(&right.0.vector_key))
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.chunk.vector_key.cmp(&right.chunk.vector_key))
     });
     if query.primary_tokens.len() >= 4 {
         apply_file_coherence_boost(&mut ranked, FILE_COHERENCE_WEIGHT, query.secondary_intent);
         ranked.sort_by(|left, right| {
             right
-                .1
-                .total_cmp(&left.1)
-                .then_with(|| left.0.vector_key.cmp(&right.0.vector_key))
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.chunk.vector_key.cmp(&right.chunk.vector_key))
         });
     }
     // A qualified member in prose is an explicit request for that definition.
@@ -3943,21 +4012,21 @@ fn fuse_rrf_with_context(
     let mut file_hit_counts: HashMap<u64, usize> = HashMap::new();
     for item in &mut ranked {
         let count = file_hit_counts
-            .entry(path_key(&item.0.file_path))
+            .entry(path_key(&item.chunk.file_path))
             .or_insert(0);
         *count += 1;
         match *count {
             1 => {}
-            2 => item.1 *= 0.35,
-            3..=4 => item.1 *= 0.15,
-            _ => item.1 *= 0.05,
+            2 => item.score *= 0.35,
+            3..=4 => item.score *= 0.15,
+            _ => item.score *= 0.05,
         }
     }
     ranked.sort_by(|left, right| {
         right
-            .1
-            .total_cmp(&left.1)
-            .then_with(|| left.0.vector_key.cmp(&right.0.vector_key))
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.chunk.vector_key.cmp(&right.chunk.vector_key))
     });
     let enable_backfill = backfill_enabled(&ranked);
 
@@ -3966,7 +4035,7 @@ fn fuse_rrf_with_context(
         QueryIntent::NaturalLanguage | QueryIntent::DocsTestsExamples | QueryIntent::Mixed
     ) {
         let mut seen_files = HashSet::new();
-        ranked.retain(|(chunk, _, _)| seen_files.insert(path_key(&chunk.file_path)));
+        ranked.retain(|item| seen_files.insert(path_key(&item.chunk.file_path)));
     }
 
     let mut filtered = filter_meaningful_scores_with_query(ranked, query, enable_backfill);
@@ -3981,6 +4050,9 @@ fn fuse_rrf_with_context(
     );
 
     filtered
+        .into_iter()
+        .map(RankedCandidate::into_tuple)
+        .collect()
 }
 
 pub fn rerank_candidate_limit() -> usize {
@@ -3997,15 +4069,26 @@ fn filter_meaningful_scores(
     query_text: &str,
 ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
     let query = FusionQuery::new(query_text);
+    let ranked = ranked
+        .into_iter()
+        .map(|(chunk, score, sources)| RankedCandidate {
+            chunk,
+            score,
+            sources: source_mask(&sources),
+        })
+        .collect::<Vec<_>>();
     let enable_backfill = backfill_enabled(&ranked);
     filter_meaningful_scores_with_query(ranked, &query, enable_backfill)
+        .into_iter()
+        .map(RankedCandidate::into_tuple)
+        .collect()
 }
 
 fn filter_meaningful_scores_with_query(
-    ranked: Vec<(IndexedChunk, f32, Vec<String>)>,
+    ranked: Vec<RankedCandidate>,
     query: &FusionQuery<'_>,
     enable_backfill: bool,
-) -> Vec<(IndexedChunk, f32, Vec<String>)> {
+) -> Vec<RankedCandidate> {
     let precise_query = is_precise_lookup_query_with_tokens(query.text, &query.primary_tokens);
     let query_tokens = query.tokens.as_slice();
     let secondary_intent = query.secondary_intent;
@@ -4017,19 +4100,17 @@ fn filter_meaningful_scores_with_query(
         return vec![];
     }
 
-    let best_score = ranked[0].1;
-    let has_direct_candidate = ranked
-        .iter()
-        .any(|(_, _, sources)| has_direct_source(sources));
+    let best_score = ranked[0].score;
+    let has_direct_candidate = ranked.iter().any(|item| has_direct_source(item.sources));
     if !has_direct_candidate {
         return filter_semantic_only_scores(ranked, query, precise_query);
     }
 
     if ranked.len() == 1 {
-        let (chunk, _, sources) = &ranked[0];
+        let item = &ranked[0];
         if direct_candidate_has_enough_authority(
-            chunk,
-            sources,
+            &item.chunk,
+            item.sources,
             query_tokens,
             precise_query,
             secondary_intent,
@@ -4045,16 +4126,16 @@ fn filter_meaningful_scores_with_query(
     // the best result. Low-authority files are suppressed unless the query is
     // an exact identifier/path-style lookup with a verified literal hit; this
     // avoids fixture/data/vendor junk leaking into high-confidence advice.
-    let mean = ranked.iter().map(|(_, score, _)| score).sum::<f32>() / ranked.len() as f32;
+    let mean = ranked.iter().map(|item| item.score).sum::<f32>() / ranked.len() as f32;
     let variance = ranked
         .iter()
-        .map(|(_, score, _)| (score - mean).powi(2))
+        .map(|item| (item.score - mean).powi(2))
         .sum::<f32>()
         / ranked.len() as f32;
     let stddev = variance.sqrt();
     let adaptive_threshold = (mean - stddev).max(best_score * 0.35).max(0.010);
 
-    let candidate_authority = |chunk: &IndexedChunk, sources: &[String]| -> (f32, f32) {
+    let candidate_authority = |chunk: &IndexedChunk, sources: SourceMask| -> (f32, f32) {
         let path_lower = lower_index_path(&chunk.file_path);
         let authority =
             effective_authority_score_for_path(query_tokens, path_lower.as_ref(), secondary_intent);
@@ -4071,23 +4152,23 @@ fn filter_meaningful_scores_with_query(
     let mut filtered = Vec::new();
     let mut backfill = Vec::new();
     for (index, item) in ranked.into_iter().enumerate() {
-        let (authority, authority_floor) = candidate_authority(&item.0, &item.2);
+        let (authority, authority_floor) = candidate_authority(&item.chunk, item.sources);
         let enough_authority = authority >= authority_floor;
-        let strong_path_match = has_path_source(&item.2)
-            && file_stem_boost(query_tokens, &ChunkBoostContext::new(&item.0)) >= 0.5;
+        let strong_path_match = has_path_source(item.sources)
+            && file_stem_boost(query_tokens, &ChunkBoostContext::new(&item.chunk)) >= 0.5;
         let meaningful = if strong_path_match {
             enough_authority
-        } else if has_literal_source(&item.2) {
-            enough_authority && (precise_query || item.1 >= adaptive_threshold * 0.7)
+        } else if has_literal_source(item.sources) {
+            enough_authority && (precise_query || item.score >= adaptive_threshold * 0.7)
         } else {
-            item.1 >= adaptive_threshold && enough_authority
+            item.score >= adaptive_threshold && enough_authority
         };
 
         if meaningful {
             filtered.push(item);
         } else if enable_backfill && enough_authority && backfill.len() < MIN_FILTERED_RESULTS {
             backfill.push(item);
-        } else if index == 0 && has_direct_source(&item.2) && enough_authority {
+        } else if index == 0 && has_direct_source(item.sources) && enough_authority {
             fallback = Some(item);
         }
     }
@@ -4099,17 +4180,17 @@ fn filter_meaningful_scores_with_query(
     if enable_backfill && filtered.len() < MIN_FILTERED_RESULTS {
         let mut selected = filtered
             .iter()
-            .map(|(chunk, _, _)| chunk.vector_key)
+            .map(|item| item.chunk.vector_key)
             .collect::<HashSet<_>>();
         let mut next_backfill_score = filtered
             .last()
-            .map(|(_, score, _)| *score * 0.99)
+            .map(|item| item.score * 0.99)
             .unwrap_or(f32::MAX);
         for mut item in backfill {
-            if selected.insert(item.0.vector_key) {
-                item.1 = item.1.min(next_backfill_score);
-                next_backfill_score = item.1 * 0.99;
-                item.2.push("backfill".to_string());
+            if selected.insert(item.chunk.vector_key) {
+                item.score = item.score.min(next_backfill_score);
+                next_backfill_score = item.score * 0.99;
+                item.sources |= SOURCE_BACKFILL;
                 filtered.push(item);
                 if filtered.len() == MIN_FILTERED_RESULTS {
                     break;
@@ -4122,19 +4203,19 @@ fn filter_meaningful_scores_with_query(
 }
 
 fn filter_semantic_only_scores(
-    ranked: Vec<(IndexedChunk, f32, Vec<String>)>,
+    ranked: Vec<RankedCandidate>,
     query: &FusionQuery<'_>,
     precise_query: bool,
-) -> Vec<(IndexedChunk, f32, Vec<String>)> {
+) -> Vec<RankedCandidate> {
     let Some(best) = ranked.first() else {
         return vec![];
     };
 
-    let bctx = ChunkBoostContext::new(&best.0);
+    let bctx = ChunkBoostContext::new(&best.chunk);
     let support = support_signals(query.text, &query.tokens, &bctx);
     let authority =
         effective_authority_score_with_intent(&query.tokens, &bctx, query.secondary_intent);
-    let second_score = ranked.get(1).map(|(_, score, _)| *score).unwrap_or(0.0);
+    let second_score = ranked.get(1).map(|item| item.score).unwrap_or(0.0);
     let authority_floor = if query.secondary_intent || precise_query {
         0.5
     } else {
@@ -4150,10 +4231,10 @@ fn filter_semantic_only_scores(
     } else {
         1.30
     };
-    let decisive = best.1 >= score_floor
-        || (best.1 >= score_floor * 0.8
+    let decisive = best.score >= score_floor
+        || (best.score >= score_floor * 0.8
             && second_score > f32::EPSILON
-            && best.1 / second_score >= decisive_ratio);
+            && best.score / second_score >= decisive_ratio);
 
     if authority >= authority_floor
         && decisive
@@ -4165,27 +4246,23 @@ fn filter_semantic_only_scores(
     }
 }
 
-fn has_direct_source(sources: &[String]) -> bool {
+fn has_direct_source(sources: SourceMask) -> bool {
     has_literal_source(sources)
-        || sources.iter().any(|source| {
-            source == "lexical"
-                || source == "path"
-                || source == "exact-symbol"
-                || source == "inferred-symbol"
-        })
+        || sources & (SOURCE_LEXICAL | SOURCE_PATH | SOURCE_EXACT_SYMBOL | SOURCE_INFERRED_SYMBOL)
+            != 0
 }
 
-fn has_literal_source(sources: &[String]) -> bool {
-    sources.iter().any(|source| source == "literal")
+fn has_literal_source(sources: SourceMask) -> bool {
+    sources & SOURCE_LITERAL != 0
 }
 
-fn has_path_source(sources: &[String]) -> bool {
-    sources.iter().any(|source| source == "path")
+fn has_path_source(sources: SourceMask) -> bool {
+    sources & SOURCE_PATH != 0
 }
 
 fn direct_candidate_has_enough_authority(
     chunk: &IndexedChunk,
-    sources: &[String],
+    sources: SourceMask,
     query_tokens: &[String],
     precise_query: bool,
     secondary_intent: bool,
@@ -4206,7 +4283,7 @@ fn direct_candidate_has_enough_authority(
 }
 
 fn recommendation_authority_floor(
-    sources: &[String],
+    sources: SourceMask,
     precise_query: bool,
     secondary_intent: bool,
     implementation_intent: bool,
@@ -6367,6 +6444,29 @@ function sendfile(res, path, options, callback) {
     }
 
     #[test]
+    fn neural_prose_lexical_search_condenses_expansion_passes() {
+        let routing = QueryRouting::classify("calculate invoice tax region");
+        assert!(routing.use_neural);
+
+        let lexical = build_lexical_queries("calculate invoice tax region");
+        let search_queries = lexical_search_queries_for_routing(&lexical, routing, false);
+
+        assert_eq!(search_queries.len(), 2);
+        assert_eq!(search_queries[0], "calculate invoice tax region");
+        assert!(search_queries[1].contains("calculate_invoice_tax_region"));
+        assert!(search_queries[1].contains("calculateInvoiceTaxRegion"));
+    }
+
+    #[test]
+    fn exact_identifier_lexical_search_keeps_full_expansion_passes() {
+        let routing = QueryRouting::classify("handle_error");
+        let lexical = build_lexical_queries("handle_error");
+        let search_queries = lexical_search_queries_for_routing(&lexical, routing, false);
+
+        assert_eq!(search_queries, lexical);
+    }
+
+    #[test]
     fn natural_language_symbol_queries_are_bounded_and_definition_shaped() {
         let visitor =
             natural_language_symbol_queries("Visitor pattern for deserializer implementations");
@@ -7152,13 +7252,16 @@ export function registerCommands(p: Plugin) {
         );
         let low = make_chunk_with_path("low", "src/low.rs", "supporting implementation");
         let query = FusionQuery::new("binary file detection");
-        let mut ranked = vec![
+        let ranked = vec![
             (top, 2.0, vec!["lexical".to_string()]),
             (low, 0.1, vec!["lexical".to_string()]),
         ];
 
-        let filtered =
-            filter_meaningful_scores_with_query(std::mem::take(&mut ranked), &query, true);
+        let filtered = ranked_candidates_to_tuples(filter_meaningful_scores_with_query(
+            ranked_candidates_from_tuples(ranked),
+            &query,
+            true,
+        ));
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[1].0.chunk_id, "low");
         assert!(filtered[1].2.contains(&"backfill".to_string()));
@@ -7173,14 +7276,16 @@ export function registerCommands(p: Plugin) {
             "JSON response JSONP callback support",
         );
         let other = make_chunk_with_path("other", "src/other.rs", "JSON response");
-        let mut ranked = vec![
+        let ranked = vec![
             (top, 5.0, vec!["lexical".to_string()]),
             (evidence, 4.0, vec!["path".to_string()]),
             (other, 3.0, vec!["lexical".to_string()]),
         ];
         let query_tokens = tokenize_query("JSON response serialization and JSONP callback support");
 
+        let mut ranked = ranked_candidates_from_tuples(ranked);
         promote_representative_span(&mut ranked, &query_tokens, 0.67);
+        let ranked = ranked_candidates_to_tuples(ranked);
 
         assert_eq!(ranked[0].0.chunk_id, "evidence");
         assert_eq!(ranked[0].1, 5.0);
@@ -7209,7 +7314,7 @@ export function registerCommands(p: Plugin) {
         member.language = "javascript".to_string();
         member.kind = "Module".to_string();
         let other = make_chunk_with_path("other", "lib/static.js", "function serveStatic(path) {}");
-        let mut ranked = vec![
+        let ranked = vec![
             (
                 helper,
                 5.0,
@@ -7219,7 +7324,9 @@ export function registerCommands(p: Plugin) {
             (other, 3.0, vec!["lexical".to_string()]),
         ];
 
+        let mut ranked = ranked_candidates_from_tuples(ranked);
         promote_qualified_symbol_span(&mut ranked, "static file serving with res.sendFile()");
+        let ranked = ranked_candidates_to_tuples(ranked);
 
         assert_eq!(ranked[0].0.chunk_id, "member");
         assert_eq!(ranked[0].1, 5.0);
@@ -7244,13 +7351,15 @@ export function registerCommands(p: Plugin) {
         let primary = make_chunk_with_path("primary", "src/primary.rs", "primary");
         let support = make_chunk_with_path("support", "src/primary.rs", "support");
         let alternate = make_chunk_with_path("alternate", "src/alternate.rs", "alternate");
-        let mut ranked = vec![
+        let ranked = vec![
             (alternate, 1.0, vec![]),
             (primary, 0.95, vec![]),
             (support, 0.90, vec![]),
         ];
 
+        let mut ranked = ranked_candidates_from_tuples(ranked);
         apply_file_coherence_boost(&mut ranked, 0.2, false);
+        let ranked = ranked_candidates_to_tuples(ranked);
 
         assert_eq!(ranked[0].1, 1.0 + 0.2 / 1.85);
         assert_eq!(ranked[1].1, 0.95 + 0.2);
@@ -7262,13 +7371,15 @@ export function registerCommands(p: Plugin) {
         let primary = make_chunk_with_path("primary", "src/primary_test.rs", "primary");
         let support = make_chunk_with_path("support", "src/primary_test.rs", "support");
         let alternate = make_chunk_with_path("alternate", "src/alternate.rs", "alternate");
-        let mut ranked = vec![
+        let ranked = vec![
             (alternate, 1.0, vec![]),
             (primary, 0.95, vec![]),
             (support, 0.90, vec![]),
         ];
 
+        let mut ranked = ranked_candidates_from_tuples(ranked);
         apply_file_coherence_boost(&mut ranked, 0.2, false);
+        let ranked = ranked_candidates_to_tuples(ranked);
 
         assert_eq!(ranked[0].1, 1.0 + 0.2 / 1.85);
         assert_eq!(ranked[1].1, 0.95 + 0.2 * 0.6);
@@ -7295,6 +7406,28 @@ export function registerCommands(p: Plugin) {
                     sources.iter().map(|s| s.to_string()).collect(),
                 )
             })
+            .collect()
+    }
+
+    fn ranked_candidates_from_tuples(
+        ranked: Vec<(IndexedChunk, f32, Vec<String>)>,
+    ) -> Vec<RankedCandidate> {
+        ranked
+            .into_iter()
+            .map(|(chunk, score, sources)| RankedCandidate {
+                chunk,
+                score,
+                sources: source_mask(&sources),
+            })
+            .collect()
+    }
+
+    fn ranked_candidates_to_tuples(
+        ranked: Vec<RankedCandidate>,
+    ) -> Vec<(IndexedChunk, f32, Vec<String>)> {
+        ranked
+            .into_iter()
+            .map(RankedCandidate::into_tuple)
             .collect()
     }
 
@@ -7443,6 +7576,7 @@ export function registerCommands(p: Plugin) {
             })
             .collect::<Vec<_>>();
 
+        let ranked = ranked_candidates_from_tuples(ranked);
         assert!(!backfill_enabled(&ranked));
     }
 
