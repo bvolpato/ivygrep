@@ -222,7 +222,7 @@ fn platform_available_memory_bytes() -> Option<u64> {
     let available_pages = u64::from(stats.free_count)
         .saturating_add(u64::from(stats.inactive_count))
         .saturating_add(u64::from(stats.purgeable_count))
-        .saturating_sub(u64::from(stats.compressor_page_count));
+        .saturating_add(u64::from(stats.speculative_count));
     Some(available_pages.saturating_mul(page_size as u64))
 }
 
