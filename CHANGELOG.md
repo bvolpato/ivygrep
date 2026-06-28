@@ -4,6 +4,16 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.12.11] - 2026-06-28
+
+### Performance
+- **Transformer enhancement batches real forward passes on accelerator backends.** CUDA and Metal builds now run contiguous MiniLM batches for background neural enhancement, choose larger accelerator batch defaults when free VRAM allows it, and keep bounded handle pools so indexing can push more work onto the GPU without oversubscribing laptops.
+- **Daemon neural search warms the model before serving the first neural query.** The first post-load query no longer pays the one-time backend/tokenizer warmup cost; on the local CUDA MiniLM fixture, first neural embedding moved from `9.23 ms` to `4.22 ms` and daemon search total from `13.77 ms` to `9.00 ms`.
+- **Single-query transformer embedding avoids a tokenizer clone on every request.** The hot search path now reuses each handle's configured tokenizer directly, reducing cache-bypassed daemon search averages from `24.1 ms` to `19.9 ms` on the local 15k-chunk MiniLM fixture.
+
+### Fixed
+- **macOS available-memory detection no longer underreports safe transformer capacity.** Neural worker and batch sizing now use the corrected platform calculation before applying memory caps.
+
 ## [0.12.10] - 2026-06-27
 
 ### Changed
