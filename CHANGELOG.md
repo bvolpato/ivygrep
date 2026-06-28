@@ -4,6 +4,16 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.12.12] - 2026-06-28
+
+### Performance
+- **CUDA transformer enhancement sizes batches from live GPU headroom.** Linux CUDA builds now default background MiniLM enhancement to batch size 8 only when `nvidia-smi` reports enough free VRAM and low GPU utilization; memory pressure or an already-busy GPU backs off to smaller batches instead of competing with workloads such as local LLM serving. Local RTX 5070 Ti validation completed the ripgrep fixture in `10.34s` with `4,814 / 4,814` vectors under idle conditions.
+- **Foreground transformer queries default to accelerator-backed embedding when available.** CUDA and Metal builds use the local accelerator for transformer query vectors, prefetch common neural query vectors in the daemon, and skip redundant hash fallback once neural coverage is complete.
+- **Neural search fusion trims candidate bookkeeping overhead.** Fusion stores compact source masks and hydrates only the bounded rerank set before boost computation, reducing hot neural search work while preserving result behavior.
+
+### Fixed
+- **Foreground accelerator builds satisfy the cross-platform lint gate.** The accelerator selection path now compiles cleanly under the full CI matrix.
+
 ## [0.12.11] - 2026-06-28
 
 ### Performance

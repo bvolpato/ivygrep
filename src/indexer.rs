@@ -5,7 +5,7 @@ use std::io::{IsTerminal, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use rayon::prelude::*;
@@ -49,8 +49,16 @@ const MAX_RUST_DOC_INCLUDE_CHUNKS_PER_SOURCE: usize = 128;
 const NEURAL_CPU_BATCH_SIZE: usize = 64;
 const NEURAL_CUDA_BATCH_SIZE: usize = 8;
 const NEURAL_METAL_BATCH_SIZE: usize = 256;
-const NEURAL_MIN_ACCELERATOR_FREE_BYTES: u64 = 1024 * MIB;
-const NEURAL_TARGET_ACCELERATOR_FREE_BYTES: u64 = 2 * 1024 * MIB;
+const NEURAL_CUDA_HIGH_PRESSURE_FREE_BYTES: u64 = 2 * 1024 * MIB;
+const NEURAL_CUDA_MEDIUM_PRESSURE_FREE_BYTES: u64 = 4 * 1024 * MIB;
+const NEURAL_CUDA_SHARED_FREE_BYTES: u64 = 8 * 1024 * MIB;
+const NEURAL_CUDA_HIGH_PRESSURE_FREE_PERCENT: u64 = 20;
+const NEURAL_CUDA_MEDIUM_PRESSURE_FREE_PERCENT: u64 = 35;
+const NEURAL_CUDA_SHARED_FREE_PERCENT: u64 = 50;
+const NEURAL_CUDA_HIGH_UTILIZATION_PERCENT: u32 = 70;
+const NEURAL_CUDA_BUSY_UTILIZATION_PERCENT: u32 = 35;
+const NEURAL_CUDA_ACTIVE_UTILIZATION_PERCENT: u32 = 25;
+const NEURAL_BATCH_SIZE_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CONFIGURED_NEURAL_BATCH_SIZE: usize = 4096;
 
 thread_local! {
@@ -97,25 +105,78 @@ fn configured_neural_batch_size() -> Option<usize> {
         .map(|value| value.min(MAX_CONFIGURED_NEURAL_BATCH_SIZE))
 }
 
-fn cuda_free_memory_bytes() -> Option<u64> {
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct CudaResourceSnapshot {
+    free_bytes: u64,
+    total_bytes: u64,
+    utilization_percent: u32,
+}
+
+impl CudaResourceSnapshot {
+    fn free_percent(self) -> u64 {
+        if self.total_bytes == 0 {
+            return 0;
+        }
+        ((self.free_bytes as u128 * 100) / self.total_bytes as u128) as u64
+    }
+}
+
+fn parse_cuda_resource_snapshot(line: &str) -> Option<CudaResourceSnapshot> {
+    let mut parts = line.split(',').map(str::trim);
+    let free_mib = parts.next()?.parse::<u64>().ok()?;
+    let total_mib = parts.next()?.parse::<u64>().ok()?;
+    let utilization_percent = parts.next()?.parse::<u32>().ok()?;
+    Some(CudaResourceSnapshot {
+        free_bytes: free_mib.checked_mul(MIB)?,
+        total_bytes: total_mib.checked_mul(MIB)?,
+        utilization_percent,
+    })
+}
+
+fn cuda_resource_snapshot() -> Option<CudaResourceSnapshot> {
     let output = Command::new("nvidia-smi")
-        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
+        .args([
+            "--query-gpu=memory.free,memory.total,utilization.gpu",
+            "--format=csv,noheader,nounits",
+        ])
         .output()
         .ok()?;
     if !output.status.success() {
         return None;
     }
     let stdout = String::from_utf8(output.stdout).ok()?;
-    stdout
-        .lines()
-        .next()
-        .and_then(|line| line.trim().parse::<u64>().ok())
-        .and_then(|mib| mib.checked_mul(MIB))
+    stdout.lines().next().and_then(parse_cuda_resource_snapshot)
+}
+
+fn cuda_neural_enhance_batch_size(resources: Option<CudaResourceSnapshot>) -> usize {
+    let Some(resources) = resources else {
+        return NEURAL_CUDA_BATCH_SIZE;
+    };
+    let free_percent = resources.free_percent();
+    if resources.utilization_percent >= NEURAL_CUDA_HIGH_UTILIZATION_PERCENT
+        || resources.free_bytes < NEURAL_CUDA_HIGH_PRESSURE_FREE_BYTES
+        || free_percent <= NEURAL_CUDA_HIGH_PRESSURE_FREE_PERCENT
+    {
+        return 1;
+    }
+    if resources.utilization_percent >= NEURAL_CUDA_BUSY_UTILIZATION_PERCENT
+        || resources.free_bytes < NEURAL_CUDA_MEDIUM_PRESSURE_FREE_BYTES
+        || free_percent <= NEURAL_CUDA_MEDIUM_PRESSURE_FREE_PERCENT
+    {
+        return (NEURAL_CUDA_BATCH_SIZE / 4).max(1);
+    }
+    if resources.utilization_percent >= NEURAL_CUDA_ACTIVE_UTILIZATION_PERCENT
+        || resources.free_bytes < NEURAL_CUDA_SHARED_FREE_BYTES
+        || free_percent <= NEURAL_CUDA_SHARED_FREE_PERCENT
+    {
+        return (NEURAL_CUDA_BATCH_SIZE / 2).max(1);
+    }
+    NEURAL_CUDA_BATCH_SIZE
 }
 
 fn neural_enhance_batch_size_for(
     backend: Option<&str>,
-    accelerator_free_bytes: Option<u64>,
+    cuda_resources: Option<CudaResourceSnapshot>,
     configured: Option<usize>,
 ) -> usize {
     if let Some(configured) = configured {
@@ -126,7 +187,7 @@ fn neural_enhance_batch_size_for(
         return NEURAL_CPU_BATCH_SIZE;
     };
     let default_batch_size = if backend.contains("Candle CUDA") {
-        NEURAL_CUDA_BATCH_SIZE
+        cuda_neural_enhance_batch_size(cuda_resources)
     } else if backend.contains("Candle Metal") {
         NEURAL_METAL_BATCH_SIZE
     } else {
@@ -135,24 +196,15 @@ fn neural_enhance_batch_size_for(
     if default_batch_size == NEURAL_CPU_BATCH_SIZE {
         return NEURAL_CPU_BATCH_SIZE;
     }
-
-    match accelerator_free_bytes {
-        Some(bytes) if bytes < NEURAL_MIN_ACCELERATOR_FREE_BYTES => {
-            default_batch_size.min(NEURAL_CPU_BATCH_SIZE)
-        }
-        Some(bytes) if bytes < NEURAL_TARGET_ACCELERATOR_FREE_BYTES => {
-            (default_batch_size / 2).max(1)
-        }
-        _ => default_batch_size,
-    }
+    default_batch_size
 }
 
 fn neural_enhance_batch_size(neural_model: &dyn EmbeddingModel) -> usize {
     let backend = neural_model.backend_info();
-    let free_bytes = backend
+    let cuda_resources = backend
         .filter(|backend| backend.contains("Candle CUDA"))
-        .and_then(|_| cuda_free_memory_bytes());
-    neural_enhance_batch_size_for(backend, free_bytes, configured_neural_batch_size())
+        .and_then(|_| cuda_resource_snapshot());
+    neural_enhance_batch_size_for(backend, cuda_resources, configured_neural_batch_size())
 }
 
 impl<D> Directory for RetryingDirectory<D>
@@ -2236,11 +2288,13 @@ pub fn enhance_workspace_neural(
     let _ = fs::write(&progress_path, progress_count.to_string());
 
     // Phase 2: Stream rows and skip already-embedded keys without decompressing text.
-    // CPU keeps small batches for load checks; accelerators use larger batches
-    // to reduce host-side overhead without overrunning low-VRAM devices.
-    let batch_size = neural_enhance_batch_size(neural_model);
-    let mut batch: Vec<(u64, String)> = Vec::with_capacity(batch_size);
-    let mut batch_keys = HashSet::with_capacity(batch_size);
+    // Re-check the accelerator batch size at each batch boundary so a CUDA GPU
+    // that becomes busy with another workload backs off during long enhancement.
+    let initial_batch_size = neural_enhance_batch_size(neural_model);
+    let mut current_batch_size = initial_batch_size;
+    let mut last_batch_size_refresh = Instant::now();
+    let mut batch: Vec<(u64, String)> = Vec::with_capacity(initial_batch_size);
+    let mut batch_keys = HashSet::with_capacity(initial_batch_size);
 
     let mut stmt = sqlite.prepare("SELECT vector_key, text FROM chunks")?;
     let rows = stmt.query_map([], |row| {
@@ -2297,7 +2351,7 @@ pub fn enhance_workspace_neural(
         let text = decompress_text(raw);
         batch.push((key, text));
 
-        if batch.len() >= batch_size {
+        if batch.len() >= current_batch_size {
             while neural_model.respects_system_constraints()
                 && let Some(reason) = check_system_constraints()
             {
@@ -2306,10 +2360,15 @@ pub fn enhance_workspace_neural(
             }
             let _ = std::fs::remove_file(&paused_path);
 
+            let processed_len = batch.len();
             process_batch(&mut batch, &mut newly_processed, &mut vector_index)?;
             batch_keys.clear();
-            progress_count += batch_size;
+            progress_count += processed_len;
             let _ = std::fs::write(&progress_path, progress_count.to_string());
+            if last_batch_size_refresh.elapsed() >= NEURAL_BATCH_SIZE_REFRESH_INTERVAL {
+                current_batch_size = neural_enhance_batch_size(neural_model);
+                last_batch_size_refresh = Instant::now();
+            }
 
             if newly_processed.is_multiple_of(16_384) {
                 vector_index.save()?;
@@ -3187,6 +3246,13 @@ mod tests {
 
     #[test]
     fn neural_enhance_batch_size_scales_for_accelerators() {
+        let cuda_resources =
+            |free_gib: u64, total_gib: u64, utilization_percent: u32| CudaResourceSnapshot {
+                free_bytes: free_gib * 1024 * MIB,
+                total_bytes: total_gib * 1024 * MIB,
+                utilization_percent,
+            };
+
         assert_eq!(
             neural_enhance_batch_size_for(None, None, None),
             NEURAL_CPU_BATCH_SIZE
@@ -3198,7 +3264,7 @@ mod tests {
         assert_eq!(
             neural_enhance_batch_size_for(
                 Some("BERT embedding via Candle CUDA"),
-                Some(512 * MIB),
+                Some(cuda_resources(14, 16, 0)),
                 None,
             ),
             NEURAL_CUDA_BATCH_SIZE
@@ -3206,7 +3272,7 @@ mod tests {
         assert_eq!(
             neural_enhance_batch_size_for(
                 Some("BERT embedding via Candle CUDA"),
-                Some(1536 * MIB),
+                Some(cuda_resources(6, 16, 0)),
                 None,
             ),
             NEURAL_CUDA_BATCH_SIZE / 2
@@ -3214,23 +3280,52 @@ mod tests {
         assert_eq!(
             neural_enhance_batch_size_for(
                 Some("BERT embedding via Candle CUDA"),
-                Some(4 * 1024 * MIB),
+                Some(cuda_resources(5, 16, 0)),
                 None,
             ),
+            NEURAL_CUDA_BATCH_SIZE / 4
+        );
+        assert_eq!(
+            neural_enhance_batch_size_for(
+                Some("BERT embedding via Candle CUDA"),
+                Some(cuda_resources(14, 16, 75)),
+                None,
+            ),
+            1
+        );
+        assert_eq!(
+            neural_enhance_batch_size_for(
+                Some("BERT embedding via Candle CUDA"),
+                Some(cuda_resources(1, 16, 0)),
+                None,
+            ),
+            1
+        );
+        assert_eq!(
+            neural_enhance_batch_size_for(Some("BERT embedding via Candle CUDA"), None, None),
             NEURAL_CUDA_BATCH_SIZE
+        );
+        assert_eq!(
+            neural_enhance_batch_size_for(
+                Some("BERT embedding via Candle CUDA"),
+                Some(cuda_resources(1, 16, 90)),
+                Some(32),
+            ),
+            32
         );
         assert_eq!(
             neural_enhance_batch_size_for(Some("BERT embedding via Candle Metal"), None, None),
             NEURAL_METAL_BATCH_SIZE
         );
-        assert_eq!(
-            neural_enhance_batch_size_for(
-                Some("BERT embedding via Candle Metal"),
-                Some(1536 * MIB),
-                None,
-            ),
-            NEURAL_METAL_BATCH_SIZE / 2
-        );
+    }
+
+    #[test]
+    fn parses_cuda_resource_snapshot_from_nvidia_smi() {
+        let snapshot = parse_cuda_resource_snapshot("13988, 16303, 7").unwrap();
+        assert_eq!(snapshot.free_bytes, 13_988 * MIB);
+        assert_eq!(snapshot.total_bytes, 16_303 * MIB);
+        assert_eq!(snapshot.utilization_percent, 7);
+        assert_eq!(snapshot.free_percent(), 85);
     }
 
     #[test]

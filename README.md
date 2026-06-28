@@ -300,9 +300,12 @@ workers. `IVYGREP_NEURAL_THREADS` sets the desired worker ceiling; ivygrep
 automatically lowers additional workers after accounting for the required
 shared model and one quarter of currently available memory. Set
 `IVYGREP_NEURAL_MEMORY_MB` to impose a smaller explicit worker-sizing budget.
-Background neural enhancement uses larger batches on CUDA/Metal when free
-accelerator memory allows it; set `IVYGREP_NEURAL_BATCH_SIZE` to override the
-batch size for local benchmarking. Accelerator builds can also set
+Background neural enhancement uses larger batches on CUDA/Metal when resources
+allow it. CUDA builds read `nvidia-smi` free VRAM, total VRAM, and GPU
+utilization before choosing a batch size, so an idle large GPU gets higher
+throughput while a GPU already serving another workload backs off. Set
+`IVYGREP_NEURAL_BATCH_SIZE` to override the batch size for local benchmarking.
+Accelerator builds can also set
 `IVYGREP_NEURAL_ACCELERATOR_HANDLES` to tune concurrent shared-model inference
 handles during background enhancement. Accelerator builds also use CUDA/Metal
 for foreground transformer query embedding when available; set
