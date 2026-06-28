@@ -815,10 +815,10 @@ fn preferred_neural_backend() -> NeuralBackend {
 
 #[cfg(feature = "neural")]
 fn foreground_accelerator_setting(value: Option<&str>) -> bool {
-    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
-        Some("0" | "false" | "no" | "off" | "cpu") => false,
-        _ => true,
-    }
+    !matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("0" | "false" | "no" | "off" | "cpu")
+    )
 }
 
 #[cfg(feature = "neural")]
