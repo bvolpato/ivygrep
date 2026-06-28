@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{IsTerminal, Write};
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -45,6 +46,11 @@ const MAX_RUST_DOC_INCLUDES_PER_SOURCE: usize = 16;
 const MAX_RUST_DOC_INCLUDE_BYTES: u64 = MIB;
 const MAX_RUST_DOC_INCLUDE_TOTAL_BYTES: u64 = 2 * MIB;
 const MAX_RUST_DOC_INCLUDE_CHUNKS_PER_SOURCE: usize = 128;
+const NEURAL_CPU_BATCH_SIZE: usize = 64;
+const NEURAL_ACCELERATOR_BATCH_SIZE: usize = 256;
+const NEURAL_MIN_ACCELERATOR_FREE_BYTES: u64 = 1024 * MIB;
+const NEURAL_TARGET_ACCELERATOR_FREE_BYTES: u64 = 2 * 1024 * MIB;
+const MAX_CONFIGURED_NEURAL_BATCH_SIZE: usize = 4096;
 
 thread_local! {
     static TEXT_COMPRESSOR: RefCell<Option<zstd::bulk::Compressor<'static>>> =
@@ -80,6 +86,64 @@ where
         }
     }
     unreachable!("the retry loop always returns on its final attempt")
+}
+
+fn configured_neural_batch_size() -> Option<usize> {
+    std::env::var("IVYGREP_NEURAL_BATCH_SIZE")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| value.min(MAX_CONFIGURED_NEURAL_BATCH_SIZE))
+}
+
+fn cuda_free_memory_bytes() -> Option<u64> {
+    let output = Command::new("nvidia-smi")
+        .args(["--query-gpu=memory.free", "--format=csv,noheader,nounits"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    stdout
+        .lines()
+        .next()
+        .and_then(|line| line.trim().parse::<u64>().ok())
+        .and_then(|mib| mib.checked_mul(MIB))
+}
+
+fn neural_enhance_batch_size_for(
+    backend: Option<&str>,
+    accelerator_free_bytes: Option<u64>,
+    configured: Option<usize>,
+) -> usize {
+    if let Some(configured) = configured {
+        return configured;
+    }
+
+    let Some(backend) = backend else {
+        return NEURAL_CPU_BATCH_SIZE;
+    };
+    let accelerator = backend.contains("Candle CUDA") || backend.contains("Candle Metal");
+    if !accelerator {
+        return NEURAL_CPU_BATCH_SIZE;
+    }
+
+    match accelerator_free_bytes {
+        Some(bytes) if bytes < NEURAL_MIN_ACCELERATOR_FREE_BYTES => NEURAL_CPU_BATCH_SIZE,
+        Some(bytes) if bytes < NEURAL_TARGET_ACCELERATOR_FREE_BYTES => {
+            NEURAL_ACCELERATOR_BATCH_SIZE / 2
+        }
+        _ => NEURAL_ACCELERATOR_BATCH_SIZE,
+    }
+}
+
+fn neural_enhance_batch_size(neural_model: &dyn EmbeddingModel) -> usize {
+    let backend = neural_model.backend_info();
+    let free_bytes = backend
+        .filter(|backend| backend.contains("Candle CUDA"))
+        .and_then(|_| cuda_free_memory_bytes());
+    neural_enhance_batch_size_for(backend, free_bytes, configured_neural_batch_size())
 }
 
 impl<D> Directory for RetryingDirectory<D>
@@ -2163,10 +2227,11 @@ pub fn enhance_workspace_neural(
     let _ = fs::write(&progress_path, progress_count.to_string());
 
     // Phase 2: Stream rows and skip already-embedded keys without decompressing text.
-    // Keep batches small so load and battery checks run frequently on laptops.
-    const BATCH_SIZE: usize = 64;
-    let mut batch: Vec<(u64, String)> = Vec::with_capacity(BATCH_SIZE);
-    let mut batch_keys = HashSet::with_capacity(BATCH_SIZE);
+    // CPU keeps small batches for load checks; accelerators use larger batches
+    // to reduce host-side overhead without overrunning low-VRAM devices.
+    let batch_size = neural_enhance_batch_size(neural_model);
+    let mut batch: Vec<(u64, String)> = Vec::with_capacity(batch_size);
+    let mut batch_keys = HashSet::with_capacity(batch_size);
 
     let mut stmt = sqlite.prepare("SELECT vector_key, text FROM chunks")?;
     let rows = stmt.query_map([], |row| {
@@ -2223,7 +2288,7 @@ pub fn enhance_workspace_neural(
         let text = decompress_text(raw);
         batch.push((key, text));
 
-        if batch.len() >= BATCH_SIZE {
+        if batch.len() >= batch_size {
             while neural_model.respects_system_constraints()
                 && let Some(reason) = check_system_constraints()
             {
@@ -2234,7 +2299,7 @@ pub fn enhance_workspace_neural(
 
             process_batch(&mut batch, &mut newly_processed, &mut vector_index)?;
             batch_keys.clear();
-            progress_count += BATCH_SIZE;
+            progress_count += batch_size;
             let _ = std::fs::write(&progress_path, progress_count.to_string());
 
             if newly_processed.is_multiple_of(16_384) {
@@ -3109,6 +3174,61 @@ mod tests {
         unsafe { std::env::set_var("IVYGREP_ENHANCE_MAX_LOAD_RATIO", "0") };
         assert!(parse_system_load(100.0, 8.0).is_none());
         unsafe { std::env::remove_var("IVYGREP_ENHANCE_MAX_LOAD_RATIO") };
+    }
+
+    #[test]
+    fn neural_enhance_batch_size_scales_for_accelerators() {
+        assert_eq!(
+            neural_enhance_batch_size_for(None, None, None),
+            NEURAL_CPU_BATCH_SIZE
+        );
+        assert_eq!(
+            neural_enhance_batch_size_for(Some("BERT embedding via Candle CPU"), None, None),
+            NEURAL_CPU_BATCH_SIZE
+        );
+        assert_eq!(
+            neural_enhance_batch_size_for(
+                Some("BERT embedding via Candle CUDA"),
+                Some(512 * MIB),
+                None,
+            ),
+            NEURAL_CPU_BATCH_SIZE
+        );
+        assert_eq!(
+            neural_enhance_batch_size_for(
+                Some("BERT embedding via Candle CUDA"),
+                Some(1536 * MIB),
+                None,
+            ),
+            NEURAL_ACCELERATOR_BATCH_SIZE / 2
+        );
+        assert_eq!(
+            neural_enhance_batch_size_for(
+                Some("BERT embedding via Candle CUDA"),
+                Some(4 * 1024 * MIB),
+                None,
+            ),
+            NEURAL_ACCELERATOR_BATCH_SIZE
+        );
+        assert_eq!(
+            neural_enhance_batch_size_for(Some("BERT embedding via Candle Metal"), None, None),
+            NEURAL_ACCELERATOR_BATCH_SIZE
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn neural_batch_size_env_override_is_bounded() {
+        unsafe { std::env::set_var("IVYGREP_NEURAL_BATCH_SIZE", "128") };
+        assert_eq!(configured_neural_batch_size(), Some(128));
+        unsafe { std::env::set_var("IVYGREP_NEURAL_BATCH_SIZE", "999999") };
+        assert_eq!(
+            configured_neural_batch_size(),
+            Some(MAX_CONFIGURED_NEURAL_BATCH_SIZE)
+        );
+        unsafe { std::env::set_var("IVYGREP_NEURAL_BATCH_SIZE", "0") };
+        assert_eq!(configured_neural_batch_size(), None);
+        unsafe { std::env::remove_var("IVYGREP_NEURAL_BATCH_SIZE") };
     }
 
     #[test]

@@ -390,6 +390,32 @@ fn transformer_pool_size(
     1 + additional_workers
 }
 
+#[cfg(feature = "neural")]
+fn configured_neural_accelerator_handles() -> Option<usize> {
+    std::env::var("IVYGREP_NEURAL_ACCELERATOR_HANDLES")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .map(|value| value.min(8))
+}
+
+#[cfg(feature = "neural")]
+fn accelerator_pool_size_for(
+    is_background: bool,
+    requested_workers: usize,
+    configured: Option<usize>,
+) -> usize {
+    if !is_background {
+        return 1;
+    }
+    let requested_workers = requested_workers.max(1);
+    let default_handles = 2.min(requested_workers);
+    configured
+        .unwrap_or(default_handles)
+        .clamp(1, 8)
+        .min(requested_workers)
+}
+
 // ── Hash-based embedding (always available) ────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -780,14 +806,29 @@ fn preferred_neural_backend() -> NeuralBackend {
 }
 
 #[cfg(feature = "neural")]
+fn configured_neural_foreground_accelerator() -> bool {
+    std::env::var("IVYGREP_NEURAL_FOREGROUND_ACCELERATOR")
+        .ok()
+        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+#[cfg(feature = "neural")]
+fn preferred_neural_backend_for(is_background: bool) -> NeuralBackend {
+    if is_background || configured_neural_foreground_accelerator() {
+        preferred_neural_backend()
+    } else {
+        NeuralBackend::cpu()
+    }
+}
+
+#[cfg(feature = "neural")]
 pub struct CandleEmbeddingModel {
     /// Pool of per-worker embedder handles. The handles share immutable model
-    /// tensors but retain independent tokenizer state. `candle_embed`'s `embed_batch`
-    /// is a sequential `for text in texts` loop of single-text, single-threaded
-    /// forward passes, so a lone handle behind a mutex uses ~1 core regardless
-    /// of the thread budget. To actually use the allotted cores we run forwards
-    /// in parallel — one embedder per worker thread, so there is no mutex
-    /// contention. Foreground (query) embedding only ever needs one.
+    /// tensors but retain independent tokenizer state. CPU background inference
+    /// uses one batched handle per worker so tokenization and forward passes can
+    /// use multiple cores without mutex contention. Foreground (query)
+    /// embedding only ever needs one.
     pool: Vec<parking_lot::Mutex<candle_embed::BasedBertEmbedder>>,
     backend: NeuralBackend,
     profile: NeuralProfile,
@@ -936,7 +977,7 @@ impl CandleEmbeddingModel {
             Ok((embedder, actual))
         };
 
-        let preferred = preferred_neural_backend();
+        let preferred = preferred_neural_backend_for(is_background);
         let (first, backend) = match build_one(preferred) {
             Ok(loaded) => loaded,
             Err(accelerator_error) if preferred.accelerator() => {
@@ -948,14 +989,16 @@ impl CandleEmbeddingModel {
             }
             Err(error) => return Err(error),
         };
-        // CPU throughput benefits from per-worker handles with shared model
-        // tensors. GPU inference remains single-handle until concurrent
-        // forwards show a measured benefit.
         let pool_size = if backend.accelerator() {
-            1
+            accelerator_pool_size_for(
+                is_background,
+                neural_threads,
+                configured_neural_accelerator_handles(),
+            )
         } else {
             cpu_pool_size
         };
+        tracing::info!("neural embedder pool uses {pool_size} handle(s)");
         let mut embedders = Vec::with_capacity(pool_size);
         embedders.push(first);
 
@@ -1006,15 +1049,10 @@ impl EmbeddingModel for CandleEmbeddingModel {
         let n = self.pool.len();
         parallel_embed(texts, n, |i, slice| {
             let embedder = &self.pool[i % n];
-            slice
-                .iter()
-                .map(|text| {
-                    embedder
-                        .lock()
-                        .embed_one(text)
-                        .unwrap_or_else(|_| vec![0.0; 384])
-                })
-                .collect()
+            embedder
+                .lock()
+                .embed_batch(slice)
+                .unwrap_or_else(|_| vec![vec![0.0; 384]; slice.len()])
         })
     }
 
@@ -1152,6 +1190,16 @@ mod tests {
             transformer_pool_size(NeuralProfile::General, 8, None, None),
             8
         );
+    }
+
+    #[cfg(feature = "neural")]
+    #[test]
+    fn accelerator_pool_is_background_only_and_bounded() {
+        assert_eq!(accelerator_pool_size_for(false, 8, None), 1);
+        assert_eq!(accelerator_pool_size_for(true, 1, None), 1);
+        assert_eq!(accelerator_pool_size_for(true, 8, None), 2);
+        assert_eq!(accelerator_pool_size_for(true, 8, Some(2)), 2);
+        assert_eq!(accelerator_pool_size_for(true, 4, Some(8)), 4);
     }
 
     #[test]
@@ -1314,6 +1362,25 @@ mod tests {
             "BERT embedding via Candle CPU"
         };
         assert_eq!(NeuralBackend::cpu().label(), expected);
+    }
+
+    #[cfg(feature = "neural")]
+    #[test]
+    #[serial]
+    fn foreground_backend_defaults_to_cpu_without_override() {
+        unsafe { std::env::remove_var("IVYGREP_NEURAL_FOREGROUND_ACCELERATOR") };
+        assert_eq!(preferred_neural_backend_for(false), NeuralBackend::cpu());
+        assert_eq!(
+            preferred_neural_backend_for(true),
+            preferred_neural_backend()
+        );
+
+        unsafe { std::env::set_var("IVYGREP_NEURAL_FOREGROUND_ACCELERATOR", "1") };
+        assert_eq!(
+            preferred_neural_backend_for(false),
+            preferred_neural_backend()
+        );
+        unsafe { std::env::remove_var("IVYGREP_NEURAL_FOREGROUND_ACCELERATOR") };
     }
 
     #[test]

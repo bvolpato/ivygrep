@@ -328,12 +328,91 @@ impl BasedBertEmbedder {
                 "CandleEmbed error: embed_batch called with empty texts",
             ));
         }
-        let mut embeddings = vec![];
-        for text in texts {
-            let embedding = self.embed_one(text)?;
-            embeddings.push(embedding);
+        if texts.iter().any(|text| text.is_empty()) {
+            return Err(Error::msg(
+                "CandleEmbed error: embed_batch called with empty text",
+            ));
         }
-        Ok(embeddings)
+
+        if !self.truncate_text_len_overflow {
+            for count in self.token_count_batch(texts)? {
+                if count > self.model_max_input {
+                    return Err(Error::msg(format!(
+                        "CandleEmbed error: Text input size of {} exceeds maximum input size of {}",
+                        count, self.model_max_input
+                    )));
+                }
+            }
+        }
+
+        if self.model.borrow().is_none() {
+            self.load_model()?;
+        }
+
+        let model = self.model.borrow();
+        let model = if let Some(model) = model.as_ref() {
+            model
+        } else {
+            panic!("Model did not load")
+        };
+
+        let device = &model.device;
+        let encodings = self.encode_texts(texts, true)?;
+        let batch_size = encodings.len();
+        let max_len = encodings
+            .iter()
+            .map(|encoding| encoding.get_ids().len())
+            .max()
+            .unwrap_or(0);
+        if max_len == 0 {
+            return Err(Error::msg(
+                "CandleEmbed error: tokenizer produced an empty batch",
+            ));
+        }
+
+        let pad_token_id = self.config.pad_token_id as u32;
+        let mut token_ids = Vec::with_capacity(batch_size * max_len);
+        let mut token_type_ids = Vec::with_capacity(batch_size * max_len);
+        let mut attention_mask = Vec::with_capacity(batch_size * max_len);
+
+        for encoding in encodings {
+            let ids = encoding.get_ids();
+            let types = encoding.get_type_ids();
+            for idx in 0..max_len {
+                if idx < ids.len() {
+                    token_ids.push(ids[idx]);
+                    token_type_ids.push(types.get(idx).copied().unwrap_or(0));
+                    attention_mask.push(1u32);
+                } else {
+                    token_ids.push(pad_token_id);
+                    token_type_ids.push(0u32);
+                    attention_mask.push(0u32);
+                }
+            }
+        }
+
+        let token_ids = Tensor::from_vec(token_ids, (batch_size, max_len), device)?;
+        let token_type_ids = Tensor::from_vec(token_type_ids, (batch_size, max_len), device)?;
+        let attention_mask = Tensor::from_vec(attention_mask, (batch_size, max_len), device)?;
+        let outputs = model.forward(&token_ids, &token_type_ids, Some(&attention_mask))?;
+
+        let embedding = if self.mean_pooling {
+            let mask = attention_mask.to_dtype(outputs.dtype())?;
+            let masked_outputs = outputs.broadcast_mul(&mask.unsqueeze(2)?)?;
+            masked_outputs
+                .sum(1)?
+                .broadcast_div(&mask.sum_keepdim(1)?)?
+        } else {
+            outputs.i((.., 0))?
+        };
+
+        let embedding = if self.normalize_embeddings {
+            embedding.broadcast_div(&embedding.sqr()?.sum_keepdim(1)?.sqrt()?)?
+        } else {
+            embedding
+        };
+
+        Ok(embedding.to_vec2::<f32>()?)
     }
 
     /// Embeds a single text using the loaded BERT model.
@@ -568,6 +647,35 @@ mod tests {
         let batch_embeddings = candle_embed.embed_batch(&texts)?;
         assert_eq!(batch_embeddings.len(), 3);
         assert_eq!(batch_embeddings[0].len(), candle_embed.model_dimensions);
+        candle_embed.unload();
+        Ok(())
+    }
+
+    #[test]
+    fn batch_embeddings_match_individual_embeddings() -> Result<()> {
+        let candle_embed = CandleEmbedBuilder::new().with_device_cpu().build()?;
+        let texts = vec![
+            "Short sentence.",
+            "This is a longer sentence that forces padding in the batched forward pass.",
+            "Medium length input for comparison.",
+        ];
+        let batch_embeddings = candle_embed.embed_batch(&texts)?;
+        let individual_embeddings = texts
+            .iter()
+            .map(|text| candle_embed.embed_one(text))
+            .collect::<Result<Vec<_>>>()?;
+
+        assert_eq!(batch_embeddings.len(), individual_embeddings.len());
+        for (batch, individual) in batch_embeddings.iter().zip(individual_embeddings.iter()) {
+            assert_eq!(batch.len(), individual.len());
+            for (batch_value, individual_value) in batch.iter().zip(individual.iter()) {
+                assert!(
+                    (batch_value - individual_value).abs() < 1e-5,
+                    "batch value {batch_value} differs from individual value {individual_value}"
+                );
+            }
+        }
+
         candle_embed.unload();
         Ok(())
     }

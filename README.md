@@ -300,6 +300,13 @@ workers. `IVYGREP_NEURAL_THREADS` sets the desired worker ceiling; ivygrep
 automatically lowers additional workers after accounting for the required
 shared model and one quarter of currently available memory. Set
 `IVYGREP_NEURAL_MEMORY_MB` to impose a smaller explicit worker-sizing budget.
+Background neural enhancement uses larger batches on CUDA/Metal when free
+accelerator memory allows it; set `IVYGREP_NEURAL_BATCH_SIZE` to override the
+batch size for local benchmarking. Accelerator builds can also set
+`IVYGREP_NEURAL_ACCELERATOR_HANDLES` to tune concurrent shared-model inference
+handles during background enhancement. Foreground query embedding stays on CPU
+by default because single-query accelerator launches are usually slower; set
+`IVYGREP_NEURAL_FOREGROUND_ACCELERATOR=1` only when benchmarking that path.
 At least one model handle is still required, so this setting is not an OS-level
 hard memory cap. Linux accounting honors the process's effective cgroup
 hierarchy, including containers.
@@ -345,7 +352,7 @@ ivygrep runs search and embedding inference locally and never sends your code, q
 
 - **Where data lives:** the index stores compressed source chunks under `~/.local/share/ivygrep` (or `$XDG_DATA_HOME`/`$IVYGREP_HOME`). Unix uses an owner-only `0600` socket plus peer-uid verification. Windows uses loopback TCP with a per-daemon authentication token stored beside the user-owned index. Keep a custom `IVYGREP_HOME` private to your account.
 - **Model download:** neural mode uses `hf-hub` to download revision-pinned model assets on first use and caches them under `$HF_HOME` or `~/.cache/huggingface`. The default is `sentence-transformers/static-retrieval-mrl-en-v1`; `IVYGREP_MODEL_PROFILE=potion-code` selects an optional code-specialized static profile, while `general`, `code`, and `code-hq` select optional transformer profiles. Cached assets work without network access. Use `--hash` or a `--no-default-features` build when model assets must never be downloaded.
-- **Inference backend:** macOS release binaries execute locally with Accelerate-backed CPU math; Linux and Windows release binaries execute locally on CPU. Source builds can opt into local Metal with `--features accelerate,metal` or CUDA with `--features cuda` on a compatible installation. The CUDA build does not require cuDNN. If `nvidia-smi` cannot report compute capability, `build.sh` and `test.sh` infer `CUDA_COMPUTE_CAP=120` for RTX 50/Blackwell hosts; set `CUDA_COMPUTE_CAP` explicitly for other affected GPUs. `ig --status` reports the recorded backend that last generated neural vectors.
+- **Inference backend:** macOS release binaries execute locally with Accelerate-backed CPU math; Linux and Windows release binaries execute locally on CPU. Source builds can opt into local Metal with `--features accelerate,metal` or CUDA with `--features cuda` on a compatible installation. Accelerator builds use Metal/CUDA for background transformer enhancement and keep foreground query embedding on CPU unless `IVYGREP_NEURAL_FOREGROUND_ACCELERATOR=1` is set for benchmarking. The CUDA build does not require cuDNN. If `nvidia-smi` cannot report compute capability, `build.sh` and `test.sh` infer `CUDA_COMPUTE_CAP=120` for RTX 50/Blackwell hosts; set `CUDA_COMPUTE_CAP` explicitly for other affected GPUs. `ig --status` reports the recorded backend that last generated neural vectors.
 - **Resource controls:** indexing refuses to start below 512 MiB available memory, background enhancement pauses below 1 GiB, and optional transformer workers share model weights plus an adaptive memory budget. These checks use native available-memory reporting on macOS and Windows and cgroup-aware reporting on Linux.
 - **Secrets in your repo:** ivygrep indexes file *contents*, including config/dotfiles (e.g. `.env`) unless they're gitignored. Those contents are stored in the local index and can appear in search snippets. Keep secrets out of the workspace or in `.gitignore`.
 - **MCP scope:** the `ig_search` MCP tool only searches the workspace at the provided `path` — it cannot search across other indexed projects.
