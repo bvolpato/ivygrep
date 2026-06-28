@@ -389,6 +389,17 @@ struct DaemonState {
     cpu_permits: Arc<tokio::sync::Semaphore>,
 }
 
+fn create_search_model() -> Arc<dyn EmbeddingModel> {
+    let model = create_model(false);
+    let started = std::time::Instant::now();
+    let is_neural = model.model_identity().is_some();
+    model.warm_for_search();
+    if is_neural {
+        tracing::trace!("daemon_model_warmup={:?}", started.elapsed());
+    }
+    Arc::from(model)
+}
+
 impl DaemonState {
     fn resolve_workspace(&self, path: &Path) -> Result<Workspace> {
         if path.is_absolute()
@@ -487,10 +498,7 @@ impl DaemonState {
             return Ok(self.get_model_or_fallback());
         }
 
-        let model = self
-            .lazy_model
-            .get_or_init(|| Arc::from(create_model(false)))
-            .clone();
+        let model = self.lazy_model.get_or_init(create_search_model).clone();
         if model.model_identity().is_none() {
             anyhow::bail!("neural search was required, but the neural model is unavailable");
         }
@@ -506,7 +514,7 @@ impl DaemonState {
         let loading = self.model_loading.clone();
         std::thread::spawn(move || {
             daemon_log("loading embedding model...");
-            lazy.get_or_init(|| Arc::from(create_model(false)));
+            lazy.get_or_init(create_search_model);
             loading.store(false, Ordering::Relaxed);
             daemon_log("embedding model ready");
         });

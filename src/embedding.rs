@@ -217,6 +217,10 @@ pub trait EmbeddingModel: Send + Sync {
         texts.iter().map(|t| self.embed(t)).collect()
     }
 
+    /// Run any backend-specific warmup needed before serving latency-sensitive
+    /// search requests.
+    fn warm_for_search(&self) {}
+
     /// Human-readable backend used to create persisted neural vectors.
     fn backend_info(&self) -> Option<&'static str> {
         None
@@ -541,6 +545,10 @@ impl EmbeddingModel for ConfiguredNeuralModel {
             Self::Static(model) => model.embed_batch(texts),
             Self::Candle(model) => model.embed_batch(texts),
         }
+    }
+
+    fn warm_for_search(&self) {
+        let _ = self.embed("semantic search warmup");
     }
 
     fn backend_info(&self) -> Option<&'static str> {
