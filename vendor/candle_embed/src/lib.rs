@@ -531,26 +531,24 @@ impl BasedBertEmbedder {
         } else {
             panic!("Tokenizer did not load")
         };
-        let tokenizer = if with_trunc_settings && self.truncate_text_len_overflow {
+        if with_trunc_settings && self.truncate_text_len_overflow {
             tokenizer
                 .with_padding(None)
                 .with_truncation(Some(tokenizers::TruncationParams {
                     max_length: self.model_max_input,
                     ..Default::default()
                 }))
-                .map_err(anyhow::Error::msg)?
-                .clone()
+                .map_err(anyhow::Error::msg)?;
         } else {
             tokenizer
                 .with_padding(None)
                 .with_truncation(None)
-                .map_err(anyhow::Error::msg)?
-                .clone()
-        };
+                .map_err(anyhow::Error::msg)?;
+        }
         let encoding: tokenizers::Encoding = tokenizer.encode(text, true).map_err(Error::msg)?;
         Ok(encoding)
     }
-    /// Encodes a batch of texts using the loaded tokenizer. Used for the tokenizer functions and for pre-checking the input size. It is not used to generate embeddings.
+    /// Encodes a batch of texts using the loaded tokenizer.
     ///
     fn encode_texts(&self, texts: &[&str], with_trunc_settings: bool) -> Result<Vec<Encoding>> {
         if texts.iter().any(|text| text.is_empty()) {
@@ -567,22 +565,20 @@ impl BasedBertEmbedder {
         } else {
             panic!("Tokenizer did not load")
         };
-        let tokenizer = if with_trunc_settings && self.truncate_text_len_overflow {
+        if with_trunc_settings && self.truncate_text_len_overflow {
             tokenizer
                 .with_padding(None)
                 .with_truncation(Some(tokenizers::TruncationParams {
                     max_length: self.model_max_input,
                     ..Default::default()
                 }))
-                .map_err(anyhow::Error::msg)?
-                .clone()
+                .map_err(anyhow::Error::msg)?;
         } else {
             tokenizer
                 .with_padding(None)
                 .with_truncation(None)
-                .map_err(anyhow::Error::msg)?
-                .clone()
-        };
+                .map_err(anyhow::Error::msg)?;
+        }
         let encodings: Vec<tokenizers::Encoding> = tokenizer
             .encode_batch(texts.to_vec(), true)
             .map_err(Error::msg)?;
