@@ -27,8 +27,8 @@ use crate::protocol::{
 };
 use crate::regex_search::regex_search;
 use crate::search::{
-    SearchContext, SearchOptions, hybrid_search_with_context, literal_search_with_context,
-    workspace_neural_model_identity,
+    SearchContext, SearchOptions, hybrid_search_with_context_and_neural_job,
+    literal_search_with_context, workspace_neural_model_identity,
 };
 use crate::workspace::{Workspace, WorkspaceScope, list_workspaces};
 
@@ -1091,6 +1091,18 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     return (cached_hits, all_errors);
                 }
 
+                let mut neural_query_vector_job = if workspaces.len() == 1
+                    && model.model_identity().is_some()
+                    && model.backend_info().is_some_and(|backend| {
+                        backend.contains("Candle CUDA") || backend.contains("Candle Metal")
+                    }) {
+                    let model = model.clone();
+                    let query = query.clone();
+                    Some(std::thread::spawn(move || model.embed(&query)))
+                } else {
+                    None
+                };
+
                 for (workspace, signature) in workspaces.iter().zip(workspace_signatures) {
                     let context = match state_clone.cached_search_context_for_signature(
                         workspace,
@@ -1109,12 +1121,13 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                         }
                     };
                     tracing::trace!("daemon_search_context={:?}", task_started.elapsed());
-                    match hybrid_search_with_context(
+                    match hybrid_search_with_context_and_neural_job(
                         &context,
                         workspace,
                         &query,
                         Some(model.as_ref()),
                         &options,
+                        neural_query_vector_job.take(),
                     ) {
                         Ok(mut hits) => {
                             if all_indices {

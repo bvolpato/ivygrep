@@ -997,6 +997,24 @@ pub fn hybrid_search_with_context(
     embedding_model: Option<&dyn EmbeddingModel>,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
+    hybrid_search_with_context_and_neural_job(
+        ctx,
+        workspace,
+        query_text,
+        embedding_model,
+        options,
+        None,
+    )
+}
+
+pub(crate) fn hybrid_search_with_context_and_neural_job(
+    ctx: &SearchContext,
+    workspace: &Workspace,
+    query_text: &str,
+    embedding_model: Option<&dyn EmbeddingModel>,
+    options: &SearchOptions,
+    mut neural_query_vector_job: Option<std::thread::JoinHandle<Vec<f32>>>,
+) -> Result<Vec<SearchHit>> {
     let query_text = query_text.trim();
     // An empty/whitespace query has no lexical or literal terms; without this
     // guard the semantic pass would still embed "" and return arbitrary
@@ -1537,7 +1555,8 @@ pub fn hybrid_search_with_context(
             let mut sources = Vec::with_capacity(2);
             let neural_matches = if let Some(model) = neural_model {
                 neural_executed = true;
-                let neural_query_vector = model.embed(query_text);
+                let neural_query_vector =
+                    neural_query_vector(model, query_text, &mut neural_query_vector_job);
                 tracing::trace!("semantic_neural_embed={:?}", semantic_started.elapsed());
                 let matches = collect_semantic_vector_matches(
                     &neural_query_vector,
@@ -1595,7 +1614,8 @@ pub fn hybrid_search_with_context(
 
             if let Some(model) = neural_model {
                 neural_executed = true;
-                let neural_query_vector = model.embed(query_text);
+                let neural_query_vector =
+                    neural_query_vector(model, query_text, &mut neural_query_vector_job);
                 let neural_hits = collect_semantic_candidates(
                     ctx,
                     &path_matcher,
@@ -3094,6 +3114,23 @@ fn collect_semantic_vector_matches(
     matches.retain(|vector_match| seen_keys.insert(vector_match.key));
     matches.truncate(candidate_limit);
     matches
+}
+
+fn neural_query_vector(
+    model: &dyn EmbeddingModel,
+    query_text: &str,
+    job: &mut Option<std::thread::JoinHandle<Vec<f32>>>,
+) -> Vec<f32> {
+    if let Some(job) = job.take() {
+        match job.join() {
+            Ok(vector) if vector.len() == model.dimensions() => return vector,
+            Ok(_) => {
+                tracing::warn!("discarding precomputed neural query vector with wrong dimensions")
+            }
+            Err(_) => tracing::warn!("precomputed neural query vector task panicked"),
+        }
+    }
+    model.embed(query_text)
 }
 
 fn collect_unfiltered_semantic_candidates(
@@ -4853,6 +4890,7 @@ pub fn workspace_has_results(workspace: &Workspace) -> Result<bool> {
 mod tests {
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use serial_test::serial;
 
@@ -4975,6 +5013,55 @@ mod tests {
         assert!(!FusionQuery::new("how routes are stored and matched").compact_candidate_text);
         assert!(PresentationQuery::new("apply filters").compact_matching);
         assert!(!PresentationQuery::new("how routes are stored and matched").compact_matching);
+    }
+
+    struct CountingEmbeddingModel {
+        dimensions: usize,
+        calls: AtomicUsize,
+    }
+
+    impl CountingEmbeddingModel {
+        fn new(dimensions: usize) -> Self {
+            Self {
+                dimensions,
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl EmbeddingModel for CountingEmbeddingModel {
+        fn dimensions(&self) -> usize {
+            self.dimensions
+        }
+
+        fn embed(&self, _text: &str) -> Vec<f32> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            vec![1.0; self.dimensions]
+        }
+    }
+
+    #[test]
+    fn neural_query_vector_uses_precomputed_job() {
+        let model = CountingEmbeddingModel::new(3);
+        let mut job = Some(std::thread::spawn(|| vec![0.25, 0.5, 0.75]));
+
+        let vector = neural_query_vector(&model, "ignored", &mut job);
+
+        assert_eq!(vector, vec![0.25, 0.5, 0.75]);
+        assert_eq!(model.calls.load(Ordering::Relaxed), 0);
+        assert!(job.is_none());
+    }
+
+    #[test]
+    fn neural_query_vector_falls_back_on_wrong_dimensions() {
+        let model = CountingEmbeddingModel::new(3);
+        let mut job = Some(std::thread::spawn(|| vec![0.25, 0.5]));
+
+        let vector = neural_query_vector(&model, "fallback", &mut job);
+
+        assert_eq!(vector, vec![1.0, 1.0, 1.0]);
+        assert_eq!(model.calls.load(Ordering::Relaxed), 1);
+        assert!(job.is_none());
     }
 
     struct TestEmbeddingModel384;
