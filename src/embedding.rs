@@ -814,11 +814,20 @@ fn preferred_neural_backend() -> NeuralBackend {
 }
 
 #[cfg(feature = "neural")]
+fn foreground_accelerator_setting(value: Option<&str>) -> bool {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("0" | "false" | "no" | "off" | "cpu") => false,
+        _ => true,
+    }
+}
+
+#[cfg(feature = "neural")]
 fn configured_neural_foreground_accelerator() -> bool {
-    std::env::var("IVYGREP_NEURAL_FOREGROUND_ACCELERATOR")
-        .ok()
-        .map(|value| matches!(value.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
-        .unwrap_or(false)
+    foreground_accelerator_setting(
+        std::env::var("IVYGREP_NEURAL_FOREGROUND_ACCELERATOR")
+            .ok()
+            .as_deref(),
+    )
 }
 
 #[cfg(feature = "neural")]
@@ -1375,20 +1384,29 @@ mod tests {
     #[cfg(feature = "neural")]
     #[test]
     #[serial]
-    fn foreground_backend_defaults_to_cpu_without_override() {
+    fn foreground_backend_uses_preferred_backend_with_cpu_opt_out() {
         unsafe { std::env::remove_var("IVYGREP_NEURAL_FOREGROUND_ACCELERATOR") };
-        assert_eq!(preferred_neural_backend_for(false), NeuralBackend::cpu());
-        assert_eq!(
-            preferred_neural_backend_for(true),
-            preferred_neural_backend()
-        );
+        let preferred = preferred_neural_backend();
+        assert_eq!(preferred_neural_backend_for(false), preferred);
+        assert_eq!(preferred_neural_backend_for(true), preferred);
 
         unsafe { std::env::set_var("IVYGREP_NEURAL_FOREGROUND_ACCELERATOR", "1") };
-        assert_eq!(
-            preferred_neural_backend_for(false),
-            preferred_neural_backend()
-        );
+        assert_eq!(preferred_neural_backend_for(false), preferred);
+        unsafe { std::env::set_var("IVYGREP_NEURAL_FOREGROUND_ACCELERATOR", "0") };
+        assert_eq!(preferred_neural_backend_for(false), NeuralBackend::cpu());
         unsafe { std::env::remove_var("IVYGREP_NEURAL_FOREGROUND_ACCELERATOR") };
+    }
+
+    #[cfg(feature = "neural")]
+    #[test]
+    fn foreground_accelerator_setting_defaults_to_auto_with_cpu_opt_out() {
+        assert!(foreground_accelerator_setting(None));
+        assert!(foreground_accelerator_setting(Some("1")));
+        assert!(foreground_accelerator_setting(Some("true")));
+        assert!(foreground_accelerator_setting(Some("auto")));
+        assert!(!foreground_accelerator_setting(Some("0")));
+        assert!(!foreground_accelerator_setting(Some("false")));
+        assert!(!foreground_accelerator_setting(Some("cpu")));
     }
 
     #[test]
