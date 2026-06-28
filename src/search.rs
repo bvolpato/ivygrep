@@ -1572,9 +1572,9 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
 
             let skip_hash = neural_available
                 && neural_vector_count >= hash_vector_count
-                && neural_matches.as_ref().is_some_and(|matches| {
-                    neural_direct_overlap_allows_hash_skip(matches, &direct_ids)
-                });
+                && neural_matches
+                    .as_ref()
+                    .is_some_and(|matches| neural_coverage_allows_hash_skip(matches, &direct_ids));
 
             if has_hash_vectors && !skip_hash {
                 let hash_query_vector = embed_hash_query(trimmed);
@@ -1798,6 +1798,17 @@ fn neural_direct_overlap_allows_hash_skip(
         .filter(|vector_match| direct_ids.contains(&vector_match.key))
         .count()
         >= MIN_DIRECT_OVERLAP
+}
+
+fn neural_coverage_allows_hash_skip(
+    neural_matches: &[VectorMatch],
+    direct_ids: &HashSet<u64>,
+) -> bool {
+    const MIN_DIRECT_EVIDENCE: usize = 10;
+    const MIN_NEURAL_EVIDENCE: usize = 10;
+
+    neural_direct_overlap_allows_hash_skip(neural_matches, direct_ids)
+        || (direct_ids.len() >= MIN_DIRECT_EVIDENCE && neural_matches.len() >= MIN_NEURAL_EVIDENCE)
 }
 
 fn to_hit(
@@ -5000,6 +5011,31 @@ mod tests {
         let direct_ids = (1..=9).collect::<HashSet<_>>();
         assert!(!neural_direct_overlap_allows_hash_skip(
             &matches,
+            &direct_ids
+        ));
+    }
+
+    #[test]
+    fn hash_skip_allows_complete_neural_coverage_with_direct_evidence() {
+        let direct_ids = (1..=10).collect::<HashSet<_>>();
+        let matches = (101..=110)
+            .map(|key| VectorMatch {
+                key,
+                score: key as f32,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(neural_coverage_allows_hash_skip(&matches, &direct_ids));
+
+        let sparse_direct_ids = (1..=9).collect::<HashSet<_>>();
+        assert!(!neural_coverage_allows_hash_skip(
+            &matches,
+            &sparse_direct_ids
+        ));
+
+        let sparse_matches = matches[..9].to_vec();
+        assert!(!neural_coverage_allows_hash_skip(
+            &sparse_matches,
             &direct_ids
         ));
     }
