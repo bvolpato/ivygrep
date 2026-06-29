@@ -4,6 +4,14 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.12.15] - 2026-06-29
+
+### Performance
+- **Indexing avoids per-chunk random UUID syscalls.** Transient chunk IDs now reuse the existing stable 128-bit chunk digest instead of calling `Uuid::new_v4()` for every chunk. A 101k-chunk strace dropped `getrandom` calls from `101,092` to `90`, and the generated 505k-chunk profile improved median fresh-index time from `4103.9 ms` to `3949.6 ms` while preserving recall@20 and MRR@20 at `1.0`.
+
+### Fixed
+- **Linux Clippy can validate portable accelerator feature flags.** macOS Metal/Accelerate Candle dependencies are isolated to macOS targets, so Linux CI can lint `--features accelerate,metal` without pulling Apple frameworks or requiring CUDA `nvcc`.
+
 ## [0.12.14] - 2026-06-29
 
 ### Performance
