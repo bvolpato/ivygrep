@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, Statement, params};
 
 use crate::indexer::{
     IndexedChunk, decompress_text, open_sqlite_readonly, reconcile_worktree_overlay,
@@ -32,6 +32,17 @@ pub fn index_chunk_definition(
              ) VALUES (?1, ?2)",
         )?
         .execute(params![normalize_symbol(&name), chunk_key])?;
+    }
+    Ok(())
+}
+
+pub(crate) fn index_chunk_definition_with_statement(
+    stmt: &mut Statement<'_>,
+    chunk: &IndexedChunk,
+    chunk_key: i64,
+) -> Result<()> {
+    for name in definition_names(chunk) {
+        stmt.execute(params![normalize_symbol(&name), chunk_key])?;
     }
     Ok(())
 }

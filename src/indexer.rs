@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use rayon::prelude::*;
-use rusqlite::{Connection, params, params_from_iter};
+use rusqlite::{Connection, Statement, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 
 use tantivy::directory::error::{DeleteError, LockError, OpenReadError, OpenWriteError};
@@ -432,12 +432,20 @@ fn remove_workspace_index_contents(workspace: &Workspace) -> Result<()> {
 }
 
 pub fn open_storage(workspace: &Workspace, embedding_dimensions: usize) -> Result<StorageHandles> {
+    open_storage_with_options(workspace, embedding_dimensions, true)
+}
+
+fn open_storage_with_options(
+    workspace: &Workspace,
+    embedding_dimensions: usize,
+    create_secondary_indexes: bool,
+) -> Result<StorageHandles> {
     workspace.ensure_dirs()?;
     fs::create_dir_all(workspace.tantivy_dir())?;
 
     let sqlite_path = workspace.sqlite_path();
     let conn = Connection::open(&sqlite_path)?;
-    create_tables(&conn)?;
+    create_tables_with_options(&conn, create_secondary_indexes)?;
     drop(conn);
 
     let tantivy_dir = workspace.tantivy_dir();
@@ -1085,20 +1093,27 @@ fn index_workspace_inner(
         )
     };
 
+    let defer_secondary_indexes = !use_overlay && !workspace_is_indexed(workspace);
+
     if !use_overlay {
         let preserved_metadata = workspace.read_metadata().ok().flatten();
-        if let Err(err) = open_storage(workspace, crate::EMBEDDING_DIMENSIONS) {
+        if let Err(err) = open_storage_with_options(
+            workspace,
+            crate::EMBEDDING_DIMENSIONS,
+            !defer_secondary_indexes,
+        ) {
             tracing::warn!(
                 "storage verification failed for {}: {err:#}; rebuilding index storage",
                 workspace.root.display()
             );
             rebuild_index_storage(workspace, preserved_metadata.as_ref())?;
-            let _ = open_storage(workspace, crate::EMBEDDING_DIMENSIONS).with_context(|| {
-                format!(
-                    "failed to reopen index storage after rebuild for {}",
-                    workspace.root.display()
-                )
-            })?;
+            let _ = open_storage_with_options(workspace, crate::EMBEDDING_DIMENSIONS, false)
+                .with_context(|| {
+                    format!(
+                        "failed to reopen index storage after rebuild for {}",
+                        workspace.root.display()
+                    )
+                })?;
         }
     }
 
@@ -1110,7 +1125,7 @@ fn index_workspace_inner(
          PRAGMA cache_size = -16000;
          PRAGMA temp_store = MEMORY;",
     )?;
-    create_tables(&sqlite)?;
+    create_tables_with_options(&sqlite, !defer_secondary_indexes)?;
     if use_overlay {
         create_overlay_tables(&sqlite)?;
     }
@@ -1342,6 +1357,8 @@ fn index_workspace_inner(
         };
     }
 
+    let mut persist_statements = persist_or_stop!(PersistStatements::prepare(&tx));
+
     while let Some(file_chunks) = producer.recv() {
         // Persist lexical metadata first. Hash ANN construction is intentionally
         // deferred to background enhancement: on multi-million chunk repos the
@@ -1367,12 +1384,10 @@ fn index_workspace_inner(
             }
 
             for included_path in &indexed_file.included_paths {
-                persist_or_stop!(tx.execute(
-                    "INSERT OR IGNORE INTO included_file_dependencies (
-                        owner_path, included_path
-                    ) VALUES (?1, ?2)",
-                    params![rel_path_string, index_path_string(included_path)],
-                ));
+                let included_path = index_path_string(included_path);
+                persist_or_stop!(
+                    persist_statements.insert_dependency(&rel_path_string, &included_path)
+                );
             }
 
             // Batch the timestamp syscall per file, not per chunk.
@@ -1385,6 +1400,7 @@ fn index_workspace_inner(
                 let indexed = &prepared.chunk;
                 persist_or_stop!(insert_chunk(
                     &tx,
+                    &mut persist_statements,
                     indexed,
                     &prepared.compressed_text,
                     &rel_path_string,
@@ -1403,11 +1419,13 @@ fn index_workspace_inner(
         // Fresh indexes publish Tantivy once at the end: committing every
         // SQLite batch forces repeated segment merges and multiplies disk I/O.
         if chunks_since_commit >= 25_000 {
+            drop(persist_statements);
             persist_or_stop!(tx.commit());
             if !is_fresh_index {
                 persist_or_stop!(writer.commit());
             }
             tx = persist_or_stop!(sqlite.transaction());
+            persist_statements = persist_or_stop!(PersistStatements::prepare(&tx));
             chunks_since_commit = 0;
         }
     }
@@ -1426,6 +1444,10 @@ fn index_workspace_inner(
         );
     }
 
+    drop(persist_statements);
+    if defer_secondary_indexes {
+        create_secondary_indexes(&tx)?;
+    }
     finalize_graph_indexes(&tx)?;
 
     // Update cached stats before committing so status reads are O(1).
@@ -2631,26 +2653,14 @@ fn add_chunk_doc(
 
 fn insert_chunk(
     conn: &Connection,
+    statements: &mut PersistStatements<'_>,
     chunk: &IndexedChunk,
     compressed_text: &[u8],
     file_path: &str,
     now_unix: i64,
 ) -> Result<()> {
-    let mut stmt = conn.prepare_cached(
-        "INSERT INTO chunks (
-            file_path,
-            start_line,
-            end_line,
-            language,
-            kind,
-            text,
-            vector_key,
-            modified_unix,
-            is_ignored
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-    )?;
     let is_ignored_int = if chunk.is_ignored { 1i64 } else { 0i64 };
-    stmt.execute(params![
+    statements.chunk_insert.execute(params![
         file_path,
         chunk.start_line as i64,
         chunk.end_line as i64,
@@ -2661,8 +2671,54 @@ fn insert_chunk(
         now_unix,
         is_ignored_int,
     ])?;
-    crate::symbols::index_chunk_definition(conn, chunk, conn.last_insert_rowid())?;
+    crate::symbols::index_chunk_definition_with_statement(
+        &mut statements.symbol_insert,
+        chunk,
+        conn.last_insert_rowid(),
+    )?;
     Ok(())
+}
+
+struct PersistStatements<'conn> {
+    chunk_insert: Statement<'conn>,
+    symbol_insert: Statement<'conn>,
+    dependency_insert: Statement<'conn>,
+}
+
+impl<'conn> PersistStatements<'conn> {
+    fn prepare(conn: &'conn Connection) -> Result<Self> {
+        Ok(Self {
+            chunk_insert: conn.prepare(
+                "INSERT INTO chunks (
+                    file_path,
+                    start_line,
+                    end_line,
+                    language,
+                    kind,
+                    text,
+                    vector_key,
+                    modified_unix,
+                    is_ignored
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            )?,
+            symbol_insert: conn.prepare(
+                "INSERT OR REPLACE INTO symbols (
+                    normalized_name, chunk_key
+                 ) VALUES (?1, ?2)",
+            )?,
+            dependency_insert: conn.prepare(
+                "INSERT OR IGNORE INTO included_file_dependencies (
+                    owner_path, included_path
+                ) VALUES (?1, ?2)",
+            )?,
+        })
+    }
+
+    fn insert_dependency(&mut self, owner_path: &str, included_path: &str) -> Result<()> {
+        self.dependency_insert
+            .execute(params![owner_path, included_path])?;
+        Ok(())
+    }
 }
 
 fn chunk_vector_keys_for_file(conn: &Connection, rel_path: &str) -> Result<Vec<u64>> {
@@ -2723,6 +2779,10 @@ pub fn open_sqlite_readonly(sqlite_path: &Path) -> Result<Connection> {
 }
 
 fn create_tables(conn: &Connection) -> Result<()> {
+    create_tables_with_options(conn, true)
+}
+
+fn create_tables_with_options(conn: &Connection, create_indexes: bool) -> Result<()> {
     conn.execute_batch(
         r#"
         PRAGMA journal_mode = WAL;
@@ -2758,13 +2818,11 @@ fn create_tables(conn: &Connection) -> Result<()> {
             PRIMARY KEY (owner_path, included_path)
         ) WITHOUT ROWID;
 
-        CREATE INDEX IF NOT EXISTS idx_chunks_file_path ON chunks(file_path);
-        CREATE INDEX IF NOT EXISTS idx_chunks_vector_key ON chunks(vector_key);
-        CREATE INDEX IF NOT EXISTS idx_chunks_language ON chunks(language);
-        CREATE INDEX IF NOT EXISTS idx_included_file_dependencies_path
-            ON included_file_dependencies(included_path);
         "#,
     )?;
+    if create_indexes {
+        create_secondary_indexes(conn)?;
+    }
 
     // Migration: Add is_ignored column to older tables
     let _ = conn.execute(
@@ -2805,6 +2863,19 @@ fn create_tables(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    Ok(())
+}
+
+fn create_secondary_indexes(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_chunks_file_path ON chunks(file_path);
+        CREATE INDEX IF NOT EXISTS idx_chunks_vector_key ON chunks(vector_key);
+        CREATE INDEX IF NOT EXISTS idx_chunks_language ON chunks(language);
+        CREATE INDEX IF NOT EXISTS idx_included_file_dependencies_path
+            ON included_file_dependencies(included_path);
+        "#,
+    )?;
     Ok(())
 }
 
@@ -3214,6 +3285,33 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn create_tables_can_defer_secondary_indexes() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_tables_with_options(&conn, false).unwrap();
+
+        let count_indexes = |conn: &Connection| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index'
+                   AND name IN (
+                     'idx_chunks_file_path',
+                     'idx_chunks_vector_key',
+                     'idx_chunks_language',
+                     'idx_included_file_dependencies_path'
+                   )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(count_indexes(&conn), 0);
+
+        create_secondary_indexes(&conn).unwrap();
+
+        assert_eq!(count_indexes(&conn), 4);
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
