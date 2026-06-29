@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use rusqlite::{Connection, Statement, params};
+use rusqlite::{Connection, params};
 
 use crate::indexer::{
     IndexedChunk, decompress_text, open_sqlite_readonly, reconcile_worktree_overlay,
@@ -25,26 +25,27 @@ pub fn index_chunk_definition(
     chunk: &IndexedChunk,
     chunk_key: i64,
 ) -> Result<()> {
-    for name in definition_names(chunk) {
-        conn.prepare_cached(
-            "INSERT OR REPLACE INTO symbols (
-                normalized_name, chunk_key
-             ) VALUES (?1, ?2)",
-        )?
-        .execute(params![normalize_symbol(&name), chunk_key])?;
+    let mut rows = Vec::new();
+    append_chunk_definition_rows(chunk, chunk_key, &mut rows);
+    let mut stmt = conn.prepare_cached(
+        "INSERT OR REPLACE INTO symbols (
+            normalized_name, chunk_key
+         ) VALUES (?1, ?2)",
+    )?;
+    for (normalized_name, chunk_key) in rows {
+        stmt.execute(params![normalized_name, chunk_key])?;
     }
     Ok(())
 }
 
-pub(crate) fn index_chunk_definition_with_statement(
-    stmt: &mut Statement<'_>,
+pub(crate) fn append_chunk_definition_rows(
     chunk: &IndexedChunk,
     chunk_key: i64,
-) -> Result<()> {
+    rows: &mut Vec<(String, i64)>,
+) {
     for name in definition_names(chunk) {
-        stmt.execute(params![normalize_symbol(&name), chunk_key])?;
+        rows.push((normalize_symbol(&name), chunk_key));
     }
-    Ok(())
 }
 
 pub fn remove_file_graph(conn: &Connection, file_path: &str) -> Result<()> {

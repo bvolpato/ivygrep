@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use rayon::prelude::*;
-use rusqlite::{Connection, Statement, params, params_from_iter};
+use rusqlite::{Connection, Statement, ToSql, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 
 use tantivy::directory::error::{DeleteError, LockError, OpenReadError, OpenWriteError};
@@ -60,6 +60,7 @@ const NEURAL_CUDA_BUSY_UTILIZATION_PERCENT: u32 = 35;
 const NEURAL_CUDA_ACTIVE_UTILIZATION_PERCENT: u32 = 25;
 const NEURAL_BATCH_SIZE_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CONFIGURED_NEURAL_BATCH_SIZE: usize = 4096;
+const SYMBOL_INSERT_BATCH_ROWS: usize = 256;
 
 thread_local! {
     static TEXT_COMPRESSOR: RefCell<Option<zstd::bulk::Compressor<'static>>> =
@@ -397,6 +398,72 @@ pub struct StorageHandles {
     pub vector_path: PathBuf,
 }
 
+struct FreshIndexStaging {
+    dir: PathBuf,
+    sqlite_path: PathBuf,
+    tantivy_dir: PathBuf,
+    vector_path: PathBuf,
+    active: bool,
+}
+
+impl FreshIndexStaging {
+    fn create(workspace: &Workspace) -> Result<Self> {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = workspace.index_dir.join(format!(
+            ".fresh-index-staging-{}-{unique}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir)?;
+        Ok(Self {
+            sqlite_path: dir.join("metadata.sqlite3"),
+            tantivy_dir: dir.join("tantivy"),
+            vector_path: dir.join("vectors.usearch"),
+            dir,
+            active: true,
+        })
+    }
+
+    fn promote(mut self, workspace: &Workspace) -> Result<()> {
+        remove_main_store_artifacts(workspace)?;
+        fs::rename(&self.sqlite_path, workspace.sqlite_path()).with_context(|| {
+            format!(
+                "failed to promote SQLite index {} -> {}",
+                self.sqlite_path.display(),
+                workspace.sqlite_path().display()
+            )
+        })?;
+        fs::rename(&self.tantivy_dir, workspace.tantivy_dir()).with_context(|| {
+            format!(
+                "failed to promote Tantivy index {} -> {}",
+                self.tantivy_dir.display(),
+                workspace.tantivy_dir().display()
+            )
+        })?;
+        fs::rename(&self.vector_path, workspace.vector_path()).with_context(|| {
+            format!(
+                "failed to promote vector store {} -> {}",
+                self.vector_path.display(),
+                workspace.vector_path().display()
+            )
+        })?;
+        self.active = false;
+        let _ = fs::remove_dir_all(&self.dir);
+        Ok(())
+    }
+}
+
+impl Drop for FreshIndexStaging {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+}
+
 pub fn workspace_is_indexed(workspace: &Workspace) -> bool {
     workspace.quick_index_health().is_queryable()
 }
@@ -427,6 +494,36 @@ fn remove_workspace_index_contents(workspace: &Workspace) -> Result<()> {
         } else {
             fs::remove_file(&path)?;
         }
+    }
+    Ok(())
+}
+
+fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut sidecar = path.as_os_str().to_owned();
+    sidecar.push(suffix);
+    PathBuf::from(sidecar)
+}
+
+fn remove_path_if_exists(path: &Path) -> Result<()> {
+    if path.is_dir() {
+        fs::remove_dir_all(path)?;
+    } else if path.exists() {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+fn remove_main_store_artifacts(workspace: &Workspace) -> Result<()> {
+    let sqlite_path = workspace.sqlite_path();
+    for path in [
+        sqlite_path.clone(),
+        sqlite_sidecar_path(&sqlite_path, "-wal"),
+        sqlite_sidecar_path(&sqlite_path, "-shm"),
+        workspace.tantivy_dir(),
+        workspace.vector_path(),
+        workspace.vector_path().with_extension("usearch.bak"),
+    ] {
+        remove_path_if_exists(&path)?;
     }
     Ok(())
 }
@@ -1079,7 +1176,19 @@ fn index_workspace_inner(
 
     // Determine which stores to write to: overlay or main
     let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
-    let (sqlite_path, tantivy_path, vector_path) = if use_overlay {
+    let is_fresh_index = !workspace_is_indexed(workspace);
+    let fresh_staging = if !use_overlay && is_fresh_index {
+        Some(FreshIndexStaging::create(workspace)?)
+    } else {
+        None
+    };
+    let (sqlite_path, tantivy_path, vector_path) = if let Some(staging) = &fresh_staging {
+        (
+            staging.sqlite_path.clone(),
+            staging.tantivy_dir.clone(),
+            staging.vector_path.clone(),
+        )
+    } else if use_overlay {
         (
             workspace.overlay_sqlite_path(),
             workspace.overlay_tantivy_dir(),
@@ -1093,9 +1202,9 @@ fn index_workspace_inner(
         )
     };
 
-    let defer_secondary_indexes = !use_overlay && !workspace_is_indexed(workspace);
+    let defer_secondary_indexes = !use_overlay && is_fresh_index;
 
-    if !use_overlay {
+    if !use_overlay && fresh_staging.is_none() {
         let preserved_metadata = workspace.read_metadata().ok().flatten();
         if let Err(err) = open_storage_with_options(
             workspace,
@@ -1118,14 +1227,12 @@ fn index_workspace_inner(
     }
 
     let mut sqlite = Connection::open(&sqlite_path)?;
-    // WAL mode + larger cache for bulk-write throughput on initial index.
-    sqlite.execute_batch(
-        "PRAGMA journal_mode = WAL;
-         PRAGMA synchronous = NORMAL;
-         PRAGMA cache_size = -16000;
-         PRAGMA temp_store = MEMORY;",
-    )?;
-    create_tables_with_options(&sqlite, !defer_secondary_indexes)?;
+    if fresh_staging.is_some() {
+        apply_fresh_staging_pragmas(&sqlite)?;
+    } else {
+        apply_bulk_write_pragmas(&sqlite)?;
+    }
+    create_tables_schema(&sqlite, !defer_secondary_indexes)?;
     if use_overlay {
         create_overlay_tables(&sqlite)?;
     }
@@ -1236,11 +1343,6 @@ fn index_workspace_inner(
     let mut total_chunks_processed = 0;
     let mut touched_files = HashSet::new();
     let mut chunks_since_commit = 0;
-
-    // On a fresh (empty) index, skip per-file remove_file_chunks entirely —
-    // there's nothing to delete, and the SELECT + DELETE per file is pure overhead
-    // on large initial indexes (~93K files in linux kernel).
-    let is_fresh_index = !workspace_is_indexed(workspace);
 
     // Stream through batches to rigidly bound memory footprints.
     // 4096 files is highly parallelizable while capping memory overhead effectively.
@@ -1399,7 +1501,6 @@ fn index_workspace_inner(
             for prepared in indexed_chunks {
                 let indexed = &prepared.chunk;
                 persist_or_stop!(insert_chunk(
-                    &tx,
                     &mut persist_statements,
                     indexed,
                     &prepared.compressed_text,
@@ -1419,6 +1520,7 @@ fn index_workspace_inner(
         // Fresh indexes publish Tantivy once at the end: committing every
         // SQLite batch forces repeated segment merges and multiplies disk I/O.
         if chunks_since_commit >= 25_000 {
+            persist_or_stop!(persist_statements.flush_symbols());
             drop(persist_statements);
             persist_or_stop!(tx.commit());
             if !is_fresh_index {
@@ -1444,6 +1546,7 @@ fn index_workspace_inner(
         );
     }
 
+    persist_statements.flush_symbols()?;
     drop(persist_statements);
     if defer_secondary_indexes {
         create_secondary_indexes(&tx)?;
@@ -1481,6 +1584,16 @@ fn index_workspace_inner(
 
     writer.commit()?;
     writer.wait_merging_threads()?;
+    if fresh_staging.is_some() {
+        apply_default_write_pragmas(&sqlite)?;
+        sqlite.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+    }
+    drop(tantivy);
+    drop(sqlite);
+
+    if let Some(staging) = fresh_staging {
+        staging.promote(workspace)?;
+    }
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2652,7 +2765,6 @@ fn add_chunk_doc(
 }
 
 fn insert_chunk(
-    conn: &Connection,
     statements: &mut PersistStatements<'_>,
     chunk: &IndexedChunk,
     compressed_text: &[u8],
@@ -2671,23 +2783,22 @@ fn insert_chunk(
         now_unix,
         is_ignored_int,
     ])?;
-    crate::symbols::index_chunk_definition_with_statement(
-        &mut statements.symbol_insert,
-        chunk,
-        conn.last_insert_rowid(),
-    )?;
+    statements.queue_symbols(chunk, statements.conn.last_insert_rowid())?;
     Ok(())
 }
 
 struct PersistStatements<'conn> {
+    conn: &'conn Connection,
     chunk_insert: Statement<'conn>,
-    symbol_insert: Statement<'conn>,
     dependency_insert: Statement<'conn>,
+    symbol_rows: Vec<(String, i64)>,
+    symbol_insert_sql: String,
 }
 
 impl<'conn> PersistStatements<'conn> {
     fn prepare(conn: &'conn Connection) -> Result<Self> {
         Ok(Self {
+            conn,
             chunk_insert: conn.prepare(
                 "INSERT INTO chunks (
                     file_path,
@@ -2701,22 +2812,57 @@ impl<'conn> PersistStatements<'conn> {
                     is_ignored
                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?,
-            symbol_insert: conn.prepare(
-                "INSERT OR REPLACE INTO symbols (
-                    normalized_name, chunk_key
-                 ) VALUES (?1, ?2)",
-            )?,
             dependency_insert: conn.prepare(
                 "INSERT OR IGNORE INTO included_file_dependencies (
                     owner_path, included_path
                 ) VALUES (?1, ?2)",
             )?,
+            symbol_rows: Vec::with_capacity(SYMBOL_INSERT_BATCH_ROWS),
+            symbol_insert_sql: String::with_capacity(
+                "INSERT OR REPLACE INTO symbols (normalized_name, chunk_key) VALUES ".len()
+                    + SYMBOL_INSERT_BATCH_ROWS * "(?, ?),".len(),
+            ),
         })
     }
 
     fn insert_dependency(&mut self, owner_path: &str, included_path: &str) -> Result<()> {
         self.dependency_insert
             .execute(params![owner_path, included_path])?;
+        Ok(())
+    }
+
+    fn queue_symbols(&mut self, chunk: &IndexedChunk, chunk_key: i64) -> Result<()> {
+        crate::symbols::append_chunk_definition_rows(chunk, chunk_key, &mut self.symbol_rows);
+        if self.symbol_rows.len() >= SYMBOL_INSERT_BATCH_ROWS {
+            self.flush_symbols()?;
+        }
+        Ok(())
+    }
+
+    fn flush_symbols(&mut self) -> Result<()> {
+        while !self.symbol_rows.is_empty() {
+            let batch_len = self.symbol_rows.len().min(SYMBOL_INSERT_BATCH_ROWS);
+            self.symbol_insert_sql.clear();
+            self.symbol_insert_sql
+                .push_str("INSERT OR REPLACE INTO symbols (normalized_name, chunk_key) VALUES ");
+            for index in 0..batch_len {
+                if index > 0 {
+                    self.symbol_insert_sql.push(',');
+                }
+                self.symbol_insert_sql.push_str("(?, ?)");
+            }
+
+            {
+                let mut params: Vec<&dyn ToSql> = Vec::with_capacity(batch_len * 2);
+                for (name, chunk_key) in &self.symbol_rows[..batch_len] {
+                    params.push(name);
+                    params.push(chunk_key);
+                }
+                self.conn
+                    .execute(&self.symbol_insert_sql, params.as_slice())?;
+            }
+            self.symbol_rows.drain(..batch_len);
+        }
         Ok(())
     }
 }
@@ -2783,11 +2929,44 @@ fn create_tables(conn: &Connection) -> Result<()> {
 }
 
 fn create_tables_with_options(conn: &Connection, create_indexes: bool) -> Result<()> {
+    apply_default_write_pragmas(conn)?;
+    create_tables_schema(conn, create_indexes)
+}
+
+fn apply_default_write_pragmas(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         r#"
         PRAGMA journal_mode = WAL;
         PRAGMA synchronous = NORMAL;
+        "#,
+    )?;
+    Ok(())
+}
 
+fn apply_bulk_write_pragmas(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA cache_size = -16000;
+         PRAGMA temp_store = MEMORY;",
+    )?;
+    Ok(())
+}
+
+fn apply_fresh_staging_pragmas(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "PRAGMA journal_mode = OFF;
+         PRAGMA synchronous = OFF;
+         PRAGMA locking_mode = EXCLUSIVE;
+         PRAGMA cache_size = -64000;
+         PRAGMA temp_store = MEMORY;",
+    )?;
+    Ok(())
+}
+
+fn create_tables_schema(conn: &Connection, create_indexes: bool) -> Result<()> {
+    conn.execute_batch(
+        r#"
         CREATE TABLE IF NOT EXISTS chunks (
             chunk_key INTEGER PRIMARY KEY,
             file_path TEXT NOT NULL,
@@ -3285,6 +3464,135 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn fresh_index_staging_promotes_main_artifacts_and_preserves_lock() {
+        let root = tempdir().unwrap();
+        let index_root = tempdir().unwrap();
+        let workspace = Workspace {
+            id: "staging-test".to_string(),
+            root: root.path().to_path_buf(),
+            index_dir: index_root.path().join("index"),
+            repo_id: None,
+            base_index_dir: None,
+        };
+        fs::create_dir_all(&workspace.index_dir).unwrap();
+        fs::write(workspace.lock_path(), "locked").unwrap();
+        fs::write(workspace.sqlite_path(), "old sqlite").unwrap();
+        fs::write(
+            sqlite_sidecar_path(&workspace.sqlite_path(), "-wal"),
+            "old wal",
+        )
+        .unwrap();
+        fs::create_dir_all(workspace.tantivy_dir()).unwrap();
+        fs::write(workspace.tantivy_dir().join("old"), "old tantivy").unwrap();
+        fs::write(workspace.vector_path(), "old vector").unwrap();
+        fs::write(
+            workspace.vector_path().with_extension("usearch.bak"),
+            "old vector backup",
+        )
+        .unwrap();
+
+        let staging = FreshIndexStaging::create(&workspace).unwrap();
+        let staging_dir = staging.dir.clone();
+        fs::write(&staging.sqlite_path, "new sqlite").unwrap();
+        fs::create_dir_all(&staging.tantivy_dir).unwrap();
+        fs::write(staging.tantivy_dir.join("new"), "new tantivy").unwrap();
+        fs::write(&staging.vector_path, "new vector").unwrap();
+
+        staging.promote(&workspace).unwrap();
+
+        assert_eq!(fs::read_to_string(workspace.lock_path()).unwrap(), "locked");
+        assert_eq!(
+            fs::read_to_string(workspace.sqlite_path()).unwrap(),
+            "new sqlite"
+        );
+        assert!(!sqlite_sidecar_path(&workspace.sqlite_path(), "-wal").exists());
+        assert!(workspace.tantivy_dir().join("new").exists());
+        assert!(!workspace.tantivy_dir().join("old").exists());
+        assert_eq!(
+            fs::read_to_string(workspace.vector_path()).unwrap(),
+            "new vector"
+        );
+        assert!(
+            !workspace
+                .vector_path()
+                .with_extension("usearch.bak")
+                .exists()
+        );
+        assert!(!staging_dir.exists());
+    }
+
+    #[test]
+    fn persist_statements_flushes_batched_symbols() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        create_tables(&conn).unwrap();
+
+        let definitions = (0..(SYMBOL_INSERT_BATCH_ROWS + 3))
+            .map(|index| format!("pub fn batched_symbol_{index}() {{}}\n"))
+            .collect::<String>();
+        let big_chunk = IndexedChunk {
+            chunk_id: String::new(),
+            file_path: PathBuf::from("src/lib.rs"),
+            start_line: 1,
+            end_line: SYMBOL_INSERT_BATCH_ROWS + 3,
+            language: "rust".to_string(),
+            kind: "Module".to_string(),
+            text: definitions,
+            content_hash: "big".to_string(),
+            vector_key: 1,
+            is_ignored: false,
+        };
+        let tail_chunk = IndexedChunk {
+            chunk_id: String::new(),
+            file_path: PathBuf::from("src/tail.rs"),
+            start_line: 1,
+            end_line: 1,
+            language: "rust".to_string(),
+            kind: "Function".to_string(),
+            text: "pub fn tail_symbol() {}".to_string(),
+            content_hash: "tail".to_string(),
+            vector_key: 2,
+            is_ignored: false,
+        };
+
+        let tx = conn.transaction().unwrap();
+        let mut statements = PersistStatements::prepare(&tx).unwrap();
+        insert_chunk(
+            &mut statements,
+            &big_chunk,
+            big_chunk.text.as_bytes(),
+            "src/lib.rs",
+            1,
+        )
+        .unwrap();
+        insert_chunk(
+            &mut statements,
+            &tail_chunk,
+            tail_chunk.text.as_bytes(),
+            "src/tail.rs",
+            1,
+        )
+        .unwrap();
+        statements.flush_symbols().unwrap();
+        drop(statements);
+        tx.commit().unwrap();
+
+        let count = conn
+            .query_row("SELECT COUNT(*) FROM symbols", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        assert_eq!(count, (SYMBOL_INSERT_BATCH_ROWS + 4) as i64);
+        let tail_count = conn
+            .query_row(
+                "SELECT COUNT(*) FROM symbols WHERE normalized_name = 'tail_symbol'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(tail_count, 1);
     }
 
     #[test]
