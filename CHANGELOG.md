@@ -4,6 +4,15 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.12.14] - 2026-06-29
+
+### Performance
+- **Fresh indexes now stage bulk writes and promote complete stores atomically.** Initial indexing writes SQLite, Tantivy, and hash-vector stores into a private staging directory with fast bulk-write pragmas, restores WAL mode, then promotes the complete stores into place. The 505k-chunk generated profile improved fresh index wall time from `4295.9 ms` to `3891.1 ms`, reduced filesystem writes from `432.3 MB` to `261.3 MB`, and preserved warm search p95 (`0.698 ms` to `0.688 ms`) across 1000 query samples.
+- **Symbol definition persistence batches inserts.** Indexing now accumulates normalized symbol rows and flushes 256-row SQLite inserts instead of executing one statement per discovered definition.
+
+### Testing
+- **Longer benchmark samples guard search quality and latency noise.** The release comparison used 1000 warm distinct-query samples and retained expected recall@20 and MRR@20 at `1.0`.
+
 ## [0.12.13] - 2026-06-29
 
 ### Performance
