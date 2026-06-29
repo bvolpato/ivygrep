@@ -4,6 +4,14 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.12.13] - 2026-06-29
+
+### Performance
+- **Fresh SQLite indexing writes less and finishes sooner.** Fresh indexes now defer secondary metadata indexes until after bulk chunk ingestion and reuse transaction-scoped prepared statements for chunk, symbol, and dependency persistence. The generated 505k-chunk profile improved fresh index wall time from `4907 ms` to `4096 ms`, reduced filesystem writes from `640.7 MB` to `447.2 MB`, and cut the persist phase from `4745 ms` to `3000 ms`.
+
+### Testing
+- **Discarded non-winning speedup candidates before release.** DuckDB was tested as a metadata-store replacement and rejected because ivygrep's point lookups and symbol joins were slower despite smaller files. A broad lexical expansion short-circuit was also reverted after relevance dropped. CLI startup and full staging-directory swaps remain follow-up candidates rather than shipped changes.
+
 ## [0.12.12] - 2026-06-28
 
 ### Performance
