@@ -17,8 +17,8 @@ path = "src/main.rs"
 [features]
 default = ["neural"]
 neural = ["dep:candle_embed", "dep:candle-core", "dep:hf-hub", "dep:tokenizers"]
-accelerate = ["candle-core/accelerate"]
-metal = ["neural", "candle-core/metal", "candle_embed/metal"]
+accelerate = ["neural"]
+metal = ["neural"]
 cuda = ["neural", "candle-core/cuda", "candle_embed/cuda"]
 
 [dependencies]
@@ -99,6 +99,10 @@ tempfile = "3.27"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 openssl = { version = "0.10", features = ["vendored"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+candle_embed = { version = "0.1.4", default-features = false, optional = true, features = ["metal"] }
+candle-core = { version = "0.10.2", optional = true, features = ["accelerate", "metal"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = [

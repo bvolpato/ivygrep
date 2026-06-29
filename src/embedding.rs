@@ -777,7 +777,7 @@ enum NeuralBackend {
 #[cfg(feature = "neural")]
 impl NeuralBackend {
     fn cpu() -> Self {
-        if cfg!(feature = "accelerate") {
+        if cfg!(all(feature = "accelerate", target_os = "macos")) {
             Self::AccelerateCpu
         } else {
             Self::Cpu
@@ -800,7 +800,7 @@ impl NeuralBackend {
 
 #[cfg(feature = "neural")]
 fn preferred_neural_backend() -> NeuralBackend {
-    #[cfg(feature = "metal")]
+    #[cfg(all(feature = "metal", target_os = "macos"))]
     if candle_core::utils::metal_is_available() {
         return NeuralBackend::Metal;
     }
@@ -976,7 +976,16 @@ impl CandleEmbeddingModel {
             .custom_model_revision(profile.model_revision())
             .normalize_embeddings(true);
             let builder = match requested {
-                NeuralBackend::Metal => builder.with_device_metal(),
+                NeuralBackend::Metal => {
+                    #[cfg(all(feature = "metal", target_os = "macos"))]
+                    {
+                        builder.with_device_metal()
+                    }
+                    #[cfg(not(all(feature = "metal", target_os = "macos")))]
+                    {
+                        builder.with_device_cpu()
+                    }
+                }
                 NeuralBackend::Cuda => builder.with_device_any_cuda(),
                 NeuralBackend::AccelerateCpu | NeuralBackend::Cpu => builder.with_device_cpu(),
             };
@@ -1373,7 +1382,7 @@ mod tests {
     #[cfg(feature = "neural")]
     #[test]
     fn cpu_backend_label_reports_accelerate_feature_truthfully() {
-        let expected = if cfg!(feature = "accelerate") {
+        let expected = if cfg!(all(feature = "accelerate", target_os = "macos")) {
             "BERT embedding via Candle CPU (Accelerate)"
         } else {
             "BERT embedding via Candle CPU"

@@ -1871,10 +1871,13 @@ fn make_chunk(
     content_hash_data.extend_from_slice(&start_line.to_le_bytes());
     content_hash_data.extend_from_slice(&end_line.to_le_bytes());
     content_hash_data.extend_from_slice(text.as_bytes());
-    let content_hash = hex::encode(xxhash_rust::xxh3::xxh3_128(&content_hash_data).to_le_bytes());
+    let content_digest = xxhash_rust::xxh3::xxh3_128(&content_hash_data).to_le_bytes();
+    let content_hash = hex::encode(content_digest);
 
     Chunk {
-        id: Uuid::new_v4(),
+        // Transient chunk ids do not back persisted identity. Reuse the stable
+        // digest to avoid an RNG syscall per chunk during indexing.
+        id: Uuid::from_bytes(content_digest),
         file_path: rel_path.to_path_buf(),
         start_line,
         end_line,
@@ -1907,6 +1910,19 @@ pub fn calculate_total(amount: f64) -> f64 {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].kind, ChunkKind::Function);
         assert!(chunks[0].text.contains("calculate_tax"));
+    }
+
+    #[test]
+    fn chunk_ids_are_stable_for_same_chunk_identity() {
+        let src = "pub fn stable() {}\n";
+        let first = chunk_source(Path::new("src/lib.rs"), src);
+        let second = chunk_source(Path::new("src/lib.rs"), src);
+        let changed_content = chunk_source(Path::new("src/lib.rs"), "pub fn changed() {}\n");
+        let changed_path = chunk_source(Path::new("src/other.rs"), src);
+
+        assert_eq!(first[0].id, second[0].id);
+        assert_ne!(first[0].id, changed_content[0].id);
+        assert_ne!(first[0].id, changed_path[0].id);
     }
 
     #[test]
