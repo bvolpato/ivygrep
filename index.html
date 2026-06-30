@@ -4,12 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ivygrep - Semantic code search that never uploads your code</title>
-    <meta name="description" content="Local-first semantic code search combining BM25 lexical search with neural vector embeddings. Sub-100-ms warm daemon replay in fresh Linux validation, zero telemetry, 45 language/file types, built-in MCP server for AI agents.">
+    <meta name="description" content="Local semantic code search with BM25, vector retrieval, zero telemetry, 45 language/file types, and a built-in MCP server.">
     <meta name="theme-color" content="#06070a">
 
     <!-- Open Graph -->
     <meta property="og:title" content="ivygrep - Semantic code search that never uploads your code">
-    <meta property="og:description" content="Ask questions in English, get answers in code. Local inference, sub-100-ms warm daemon replay in fresh Linux validation, zero telemetry.">
+    <meta property="og:description" content="Ask questions in English. Get answers from local code search with no telemetry.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://bvolpato.github.io/ivygrep">
     <meta property="og:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner.png">
@@ -17,7 +17,7 @@
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="ivygrep - Semantic code search that never uploads your code">
-    <meta name="twitter:description" content="Ask questions in English, get answers in code. Local inference, sub-100-ms warm daemon replay in fresh Linux validation, zero telemetry.">
+    <meta name="twitter:description" content="Ask questions in English. Get answers from local code search with no telemetry.">
     <meta name="twitter:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner.png">
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -39,7 +39,7 @@
     <!-- Floating particles -->
     <div class="particles" id="particles"></div>
 
-    <!-- ─── Navigation ─── -->
+    <!-- Navigation -->
     <nav class="navbar relative z-10 fade-in">
         <div class="container nav-content">
             <a href="#" class="logo">
@@ -64,18 +64,18 @@
         </div>
     </nav>
 
-    <!-- ─── Hero ─── -->
+    <!-- Hero -->
     <header class="hero relative z-10">
         <div class="container hero-content">
             <div class="hero-badge slide-up">
                 <span class="badge-dot"></span>
-                v0.12.7 -- stronger retrieval, faster tails
+                v0.12.17 - local semantic code search
             </div>
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" onerror="this.src='assets/logo.png'"/>
             </div>
             <h1 class="slide-up delay-1">Semantic code search that <br/><span class="highlight-gradient">never uploads your code.</span></h1>
-            <p class="subtitle slide-up delay-2">Ask questions in English. Get answers in code.<br>Local inference, lightning fast, zero telemetry.</p>
+            <p class="subtitle slide-up delay-2">Ask questions in English. Get answers in code.<br>Local inference. Fast indexed search. Zero telemetry.</p>
 
             <div class="cta-row slide-up delay-3">
                 <a href="#install" class="btn btn-primary">
@@ -94,7 +94,7 @@
         </div>
     </header>
 
-    <!-- ─── Demo Terminal ─── -->
+    <!-- Demo terminal -->
     <section class="demo-section relative z-10 slide-up delay-3">
         <div class="container">
             <div class="glass-panel mockup-window">
@@ -102,10 +102,10 @@
                     <span class="dot red"></span>
                     <span class="dot yellow"></span>
                     <span class="dot green"></span>
-                    <span class="mockup-title">Terminal — ig</span>
+                    <span class="mockup-title">Terminal - ig</span>
                 </div>
                 <div class="mockup-body code-font">
-                    <div class="line"><span class="comment"># Ask in English, find the code intuitively</span></div>
+                    <div class="line"><span class="comment"># Ask in English, find code by intent</span></div>
                     <div class="line typing"><span class="prompt">$</span> ig "where is tax calculated?"</div>
                     <div class="line output success">✓ Found 3 semantic matches in 45ms</div>
                     <div class="line output"><span class="path">src/finance/billing.rs:182</span></div>
@@ -119,7 +119,7 @@
         </div>
     </section>
 
-    <!-- ─── Social Proof Strip ─── -->
+    <!-- Social proof strip -->
     <section class="social-proof relative z-10">
         <div class="container">
             <div class="proof-strip">
@@ -139,51 +139,51 @@
                 </div>
                 <div class="proof-divider"></div>
                 <div class="proof-item">
-                    <span class="proof-value">21</span>
+                    <span class="proof-value">24</span>
                     <span class="proof-label">Tree-sitter ASTs</span>
                 </div>
             </div>
         </div>
     </section>
 
-    <!-- ─── Features ─── -->
+    <!-- Features -->
     <section id="features" class="container relative z-10 section-spacing">
         <div class="section-header">
             <span class="section-tag">Capabilities</span>
-            <h2 class="section-title text-center">Why developers choose ivygrep</h2>
-            <p class="text-center subtitle-small">The speed of grep with the understanding of an IDE — all running locally.</p>
+            <h2 class="section-title text-center">Local code search, indexed</h2>
+            <p class="text-center subtitle-small">BM25, vectors, AST chunks, and MCP run on your machine.</p>
         </div>
 
         <div class="grid grid-3 mt-4">
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">⚡</span></div>
-                <h3>Blazing Fast</h3>
-                <p>Sub-100-ms warm daemon replay in fresh shared Linux validation. Hash embeddings deliver immediate first results; neural models upgrade silently in the background.</p>
+                <h3>Fast indexed search</h3>
+                <p>Warm daemon replay stays under 100 ms in current Linux validation. Hash results are available first; neural vectors build in the background.</p>
             </div>
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">🔒</span></div>
-                <h3>Local Privacy</h3>
+                <h3>Local by default</h3>
                 <p>No hosted inference. No telemetry. Your source code, queries, and index data never leave your machine. Neural mode downloads model assets once on first use.</p>
             </div>
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">🧠</span></div>
-                <h3>Natural Language</h3>
-                <p>Combines classic BM25 text matching with 384-dimensional local Candle neural embeddings. Ask "where is the tax calculated?" and get the right function.</p>
+                <h3>Intent queries</h3>
+                <p>BM25 and local vector retrieval let prose queries find code without exact identifiers. Ask "where is the tax calculated?" and get the right function.</p>
             </div>
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">🌿</span></div>
-                <h3>Git-Native</h3>
-                <p>Understands branches, worktrees, and .gitignore natively. Branch switches trigger instant Merkle-diff re-indexes — never a full re-scan.</p>
+                <h3>Git-aware</h3>
+                <p>Branches, worktrees, and .gitignore are part of indexing. Branch switches use Merkle deltas instead of full rebuilds.</p>
             </div>
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">🤖</span></div>
-                <h3>Built for AI Agents</h3>
-                <p>Ships with a built-in MCP server. One command to connect Claude Code, Cursor, Codex, Gemini, or OpenCode — no plugins needed.</p>
+                <h3>MCP server</h3>
+                <p>Built-in MCP server for Claude Code, Cursor, Codex, Gemini, and OpenCode. No separate plugin required.</p>
             </div>
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">🏗️</span></div>
-                <h3>Code-Aware Chunking</h3>
-                <p>21 languages with Tree-sitter AST parsing. Understands functions, classes, and imports — not just lines of text.</p>
+                <h3>Code-aware chunks</h3>
+                <p>24 Tree-sitter AST languages plus heuristic chunking for the rest of the 45 supported types.</p>
             </div>
         </div>
 
@@ -239,28 +239,28 @@
                         <td><span class="highlight">✅</span></td>
                     </tr>
                     <tr>
-                        <td>AST code chunking</td>
+                        <td>Structural code chunking</td>
                         <td>❌</td>
                         <td>❌</td>
                         <td>⚠️</td>
                         <td><span class="highlight">✅</span></td>
                     </tr>
                     <tr>
-                        <td>Incremental Merkle indexing</td>
+                        <td>Incremental indexing</td>
                         <td>❌</td>
                         <td>❌</td>
                         <td>❌</td>
                         <td><span class="highlight">✅</span></td>
                     </tr>
                     <tr>
-                        <td>Git worktree overlays</td>
+                        <td>Git-native worktrees/branches</td>
                         <td>❌</td>
                         <td>❌</td>
                         <td>❌</td>
                         <td><span class="highlight">✅</span></td>
                     </tr>
                     <tr>
-                        <td>Built-in MCP server</td>
+                        <td>MCP server for AI agents</td>
                         <td>❌</td>
                         <td>❌</td>
                         <td>❌</td>
@@ -271,18 +271,18 @@
         </div>
     </section>
 
-    <!-- ─── Architecture ─── -->
+    <!-- Architecture -->
     <section id="how-it-works" class="container relative z-10 section-spacing">
         <div class="section-header">
-            <span class="section-tag">Under the Hood</span>
-            <h2 class="section-title text-center">Two-Tier Hybrid Architecture</h2>
-            <p class="text-center subtitle-small">Fast indexing with progressive quality upgrades — you never wait for neural models.</p>
+            <span class="section-tag">Architecture</span>
+            <h2 class="section-title text-center">Two-tier hybrid index</h2>
+            <p class="text-center subtitle-small">BM25 and literal search are available first; background jobs add vector quality.</p>
         </div>
 
         <div class="flow-diagram glass-panel fade-in-scroll mt-4">
             <div class="flow-step">
                 <div class="flow-icon pulse-glow">1</div>
-                <h4>Hash Index</h4>
+                <h4>Hash index</h4>
                 <p>Sub-second indexing via 128-bit xxh3 SIMD structural hashes. Instant search availability.</p>
             </div>
             <div class="flow-arrow">
@@ -290,7 +290,7 @@
             </div>
             <div class="flow-step">
                 <div class="flow-icon pulse-glow">2</div>
-                <h4>Hybrid Fusion</h4>
+                <h4>Hybrid fusion</h4>
                 <p>Lexical BM25 (Tantivy) and semantic ANN (USearch) fuse via Reciprocal Rank Fusion for high-precision results.</p>
             </div>
             <div class="flow-arrow">
@@ -298,8 +298,8 @@
             </div>
             <div class="flow-step">
                 <div class="flow-icon pulse-glow">3</div>
-                <h4>Neural Enhancement</h4>
-                <p>Background daemon upgrades to a locally cached Candle model (AllMiniLML6V2). macOS releases use Accelerate-backed local CPU math; Metal is an opt-in local build.</p>
+                <h4>Neural enhancement</h4>
+                <p>Background daemon upgrades to locally cached 256-dimensional static-retrieval-v1 vectors. macOS releases use Accelerate-backed CPU math; Metal/CUDA are opt-in source builds.</p>
             </div>
         </div>
 
@@ -307,28 +307,28 @@
         <div class="glass-panel fade-in-scroll mt-4 git-panel">
             <h3 class="git-panel-title">
                 <svg width="22" height="22" fill="none" stroke="#10b981" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M16 8V5a1 1 0 0 0-1-1H9a1 1 0 0 0-1 1v3M8 16v3a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-3"/></svg>
-                Git-Native Intelligence
+                Git-aware indexing
             </h3>
-            <p class="git-panel-subtitle">Deeply understands git. Not an afterthought — a core design decision.</p>
+            <p class="git-panel-subtitle">Worktrees share one base index; branch switches re-index changed files only.</p>
             <div class="grid grid-2" style="gap: 1.5rem;">
                 <div class="git-feature">
-                    <h4>Worktree Overlays</h4>
-                    <p>When you <code>git worktree add</code>, ivygrep does <strong>not</strong> copy the search index. Each worktree references one shared base index while its SQLite, lexical, and vector overlay stores contain only divergent chunks and tombstones. Lightweight Merkle metadata tracks filesystem state.</p>
+                    <h4>Worktree overlays</h4>
+                    <p>Each worktree references one shared base index. SQLite, lexical, and vector overlays store only divergent chunks and tombstones.</p>
                 </div>
                 <div class="git-feature">
-                    <h4>Branch-Switch Deltas</h4>
-                    <p>Switching branches triggers Merkle reconciliation that re-indexes <strong>only the changed files</strong> instead of rebuilding the search index. Content-based hashes mean byte-identical files across branches are never re-processed.</p>
+                    <h4>Branch-switch deltas</h4>
+                    <p>Merkle reconciliation re-indexes <strong>only changed files</strong>. Content hashes skip byte-identical files across branches.</p>
                 </div>
             </div>
         </div>
     </section>
 
-    <!-- ─── Performance ─── -->
+    <!-- Performance -->
     <section id="performance" class="container relative z-10 section-spacing">
         <div class="section-header">
             <span class="section-tag">Benchmarks</span>
-            <h2 class="section-title text-center">Speed That Scales</h2>
-            <p class="text-center subtitle-small">Fresh validation on the <strong>Linux kernel</strong>: 93,502 indexed files and 4,419,660 chunks on a shared x86 workspace</p>
+            <h2 class="section-title text-center">Performance evidence</h2>
+            <p class="text-center subtitle-small">Fresh Linux kernel validation: 93,502 indexed files and 4,419,660 chunks.</p>
         </div>
 
         <!-- Benchmark bars -->
@@ -381,8 +381,8 @@
                 </div>
             </div>
             <div class="glass-panel fade-in-scroll">
-                <h3>Concurrent Search (AI Agent Load)</h3>
-                <p class="text-xs opacity-70 mb-2">8 threads × Linux kernel — simulating MCP agent traffic</p>
+                <h3>Concurrent search</h3>
+                <p class="text-xs opacity-70 mb-2">8 threads on Linux kernel, simulating MCP agent traffic</p>
                 <div class="perf-bar-group">
                     <div class="perf-label">Linux Ryzen 9 (Avg)</div>
                     <div class="perf-bar-wrapper"><div class="perf-bar fill-green" style="width: 25%">11 ms</div></div>
@@ -403,17 +403,17 @@
         </div>
     </section>
 
-    <!-- ─── Languages ─── -->
+    <!-- Languages -->
     <section id="languages" class="container relative z-10 section-spacing">
         <div class="section-header">
-            <span class="section-tag">Language Support</span>
-            <h2 class="section-title text-center">45 Language/File Types, 21 Tree-sitter ASTs</h2>
-            <p class="text-center subtitle-small">Tree-sitter languages get function/class-level structural chunking. All others get intelligent heuristic chunking with full index coverage.</p>
+            <span class="section-tag">Language support</span>
+            <h2 class="section-title text-center">45 language/file types, 24 Tree-sitter ASTs</h2>
+            <p class="text-center subtitle-small">Tree-sitter sources get function/class-level chunks. Other supported files use heuristic chunks.</p>
         </div>
 
         <div class="lang-grid glass-panel fade-in-scroll mt-4">
             <div class="lang-category">
-                <h4>🌲 Tree-sitter AST <span class="lang-badge">21 languages</span></h4>
+                <h4>🌲 Tree-sitter AST <span class="lang-badge">24 languages</span></h4>
                 <div class="lang-tags">
                     <span class="lang-tag lang-ast">Rust</span>
                     <span class="lang-tag lang-ast">Python</span>
@@ -425,9 +425,12 @@
                     <span class="lang-tag lang-ast">C++</span>
                     <span class="lang-tag lang-ast">C#</span>
                     <span class="lang-tag lang-ast">Scala</span>
+                    <span class="lang-tag lang-ast">Kotlin</span>
                     <span class="lang-tag lang-ast">PHP</span>
                     <span class="lang-tag lang-ast">Ruby</span>
                     <span class="lang-tag lang-ast">Swift</span>
+                    <span class="lang-tag lang-ast">Elixir</span>
+                    <span class="lang-tag lang-ast">Zig</span>
                     <span class="lang-tag lang-ast">Bash</span>
                     <span class="lang-tag lang-ast">Haskell</span>
                     <span class="lang-tag lang-ast">OCaml</span>
@@ -435,17 +438,14 @@
                     <span class="lang-tag lang-ast">Dart</span>
                     <span class="lang-tag lang-ast">Objective-C</span>
                     <span class="lang-tag lang-ast">Perl</span>
-                    <span class="lang-tag lang-ast">Starlark macros</span>
+                    <span class="lang-tag lang-ast">Starlark macros/targets</span>
                 </div>
             </div>
             <div class="lang-category">
-                <h4>📐 Heuristic Chunking <span class="lang-badge lang-badge-muted">24 more</span></h4>
+                <h4>📐 Heuristic chunking <span class="lang-badge lang-badge-muted">21 more</span></h4>
                 <div class="lang-tags">
-                    <span class="lang-tag">Zig</span>
                     <span class="lang-tag">Nim</span>
-                    <span class="lang-tag">Kotlin</span>
                     <span class="lang-tag">Groovy</span>
-                    <span class="lang-tag">Elixir</span>
                     <span class="lang-tag">Erlang</span>
                     <span class="lang-tag">Clojure</span>
                     <span class="lang-tag">R</span>
@@ -470,13 +470,13 @@
         </div>
     </section>
 
-    <!-- ─── MCP / AI Agents ─── -->
+    <!-- MCP / AI agents -->
     <section id="mcp" class="mcp-section relative z-10 section-spacing">
         <div class="container">
             <div class="section-header">
                 <span class="section-tag">Model Context Protocol</span>
-                <h2 class="section-title text-center">Supercharge Your AI Agents</h2>
-                <p class="text-center subtitle-small">ivygrep ships a built-in MCP server. Instead of stuffing entire repos into context windows, your agent queries your indexed codebase natively, with sub-100-ms warm daemon replay in fresh shared Linux validation.</p>
+                <h2 class="section-title text-center">MCP for coding agents</h2>
+                <p class="text-center subtitle-small">Agents query the local index instead of loading whole repos into context.</p>
             </div>
 
             <div class="grid agent-grid mt-4">
@@ -540,7 +540,7 @@
             </div>
 
             <div class="mcp-workflow glass-panel fade-in-scroll mt-4">
-                <h3 class="text-center" style="margin-bottom: 1.5rem;">How MCP Search Works</h3>
+                <h3 class="text-center" style="margin-bottom: 1.5rem;">MCP search flow</h3>
                 <div class="mcp-flow">
                     <div class="mcp-flow-step">
                         <div class="mcp-flow-icon">🤖</div>
@@ -570,7 +570,7 @@
         </div>
     </section>
 
-    <!-- ─── Install ─── -->
+    <!-- Install -->
     <section id="install" class="container relative z-10 section-spacing">
         <div class="section-header">
             <span class="section-tag">Get Started</span>
@@ -637,7 +637,7 @@
         </div>
     </section>
 
-    <!-- ─── Footer ─── -->
+    <!-- Footer -->
     <footer class="footer relative z-10">
         <div class="container">
             <div class="footer-content">
@@ -654,14 +654,14 @@
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md" class="footer-link">Changelog</a>
                 </div>
                 <div class="footer-copy">
-                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v0.12.7</p>
+                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v0.12.17</p>
                 </div>
             </div>
         </div>
     </footer>
 
     <script>
-        // ─── Copy handler for agent cards ───
+        // Copy handler for agent cards
         function copyAgentCmd(btn) {
             navigator.clipboard.writeText(btn.dataset.copy);
             btn.textContent = 'Copied!';
@@ -679,7 +679,7 @@
             setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
         }
 
-        // ─── Intersection Observer for scroll animations ───
+        // Intersection Observer for scroll animations
         const observer = new IntersectionObserver((entries) => {
             entries.forEach(entry => {
                 if (entry.isIntersecting) {
@@ -691,7 +691,7 @@
 
         document.querySelectorAll('.fade-in-scroll').forEach(el => observer.observe(el));
 
-        // ─── Typing effect ───
+        // Typing effect
         const typingEl = document.querySelector('.typing');
         if (typingEl) {
             const prompt = '<span class="prompt">$</span> ';
@@ -721,7 +721,7 @@
             }, 1200);
         }
 
-        // ─── Animated benchmark bars ───
+        // Animated benchmark bars
         const benchmarkPanel = document.querySelector('.benchmark-panel');
         if (benchmarkPanel) {
             const benchObserver = new IntersectionObserver((entries) => {
@@ -737,7 +737,7 @@
             benchObserver.observe(benchmarkPanel);
         }
 
-        // ─── Counter animation ───
+        // Counter animation
         const counters = document.querySelectorAll('.counter');
         const counterObserver = new IntersectionObserver((entries) => {
             entries.forEach(entry => {
@@ -757,7 +757,7 @@
         }, { threshold: 0.5 });
         counters.forEach(c => counterObserver.observe(c));
 
-        // ─── Floating particles (subtle) ───
+        // Floating particles (subtle)
         const particlesContainer = document.getElementById('particles');
         if (particlesContainer) {
             for (let i = 0; i < 30; i++) {
@@ -771,7 +771,7 @@
             }
         }
 
-        // ─── Smooth scroll for nav links ───
+        // Smooth scroll for nav links
         document.querySelectorAll('a[href^="#"]').forEach(a => {
             a.addEventListener('click', e => {
                 const target = document.querySelector(a.getAttribute('href'));
