@@ -3072,6 +3072,10 @@ fn build_schema() -> Schema {
         .set_tokenizer(CODE_TOKENIZER_NAME)
         .set_index_option(IndexRecordOption::WithFreqsAndPositions);
     let code_text_opts = TextOptions::default().set_indexing_options(code_indexing.clone());
+    let boosted_aux_indexing = TextFieldIndexing::default()
+        .set_tokenizer(CODE_TOKENIZER_NAME)
+        .set_index_option(IndexRecordOption::Basic);
+    let boosted_aux_text_opts = TextOptions::default().set_indexing_options(boosted_aux_indexing);
 
     let mut schema = Schema::builder();
     schema.add_u64_field("vector_key", STORED);
@@ -3084,8 +3088,8 @@ fn build_schema() -> Schema {
     schema.add_text_field("text", code_text_opts.clone());
     schema.add_u64_field("is_ignored", STORED);
     // BM25F fields: tokenized path + definition signature with code tokenizer
-    schema.add_text_field("file_path_text", code_text_opts.clone());
-    schema.add_text_field("signature", code_text_opts);
+    schema.add_text_field("file_path_text", boosted_aux_text_opts.clone());
+    schema.add_text_field("signature", boosted_aux_text_opts);
     schema.build()
 }
 
