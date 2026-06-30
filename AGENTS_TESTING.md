@@ -42,7 +42,8 @@ Benchmark output reports per-operation latency. Microbenchmarks run repeated log
 For `README.md`, `docs/**`, or `assets/**` changes:
 
 ```bash
-rg -n "v0\.9\.0|TODO|FIXME" README.md docs
+rg -n "TODO|FIXME" README.md docs
+rg -n "v0\.9\.0" README.md docs/index.html
 python3 -m http.server 8765 --directory docs
 ```
 

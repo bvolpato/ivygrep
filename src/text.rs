@@ -16,45 +16,32 @@ pub const CODE_TOKENIZER_NAME: &str = "code";
 #[derive(Clone, Default)]
 pub struct CodeTokenizer;
 
-pub struct CodeTokenStream {
-    tokens: Vec<Token>,
-    index: usize,
+pub struct CodeTokenStream<'a> {
+    text: &'a str,
+    cursor: usize,
+    pending: Vec<PendingSegment>,
+    pending_index: usize,
+    position: usize,
     token: Token,
 }
 
+#[derive(Default)]
+struct PendingSegment {
+    offset_from: usize,
+    offset_to: usize,
+    text: String,
+}
+
 impl Tokenizer for CodeTokenizer {
-    type TokenStream<'a> = CodeTokenStream;
+    type TokenStream<'a> = CodeTokenStream<'a>;
 
     fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
-        let mut tokens = Vec::new();
-        let mut offset = 0usize;
-
-        for word in text.split(|ch: char| ch.is_whitespace() || is_code_separator(ch)) {
-            if word.is_empty() {
-                offset += 1; // separator char
-                continue;
-            }
-
-            let segments = split_identifier_segments(word);
-            let mut local_offset = offset;
-            for seg in &segments {
-                let tok = Token {
-                    offset_from: local_offset,
-                    offset_to: local_offset + seg.len(),
-                    position: tokens.len(),
-                    text: seg.clone(),
-                    position_length: 1,
-                };
-                tokens.push(tok);
-                local_offset += seg.len();
-            }
-
-            offset += word.len() + 1; // +1 for the separator
-        }
-
         CodeTokenStream {
-            tokens,
-            index: 0,
+            text,
+            cursor: 0,
+            pending: Vec::new(),
+            pending_index: 0,
+            position: 0,
             token: Token::default(),
         }
     }
@@ -96,14 +83,26 @@ fn is_code_separator(ch: char) -> bool {
     )
 }
 
-impl TokenStream for CodeTokenStream {
+impl TokenStream for CodeTokenStream<'_> {
     fn advance(&mut self) -> bool {
-        if self.index < self.tokens.len() {
-            self.token = self.tokens[self.index].clone();
-            self.index += 1;
-            true
-        } else {
-            false
+        loop {
+            if self.pending_index < self.pending.len() {
+                let segment = std::mem::take(&mut self.pending[self.pending_index]);
+                self.pending_index += 1;
+                self.token = Token {
+                    offset_from: segment.offset_from,
+                    offset_to: segment.offset_to,
+                    position: self.position,
+                    text: segment.text,
+                    position_length: 1,
+                };
+                self.position += 1;
+                return true;
+            }
+
+            if !self.fill_next_word_segments() {
+                return false;
+            }
         }
     }
 
@@ -113,6 +112,52 @@ impl TokenStream for CodeTokenStream {
 
     fn token_mut(&mut self) -> &mut Token {
         &mut self.token
+    }
+}
+
+impl CodeTokenStream<'_> {
+    fn fill_next_word_segments(&mut self) -> bool {
+        self.pending.clear();
+        self.pending_index = 0;
+
+        while let Some(range) = self.next_word_range() {
+            split_identifier_segments_with_offsets(
+                &self.text[range.clone()],
+                range.start,
+                &mut self.pending,
+            );
+            if !self.pending.is_empty() {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    fn next_word_range(&mut self) -> Option<Range<usize>> {
+        while self.cursor < self.text.len() {
+            let ch = self.text[self.cursor..].chars().next()?;
+            if ch.is_whitespace() || is_code_separator(ch) {
+                self.cursor += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+
+        if self.cursor >= self.text.len() {
+            return None;
+        }
+
+        let start = self.cursor;
+        while self.cursor < self.text.len() {
+            let ch = self.text[self.cursor..].chars().next()?;
+            if ch.is_whitespace() || is_code_separator(ch) {
+                break;
+            }
+            self.cursor += ch.len_utf8();
+        }
+
+        Some(start..self.cursor)
     }
 }
 
@@ -127,16 +172,29 @@ pub fn build_code_analyzer() -> tantivy::tokenizer::TextAnalyzer {
 /// lowercase segments: `["calculate", "tax", "total"]`.
 pub fn split_identifier_segments(token: &str) -> Vec<String> {
     let mut segments = Vec::new();
+    split_identifier_segments_with_offsets(token, 0, &mut segments);
+    segments.into_iter().map(|segment| segment.text).collect()
+}
+
+fn split_identifier_segments_with_offsets(
+    token: &str,
+    base_offset: usize,
+    segments: &mut Vec<PendingSegment>,
+) {
     let mut current = String::new();
+    let mut current_start = 0usize;
+    let mut current_end = 0usize;
     let mut prev_is_lower = false;
     let mut prev_is_alpha = false;
 
-    for ch in token.chars() {
+    for (offset, ch) in token.char_indices() {
         if !ch.is_ascii_alphanumeric() {
-            if !current.is_empty() {
-                segments.push(current.to_ascii_lowercase());
-                current.clear();
-            }
+            push_current_segment(
+                segments,
+                &mut current,
+                base_offset + current_start,
+                base_offset + current_end,
+            );
             prev_is_lower = false;
             prev_is_alpha = false;
             continue;
@@ -146,25 +204,54 @@ pub fn split_identifier_segments(token: &str) -> Vec<String> {
         let is_alpha = ch.is_ascii_alphabetic();
 
         if !current.is_empty() && is_upper && prev_is_lower {
-            segments.push(current.to_ascii_lowercase());
-            current.clear();
+            push_current_segment(
+                segments,
+                &mut current,
+                base_offset + current_start,
+                base_offset + current_end,
+            );
         }
 
         if !current.is_empty() && is_alpha != prev_is_alpha {
-            segments.push(current.to_ascii_lowercase());
-            current.clear();
+            push_current_segment(
+                segments,
+                &mut current,
+                base_offset + current_start,
+                base_offset + current_end,
+            );
         }
 
-        current.push(ch);
+        if current.is_empty() {
+            current_start = offset;
+        }
+        current.push(ch.to_ascii_lowercase());
+        current_end = offset + ch.len_utf8();
         prev_is_lower = ch.is_ascii_lowercase();
         prev_is_alpha = is_alpha;
     }
 
-    if !current.is_empty() {
-        segments.push(current.to_ascii_lowercase());
-    }
+    push_current_segment(
+        segments,
+        &mut current,
+        base_offset + current_start,
+        base_offset + current_end,
+    );
+}
 
-    segments
+fn push_current_segment(
+    segments: &mut Vec<PendingSegment>,
+    current: &mut String,
+    offset_from: usize,
+    offset_to: usize,
+) {
+    if current.is_empty() {
+        return;
+    }
+    segments.push(PendingSegment {
+        offset_from,
+        offset_to,
+        text: std::mem::take(current),
+    });
 }
 
 /// Returns the singular form of a token, or the token unchanged if it's too

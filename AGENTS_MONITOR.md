@@ -10,7 +10,7 @@ gh run list --limit 10 --json workflowName,headBranch,headSha,status,conclusion,
 curl -fsSL https://bvolpato.github.io/ivygrep/ >/tmp/ivygrep-site.html
 curl -fsSL https://bvolpato.github.io/ivygrep/benchmarks/ >/tmp/ivygrep-benchmarks.html
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
-rg -n "v${version}|Performance Evidence|Daemon hot-query" /tmp/ivygrep-site.html /tmp/ivygrep-benchmarks.html
+rg -n "v${version}|Performance evidence|Daemon hot-query" /tmp/ivygrep-site.html /tmp/ivygrep-benchmarks.html
 ```
 
 Docs Pages and `pages-build-deployment` should complete successfully. The live

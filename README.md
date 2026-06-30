@@ -47,17 +47,13 @@ curl -fsSL https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.sh | 
 irm https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.ps1 | iex
 ```
 
-The installers select the correct release archive, verify its published
-SHA-256 checksum, install `ig` in the standard user binary directory, and print
-the installed version. The PowerShell installer also updates the user `PATH`.
-Windows uses the same USearch approximate-nearest-neighbor backend as Linux and
-macOS, with Rust-managed persistence for Unicode paths and replaceable index
-files. The binary is long-path aware for deeply nested repositories on current
-Windows 10 and Windows 11 systems, and statically links the Visual C++ runtime.
+Installers pick the right archive, verify its SHA-256 checksum, install `ig`,
+and print the installed version. PowerShell also updates the user `PATH`.
+Windows uses the same USearch ANN backend as Linux and macOS, Rust-managed
+persistence, long-path support, and a statically linked Visual C++ runtime.
 
-Every release publishes a SHA-256 checksum, SPDX JSON SBOM, and provenance
-sidecar for each archive. The release is created only after CI extracts and
-runs those exact archive bytes:
+Every release ships checksums, SPDX JSON SBOMs, and provenance sidecars. CI
+extracts and runs the exact archive bytes before publishing:
 
 | Target | Release behavior | Offline fallback |
 |---|---|---|
@@ -67,15 +63,13 @@ runs those exact archive bytes:
 | macOS Apple Silicon | Native archive with Accelerate-backed local neural inference | Hash search |
 | Windows x86_64 | Native USearch ANN plus local CPU neural inference | Hash search |
 
-The archive procedure covers startup, indexing, hybrid/hash/literal/regex
-search, daemon equivalence, status/doctor, stale-index rebuild, and removal.
-Running `ig` requires no Python, compiler, system database, or external
-service. Neural mode may download its pinned model once; Linux and Windows
-acceptance checks verify that the cached model can then be imported without
-network access.
+Archive checks cover startup, indexing, hybrid/hash/literal/regex search,
+daemon equivalence, status/doctor, stale-index rebuild, and removal. `ig`
+needs no Python, compiler, system database, or external service. Neural mode
+may download its pinned model once; `--hash` and hash-only builds do not.
 
-Quality, latency, footprint, release-size history, unavailable comparisons,
-and the mechanically enforced claim policy are published in the
+Quality, latency, footprint, release size, unavailable comparisons, and the
+claim policy live in the
 [evidence dashboard](https://bvolpato.github.io/ivygrep/benchmarks/evidence-dashboard.html).
 
 **Build from source:**
@@ -106,17 +100,20 @@ ig "error handling" src/api/         # scope to a directory
 ig --all "database migrations"      # search across all indexed projects
 ```
 
-That's it. No config files, no setup wizards, no prompts, no API keys. On first run, `ig` auto-indexes the workspace and spawns a background daemon for incremental updates. Neural mode downloads its model artifacts into the Hugging Face cache on first use; `--hash` and hash-only builds require no model download.
+No config, prompts, or API keys. First run auto-indexes the workspace and
+starts a background daemon for incremental updates. Neural mode may download
+model artifacts once; `--hash` and hash-only builds do not.
 
 <p>
-  <img src="assets/ig-demo.gif" alt="ivygrep demo — searching the opencode repo" width="700" />
+  <img src="assets/ig-demo.gif" alt="ivygrep demo: searching the opencode repo" width="700" />
 </p>
 
 ---
 
-## 🤖 MCP Server — Supercharge Your AI Agent
+## 🤖 MCP server for AI agents
 
-ivygrep is the **retrieval layer your coding agent is missing**. Instead of stuffing entire files into context, your agent pulls only the relevant code chunks natively.
+Use `ig --mcp` when an agent needs code search without loading whole files into
+context.
 
 ```bash
 ig --mcp    # starts MCP server on stdio
@@ -231,27 +228,27 @@ tool-selection guidance, worktree behavior, and troubleshooting.
 
 ## 🤔 What is ivygrep?
 
-**ivygrep (`ig`)** is a local-first code search tool that understands natural language. It combines lexical search (like `grep`/`rg`) with semantic vector search — so you can search your code the way you *think* about it.
+**ivygrep (`ig`)** is local semantic code search. It mixes BM25/literal lookup
+with vector search, so queries can describe intent instead of exact tokens.
 
-Traditional tools require you to know _exactly_ what you're looking for. ivygrep lets you search with intent.
+| Feature | `grep` / `rg` | GitHub Search | [zoekt](https://github.com/google/zoekt) | **ivygrep** |
+|---------|:---:|:---:|:---:|:---:|
+| Works offline | ✅ | ❌ | ✅ | ✅ |
+| Natural language queries | ❌ | ⚠️ | ❌ | ✅ |
+| Semantic understanding | ❌ | ❌ | ❌ | ✅ |
+| Warm indexed query latency | ✅ | ❌ | ✅ | ✅ |
+| Privacy-first (no upload) | ✅ | ❌ | ✅ | ✅ |
+| Git-native worktrees/branches | ❌ | ❌ | ❌ | ✅ |
+| Structural code chunking | ❌ | ❌ | ⚠️ | ✅ |
+| Incremental indexing | ❌ | ❌ | ❌ | ✅ |
+| MCP server for AI agents | ❌ | ❌ | ❌ | ✅ |
 
-| Feature | `grep` / `rg` | GitHub Search | **ivygrep** |
-|---------|:---:|:---:|:---:|
-| Works offline | ✅ | ❌ | ✅ |
-| Natural language queries | ❌ | ⚠️ | ✅ |
-| Semantic understanding | ❌ | ❌ | ✅ |
-| Warm indexed query latency | ✅ | ❌ | ✅ |
-| Privacy-first (no upload) | ✅ | ❌ | ✅ |
-| Git-native (worktrees, branches) | ❌ | ❌ | ✅ |
-| Structural code chunking | ❌ | ❌ | ✅ |
-| Incremental indexing | ❌ | ❌ | ✅ |
-| MCP server for AI agents | ❌ | ❌ | ✅ |
+### 🌍 45 language/file types
 
-### 🌍 45 Language/File Types Supported
-ivygrep indexes and structurally chunks 45 language/file types today:
-
-- **Tree-sitter AST chunking (24 languages):** Rust, Python, Go, JavaScript, TypeScript/TSX, Java, C, C++, C#, Scala, Kotlin, PHP, Ruby, Swift, Elixir, Zig, Bash, Haskell, OCaml, Lua, Dart, Objective-C, Perl, Starlark macros and targets in very large BUILD-like sources
-- **Heuristic structural chunking:** the remaining supported languages below
+ivygrep indexes 45 language/file types. 24 use Tree-sitter AST chunking:
+Rust, Python, Go, JavaScript, TypeScript/TSX, Java, C, C++, C#, Scala, Kotlin,
+PHP, Ruby, Swift, Elixir, Zig, Bash, Haskell, OCaml, Lua, Dart, Objective-C,
+Perl, and Starlark macros/targets in very large BUILD-like sources.
 
 - **Systems:** Rust, C, C++, Zig, Nim
 - **Backend:** Python, Go, Java, Kotlin, Scala, C#, Ruby, PHP, Perl, Groovy
@@ -263,9 +260,10 @@ Unknown extensions are auto-detected and indexed as text.
 
 ---
 
-## 🚀 Performance & Speed
+## 🚀 Performance and speed
 
-Fresh release-readiness validation used a **Linux kernel** checkout with 93,502 indexed files and 4,419,660 chunks:
+Release-readiness validation used a **Linux kernel** checkout with 93,502
+indexed files and 4,419,660 chunks:
 
 | Scenario | Metric | Result |
 |------|------|-----:|
@@ -279,41 +277,28 @@ Fresh release-readiness validation used a **Linux kernel** checkout with 93,502 
 | Lexical-first scoped stress probe | 10,501 files | ~3 sec |
 | Warm daemon correctness guard | daemon/local hits | 20 / 20 |
 
-The daemon benchmark reports warmed distinct-query latency separately from
-identical-query cache replay. Latency depends on CPU, storage, repository
-shape, index state, and virtualization; dedicated-host measurements are not
-universal claims. Reproducible public quality, latency, indexing, refresh, and
-resource evidence lives under [`docs/benchmarks/`](docs/benchmarks/).
+Latency depends on CPU, storage, repository shape, index state, and
+virtualization. Public quality, latency, refresh, and resource evidence lives
+under [`docs/benchmarks/`](docs/benchmarks/).
 
-Indexing commits BM25/literal search first. A load-aware background subprocess
+Indexing publishes BM25/literal search first. A load-aware background process
 builds hash ANN vectors, then upgrades to the portable 256-dimensional
-`static-retrieval-v1` model selected by the public embedding bake-off. Set
-`IVYGREP_MODEL_PROFILE=potion-code` for the pinned code-specialized Model2Vec
-profile, `general` for the pinned general MiniLM profile, or `code` for the
-CodeSearchNet-trained MiniLM profile. Optional profiles are retained for
-comparison and compatibility rather than recommended laptop defaults. Model
-identity is persisted with the index so incompatible vectors are rebuilt rather
-than silently reused.
+`static-retrieval-v1` model selected by the public embedding bake-off. Optional
+profiles remain available through `IVYGREP_MODEL_PROFILE`: `potion-code`,
+`general`, `code`, and `code-hq`. Model identity is stored with the index, so
+incompatible vectors are rebuilt.
 
-Optional transformer profiles share one immutable model across background
-workers. `IVYGREP_NEURAL_THREADS` sets the desired worker ceiling; ivygrep
-automatically lowers additional workers after accounting for the required
-shared model and one quarter of currently available memory. Set
-`IVYGREP_NEURAL_MEMORY_MB` to impose a smaller explicit worker-sizing budget.
-Background neural enhancement uses larger batches on CUDA/Metal when resources
-allow it. CUDA builds read `nvidia-smi` free VRAM, total VRAM, and GPU
-utilization before choosing a batch size, so an idle large GPU gets higher
-throughput while a GPU already serving another workload backs off. Set
-`IVYGREP_NEURAL_BATCH_SIZE` to override the batch size for local benchmarking.
-Accelerator builds can also set
-`IVYGREP_NEURAL_ACCELERATOR_HANDLES` to tune concurrent shared-model inference
-handles during background enhancement. Accelerator builds also use CUDA/Metal
-for foreground transformer query embedding when available; set
-`IVYGREP_NEURAL_FOREGROUND_ACCELERATOR=0` to force CPU query embedding for
-local benchmarking or troubleshooting.
-At least one model handle is still required, so this setting is not an OS-level
-hard memory cap. Linux accounting honors the process's effective cgroup
-hierarchy, including containers.
+Resource knobs:
+
+- `IVYGREP_NEURAL_THREADS`: desired transformer worker ceiling.
+- `IVYGREP_NEURAL_MEMORY_MB`: smaller explicit memory budget for worker sizing.
+- `IVYGREP_NEURAL_BATCH_SIZE`: local benchmark override for background batches.
+- `IVYGREP_NEURAL_ACCELERATOR_HANDLES`: shared-model CUDA/Metal concurrency.
+- `IVYGREP_NEURAL_FOREGROUND_ACCELERATOR=0`: force CPU query embedding.
+
+CUDA builds read `nvidia-smi` free VRAM, total VRAM, and utilization before
+choosing batch size. Linux memory accounting honors effective cgroup limits,
+including containers.
 
 Relevance evaluation separates foreground readiness from post-background hash
 quality:
@@ -328,17 +313,15 @@ uv run scripts/run_public_benchmark_matrix.py \
   --output public-code-retrieval-results.json
 ```
 
-The public matrix pins 20 CoIR task/language variants and retains a compact
-1,000-query baseline spanning 48 languages, with raw-result checksums, per-task
-quality, run variance, latency, memory, and index size. The current report and
-machine-readable result live under
-[`docs/benchmarks/`](docs/benchmarks/).
+The public matrix pins 20 CoIR task/language variants plus a compact
+1,000-query, 48-language baseline. Reports include checksums, quality, variance,
+latency, memory, and index size under [`docs/benchmarks/`](docs/benchmarks/).
 
 ---
 
-## 🏗️ Architecture & Git-Native Intelligence
+## 🏗️ Architecture and git
 
-ivygrep deeply understands git. This is a core design decision, not an afterthought:
+Git behavior is part of the index design:
 - **Worktree overlays:** Reuses one base search index. Per-worktree SQLite, lexical, and vector stores contain only divergent chunks and tombstones; lightweight Merkle metadata tracks filesystem state.
 - **Branch-switch deltas:** Merkle reconciliation re-indexes *only* changed files upon branch switch instead of rebuilding the search index.
 - **Content-based deduplication:** Byte-identical files are never re-indexed across branches.
@@ -350,20 +333,21 @@ symbol/call graph storage,
 
 ---
 
-## 🔒 Security & Privacy
+## 🔒 Security and privacy
 
-ivygrep runs search and embedding inference locally and never sends your code, queries, or index data to an external service. A few things worth knowing:
+ivygrep runs search and embedding inference locally. It never sends code,
+queries, or index data to an external service.
 
-- **Where data lives:** the index stores compressed source chunks under `~/.local/share/ivygrep` (or `$XDG_DATA_HOME`/`$IVYGREP_HOME`). Unix uses an owner-only `0600` socket plus peer-uid verification. Windows uses loopback TCP with a per-daemon authentication token stored beside the user-owned index. Keep a custom `IVYGREP_HOME` private to your account.
-- **Model download:** neural mode uses `hf-hub` to download revision-pinned model assets on first use and caches them under `$HF_HOME` or `~/.cache/huggingface`. The default is `sentence-transformers/static-retrieval-mrl-en-v1`; `IVYGREP_MODEL_PROFILE=potion-code` selects an optional code-specialized static profile, while `general`, `code`, and `code-hq` select optional transformer profiles. Cached assets work without network access. Use `--hash` or a `--no-default-features` build when model assets must never be downloaded.
-- **Inference backend:** macOS release binaries execute locally with Accelerate-backed CPU math; Linux and Windows release binaries execute locally on CPU. Source builds can opt into local Metal with `--features accelerate,metal` or CUDA with `--features cuda` on a compatible installation. Accelerator builds use Metal/CUDA for transformer enhancement and foreground transformer query embedding when available; set `IVYGREP_NEURAL_FOREGROUND_ACCELERATOR=0` to force CPU query embedding. The CUDA build does not require cuDNN. If `nvidia-smi` cannot report compute capability, `build.sh` and `test.sh` infer `CUDA_COMPUTE_CAP=120` for RTX 50/Blackwell hosts; set `CUDA_COMPUTE_CAP` explicitly for other affected GPUs. `ig --status` reports the recorded backend that last generated neural vectors.
+- **Where data lives:** compressed source chunks live under `~/.local/share/ivygrep` (or `$XDG_DATA_HOME`/`$IVYGREP_HOME`). Unix uses an owner-only `0600` socket plus peer-uid verification. Windows uses loopback TCP with a per-daemon token beside the user-owned index. Keep custom `IVYGREP_HOME` paths private.
+- **Model download:** neural mode downloads revision-pinned assets with `hf-hub` on first use and caches them under `$HF_HOME` or `~/.cache/huggingface`. Use `--hash` or a `--no-default-features` build when model assets must never be downloaded.
+- **Inference backend:** release binaries run locally: Accelerate-backed CPU math on macOS, CPU on Linux/Windows. Source builds can opt into Metal (`--features accelerate,metal`) or CUDA (`--features cuda`). CUDA does not require cuDNN. Set `CUDA_COMPUTE_CAP` explicitly when auto-detection is wrong; `ig --status` reports the backend that last generated neural vectors.
 - **Resource controls:** indexing refuses to start below 512 MiB available memory, background enhancement pauses below 1 GiB, and optional transformer workers share model weights plus an adaptive memory budget. These checks use native available-memory reporting on macOS and Windows and cgroup-aware reporting on Linux.
 - **Secrets in your repo:** ivygrep indexes file *contents*, including config/dotfiles (e.g. `.env`) unless they're gitignored. Those contents are stored in the local index and can appear in search snippets. Keep secrets out of the workspace or in `.gitignore`.
-- **MCP scope:** the `ig_search` MCP tool only searches the workspace at the provided `path` — it cannot search across other indexed projects.
+- **MCP scope:** `ig_search` only searches the workspace at the supplied `path`.
 
 ---
 
-## 🔧 CLI Reference
+## 🔧 CLI reference
 
 ```bash
 # Core workflow
@@ -396,16 +380,13 @@ ig --json "query"                  # machine-readable JSON
 ig --first-line-only "query"       # compact grep-style output
 ig --file-name-only "query"        # file paths only
 
-# Daemon & server
+# Daemon and server
 ig --daemon                        # start background watcher
 ig --mcp                           # start MCP server (stdio)
 ```
 
-`--limit` and `--context` are independent controls:
-
-**Use `--limit` to choose how broadly ivygrep searches and how many ranked files
-it may return. Use `--context` to choose how much source text appears around
-each hit. Neither option is a relevance threshold.**
+`--limit` controls retrieval breadth. `--context` controls snippet size.
+Neither is a relevance threshold.
 
 | Control | What it changes | Ranking |
 |---|---|---|
@@ -415,43 +396,16 @@ each hit. Neither option is a relevance threshold.**
 | `--first-line-only` | Reduces each result to one preview line after retrieval | Unchanged |
 | `--file-name-only` | Returns paths only; without `-n`, the CLI also uses maximum candidate budgets | Unchanged with `-n`; without `-n`, the deeper pool can change ranks |
 
-- `--limit` controls breadth, not the ranker's relevance objective. A larger
-  value searches deeper, which improves the chance of finding additional
-  relevant files but also includes progressively lower-ranked candidates.
-- Results remain score-ordered. A smaller limit truncates the response to the
-  highest-ranked files found for that request. It does not deliberately return
-  less-relevant files, but a relevant file below the cutoff will not be shown.
-- Because ivygrep sizes its candidate pool from the requested limit, increasing
-  the limit can introduce candidates that slightly rerank the top results.
-  `--limit` is a maximum file count, not a line, token, or confidence budget.
-- Without `--limit`, normal candidate retrieval remains bounded, but no
-  explicit final result-file cap is applied. `--no-limit` expands retrieval to
-  the maximum candidate budgets and can be much slower.
-- `--context N` returns up to `N` lines before and after each focused match.
-  It changes snippet size only, not retrieval or ranking. For example, `-C 4`
-  returns at most nine lines per hit when file boundaries allow.
-- `--first-line-only` changes presentation only. `--file-name-only -n N` also
-  keeps retrieval bounded by `N`. For grep-style path discovery,
-  `--file-name-only` without `-n` uses maximum candidate budgets; add `-n` when
-  you need a predictable result count and latency.
-
-Fewer snippet tokens do not mean fewer result files, better relevance, or worse
-relevance. They mean less source text was returned for the selected files.
-Relevance is measured separately with ranking metrics such as nDCG and,
-ultimately, whether the returned evidence is sufficient for the task.
-
-For agents, set an explicit limit: start with `-n 5` to `-n 10` and `-C 2`.
-Increase context when the right file is present but the snippet is too small.
-Increase the result limit when the result set does not contain enough distinct
-files. Narrow `path`, `--type`, `--include`, or `--exclude` when results are
-topically correct but too broad.
-ivygrep does not currently expose a total token-budget parameter.
-
-Do not treat the internal fused score as a globally calibrated confidence
-value. Scores are meaningful for ordering one query's results, but a fixed
-minimum-score threshold would not transfer reliably across queries or
-repositories. Use rank, path/type filters, and task evidence to decide whether
-the returned set is sufficient.
+- Smaller limits truncate ranked files. Larger limits search deeper and can
+  slightly rerank top results.
+- `--no-limit` uses maximum candidate budgets and can be much slower.
+- `-C`, `--first-line-only`, and `--file-name-only -n N` change presentation
+  after retrieval.
+- `--file-name-only` without `-n` also uses maximum candidate budgets.
+- Agents should start with `-n 5` to `-n 10` and `-C 2`. Increase context for
+  more lines from the same file; increase limit for more candidate files.
+- Scores order one query's results. They are not global confidence values.
+- ivygrep does not expose a total token-budget parameter.
 
 ---
 
@@ -464,11 +418,10 @@ the returned set is sufficient.
 ./build.sh --locked --features cuda  # opt-in Linux CUDA neural binary
 ./bench.sh          # critical Criterion benchmark, no stale local baseline comparison
 ```
-The test suite covers unit tests, CLI snapshots, concurrency, golden queries,
-public-layout retrieval metrics, symbol/caller indexing, incremental CRUD, MCP,
-daemon recovery, git/worktree behavior, property-based Merkle invariants, and
-benchmark guards.
-Benchmark output reports per-operation latency; short-looking numbers are repeated inside Criterion so actual timed samples remain long enough to be stable.
+Tests cover unit behavior, CLI snapshots, concurrency, golden queries, public
+retrieval metrics, symbols/callers, incremental CRUD, MCP, daemon recovery,
+git/worktrees, Merkle properties, and benchmark guards. Criterion repeats short
+operations inside stable timed samples.
 
 ### End-to-end procedures
 ```bash
@@ -479,15 +432,16 @@ python3 scripts/check_daemon_equivalence.py \
   --binary ./target/release/ig \
   --bench-home /tmp/ivygrep-daemon-equivalence
 
-# Opt-in macOS Metal backend validation (downloads local model artifacts on first run)
+# Opt-in macOS Metal backend validation. Downloads local model artifacts once.
 ./build.sh --locked --features accelerate,metal
 ./scripts/e2e_neural_backend.sh --binary ./target/release/ig --model-profile general --expect-backend "Candle Metal"
 
-# Opt-in Linux CUDA backend validation (downloads local model artifacts on first run)
+# Opt-in Linux CUDA backend validation. Downloads local model artifacts once.
 ./build.sh --locked --features cuda
 ./scripts/e2e_neural_backend.sh --binary ./target/release/ig --model-profile general --expect-backend "Candle CUDA"
 ```
-These smoke tests run against throwaway projects and isolated `IVYGREP_HOME` directories; the neural backend check embeds fixture text locally and verifies recorded backend reporting.
+Smoke tests use throwaway projects and isolated `IVYGREP_HOME` directories. The
+neural backend check embeds fixture text locally and verifies backend reporting.
 
 ### Stress testing
 ```bash
@@ -497,14 +451,14 @@ These smoke tests run against throwaway projects and isolated `IVYGREP_HOME` dir
 
 ## Roadmap
 
-- **More Tree-sitter languages:** expand the AST pipeline to SQL and additional grammars as high-quality tree-sitter parsers mature.
+- **More Tree-sitter languages:** add SQL and other mature grammars.
 - **Evidence-backed search program:** track the quality,
   latency, footprint, and portability work in
   [#128](https://github.com/bvolpato/ivygrep/issues/128).
 - **Learned reranking:** evaluate compact local cross-encoders against the
   bounded deterministic reranker without weakening offline portability.
-- **Editor integrations:** VS Code extension and Neovim telescope plugin for in-editor semantic search.
-- **Background job resilience:** richer queue diagnostics and resumable worker state across daemon restarts.
+- **Editor integrations:** VS Code and Neovim Telescope.
+- **Background job resilience:** better queue diagnostics and resumable worker state.
 
 ## Contributing
 

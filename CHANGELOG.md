@@ -4,6 +4,15 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.12.17] - 2026-06-30
+
+### Performance
+- **Code tokenization now streams terms instead of materializing every token.** The code tokenizer emits normalized segments on demand, removing a hot allocation path during indexing. Paired million-chunk validation improved fresh-index average from `7.238s` to `7.072s`, reduced indexing CPU from `68.0s` to `61.8s`, and cut concurrent search p95 from `9.00ms` to `6.69ms` while preserving recall@20 and MRR@20 at `1.0`.
+- **Small stored chunks avoid premature compression.** Tiny chunk text stays inline until `512` bytes, reducing compression overhead during indexing. Validation showed index size moving from `435MB` to `467MB`, a deliberate tradeoff for lower CPU and better tails.
+
+### Documentation
+- **README and Pages are tighter and current.** The comparison table now includes Zoekt, release/site copy matches the 24 Tree-sitter AST language set and `static-retrieval-v1` embedding model, and the GitHub Pages table shape is fixed.
+
 ## [0.12.16] - 2026-06-30
 
 ### Performance
