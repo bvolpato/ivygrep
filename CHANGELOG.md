@@ -4,6 +4,14 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.12.16] - 2026-06-30
+
+### Performance
+- **Auxiliary BM25F fields no longer store token positions.** The boosted `file_path_text` and `signature` Tantivy fields now keep code-tokenized matching while using basic postings instead of full positions; the main code body field still keeps positions. Six paired million-chunk runs preserved expected recall@20 and MRR@20 at `1.0`, reduced warm distinct-query p95 to `0.917x`, reduced index size to `0.976x`, and held fresh-index throughput at `1.003x`.
+
+### Security
+- **Updated `anyhow` past the denied RustSec advisory.** The lockfile now uses `anyhow 1.0.103`, clearing the `RUSTSEC-2026-0190` unsoundness denial in `cargo audit --deny yanked --deny unsound`.
+
 ## [0.12.15] - 2026-06-29
 
 ### Performance
