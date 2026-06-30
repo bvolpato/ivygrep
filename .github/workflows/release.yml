@@ -76,7 +76,7 @@ jobs:
 
       - name: Install Python on Windows
         if: runner.os == 'Windows'
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.13"
 
@@ -206,12 +206,12 @@ jobs:
             --output "$PROVENANCE_PATH"
 
       - name: Attest build provenance
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4
         with:
           subject-path: dist/ivygrep-${{ github.ref_name }}-${{ matrix.archive_name }}.${{ matrix.archive }}
 
       - name: Attest SBOM
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4
         with:
           subject-path: dist/ivygrep-${{ github.ref_name }}-${{ matrix.archive_name }}.${{ matrix.archive }}
           sbom-path: dist/ivygrep-${{ github.ref_name }}-${{ matrix.archive_name }}.spdx.json
@@ -262,7 +262,7 @@ jobs:
 
       - name: Install Python on Windows
         if: runner.os == 'Windows'
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.13"
 
