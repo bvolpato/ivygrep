@@ -7,7 +7,7 @@ All notable changes to ivygrep are documented in this file.
 ## [0.12.21] - 2026-07-01
 
 ### Performance
-- **Main Tantivy code-body postings no longer store positions.** The main `text` field now keeps term frequencies without positional postings, cutting position-decoding work in lexical search while exact user-facing matches still go through literal verification. Paired Criterion runs improved `hybrid_complex_phrase_1000_files` from `4.45 ms` to `2.66 ms`, `hybrid_search_200_files` from `3.66 ms` to `3.19 ms`, and `literal_search_200_files` from `2.41 ms` to `2.16 ms`; fresh and incremental indexing stayed neutral.
+- **Main Tantivy code-body postings no longer store positions.** The main `text` field now keeps term frequencies without positional postings, cutting position-decoding work in lexical search while exact user-facing matches still go through literal verification. Paired Criterion runs improved `hybrid_complex_phrase_1000_files` from `4.45 ms` to `2.79 ms`, `hybrid_search_200_files` from `3.66 ms` to `3.50 ms`, `literal_search_200_files` from `2.41 ms` to `2.05 ms`, and `hybrid_simple_symbol_1000_files` from `3.19 ms` to `2.96 ms`; fresh and incremental indexing stayed neutral.
 
 ### Testing
 - **Relevance and discarded candidates were checked before release.** The foreground relevance gate stayed at `MRR 0.609`, `precision@1 0.435`, and `recall@5 0.783`. Fast-field stored-doc replacement, a direct flat vector backend, and a generic search-context cache were tested independently and discarded.

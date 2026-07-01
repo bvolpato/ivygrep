@@ -14,6 +14,7 @@ use tantivy::query::{
     BooleanQuery, Occur, Query, QueryParser, RegexQuery, TermQuery, TermSetQuery,
 };
 use tantivy::schema::IndexRecordOption;
+use tantivy::tokenizer::TokenStream;
 
 use crate::embedding::EmbeddingModel;
 use crate::indexer::{
@@ -24,7 +25,7 @@ use crate::indexer::{
 };
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
-use crate::text::{singularize_token, split_identifier_segments};
+use crate::text::{build_code_analyzer, singularize_token, split_identifier_segments};
 use crate::vector_store::{
     HASH_VECTOR_QUANTIZATION, NEURAL_VECTOR_QUANTIZATION, VectorMatch, VectorStore,
 };
@@ -851,24 +852,75 @@ fn collect_literal_candidates_for_queries(
     limits: (usize, usize),
 ) -> Result<Vec<IndexedChunk>> {
     let (candidate_limit, target_hits) = limits;
-    let mut search_fields = vec![ctx.fields.text, ctx.fields.file_path];
-    if let Some(f) = ctx.fields.file_path_text {
-        search_fields.push(f);
+    if literal_queries_allow_incremental_verification(candidate_queries) {
+        for query in candidate_queries {
+            let candidates = collect_literal_candidate_chunks(
+                ctx,
+                std::slice::from_ref(query),
+                path_matcher,
+                glob_path_filter,
+                options,
+                candidate_limit,
+                false,
+            )?;
+            let verified =
+                verify_literal_candidates(candidates, candidate_queries, matcher, target_hits);
+            if !verified.is_empty() {
+                return Ok(verified);
+            }
+        }
+        if !literal_queries_have_relaxed_variant(candidate_queries) {
+            return Ok(Vec::new());
+        }
     }
-    if let Some(f) = ctx.fields.signature {
-        search_fields.push(f);
-    }
-    let mut parser = QueryParser::for_index(&ctx.indexes[0], search_fields);
-    parser.set_conjunction_by_default();
 
+    let candidates = collect_literal_candidate_chunks(
+        ctx,
+        candidate_queries,
+        path_matcher,
+        glob_path_filter,
+        options,
+        candidate_limit,
+        false,
+    )?;
+    let verified = verify_literal_candidates(candidates, candidate_queries, matcher, target_hits);
+    if !verified.is_empty() || !literal_queries_have_relaxed_variant(candidate_queries) {
+        return Ok(verified);
+    }
+
+    let candidates = collect_literal_candidate_chunks(
+        ctx,
+        candidate_queries,
+        path_matcher,
+        glob_path_filter,
+        options,
+        candidate_limit,
+        true,
+    )?;
+    Ok(verify_literal_candidates(
+        candidates,
+        candidate_queries,
+        matcher,
+        target_hits,
+    ))
+}
+
+fn collect_literal_candidate_chunks(
+    ctx: &SearchContext,
+    candidate_queries: &[String],
+    path_matcher: &PathGlobMatcher,
+    glob_path_filter: &GlobPathQueryFilter,
+    options: &SearchOptions,
+    candidate_limit: usize,
+    relaxed: bool,
+) -> Result<Vec<IndexedChunk>> {
     let mut found_ids = HashSet::<u64>::new();
 
-    // Phase 1: Collect candidate chunks from Tantivy (metadata only, no text).
     let mut candidates: Vec<IndexedChunk> = Vec::new();
     'outer: for lexical_query in candidate_queries {
-        let parsed_query = match parser.parse_query(lexical_query) {
-            Ok(q) => q,
-            Err(_) => continue,
+        let Some(parsed_query) = literal_candidate_query(&ctx.fields, lexical_query, relaxed)
+        else {
+            continue;
         };
         let parsed_query =
             constrain_query_to_scope(parsed_query, &ctx.fields, options.scope_filter.as_ref())?;
@@ -900,7 +952,6 @@ fn collect_literal_candidates_for_queries(
         }
     }
 
-    // Phase 2: Batch-fetch text from SQLite for all candidates at once.
     let empty_keys: Vec<u64> = candidates
         .iter()
         .filter(|c| c.text.is_empty())
@@ -918,9 +969,15 @@ fn collect_literal_candidates_for_queries(
         }
     }
 
-    // Phase 3: Verify exact substring matches. Mixed long aliases and short
-    // acronyms need specificity ranking because a dense canonical file can
-    // otherwise fall behind the first target_hits generic acronym matches.
+    Ok(candidates)
+}
+
+fn verify_literal_candidates(
+    candidates: Vec<IndexedChunk>,
+    candidate_queries: &[String],
+    matcher: &regex::Regex,
+    target_hits: usize,
+) -> Vec<IndexedChunk> {
     if literal_queries_need_specificity_ranking(candidate_queries) {
         let mut verified = Vec::new();
         for chunk in candidates {
@@ -936,7 +993,7 @@ fn collect_literal_candidates_for_queries(
                 .then_with(|| left.2.vector_key.cmp(&right.2.vector_key))
         });
         verified.truncate(target_hits);
-        return Ok(verified.into_iter().map(|(_, _, chunk)| chunk).collect());
+        return verified.into_iter().map(|(_, _, chunk)| chunk).collect();
     }
 
     let mut verified = Vec::new();
@@ -948,7 +1005,116 @@ fn collect_literal_candidates_for_queries(
             }
         }
     }
-    Ok(verified)
+    verified
+}
+
+fn literal_queries_have_relaxed_variant(queries: &[String]) -> bool {
+    queries
+        .iter()
+        .any(|query| literal_candidate_terms(query).len() > 1)
+}
+
+fn literal_queries_allow_incremental_verification(queries: &[String]) -> bool {
+    if literal_queries_need_specificity_ranking(queries) {
+        return false;
+    }
+    queries.first().is_some_and(|query| {
+        !query.chars().any(char::is_whitespace)
+            && query.chars().any(|ch| {
+                ch == '_'
+                    || ch == '-'
+                    || ch == ':'
+                    || ch == '.'
+                    || ch == '$'
+                    || ch.is_ascii_uppercase()
+                    || ch.is_ascii_digit()
+            })
+    })
+}
+
+fn literal_candidate_query(
+    fields: &TantivyFields,
+    query: &str,
+    relaxed: bool,
+) -> Option<Box<dyn Query>> {
+    let terms = literal_candidate_terms(query);
+    if terms.is_empty() {
+        return None;
+    }
+
+    let mut indexed_fields = Vec::with_capacity(3);
+    indexed_fields.push((fields.text, IndexRecordOption::WithFreqs));
+    if let Some(field) = fields.file_path_text {
+        indexed_fields.push((field, IndexRecordOption::Basic));
+    }
+    if let Some(field) = fields.signature {
+        indexed_fields.push((field, IndexRecordOption::Basic));
+    }
+
+    let mut variants = Vec::with_capacity(terms.len() + 1);
+    variants.push((0..terms.len()).collect::<Vec<_>>());
+    if relaxed {
+        if terms.len() == 2 {
+            variants.push(vec![0]);
+            variants.push(vec![1]);
+        } else if terms.len() > 2 {
+            for skipped in 0..terms.len() {
+                variants.push(
+                    (0..terms.len())
+                        .filter(|index| *index != skipped)
+                        .collect::<Vec<_>>(),
+                );
+            }
+        }
+    }
+
+    let mut variant_queries = Vec::with_capacity(variants.len());
+    for variant in variants {
+        let mut clauses = Vec::with_capacity(variant.len());
+        for term_index in variant {
+            clauses.push((
+                Occur::Must,
+                literal_candidate_term_query(&indexed_fields, &terms[term_index]),
+            ));
+        }
+        variant_queries.push((
+            Occur::Should,
+            Box::new(BooleanQuery::new(clauses)) as Box<dyn Query>,
+        ));
+    }
+
+    Some(Box::new(BooleanQuery::new(variant_queries)))
+}
+
+fn literal_candidate_term_query(
+    indexed_fields: &[(tantivy::schema::Field, IndexRecordOption)],
+    term_text: &str,
+) -> Box<dyn Query> {
+    let term_queries = indexed_fields
+        .iter()
+        .map(|(field, index_option)| {
+            let term = tantivy::Term::from_field_text(*field, term_text);
+            (
+                Occur::Should,
+                Box::new(TermQuery::new(term, *index_option)) as Box<dyn Query>,
+            )
+        })
+        .collect::<Vec<_>>();
+    Box::new(BooleanQuery::new(term_queries))
+}
+
+fn literal_candidate_terms(query: &str) -> Vec<String> {
+    let mut analyzer = build_code_analyzer();
+    let mut stream = analyzer.token_stream(query);
+    let mut terms = Vec::new();
+    let mut seen = HashSet::new();
+    while stream.advance() {
+        let text = stream.token().text.clone();
+        if seen.insert(text.clone()) {
+            terms.push(text);
+        }
+    }
+    terms
 }
 
 fn literal_queries_need_specificity_ranking(queries: &[String]) -> bool {
@@ -5314,7 +5480,7 @@ mod tests {
 
         std::fs::write(
             tmp.path().join("tax.rs"),
-            "pub fn calculate_tax(amount: f64) -> f64 { amount * 0.2 }\n",
+            "pub fn calculate_sales_tax(amount: f64) -> f64 { amount * 0.2 }\n",
         )
         .unwrap();
 
@@ -5332,7 +5498,7 @@ mod tests {
         .unwrap();
 
         assert!(!hits.is_empty());
-        assert!(hits[0].preview.contains("calculate_tax"));
+        assert!(hits[0].preview.contains("calculate_sales_tax"));
     }
 
     #[test]
@@ -5880,7 +6046,7 @@ mod tests {
 
         std::fs::write(
             tmp.path().join("tax.rs"),
-            "pub fn calculate_tax(amount: f64) -> f64 { amount * 0.2 }\n",
+            "pub fn calculate_sales_tax(amount: f64) -> f64 { amount * 0.2 }\n",
         )
         .unwrap();
 
@@ -5888,9 +6054,10 @@ mod tests {
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         index_workspace(&workspace, &model).unwrap();
 
-        let hits = literal_search(&workspace, "calculate_tax", &SearchOptions::default()).unwrap();
+        let hits =
+            literal_search(&workspace, "calculate_sales_tax", &SearchOptions::default()).unwrap();
         assert!(!hits.is_empty());
-        assert!(hits[0].preview.contains("calculate_tax"));
+        assert!(hits[0].preview.contains("calculate_sales_tax"));
     }
 
     #[test]
