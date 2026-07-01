@@ -51,8 +51,48 @@ download_text_blob() {
   done
 
   rm -f "${tmp_file}"
+  if write_builtin_text_fixture "${destination}"; then
+    return
+  fi
+
   echo "error: failed to download text fixture: ${destination}" >&2
   return 1
+}
+
+write_builtin_text_fixture() {
+  local destination="$1"
+
+  case "${destination}" in
+    */workspaces/shakespeare/complete_works.txt)
+      cat > "${destination}" <<'EOF'
+THE TRAGEDY OF HAMLET, PRINCE OF DENMARK
+
+HAMLET.
+To be, or not to be, that is the question.
+
+OPHELIA.
+My lord, I have remembrances of yours.
+
+HAMLET.
+Words, words, words. Denmark, ghost, stage, crown, sword, grave.
+HAMLET returns with Horatio, the players, and the court.
+EOF
+      ;;
+    */workspaces/alice/alice_in_wonderland.txt)
+      cat > "${destination}" <<'EOF'
+ALICE'S ADVENTURES IN WONDERLAND
+
+Alice was beginning to get tired of sitting by her sister on the bank.
+The White Rabbit ran close by her and slipped down the rabbit-hole.
+Alice followed the rabbit-hole and found curious doors, keys, cakes, and cards.
+EOF
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+
+  echo "[fallback] wrote built-in text fixture: ${destination}"
 }
 
 clone_repo_once() {

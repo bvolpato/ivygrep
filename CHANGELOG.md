@@ -4,6 +4,11 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.12.19] - 2026-06-30
+
+### Fixed
+- **Stress fixture bootstrap no longer fails when Project Gutenberg is unreachable.** Downloaded public-domain corpora remain preferred, but the script now writes small deterministic fallback fixtures that preserve the ignored stress-test queries when Gutenberg times out from CI runners.
+
 ## [0.12.18] - 2026-06-30
 
 ### Performance
