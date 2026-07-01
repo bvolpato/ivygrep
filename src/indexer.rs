@@ -3233,7 +3233,7 @@ pub fn fetch_chunk_texts_by_vector_keys_batch(
         query.push_str("SELECT vector_key, text FROM chunks WHERE vector_key IN (");
         push_sql_placeholders(&mut query, batch.len());
         query.push(')');
-        let mut stmt = conn.prepare(&query)?;
+        let mut stmt = conn.prepare_cached(&query)?;
 
         let mut rows = stmt.query(params_from_iter(batch.iter().map(|key| *key as i64)))?;
         while let Some(row) = rows.next()? {
@@ -3286,7 +3286,7 @@ fn fetch_chunks_by_vector_keys_batch_impl(
         query.push_str(", vector_key, is_ignored FROM chunks WHERE vector_key IN (");
         push_sql_placeholders(&mut query, batch.len());
         query.push(')');
-        let mut stmt = conn.prepare(&query)?;
+        let mut stmt = conn.prepare_cached(&query)?;
 
         let mut rows = stmt.query(params_from_iter(batch.iter().map(|key| *key as i64)))?;
         while let Some(row) = rows.next()? {

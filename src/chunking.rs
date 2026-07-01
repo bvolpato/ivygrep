@@ -551,11 +551,16 @@ const STARLARK_TARGET_AST_LINE_THRESHOLD: usize = 500;
 /// search hits. We fold such lines into the following definition chunk instead.
 fn is_leading_doc_line(trimmed: &str, language: &str) -> bool {
     // Covers //, ///, //! (C/Rust/Go/Java/JS/TS/Swift/Scala/Dart…), block comment
-    // bodies (/* * */), decorators/annotations (@), -- (SQL/Haskell/Lua),
-    // ; (Lisp/asm), and triple-quoted docstrings.
-    const PREFIXES: &[&str] = &["//", "/*", "*", "@", "--", ";", "\"\"\"", "'''"];
+    // bodies (/* * */), -- (SQL/Haskell/Lua), ; (Lisp/asm), and triple-quoted docstrings.
+    const PREFIXES: &[&str] = &["//", "/*", "*", "--", ";", "\"\"\"", "'''"];
     if PREFIXES.iter().any(|p| trimmed.starts_with(p)) {
         return true;
+    }
+    if trimmed.starts_with('@') {
+        return matches!(
+            language,
+            "python" | "java" | "kotlin" | "typescript" | "javascript" | "swift" | "scala" | "dart"
+        );
     }
     // Rust attributes attach to the item directly below, so fold them in.
     if trimmed.starts_with("#[") || trimmed.starts_with("#!") {
@@ -569,6 +574,46 @@ fn is_leading_doc_line(trimmed: &str, language: &str) -> bool {
         return matches!(language, "python" | "ruby" | "php" | "perl" | "shell");
     }
     false
+}
+
+fn leading_doc_start(start_line: usize, language: &str, lines: &[&str]) -> usize {
+    let mut start = start_line;
+    while start > 1 {
+        let previous = lines[start - 2].trim();
+        if !is_leading_doc_line(previous, language) {
+            break;
+        }
+        start -= 1;
+    }
+    start
+}
+
+fn should_skip_tree_sitter_for_generated_source(
+    language: &str,
+    lines: &[&str],
+    detect_signature: fn(&str) -> Option<ChunkKind>,
+) -> bool {
+    if language != "rust" || lines.len() < 200 {
+        return false;
+    }
+
+    let generated_header = lines.iter().take(20).any(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.contains("@generated")
+            || lower.contains("generated")
+            || lower.contains("automatically generated")
+            || lower.contains("do not edit")
+    });
+    if !generated_header {
+        return false;
+    }
+
+    lines
+        .iter()
+        .filter(|line| detect_signature(line.trim()).is_some())
+        .take(50)
+        .count()
+        >= 50
 }
 
 pub fn chunk_source(rel_path: &Path, text: &str) -> Vec<Chunk> {
@@ -587,8 +632,14 @@ pub(crate) fn chunk_source_with_metadata(rel_path: &Path, text: &str) -> Chunked
         };
     }
 
-    // Attempt 100% accurate AST chunking via Tree-sitter for supported languages
-    if let Some(chunked) = try_tree_sitter_chunk_source(rel_path, text, &language, &lines)
+    // Attempt 100% accurate AST chunking via Tree-sitter for supported languages.
+    // Large generated Rust files with many simple item signatures are handled by
+    // the fallback splitter to avoid paying AST parse/query cost for low-value structure.
+    let skip_tree_sitter = lang_def.is_some_and(|def| {
+        should_skip_tree_sitter_for_generated_source(&language, &lines, def.detect_signature)
+    });
+    if !skip_tree_sitter
+        && let Some(chunked) = try_tree_sitter_chunk_source(rel_path, text, &language, &lines)
         && !chunked.chunks.is_empty()
     {
         return chunked;
@@ -607,12 +658,16 @@ pub(crate) fn chunk_source_with_metadata(rel_path: &Path, text: &str) -> Chunked
         };
     }
 
+    let chunk_starts = signatures
+        .iter()
+        .map(|(start_line, _)| leading_doc_start(*start_line, &language, &lines))
+        .collect::<Vec<_>>();
     let mut chunks = Vec::new();
-    for (idx, (start_line, kind)) in signatures.iter().enumerate() {
-        let start = *start_line;
-        let end = signatures
+    for (idx, (_, kind)) in signatures.iter().enumerate() {
+        let start = chunk_starts[idx];
+        let end = chunk_starts
             .get(idx + 1)
-            .map(|(next, _)| next.saturating_sub(1))
+            .map(|next| next.saturating_sub(1))
             .unwrap_or(lines.len());
 
         if end < start {
@@ -1910,6 +1965,31 @@ pub fn calculate_total(amount: f64) -> f64 {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].kind, ChunkKind::Function);
         assert!(chunks[0].text.contains("calculate_tax"));
+    }
+
+    #[test]
+    fn generated_rust_fallback_keeps_own_doc_comments() {
+        let mut src = String::from("//! Deterministic generated module.\n\n");
+        for index in 0..60 {
+            src.push_str(&format!(
+                "/// generated purpose {index}.\npub fn generated_operation_{index:03}(value: u64) -> u64 {{\n    value + {index}\n}}\n\n"
+            ));
+        }
+
+        let chunks = chunk_source(Path::new("src/generated.rs"), &src);
+
+        assert!(chunks.len() >= 60);
+        assert!(
+            chunks[0].text.contains("generated purpose 0"),
+            "first generated chunk should keep its own doc comment: {:?}",
+            chunks[0].text
+        );
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk.text.contains("generated purpose 59")),
+            "last generated chunk should keep its own doc comment"
+        );
     }
 
     #[test]
