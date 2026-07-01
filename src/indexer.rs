@@ -3106,7 +3106,7 @@ fn finalize_graph_indexes(conn: &Connection) -> Result<()> {
 fn build_schema() -> Schema {
     let code_indexing = TextFieldIndexing::default()
         .set_tokenizer(CODE_TOKENIZER_NAME)
-        .set_index_option(IndexRecordOption::WithFreqsAndPositions);
+        .set_index_option(IndexRecordOption::WithFreqs);
     let code_text_opts = TextOptions::default().set_indexing_options(code_indexing.clone());
     let boosted_aux_indexing = TextFieldIndexing::default()
         .set_tokenizer(CODE_TOKENIZER_NAME)

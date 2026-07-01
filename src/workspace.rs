@@ -49,7 +49,8 @@ pub struct Workspace {
 ///  14 — TypeScript/TSX type aliases, enums, and abstract classes are structural chunks
 ///  15 — Kotlin, Elixir, and Zig declarations use Tree-sitter structural chunks
 ///  16 — Declaration signatures skip leading documentation and attributes
-pub const INDEX_FORMAT_VERSION: u32 = 16;
+///  17 — Main text Tantivy postings store frequencies without positions
+pub const INDEX_FORMAT_VERSION: u32 = 17;
 const COMPACTION_FREE_BYTES_THRESHOLD: u64 = 16 * 1024 * 1024;
 const COMPACTION_FREE_PERCENT_THRESHOLD: f64 = 20.0;
 
