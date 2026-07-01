@@ -290,6 +290,7 @@ incompatible vectors are rebuilt.
 
 Resource knobs:
 
+- `IVYGREP_INDEX_THREADS`: foreground parser workers; defaults to physical cores.
 - `IVYGREP_NEURAL_THREADS`: desired transformer worker ceiling.
 - `IVYGREP_NEURAL_MEMORY_MB`: smaller explicit memory budget for worker sizing.
 - `IVYGREP_NEURAL_BATCH_SIZE`: local benchmark override for background batches.

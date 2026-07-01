@@ -25,11 +25,10 @@ pub struct CodeTokenStream<'a> {
     token: Token,
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct PendingSegment {
     offset_from: usize,
     offset_to: usize,
-    text: String,
 }
 
 impl Tokenizer for CodeTokenizer {
@@ -87,15 +86,18 @@ impl TokenStream for CodeTokenStream<'_> {
     fn advance(&mut self) -> bool {
         loop {
             if self.pending_index < self.pending.len() {
-                let segment = std::mem::take(&mut self.pending[self.pending_index]);
+                let segment = self.pending[self.pending_index];
                 self.pending_index += 1;
-                self.token = Token {
-                    offset_from: segment.offset_from,
-                    offset_to: segment.offset_to,
-                    position: self.position,
-                    text: segment.text,
-                    position_length: 1,
-                };
+                self.token.offset_from = segment.offset_from;
+                self.token.offset_to = segment.offset_to;
+                self.token.position = self.position;
+                self.token.text.clear();
+                self.token.text.extend(
+                    self.text[segment.offset_from..segment.offset_to]
+                        .chars()
+                        .map(|ch| ch.to_ascii_lowercase()),
+                );
+                self.token.position_length = 1;
                 self.position += 1;
                 return true;
             }
@@ -173,7 +175,10 @@ pub fn build_code_analyzer() -> tantivy::tokenizer::TextAnalyzer {
 pub fn split_identifier_segments(token: &str) -> Vec<String> {
     let mut segments = Vec::new();
     split_identifier_segments_with_offsets(token, 0, &mut segments);
-    segments.into_iter().map(|segment| segment.text).collect()
+    segments
+        .into_iter()
+        .map(|segment| token[segment.offset_from..segment.offset_to].to_ascii_lowercase())
+        .collect()
 }
 
 fn split_identifier_segments_with_offsets(
@@ -181,8 +186,7 @@ fn split_identifier_segments_with_offsets(
     base_offset: usize,
     segments: &mut Vec<PendingSegment>,
 ) {
-    let mut current = String::new();
-    let mut current_start = 0usize;
+    let mut current_start = None;
     let mut current_end = 0usize;
     let mut prev_is_lower = false;
     let mut prev_is_alpha = false;
@@ -191,8 +195,8 @@ fn split_identifier_segments_with_offsets(
         if !ch.is_ascii_alphanumeric() {
             push_current_segment(
                 segments,
-                &mut current,
-                base_offset + current_start,
+                &mut current_start,
+                base_offset,
                 base_offset + current_end,
             );
             prev_is_lower = false;
@@ -203,28 +207,27 @@ fn split_identifier_segments_with_offsets(
         let is_upper = ch.is_ascii_uppercase();
         let is_alpha = ch.is_ascii_alphabetic();
 
-        if !current.is_empty() && is_upper && prev_is_lower {
+        if current_start.is_some() && is_upper && prev_is_lower {
             push_current_segment(
                 segments,
-                &mut current,
-                base_offset + current_start,
+                &mut current_start,
+                base_offset,
                 base_offset + current_end,
             );
         }
 
-        if !current.is_empty() && is_alpha != prev_is_alpha {
+        if current_start.is_some() && is_alpha != prev_is_alpha {
             push_current_segment(
                 segments,
-                &mut current,
-                base_offset + current_start,
+                &mut current_start,
+                base_offset,
                 base_offset + current_end,
             );
         }
 
-        if current.is_empty() {
-            current_start = offset;
+        if current_start.is_none() {
+            current_start = Some(offset);
         }
-        current.push(ch.to_ascii_lowercase());
         current_end = offset + ch.len_utf8();
         prev_is_lower = ch.is_ascii_lowercase();
         prev_is_alpha = is_alpha;
@@ -232,25 +235,24 @@ fn split_identifier_segments_with_offsets(
 
     push_current_segment(
         segments,
-        &mut current,
-        base_offset + current_start,
+        &mut current_start,
+        base_offset,
         base_offset + current_end,
     );
 }
 
 fn push_current_segment(
     segments: &mut Vec<PendingSegment>,
-    current: &mut String,
-    offset_from: usize,
+    current_start: &mut Option<usize>,
+    base_offset: usize,
     offset_to: usize,
 ) {
-    if current.is_empty() {
+    let Some(offset_from) = current_start.take() else {
         return;
-    }
+    };
     segments.push(PendingSegment {
-        offset_from,
+        offset_from: base_offset + offset_from,
         offset_to,
-        text: std::mem::take(current),
     });
 }
 
@@ -396,6 +398,30 @@ mod tests {
             tokens.push(stream.token().text.clone());
         }
         tokens
+    }
+
+    #[test]
+    fn code_tokenizer_preserves_segment_offsets() {
+        use tantivy::tokenizer::Tokenizer;
+        let mut tokenizer = CodeTokenizer;
+        let mut stream = tokenizer.token_stream("src/calculateTax_total42.rs");
+        let mut tokens = Vec::new();
+        while stream.advance() {
+            let token = stream.token();
+            tokens.push((token.text.clone(), token.offset_from, token.offset_to));
+        }
+
+        assert_eq!(
+            tokens,
+            [
+                ("src".to_string(), 0, 3),
+                ("calculate".to_string(), 4, 13),
+                ("tax".to_string(), 13, 16),
+                ("total".to_string(), 17, 22),
+                ("42".to_string(), 22, 24),
+                ("rs".to_string(), 25, 27),
+            ]
+        );
     }
 
     #[test]

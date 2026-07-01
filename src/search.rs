@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -2515,6 +2515,22 @@ fn snake_to_camel_case(value: &str) -> String {
 }
 
 fn tokenize_query(query: &str) -> Vec<String> {
+    const CACHE_CAPACITY: usize = 8;
+    thread_local! {
+        static CACHE: RefCell<VecDeque<(String, Vec<String>)>> =
+            RefCell::new(VecDeque::with_capacity(CACHE_CAPACITY));
+    }
+
+    if let Some(tokens) = CACHE.with(|cache| {
+        cache
+            .borrow()
+            .iter()
+            .find(|(cached_query, _)| cached_query == query)
+            .map(|(_, tokens)| tokens.clone())
+    }) {
+        return tokens;
+    }
+
     let mut tokens = Vec::new();
     let mut seen = HashSet::new();
     for raw in query
@@ -2535,6 +2551,14 @@ fn tokenize_query(query: &str) -> Vec<String> {
             }
         }
     }
+
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() == CACHE_CAPACITY {
+            cache.pop_back();
+        }
+        cache.push_front((query.to_string(), tokens.clone()));
+    });
 
     tokens
 }

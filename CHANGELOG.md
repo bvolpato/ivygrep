@@ -4,6 +4,17 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.12.18] - 2026-06-30
+
+### Performance
+- **Fresh indexing now uses a bounded foreground parser pool.** Indexing defaults to physical cores and exposes `IVYGREP_INDEX_THREADS` for explicit tuning. The 505k-chunk profile improved median fresh-index wall time from `3.46s` to `3.33s`, CPU time from `28.46s` to `24.05s`, and peak RSS from `251MB` to `239MB`.
+- **Code tokenization reuses buffers instead of allocating segment strings.** Identifier splits now carry source byte ranges and normalize into a reused Tantivy token buffer. Heaptrack allocation samples dropped indexing allocations from `12.93M` to `9.08M`.
+- **Repeated query tokenization is cached per search thread.** Hot search loops reuse bounded tokenized query forms, improving median latency from `0.556ms` to `0.533ms` and p95 from `0.704ms` to `0.680ms` while preserving result digests in A/B tests.
+
+### Testing
+- **Discarded slower batched symbol-definition SQL.** It preserved output digests but reduced search throughput from about `1700` QPS to `1640` QPS, so it was reverted before release.
+- **Stress validation covers the old crash path.** `./test.sh --stress` passed all 11 downloaded-fixture stress tests, including concurrent search during reindex, query storms, regex stress, and ripgrep/tantivy scale fixtures.
+
 ## [0.12.17] - 2026-06-30
 
 ### Performance

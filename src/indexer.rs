@@ -62,6 +62,38 @@ const NEURAL_BATCH_SIZE_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CONFIGURED_NEURAL_BATCH_SIZE: usize = 4096;
 const SYMBOL_INSERT_BATCH_ROWS: usize = 256;
 
+fn indexing_worker_count() -> usize {
+    let logical = num_cpus::get().max(1);
+    configured_indexing_worker_count(
+        logical,
+        num_cpus::get_physical(),
+        std::env::var("IVYGREP_INDEX_THREADS").ok().as_deref(),
+    )
+}
+
+fn configured_indexing_worker_count(
+    logical: usize,
+    physical: usize,
+    configured: Option<&str>,
+) -> usize {
+    configured
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|count| *count > 0)
+        .unwrap_or(physical)
+        .clamp(1, logical)
+}
+
+fn indexing_pool() -> &'static rayon::ThreadPool {
+    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(indexing_worker_count())
+            .thread_name(|index| format!("ivygrep-index-{index}"))
+            .build()
+            .expect("indexing thread pool must build")
+    })
+}
+
 thread_local! {
     static TEXT_COMPRESSOR: RefCell<Option<zstd::bulk::Compressor<'static>>> =
         RefCell::new(zstd::bulk::Compressor::new(1).ok());
@@ -1358,84 +1390,88 @@ fn index_workspace_inner(
 
     let producer_handle = std::thread::spawn(move || {
         for batch_paths in diff_paths.chunks(128) {
-            let file_chunks: Vec<_> = batch_paths
-                .par_iter()
-                .filter_map(|(rel_path, is_ignored)| {
-                    // For a modified file that now yields no chunks (vanished,
-                    // unreadable, empty, binary/non-text, or chunks to nothing)
-                    // emit an empty entry on an incremental index so the
-                    // consumer still runs remove_file_chunks and clears the
-                    // stale chunks + orphaned vectors. On a fresh index there is
-                    // nothing to remove, so skip the file entirely.
-                    let nothing = |rel: &std::path::Path| {
-                        if is_fresh_index {
-                            None
-                        } else {
-                            Some(IndexedFile {
-                                rel_path: rel.to_path_buf(),
-                                chunks: Vec::new(),
-                                included_paths: Vec::new(),
-                            })
+            let file_chunks: Vec<_> = indexing_pool().install(|| {
+                batch_paths
+                    .par_iter()
+                    .filter_map(|(rel_path, is_ignored)| {
+                        // For a modified file that now yields no chunks (vanished,
+                        // unreadable, empty, binary/non-text, or chunks to nothing)
+                        // emit an empty entry on an incremental index so the
+                        // consumer still runs remove_file_chunks and clears the
+                        // stale chunks + orphaned vectors. On a fresh index there is
+                        // nothing to remove, so skip the file entirely.
+                        let nothing = |rel: &std::path::Path| {
+                            if is_fresh_index {
+                                None
+                            } else {
+                                Some(IndexedFile {
+                                    rel_path: rel.to_path_buf(),
+                                    chunks: Vec::new(),
+                                    included_paths: Vec::new(),
+                                })
+                            }
+                        };
+
+                        let abs_path = root_clone.join(rel_path);
+                        if !abs_path.exists() {
+                            progress_counter_clone
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            return nothing(rel_path);
                         }
-                    };
 
-                    let abs_path = root_clone.join(rel_path);
-                    if !abs_path.exists() {
-                        progress_counter_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        return nothing(rel_path);
-                    }
+                        let content_bytes = match fs::read(&abs_path) {
+                            Ok(b) => b,
+                            Err(_) => return nothing(rel_path),
+                        };
+                        if !is_indexable_file(rel_path, &content_bytes) {
+                            progress_counter_clone
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            return nothing(rel_path);
+                        }
 
-                    let content_bytes = match fs::read(&abs_path) {
-                        Ok(b) => b,
-                        Err(_) => return nothing(rel_path),
-                    };
-                    if !is_indexable_file(rel_path, &content_bytes) {
-                        progress_counter_clone.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        return nothing(rel_path);
-                    }
+                        let content = match String::from_utf8(content_bytes) {
+                            Ok(text) => text,
+                            Err(err) => String::from_utf8_lossy(&err.into_bytes()).into_owned(),
+                        };
 
-                    let content = match String::from_utf8(content_bytes) {
-                        Ok(text) => text,
-                        Err(err) => String::from_utf8_lossy(&err.into_bytes()).into_owned(),
-                    };
+                        let mut chunked = chunk_source_with_metadata(rel_path, &content);
+                        let (included_chunks, included_paths) = load_rust_doc_includes(
+                            &root_clone,
+                            rel_path,
+                            &chunked.rust_doc_includes,
+                            current_snapshot_clone.as_deref(),
+                        );
+                        chunked.chunks.extend(included_chunks);
+                        let mut seen_vector_keys = HashSet::new();
+                        let indexed: Vec<_> = chunked
+                            .chunks
+                            .into_iter()
+                            .map(|c| build_indexed_chunk(c, *is_ignored))
+                            .filter(|chunk| seen_vector_keys.insert(chunk.vector_key))
+                            .map(prepare_indexed_chunk)
+                            .collect();
 
-                    let mut chunked = chunk_source_with_metadata(rel_path, &content);
-                    let (included_chunks, included_paths) = load_rust_doc_includes(
-                        &root_clone,
-                        rel_path,
-                        &chunked.rust_doc_includes,
-                        current_snapshot_clone.as_deref(),
-                    );
-                    chunked.chunks.extend(included_chunks);
-                    let mut seen_vector_keys = HashSet::new();
-                    let indexed: Vec<_> = chunked
-                        .chunks
-                        .into_iter()
-                        .map(|c| build_indexed_chunk(c, *is_ignored))
-                        .filter(|chunk| seen_vector_keys.insert(chunk.vector_key))
-                        .map(prepare_indexed_chunk)
-                        .collect();
+                        let n = progress_counter_clone
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                            + 1;
+                        if show_progress && n.is_multiple_of(500) {
+                            eprint!("\r\x1b[K  ⠋ indexing {n}/{total} files...");
+                        }
+                        if n.is_multiple_of(2000) {
+                            let _ = fs::write(&progress_path_clone, format!("{n}/{total}"));
+                        }
 
-                    let n = progress_counter_clone
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                        + 1;
-                    if show_progress && n.is_multiple_of(500) {
-                        eprint!("\r\x1b[K  ⠋ indexing {n}/{total} files...");
-                    }
-                    if n.is_multiple_of(2000) {
-                        let _ = fs::write(&progress_path_clone, format!("{n}/{total}"));
-                    }
-
-                    if indexed.is_empty() && included_paths.is_empty() {
-                        return nothing(rel_path);
-                    }
-                    Some(IndexedFile {
-                        rel_path: rel_path.clone(),
-                        chunks: indexed,
-                        included_paths,
+                        if indexed.is_empty() && included_paths.is_empty() {
+                            return nothing(rel_path);
+                        }
+                        Some(IndexedFile {
+                            rel_path: rel_path.clone(),
+                            chunks: indexed,
+                            included_paths,
+                        })
                     })
-                })
-                .collect();
+                    .collect()
+            });
 
             if !file_chunks.is_empty() && tx_batch.send(file_chunks).is_err() {
                 break;
@@ -3377,6 +3413,18 @@ mod tests {
     use crate::workspace::Workspace;
 
     use super::*;
+
+    #[test]
+    fn indexing_workers_default_to_physical_cores_and_respect_bounds() {
+        assert_eq!(configured_indexing_worker_count(32, 16, None), 16);
+        assert_eq!(configured_indexing_worker_count(32, 16, Some("64")), 32);
+        assert_eq!(configured_indexing_worker_count(32, 16, Some("8")), 8);
+        assert_eq!(
+            configured_indexing_worker_count(32, 16, Some("invalid")),
+            16
+        );
+        assert_eq!(configured_indexing_worker_count(32, 16, Some("0")), 16);
+    }
 
     fn indexed_texts_for_file(workspace: &Workspace, file_path: &str) -> Vec<String> {
         let conn = open_sqlite(&workspace.sqlite_path()).unwrap();
