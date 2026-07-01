@@ -32,8 +32,8 @@ jobs:
         run: |
           git fetch origin gh-pages:refs/remotes/origin/gh-pages
           git worktree add -B gh-pages ../gh-pages origin/gh-pages
-          rsync -a --delete --exclude .git --exclude assets --exclude dev docs/ ../gh-pages/
-          rsync -a --delete assets/ ../gh-pages/assets/
+          rsync -ac --delete --exclude .git --exclude assets --exclude dev docs/ ../gh-pages/
+          rsync -ac --delete assets/ ../gh-pages/assets/
           touch ../gh-pages/.nojekyll
 
       - name: Commit docs

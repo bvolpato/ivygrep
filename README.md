@@ -262,7 +262,20 @@ Unknown extensions are auto-detected and indexed as text.
 
 ## 🚀 Performance and speed
 
-Release-readiness validation used a **Linux kernel** checkout with 93,502
+Current retained public evidence:
+
+| Benchmark | Metric | Result |
+|------|------|-----:|
+| Public million-chunk search | warm distinct-query p95 | 53.77 ms -> 15.07 ms, 3.57x faster |
+| Public million-chunk indexing | controlled throughput | 4,963 -> 109,006 chunks/s, 21.96x faster |
+| Public million-chunk index size | final index footprint | 1.06 GiB -> 0.46 GiB, -57.0% |
+| Public retrieval quality | nDCG@10 / MRR@10 / precision@5 | 0.2666 / 0.2220 / 0.0601 |
+| Public retrieval recall | recall@20 / no-hit queries | 0.4890 / 0 |
+| v0.12.20 generated Rust index A/B | fresh index / warm p95 | 6505.5 -> 6354.9 ms / 0.655 -> 0.632 ms |
+| Latest CI Criterion snapshot | 30k fresh index / hybrid 200 files | 461.18 ms / 3.38 ms |
+| Latest CI Criterion snapshot | literal 200 files / hot 50k vector search | 2.37 ms / 29.42 us |
+
+Large Linux-kernel validation used a checkout with 93,502
 indexed files and 4,419,660 chunks:
 
 | Scenario | Metric | Result |
