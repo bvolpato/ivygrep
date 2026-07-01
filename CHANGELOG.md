@@ -4,6 +4,15 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [0.12.20] - 2026-07-01
+
+### Performance
+- **Large generated Rust indexes skip unnecessary Tree-sitter parsing.** Files with generated headers and many simple Rust item signatures now use the fallback splitter while preserving each item's leading documentation. The million-chunk generated profile improved fresh index time from `6505.5 ms` to `6354.9 ms`, warm p95 from `0.655 ms` to `0.632 ms`, and kept recall@20 and MRR@20 at `1.0`.
+- **Search hydration reuses SQLite prepared statements.** Repeated semantic candidate hydration now uses cached statements for batch metadata and text fetches, reducing query preparation overhead in hot search paths.
+
+### Fixed
+- **Objective-C declarations no longer fold into following method chunks.** `@interface`, `@implementation`, and `@protocol` remain structural chunks instead of being treated as generic decorator lines.
+
 ## [0.12.19] - 2026-06-30
 
 ### Fixed
