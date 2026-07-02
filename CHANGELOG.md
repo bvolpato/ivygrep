@@ -4,6 +4,17 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-01
+
+### Changed
+- **SemVer-major release for index format v17.** Existing indexes rebuild once so the main Tantivy code-body field can drop positional postings. The rebuild is intentional cache invalidation; source data and CLI behavior are unchanged.
+
+### Performance
+- **Text postings stay frequency-only on the main code body field.** Paired Criterion runs improved `hybrid_complex_phrase_1000_files` from `4.45 ms` to `2.79 ms`, `hybrid_search_200_files` from `3.66 ms` to `3.50 ms`, `literal_search_200_files` from `2.41 ms` to `2.05 ms`, and `hybrid_simple_symbol_1000_files` from `3.19 ms` to `2.96 ms`.
+
+### Testing
+- **Release gates stayed green after the version promotion.** Local checks covered formatting, Clippy, lib and integration tests, release smoke, daemon equivalence, and relevance thresholds before tagging.
+
 ## [0.12.21] - 2026-07-01
 
 ### Performance
