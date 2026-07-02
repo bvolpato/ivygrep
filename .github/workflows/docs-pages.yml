@@ -11,46 +11,42 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
 
 concurrency:
   group: docs-pages
   cancel-in-progress: false
 
 jobs:
-  publish:
-    name: Publish docs to gh-pages
+  deploy:
+    name: Deploy docs to Pages
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - name: Checkout main
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
-          fetch-depth: 0
           persist-credentials: false
 
-      - name: Sync static docs
+      - name: Build static docs
         run: |
-          git fetch origin gh-pages:refs/remotes/origin/gh-pages
-          git worktree add -B gh-pages ../gh-pages origin/gh-pages
-          rsync -ac --delete --exclude .git --exclude assets --exclude dev docs/ ../gh-pages/
-          rsync -ac --delete assets/ ../gh-pages/assets/
-          touch ../gh-pages/.nojekyll
+          rm -rf _site
+          mkdir -p _site/assets
+          rsync -ac --delete --exclude dev docs/ _site/
+          rsync -ac --delete assets/ _site/assets/
+          touch _site/.nojekyll
 
-      - name: Commit docs
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cd ../gh-pages
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          if git diff --cached --quiet; then
-            echo "No docs changes to publish"
-          else
-            git commit -m "docs: publish static site"
-            git pull --rebase origin gh-pages
-            git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:gh-pages || {
-              git pull --rebase origin gh-pages
-              git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:gh-pages
-            }
-          fi
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5
+        with:
+          timeout: 1800000
