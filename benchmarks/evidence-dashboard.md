@@ -10,7 +10,7 @@ artifacts. Every evidence link is pinned to the commit that published its bytes.
 | Million-chunk latency | 15.07 ms warm p95, 3.57x baseline |
 | Million-chunk footprint | 491589780 bytes, ratio 0.430 |
 | Daemon cache | 4.90 ms retained warm p95 |
-| Release archive history | v1.0.1 with 5 archives |
+| Release archive history | v1.0.2 with 5 archives |
 
 ## Versioned histories
 
@@ -21,8 +21,8 @@ artifacts. Every evidence link is pinned to the commit that published its bytes.
 | indexing | 2 | 0 |
 | memory | 2 | 0 |
 | index size | 2 | 0 |
-| binary size | 444 | 429 |
-| archive size | 444 | 0 |
+| binary size | 449 | 429 |
+| archive size | 449 | 0 |
 
 Each point in `evidence-dashboard.json` includes its unit, comparison series,
 hardware/corpus/model context, variance or an explicit variance-unavailable
@@ -40,6 +40,11 @@ reason, source commit, and immutable artifact URL.
 | memory | million-chunk/peak-rss | 2c7629e18d40 | 284.58 MiB | unavailable | [source](https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json) |
 | index size | million-chunk/final-index | 4b24c627d9bd | 1090.48 MiB | unavailable | [source](https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json) |
 | index size | million-chunk/final-index | 2c7629e18d40 | 468.82 MiB | unavailable | [source](https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json) |
+| binary size | release/linux-aarch64-musl | v1.0.2 | 67.15 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-linux-aarch64-musl.tar.gz) |
+| binary size | release/linux-x86_64-musl | v1.0.2 | 70.59 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-linux-x86_64-musl.tar.gz) |
+| binary size | release/macos-aarch64 | v1.0.2 | 67.65 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v1.0.2 | 68.14 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-macos-x86_64.tar.gz) |
+| binary size | release/windows-x86_64 | v1.0.2 | 69.89 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-windows-x86_64.zip) |
 | binary size | release/linux-aarch64-musl | v1.0.1 | 67.22 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.1/ivygrep-v1.0.1-linux-aarch64-musl.tar.gz) |
 | binary size | release/linux-x86_64-musl | v1.0.1 | 70.68 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.1/ivygrep-v1.0.1-linux-x86_64-musl.tar.gz) |
 | binary size | release/macos-aarch64 | v1.0.1 | 67.71 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.1/ivygrep-v1.0.1-macos-aarch64.tar.gz) |
@@ -484,6 +489,11 @@ reason, source commit, and immutable artifact URL.
 | binary size | release/linux-x86_64 | v0.5.2 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.2/ivygrep-v0.5.2-linux-x86_64.tar.gz) |
 | binary size | release/macos-aarch64 | v0.5.2 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.2/ivygrep-v0.5.2-macos-aarch64.tar.gz) |
 | binary size | release/macos-x86_64 | v0.5.2 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.2/ivygrep-v0.5.2-macos-x86_64.tar.gz) |
+| archive size | release/linux-aarch64-musl | v1.0.2 | 13.13 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-linux-aarch64-musl.tar.gz) |
+| archive size | release/linux-x86_64-musl | v1.0.2 | 13.90 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-linux-x86_64-musl.tar.gz) |
+| archive size | release/macos-aarch64 | v1.0.2 | 12.94 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-macos-aarch64.tar.gz) |
+| archive size | release/macos-x86_64 | v1.0.2 | 13.13 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-macos-x86_64.tar.gz) |
+| archive size | release/windows-x86_64 | v1.0.2 | 12.71 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-windows-x86_64.zip) |
 | archive size | release/linux-aarch64-musl | v1.0.1 | 13.15 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.1/ivygrep-v1.0.1-linux-aarch64-musl.tar.gz) |
 | archive size | release/linux-x86_64-musl | v1.0.1 | 13.94 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.1/ivygrep-v1.0.1-linux-x86_64-musl.tar.gz) |
 | archive size | release/macos-aarch64 | v1.0.1 | 12.97 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.1/ivygrep-v1.0.1-macos-aarch64.tar.gz) |
@@ -958,7 +968,7 @@ deletes them to improve the presentation.
 - [Public million-chunk benchmark](https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json) (`f4ba8051b2c7cf88...`)
 - [Daemon hot-query cache](https://github.com/bvolpato/ivygrep/blob/a99f5fb6eafef9c41d656a42dccaf44e27972d32/docs/benchmarks/daemon-hot-query-cache-explore-results.tsv) (`bf168523793c2c3f...`)
 - [Release artifact acceptance gate](https://github.com/bvolpato/ivygrep/blob/030e32e275494896d4b5e348c6c370f205c0bb69/.github/workflows/release.yml) (`8217f53005ea93e7...`)
-- [Release artifact history](https://github.com/bvolpato/ivygrep/blob/c2eab00b4a875934fa5e927b2beef6c5144590c7/docs/benchmarks/release-artifact-history.json) (`ebfeb1182f9d688a...`)
+- [Release artifact history](https://github.com/bvolpato/ivygrep/blob/b2d5a02608c33ac16c33bce9a15b76c41151c9c3/docs/benchmarks/release-artifact-history.json) (`3f9d87e6409a8285...`)
 
 Raw machine-readable dashboard:
 [`evidence-dashboard.json`](evidence-dashboard.json).

@@ -784,6 +784,81 @@
     "archive_size": [
       {
         "context": {
+          "published_at": "2026-07-02T15:09:52Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v1.0.2",
+          "tag": "v1.0.2",
+          "target": "linux-aarch64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-linux-aarch64-musl.tar.gz",
+        "series": "release/linux-aarch64-musl",
+        "unit": "bytes",
+        "value": 13765661,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-07-02T15:09:52Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v1.0.2",
+          "tag": "v1.0.2",
+          "target": "linux-x86_64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-linux-x86_64-musl.tar.gz",
+        "series": "release/linux-x86_64-musl",
+        "unit": "bytes",
+        "value": 14576378,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-07-02T15:09:52Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v1.0.2",
+          "tag": "v1.0.2",
+          "target": "macos-aarch64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-macos-aarch64.tar.gz",
+        "series": "release/macos-aarch64",
+        "unit": "bytes",
+        "value": 13567550,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-07-02T15:09:52Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v1.0.2",
+          "tag": "v1.0.2",
+          "target": "macos-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-macos-x86_64.tar.gz",
+        "series": "release/macos-x86_64",
+        "unit": "bytes",
+        "value": 13768641,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-07-02T15:09:52Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v1.0.2",
+          "tag": "v1.0.2",
+          "target": "windows-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-windows-x86_64.zip",
+        "series": "release/windows-x86_64",
+        "unit": "bytes",
+        "value": 13322753,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
           "published_at": "2026-07-02T04:08:42Z",
           "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v1.0.1",
           "tag": "v1.0.1",
@@ -7444,6 +7519,86 @@
       }
     ],
     "binary_size": [
+      {
+        "context": {
+          "published_at": "2026-07-02T15:09:52Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v1.0.2",
+          "tag": "v1.0.2",
+          "target": "linux-aarch64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-linux-aarch64-musl.tar.gz",
+        "series": "release/linux-aarch64-musl",
+        "status": "available",
+        "unit": "bytes",
+        "value": 70414496,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-07-02T15:09:52Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v1.0.2",
+          "tag": "v1.0.2",
+          "target": "linux-x86_64-musl"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-linux-x86_64-musl.tar.gz",
+        "series": "release/linux-x86_64-musl",
+        "status": "available",
+        "unit": "bytes",
+        "value": 74023568,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-07-02T15:09:52Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v1.0.2",
+          "tag": "v1.0.2",
+          "target": "macos-aarch64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-macos-aarch64.tar.gz",
+        "series": "release/macos-aarch64",
+        "status": "available",
+        "unit": "bytes",
+        "value": 70934848,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-07-02T15:09:52Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v1.0.2",
+          "tag": "v1.0.2",
+          "target": "macos-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-macos-x86_64.tar.gz",
+        "series": "release/macos-x86_64",
+        "status": "available",
+        "unit": "bytes",
+        "value": 71447284,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
+      {
+        "context": {
+          "published_at": "2026-07-02T15:09:52Z",
+          "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v1.0.2",
+          "tag": "v1.0.2",
+          "target": "windows-x86_64"
+        },
+        "immutable_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-windows-x86_64.zip",
+        "series": "release/windows-x86_64",
+        "status": "available",
+        "unit": "bytes",
+        "value": 73287680,
+        "variance": {
+          "status": "not-applicable"
+        }
+      },
       {
         "context": {
           "published_at": "2026-07-02T04:08:42Z",
@@ -15967,6 +16122,64 @@
       {
         "archives": [
           {
+            "binary_size_bytes": 70414496,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-linux-aarch64-musl.tar.gz",
+            "name": "ivygrep-v1.0.2-linux-aarch64-musl.tar.gz",
+            "provenance": true,
+            "sbom": true,
+            "size_bytes": 13765661,
+            "target": "linux-aarch64-musl"
+          },
+          {
+            "binary_size_bytes": 74023568,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-linux-x86_64-musl.tar.gz",
+            "name": "ivygrep-v1.0.2-linux-x86_64-musl.tar.gz",
+            "provenance": true,
+            "sbom": true,
+            "size_bytes": 14576378,
+            "target": "linux-x86_64-musl"
+          },
+          {
+            "binary_size_bytes": 70934848,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-macos-aarch64.tar.gz",
+            "name": "ivygrep-v1.0.2-macos-aarch64.tar.gz",
+            "provenance": true,
+            "sbom": true,
+            "size_bytes": 13567550,
+            "target": "macos-aarch64"
+          },
+          {
+            "binary_size_bytes": 71447284,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-macos-x86_64.tar.gz",
+            "name": "ivygrep-v1.0.2-macos-x86_64.tar.gz",
+            "provenance": true,
+            "sbom": true,
+            "size_bytes": 13768641,
+            "target": "macos-x86_64"
+          },
+          {
+            "binary_size_bytes": 73287680,
+            "checksum": true,
+            "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-windows-x86_64.zip",
+            "name": "ivygrep-v1.0.2-windows-x86_64.zip",
+            "provenance": true,
+            "sbom": true,
+            "size_bytes": 13322753,
+            "target": "windows-x86_64"
+          }
+        ],
+        "published_at": "2026-07-02T15:09:52Z",
+        "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v1.0.2",
+        "tag": "v1.0.2",
+        "total_archive_bytes": 69000983
+      },
+      {
+        "archives": [
+          {
             "binary_size_bytes": 70488592,
             "checksum": true,
             "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.0.1/ivygrep-v1.0.1-linux-aarch64-musl.tar.gz",
@@ -21233,10 +21446,10 @@
     "source": "https://api.github.com/repos/bvolpato/ivygrep/releases"
   },
   "release_history_artifact": {
-    "immutable_url": "https://github.com/bvolpato/ivygrep/blob/c2eab00b4a875934fa5e927b2beef6c5144590c7/docs/benchmarks/release-artifact-history.json",
+    "immutable_url": "https://github.com/bvolpato/ivygrep/blob/b2d5a02608c33ac16c33bce9a15b76c41151c9c3/docs/benchmarks/release-artifact-history.json",
     "path": "docs/benchmarks/release-artifact-history.json",
-    "publication_commit": "c2eab00b4a875934fa5e927b2beef6c5144590c7",
-    "sha256": "ebfeb1182f9d688a201015c9ad8be94bb2cd1c1600aec351c7e00aa23530df63"
+    "publication_commit": "b2d5a02608c33ac16c33bce9a15b76c41151c9c3",
+    "sha256": "3f9d87e6409a8285e089ba4f37ae58bb4bd0801dd5a0532202f4b2cfad975980"
   },
   "schema_version": 1
 }
