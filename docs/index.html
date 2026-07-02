@@ -69,7 +69,7 @@
         <div class="container hero-content">
             <div class="hero-badge slide-up">
                 <span class="badge-dot"></span>
-                v0.12.20 - local semantic code search
+                v1.0.0 - local semantic code search
             </div>
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" onerror="this.src='assets/logo.png'"/>
@@ -328,7 +328,7 @@
         <div class="section-header">
             <span class="section-tag">Benchmarks</span>
             <h2 class="section-title text-center">Performance evidence</h2>
-            <p class="text-center subtitle-small">Current public million-chunk evidence plus latest v0.12.20 CI Criterion snapshot.</p>
+            <p class="text-center subtitle-small">Current public million-chunk evidence plus v1.0.0 retained release benchmarks.</p>
         </div>
 
         <div class="glass-panel fade-in-scroll benchmark-panel mt-4">
@@ -348,13 +348,13 @@
                 <div class="benchmark-speed benchmark-speed-hero">-57.0%</div>
             </div>
             <div class="benchmark-row benchmark-row-highlight">
-                <div class="benchmark-tool"><code>v0.12.20 A/B</code><span class="benchmark-mode">6505.5 ms baseline</span></div>
-                <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig" data-width="98%"><span class="benchmark-time">6354.9 ms</span></div></div>
-                <div class="benchmark-speed benchmark-speed-hero">1.0 R/MRR</div>
+                <div class="benchmark-tool"><code>v1.0.0 A/B</code><span class="benchmark-mode">search paths</span></div>
+                <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig" data-width="63%"><span class="benchmark-time">2.05 ms</span></div></div>
+                <div class="benchmark-speed benchmark-speed-hero">1.04x+</div>
             </div>
             <p class="benchmark-note">Public million-chunk retained evidence improved warm distinct-query p95 from 53.77 ms to 15.07 ms, controlled indexing from 4,963 to 109,006 chunks/s, and final index size from 1.06 GiB to 0.46 GiB. Public retrieval quality is nDCG@10 0.2666, MRR@10 0.2220, precision@5 0.0601, recall@20 0.4890, and no-hit queries 0.</p>
-            <p class="benchmark-note">v0.12.20 generated Rust A/B preserved recall@20 and MRR@20 at 1.0 while fresh index moved 6505.5 -> 6354.9 ms and warm p95 moved 0.655 -> 0.632 ms.</p>
-            <p class="benchmark-note"><a href="benchmarks/public-million.html">Public million-chunk benchmark</a> · <a href="benchmarks/evidence-dashboard.html">Evidence dashboard</a> · <a href="dev/bench/">CI benchmark dashboard</a></p>
+            <p class="benchmark-note">v1.0.0 Tantivy postings A/B improved hybrid 200, literal 200, simple symbol, and complex phrase latency from 3.66 -> 3.50 ms, 2.41 -> 2.05 ms, 3.19 -> 2.96 ms, and 4.45 -> 2.79 ms.</p>
+            <p class="benchmark-note"><a href="benchmarks/public-million.html">Public million-chunk benchmark</a> · <a href="benchmarks/evidence-dashboard.html">Evidence dashboard</a> · <a href="benchmarks/index.html">Benchmark reports</a></p>
         </div>
 
         <div class="grid grid-2 align-center mt-4">
@@ -379,27 +379,27 @@
                 </div>
             </div>
             <div class="glass-panel fade-in-scroll">
-                <h3>Latest CI Criterion</h3>
-                <p class="text-xs opacity-70 mb-2">v0.12.20 release commit, GitHub Actions benchmark dashboard</p>
+                <h3>v1.0.0 Local Smoke</h3>
+                <p class="text-xs opacity-70 mb-2">release binary, this workstation</p>
                 <div class="perf-bar-group">
                     <div class="perf-label">30k fresh index</div>
-                    <div class="perf-bar-wrapper"><div class="perf-bar fill-blue" style="width: 90%">461.18 ms</div></div>
+                    <div class="perf-bar-wrapper"><div class="perf-bar fill-blue" style="width: 74%">271.69 ms</div></div>
                 </div>
                 <div class="perf-bar-group">
                     <div class="perf-label">Hybrid search, 200 files</div>
-                    <div class="perf-bar-wrapper"><div class="perf-bar fill-green" style="width: 58%">3.38 ms</div></div>
+                    <div class="perf-bar-wrapper"><div class="perf-bar fill-green" style="width: 58%">3.86 ms</div></div>
                 </div>
                 <div class="perf-bar-group">
                     <div class="perf-label">Literal search, 200 files</div>
-                    <div class="perf-bar-wrapper"><div class="perf-bar fill-green opacity-80" style="width: 50%;">2.37 ms</div></div>
+                    <div class="perf-bar-wrapper"><div class="perf-bar fill-green opacity-80" style="width: 50%;">2.43 ms</div></div>
                 </div>
                 <div class="perf-bar-group">
-                    <div class="perf-label">Hot vector search, 50k</div>
-                    <div class="perf-bar-wrapper"><div class="perf-bar fill-green opacity-80" style="width: 42%">29.42 us</div></div>
+                    <div class="perf-label">Regex search, 200 files</div>
+                    <div class="perf-bar-wrapper"><div class="perf-bar fill-green opacity-80" style="width: 42%">1.23 ms</div></div>
                 </div>
                 <div class="perf-bar-group">
-                    <div class="perf-label">Quick health cached, 10k</div>
-                    <div class="perf-bar-wrapper"><div class="perf-bar fill-blue opacity-80" style="width: 44%">290.43 us</div></div>
+                    <div class="perf-label">Incremental one-file change</div>
+                    <div class="perf-bar-wrapper"><div class="perf-bar fill-blue opacity-80" style="width: 44%">31.40 ms</div></div>
                 </div>
             </div>
         </div>
@@ -656,7 +656,7 @@
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md" class="footer-link">Changelog</a>
                 </div>
                 <div class="footer-copy">
-                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v0.12.20</p>
+                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v1.0.0</p>
                 </div>
             </div>
         </div>

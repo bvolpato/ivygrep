@@ -273,8 +273,6 @@ Current retained public evidence:
 | Public retrieval recall | recall@20 / no-hit queries | 0.4890 / 0 |
 | v1.0.0 Tantivy postings A/B | hybrid 200 / literal 200 / simple symbol / complex phrase | 3.66 -> 3.50 ms / 2.41 -> 2.05 ms / 3.19 -> 2.96 ms / 4.45 -> 2.79 ms |
 | v0.12.20 generated Rust index A/B | fresh index / warm p95 | 6505.5 -> 6354.9 ms / 0.655 -> 0.632 ms |
-| Latest CI Criterion snapshot | 30k fresh index / hybrid 200 files | 461.18 ms / 3.38 ms |
-| Latest CI Criterion snapshot | literal 200 files / hot 50k vector search | 2.37 ms / 29.42 us |
 
 Large Linux-kernel validation used a checkout with 93,502
 indexed files and 4,419,660 chunks:
