@@ -90,10 +90,9 @@ impl TokenStream for CodeTokenStream<'_> {
                 self.token.offset_to = segment.offset_to;
                 self.token.position = self.position;
                 self.token.text.clear();
-                self.token.text.extend(
-                    self.text[segment.offset_from..segment.offset_to]
-                        .chars()
-                        .map(|ch| ch.to_ascii_lowercase()),
+                push_ascii_lowercase(
+                    &mut self.token.text,
+                    &self.text[segment.offset_from..segment.offset_to],
                 );
                 self.token.position_length = 1;
                 self.position += 1;
@@ -184,6 +183,11 @@ fn split_identifier_segments_with_offsets(
     base_offset: usize,
     segments: &mut Vec<PendingSegment>,
 ) {
+    if token.is_ascii() {
+        split_ascii_identifier_segments_with_offsets(token.as_bytes(), base_offset, segments);
+        return;
+    }
+
     let mut current_start = None;
     let mut current_end = 0usize;
     let mut prev_is_lower = false;
@@ -239,6 +243,78 @@ fn split_identifier_segments_with_offsets(
     );
 }
 
+fn split_ascii_identifier_segments_with_offsets(
+    token: &[u8],
+    base_offset: usize,
+    segments: &mut Vec<PendingSegment>,
+) {
+    if token.iter().all(|byte| byte.is_ascii_lowercase())
+        || token.iter().all(|byte| byte.is_ascii_digit())
+    {
+        if !token.is_empty() {
+            segments.push(PendingSegment {
+                offset_from: base_offset,
+                offset_to: base_offset + token.len(),
+            });
+        }
+        return;
+    }
+
+    let mut current_start = None;
+    let mut current_end = 0usize;
+    let mut prev_is_lower = false;
+    let mut prev_is_alpha = false;
+
+    for (offset, byte) in token.iter().copied().enumerate() {
+        if !byte.is_ascii_alphanumeric() {
+            push_current_segment(
+                segments,
+                &mut current_start,
+                base_offset,
+                base_offset + current_end,
+            );
+            prev_is_lower = false;
+            prev_is_alpha = false;
+            continue;
+        }
+
+        let is_upper = byte.is_ascii_uppercase();
+        let is_alpha = byte.is_ascii_alphabetic();
+
+        if current_start.is_some() && is_upper && prev_is_lower {
+            push_current_segment(
+                segments,
+                &mut current_start,
+                base_offset,
+                base_offset + current_end,
+            );
+        }
+
+        if current_start.is_some() && is_alpha != prev_is_alpha {
+            push_current_segment(
+                segments,
+                &mut current_start,
+                base_offset,
+                base_offset + current_end,
+            );
+        }
+
+        if current_start.is_none() {
+            current_start = Some(offset);
+        }
+        current_end = offset + 1;
+        prev_is_lower = byte.is_ascii_lowercase();
+        prev_is_alpha = is_alpha;
+    }
+
+    push_current_segment(
+        segments,
+        &mut current_start,
+        base_offset,
+        base_offset + current_end,
+    );
+}
+
 fn push_current_segment(
     segments: &mut Vec<PendingSegment>,
     current_start: &mut Option<usize>,
@@ -252,6 +328,14 @@ fn push_current_segment(
         offset_from: base_offset + offset_from,
         offset_to,
     });
+}
+
+fn push_ascii_lowercase(output: &mut String, text: &str) {
+    if text.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        output.extend(text.bytes().map(|byte| byte.to_ascii_lowercase() as char));
+    } else {
+        output.push_str(text);
+    }
 }
 
 /// Returns the singular form of a token, or the token unchanged if it's too

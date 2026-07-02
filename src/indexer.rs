@@ -347,13 +347,17 @@ pub struct IndexedChunk {
 struct PreparedIndexedChunk {
     chunk: IndexedChunk,
     compressed_text: Vec<u8>,
+    tantivy_doc: TantivyDocument,
 }
 
-fn prepare_indexed_chunk(chunk: IndexedChunk) -> PreparedIndexedChunk {
+fn prepare_indexed_chunk(chunk: IndexedChunk, fields: &TantivyFields) -> PreparedIndexedChunk {
     let compressed_text = compress_text(&chunk.text);
+    let file_path = index_path_string(&chunk.file_path);
+    let tantivy_doc = build_chunk_doc(fields, &chunk, &file_path);
     PreparedIndexedChunk {
         chunk,
         compressed_text,
+        tantivy_doc,
     }
 }
 
@@ -1385,6 +1389,7 @@ fn index_workspace_inner(
     let current_snapshot_clone = current_snapshot.clone();
     let progress_path_clone = workspace.indexing_progress_path();
     let diff_paths: Vec<_> = diff.added_or_modified.clone();
+    let producer_fields = fields.clone();
 
     let _ = fs::write(&progress_path_clone, format!("0/{total}"));
 
@@ -1448,7 +1453,7 @@ fn index_workspace_inner(
                             .into_iter()
                             .map(|c| build_indexed_chunk(c, *is_ignored))
                             .filter(|chunk| seen_vector_keys.insert(chunk.vector_key))
-                            .map(prepare_indexed_chunk)
+                            .map(|chunk| prepare_indexed_chunk(chunk, &producer_fields))
                             .collect();
 
                         let n = progress_counter_clone
@@ -1502,10 +1507,10 @@ fn index_workspace_inner(
         // deferred to background enhancement: on multi-million chunk repos the
         // provisional graph dominated first-index latency and delayed usable
         // BM25/literal results by minutes.
-        for indexed_file in &file_chunks {
-            let rel_path = &indexed_file.rel_path;
-            let indexed_chunks = &indexed_file.chunks;
-            let rel_path_string = index_path_string(rel_path);
+        for indexed_file in file_chunks {
+            let rel_path = indexed_file.rel_path;
+            let indexed_chunks = indexed_file.chunks;
+            let rel_path_string = index_path_string(&rel_path);
             touched_files.insert(rel_path_string.clone());
             total_chunks_processed += indexed_chunks.len();
             chunks_since_commit += indexed_chunks.len();
@@ -1517,12 +1522,12 @@ fn index_workspace_inner(
                     &fields,
                     &hash_tombstones_path,
                     neural_tombstones_path.as_deref(),
-                    rel_path,
+                    &rel_path,
                 ));
             }
 
-            for included_path in &indexed_file.included_paths {
-                let included_path = index_path_string(included_path);
+            for included_path in indexed_file.included_paths {
+                let included_path = index_path_string(&included_path);
                 persist_or_stop!(
                     persist_statements.insert_dependency(&rel_path_string, &included_path)
                 );
@@ -1543,12 +1548,7 @@ fn index_workspace_inner(
                     &rel_path_string,
                     now_unix
                 ));
-                persist_or_stop!(add_chunk_doc(
-                    &mut writer,
-                    &fields,
-                    indexed,
-                    &rel_path_string,
-                ));
+                persist_or_stop!(writer.add_document(prepared.tantivy_doc));
             }
         }
 
@@ -2770,12 +2770,11 @@ fn extract_signature(chunk: &IndexedChunk) -> String {
         .unwrap_or_default()
 }
 
-fn add_chunk_doc(
-    writer: &mut tantivy::IndexWriter,
+fn build_chunk_doc(
     fields: &TantivyFields,
     chunk: &IndexedChunk,
     file_path: &str,
-) -> Result<()> {
+) -> TantivyDocument {
     let mut doc = TantivyDocument::default();
     doc.add_u64(fields.vector_key, chunk.vector_key);
     doc.add_text(fields.file_path, file_path);
@@ -2796,8 +2795,7 @@ fn add_chunk_doc(
             doc.add_text(f, sig);
         }
     }
-    writer.add_document(doc)?;
-    Ok(())
+    doc
 }
 
 fn insert_chunk(
@@ -4690,10 +4688,19 @@ mod tests {
             },
             false,
         );
-        let prepared = super::prepare_indexed_chunk(chunk.clone());
+        let index_dir = tempfile::tempdir().unwrap();
+        let (_index, fields) = super::open_tantivy_index(index_dir.path()).unwrap();
+        let prepared = super::prepare_indexed_chunk(chunk.clone(), &fields);
 
         assert_eq!(prepared.chunk.text, chunk.text);
         assert_eq!(super::decompress_text(prepared.compressed_text), chunk.text);
+        assert_eq!(
+            prepared
+                .tantivy_doc
+                .get_first(fields.vector_key)
+                .and_then(|value| value.as_u64()),
+            Some(chunk.vector_key)
+        );
     }
 
     #[test]

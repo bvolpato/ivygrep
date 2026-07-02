@@ -4,6 +4,15 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-07-02
+
+### Performance
+- **Fresh indexing prebuilds Tantivy documents on worker threads.** Chunk compression, signature extraction, and Tantivy document construction now happen before the single writer loop persists batches, moving more indexing work onto the parallel producer stage.
+- **ASCII code tokenization avoids extra lowercase work on common identifiers.** Lowercase and numeric tokens take a fast path while preserving existing camelCase, snake_case, path, and offset behavior.
+
+### Testing
+- **Independent A/B trials kept only the winning indexing optimizations.** The 500k generated-corpus run improved fresh-index throughput from `157k` to `202k` chunks/s while preserving recall@20 and MRR@20 at `1.0`; paired daemon query comparison found no significant search regression.
+
 ## [1.0.2] - 2026-07-02
 
 ### Performance
