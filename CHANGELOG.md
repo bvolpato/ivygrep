@@ -4,6 +4,11 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-07-02
+
+### Fixed
+- **Apple Metal builds now enable Candle NN's Metal backend.** The vendored embedding crate forwards its `metal` feature to both `candle-core` and `candle-nn`, so macOS release/source builds resolve the Metal kernel stack consistently.
+
 ## [1.0.0] - 2026-07-01
 
 ### Changed
