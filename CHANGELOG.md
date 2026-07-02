@@ -4,6 +4,14 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-07-02
+
+### Performance
+- **Query normalization no longer initializes the regex-backed pluralizer.** Common plural handling now uses a small deterministic singularizer, preserving recall while reducing cold search startup cost and improving daemon hot-query tails.
+
+### Testing
+- **Paired 500k-chunk A/B validation kept relevance unchanged.** Recall@20 and MRR@20 stayed at `1.0`; fresh indexing stayed neutral, warm daemon p95 improved from `0.658 ms` to `0.600 ms`, and cold process p95 improved from `22.253 ms` to `13.768 ms`.
+
 ## [1.0.1] - 2026-07-02
 
 ### Fixed

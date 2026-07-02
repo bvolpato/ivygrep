@@ -1,7 +1,5 @@
 use std::ops::Range;
 
-use pluralizer::pluralize;
-
 use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
 
 /// Tokenizer name registered with every Tantivy index.
@@ -263,11 +261,56 @@ pub fn singularize_token(token: &str) -> String {
         return token.to_string();
     }
 
-    let singular = pluralize(token, 1isize, false).to_ascii_lowercase();
-    if singular.is_empty() {
-        token.to_string()
-    } else {
-        singular
+    let token = token.to_ascii_lowercase();
+    if let Some(singular) = irregular_singular(&token) {
+        return singular.to_string();
+    }
+
+    if let Some(stem) = token.strip_suffix("ies")
+        && stem.len() >= 2
+    {
+        return format!("{stem}y");
+    }
+
+    for suffix in ["ches", "shes", "sses", "xes", "zes"] {
+        if let Some(stem) = token.strip_suffix(suffix)
+            && stem.len() >= 2
+        {
+            return format!("{stem}{}", &suffix[..suffix.len() - 2]);
+        }
+    }
+
+    if let Some(stem) = token.strip_suffix("s")
+        && !token.ends_with("ss")
+        && !token.ends_with("us")
+        && !token.ends_with("is")
+        && stem.len() >= 3
+    {
+        return stem.to_string();
+    }
+
+    token
+}
+
+fn irregular_singular(token: &str) -> Option<&'static str> {
+    match token {
+        "aliases" => Some("alias"),
+        "analyses" => Some("analysis"),
+        "buses" => Some("bus"),
+        "children" => Some("child"),
+        "criteria" => Some("criterion"),
+        "feet" => Some("foot"),
+        "geese" => Some("goose"),
+        "indices" => Some("index"),
+        "matrices" => Some("matrix"),
+        "men" => Some("man"),
+        "mice" => Some("mouse"),
+        "people" => Some("person"),
+        "statuses" => Some("status"),
+        "teeth" => Some("tooth"),
+        "vertices" => Some("vertex"),
+        "women" => Some("woman"),
+        _ => None,
     }
 }
 
@@ -357,6 +400,14 @@ mod tests {
     fn singularize_basic() {
         assert_eq!(singularize_token("taxes"), "tax");
         assert_eq!(singularize_token("limits"), "limit");
+        assert_eq!(singularize_token("queries"), "query");
+        assert_eq!(singularize_token("classes"), "class");
+        assert_eq!(singularize_token("files"), "file");
+        assert_eq!(singularize_token("status"), "status");
+        assert_eq!(singularize_token("analysis"), "analysis");
+        assert_eq!(singularize_token("indices"), "index");
+        assert_eq!(singularize_token("statuses"), "status");
+        assert_eq!(singularize_token("aliases"), "alias");
     }
 
     #[test]
