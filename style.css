@@ -327,7 +327,7 @@ h1 {
     margin-bottom: 1rem;
 }
 
-.section-spacing { padding: 5rem 0; }
+.section-spacing { padding: 5rem 0; scroll-margin-top: 90px; }
 
 .section-title {
     font-family: var(--font-heading);
@@ -666,7 +666,7 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
     .proof-strip { gap: 1.5rem; }
     .mcp-flow-arrow { display: none; }
 
-    .benchmark-row { grid-template-columns: 110px 1fr 50px; gap: 0.5rem; }
+    .benchmark-row { grid-template-columns: 96px minmax(0, 1fr) 64px; gap: 0.5rem; }
 }
 
 @media (max-width: 480px) {
