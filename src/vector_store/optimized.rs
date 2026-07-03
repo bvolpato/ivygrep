@@ -10,8 +10,8 @@ use usearch::{Index, IndexOptions, MetricKind};
 use super::{ScalarKind, VectorMatch};
 
 const HASH_VECTOR_DIMENSIONS: usize = 256;
-const HASH_CONNECTIVITY: usize = 8;
-const HASH_EXPANSION_ADD: usize = 16;
+const HASH_CONNECTIVITY: usize = 2;
+const HASH_EXPANSION_ADD: usize = 8;
 const HASH_EXPANSION_SEARCH: usize = 64;
 const SERIALIZED_DIMENSIONS_BYTES: u64 = 8;
 const SERIALIZED_HEADER_BYTES: u64 = 64;

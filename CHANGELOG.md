@@ -4,6 +4,16 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.0.5] - 2026-07-03
+
+### Performance
+- **Hash-vector indexing uses a smaller HNSW graph for the provisional recall tier.** The hash store now builds with lower connectivity and add expansion, cutting `ingest_5k_hash_vectors` from `338.64 ms` to `85.88 ms` and hot 50k-vector search from `35.97 us` to `9.37 us` while public hash/hybrid retrieval fixture quality stayed at `1.0` nDCG@10, MRR@10, and recall@20.
+- **Dense Rust function files skip unnecessary Tree-sitter parsing.** Large Rust files made only of many simple function definitions use the existing signature splitter, while mixed Rust files still use AST chunking. The 30k-chunk fresh-index benchmark improved from `170.97 ms` to `154.53 ms`.
+
+### Testing
+- **Independent A/B trials kept only the measured winners.** Semantic-source bitsets, file-coverage bitsets, tokenizer lowercase rewrites, threaded USearch reserve, `expansion_add=4`, and lexical pruning were discarded after benchmark or relevance regressions.
+- **Release gates passed before tagging.** Validation covered `./test.sh`, full Rust tests, Clippy, Criterion hot-path benchmarks, hash-enriched relevance, and public retrieval fixture checks.
+
 ## [1.0.4] - 2026-07-03
 
 ### Performance

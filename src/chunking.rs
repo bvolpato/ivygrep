@@ -597,6 +597,15 @@ fn should_skip_tree_sitter_for_generated_source(
         return false;
     }
 
+    let mut signature_count = 0usize;
+    let mut only_function_signatures = true;
+    for line in lines {
+        if let Some(kind) = detect_signature(line.trim()) {
+            signature_count += 1;
+            only_function_signatures &= kind == ChunkKind::Function;
+        }
+    }
+
     let generated_header = lines.iter().take(20).any(|line| {
         let lower = line.to_ascii_lowercase();
         lower.contains("@generated")
@@ -604,16 +613,13 @@ fn should_skip_tree_sitter_for_generated_source(
             || lower.contains("automatically generated")
             || lower.contains("do not edit")
     });
-    if !generated_header {
-        return false;
+    if generated_header {
+        return signature_count >= 50;
     }
 
-    lines
-        .iter()
-        .filter(|line| detect_signature(line.trim()).is_some())
-        .take(50)
-        .count()
-        >= 50
+    only_function_signatures
+        && signature_count >= 50
+        && signature_count.saturating_mul(4) >= lines.len()
 }
 
 pub fn chunk_source(rel_path: &Path, text: &str) -> Vec<Chunk> {
@@ -1990,6 +1996,27 @@ pub fn calculate_total(amount: f64) -> f64 {
                 .any(|chunk| chunk.text.contains("generated purpose 59")),
             "last generated chunk should keep its own doc comment"
         );
+    }
+
+    #[test]
+    fn dense_rust_function_files_can_skip_tree_sitter_but_mixed_files_do_not() {
+        let dense = (0..70)
+            .map(|index| format!("pub fn dense_operation_{index}() -> u64 {{\n    {index}\n}}\n\n"))
+            .collect::<String>();
+        let dense_lines = dense.lines().collect::<Vec<_>>();
+        assert!(should_skip_tree_sitter_for_generated_source(
+            "rust",
+            &dense_lines,
+            detect_rust
+        ));
+
+        let mixed = format!("pub struct Client;\n\n{dense}");
+        let mixed_lines = mixed.lines().collect::<Vec<_>>();
+        assert!(!should_skip_tree_sitter_for_generated_source(
+            "rust",
+            &mixed_lines,
+            detect_rust
+        ));
     }
 
     #[test]
