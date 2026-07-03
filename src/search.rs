@@ -11,7 +11,7 @@ use rusqlite::Connection;
 use tantivy::TantivyDocument;
 use tantivy::collector::TopDocs;
 use tantivy::query::{
-    BooleanQuery, Occur, Query, QueryParser, RegexQuery, TermQuery, TermSetQuery,
+    BooleanQuery, BoostQuery, Occur, Query, QueryParser, RegexQuery, TermQuery, TermSetQuery,
 };
 use tantivy::schema::IndexRecordOption;
 use tantivy::tokenizer::TokenStream;
@@ -1117,6 +1117,81 @@ fn literal_candidate_terms(query: &str) -> Vec<String> {
     terms
 }
 
+fn simple_lexical_query(
+    fields: &TantivyFields,
+    query: &str,
+    conjunction_by_default: bool,
+) -> Option<Box<dyn Query>> {
+    if !query
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch.is_ascii_whitespace() || ch == '_')
+    {
+        return None;
+    }
+    if query
+        .split_ascii_whitespace()
+        .any(|term| matches!(term, "AND" | "OR" | "NOT"))
+    {
+        return None;
+    }
+
+    let terms = literal_candidate_terms(query);
+    if terms.is_empty() {
+        return None;
+    }
+
+    let occur = if conjunction_by_default {
+        Occur::Must
+    } else {
+        Occur::Should
+    };
+    let mut clauses = terms
+        .iter()
+        .map(|term| (occur, simple_lexical_term_query(fields, term)))
+        .collect::<Vec<_>>();
+    if clauses.len() == 1 {
+        Some(clauses.pop().unwrap().1)
+    } else {
+        Some(Box::new(BooleanQuery::new(clauses)))
+    }
+}
+
+fn simple_lexical_term_query(fields: &TantivyFields, term_text: &str) -> Box<dyn Query> {
+    let mut field_queries = Vec::with_capacity(3);
+    field_queries.push((
+        Occur::Should,
+        Box::new(TermQuery::new(
+            tantivy::Term::from_field_text(fields.text, term_text),
+            IndexRecordOption::WithFreqs,
+        )) as Box<dyn Query>,
+    ));
+    if let Some(field) = fields.file_path_text {
+        field_queries.push((
+            Occur::Should,
+            Box::new(BoostQuery::new(
+                Box::new(TermQuery::new(
+                    tantivy::Term::from_field_text(field, term_text),
+                    IndexRecordOption::Basic,
+                )),
+                5.0,
+            )),
+        ));
+    }
+    if let Some(field) = fields.signature {
+        field_queries.push((
+            Occur::Should,
+            Box::new(BoostQuery::new(
+                Box::new(TermQuery::new(
+                    tantivy::Term::from_field_text(field, term_text),
+                    IndexRecordOption::Basic,
+                )),
+                5.0,
+            )),
+        ));
+    }
+    Box::new(BooleanQuery::new(field_queries))
+}
+
 fn literal_queries_need_specificity_ranking(queries: &[String]) -> bool {
     queries
         .iter()
@@ -1358,10 +1433,13 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     for (lexical_query, query_candidate_limit) in
         lexical_search_queries.iter().zip(lexical_query_limits)
     {
-        let mut parsed_query = match parser.parse_query(lexical_query) {
-            Ok(query) => query,
-            Err(_) => continue,
-        };
+        let mut parsed_query =
+            match simple_lexical_query(&ctx.fields, lexical_query, conjunctive_numeric_query)
+                .or_else(|| parser.parse_query(lexical_query).ok())
+            {
+                Some(query) => query,
+                None => continue,
+            };
         parsed_query =
             constrain_query_to_scope(parsed_query, &ctx.fields, options.scope_filter.as_ref())?;
         parsed_query = constrain_query_to_glob_paths(parsed_query, &ctx.fields, &glob_path_filter);
@@ -6664,6 +6742,28 @@ function sendfile(res, path, options, callback) {
         let search_queries = lexical_search_queries_for_routing(&lexical, routing, false);
 
         assert_eq!(search_queries, lexical);
+    }
+
+    #[test]
+    fn simple_lexical_query_defers_path_and_parser_syntax() {
+        let mut schema = tantivy::schema::Schema::builder();
+        let fields = TantivyFields {
+            vector_key: schema.add_u64_field("vector_key", tantivy::schema::STORED),
+            file_path: schema.add_text_field("file_path", tantivy::schema::STRING),
+            start_line: schema.add_u64_field("start_line", tantivy::schema::STORED),
+            end_line: schema.add_u64_field("end_line", tantivy::schema::STORED),
+            language: schema.add_text_field("language", tantivy::schema::STRING),
+            kind: schema.add_text_field("kind", tantivy::schema::STRING),
+            text: schema.add_text_field("text", tantivy::schema::TEXT),
+            is_ignored: None,
+            file_path_text: Some(schema.add_text_field("file_path_text", tantivy::schema::TEXT)),
+            signature: Some(schema.add_text_field("signature", tantivy::schema::TEXT)),
+        };
+
+        assert!(simple_lexical_query(&fields, "calculate invoice_tax 42", false).is_some());
+        assert!(simple_lexical_query(&fields, "src/search.rs", false).is_none());
+        assert!(simple_lexical_query(&fields, "\"exact phrase\"", false).is_none());
+        assert!(simple_lexical_query(&fields, "alpha OR beta", false).is_none());
     }
 
     #[test]

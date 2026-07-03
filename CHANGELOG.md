@@ -4,6 +4,15 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.0.7] - 2026-07-03
+
+### Performance
+- **Simple lexical searches bypass QueryParser construction.** Identifier-like BM25 queries now build Tantivy term queries directly across code text, tokenized path, and signature fields, while paths, quoted syntax, and boolean parser operators still use the existing parser path. The repeated 2x160-query A/B run improved warm median latency from `0.399 ms` to `0.363 ms`, warm p95 from `0.497 ms` to `0.464 ms`, lexical phase median from `0.255 ms` to `0.228 ms`, and total phase median from `0.370 ms` to `0.341 ms`.
+
+### Testing
+- **Relevance stayed unchanged in generated-scale validation.** Recall@20 and MRR@20 stayed at `1.0` across the A/B runs and final 1M-chunk benchmark.
+- **Index-side candidates were discarded.** Tokenizer ASCII scanning, symbol-row normalization, presentation allocation changes, and the stacked tokenizer/search candidate were tested independently and rejected after noisy or regressive indexing/search results.
+
 ## [1.0.6] - 2026-07-03
 
 ### Performance
