@@ -3,7 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, params, types::ToSql};
 
 use crate::indexer::{
     IndexedChunk, decompress_text, open_sqlite_readonly, reconcile_worktree_overlay,
@@ -12,6 +12,8 @@ use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
 use crate::search::SearchOptions;
 use crate::workspace::{Workspace, WorkspaceScope};
+
+const SYMBOL_DEFINITION_LOOKUP_BATCH: usize = 128;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum SymbolSearchMode {
@@ -141,58 +143,116 @@ pub fn definition_candidates(
     names: &[String],
     limit: usize,
 ) -> Result<Vec<IndexedChunk>> {
-    let mut seen_names = HashSet::new();
-    let mut seen_chunks = HashSet::new();
-    let mut chunks = Vec::new();
-    let mut stmt = conn.prepare_cached(
-        "SELECT c.file_path, c.start_line, c.end_line, c.language,
-                c.kind, c.text, c.vector_key, c.is_ignored
-         FROM symbols s JOIN chunks c ON c.chunk_key = s.chunk_key
-         WHERE s.normalized_name = ?1
-         ORDER BY c.file_path, c.start_line
-         LIMIT ?2",
-    )?;
+    if limit == 0 || names.is_empty() {
+        return Ok(Vec::new());
+    }
 
+    let mut seen_normalized = HashSet::new();
+    let mut requested = Vec::new();
     for name in names {
         let normalized = normalize_symbol(name);
-        if normalized.is_empty() || !seen_names.insert(normalized.clone()) {
+        if normalized.is_empty() || !seen_normalized.insert(normalized.clone()) {
             continue;
         }
+        requested.push((normalized, name.as_str()));
+    }
+    if requested.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut by_name = (0..requested.len())
+        .map(|_| Vec::new())
+        .collect::<Vec<Vec<(bool, bool, IndexedChunk)>>>();
+    let mut per_name_seen = (0..requested.len())
+        .map(|_| HashSet::new())
+        .collect::<Vec<HashSet<u64>>>();
+    let candidate_limit = if limit > 256 {
+        limit
+    } else {
+        limit.saturating_mul(8).min(256)
+    };
+    let candidate_limit_i64 = candidate_limit as i64;
+
+    for (batch_index, batch) in requested.chunks(SYMBOL_DEFINITION_LOOKUP_BATCH).enumerate() {
+        let base_ordinal = batch_index * SYMBOL_DEFINITION_LOOKUP_BATCH;
+        let values = (0..batch.len())
+            .map(|index| format!("(?{}, {index})", index + 1))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "WITH requested(name, ordinal) AS (VALUES {values}),
+                  ranked AS (
+                    SELECT r.ordinal,
+                           c.file_path, c.start_line, c.end_line, c.language,
+                           c.kind, c.text, c.vector_key, c.is_ignored,
+                           row_number() OVER (
+                             PARTITION BY r.ordinal
+                             ORDER BY c.file_path, c.start_line
+                           ) AS rn
+                    FROM requested r
+                    JOIN symbols s ON s.normalized_name = r.name
+                    JOIN chunks c ON c.chunk_key = s.chunk_key
+                  )
+             SELECT ordinal, file_path, start_line, end_line, language,
+                    kind, text, vector_key, is_ignored
+             FROM ranked
+             WHERE rn <= ?{}
+             ORDER BY ordinal, file_path, start_line",
+            batch.len() + 1
+        );
+        let mut params: Vec<&dyn ToSql> = batch
+            .iter()
+            .map(|(normalized, _)| normalized as &dyn ToSql)
+            .collect();
+        params.push(&candidate_limit_i64);
+
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let rows = stmt.query_map(params.as_slice(), |row| {
+            let raw: Vec<u8> = row.get(6)?;
+            let file_path = PathBuf::from(row.get::<_, String>(1)?);
+            let start_line = row.get::<_, i64>(2)? as usize;
+            let end_line = row.get::<_, i64>(3)? as usize;
+            let language = row.get::<_, String>(4)?;
+            let kind = row.get::<_, String>(5)?;
+            let vector_key = row.get::<_, i64>(7)? as u64;
+            Ok((
+                base_ordinal + row.get::<_, i64>(0)? as usize,
+                IndexedChunk {
+                    chunk_id: String::new(),
+                    file_path,
+                    start_line,
+                    end_line,
+                    language,
+                    kind,
+                    text: decompress_text(raw),
+                    content_hash: String::new(),
+                    vector_key,
+                    is_ignored: row.get(8)?,
+                },
+            ))
+        })?;
+
+        for row in rows {
+            let (ordinal, chunk) = row?;
+            if ordinal >= by_name.len() {
+                continue;
+            }
+            if !per_name_seen[ordinal].insert(chunk.vector_key) {
+                continue;
+            }
+            let name = requested[ordinal].1;
+            let exact_case = chunk_defines_exact_name(&chunk, name);
+            let canonical_file = file_stem_matches_symbol(&chunk, name);
+            by_name[ordinal].push((exact_case, canonical_file, chunk));
+        }
+    }
+
+    let mut seen_chunks = HashSet::new();
+    let mut chunks = Vec::new();
+    for name_candidates in &mut by_name {
         let remaining = limit.saturating_sub(chunks.len());
         if remaining == 0 {
             break;
-        }
-        let candidate_limit = remaining.saturating_mul(8).clamp(remaining, 256);
-        let rows = stmt.query_map(params![normalized, candidate_limit as i64], |row| {
-            let raw: Vec<u8> = row.get(5)?;
-            let file_path = PathBuf::from(row.get::<_, String>(0)?);
-            let start_line = row.get::<_, i64>(1)? as usize;
-            let end_line = row.get::<_, i64>(2)? as usize;
-            let language = row.get::<_, String>(3)?;
-            let kind = row.get::<_, String>(4)?;
-            let vector_key = row.get::<_, i64>(6)? as u64;
-            Ok(IndexedChunk {
-                chunk_id: String::new(),
-                file_path,
-                start_line,
-                end_line,
-                language,
-                kind,
-                text: decompress_text(raw),
-                content_hash: String::new(),
-                vector_key,
-                is_ignored: row.get(7)?,
-            })
-        })?;
-        let mut name_candidates = Vec::new();
-        let mut name_seen = HashSet::new();
-        for row in rows {
-            let chunk = row?;
-            if !seen_chunks.contains(&chunk.vector_key) && name_seen.insert(chunk.vector_key) {
-                let exact_case = chunk_defines_exact_name(&chunk, name);
-                let canonical_file = file_stem_matches_symbol(&chunk, name);
-                name_candidates.push((exact_case, canonical_file, chunk));
-            }
         }
         name_candidates.sort_by(|left, right| {
             right
@@ -202,9 +262,10 @@ pub fn definition_candidates(
                 .then_with(|| left.2.file_path.cmp(&right.2.file_path))
                 .then_with(|| left.2.start_line.cmp(&right.2.start_line))
         });
-        for (_, _, chunk) in name_candidates.into_iter().take(remaining) {
-            seen_chunks.insert(chunk.vector_key);
-            chunks.push(chunk);
+        for (_, _, chunk) in name_candidates.drain(..).take(remaining) {
+            if seen_chunks.insert(chunk.vector_key) {
+                chunks.push(chunk);
+            }
         }
     }
     Ok(chunks)
@@ -1214,6 +1275,53 @@ mod tests {
         let candidates = definition_candidates(&conn, &["SqlMapper".to_string()], 1).unwrap();
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].file_path, PathBuf::from("SqlMapper.cs"));
+    }
+
+    #[test]
+    fn definition_candidates_handles_many_requested_names() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chunks (
+                chunk_key INTEGER PRIMARY KEY,
+                file_path TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                language TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                text BLOB NOT NULL,
+                vector_key INTEGER NOT NULL,
+                is_ignored INTEGER NOT NULL
+             );
+             CREATE TABLE symbols (
+                normalized_name TEXT NOT NULL,
+                chunk_key INTEGER NOT NULL,
+                PRIMARY KEY (normalized_name, chunk_key)
+             ) WITHOUT ROWID;",
+        )
+        .unwrap();
+
+        let target = chunk("rust", "Class", "pub struct BatchTarget;");
+        conn.execute(
+            "INSERT INTO chunks (
+                chunk_key, file_path, start_line, end_line, language, kind,
+                text, vector_key, is_ignored
+             ) VALUES (1, 'src/batch_target.rs', 1, 1, ?1, ?2, ?3, 1, 0)",
+            params![target.language, target.kind, target.text.as_bytes()],
+        )
+        .unwrap();
+        index_chunk_definition(&conn, &target, 1).unwrap();
+
+        let mut names = (0..SYMBOL_DEFINITION_LOOKUP_BATCH + 10)
+            .map(|index| format!("Missing{index}"))
+            .collect::<Vec<_>>();
+        names.push("BatchTarget".to_string());
+
+        let candidates = definition_candidates(&conn, &names, 1).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].file_path,
+            PathBuf::from("src/batch_target.rs")
+        );
     }
 
     #[test]

@@ -4,6 +4,14 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-07-03
+
+### Performance
+- **Symbol definition lookup batches candidate names into one ranked SQLite query.** Search now avoids repeated symbol-definition SELECT execution in hot hybrid queries while preserving per-name ranking, exact-case preference, canonical-file preference, and chunk deduplication.
+
+### Testing
+- **Independent A/B trials kept only the symbol-query winner.** The 500k generated-corpus confirm run improved warm daemon p95 from `0.689 ms` to `0.472 ms`, filtered p95 from `0.644 ms` to `0.461 ms`, lexical phase p95 from `0.650 ms` to `0.429 ms`, and concurrent QPS from `1855` to `2343`; recall@20 and MRR@20 stayed at `1.0`. Direct query compilation, tokenizer changes, and larger symbol insert batches were discarded.
+
 ## [1.0.3] - 2026-07-02
 
 ### Performance
