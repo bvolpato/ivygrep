@@ -4,6 +4,15 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.0.6] - 2026-07-03
+
+### Performance
+- **Exact lexical routes skip unnecessary neural vector-store opens.** Default exact identifier, path, and literal/error searches now avoid loading neural vectors when routing will not execute neural retrieval, while forced neural and scoped/glob/type-filtered searches keep neural vectors available for provenance and filtered semantic search. The clean A/B run improved `hybrid_simple_symbol_1000_files` from `2.7606 ms` to `1.7812 ms`; `hybrid_complex_phrase_1000_files` stayed slightly faster at `2.5267 ms`, and bounded rerank stayed neutral at `3.0164 ms` versus `3.0122 ms`.
+
+### Testing
+- **Independent A/B trials kept only the measured winner.** Fusion map pre-sizing, single-symbol SQL fast paths, tokenizer buffer reserve changes, hash-vector expansion tuning, and F32 hash vectors were discarded after benchmark regressions, noisy wins, or artifact compatibility costs.
+- **Relevance stayed unchanged.** Hash-enriched relevance held MRR `0.6087`, nDCG@10 `0.6498`, precision@1 `0.4348`, and recall@5 `0.7826`.
+
 ## [1.0.5] - 2026-07-03
 
 ### Performance

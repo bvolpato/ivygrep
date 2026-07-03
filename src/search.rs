@@ -1148,10 +1148,19 @@ pub fn hybrid_search(
         &fallback_model
     };
     reconcile_worktree_overlay(workspace, reconciliation_model)?;
+    let routing = QueryRouting::classify(query_text);
+    let can_skip_neural_vectors = embedding_model.is_some()
+        && !options.force_neural
+        && !has_semantic_filters(options)
+        && !routing.use_neural;
+    let wants_semantic_vectors = embedding_model.is_some() && !can_skip_neural_vectors;
     let ctx = SearchContext::load(
         workspace,
-        embedding_model.map(|model| model.dimensions()),
-        embedding_model.is_some_and(|model| model.model_identity().is_some()),
+        embedding_model
+            .filter(|_| wants_semantic_vectors)
+            .map(|model| model.dimensions()),
+        wants_semantic_vectors
+            && embedding_model.is_some_and(|model| model.model_identity().is_some()),
     )?;
     hybrid_search_with_context(&ctx, workspace, query_text, embedding_model, options)
 }
