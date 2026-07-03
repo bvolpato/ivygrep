@@ -64,23 +64,33 @@ jobs:
             --bench-target indexer_bench \
             --bench-name indexer/incremental_reindex_no_change \
             --threshold 1.15
+          python3 scripts/benchmark_guard.py \
+            --baseline-ref "$BENCHMARK_BASE_REF" \
+            --bench-target indexer_bench \
+            --bench-name indexer_bulk/fresh_index_30k_chunks \
+            --threshold 1.20
 
       - name: Install cargo-criterion
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: cargo install cargo-criterion
 
       - name: Run benchmarks
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: cargo criterion --locked --message-format=json > criterion-output.json
 
       - name: Convert Criterion JSON to Custom Benchmark Format
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           python3 scripts/criterion_to_benchmark_data.py \
             criterion-output.json benchmark-data.json \
             --min-benchmarks 10
 
       - name: Restore Cargo.lock
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: git restore Cargo.lock || true
 
       - name: Track Benchmarks
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
         with:
           name: Rust Benchmark
