@@ -1,5 +1,6 @@
 use std::ops::Range;
 
+use smallvec::SmallVec;
 use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
 
 /// Tokenizer name registered with every Tantivy index.
@@ -17,7 +18,7 @@ pub struct CodeTokenizer;
 pub struct CodeTokenStream<'a> {
     text: &'a str,
     cursor: usize,
-    pending: Vec<PendingSegment>,
+    pending: SmallVec<[PendingSegment; 8]>,
     pending_index: usize,
     position: usize,
     token: Token,
@@ -36,7 +37,7 @@ impl Tokenizer for CodeTokenizer {
         CodeTokenStream {
             text,
             cursor: 0,
-            pending: Vec::new(),
+            pending: SmallVec::new(),
             pending_index: 0,
             position: 0,
             token: Token::default(),
@@ -170,7 +171,7 @@ pub fn build_code_analyzer() -> tantivy::tokenizer::TextAnalyzer {
 /// Splits an identifier like `calculateTaxTotal` or `snake_case_name` into
 /// lowercase segments: `["calculate", "tax", "total"]`.
 pub fn split_identifier_segments(token: &str) -> Vec<String> {
-    let mut segments = Vec::new();
+    let mut segments = SmallVec::<[PendingSegment; 8]>::new();
     split_identifier_segments_with_offsets(token, 0, &mut segments);
     segments
         .into_iter()
@@ -181,7 +182,7 @@ pub fn split_identifier_segments(token: &str) -> Vec<String> {
 fn split_identifier_segments_with_offsets(
     token: &str,
     base_offset: usize,
-    segments: &mut Vec<PendingSegment>,
+    segments: &mut SmallVec<[PendingSegment; 8]>,
 ) {
     if token.is_ascii() {
         split_ascii_identifier_segments_with_offsets(token.as_bytes(), base_offset, segments);
@@ -246,7 +247,7 @@ fn split_identifier_segments_with_offsets(
 fn split_ascii_identifier_segments_with_offsets(
     token: &[u8],
     base_offset: usize,
-    segments: &mut Vec<PendingSegment>,
+    segments: &mut SmallVec<[PendingSegment; 8]>,
 ) {
     if token.iter().all(|byte| byte.is_ascii_lowercase())
         || token.iter().all(|byte| byte.is_ascii_digit())
@@ -316,7 +317,7 @@ fn split_ascii_identifier_segments_with_offsets(
 }
 
 fn push_current_segment(
-    segments: &mut Vec<PendingSegment>,
+    segments: &mut SmallVec<[PendingSegment; 8]>,
     current_start: &mut Option<usize>,
     base_offset: usize,
     offset_to: usize,

@@ -2540,6 +2540,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "smallvec",
  "streaming-iterator",
  "syntect",
  "tantivy",
