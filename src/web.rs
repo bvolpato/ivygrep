@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -18,6 +19,7 @@ use crate::workspace::{Workspace, list_workspaces};
 
 const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
+const DEFAULT_SEARCH_LIMIT: usize = 50;
 
 include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
 
@@ -134,6 +136,17 @@ async fn handle_connection(
                 .await
             }
         },
+        "/api/open" => match open_tracked_file(&params) {
+            Ok(value) => write_json(&mut stream, "200 OK", &value).await,
+            Err(err) => {
+                write_json(
+                    &mut stream,
+                    "400 Bad Request",
+                    &json!({"error": err.to_string()}),
+                )
+                .await
+            }
+        },
         "/api/tree" => match read_tracked_tree(&params) {
             Ok(value) => write_json(&mut stream, "200 OK", &value).await,
             Err(err) => {
@@ -239,7 +252,7 @@ fn build_search_request_for_path(
     if query.is_empty() {
         bail!("missing q");
     }
-    let limit = Some(parse_usize_param(params, "limit", 20).clamp(1, 500));
+    let limit = Some(parse_usize_param(params, "limit", DEFAULT_SEARCH_LIMIT).clamp(1, 500));
     let context = parse_usize_param(params, "context", 2).min(20);
     let type_filter = param(params, "type")
         .map(str::trim)
@@ -369,7 +382,7 @@ async fn write_all_workspace_search_stream(
     }
 
     let started = Instant::now();
-    let limit = parse_usize_param(params, "limit", 20).clamp(1, 500);
+    let limit = parse_usize_param(params, "limit", DEFAULT_SEARCH_LIMIT).clamp(1, 500);
     let roots = tracked_roots()?;
     let total = roots.len();
     write_sse(
@@ -545,6 +558,182 @@ fn read_tracked_file(params: &HashMap<String, Vec<String>>) -> Result<Value> {
     }))
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct EditorLaunch {
+    program: String,
+    args: Vec<String>,
+}
+
+fn open_tracked_file(params: &HashMap<String, Vec<String>>) -> Result<Value> {
+    let (_, path) = resolve_tracked_path(params, false)?;
+    let line = parse_usize_param(params, "line", 1).max(1);
+    let launch = editor_launch_for_path(&path, line);
+    std::process::Command::new(&launch.program)
+        .args(&launch.args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("failed to launch {}", launch.program))?;
+    Ok(json!({
+        "ok": true,
+        "path": path,
+        "line": line,
+        "program": launch.program
+    }))
+}
+
+fn editor_launch_for_path(path: &Path, line: usize) -> EditorLaunch {
+    if let Some(launch) = configured_editor_launch(path, line) {
+        return launch;
+    }
+    for candidate in [
+        "code",
+        "code-insiders",
+        "cursor",
+        "codium",
+        "windsurf",
+        "zed",
+        "subl",
+    ] {
+        if let Some(program) = find_program(candidate) {
+            return editor_launch_from_parts([program], path, line);
+        }
+    }
+    platform_open_launch(path)
+}
+
+fn configured_editor_launch(path: &Path, line: usize) -> Option<EditorLaunch> {
+    for name in ["IVYGREP_WEB_EDITOR", "IVYGREP_EDITOR", "EDITOR", "VISUAL"] {
+        let Ok(value) = std::env::var(name) else {
+            continue;
+        };
+        let value = value.trim().to_string();
+        if value.is_empty() {
+            continue;
+        }
+        let parts = split_editor_command(&value);
+        let Some(program) = parts.first() else {
+            continue;
+        };
+        if matches!(name, "EDITOR" | "VISUAL") && is_terminal_editor(program) {
+            continue;
+        }
+        return Some(editor_launch_from_parts(parts, path, line));
+    }
+    None
+}
+
+fn split_editor_command(value: &str) -> Vec<String> {
+    value
+        .split_whitespace()
+        .filter(|part| !part.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn editor_launch_from_parts<I>(parts: I, path: &Path, line: usize) -> EditorLaunch
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut parts = parts.into_iter();
+    let program = parts
+        .next()
+        .unwrap_or_else(|| platform_open_program().to_string());
+    let mut args = parts.collect::<Vec<_>>();
+    let target = path.display().to_string();
+    let basename = program_basename(&program);
+    match basename.as_str() {
+        "code" | "code-insiders" | "codium" | "cursor" | "windsurf" => {
+            args.push("-g".to_string());
+            args.push(format!("{target}:{}", line.max(1)));
+        }
+        "zed" | "subl" | "mate" => args.push(format!("{target}:{}", line.max(1))),
+        "vim" | "nvim" | "vi" | "nano" | "emacs" => {
+            args.push(format!("+{}", line.max(1)));
+            args.push(target);
+        }
+        _ => args.push(target),
+    }
+    EditorLaunch { program, args }
+}
+
+fn program_basename(program: &str) -> String {
+    let name = Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    name.trim_end_matches(".exe").to_string()
+}
+
+fn is_terminal_editor(program: &str) -> bool {
+    matches!(
+        program_basename(program).as_str(),
+        "vim" | "nvim" | "vi" | "nano" | "emacs" | "emacsclient" | "hx" | "helix"
+    )
+}
+
+fn find_program(name: &str) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate.display().to_string());
+        }
+        #[cfg(windows)]
+        {
+            let candidate = dir.join(format!("{name}.exe"));
+            if candidate.is_file() {
+                return Some(candidate.display().to_string());
+            }
+        }
+    }
+    None
+}
+
+fn platform_open_launch(path: &Path) -> EditorLaunch {
+    EditorLaunch {
+        program: platform_open_program().to_string(),
+        args: platform_open_args(path),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn platform_open_program() -> &'static str {
+    "open"
+}
+
+#[cfg(target_os = "windows")]
+fn platform_open_program() -> &'static str {
+    "cmd"
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn platform_open_program() -> &'static str {
+    "xdg-open"
+}
+
+#[cfg(target_os = "macos")]
+fn platform_open_args(path: &Path) -> Vec<String> {
+    vec![path.display().to_string()]
+}
+
+#[cfg(target_os = "windows")]
+fn platform_open_args(path: &Path) -> Vec<String> {
+    vec![
+        "/C".to_string(),
+        "start".to_string(),
+        "".to_string(),
+        path.display().to_string(),
+    ]
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn platform_open_args(path: &Path) -> Vec<String> {
+    vec![path.display().to_string()]
+}
+
 fn read_tracked_tree(params: &HashMap<String, Vec<String>>) -> Result<Value> {
     let (root, path) = resolve_tracked_path(params, true)?;
     let mut entries = std::fs::read_dir(&path)?
@@ -678,7 +867,7 @@ mod tests {
 
     #[test]
     fn search_request_defaults_to_all_indices_hybrid() {
-        let (_, params) = parse_target("/api/search?q=hello&limit=10").unwrap();
+        let (_, params) = parse_target("/api/search?q=hello").unwrap();
         let request = build_search_request(&params).unwrap();
         let DaemonRequest::Search {
             path,
@@ -692,8 +881,18 @@ mod tests {
         };
         assert!(path.is_none());
         assert_eq!(query, "hello");
-        assert_eq!(limit, Some(10));
+        assert_eq!(limit, Some(DEFAULT_SEARCH_LIMIT));
         assert_eq!(context, 2);
+    }
+
+    #[test]
+    fn search_request_respects_explicit_limit() {
+        let (_, params) = parse_target("/api/search?q=hello&limit=10").unwrap();
+        let request = build_search_request(&params).unwrap();
+        let DaemonRequest::Search { limit, .. } = request else {
+            panic!("expected hybrid search request");
+        };
+        assert_eq!(limit, Some(10));
     }
 
     #[test]
@@ -706,5 +905,42 @@ mod tests {
         };
         assert_eq!(path, Some(PathBuf::from("/tmp/repo")));
         assert_eq!(query, "needle");
+    }
+
+    #[test]
+    fn editor_launch_uses_line_aware_args_for_gui_editors() {
+        let path = PathBuf::from("/tmp/repo/src/lib.rs");
+        let launch = editor_launch_from_parts(["code".to_string()], &path, 42);
+        assert_eq!(
+            launch,
+            EditorLaunch {
+                program: "code".to_string(),
+                args: vec!["-g".to_string(), "/tmp/repo/src/lib.rs:42".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn editor_launch_keeps_prefix_args() {
+        let path = PathBuf::from("/tmp/repo/src/lib.rs");
+        let launch = editor_launch_from_parts(
+            ["cursor".to_string(), "--reuse-window".to_string()],
+            &path,
+            7,
+        );
+        assert_eq!(
+            launch.args,
+            vec![
+                "--reuse-window".to_string(),
+                "-g".to_string(),
+                "/tmp/repo/src/lib.rs:7".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_editors_are_not_used_from_plain_editor_env() {
+        assert!(is_terminal_editor("vim"));
+        assert!(!is_terminal_editor("code"));
     }
 }

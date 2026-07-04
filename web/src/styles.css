@@ -110,6 +110,11 @@ select {
   cursor: pointer;
 }
 
+.btn:disabled {
+  cursor: wait;
+  opacity: .72;
+}
+
 .btn.secondary {
   color: var(--accent-dark);
   background: white;
@@ -128,6 +133,22 @@ select {
   height: 8px;
   border-radius: 999px;
   background: var(--accent);
+}
+
+.statusline.searching .dot {
+  animation: pulse-dot 1s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% {
+    opacity: .35;
+    transform: scale(.86);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
 }
 
 .layout {
@@ -171,6 +192,17 @@ select {
   color: var(--ink);
 }
 
+.workspace-filter {
+  width: 100%;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 0 9px;
+  background: white;
+  color: var(--ink);
+  margin-bottom: 8px;
+}
+
 .workspace.active {
   background: white;
   border-color: var(--line);
@@ -201,6 +233,47 @@ select {
   margin-top: 10px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.history {
+  display: grid;
+  gap: 5px;
+}
+
+.history-empty {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 6px 2px;
+}
+
+.history-item {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, .45);
+  color: var(--ink);
+  cursor: pointer;
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 7px 8px;
+  text-align: left;
+}
+
+.history-item:hover {
+  background: #fff;
+  border-color: var(--line);
+}
+
+.history-item span,
+.history-item small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-item small {
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .linkbtn {
@@ -290,10 +363,38 @@ select {
   overflow: hidden;
 }
 
+.results-head {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
 .summary {
   color: var(--muted);
-  margin-bottom: 10px;
   font-size: 13px;
+  min-width: 0;
+}
+
+.copy-tools {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.copy-tools select {
+  width: 112px;
+  height: 30px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.copy-btn {
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
 }
 
 #results {
@@ -316,21 +417,81 @@ select {
   box-shadow: inset 3px 0 0 var(--accent);
 }
 
-.hit button {
-  width: 100%;
+.hit:focus-within {
+  outline: 2px solid rgba(0, 127, 109, .28);
+  outline-offset: 2px;
+}
+
+.hit.pinned {
+  border-color: #d9a441;
+  box-shadow: inset 3px 0 0 #d9a441;
+}
+
+.hit-head {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: stretch;
+}
+
+.hit-main {
   border: 0;
   background: transparent;
   text-align: left;
   padding: 10px;
   cursor: pointer;
+  min-width: 0;
 }
 
-.hit.active button {
+.hit.active .hit-main {
   background: #e8f7f2;
 }
 
 .hit.active .file {
   color: var(--accent-dark);
+}
+
+.hit-select {
+  display: grid;
+  place-items: center;
+  border-right: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.hit-select input {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent);
+}
+
+.hit-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 8px 8px 8px 0;
+}
+
+.small-action {
+  height: 28px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: white;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.small-action:hover,
+.small-action.active {
+  border-color: var(--accent);
+  color: var(--accent-dark);
+  background: #e8f7f2;
+}
+
+.pin-hit.active {
+  border-color: #d9a441;
+  color: #8a5a00;
+  background: #fff8dc;
 }
 
 .hit .file {
@@ -368,6 +529,30 @@ select {
   color: var(--muted);
   font-size: 12px;
   margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.source-badge {
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  color: #475569;
+  background: #f8fafc;
+  padding: 1px 7px;
+  font-size: 11px;
+  line-height: 17px;
+}
+
+.load-more-wrap {
+  display: grid;
+  place-items: center;
+  padding: 4px 0 12px;
+}
+
+.load-more {
+  min-width: 160px;
 }
 
 .snippet {
@@ -393,6 +578,13 @@ select {
   user-select: none;
   padding: 0 10px 0 8px;
   text-align: right;
+}
+
+.query-mark {
+  background: #ffe58a;
+  color: #111827;
+  border-radius: 2px;
+  padding: 0 1px;
 }
 
 .viewer {
@@ -425,6 +617,7 @@ select {
   margin-top: 4px;
 }
 
+.viewer-controls,
 .viewer-actions {
   display: flex;
   gap: 6px;

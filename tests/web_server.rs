@@ -1,11 +1,14 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serial_test::serial;
 use tempfile::tempdir;
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 
 struct ChildGuard(Child);
 
@@ -55,6 +58,25 @@ fn create_repo(root: &Path) {
             "init",
         ],
     );
+}
+
+fn create_editor_stub(root: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let path = root.join("editor.cmd");
+        std::fs::write(&path, "@echo off\r\nexit /b 0\r\n").unwrap();
+        path
+    }
+
+    #[cfg(not(windows))]
+    {
+        let path = root.join("editor.sh");
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
 }
 
 fn percent_encode(value: &str) -> String {
@@ -144,6 +166,7 @@ fn web_server_serves_status_search_and_file() {
     let daemon = Command::new(bin())
         .arg("--daemon")
         .env("IVYGREP_HOME", home.path())
+        .env("IVYGREP_WEB_EDITOR", create_editor_stub(home.path()))
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
@@ -227,6 +250,11 @@ fn web_server_serves_status_search_and_file() {
             .unwrap()
             .contains("web_marker_search_target")
     );
+
+    let open_path = format!("/api/open?workspace={workspace}&path=web.rs&line=1");
+    let open: serde_json::Value = serde_json::from_str(&http_get(port, &open_path)).unwrap();
+    assert_eq!(open["ok"], true, "open response: {open:#}");
+    assert_eq!(open["line"], 1);
 
     let tree_path = format!("/api/tree?workspace={workspace}");
     let tree: serde_json::Value = serde_json::from_str(&http_get(port, &tree_path)).unwrap();

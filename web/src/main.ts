@@ -58,30 +58,57 @@ type TreePayload = {
 type FilePayload = {
   error?: string;
   path: string;
+  absolute_path?: string;
   text?: string;
   line_count: number;
   truncated?: boolean;
 };
 
 type ViewerMode = "preview" | "source";
+type CopyFormat = "files" | "raw" | "json";
+type CopyScope = "visible" | "selected" | "pinned";
+
+type SearchHistoryItem = {
+  query: string;
+  workspace: string;
+  scope: string;
+  mode: string;
+  type: string;
+  include: string;
+  exclude: string;
+  limit: number;
+  updatedAt: number;
+};
 
 type AppState = {
   workspaces: WorkspaceStatus[];
   workspace: string;
+  workspaceFilter: string;
   scope: string;
   events: EventSource | null;
+  searching: boolean;
+  hits: SearchHit[];
   autoOpenKey: string;
   manualOpen: boolean;
   requestedWorkspace: string;
   viewerMode: ViewerMode;
   currentFilePath: string;
+  currentFileAbsolutePath: string;
   currentFileText: string;
   currentFileStart: number;
   currentFileEnd: number;
   currentHitKey: string;
+  selectedHitKeys: Set<string>;
+  pinnedHitKeys: Set<string>;
+  history: SearchHistoryItem[];
 };
 
 const ALL_WORKSPACES = "__all__";
+const DEFAULT_LIMIT = 50;
+const LOAD_MORE_STEP = 50;
+const MAX_LIMIT = 500;
+const HISTORY_KEY = "ivygrep.searchHistory.v1";
+const HISTORY_LIMIT = 8;
 const boot = readBoot();
 const queryParams = new URLSearchParams(location.search);
 const markdown = new MarkdownIt({
@@ -94,17 +121,24 @@ const markdown = new MarkdownIt({
 const state: AppState = {
   workspaces: [],
   workspace: ALL_WORKSPACES,
+  workspaceFilter: "",
   scope: "",
   events: null,
+  searching: false,
+  hits: [],
   autoOpenKey: "",
   manualOpen: false,
   requestedWorkspace: queryParams.get("workspace") || boot.workspace || "",
   viewerMode: "source",
   currentFilePath: "",
+  currentFileAbsolutePath: "",
   currentFileText: "",
   currentFileStart: 1,
   currentFileEnd: 1,
-  currentHitKey: ""
+  currentHitKey: "",
+  selectedHitKeys: new Set(),
+  pinnedHitKeys: new Set(),
+  history: readSearchHistory()
 };
 
 function readBoot(): BootConfig {
@@ -150,11 +184,12 @@ function renderShell(): void {
       <main class="layout">
         <aside class="sidebar">
           <div class="section-title">Workspaces</div>
+          <input id="workspace-filter" class="workspace-filter" type="search" placeholder="Filter workspaces" />
           <div id="workspaces"></div>
           <div class="section-title">Filters</div>
           <div class="filters">
             <input id="type" placeholder="type" />
-            <input id="limit" type="number" min="1" max="500" value="20" title="Limit" />
+            <input id="limit" type="number" min="1" max="${MAX_LIMIT}" value="${DEFAULT_LIMIT}" title="Limit" />
             <input id="include" placeholder="include globs" />
             <input id="exclude" placeholder="exclude globs" />
           </div>
@@ -162,11 +197,28 @@ function renderShell(): void {
             <span id="scope-label">Scope: all folders</span>
             <button class="linkbtn" id="clear-scope" type="button">Global</button>
           </div>
+          <div class="section-title">Recent</div>
+          <div id="history" class="history"></div>
           <div class="section-title">Explorer</div>
           <div id="tree" class="tree"><div class="empty">Select a workspace to browse.</div></div>
         </aside>
         <section class="results">
-          <div class="summary" id="summary">No search yet.</div>
+          <div class="results-head">
+            <div class="summary" id="summary">No search yet.</div>
+            <div class="copy-tools">
+              <select id="copy-scope" title="Copy scope">
+                <option value="visible">Visible</option>
+                <option value="selected">Selected</option>
+                <option value="pinned">Pinned</option>
+              </select>
+              <select id="copy-format" title="Copy format">
+                <option value="files">File names</option>
+                <option value="raw">Raw output</option>
+                <option value="json">JSON</option>
+              </select>
+              <button class="btn secondary copy-btn" id="copy-results" type="button" disabled>Copy</button>
+            </div>
+          </div>
           <div id="results"><div class="empty">Pick a workspace or all indices, then search.</div></div>
         </section>
         <section class="viewer">
@@ -176,9 +228,12 @@ function renderShell(): void {
                 <div class="viewer-title" id="viewer-title">No file selected</div>
                 <div class="viewer-meta" id="viewer-meta">Search result previews open here.</div>
               </div>
-              <div class="viewer-actions" id="viewer-actions" hidden>
-                <button class="toggle active" id="preview-mode" type="button">Preview</button>
-                <button class="toggle" id="source-mode" type="button">Source</button>
+              <div class="viewer-controls">
+                <button class="toggle" id="open-current" type="button" disabled>Open</button>
+                <div class="viewer-actions" id="viewer-actions" hidden>
+                  <button class="toggle active" id="preview-mode" type="button">Preview</button>
+                  <button class="toggle" id="source-mode" type="button">Source</button>
+                </div>
               </div>
             </div>
           </div>
@@ -209,6 +264,15 @@ function enc(value: string): string {
 
 function setStatus(text: string): void {
   byId("status").textContent = text;
+}
+
+function setSearching(searching: boolean): void {
+  state.searching = searching;
+  byId("search").toggleAttribute("disabled", searching);
+  document.querySelector<HTMLButtonElement>("#load-more")?.toggleAttribute("disabled", searching);
+  document.querySelector(".statusline")?.classList.toggle("searching", searching);
+  byId("results").setAttribute("aria-busy", String(searching));
+  updateCopyAvailability();
 }
 
 function pathText(value: unknown): string {
@@ -277,9 +341,14 @@ function relativeWithin(path: string, root: string): string {
 
 function renderWorkspaces(): void {
   const root = byId("workspaces");
+  const filter = state.workspaceFilter.trim().toLowerCase();
   root.innerHTML = "";
   root.appendChild(workspaceButton({ root: ALL_WORKSPACES, file_count: 0, chunk_count: 0 }, "All indices"));
-  for (const ws of state.workspaces) root.appendChild(workspaceButton(ws, workspaceLabel(ws)));
+  for (const ws of state.workspaces) {
+    const label = workspaceLabel(ws);
+    const haystack = `${label} ${ws.root} ${workspaceMeta(ws)}`.toLowerCase();
+    if (!filter || haystack.includes(filter)) root.appendChild(workspaceButton(ws, label));
+  }
   for (const button of root.querySelectorAll<HTMLButtonElement>(".workspace")) {
     button.classList.toggle("active", button.dataset.workspace === state.workspace);
   }
@@ -294,6 +363,7 @@ function workspaceButton(ws: WorkspaceStatus, label: string): HTMLButtonElement 
   button.addEventListener("click", () => {
     state.workspace = ws.root;
     state.scope = "";
+    syncUrlState();
     renderWorkspaces();
     updateScopeLabel();
     void loadTree(".")
@@ -301,6 +371,97 @@ function workspaceButton(ws: WorkspaceStatus, label: string): HTMLButtonElement 
       .catch((err: Error) => setStatus(err.message));
   });
   return button;
+}
+
+function readSearchHistory(): SearchHistoryItem[] {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY);
+    if (!raw) return [];
+    const items = JSON.parse(raw) as SearchHistoryItem[];
+    if (!Array.isArray(items)) return [];
+    return items
+      .filter((item) => item && typeof item.query === "string" && item.query.trim())
+      .slice(0, HISTORY_LIMIT);
+  } catch {
+    return [];
+  }
+}
+
+function saveSearchHistory(): void {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(state.history.slice(0, HISTORY_LIMIT)));
+  } catch {
+    return;
+  }
+}
+
+function rememberSearch(): void {
+  const item: SearchHistoryItem = {
+    query: byId<HTMLInputElement>("query").value.trim(),
+    workspace: state.workspace,
+    scope: state.scope,
+    mode: byId<HTMLSelectElement>("mode").value,
+    type: byId<HTMLInputElement>("type").value.trim(),
+    include: byId<HTMLInputElement>("include").value.trim(),
+    exclude: byId<HTMLInputElement>("exclude").value.trim(),
+    limit: currentLimit(),
+    updatedAt: Date.now()
+  };
+  if (!item.query) return;
+  const key = historyItemKey(item);
+  state.history = [item, ...state.history.filter((existing) => historyItemKey(existing) !== key)].slice(0, HISTORY_LIMIT);
+  saveSearchHistory();
+  renderHistory();
+}
+
+function historyItemKey(item: SearchHistoryItem): string {
+  return [item.query, item.workspace, item.scope, item.mode, item.type, item.include, item.exclude].join("\u0000");
+}
+
+function renderHistory(): void {
+  const root = document.getElementById("history");
+  if (!root) return;
+  root.innerHTML = "";
+  if (!state.history.length) {
+    root.innerHTML = '<div class="history-empty">No searches yet.</div>';
+    return;
+  }
+  for (const item of state.history) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "history-item";
+    const workspace = item.workspace === ALL_WORKSPACES ? "All indices" : shortPath(item.workspace);
+    const details = [workspace, item.scope, item.mode].filter(Boolean).join(" / ");
+    button.innerHTML = `<span>${escapeHtml(item.query)}</span><small>${escapeHtml(details)}</small>`;
+    button.addEventListener("click", () => applyHistoryItem(item));
+    root.appendChild(button);
+  }
+}
+
+function applyHistoryItem(item: SearchHistoryItem): void {
+  byId<HTMLInputElement>("query").value = item.query;
+  byId<HTMLSelectElement>("mode").value = item.mode || "hybrid";
+  byId<HTMLInputElement>("limit").value = String(item.limit || DEFAULT_LIMIT);
+  byId<HTMLInputElement>("type").value = item.type || "";
+  byId<HTMLInputElement>("include").value = item.include || "";
+  byId<HTMLInputElement>("exclude").value = item.exclude || "";
+  state.workspace = item.workspace || ALL_WORKSPACES;
+  state.scope = item.scope || "";
+  if (state.workspace !== ALL_WORKSPACES && !state.workspaces.some((ws) => ws.root === state.workspace)) {
+    state.workspace = ALL_WORKSPACES;
+    state.scope = "";
+  }
+  renderWorkspaces();
+  updateScopeLabel();
+  syncUrlState();
+  void loadTree(state.scope || ".")
+    .then(() => runSearch())
+    .catch((err: Error) => setStatus(err.message));
+}
+
+function shortPath(path: string): string {
+  const parts = pathText(path).split(/[\\/]/).filter(Boolean);
+  return parts.slice(-2).join("/") || path;
 }
 
 async function loadTree(path = "."): Promise<void> {
@@ -347,6 +508,7 @@ function treeButton(entry: TreeEntry, kind: "parent" | "folder" | "file", active
     if (entry.is_dir) {
       state.scope = pathText(entry.path);
       updateScopeLabel();
+      syncUrlState();
       void loadTree(state.scope || ".")
         .then(refreshSearchIfQuery)
         .catch((err: Error) => setStatus(err.message));
@@ -374,22 +536,41 @@ function updateScopeLabel(): void {
   byId("scope-label").textContent = label;
 }
 
-function runSearch(): void {
+function runSearch(options: { preserveSelection?: boolean } = {}): void {
   const q = byId<HTMLInputElement>("query").value.trim();
   if (!q) {
+    state.hits = [];
+    state.currentHitKey = "";
+    state.selectedHitKeys.clear();
+    state.pinnedHitKeys.clear();
+    setSearching(false);
+    updateCopyAvailability();
     byId("summary").textContent = "Enter a query.";
+    byId("results").innerHTML = '<div class="empty">Enter a query to search tracked workspaces.</div>';
     return;
   }
   if (state.events) state.events.close();
-  state.autoOpenKey = "";
-  state.manualOpen = false;
-  byId("results").innerHTML = "";
+  syncUrlState();
+  rememberSearch();
+  if (options.preserveSelection) {
+    state.manualOpen = true;
+    state.autoOpenKey = state.currentHitKey;
+  } else {
+    state.autoOpenKey = "";
+    state.manualOpen = false;
+    state.hits = [];
+    state.currentHitKey = "";
+    state.selectedHitKeys.clear();
+    state.pinnedHitKeys.clear();
+    byId("results").innerHTML = "";
+  }
+  setSearching(true);
   byId("summary").textContent = "Searching...";
   const params = new URLSearchParams({
     q,
     workspace: state.workspace,
     mode: byId<HTMLSelectElement>("mode").value,
-    limit: byId<HTMLInputElement>("limit").value || "20",
+    limit: String(currentLimit()),
     type: byId<HTMLInputElement>("type").value || "",
     include: byId<HTMLInputElement>("include").value || "",
     exclude: byId<HTMLInputElement>("exclude").value || ""
@@ -403,11 +584,13 @@ function runSearch(): void {
   state.events.addEventListener("done", () => {
     state.events?.close();
     state.events = null;
+    setSearching(false);
     setStatus("Ready");
   });
   state.events.onerror = () => {
     state.events?.close();
     state.events = null;
+    setSearching(false);
     setStatus("Search connection closed");
   };
 }
@@ -418,14 +601,22 @@ function refreshSearchIfQuery(): void {
 
 function renderResults(payload: SearchPayload): void {
   if (payload.error) {
+    state.hits = [];
+    state.currentHitKey = "";
+    setSearching(false);
     byId("summary").textContent = payload.error;
     byId("results").innerHTML = `<div class="empty">${escapeHtml(payload.error)}</div>`;
     return;
   }
   const hits = payload.hits || [];
+  state.hits = hits;
+  pruneResultKeySets();
+  updateCopyAvailability();
   byId("summary").textContent = `${hits.length} hit(s) in ${Number(payload.elapsed_ms || 0).toFixed(1)} ms`;
   if (!hits.length) {
-    byId("results").innerHTML = '<div class="empty">No hits.</div>';
+    state.currentHitKey = "";
+    byId("results").innerHTML = '<div class="empty">No hits. Try a broader query, fewer filters, or a different search mode.</div>';
+    updateSelectedRows();
     return;
   }
   const root = byId("results");
@@ -436,12 +627,36 @@ function renderResults(payload: SearchPayload): void {
     item.className = "hit";
     item.dataset.hitKey = key;
     item.classList.toggle("active", key === state.currentHitKey);
-    item.innerHTML = `<button type="button"><div class="file">${languageIconForPath(hit.file_path)}<span class="file-path">${escapeHtml(hit.file_path)}</span></div><div class="score">score ${Number(hit.score).toFixed(3)} ${escapeHtml((hit.sources || []).join(", "))}</div></button><pre class="snippet hljs">${renderSnippet(hit)}</pre>`;
-    item.querySelector("button")?.addEventListener("click", () => selectHit(hit));
+    item.classList.toggle("pinned", state.pinnedHitKeys.has(key));
+    item.innerHTML = `
+      <div class="hit-head">
+        <label class="hit-select" title="Select result">
+          <input type="checkbox" ${state.selectedHitKeys.has(key) ? "checked" : ""} />
+          <span></span>
+        </label>
+        <button class="hit-main" type="button">
+          <div class="file">${languageIconForPath(hit.file_path)}<span class="file-path">${escapeHtml(hit.file_path)}</span></div>
+          <div class="score">score ${Number(hit.score).toFixed(3)}${sourceBadges(hit.sources || [])}</div>
+        </button>
+        <div class="hit-actions">
+          <button class="small-action pin-hit${state.pinnedHitKeys.has(key) ? " active" : ""}" type="button">${state.pinnedHitKeys.has(key) ? "Pinned" : "Pin"}</button>
+          <button class="small-action open-hit" type="button">Open</button>
+        </div>
+      </div>
+      <pre class="snippet hljs">${renderSnippet(hit)}</pre>`;
+    item.querySelector(".hit-main")?.addEventListener("click", () => selectHit(hit));
+    item.querySelector<HTMLInputElement>(".hit-select input")?.addEventListener("change", (event) => {
+      toggleResultSelection(key, (event.target as HTMLInputElement).checked);
+    });
+    item.querySelector(".pin-hit")?.addEventListener("click", () => togglePinnedHit(key));
+    item.querySelector(".open-hit")?.addEventListener("click", () => {
+      void openHitInEditor(hit).catch((err: Error) => setStatus(err.message));
+    });
     root.appendChild(item);
   }
+  if (canLoadMore(hits.length)) root.appendChild(loadMoreButton(hits.length));
   const first = hits[0];
-  const firstKey = `${first.file_path}:${first.start_line}:${first.end_line}`;
+  const firstKey = hitKey(first);
   if (!state.manualOpen && state.autoOpenKey !== firstKey) {
     state.autoOpenKey = firstKey;
     void openHit(first).catch((err: Error) => setStatus(err.message));
@@ -453,9 +668,173 @@ function selectHit(hit: SearchHit): void {
   void openHit(hit).catch((err: Error) => setStatus(err.message));
 }
 
+function selectHitByIndex(index: number): void {
+  if (!state.hits.length) return;
+  const clamped = Math.max(0, Math.min(index, state.hits.length - 1));
+  state.manualOpen = true;
+  void openHit(state.hits[clamped]).catch((err: Error) => setStatus(err.message));
+}
+
+function loadMoreResults(): void {
+  const input = byId<HTMLInputElement>("limit");
+  input.value = String(Math.min(currentLimit() + LOAD_MORE_STEP, MAX_LIMIT));
+  syncUrlState();
+  runSearch({ preserveSelection: true });
+}
+
+function canLoadMore(hitCount: number): boolean {
+  const limit = currentLimit();
+  return hitCount >= limit && limit < MAX_LIMIT;
+}
+
+function loadMoreButton(hitCount: number): HTMLDivElement {
+  const footer = document.createElement("div");
+  footer.className = "load-more-wrap";
+  const button = document.createElement("button");
+  button.id = "load-more";
+  button.className = "btn secondary load-more";
+  button.type = "button";
+  button.textContent = `Load ${Math.min(LOAD_MORE_STEP, MAX_LIMIT - currentLimit())} more`;
+  button.title = `Showing ${hitCount} snippets`;
+  button.addEventListener("click", loadMoreResults);
+  footer.appendChild(button);
+  return footer;
+}
+
+function pruneResultKeySets(): void {
+  const keys = new Set(state.hits.map(hitKey));
+  state.selectedHitKeys = new Set([...state.selectedHitKeys].filter((key) => keys.has(key)));
+  state.pinnedHitKeys = new Set([...state.pinnedHitKeys].filter((key) => keys.has(key)));
+}
+
+function toggleResultSelection(key: string, selected: boolean): void {
+  if (selected) {
+    state.selectedHitKeys.add(key);
+  } else {
+    state.selectedHitKeys.delete(key);
+  }
+  updateSelectedRows();
+  updateCopyAvailability();
+}
+
+function togglePinnedHit(key: string): void {
+  if (state.pinnedHitKeys.has(key)) {
+    state.pinnedHitKeys.delete(key);
+  } else {
+    state.pinnedHitKeys.add(key);
+  }
+  updateSelectedRows();
+  updateCopyAvailability();
+}
+
+function updateCopyAvailability(): void {
+  const button = document.querySelector<HTMLButtonElement>("#copy-results");
+  if (button) button.disabled = state.searching || copyHits(currentCopyScope()).length === 0;
+}
+
+async function copyVisibleResults(): Promise<void> {
+  const scope = currentCopyScope();
+  const hits = copyHits(scope);
+  const text = clipboardText(byId<HTMLSelectElement>("copy-format").value as CopyFormat, hits);
+  if (!text) {
+    setStatus(`No ${scope} results to copy`);
+    return;
+  }
+  await writeClipboard(text);
+  setStatus(`Copied ${hits.length} result(s)`);
+}
+
+function currentCopyScope(): CopyScope {
+  const value = document.querySelector<HTMLSelectElement>("#copy-scope")?.value;
+  return value === "selected" || value === "pinned" ? value : "visible";
+}
+
+function copyHits(scope: CopyScope): SearchHit[] {
+  if (scope === "selected") return state.hits.filter((hit) => state.selectedHitKeys.has(hitKey(hit)));
+  if (scope === "pinned") return state.hits.filter((hit) => state.pinnedHitKeys.has(hitKey(hit)));
+  return state.hits;
+}
+
+function clipboardText(format: CopyFormat, hits: SearchHit[]): string {
+  if (!hits.length) return "";
+  if (format === "files") return uniqueFilePaths(hits).join("\n");
+  if (format === "json") return JSON.stringify(searchExport(hits), null, 2);
+  return hits.map(rawHitText).join("\n\n");
+}
+
+function uniqueFilePaths(hits: SearchHit[]): string[] {
+  return Array.from(new Set(hits.map((hit) => hit.file_path)));
+}
+
+function searchExport(hits: SearchHit[]): Record<string, unknown> {
+  return {
+    query: byId<HTMLInputElement>("query").value.trim(),
+    workspace: state.workspace,
+    scope: state.scope || null,
+    mode: byId<HTMLSelectElement>("mode").value,
+    limit: currentLimit(),
+    count: hits.length,
+    hits: hits.map((hit) => ({
+      file_path: hit.file_path,
+      start_line: hit.start_line,
+      end_line: hit.end_line,
+      score: hit.score,
+      sources: hit.sources || [],
+      preview: hit.preview || ""
+    }))
+  };
+}
+
+function rawHitText(hit: SearchHit): string {
+  const range = hit.start_line === hit.end_line ? `${hit.start_line}` : `${hit.start_line}-${hit.end_line}`;
+  const sources = hit.sources?.length ? ` [${hit.sources.join(", ")}]` : "";
+  const preview = (hit.preview || "").trimEnd();
+  return `${hit.file_path}:${range}\nscore ${Number(hit.score).toFixed(3)}${sources}${preview ? `\n${preview}` : ""}`;
+}
+
+async function writeClipboard(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  const textArea = document.createElement("textarea");
+  textArea.value = text;
+  textArea.setAttribute("readonly", "");
+  textArea.style.position = "fixed";
+  textArea.style.opacity = "0";
+  document.body.appendChild(textArea);
+  textArea.select();
+  const copied = document.execCommand("copy");
+  textArea.remove();
+  if (!copied) throw new Error("clipboard write failed");
+}
+
 async function openHit(hit: SearchHit): Promise<void> {
   const workspace = state.workspace === ALL_WORKSPACES ? "" : state.workspace;
   await openFilePath(hit.file_path, hit.start_line, hit.end_line, workspace, hitKey(hit));
+}
+
+async function openHitInEditor(hit: SearchHit): Promise<void> {
+  const workspace = state.workspace === ALL_WORKSPACES ? "" : state.workspace;
+  await openPathInEditor(hit.file_path, hit.start_line, workspace);
+}
+
+async function openCurrentInEditor(): Promise<void> {
+  const path = state.currentFileAbsolutePath || state.currentFilePath;
+  if (!path) {
+    setStatus("No file selected");
+    return;
+  }
+  await openPathInEditor(path, state.currentFileStart, "");
+}
+
+async function openPathInEditor(path: string, line: number, workspace: string): Promise<void> {
+  const params = new URLSearchParams({ path, line: String(Math.max(1, line || 1)) });
+  if (workspace && workspace !== ALL_WORKSPACES) params.set("workspace", workspace);
+  const response = await fetch(`/api/open?${params.toString()}`);
+  const payload = await response.json() as { ok?: boolean; error?: string; program?: string };
+  if (payload.error || !payload.ok) throw new Error(payload.error || "open failed");
+  setStatus(`Opened ${shortPath(path)}`);
 }
 
 async function openFilePath(path: string, start = 1, end = 1, workspace = state.workspace, hitKeyValue = ""): Promise<void> {
@@ -463,6 +842,7 @@ async function openFilePath(path: string, start = 1, end = 1, workspace = state.
   const payload = await response.json() as FilePayload;
   if (payload.error) throw new Error(payload.error);
   state.currentFilePath = pathText(payload.path);
+  state.currentFileAbsolutePath = pathText(payload.absolute_path);
   state.currentFileText = payload.text || "";
   state.currentFileStart = start;
   state.currentFileEnd = end;
@@ -476,6 +856,7 @@ async function openFilePath(path: string, start = 1, end = 1, workspace = state.
 
 function renderViewerFile(): void {
   const actions = byId<HTMLDivElement>("viewer-actions");
+  byId<HTMLButtonElement>("open-current").disabled = !state.currentFilePath;
   const markdownFile = isMarkdownPath(state.currentFilePath);
   actions.hidden = !markdownFile;
   byId("preview-mode").classList.toggle("active", markdownFile && state.viewerMode === "preview");
@@ -495,14 +876,40 @@ function renderCode(text: string, start: number, end: number, path: string): voi
     const focus = number >= start && number <= end ? " focus" : "";
     return `<span class="line${focus}"><span class="line-number">${number}</span><span>${highlightLine(line, language) || " "}</span></span>`;
   }).join("")}</pre>`;
+  scrollFocusedLine();
 }
 
 function renderSnippet(hit: SearchHit): string {
   const language = languageForPath(hit.file_path);
   return (hit.preview || "").split(/\r?\n/).map((line, index) => {
     const number = hit.start_line + index;
-    return `<span class="snippet-line"><span class="snippet-line-number">${number}</span><span>${highlightLine(line, language) || " "}</span></span>`;
+    return `<span class="snippet-line"><span class="snippet-line-number">${number}</span><span>${markQueryTerms(highlightLine(line, language) || " ")}</span></span>`;
   }).join("");
+}
+
+function markQueryTerms(html: string): string {
+  const terms = queryTerms();
+  if (!terms.length) return html;
+  const pattern = new RegExp(`(${terms.map(escapeRegExp).join("|")})`, "gi");
+  return html
+    .split(/(<[^>]+>)/g)
+    .map((part) => part.startsWith("<") ? part : part.replace(pattern, '<mark class="query-mark">$1</mark>'))
+    .join("");
+}
+
+function queryTerms(): string[] {
+  const query = byId<HTMLInputElement>("query").value.trim();
+  if (!query) return [];
+  const terms = query.match(/[A-Za-z0-9_.$:/-]{2,}/g) || (query.length <= 32 ? [query] : []);
+  return Array.from(new Set(terms.map((term) => term.toLowerCase()))).slice(0, 8);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function sourceBadges(sources: string[]): string {
+  return sources.map((source) => `<span class="source-badge">${escapeHtml(source)}</span>`).join("");
 }
 
 function hitKey(hit: SearchHit): string {
@@ -519,7 +926,17 @@ function samePath(left: string, right: string): boolean {
 
 function updateSelectedRows(): void {
   for (const hit of document.querySelectorAll<HTMLElement>(".hit")) {
-    hit.classList.toggle("active", hit.dataset.hitKey === state.currentHitKey);
+    const key = hit.dataset.hitKey || "";
+    const pinned = state.pinnedHitKeys.has(key);
+    hit.classList.toggle("active", key === state.currentHitKey);
+    hit.classList.toggle("pinned", pinned);
+    const checkbox = hit.querySelector<HTMLInputElement>(".hit-select input");
+    if (checkbox) checkbox.checked = state.selectedHitKeys.has(key);
+    const pin = hit.querySelector<HTMLButtonElement>(".pin-hit");
+    if (pin) {
+      pin.classList.toggle("active", pinned);
+      pin.textContent = pinned ? "Pinned" : "Pin";
+    }
   }
   for (const row of document.querySelectorAll<HTMLButtonElement>(".tree-row")) {
     const kind = row.dataset.kind;
@@ -527,6 +944,13 @@ function updateSelectedRows(): void {
     const active = kind === "file" ? samePath(path, state.currentFilePath) : kind === "folder" && path === state.scope;
     row.classList.toggle("active", active);
   }
+  document.querySelector(".hit.active")?.scrollIntoView({ block: "nearest" });
+}
+
+function scrollFocusedLine(): void {
+  requestAnimationFrame(() => {
+    document.querySelector(".line.focus")?.scrollIntoView({ block: "center", inline: "nearest" });
+  });
 }
 
 function highlightLine(line: string, language?: string): string {
@@ -745,16 +1169,89 @@ function debounce(fn: () => void, delayMs: number): () => void {
   };
 }
 
+function applyInitialParams(): void {
+  byId<HTMLInputElement>("query").value = queryParams.get("q") || boot.query || "";
+  byId<HTMLSelectElement>("mode").value = queryParams.get("mode") || "hybrid";
+  byId<HTMLInputElement>("limit").value = queryParams.get("limit") || String(DEFAULT_LIMIT);
+  byId<HTMLInputElement>("type").value = queryParams.get("type") || "";
+  byId<HTMLInputElement>("include").value = queryParams.get("include") || "";
+  byId<HTMLInputElement>("exclude").value = queryParams.get("exclude") || "";
+}
+
+function currentLimit(): number {
+  const parsed = Number.parseInt(byId<HTMLInputElement>("limit").value, 10);
+  if (!Number.isFinite(parsed)) return DEFAULT_LIMIT;
+  return Math.max(1, Math.min(parsed, MAX_LIMIT));
+}
+
+function syncUrlState(): void {
+  const params = new URLSearchParams();
+  const query = byId<HTMLInputElement>("query").value.trim();
+  const mode = byId<HTMLSelectElement>("mode").value;
+  const limit = currentLimit();
+  const type = byId<HTMLInputElement>("type").value.trim();
+  const include = byId<HTMLInputElement>("include").value.trim();
+  const exclude = byId<HTMLInputElement>("exclude").value.trim();
+  if (query) params.set("q", query);
+  if (state.workspace !== ALL_WORKSPACES) params.set("workspace", scopedWorkspacePath());
+  if (mode !== "hybrid") params.set("mode", mode);
+  if (limit !== DEFAULT_LIMIT) params.set("limit", String(limit));
+  if (type) params.set("type", type);
+  if (include) params.set("include", include);
+  if (exclude) params.set("exclude", exclude);
+  const search = params.toString();
+  history.replaceState(null, "", `${location.pathname}${search ? `?${search}` : ""}`);
+}
+
+function scopedWorkspacePath(): string {
+  if (!state.scope) return state.workspace;
+  return `${state.workspace.replace(/[/\\]+$/, "")}/${state.scope.replace(/^[/\\]+/, "")}`;
+}
+
+function handleGlobalKeyDown(event: KeyboardEvent): void {
+  const target = event.target;
+  const editing = target instanceof Element && Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    const query = byId<HTMLInputElement>("query");
+    query.focus();
+    query.select();
+    return;
+  }
+  if (!editing && event.key === "/") {
+    event.preventDefault();
+    byId<HTMLInputElement>("query").focus();
+    return;
+  }
+  if (editing || event.altKey || event.metaKey || event.ctrlKey) return;
+  const activeIndex = state.hits.findIndex((hit) => hitKey(hit) === state.currentHitKey);
+  if (event.key === "ArrowDown" || event.key.toLowerCase() === "j") {
+    event.preventDefault();
+    selectHitByIndex(activeIndex < 0 ? 0 : activeIndex + 1);
+  } else if (event.key === "ArrowUp" || event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    selectHitByIndex(activeIndex < 0 ? 0 : activeIndex - 1);
+  }
+}
+
 function escapeHtml(value: unknown): string {
   return String(value).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch);
 }
 
 function attachEvents(): void {
-  byId("search").addEventListener("click", runSearch);
+  byId("search").addEventListener("click", () => runSearch());
+  byId("copy-results").addEventListener("click", () => {
+    void copyVisibleResults().catch((err: Error) => setStatus(err.message));
+  });
+  byId("copy-scope").addEventListener("change", updateCopyAvailability);
   byId("refresh").addEventListener("click", () => void loadStatus().catch((err: Error) => setStatus(err.message)));
+  byId("open-current").addEventListener("click", () => {
+    void openCurrentInEditor().catch((err: Error) => setStatus(err.message));
+  });
   byId("clear-scope").addEventListener("click", () => {
     state.scope = "";
     updateScopeLabel();
+    syncUrlState();
     void loadTree(".")
       .then(refreshSearchIfQuery)
       .catch((err: Error) => setStatus(err.message));
@@ -770,17 +1267,29 @@ function attachEvents(): void {
   byId<HTMLInputElement>("query").addEventListener("keydown", (event) => {
     if (event.key === "Enter") runSearch();
   });
+  byId<HTMLInputElement>("workspace-filter").addEventListener("input", (event) => {
+    state.workspaceFilter = (event.target as HTMLInputElement).value;
+    renderWorkspaces();
+  });
   const debouncedRefresh = debounce(refreshSearchIfQuery, 220);
   for (const id of ["type", "limit", "include", "exclude"]) {
-    byId<HTMLInputElement>(id).addEventListener("input", debouncedRefresh);
+    byId<HTMLInputElement>(id).addEventListener("input", () => {
+      syncUrlState();
+      debouncedRefresh();
+    });
   }
-  byId<HTMLSelectElement>("mode").addEventListener("change", refreshSearchIfQuery);
+  byId<HTMLSelectElement>("mode").addEventListener("change", () => {
+    syncUrlState();
+    refreshSearchIfQuery();
+  });
+  document.addEventListener("keydown", handleGlobalKeyDown);
 }
 
 installFavicon();
 renderShell();
 attachEvents();
-byId<HTMLInputElement>("query").value = queryParams.get("q") || boot.query || "";
+applyInitialParams();
+renderHistory();
 void loadStatus()
   .then(() => {
     if (byId<HTMLInputElement>("query").value.trim()) runSearch();
