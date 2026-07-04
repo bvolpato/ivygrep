@@ -18,6 +18,9 @@ Options:
       --fix                   Repair a broken or stale index (used with --doctor)
       --deep                  Perform full cross-store integrity scans (used with --doctor)
       --daemon                
+      --web                   Open the daemon-backed local web UI
+      --host <HOST>           Host for --web. Defaults to loopback; use 0.0.0.0 to expose on the LAN [default: 127.0.0.1]
+      --port <PORT>           Port for --web. Use 0 to let the OS choose a free port [default: 4747]
       --mcp                   
       --wait-for-enhancement  
   -f, --force                 

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ivygrep - Semantic code search that never uploads your code</title>
-    <meta name="description" content="Local semantic code search with BM25, vector retrieval, zero telemetry, 45 language/file types, and a built-in MCP server.">
+    <meta name="description" content="Local semantic code search with BM25, vector retrieval, zero telemetry, 45 language/file types, a local web UI, and a built-in MCP server.">
     <meta name="theme-color" content="#06070a">
 
     <!-- Open Graph -->
@@ -69,7 +69,7 @@
         <div class="container hero-content">
             <div class="hero-badge slide-up">
                 <span class="badge-dot"></span>
-                v1.0.7 - local semantic code search
+                v1.1.0 - local web UI and semantic code search
             </div>
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" onerror="this.src='assets/logo.png'"/>
@@ -151,7 +151,7 @@
         <div class="section-header">
             <span class="section-tag">Capabilities</span>
             <h2 class="section-title text-center">Local code search, indexed</h2>
-            <p class="text-center subtitle-small">BM25, vectors, AST chunks, and MCP run on your machine.</p>
+            <p class="text-center subtitle-small">BM25, vectors, AST chunks, browser UI, and MCP run on your machine.</p>
         </div>
 
         <div class="grid grid-3 mt-4">
@@ -181,9 +181,31 @@
                 <p>Built-in MCP server for Claude Code, Cursor, Codex, Gemini, and OpenCode. No separate plugin required.</p>
             </div>
             <div class="glass-card fade-in-scroll">
+                <div class="card-icon-wrap"><span class="card-icon-emoji">🖥️</span></div>
+                <h3>Web workspace browser</h3>
+                <p>Run <code>ig --web</code> for local HTTP search across indexed projects, folder focus, daemon status, streaming results, syntax-highlighted files, and Markdown preview.</p>
+            </div>
+            <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">🏗️</span></div>
                 <h3>Code-aware chunks</h3>
                 <p>24 Tree-sitter AST languages plus heuristic chunking for the rest of the 45 supported types.</p>
+            </div>
+        </div>
+
+        <div class="glass-panel fade-in-scroll mt-4">
+            <div class="grid grid-2 align-center">
+                <div>
+                    <span class="section-tag">New in v1.1.0</span>
+                    <h3>Daemon-backed web UI</h3>
+                    <p>Open a browser UI without leaving local mode. Search all tracked workspaces, drill into one folder, browse indexed files, and keep result and file panes independently scrollable.</p>
+                    <p>Result cards show language icons, syntax-highlighted snippets, line markers, and selected-state highlighting. The file viewer highlights focused result lines and previews Markdown with a source toggle.</p>
+                </div>
+                <div class="install-code relative">
+                    <pre class="code-block"><span class="prompt">$</span> ig --web
+<span class="prompt">$</span> ig --web "auth flow" .
+<span class="prompt">$</span> ig --web --host 0.0.0.0 --port 4747</pre>
+                    <button class="copy-btn" onclick="copyInstallCmd(this)">Copy</button>
+                </div>
             </div>
         </div>
 
@@ -264,6 +286,13 @@
                         <td>❌</td>
                         <td>❌</td>
                         <td>❌</td>
+                        <td><span class="highlight">✅</span></td>
+                    </tr>
+                    <tr>
+                        <td>Local web UI</td>
+                        <td>❌</td>
+                        <td>✅</td>
+                        <td>✅</td>
                         <td><span class="highlight">✅</span></td>
                     </tr>
                 </tbody>
@@ -631,6 +660,13 @@
                 <div class="quickstart-step">
                     <span class="quickstart-number">4</span>
                     <div>
+                        <h4>Browse in a local web UI</h4>
+                        <code class="quickstart-code">ig --web "auth flow" .</code>
+                    </div>
+                </div>
+                <div class="quickstart-step">
+                    <span class="quickstart-number">5</span>
+                    <div>
                         <h4>Connect AI agents</h4>
                         <code class="quickstart-code">claude mcp add -s user ig -- ig --mcp</code>
                     </div>
@@ -656,7 +692,7 @@
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md" class="footer-link">Changelog</a>
                 </div>
                 <div class="footer-copy">
-                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v1.0.7</p>
+                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v1.1.0</p>
                 </div>
             </div>
         </div>

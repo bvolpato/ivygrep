@@ -37,6 +37,106 @@ pub fn acquire_daemon_lock() -> anyhow::Result<Option<std::fs::File>> {
     Ok(None)
 }
 
+pub struct DaemonPidGuard {
+    path: std::path::PathBuf,
+}
+
+impl Drop for DaemonPidGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+pub fn daemon_pid_path() -> anyhow::Result<std::path::PathBuf> {
+    Ok(crate::config::app_home()?.join("daemon.pid"))
+}
+
+pub fn write_daemon_pid() -> anyhow::Result<DaemonPidGuard> {
+    let path = daemon_pid_path()?;
+    std::fs::write(&path, std::process::id().to_string())?;
+    Ok(DaemonPidGuard { path })
+}
+
+pub fn cleanup_daemon_pid() {
+    if let Ok(path) = daemon_pid_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn terminate_recorded_daemon(timeout: std::time::Duration) -> bool {
+    let Some(pid) = read_recorded_pid() else {
+        return false;
+    };
+    if pid <= 1 || pid == std::process::id() as i32 {
+        return false;
+    }
+    if !recorded_pid_is_ig(pid) {
+        if !pid_alive(pid) {
+            cleanup_daemon_pid();
+        }
+        return false;
+    }
+    if !pid_alive(pid) {
+        cleanup_daemon_pid();
+        return false;
+    }
+
+    let _ = unsafe { libc::kill(pid, libc::SIGTERM) };
+    if wait_for_pid_exit(pid, timeout) {
+        cleanup_daemon_pid();
+        return true;
+    }
+
+    let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+    let stopped = wait_for_pid_exit(pid, std::time::Duration::from_secs(1));
+    if stopped {
+        cleanup_daemon_pid();
+    }
+    stopped
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn terminate_recorded_daemon(_timeout: std::time::Duration) -> bool {
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn read_recorded_pid() -> Option<i32> {
+    let path = daemon_pid_path().ok()?;
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+#[cfg(target_os = "linux")]
+fn recorded_pid_is_ig(pid: i32) -> bool {
+    let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok();
+    exe.as_deref()
+        .and_then(std::path::Path::file_stem)
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("ig"))
+}
+
+#[cfg(target_os = "linux")]
+fn pid_alive(pid: i32) -> bool {
+    let rc = unsafe { libc::kill(pid, 0) };
+    rc == 0
+        || std::io::Error::last_os_error()
+            .raw_os_error()
+            .is_some_and(|code| code == libc::EPERM)
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_pid_exit(pid: i32, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        if !pid_alive(pid) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    !pid_alive(pid)
+}
+
 #[cfg(unix)]
 mod unix {
     use crate::config;
@@ -239,5 +339,23 @@ mod tests {
         cleanup_socket();
 
         assert!(!socket_exists(), "socket/port file should be cleaned up");
+    }
+
+    #[test]
+    #[serial]
+    fn daemon_pid_guard_writes_and_cleans() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", tmp.path()) };
+        let _ = crate::config::ensure_app_dirs();
+
+        {
+            let _guard = write_daemon_pid().unwrap();
+            assert_eq!(
+                std::fs::read_to_string(daemon_pid_path().unwrap()).unwrap(),
+                std::process::id().to_string()
+            );
+        }
+
+        assert!(!daemon_pid_path().unwrap().exists());
     }
 }

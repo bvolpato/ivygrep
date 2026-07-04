@@ -1,4 +1,5 @@
 use std::env;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -57,6 +58,18 @@ pub struct Cli {
 
     #[arg(long, default_value_t = false)]
     pub daemon: bool,
+
+    /// Open the daemon-backed local web UI.
+    #[arg(long, default_value_t = false)]
+    pub web: bool,
+
+    /// Host for --web. Defaults to loopback; use 0.0.0.0 to expose on the LAN.
+    #[arg(long, default_value = "127.0.0.1", requires = "web")]
+    pub host: String,
+
+    /// Port for --web. Use 0 to let the OS choose a free port.
+    #[arg(long, default_value_t = 4747, requires = "web")]
+    pub port: u16,
 
     #[arg(long, default_value_t = false)]
     pub mcp: bool,
@@ -197,6 +210,7 @@ pub async fn run() -> Result<()> {
         cli.status,
         cli.doctor,
         cli.daemon,
+        cli.web,
         cli.mcp,
     ]
     .iter()
@@ -204,11 +218,43 @@ pub async fn run() -> Result<()> {
     .count();
 
     if action_count > 1 {
-        bail!("use only one action at a time: --add, --rm, --status, --doctor, --daemon, or --mcp");
+        bail!(
+            "use only one action at a time: --add, --rm, --status, --doctor, --daemon, --web, or --mcp"
+        );
     }
 
     if cli.daemon {
         daemon::run_daemon().await?;
+        return Ok(());
+    }
+
+    if cli.web {
+        let selected_path = match &cli.query_path {
+            Some(path) => path.clone(),
+            None => env::current_dir()?,
+        };
+        let selected_path = selected_path.canonicalize().unwrap_or(selected_path);
+        let response = daemon::request::<fn(String, usize, usize)>(
+            &DaemonRequest::ServeWeb {
+                host: cli.host.clone(),
+                port: cli.port,
+                initial_query: cli.query.clone(),
+                initial_path: Some(selected_path),
+            },
+            true,
+            None,
+        )
+        .await?;
+        let url = match response {
+            Some(DaemonResponse::WebStarted { url }) => url,
+            Some(DaemonResponse::Error { message }) => {
+                bail!("could not start ivygrep web server: {message}");
+            }
+            _ => bail!("could not start ivygrep web server"),
+        };
+        println!("ivygrep web listening at {url}");
+        std::io::stdout().flush().ok();
+        open_browser(&url);
         return Ok(());
     }
 
@@ -368,6 +414,39 @@ pub async fn run() -> Result<()> {
     }
 
     run_query(cli).await
+}
+
+fn open_browser(url: &str) {
+    if std::env::var_os("IVYGREP_NO_BROWSER").is_some() {
+        return;
+    }
+
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = std::process::Command::new("open");
+        command.arg(url);
+        command
+    };
+
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = std::process::Command::new("cmd");
+        command.args(["/C", "start", "", url]);
+        command
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = std::process::Command::new("xdg-open");
+        command.arg(url);
+        command
+    };
+
+    let _ = command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 async fn run_status(json: bool) -> Result<()> {
@@ -1512,7 +1591,9 @@ fn print_daemon_response(response: DaemonResponse, json: bool) -> Result<()> {
             }
             Ok(())
         }
-        DaemonResponse::Version { .. } | DaemonResponse::RuntimeStatus { .. } => Ok(()),
+        DaemonResponse::Version { .. }
+        | DaemonResponse::RuntimeStatus { .. }
+        | DaemonResponse::WebStarted { .. } => Ok(()),
         DaemonResponse::SearchProgress { .. } => Ok(()),
     }
 }

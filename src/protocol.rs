@@ -12,7 +12,7 @@ fn is_false(value: &bool) -> bool {
 /// Compile-time version tag so the CLI can detect stale daemon processes.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Wire protocol version for daemon request compatibility.
-pub const DAEMON_PROTOCOL_VERSION: u32 = 3;
+pub const DAEMON_PROTOCOL_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchHit {
@@ -38,6 +38,12 @@ pub enum DaemonRequest {
         path: Option<PathBuf>,
     },
     Status,
+    ServeWeb {
+        host: String,
+        port: u16,
+        initial_query: Option<String>,
+        initial_path: Option<PathBuf>,
+    },
     Index {
         path: PathBuf,
         watch: bool,
@@ -128,6 +134,9 @@ pub enum DaemonResponse {
     Version {
         #[serde(default)]
         version: Option<String>,
+    },
+    WebStarted {
+        url: String,
     },
     RuntimeStatus {
         #[serde(default)]

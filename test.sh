@@ -22,6 +22,7 @@ Options:
   --no-fmt              Skip cargo fmt -- --check
   --no-shellcheck       Skip ShellCheck
   --no-clippy           Skip cargo clippy
+  --no-web              Skip pnpm web frontend checks
   --no-python           Skip Python harness tests
   --filter NAME         Pass Cargo test filter
   --nocapture           Pass --nocapture to test harness
@@ -62,6 +63,7 @@ mode="ci"
 do_fmt=1
 do_shellcheck=1
 do_clippy=1
+do_web=1
 do_python_tests=1
 cargo_flags=(--locked)
 profile_flags=()
@@ -153,6 +155,7 @@ while (($#)); do
       do_fmt=1
       do_shellcheck=1
       do_clippy=1
+      do_web=1
       do_python_tests=1
       scope_flags=(--lib --bins --tests)
       ;;
@@ -161,6 +164,7 @@ while (($#)); do
       do_fmt=0
       do_shellcheck=0
       do_clippy=0
+      do_web=0
       do_python_tests=0
       scope_flags=(--lib)
       ;;
@@ -172,6 +176,7 @@ while (($#)); do
       do_fmt=0
       do_shellcheck=0
       do_clippy=0
+      do_web=0
       do_python_tests=0
       ;;
     --release)
@@ -197,6 +202,9 @@ while (($#)); do
       ;;
     --no-clippy)
       do_clippy=0
+      ;;
+    --no-web)
+      do_web=0
       ;;
     --no-python)
       do_python_tests=0
@@ -253,6 +261,17 @@ fi
 
 if ((do_clippy)); then
   run cargo clippy "${profile_flags[@]}" --all-targets "${cargo_flags[@]}" -- -D warnings
+fi
+
+if ((do_web)); then
+  if ! command -v pnpm >/dev/null 2>&1; then
+    echo "pnpm not found; install it or pass --no-web" >&2
+    exit 127
+  fi
+  run pnpm -C web install --frozen-lockfile
+  run pnpm -C web check
+  run pnpm -C web build
+  run git diff --exit-code -- web/dist
 fi
 
 if [[ "$mode" == "stress" ]]; then

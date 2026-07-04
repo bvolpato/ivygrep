@@ -11,7 +11,7 @@
   <a href="https://github.com/bvolpato/ivygrep/actions"><img src="https://github.com/bvolpato/ivygrep/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://github.com/bvolpato/ivygrep/actions/workflows/security.yml"><img src="https://github.com/bvolpato/ivygrep/actions/workflows/security.yml/badge.svg" alt="Security" /></a>
   <a href="https://github.com/bvolpato/ivygrep/actions/workflows/relevance.yml"><img src="https://github.com/bvolpato/ivygrep/actions/workflows/relevance.yml/badge.svg" alt="Relevance" /></a>
-  <a href="https://github.com/bvolpato/ivygrep/releases/tag/v1.0.7"><img src="https://img.shields.io/badge/release-v1.0.7-34d058" alt="Latest Release" /></a>
+  <a href="https://github.com/bvolpato/ivygrep/releases/tag/v1.1.0"><img src="https://img.shields.io/badge/release-v1.1.0-34d058" alt="Latest Release" /></a>
   <a href="https://github.com/bvolpato/ivygrep/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
   <a href="https://github.com/bvolpato/ivygrep/releases"><img src="https://img.shields.io/github/downloads/bvolpato/ivygrep/total?color=%23ff6f00" alt="Downloads" /></a>
 </p>
@@ -99,6 +99,30 @@ ig "authentication flow"            # auto-indexes on first run, then searches
 ig "error handling" src/api/         # scope to a directory
 ig --all "database migrations"      # search across all indexed projects
 ```
+
+**Web UI:**
+```bash
+ig --web                            # open http://127.0.0.1:4747
+ig --web "authentication flow" .    # open with query + current workspace
+ig --web --host 0.0.0.0 --port 4747 # bind beyond loopback
+```
+
+The web UI runs from the daemon and embeds into the `ig` binary. By default it
+binds `127.0.0.1:4747`, opens in your browser, and searches all indexed
+workspaces. Use `--host`/`--port` to choose the listener. `ig --web "query" .`
+enables web on the current daemon when possible and opens with that folder
+selected.
+
+Web UI capabilities:
+
+- Search all tracked workspaces or focus one workspace/folder.
+- See daemon status and workspace health.
+- Stream result updates while the search runs.
+- Browse indexed folders in the sidebar.
+- Open tracked files with syntax highlighting and focused result lines.
+- Preview Markdown files, with a source toggle.
+- Highlight selected results, show language icons, and keep sidebar/results/file
+  panes independently scrollable.
 
 No config, prompts, or API keys. First run auto-indexes the workspace and
 starts a background daemon for incremental updates. Neural mode may download
@@ -395,6 +419,9 @@ ig --file-name-only "query"        # file paths only
 
 # Daemon and server
 ig --daemon                        # start background watcher
+ig --web                           # start daemon + local browser UI
+ig --web "query" .                 # preload query and selected workspace
+ig --web --host 0.0.0.0 --port 4747
 ig --mcp                           # start MCP server (stdio)
 ```
 
@@ -431,6 +458,10 @@ Neither is a relevance threshold.
 ./build.sh --locked --features cuda  # opt-in Linux CUDA neural binary
 ./bench.sh          # critical Criterion benchmark, no stale local baseline comparison
 ```
+The web UI source lives under `web/` and is managed with pnpm. `pnpm -C web
+build` writes committed assets to `web/dist/`; Cargo embeds those assets into
+the `ig` binary at build time.
+
 Tests cover unit behavior, CLI snapshots, concurrency, golden queries, public
 retrieval metrics, symbols/callers, incremental CRUD, MCP, daemon recovery,
 git/worktrees, Merkle properties, and benchmark guards. Criterion repeats short

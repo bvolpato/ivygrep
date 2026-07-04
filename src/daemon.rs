@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -372,7 +373,7 @@ fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
 }
 
 #[derive(Clone)]
-struct DaemonState {
+pub(crate) struct DaemonState {
     lazy_model: Arc<std::sync::OnceLock<Arc<dyn EmbeddingModel>>>,
     model_loading: Arc<AtomicBool>,
     watchers: Arc<Mutex<HashMap<String, WatchRegistration>>>,
@@ -387,6 +388,12 @@ struct DaemonState {
     /// Tokio's blocking pool (default cap 512), oversubscribing CPU and memory
     /// with no backpressure. See #58.
     cpu_permits: Arc<tokio::sync::Semaphore>,
+    web_server: Arc<Mutex<Option<WebServerRuntime>>>,
+}
+
+struct WebServerRuntime {
+    local_addr: SocketAddr,
+    alive: Arc<AtomicBool>,
 }
 
 fn create_search_model() -> Arc<dyn EmbeddingModel> {
@@ -616,7 +623,31 @@ impl DaemonState {
     }
 }
 
+fn create_daemon_state() -> DaemonState {
+    // Defer model creation; model artifact download happens on first neural use.
+    let lazy_model: Arc<std::sync::OnceLock<Arc<dyn EmbeddingModel>>> =
+        Arc::new(std::sync::OnceLock::new());
+
+    DaemonState {
+        lazy_model: lazy_model.clone(),
+        model_loading: Arc::new(AtomicBool::new(false)),
+        watchers: Arc::new(Mutex::new(HashMap::new())),
+        resolved_workspaces: Arc::new(Mutex::new(HashMap::new())),
+        neural_statuses: Arc::new(Mutex::new(HashMap::new())),
+        search_contexts: Arc::new(Mutex::new(HashMap::new())),
+        idle_search_context_count: Arc::new(AtomicUsize::new(0)),
+        query_results: Arc::new(Mutex::new(QueryResultCache::default())),
+        query_result_cache_enabled: config::query_result_cache_enabled(),
+        cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
+        web_server: Arc::new(Mutex::new(None)),
+    }
+}
+
 pub async fn run_daemon() -> Result<()> {
+    run_daemon_inner().await
+}
+
+async fn run_daemon_inner() -> Result<()> {
     config::ensure_app_dirs()?;
 
     // Single-instance guard: acquire an exclusive lock before binding the
@@ -630,6 +661,7 @@ pub async fn run_daemon() -> Result<()> {
             return Ok(());
         }
     };
+    let _daemon_pid = crate::ipc::write_daemon_pid()?;
 
     let (listener, socket_path) = crate::ipc::bind().await?;
     daemon_log(&format!(
@@ -637,24 +669,13 @@ pub async fn run_daemon() -> Result<()> {
         socket_path.display()
     ));
 
-    // Defer model creation; model artifact download happens on first neural use.
-    let lazy_model: Arc<std::sync::OnceLock<Arc<dyn EmbeddingModel>>> =
-        Arc::new(std::sync::OnceLock::new());
-
-    let state = DaemonState {
-        lazy_model: lazy_model.clone(),
-        model_loading: Arc::new(AtomicBool::new(false)),
-        watchers: Arc::new(Mutex::new(HashMap::new())),
-        resolved_workspaces: Arc::new(Mutex::new(HashMap::new())),
-        neural_statuses: Arc::new(Mutex::new(HashMap::new())),
-        search_contexts: Arc::new(Mutex::new(HashMap::new())),
-        idle_search_context_count: Arc::new(AtomicUsize::new(0)),
-        query_results: Arc::new(Mutex::new(QueryResultCache::default())),
-        query_result_cache_enabled: config::query_result_cache_enabled(),
-        cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
-    };
-
-    restore_configured_watchers(&state);
+    let state = create_daemon_state();
+    if std::env::var_os("IVYGREP_SKIP_WATCHER_RESTORE").is_none() {
+        let restore_state = state.clone();
+        tokio::spawn(async move {
+            restore_configured_watchers(&restore_state);
+        });
+    }
 
     // Graceful shutdown on SIGTERM/SIGINT (e.g. service stop): stop watchers
     // and remove the socket before exiting, instead of leaving them dangling.
@@ -678,6 +699,7 @@ pub async fn run_daemon() -> Result<()> {
             daemon_log("received shutdown signal; stopping watchers and cleaning up");
             stop_all_watchers(&shutdown_state);
             crate::ipc::cleanup_socket();
+            crate::ipc::cleanup_daemon_pid();
             std::process::exit(0);
         });
     }
@@ -710,6 +732,49 @@ pub async fn run_daemon() -> Result<()> {
             }
         });
     }
+}
+
+pub(crate) async fn handle_web_request(
+    state: DaemonState,
+    request: DaemonRequest,
+) -> DaemonResponse {
+    handle_request(state, request).await
+}
+
+fn start_web_server(state: &DaemonState, web_config: crate::web::WebConfig) -> Result<String> {
+    if let Some(local_addr) = active_web_addr(state) {
+        return Ok(crate::web::initial_url(&web_config, local_addr));
+    }
+
+    let bind_addr = crate::web::bind_addr(&web_config.host, web_config.port)?;
+    let std_listener = std::net::TcpListener::bind(bind_addr)?;
+    std_listener.set_nonblocking(true)?;
+    let web_listener = tokio::net::TcpListener::from_std(std_listener)?;
+    let local_addr = web_listener.local_addr()?;
+    let url = crate::web::initial_url(&web_config, local_addr);
+    let web_state = state.clone();
+    let server_config = web_config.clone();
+    let alive = Arc::new(AtomicBool::new(true));
+    let server_alive = alive.clone();
+    tokio::spawn(async move {
+        if let Err(err) = crate::web::serve(web_listener, web_state, server_config).await {
+            error!("web server error: {err:#}");
+        }
+        server_alive.store(false, Ordering::Relaxed);
+    });
+    *state.web_server.lock() = Some(WebServerRuntime { local_addr, alive });
+    Ok(url)
+}
+
+fn active_web_addr(state: &DaemonState) -> Option<SocketAddr> {
+    let mut guard = state.web_server.lock();
+    if guard
+        .as_ref()
+        .is_some_and(|runtime| !runtime.alive.load(Ordering::Relaxed))
+    {
+        *guard = None;
+    }
+    guard.as_ref().map(|runtime| runtime.local_addr)
 }
 
 fn restore_configured_watchers(state: &DaemonState) {
@@ -857,6 +922,27 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 message: err.to_string(),
             },
         },
+        DaemonRequest::ServeWeb {
+            host,
+            port,
+            initial_query,
+            initial_path,
+        } => {
+            match start_web_server(
+                &state,
+                crate::web::WebConfig {
+                    host,
+                    port,
+                    initial_query,
+                    initial_path,
+                },
+            ) {
+                Ok(url) => DaemonResponse::WebStarted { url },
+                Err(err) => DaemonResponse::Error {
+                    message: err.to_string(),
+                },
+            }
+        }
         DaemonRequest::Index {
             path,
             watch,
@@ -1433,6 +1519,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             stop_all_watchers(&state);
             // Clean up socket so the new daemon can bind immediately
             crate::ipc::cleanup_socket();
+            crate::ipc::cleanup_daemon_pid();
             // Schedule exit after the response is sent
             tokio::spawn(async {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1989,9 +2076,13 @@ async fn ensure_compatible_daemon() {
 }
 
 pub(crate) async fn restart_daemon_process() {
-    let _ =
+    let restarted =
         request_unchecked::<fn(String, usize, usize)>(&DaemonRequest::Restart, false, None).await;
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    if !matches!(restarted, Ok(Some(DaemonResponse::Ack { .. }))) {
+        let _ = crate::ipc::terminate_recorded_daemon(std::time::Duration::from_secs(2));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
     if crate::ipc::socket_exists() {
         crate::ipc::cleanup_socket();
     }
@@ -2019,6 +2110,9 @@ where
     {
         let mut cmd = std::process::Command::new(exe);
         cmd.arg("--daemon");
+        if matches!(request, DaemonRequest::ServeWeb { .. }) {
+            cmd.env("IVYGREP_SKIP_WATCHER_RESTORE", "1");
+        }
 
         // Redirect daemon I/O to a log file to keep the CLI terminal clean.
         if let Ok(mut log_file) = open_daemon_log_file() {
@@ -2110,6 +2204,7 @@ where
         DaemonRequest::Version
         | DaemonRequest::RuntimeStatus { .. }
         | DaemonRequest::Status
+        | DaemonRequest::ServeWeb { .. }
         | DaemonRequest::Restart => 5, // quick
         DaemonRequest::Search { .. }
         | DaemonRequest::RegexSearch { .. }
@@ -2174,6 +2269,7 @@ mod tests {
             query_results: Arc::new(Mutex::new(QueryResultCache::default())),
             query_result_cache_enabled: true,
             cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
+            web_server: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -2449,7 +2545,7 @@ mod tests {
         let version = handle_request(test_state(), DaemonRequest::Version).await;
         assert!(matches!(
             version,
-            DaemonResponse::Version { version } if version.as_deref() == Some(BUILD_VERSION)
+            DaemonResponse::Version { version, .. } if version.as_deref() == Some(BUILD_VERSION)
         ));
 
         let runtime = handle_request(

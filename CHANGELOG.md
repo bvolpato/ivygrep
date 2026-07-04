@@ -4,6 +4,16 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-04
+
+### Added
+- **Web daemon mode (`ig --web`) opens local browser search.** The daemon can now bind a local HTTP UI on `127.0.0.1:4747` by default, with `--host`, `--port`, optional initial query, workspace focus, all-index search, status, result browsing, and tracked-file viewing.
+- **Browser UI now includes code navigation affordances.** Result snippets and opened files use best-effort syntax highlighting, result snippets show line markers, Markdown files open in preview mode with a source toggle, selected results are visibly highlighted, known languages get compact file icons, and sidebar/results/file panes scroll independently.
+
+### Testing
+- Added web-server integration coverage for status, search, and safe tracked-file reads.
+- Added pnpm frontend checks so embedded web assets stay in sync with source.
+
 ## [1.0.7] - 2026-07-03
 
 ### Performance

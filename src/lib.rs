@@ -21,6 +21,7 @@ pub mod text;
 pub mod tui;
 pub mod vector_store;
 pub mod walker;
+pub(crate) mod web;
 pub mod workspace;
 
 /// Legacy constant kept for tests. Prefer [`embedding::model_dimensions`].

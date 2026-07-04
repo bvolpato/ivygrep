@@ -12,6 +12,7 @@ enum Section {
 
 fn main() {
     configure_windows_manifest();
+    generate_web_assets();
 
     let input = Path::new("assets/query_aliases.toml");
     println!("cargo:rerun-if-changed={}", input.display());
@@ -25,6 +26,103 @@ fn main() {
     let out_path = Path::new(&out_dir).join("query_aliases.rs");
     fs::write(out_path, generate_alias_module(&aliases))
         .expect("failed to write generated query aliases");
+}
+
+fn generate_web_assets() {
+    let manifest_dir = env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set");
+    let manifest_dir = Path::new(&manifest_dir);
+    let dist_dir = manifest_dir.join("web/dist");
+    let index = dist_dir.join("index.html");
+    if !index.is_file() {
+        panic!(
+            "{} is missing; run `pnpm -C web install --frozen-lockfile && pnpm -C web build`",
+            index.display()
+        );
+    }
+
+    println!("cargo:rerun-if-changed={}", dist_dir.display());
+
+    let mut files = collect_web_dist_files(&dist_dir);
+    files.sort();
+
+    let out_dir = env::var_os("OUT_DIR").expect("OUT_DIR must be set by Cargo");
+    let out_path = Path::new(&out_dir).join("web_assets.rs");
+    fs::write(
+        out_path,
+        generate_web_asset_module(&dist_dir, &index, &files),
+    )
+    .expect("failed to write generated web asset module");
+}
+
+fn collect_web_dist_files(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    for entry in fs::read_dir(dir)
+        .unwrap_or_else(|err| panic!("failed to read web dist {}: {err}", dir.display()))
+    {
+        let entry = entry.expect("failed to read web dist entry");
+        let path = entry.path();
+        if path.is_dir() {
+            files.extend(collect_web_dist_files(&path));
+        } else if path.file_name().is_some_and(|name| name != "index.html") {
+            println!("cargo:rerun-if-changed={}", path.display());
+            files.push(path);
+        }
+    }
+    files
+}
+
+fn generate_web_asset_module(
+    dist_dir: &Path,
+    index: &Path,
+    files: &[std::path::PathBuf],
+) -> String {
+    let mut output = String::new();
+    output.push_str("pub(crate) struct WebAsset {\n");
+    output.push_str("    pub(crate) path: &'static str,\n");
+    output.push_str("    pub(crate) content_type: &'static str,\n");
+    output.push_str("    pub(crate) bytes: &'static [u8],\n");
+    output.push_str("}\n\n");
+    output.push_str(&format!(
+        "pub(crate) const WEB_INDEX_HTML: &str = include_str!(r#\"{}\"#);\n\n",
+        index.display()
+    ));
+    output.push_str("pub(crate) const WEB_ASSETS: &[WebAsset] = &[\n");
+    for file in files {
+        let relative = file
+            .strip_prefix(dist_dir)
+            .expect("web asset must be inside dist")
+            .to_string_lossy()
+            .replace('\\', "/");
+        output.push_str("    WebAsset {\n");
+        output.push_str(&format!("        path: \"/{}\",\n", relative));
+        output.push_str(&format!(
+            "        content_type: \"{}\",\n",
+            web_content_type(&relative)
+        ));
+        output.push_str(&format!(
+            "        bytes: include_bytes!(r#\"{}\"#),\n",
+            file.display()
+        ));
+        output.push_str("    },\n");
+    }
+    output.push_str("];\n");
+    output
+}
+
+fn web_content_type(path: &str) -> &'static str {
+    if path.ends_with(".js") {
+        "text/javascript; charset=utf-8"
+    } else if path.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if path.ends_with(".svg") {
+        "image/svg+xml"
+    } else if path.ends_with(".png") {
+        "image/png"
+    } else if path.ends_with(".woff2") {
+        "font/woff2"
+    } else {
+        "application/octet-stream"
+    }
 }
 
 fn configure_windows_manifest() {

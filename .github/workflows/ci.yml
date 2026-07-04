@@ -43,6 +43,16 @@ jobs:
       - name: ShellCheck scripts
         run: shellcheck install.sh build.sh test.sh bench.sh scripts/bootstrap_stress_fixtures.sh scripts/e2e_procedures.sh scripts/e2e_neural_backend.sh scripts/e2e_x86_baseline.sh scripts/e2e_cached_model.sh scripts/stress_large_repo.sh
 
+      - name: Install pnpm
+        run: npm install -g pnpm@10.33.0
+
+      - name: Verify web frontend
+        run: |
+          pnpm -C web install --frozen-lockfile
+          pnpm -C web check
+          pnpm -C web build
+          git diff --exit-code -- web/dist
+
       - name: Test Python harnesses
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
 
