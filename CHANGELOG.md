@@ -4,6 +4,15 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-07-04
+
+### Fixed
+- **Daemon-backed web searches recover unhealthy workspace indexes before failing.** Selected-workspace searches rebuild broken metadata/index stores on demand, and all-index searches skip unrecoverable workspaces without failing the whole result stream.
+- **Web UI no longer keeps recent searches.** The sidebar now focuses on workspaces, scope, explorer, results, pinned copies, and file browsing without persisting query history in local storage.
+
+### Documentation
+- **README and Pages keep `ig --web` visible in normal workflow docs.** The local web UI remains documented alongside daemon and MCP commands without adding another launch-heavy section.
+
 ## [1.1.0] - 2026-07-04
 
 ### Added

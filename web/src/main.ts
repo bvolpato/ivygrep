@@ -66,19 +66,7 @@ type FilePayload = {
 
 type ViewerMode = "preview" | "source";
 type CopyFormat = "files" | "raw" | "json";
-type CopyScope = "visible" | "selected" | "pinned";
-
-type SearchHistoryItem = {
-  query: string;
-  workspace: string;
-  scope: string;
-  mode: string;
-  type: string;
-  include: string;
-  exclude: string;
-  limit: number;
-  updatedAt: number;
-};
+type CopyScope = "visible" | "pinned";
 
 type AppState = {
   workspaces: WorkspaceStatus[];
@@ -98,17 +86,13 @@ type AppState = {
   currentFileStart: number;
   currentFileEnd: number;
   currentHitKey: string;
-  selectedHitKeys: Set<string>;
   pinnedHitKeys: Set<string>;
-  history: SearchHistoryItem[];
 };
 
 const ALL_WORKSPACES = "__all__";
 const DEFAULT_LIMIT = 50;
 const LOAD_MORE_STEP = 50;
 const MAX_LIMIT = 500;
-const HISTORY_KEY = "ivygrep.searchHistory.v1";
-const HISTORY_LIMIT = 8;
 const boot = readBoot();
 const queryParams = new URLSearchParams(location.search);
 const markdown = new MarkdownIt({
@@ -136,9 +120,7 @@ const state: AppState = {
   currentFileStart: 1,
   currentFileEnd: 1,
   currentHitKey: "",
-  selectedHitKeys: new Set(),
-  pinnedHitKeys: new Set(),
-  history: readSearchHistory()
+  pinnedHitKeys: new Set()
 };
 
 function readBoot(): BootConfig {
@@ -197,8 +179,6 @@ function renderShell(): void {
             <span id="scope-label">Scope: all folders</span>
             <button class="linkbtn" id="clear-scope" type="button">Global</button>
           </div>
-          <div class="section-title">Recent</div>
-          <div id="history" class="history"></div>
           <div class="section-title">Explorer</div>
           <div id="tree" class="tree"><div class="empty">Select a workspace to browse.</div></div>
         </aside>
@@ -208,7 +188,6 @@ function renderShell(): void {
             <div class="copy-tools">
               <select id="copy-scope" title="Copy scope">
                 <option value="visible">Visible</option>
-                <option value="selected">Selected</option>
                 <option value="pinned">Pinned</option>
               </select>
               <select id="copy-format" title="Copy format">
@@ -373,92 +352,6 @@ function workspaceButton(ws: WorkspaceStatus, label: string): HTMLButtonElement 
   return button;
 }
 
-function readSearchHistory(): SearchHistoryItem[] {
-  try {
-    const raw = localStorage.getItem(HISTORY_KEY);
-    if (!raw) return [];
-    const items = JSON.parse(raw) as SearchHistoryItem[];
-    if (!Array.isArray(items)) return [];
-    return items
-      .filter((item) => item && typeof item.query === "string" && item.query.trim())
-      .slice(0, HISTORY_LIMIT);
-  } catch {
-    return [];
-  }
-}
-
-function saveSearchHistory(): void {
-  try {
-    localStorage.setItem(HISTORY_KEY, JSON.stringify(state.history.slice(0, HISTORY_LIMIT)));
-  } catch {
-    return;
-  }
-}
-
-function rememberSearch(): void {
-  const item: SearchHistoryItem = {
-    query: byId<HTMLInputElement>("query").value.trim(),
-    workspace: state.workspace,
-    scope: state.scope,
-    mode: byId<HTMLSelectElement>("mode").value,
-    type: byId<HTMLInputElement>("type").value.trim(),
-    include: byId<HTMLInputElement>("include").value.trim(),
-    exclude: byId<HTMLInputElement>("exclude").value.trim(),
-    limit: currentLimit(),
-    updatedAt: Date.now()
-  };
-  if (!item.query) return;
-  const key = historyItemKey(item);
-  state.history = [item, ...state.history.filter((existing) => historyItemKey(existing) !== key)].slice(0, HISTORY_LIMIT);
-  saveSearchHistory();
-  renderHistory();
-}
-
-function historyItemKey(item: SearchHistoryItem): string {
-  return [item.query, item.workspace, item.scope, item.mode, item.type, item.include, item.exclude].join("\u0000");
-}
-
-function renderHistory(): void {
-  const root = document.getElementById("history");
-  if (!root) return;
-  root.innerHTML = "";
-  if (!state.history.length) {
-    root.innerHTML = '<div class="history-empty">No searches yet.</div>';
-    return;
-  }
-  for (const item of state.history) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "history-item";
-    const workspace = item.workspace === ALL_WORKSPACES ? "All indices" : shortPath(item.workspace);
-    const details = [workspace, item.scope, item.mode].filter(Boolean).join(" / ");
-    button.innerHTML = `<span>${escapeHtml(item.query)}</span><small>${escapeHtml(details)}</small>`;
-    button.addEventListener("click", () => applyHistoryItem(item));
-    root.appendChild(button);
-  }
-}
-
-function applyHistoryItem(item: SearchHistoryItem): void {
-  byId<HTMLInputElement>("query").value = item.query;
-  byId<HTMLSelectElement>("mode").value = item.mode || "hybrid";
-  byId<HTMLInputElement>("limit").value = String(item.limit || DEFAULT_LIMIT);
-  byId<HTMLInputElement>("type").value = item.type || "";
-  byId<HTMLInputElement>("include").value = item.include || "";
-  byId<HTMLInputElement>("exclude").value = item.exclude || "";
-  state.workspace = item.workspace || ALL_WORKSPACES;
-  state.scope = item.scope || "";
-  if (state.workspace !== ALL_WORKSPACES && !state.workspaces.some((ws) => ws.root === state.workspace)) {
-    state.workspace = ALL_WORKSPACES;
-    state.scope = "";
-  }
-  renderWorkspaces();
-  updateScopeLabel();
-  syncUrlState();
-  void loadTree(state.scope || ".")
-    .then(() => runSearch())
-    .catch((err: Error) => setStatus(err.message));
-}
-
 function shortPath(path: string): string {
   const parts = pathText(path).split(/[\\/]/).filter(Boolean);
   return parts.slice(-2).join("/") || path;
@@ -541,7 +434,6 @@ function runSearch(options: { preserveSelection?: boolean } = {}): void {
   if (!q) {
     state.hits = [];
     state.currentHitKey = "";
-    state.selectedHitKeys.clear();
     state.pinnedHitKeys.clear();
     setSearching(false);
     updateCopyAvailability();
@@ -551,7 +443,6 @@ function runSearch(options: { preserveSelection?: boolean } = {}): void {
   }
   if (state.events) state.events.close();
   syncUrlState();
-  rememberSearch();
   if (options.preserveSelection) {
     state.manualOpen = true;
     state.autoOpenKey = state.currentHitKey;
@@ -560,7 +451,6 @@ function runSearch(options: { preserveSelection?: boolean } = {}): void {
     state.manualOpen = false;
     state.hits = [];
     state.currentHitKey = "";
-    state.selectedHitKeys.clear();
     state.pinnedHitKeys.clear();
     byId("results").innerHTML = "";
   }
@@ -616,7 +506,7 @@ function renderResults(payload: SearchPayload): void {
   if (!hits.length) {
     state.currentHitKey = "";
     byId("results").innerHTML = '<div class="empty">No hits. Try a broader query, fewer filters, or a different search mode.</div>';
-    updateSelectedRows();
+    updateResultRows();
     return;
   }
   const root = byId("results");
@@ -630,10 +520,6 @@ function renderResults(payload: SearchPayload): void {
     item.classList.toggle("pinned", state.pinnedHitKeys.has(key));
     item.innerHTML = `
       <div class="hit-head">
-        <label class="hit-select" title="Select result">
-          <input type="checkbox" ${state.selectedHitKeys.has(key) ? "checked" : ""} />
-          <span></span>
-        </label>
         <button class="hit-main" type="button">
           <div class="file">${languageIconForPath(hit.file_path)}<span class="file-path">${escapeHtml(hit.file_path)}</span></div>
           <div class="score">score ${Number(hit.score).toFixed(3)}${sourceBadges(hit.sources || [])}</div>
@@ -645,9 +531,6 @@ function renderResults(payload: SearchPayload): void {
       </div>
       <pre class="snippet hljs">${renderSnippet(hit)}</pre>`;
     item.querySelector(".hit-main")?.addEventListener("click", () => selectHit(hit));
-    item.querySelector<HTMLInputElement>(".hit-select input")?.addEventListener("change", (event) => {
-      toggleResultSelection(key, (event.target as HTMLInputElement).checked);
-    });
     item.querySelector(".pin-hit")?.addEventListener("click", () => togglePinnedHit(key));
     item.querySelector(".open-hit")?.addEventListener("click", () => {
       void openHitInEditor(hit).catch((err: Error) => setStatus(err.message));
@@ -703,18 +586,7 @@ function loadMoreButton(hitCount: number): HTMLDivElement {
 
 function pruneResultKeySets(): void {
   const keys = new Set(state.hits.map(hitKey));
-  state.selectedHitKeys = new Set([...state.selectedHitKeys].filter((key) => keys.has(key)));
   state.pinnedHitKeys = new Set([...state.pinnedHitKeys].filter((key) => keys.has(key)));
-}
-
-function toggleResultSelection(key: string, selected: boolean): void {
-  if (selected) {
-    state.selectedHitKeys.add(key);
-  } else {
-    state.selectedHitKeys.delete(key);
-  }
-  updateSelectedRows();
-  updateCopyAvailability();
 }
 
 function togglePinnedHit(key: string): void {
@@ -723,7 +595,7 @@ function togglePinnedHit(key: string): void {
   } else {
     state.pinnedHitKeys.add(key);
   }
-  updateSelectedRows();
+  updateResultRows();
   updateCopyAvailability();
 }
 
@@ -746,11 +618,10 @@ async function copyVisibleResults(): Promise<void> {
 
 function currentCopyScope(): CopyScope {
   const value = document.querySelector<HTMLSelectElement>("#copy-scope")?.value;
-  return value === "selected" || value === "pinned" ? value : "visible";
+  return value === "pinned" ? "pinned" : "visible";
 }
 
 function copyHits(scope: CopyScope): SearchHit[] {
-  if (scope === "selected") return state.hits.filter((hit) => state.selectedHitKeys.has(hitKey(hit)));
   if (scope === "pinned") return state.hits.filter((hit) => state.pinnedHitKeys.has(hitKey(hit)));
   return state.hits;
 }
@@ -851,7 +722,7 @@ async function openFilePath(path: string, start = 1, end = 1, workspace = state.
   byId("viewer-title").textContent = payload.path;
   byId("viewer-meta").textContent = `${payload.line_count} lines${payload.truncated ? ", truncated" : ""}`;
   renderViewerFile();
-  updateSelectedRows();
+  updateResultRows();
 }
 
 function renderViewerFile(): void {
@@ -924,14 +795,12 @@ function samePath(left: string, right: string): boolean {
   return Boolean(left && right) && normalizePath(left) === normalizePath(right);
 }
 
-function updateSelectedRows(): void {
+function updateResultRows(): void {
   for (const hit of document.querySelectorAll<HTMLElement>(".hit")) {
     const key = hit.dataset.hitKey || "";
     const pinned = state.pinnedHitKeys.has(key);
     hit.classList.toggle("active", key === state.currentHitKey);
     hit.classList.toggle("pinned", pinned);
-    const checkbox = hit.querySelector<HTMLInputElement>(".hit-select input");
-    if (checkbox) checkbox.checked = state.selectedHitKeys.has(key);
     const pin = hit.querySelector<HTMLButtonElement>(".pin-hit");
     if (pin) {
       pin.classList.toggle("active", pinned);
@@ -1289,7 +1158,6 @@ installFavicon();
 renderShell();
 attachEvents();
 applyInitialParams();
-renderHistory();
 void loadStatus()
   .then(() => {
     if (byId<HTMLInputElement>("query").value.trim()) runSearch();

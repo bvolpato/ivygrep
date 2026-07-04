@@ -235,47 +235,6 @@ select {
   font-size: 12px;
 }
 
-.history {
-  display: grid;
-  gap: 5px;
-}
-
-.history-empty {
-  color: var(--muted);
-  font-size: 12px;
-  padding: 6px 2px;
-}
-
-.history-item {
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: rgba(255, 255, 255, .45);
-  color: var(--ink);
-  cursor: pointer;
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-  padding: 7px 8px;
-  text-align: left;
-}
-
-.history-item:hover {
-  background: #fff;
-  border-color: var(--line);
-}
-
-.history-item span,
-.history-item small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.history-item small {
-  color: var(--muted);
-  font-size: 11px;
-}
-
 .linkbtn {
   border: 0;
   background: transparent;
@@ -429,7 +388,7 @@ select {
 
 .hit-head {
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: stretch;
 }
 
@@ -448,19 +407,6 @@ select {
 
 .hit.active .file {
   color: var(--accent-dark);
-}
-
-.hit-select {
-  display: grid;
-  place-items: center;
-  border-right: 1px solid var(--line);
-  cursor: pointer;
-}
-
-.hit-select input {
-  width: 15px;
-  height: 15px;
-  accent-color: var(--accent);
 }
 
 .hit-actions {

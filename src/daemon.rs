@@ -31,7 +31,7 @@ use crate::search::{
     SearchContext, SearchOptions, hybrid_search_with_context_and_neural_job,
     literal_search_with_context, workspace_neural_model_identity,
 };
-use crate::workspace::{Workspace, WorkspaceScope, list_workspaces};
+use crate::workspace::{Workspace, WorkspaceIndexState, WorkspaceScope, list_workspaces};
 
 const WATCH_QUIET_PERIOD: Duration = Duration::from_secs(2);
 const WATCH_MAX_DEBOUNCE: Duration = Duration::from_secs(30);
@@ -1114,6 +1114,30 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 let reconciliation_model = cached_hash_model();
                 let mut all_hits = Vec::new();
                 let mut all_errors: Vec<String> = Vec::new();
+                let mut skipped_workspace_errors = false;
+                let mut prepared_workspaces = Vec::with_capacity(workspaces.len());
+                for workspace in workspaces {
+                    match ensure_queryable_workspace(&workspace, options.skip_gitignore) {
+                        Ok(repaired) => {
+                            if repaired {
+                                state_clone.clear_workspace_contexts(&workspace);
+                            }
+                            prepared_workspaces.push(workspace);
+                        }
+                        Err(err) => {
+                            warn!(
+                                "failed to repair index for {}: {err:#}",
+                                workspace.root.display()
+                            );
+                            if !all_indices {
+                                all_errors.push(format!("{}: {err:#}", workspace.root.display()));
+                            } else {
+                                skipped_workspace_errors = true;
+                            }
+                        }
+                    }
+                }
+                let workspaces = prepared_workspaces;
                 let mut reconciled_workspaces = Vec::with_capacity(workspaces.len());
                 for workspace in workspaces {
                     match reconcile_worktree_overlay(&workspace, reconciliation_model.as_ref()) {
@@ -1128,7 +1152,11 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                                 "failed to reconcile worktree overlay for {}: {err:#}",
                                 workspace.root.display()
                             );
-                            all_errors.push(format!("{}: {err:#}", workspace.root.display()));
+                            if !all_indices {
+                                all_errors.push(format!("{}: {err:#}", workspace.root.display()));
+                            } else {
+                                skipped_workspace_errors = true;
+                            }
                         }
                     }
                 }
@@ -1202,7 +1230,11 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                                 "failed to load search context for {}: {err:#}",
                                 workspace.root.display()
                             );
-                            all_errors.push(format!("{}: {err:#}", workspace.root.display()));
+                            if !all_indices {
+                                all_errors.push(format!("{}: {err:#}", workspace.root.display()));
+                            } else {
+                                skipped_workspace_errors = true;
+                            }
                             continue;
                         }
                     };
@@ -1228,7 +1260,11 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                                 "hybrid_search failed for {}: {err:#}",
                                 workspace.root.display()
                             );
-                            all_errors.push(format!("{}: {err:#}", workspace.root.display()));
+                            if !all_indices {
+                                all_errors.push(format!("{}: {err:#}", workspace.root.display()));
+                            } else {
+                                skipped_workspace_errors = true;
+                            }
                         }
                     }
                     tracing::trace!("daemon_search_hybrid={:?}", task_started.elapsed());
@@ -1241,7 +1277,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 if let Some(l) = options.limit {
                     all_hits.truncate(l);
                 }
-                if all_errors.is_empty() {
+                if all_errors.is_empty() && !skipped_workspace_errors {
                     state_clone.store_query_results(cache_key, &all_hits);
                 }
                 // Spawn background hash and neural enhancement for workspaces that need it.
@@ -1310,12 +1346,28 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             };
 
             let scope_filter = scope_from_request(scope_path, scope_is_file);
+            let all_indices = path.is_none();
             // Bound concurrent heavy regex work (see #58).
             let permit = state.cpu_permits.clone().acquire_owned().await.ok();
             let result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
                 let mut all_hits = Vec::new();
+                let mut all_errors = Vec::new();
                 for workspace in &workspaces {
+                    match ensure_queryable_workspace(workspace, skip_gitignore) {
+                        Ok(false) => {}
+                        Ok(true) => {}
+                        Err(err) => {
+                            warn!(
+                                "failed to repair index for {}: {err:#}",
+                                workspace.root.display()
+                            );
+                            if !all_indices {
+                                all_errors.push(format!("{}: {err:#}", workspace.root.display()));
+                            }
+                            continue;
+                        }
+                    }
                     match regex_search(
                         workspace,
                         &pattern,
@@ -1338,23 +1390,32 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                                 "regex_search failed for {}: {err:#}",
                                 workspace.root.display()
                             );
+                            if !all_indices {
+                                all_errors.push(format!("{}: {err:#}", workspace.root.display()));
+                            }
                         }
                     }
                 }
 
+                if !all_indices && all_hits.is_empty() && !all_errors.is_empty() {
+                    return Err(all_errors.join("; "));
+                }
                 if let Some(l) = limit {
                     all_hits.truncate(l);
                 }
 
-                all_hits
+                Ok(all_hits)
             })
             .await
             .unwrap_or_else(|join_err| {
                 warn!("regex search task panicked: {join_err:#}");
-                Vec::new()
+                Err(join_err.to_string())
             });
 
-            DaemonResponse::SearchResults { hits: result }
+            match result {
+                Ok(hits) => DaemonResponse::SearchResults { hits },
+                Err(message) => DaemonResponse::Error { message },
+            }
         }
         DaemonRequest::LiteralSearch {
             path,
@@ -1393,6 +1454,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             };
 
             let scope_filter = scope_from_request(scope_path, scope_is_file);
+            let all_indices = path.is_none();
             let options = SearchOptions {
                 limit,
                 context,
@@ -1414,6 +1476,20 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 let mut all_hits = Vec::new();
                 let mut all_errors: Vec<String> = Vec::new();
                 for workspace in &workspaces {
+                    match ensure_queryable_workspace(workspace, options.skip_gitignore) {
+                        Ok(false) => {}
+                        Ok(true) => state_clone.clear_workspace_contexts(workspace),
+                        Err(err) => {
+                            warn!(
+                                "failed to repair index for {}: {err:#}",
+                                workspace.root.display()
+                            );
+                            if !all_indices {
+                                all_errors.push(format!("{}: {err:#}", workspace.root.display()));
+                            }
+                            continue;
+                        }
+                    }
                     let context = match state_clone.cached_search_context(workspace, None, false) {
                         Ok(context) => context,
                         Err(err) => {
@@ -1421,7 +1497,9 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                                 "failed to load literal search context for {}: {err:#}",
                                 workspace.root.display()
                             );
-                            all_errors.push(format!("{}: {err:#}", workspace.root.display()));
+                            if !all_indices {
+                                all_errors.push(format!("{}: {err:#}", workspace.root.display()));
+                            }
                             continue;
                         }
                     };
@@ -1439,12 +1517,14 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                                 "literal_search failed for {}: {err:#}",
                                 workspace.root.display()
                             );
-                            all_errors.push(format!("{}: {err:#}", workspace.root.display()));
+                            if !all_indices {
+                                all_errors.push(format!("{}: {err:#}", workspace.root.display()));
+                            }
                         }
                     }
                 }
 
-                if all_hits.is_empty() && !all_errors.is_empty() {
+                if !all_indices && all_hits.is_empty() && !all_errors.is_empty() {
                     return Err(all_errors.join("; "));
                 }
 
@@ -1790,6 +1870,50 @@ fn cached_hash_model() -> Arc<dyn EmbeddingModel> {
     HASH_MODEL
         .get_or_init(|| Arc::from(create_model(true)))
         .clone()
+}
+
+fn ensure_queryable_workspace(workspace: &Workspace, skip_gitignore: bool) -> Result<bool> {
+    if workspace.quick_index_health().is_queryable() {
+        return Ok(false);
+    }
+
+    let health = workspace.index_health();
+    if health.is_queryable() {
+        return Ok(false);
+    }
+
+    let should_rebuild = match health.state {
+        WorkspaceIndexState::Unhealthy => true,
+        WorkspaceIndexState::NotIndexed => health.has_indexable_files,
+        WorkspaceIndexState::Healthy | WorkspaceIndexState::HealthyEmpty => false,
+    };
+    if !should_rebuild {
+        return Ok(false);
+    }
+
+    let mut metadata =
+        workspace
+            .read_metadata()?
+            .unwrap_or_else(|| crate::workspace::WorkspaceMetadata {
+                id: workspace.id.clone(),
+                root: workspace.root.clone(),
+                created_at_unix: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                last_indexed_at_unix: None,
+                watch_enabled: false,
+                skip_gitignore,
+                index_generation: 0,
+            });
+    metadata.skip_gitignore = skip_gitignore;
+
+    remove_workspace_index(workspace)?;
+    workspace.ensure_dirs()?;
+    workspace.write_metadata(&metadata)?;
+    let model = cached_hash_model();
+    index_workspace(workspace, model.as_ref())?;
+    Ok(true)
 }
 
 fn search_context_signature(
@@ -2271,6 +2395,21 @@ mod tests {
             cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
             web_server: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn write_broken_completed_index_metadata(workspace: &Workspace, skip_gitignore: bool) {
+        workspace.ensure_dirs().unwrap();
+        workspace
+            .write_metadata(&WorkspaceMetadata {
+                id: workspace.id.clone(),
+                root: workspace.root.clone(),
+                created_at_unix: 0,
+                last_indexed_at_unix: Some(1),
+                watch_enabled: false,
+                skip_gitignore,
+                index_generation: 0,
+            })
+            .unwrap();
     }
 
     struct TestNeuralModel;
@@ -3038,6 +3177,121 @@ mod tests {
 
         state.clear_workspace_contexts(&workspace);
         assert!(state.query_results.lock().results.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn daemon_search_repairs_broken_selected_workspace_index() {
+        let home = tempdir().unwrap();
+        unsafe {
+            std::env::set_var("IVYGREP_HOME", home.path());
+            std::env::set_var("IVYGREP_NO_AUTOSPAWN", "1");
+        }
+
+        let repo = tempdir().unwrap();
+        std::fs::write(
+            repo.path().join("recover.rs"),
+            "pub fn recoverable_marker() -> usize { 42 }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        write_broken_completed_index_metadata(&workspace, false);
+        assert_eq!(
+            workspace.index_health().state,
+            WorkspaceIndexState::Unhealthy
+        );
+
+        let response = handle_request(
+            test_state(),
+            DaemonRequest::Search {
+                path: Some(workspace.root.clone()),
+                query: "recoverable_marker".to_string(),
+                limit: Some(10),
+                context: 1,
+                type_filter: None,
+                include_globs: Vec::new(),
+                exclude_globs: Vec::new(),
+                scope_path: None,
+                scope_is_file: false,
+                skip_gitignore: false,
+                force_neural: false,
+            },
+        )
+        .await;
+
+        match response {
+            DaemonResponse::SearchResults { hits } => {
+                assert!(
+                    hits.iter()
+                        .any(|hit| hit.file_path.to_string_lossy().ends_with("recover.rs")),
+                    "repaired search should return recover.rs, got {hits:?}"
+                );
+            }
+            other => panic!("expected SearchResults, got {other:?}"),
+        }
+        assert!(workspace.index_health().is_queryable());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn daemon_all_indices_search_repairs_broken_workspace_index() {
+        let home = tempdir().unwrap();
+        unsafe {
+            std::env::set_var("IVYGREP_HOME", home.path());
+            std::env::set_var("IVYGREP_NO_AUTOSPAWN", "1");
+        }
+
+        let broken_repo = tempdir().unwrap();
+        std::fs::write(
+            broken_repo.path().join("recover.rs"),
+            "pub fn all_indices_repair_marker() -> usize { 42 }\n",
+        )
+        .unwrap();
+        let broken_workspace = Workspace::resolve(broken_repo.path()).unwrap();
+        write_broken_completed_index_metadata(&broken_workspace, false);
+
+        let healthy_repo = tempdir().unwrap();
+        std::fs::write(
+            healthy_repo.path().join("other.rs"),
+            "pub fn unrelated_marker() -> usize { 7 }\n",
+        )
+        .unwrap();
+        let healthy_workspace = Workspace::resolve(healthy_repo.path()).unwrap();
+        let model = create_hash_model();
+        index_workspace(&healthy_workspace, model.as_ref()).unwrap();
+
+        let response = handle_request(
+            test_state(),
+            DaemonRequest::Search {
+                path: None,
+                query: "all_indices_repair_marker".to_string(),
+                limit: Some(10),
+                context: 1,
+                type_filter: None,
+                include_globs: Vec::new(),
+                exclude_globs: Vec::new(),
+                scope_path: None,
+                scope_is_file: false,
+                skip_gitignore: false,
+                force_neural: false,
+            },
+        )
+        .await;
+
+        match response {
+            DaemonResponse::SearchResults { hits } => {
+                assert!(
+                    hits.iter().any(|hit| {
+                        hit.file_path.is_absolute()
+                            && hit.file_path.to_string_lossy().ends_with("recover.rs")
+                    }),
+                    "all-index search should repair and return absolute recover.rs, got {hits:?}"
+                );
+            }
+            other => panic!("expected SearchResults, got {other:?}"),
+        }
+        assert!(broken_workspace.index_health().is_queryable());
     }
 
     #[test]
