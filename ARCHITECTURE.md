@@ -21,31 +21,52 @@ match the source tree.
 | Web UI | `src/web.rs`, `web/` | Daemon-backed local HTTP UI, embedded frontend assets |
 | MCP | `src/mcp.rs` | Stdio MCP tools for coding agents |
 
+```mermaid
+flowchart LR
+    CLI["CLI<br/>src/main.rs + src/cli.rs"] --> Workspace["Workspace resolver"]
+    CLI --> IPC["Daemon IPC"]
+    IPC --> Daemon["Daemon"]
+    Daemon --> Search["Search pipeline"]
+    Daemon --> Watchers["File watchers"]
+    Watchers --> Indexer["Indexer"]
+    Web["Web UI<br/>src/web.rs + web/"] --> Daemon
+    MCP["MCP stdio"] --> Search
+    Indexer --> SQLite[("SQLite metadata")]
+    Indexer --> Tantivy[("Tantivy lexical")]
+    Indexer --> Vectors[("USearch vectors")]
+    Search --> SQLite
+    Search --> Tantivy
+    Search --> Vectors
+```
+
 ## Runtime Shape
 
 Foreground CLI calls do as little work as possible:
 
-```text
-ig query
--> resolve workspace
--> ask daemon when available
--> daemon reuses warmed SQLite/Tantivy/vector handles
--> CLI renders ranked hits
+```mermaid
+flowchart LR
+    Query["ig query"] --> Resolve["Resolve workspace"]
+    Resolve --> Route{"Daemon available?"}
+    Route -- "yes" --> Warm["Reuse warmed SQLite/Tantivy/vector handles"]
+    Route -- "no" --> Local["Open local read handles"]
+    Warm --> Hybrid["Run hybrid search"]
+    Local --> Hybrid
+    Hybrid --> Render["Render ranked hits"]
 ```
 
 Indexing publishes in stages:
 
-```text
-resolve workspace
--> acquire index lock
--> health check and format check
--> build or refresh Merkle-style snapshot
--> diff old snapshot against new snapshot
--> chunk changed files
--> write SQLite and Tantivy
--> commit lexical stores
--> save snapshot and metadata generation
--> build hash and neural vectors in background
+```mermaid
+flowchart TD
+    Resolve["Resolve workspace"] --> Lock["Acquire index lock"]
+    Lock --> Health["Health and format check"]
+    Health --> Snapshot["Build or refresh Merkle-style snapshot"]
+    Snapshot --> Diff["Diff old snapshot against new snapshot"]
+    Diff --> Chunk["Chunk changed files"]
+    Chunk --> Write["Write SQLite and Tantivy"]
+    Write --> Commit["Commit lexical stores"]
+    Commit --> Save["Save snapshot and metadata generation"]
+    Save --> Enhance["Build hash and neural vectors in background"]
 ```
 
 The design goal is quick usable search, then better semantic recall after
@@ -293,6 +314,19 @@ The indexer recomputes only files in `added_or_modified`, plus extra owners
 found through `included_file_dependencies`. Deleted files remove persisted chunks
 and append vector tombstones.
 
+```mermaid
+flowchart TD
+    Old["Old snapshot<br/>BTreeMap path -> hash+suffix"] --> Diff["MerkleSnapshot::diff"]
+    New["New snapshot<br/>BTreeMap path -> hash+suffix"] --> Diff
+    Diff --> Changed["added_or_modified<br/>PathBuf + is_ignored"]
+    Diff --> Deleted["deleted<br/>PathBuf"]
+    Changed --> Dependents["Expand Rust doc include dependents"]
+    Dependents --> Rechunk["Rechunk files and rewrite rows/docs/symbols"]
+    Deleted --> Remove["Delete chunks, symbols, Tantivy docs"]
+    Rechunk --> Tombstones["Journal old vector ids"]
+    Remove --> Tombstones
+```
+
 ### Targeted Watcher Refresh
 
 Daemon watchers send changed relative paths into
@@ -343,11 +377,20 @@ build and good enough for same-worktree incremental checks.
 
 `merkle_snapshot.json` is saved after persistent stores commit:
 
-1. SQLite transaction commits.
-2. Tantivy writer commits and waits for merge threads.
-3. Fresh staging promotes into final paths when applicable.
-4. Workspace metadata and `index_format_version` are written.
-5. Snapshot is atomically written to a temp file and renamed.
+```mermaid
+sequenceDiagram
+    participant Indexer
+    participant SQLite
+    participant Tantivy
+    participant Staging
+    participant Metadata
+    participant Snapshot
+    Indexer->>SQLite: Commit transaction
+    Indexer->>Tantivy: Commit writer and wait for merges
+    Indexer->>Staging: Promote fresh stores when applicable
+    Indexer->>Metadata: Write workspace metadata and format version
+    Indexer->>Snapshot: Atomic temp-file write + rename
+```
 
 If the process dies before step 5, the next run sees an older snapshot and
 recomputes changed files. That can do extra work, but it does not mark
@@ -461,6 +504,17 @@ Search over an overlay reads both base and overlay stores. Overlay chunks
 override base chunks with the same path, and overlay tombstones hide deleted
 base files.
 
+```mermaid
+flowchart LR
+    Query["Search query"] --> Base["Base index"]
+    Query --> Overlay["Worktree overlay"]
+    Overlay --> Tombstones["Overlay tombstones"]
+    Base --> Merge["Merge by path"]
+    Overlay --> Merge
+    Tombstones --> Merge
+    Merge --> Results["Overlay wins; tombstoned base files hidden"]
+```
+
 ## Embeddings and Background Enhancement
 
 Hash embeddings are always available. The hash model is 256-dimensional and
@@ -496,18 +550,21 @@ without blocking lexical search.
 
 `hybrid_search` builds several ranked lists and fuses them:
 
-1. Literal: exact-ish and regex queries use Tantivy to narrow candidates, then
-   verify against decompressed SQLite text.
-2. BM25F: code body, exact path, tokenized path, and signature fields.
-3. Symbols: exact definitions, references, callers, qualified leaf names,
-   inferred symbol names, and aliases from SQLite.
-4. Path recall: path-shaped and natural-language path queries through
-   `file_path_text`.
-5. Semantic: hash vectors and, when available and compatible, neural vectors.
-6. Fusion: Reciprocal Rank Fusion plus coverage, path, symbol, authority,
-   coherence, literal, and identifier-shape boosts.
-7. Filters: secondary-source gates and semantic confidence filters suppress
-   weak or unrelated hits.
+```mermaid
+flowchart TD
+    Query["Query"] --> Literal["Literal / regex<br/>Tantivy narrow + SQLite verify"]
+    Query --> BM25["BM25F<br/>body, path, signature"]
+    Query --> Symbols["Symbols<br/>defs, refs, callers, aliases"]
+    Query --> Path["Path recall<br/>file_path_text"]
+    Query --> Semantic["Semantic<br/>hash + compatible neural vectors"]
+    Literal --> Fusion["Reciprocal Rank Fusion + boosts"]
+    BM25 --> Fusion
+    Symbols --> Fusion
+    Path --> Fusion
+    Semantic --> Fusion
+    Fusion --> Filters["Secondary-source gates<br/>semantic confidence filters"]
+    Filters --> Results["Ranked results"]
+```
 
 Search hydrates source text late. BM25 candidates are truncated before SQLite
 text fetch. Semantic candidates batch-fetch chunk metadata and text through
