@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  <strong>Semantic code search that never uploads your code.</strong><br/>
-  Ask questions in English. Get answers in code. Local inference.
+  <strong>Local semantic code search. No code upload.</strong><br/>
+  Ask English questions, get ranked code answers, run inference locally.
 </p>
 
 <p align="center">
@@ -30,14 +30,14 @@
 
 ---
 
-## ⚡ Quick Start
+## Quick Start
 
-**Install via Homebrew (recommended):**
+**Homebrew:**
 ```bash
 brew install bvolpato/tap/ivygrep
 ```
 
-**Linux / macOS:**
+**Linux and macOS:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.sh | sh
 ```
@@ -47,10 +47,10 @@ curl -fsSL https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.sh | 
 irm https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.ps1 | iex
 ```
 
-Installers pick the right archive, verify its SHA-256 checksum, install `ig`,
-and print the installed version. PowerShell also updates the user `PATH`.
-Windows uses the same USearch ANN backend as Linux and macOS, Rust-managed
-persistence, long-path support, and a statically linked Visual C++ runtime.
+Installers choose the right archive, verify SHA-256, install `ig`, and print
+the installed version. PowerShell also updates the user `PATH`. Windows uses
+the same USearch ANN backend as Linux and macOS, Rust-managed persistence,
+long-path support, and a statically linked Visual C++ runtime.
 
 Every release ships checksums, SPDX JSON SBOMs, and provenance sidecars. CI
 extracts and runs the exact archive bytes before publishing:
@@ -63,10 +63,10 @@ extracts and runs the exact archive bytes before publishing:
 | macOS Apple Silicon | Native archive with Accelerate-backed local neural inference | Hash search |
 | Windows x86_64 | Native USearch ANN plus local CPU neural inference | Hash search |
 
-Archive checks cover startup, indexing, hybrid/hash/literal/regex search,
-daemon equivalence, status/doctor, stale-index rebuild, and removal. `ig`
-needs no Python, compiler, system database, or external service. Neural mode
-may download its pinned model once; `--hash` and hash-only builds do not.
+Release archive checks cover startup, indexing, hybrid/hash/literal/regex
+search, daemon equivalence, status/doctor, stale-index rebuild, and removal.
+`ig` needs no Python, compiler, system database, or external service. Neural
+mode may download its pinned model once; `--hash` and hash-only builds do not.
 
 Quality, latency, footprint, release size, unavailable comparisons, and the
 claim policy live in the
@@ -124,7 +124,7 @@ Web UI capabilities:
 - Highlight selected results, show language icons, and keep sidebar/results/file
   panes independently scrollable.
 
-No config, prompts, or API keys. First run auto-indexes the workspace and
+No config or API key is required. First run auto-indexes the workspace and
 starts a background daemon for incremental updates. Neural mode may download
 model artifacts once; `--hash` and hash-only builds do not.
 
@@ -134,7 +134,7 @@ model artifacts once; `--hash` and hash-only builds do not.
 
 ---
 
-## 🤖 MCP server for AI agents
+## MCP Server for Agents
 
 Use `ig --mcp` when an agent needs code search without loading whole files into
 context.
@@ -250,7 +250,7 @@ tool-selection guidance, worktree behavior, and troubleshooting.
 
 ---
 
-## 🤔 What is ivygrep?
+## What ivygrep Does
 
 **ivygrep (`ig`)** is local semantic code search. It mixes BM25/literal lookup
 with vector search, so queries can describe intent instead of exact tokens.
@@ -259,32 +259,34 @@ with vector search, so queries can describe intent instead of exact tokens.
 |---------|:---:|:---:|:---:|:---:|
 | Works offline | ✅ | ❌ | ✅ | ✅ |
 | Natural language queries | ❌ | ⚠️ | ❌ | ✅ |
-| Semantic understanding | ❌ | ❌ | ❌ | ✅ |
+| Semantic intent search | ❌ | ❌ | ❌ | ✅ |
 | Warm indexed query latency | ✅ | ❌ | ✅ | ✅ |
-| Privacy-first (no upload) | ✅ | ❌ | ✅ | ✅ |
+| No code upload | ✅ | ❌ | ✅ | ✅ |
 | Git-native worktrees/branches | ❌ | ❌ | ❌ | ✅ |
 | Structural code chunking | ❌ | ❌ | ⚠️ | ✅ |
 | Incremental indexing | ❌ | ❌ | ❌ | ✅ |
 | MCP server for AI agents | ❌ | ❌ | ❌ | ✅ |
 
-### 🌍 45 language/file types
+### 45 Language and File Types
 
 ivygrep indexes 45 language/file types. 24 use Tree-sitter AST chunking:
 Rust, Python, Go, JavaScript, TypeScript/TSX, Java, C, C++, C#, Scala, Kotlin,
 PHP, Ruby, Swift, Elixir, Zig, Bash, Haskell, OCaml, Lua, Dart, Objective-C,
 Perl, and Starlark macros/targets in very large BUILD-like sources.
 
-- **Systems:** Rust, C, C++, Zig, Nim
-- **Backend:** Python, Go, Java, Kotlin, Scala, C#, Ruby, PHP, Perl, Groovy
-- **Web & Mobile:** JavaScript, TypeScript, HTML, CSS, GraphQL, Swift, Dart, Objective-C
-- **Functional:** Haskell, OCaml, Elixir, Erlang, Clojure
-- **Data, Scripting & Config:** R, Julia, Bash/Shell, PowerShell, Lua, SQL, Protobuf, Thrift, Terraform, Starlark/Bazel, Dockerfile, Makefile, Markdown, XML, TOML/YAML/INI/env config, JSON, plain text
+| Group | Languages and formats |
+|---|---|
+| Systems | Rust, C, C++, Zig, Nim |
+| Backend | Python, Go, Java, Kotlin, Scala, C#, Ruby, PHP, Perl, Groovy |
+| Web and mobile | JavaScript, TypeScript, HTML, CSS, GraphQL, Swift, Dart, Objective-C |
+| Functional | Haskell, OCaml, Elixir, Erlang, Clojure |
+| Data, scripting, config | R, Julia, Bash/Shell, PowerShell, Lua, SQL, Protobuf, Thrift, Terraform, Starlark/Bazel, Dockerfile, Makefile, Markdown, XML, TOML/YAML/INI/env config, JSON, plain text |
 
 Unknown extensions are auto-detected and indexed as text.
 
 ---
 
-## 🚀 Performance and speed
+## Performance Evidence
 
 Current retained public evidence:
 
@@ -356,13 +358,16 @@ latency, memory, and index size under [`docs/benchmarks/`](docs/benchmarks/).
 
 ---
 
-## 🏗️ Architecture and git
+## Architecture and Git
 
 Git behavior is part of the index design:
-- **Worktree overlays:** Reuses one base search index. Per-worktree SQLite, lexical, and vector stores contain only divergent chunks and tombstones; lightweight Merkle metadata tracks filesystem state.
-- **Branch-switch deltas:** Merkle reconciliation re-indexes *only* changed files upon branch switch instead of rebuilding the search index.
-- **Content-based deduplication:** Byte-identical files are never re-indexed across branches.
-- **`.gitignore` native:** Respects rules automatically at every level.
+
+| Behavior | Current implementation |
+|---|---|
+| Worktree overlays | One base search index, with per-worktree SQLite, lexical, and vector stores for divergent chunks and tombstones. |
+| Branch-switch deltas | Merkle reconciliation re-indexes changed files instead of rebuilding the whole search index. |
+| Content-based overlay diff | Byte-identical files do not create worktree overlay chunks. |
+| `.gitignore` support | Repository ignore rules apply during file walks. |
 
 **Tech stack:** `tantivy` (BM25), `usearch` (ANN), `tree-sitter` (AST), SQLite
 symbol/call graph storage,
@@ -370,21 +375,37 @@ symbol/call graph storage,
 
 ---
 
-## 🔒 Security and privacy
+## Security and Privacy
 
 ivygrep runs search and embedding inference locally. It never sends code,
 queries, or index data to an external service.
 
-- **Where data lives:** compressed source chunks live under `~/.local/share/ivygrep` (or `$XDG_DATA_HOME`/`$IVYGREP_HOME`). Unix uses an owner-only `0600` socket plus peer-uid verification. Windows uses loopback TCP with a per-daemon token beside the user-owned index. Keep custom `IVYGREP_HOME` paths private.
-- **Model download:** neural mode downloads revision-pinned assets with `hf-hub` on first use and caches them under `$HF_HOME` or `~/.cache/huggingface`. Use `--hash` or a `--no-default-features` build when model assets must never be downloaded.
-- **Inference backend:** release binaries run locally: Accelerate-backed CPU math on macOS, CPU on Linux/Windows. Source builds can opt into Metal (`--features accelerate,metal`) or CUDA (`--features cuda`). CUDA does not require cuDNN. Set `CUDA_COMPUTE_CAP` explicitly when auto-detection is wrong; `ig --status` reports the backend that last generated neural vectors.
-- **Resource controls:** indexing refuses to start below 512 MiB available memory, background enhancement pauses below 1 GiB, and optional transformer workers share model weights plus an adaptive memory budget. These checks use native available-memory reporting on macOS and Windows and cgroup-aware reporting on Linux.
-- **Secrets in your repo:** ivygrep indexes file *contents*, including config/dotfiles (e.g. `.env`) unless they're gitignored. Those contents are stored in the local index and can appear in search snippets. Keep secrets out of the workspace or in `.gitignore`.
-- **MCP scope:** `ig_search` only searches the workspace at the supplied `path`.
+- Compressed source chunks live under `~/.local/share/ivygrep` or the configured
+  `$XDG_DATA_HOME`/`$IVYGREP_HOME`. Unix uses an owner-only `0600` socket plus
+  peer-uid verification. Windows uses loopback TCP with a per-daemon token
+  beside the user-owned index. Keep custom `IVYGREP_HOME` paths private.
+- Neural mode downloads revision-pinned assets with `hf-hub` on first use and
+  caches them under `$HF_HOME` or `~/.cache/huggingface`. Use `--hash` or a
+  `--no-default-features` build when model assets must never be downloaded.
+- Release binaries run locally: Accelerate-backed CPU math on macOS, CPU on
+  Linux/Windows. Source builds can opt into Metal (`--features
+  accelerate,metal`) or CUDA (`--features cuda`). CUDA does not require cuDNN.
+  Set `CUDA_COMPUTE_CAP` explicitly when auto-detection is wrong; `ig --status`
+  reports the backend that last generated neural vectors.
+- Indexing refuses to start below 512 MiB available memory. Background
+  enhancement pauses below 1 GiB. Optional transformer workers share model
+  weights plus an adaptive memory budget. These checks use native
+  available-memory reporting on macOS and Windows and cgroup-aware reporting on
+  Linux.
+- ivygrep indexes file *contents*, including config/dotfiles such as `.env`
+  unless they're gitignored. Those contents are stored in the local index and
+  can appear in search snippets. Keep secrets out of the workspace or in
+  `.gitignore`.
+- `ig_search` only searches the workspace at the supplied `path`.
 
 ---
 
-## 🔧 CLI reference
+## CLI Reference
 
 ```bash
 # Core workflow
@@ -449,7 +470,7 @@ Neither is a relevance threshold.
 
 ---
 
-## 🧪 Development
+## Development
 
 ```bash
 ./test.sh           # fmt, ShellCheck, clippy, Rust and Python harness tests
@@ -495,18 +516,18 @@ neural backend check embeds fixture text locally and verifies backend reporting.
 
 ## Roadmap
 
-- **More Tree-sitter languages:** add SQL and other mature grammars.
-- **Evidence-backed search program:** track the quality,
+- More Tree-sitter languages: add SQL and other mature grammars.
+- Evidence-backed search program: track the quality,
   latency, footprint, and portability work in
   [#128](https://github.com/bvolpato/ivygrep/issues/128).
-- **Learned reranking:** evaluate compact local cross-encoders against the
+- Learned reranking: evaluate compact local cross-encoders against the
   bounded deterministic reranker without weakening offline portability.
-- **Editor integrations:** VS Code and Neovim Telescope.
-- **Background job resilience:** better queue diagnostics and resumable worker state.
+- Editor integrations: VS Code and Neovim Telescope.
+- Background job resilience: better queue diagnostics and resumable worker state.
 
 ## Contributing
 
-Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
 
 ---
 
