@@ -13,8 +13,8 @@ version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
 rg -n "v${version}|Performance evidence|Daemon hot-query" /tmp/ivygrep-site.html /tmp/ivygrep-benchmarks.html
 ```
 
-Docs Pages and `pages-build-deployment` should complete successfully. The live
-site should show the current release badge and benchmark index.
+Docs Pages should complete successfully and report the GitHub Pages deployment
+URL. The live site should show the current release badge and benchmark index.
 
 ## Verify Release Pipeline
 

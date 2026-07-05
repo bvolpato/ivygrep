@@ -3,8 +3,9 @@
 ## Docs Site
 
 Docs deploy from `main` through `.github/workflows/docs-pages.yml` whenever
-`assets/**`, `docs/**`, or the workflow itself changes. The workflow syncs
-`docs/` plus `assets/` to `gh-pages` and keeps `dev/bench/` benchmark history.
+`assets/**`, `docs/**`, or the workflow itself changes. The workflow builds a
+Pages artifact from `docs/` plus `assets/`, copies retained `dev/` benchmark
+history from `gh-pages` when present, and deploys through GitHub Pages Actions.
 
 After pushing docs changes, verify:
 - Docs Pages workflow: `https://github.com/bvolpato/ivygrep/actions/workflows/docs-pages.yml`
