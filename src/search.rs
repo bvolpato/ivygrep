@@ -783,13 +783,9 @@ fn exact_literal_chunks_with_context(
 ) -> Result<Vec<IndexedChunk>> {
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
     let glob_path_filter = build_glob_path_query_filter(ctx, &path_matcher, options)?;
-    let matcher = regex::RegexBuilder::new(&regex::escape(query))
-        .case_insensitive(true)
-        .build()?;
     collect_literal_candidates(
         ctx,
         query,
-        &matcher,
         &path_matcher,
         &glob_path_filter,
         options,
@@ -803,7 +799,6 @@ fn exact_literal_chunks_with_context(
 fn collect_literal_candidates(
     ctx: &SearchContext,
     query: &str,
-    matcher: &regex::Regex,
     path_matcher: &PathGlobMatcher,
     glob_path_filter: &GlobPathQueryFilter,
     options: &SearchOptions,
@@ -830,11 +825,15 @@ fn collect_literal_candidates(
         options.limit.unwrap_or(100).min(candidate_limit)
     };
     let candidate_queries = build_lexical_queries(query);
+    let matcher = LiteralMatcher::from_queries(
+        std::iter::once(query),
+        literal_queries_need_specificity_ranking(&candidate_queries),
+    )?;
 
     collect_literal_candidates_for_queries(
         ctx,
         &candidate_queries,
-        matcher,
+        &matcher,
         path_matcher,
         glob_path_filter,
         options,
@@ -845,7 +844,7 @@ fn collect_literal_candidates(
 fn collect_literal_candidates_for_queries(
     ctx: &SearchContext,
     candidate_queries: &[String],
-    matcher: &regex::Regex,
+    matcher: &LiteralMatcher,
     path_matcher: &PathGlobMatcher,
     glob_path_filter: &GlobPathQueryFilter,
     options: &SearchOptions,
@@ -975,7 +974,7 @@ fn collect_literal_candidate_chunks(
 fn verify_literal_candidates(
     candidates: Vec<IndexedChunk>,
     candidate_queries: &[String],
-    matcher: &regex::Regex,
+    matcher: &LiteralMatcher,
     target_hits: usize,
 ) -> Vec<IndexedChunk> {
     if literal_queries_need_specificity_ranking(candidate_queries) {
@@ -1199,14 +1198,123 @@ fn literal_queries_need_specificity_ranking(queries: &[String]) -> bool {
         && queries.iter().any(|query| query.len() >= 5)
 }
 
-fn literal_match_specificity(matcher: &regex::Regex, text: &str) -> Option<(usize, usize)> {
-    let mut count = 0;
-    let mut longest = 0;
-    for matched in matcher.find_iter(text) {
-        count += 1;
-        longest = longest.max(matched.as_str().len());
+fn literal_match_specificity(matcher: &LiteralMatcher, text: &str) -> Option<(usize, usize)> {
+    matcher.specificity(text)
+}
+
+enum LiteralMatcher {
+    Ascii(Vec<String>),
+    Regex(regex::Regex),
+}
+
+impl LiteralMatcher {
+    fn from_queries<'a>(
+        queries: impl IntoIterator<Item = &'a str>,
+        force_regex: bool,
+    ) -> Result<Self> {
+        let queries = queries.into_iter().collect::<Vec<_>>();
+        if !force_regex && queries.len() == 1 && queries[0].is_ascii() {
+            return Ok(Self::Ascii(
+                queries
+                    .into_iter()
+                    .map(str::to_ascii_lowercase)
+                    .collect::<Vec<_>>(),
+            ));
+        }
+
+        let pattern = queries
+            .into_iter()
+            .map(regex::escape)
+            .collect::<Vec<_>>()
+            .join("|");
+        Ok(Self::Regex(
+            regex::RegexBuilder::new(&pattern)
+                .case_insensitive(true)
+                .build()?,
+        ))
     }
-    (count > 0).then_some((longest, count))
+
+    fn is_match(&self, text: &str) -> bool {
+        match self {
+            Self::Ascii(needles) => needles
+                .iter()
+                .any(|needle| contains_ascii_case_insensitive(text, needle)),
+            Self::Regex(regex) => regex.is_match(text),
+        }
+    }
+
+    fn match_count(&self, text: &str) -> usize {
+        match self {
+            Self::Ascii(needles) => needles
+                .iter()
+                .map(|needle| count_ascii_case_insensitive(text, needle))
+                .sum(),
+            Self::Regex(regex) => regex.find_iter(text).count(),
+        }
+    }
+
+    fn specificity(&self, text: &str) -> Option<(usize, usize)> {
+        match self {
+            Self::Ascii(needles) => {
+                let mut count = 0;
+                let mut longest = 0;
+                for needle in needles {
+                    let matches = count_ascii_case_insensitive(text, needle);
+                    if matches > 0 {
+                        count += matches;
+                        longest = longest.max(needle.len());
+                    }
+                }
+                (count > 0).then_some((longest, count))
+            }
+            Self::Regex(regex) => {
+                let mut count = 0;
+                let mut longest = 0;
+                for matched in regex.find_iter(text) {
+                    count += 1;
+                    longest = longest.max(matched.as_str().len());
+                }
+                (count > 0).then_some((longest, count))
+            }
+        }
+    }
+}
+
+fn contains_ascii_case_insensitive(haystack: &str, needle_lower: &str) -> bool {
+    !needle_lower.is_empty()
+        && haystack
+            .as_bytes()
+            .windows(needle_lower.len())
+            .any(|window| {
+                window
+                    .iter()
+                    .zip(needle_lower.bytes())
+                    .all(|(left, right)| left.to_ascii_lowercase() == right)
+            })
+}
+
+fn count_ascii_case_insensitive(haystack: &str, needle_lower: &str) -> usize {
+    if needle_lower.is_empty() {
+        return 0;
+    }
+    let needle_len = needle_lower.len();
+    let mut count = 0;
+    let mut cursor = 0;
+    let bytes = haystack.as_bytes();
+    while cursor + needle_len <= bytes.len() {
+        let window = &bytes[cursor..cursor + needle_len];
+        if window
+            .iter()
+            .zip(needle_lower.bytes())
+            .all(|(left, right)| left.to_ascii_lowercase() == right)
+        {
+            count += 1;
+            cursor += needle_len;
+        } else {
+            cursor += 1;
+        }
+    }
+    count
 }
 
 pub fn hybrid_search(
@@ -1324,15 +1432,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     let literal_queries = build_literal_queries(trimmed, &lexical_queries);
     let symbol_candidate_limit = output_limit.clamp(20, routing.symbol_limit);
     let literal_matcher = if !literal_queries.is_empty() {
-        let literal_pattern = literal_queries
-            .iter()
-            .map(|v| regex::escape(v))
-            .collect::<Vec<_>>()
-            .join("|");
-        regex::RegexBuilder::new(&literal_pattern)
-            .case_insensitive(true)
-            .build()
-            .ok()
+        LiteralMatcher::from_queries(literal_queries.iter().map(String::as_str), true).ok()
     } else {
         None
     };
@@ -1360,7 +1460,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
         all_candidates
             .into_iter()
             .map(|c| {
-                let count = matcher.find_iter(&c.text).count().max(1) as f32;
+                let count = matcher.match_count(&c.text).max(1) as f32;
                 let score = 1.0 + (count - 1.0).min(4.0) * 0.15; // 1.0 → 1.6 for 5+ matches
                 (c, score)
             })
@@ -6569,13 +6669,31 @@ function sendfile(res, path, options, callback) {
             "multipart".to_string(),
         ]));
 
-        let matcher = regex::RegexBuilder::new("sse|server-sent-events")
-            .case_insensitive(true)
-            .build()
-            .unwrap();
+        let matcher = LiteralMatcher::from_queries(["sse", "server-sent-events"], true).unwrap();
         assert!(
             literal_match_specificity(&matcher, "server-sent-events")
                 > literal_match_specificity(&matcher, "SSE SSE")
+        );
+    }
+
+    #[test]
+    fn ascii_literal_matcher_is_case_insensitive_and_non_overlapping() {
+        let matcher = LiteralMatcher::from_queries(["calculate_tax"], false).unwrap();
+        assert!(matcher.is_match("fn CALCULATE_TAX() {}"));
+        assert_eq!(matcher.match_count("calculate_tax CALCULATE_TAX"), 2);
+        assert_eq!(matcher.match_count("aaaa"), 0);
+
+        let matcher = LiteralMatcher::from_queries(["aa"], false).unwrap();
+        assert_eq!(matcher.match_count("aaaa"), 2);
+    }
+
+    #[test]
+    fn literal_matcher_uses_regex_for_multi_query_specificity() {
+        let matcher = LiteralMatcher::from_queries(["sse", "server-sent-events"], true).unwrap();
+        assert_eq!(literal_match_specificity(&matcher, "SSE SSE"), Some((3, 2)));
+        assert_eq!(
+            literal_match_specificity(&matcher, "server-sent-events"),
+            Some((18, 1))
         );
     }
 

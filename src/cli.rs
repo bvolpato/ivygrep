@@ -842,6 +842,13 @@ async fn run_query(cli: Cli) -> Result<()> {
     let local_only_mode = cli.lexical_only || cli.symbol || cli.refs || cli.callers;
     let watch_configured =
         should_autospawn_daemon_for_query(&workspace, cli.no_watch) && !local_only_mode;
+    let watcher_health_required = !cli.no_watch
+        && !local_only_mode
+        && workspace
+            .read_metadata()
+            .ok()
+            .flatten()
+            .is_some_and(|metadata| metadata.watch_enabled);
     let scope_path = scope_filter.as_ref().map(|scope| scope.rel_path.clone());
     let scope_is_file = scope_filter.as_ref().is_some_and(|scope| scope.is_file);
     let skip_static_daemon_status = should_skip_static_daemon_status(watch_configured);
@@ -972,7 +979,9 @@ async fn run_query(cli: Cli) -> Result<()> {
                     search_via_daemon = true;
                 }
             }
-        } else if skip_static_daemon_status {
+        } else if skip_static_daemon_status
+            || (!watcher_health_required && crate::ipc::socket_exists())
+        {
             search_via_daemon = true;
         } else {
             // Already indexed. Just check if the daemon is online to route the search request.
