@@ -53,6 +53,7 @@ const MAX_IDLE_SEARCH_CONTEXTS: usize = 32;
 /// same immutable path-derived workspace descriptor.
 const MAX_RESOLVED_WORKSPACES: usize = 128;
 const MAX_NEURAL_STATUSES: usize = 128;
+const MAX_READY_WORKSPACES: usize = 256;
 /// Don't cache result sets larger than this (each hit carries preview/reason
 /// strings; large `--no-limit` results would bloat the query cache).
 const MAX_CACHEABLE_HITS: usize = 2_000;
@@ -165,6 +166,29 @@ struct NeuralStatusSignature {
     vectors: Option<FileStamp>,
     base_model: Option<FileStamp>,
     base_vectors: Option<FileStamp>,
+}
+
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+struct WorkspaceReadinessCacheKey {
+    workspace_id: String,
+    skip_gitignore: bool,
+}
+
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+struct WorkspaceReadinessSignature {
+    metadata: Option<FileStamp>,
+    index_format: Option<FileStamp>,
+    sqlite: Option<FileStamp>,
+    tantivy: Option<DirStamp>,
+    hash_vectors: Option<FileStamp>,
+    overlay_sqlite: Option<FileStamp>,
+    overlay_tantivy: Option<DirStamp>,
+    overlay_hash_vectors: Option<FileStamp>,
+    base_ref: Option<FileStamp>,
+    base_metadata: Option<FileStamp>,
+    base_index_format: Option<FileStamp>,
+    merkle: Option<FileStamp>,
+    indexing_pid: Option<FileStamp>,
 }
 
 #[derive(Clone)]
@@ -379,6 +403,7 @@ pub(crate) struct DaemonState {
     watchers: Arc<Mutex<HashMap<String, WatchRegistration>>>,
     resolved_workspaces: Arc<Mutex<HashMap<PathBuf, Workspace>>>,
     neural_statuses: Arc<Mutex<HashMap<String, CachedNeuralStatus>>>,
+    ready_workspaces: Arc<Mutex<HashMap<WorkspaceReadinessCacheKey, WorkspaceReadinessSignature>>>,
     search_contexts: Arc<Mutex<HashMap<SearchContextCacheKey, CachedSearchContext>>>,
     idle_search_context_count: Arc<AtomicUsize>,
     query_results: Arc<Mutex<QueryResultCache>>,
@@ -594,11 +619,66 @@ impl DaemonState {
         })
     }
 
+    fn prepare_workspace_for_hybrid_query(
+        &self,
+        workspace: &Workspace,
+        skip_gitignore: bool,
+    ) -> Result<bool> {
+        let signature = workspace_readiness_signature(workspace);
+        if self.workspace_is_ready(workspace, skip_gitignore, &signature) {
+            return Ok(false);
+        }
+
+        let mut changed = ensure_queryable_workspace(workspace, skip_gitignore)?;
+        let reconciliation_model = cached_hash_model();
+        changed |= reconcile_worktree_overlay(workspace, reconciliation_model.as_ref())?;
+        if changed {
+            self.clear_workspace_contexts(workspace);
+        }
+
+        self.store_workspace_ready(
+            workspace,
+            skip_gitignore,
+            workspace_readiness_signature(workspace),
+        );
+        Ok(changed)
+    }
+
+    fn workspace_is_ready(
+        &self,
+        workspace: &Workspace,
+        skip_gitignore: bool,
+        signature: &WorkspaceReadinessSignature,
+    ) -> bool {
+        let key = workspace_readiness_key(workspace, skip_gitignore);
+        self.ready_workspaces
+            .lock()
+            .get(&key)
+            .is_some_and(|cached| cached == signature)
+    }
+
+    fn store_workspace_ready(
+        &self,
+        workspace: &Workspace,
+        skip_gitignore: bool,
+        signature: WorkspaceReadinessSignature,
+    ) {
+        let key = workspace_readiness_key(workspace, skip_gitignore);
+        let mut cache = self.ready_workspaces.lock();
+        if cache.len() >= MAX_READY_WORKSPACES && !cache.contains_key(&key) {
+            cache.clear();
+        }
+        cache.insert(key, signature);
+    }
+
     fn clear_workspace_contexts(&self, workspace: &Workspace) {
         self.search_contexts
             .lock()
             .retain(|key, _| key.workspace_id != workspace.id);
         self.neural_statuses.lock().remove(&workspace.id);
+        self.ready_workspaces
+            .lock()
+            .retain(|key, _| key.workspace_id != workspace.id);
         self.query_results.lock().clear();
     }
 
@@ -634,6 +714,7 @@ fn create_daemon_state() -> DaemonState {
         watchers: Arc::new(Mutex::new(HashMap::new())),
         resolved_workspaces: Arc::new(Mutex::new(HashMap::new())),
         neural_statuses: Arc::new(Mutex::new(HashMap::new())),
+        ready_workspaces: Arc::new(Mutex::new(HashMap::new())),
         search_contexts: Arc::new(Mutex::new(HashMap::new())),
         idle_search_context_count: Arc::new(AtomicUsize::new(0)),
         query_results: Arc::new(Mutex::new(QueryResultCache::default())),
@@ -1111,22 +1192,20 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     Err(err) => return (Vec::new(), vec![err.to_string()]),
                 };
                 tracing::trace!("daemon_search_model={:?}", task_started.elapsed());
-                let reconciliation_model = cached_hash_model();
                 let mut all_hits = Vec::new();
                 let mut all_errors: Vec<String> = Vec::new();
                 let mut skipped_workspace_errors = false;
                 let mut prepared_workspaces = Vec::with_capacity(workspaces.len());
                 for workspace in workspaces {
-                    match ensure_queryable_workspace(&workspace, options.skip_gitignore) {
-                        Ok(repaired) => {
-                            if repaired {
-                                state_clone.clear_workspace_contexts(&workspace);
-                            }
+                    match state_clone
+                        .prepare_workspace_for_hybrid_query(&workspace, options.skip_gitignore)
+                    {
+                        Ok(_) => {
                             prepared_workspaces.push(workspace);
                         }
                         Err(err) => {
                             warn!(
-                                "failed to repair index for {}: {err:#}",
+                                "failed to prepare index for {}: {err:#}",
                                 workspace.root.display()
                             );
                             if !all_indices {
@@ -1138,30 +1217,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     }
                 }
                 let workspaces = prepared_workspaces;
-                let mut reconciled_workspaces = Vec::with_capacity(workspaces.len());
-                for workspace in workspaces {
-                    match reconcile_worktree_overlay(&workspace, reconciliation_model.as_ref()) {
-                        Ok(changed) => {
-                            if changed {
-                                state_clone.clear_workspace_contexts(&workspace);
-                            }
-                            reconciled_workspaces.push(workspace);
-                        }
-                        Err(err) => {
-                            warn!(
-                                "failed to reconcile worktree overlay for {}: {err:#}",
-                                workspace.root.display()
-                            );
-                            if !all_indices {
-                                all_errors.push(format!("{}: {err:#}", workspace.root.display()));
-                            } else {
-                                skipped_workspace_errors = true;
-                            }
-                        }
-                    }
-                }
-                let workspaces = reconciled_workspaces;
-                tracing::trace!("daemon_search_reconcile={:?}", task_started.elapsed());
+                tracing::trace!("daemon_search_prepare={:?}", task_started.elapsed());
                 let background_enhancement_enabled =
                     crate::config::background_enhancement_enabled();
                 let ws_neural_missing = if background_enhancement_enabled {
@@ -1980,6 +2036,35 @@ fn neural_status_signature(workspace: &Workspace) -> NeuralStatusSignature {
     }
 }
 
+fn workspace_readiness_key(
+    workspace: &Workspace,
+    skip_gitignore: bool,
+) -> WorkspaceReadinessCacheKey {
+    WorkspaceReadinessCacheKey {
+        workspace_id: workspace.id.clone(),
+        skip_gitignore,
+    }
+}
+
+fn workspace_readiness_signature(workspace: &Workspace) -> WorkspaceReadinessSignature {
+    let base_dir = workspace.base_index_dir.as_ref();
+    WorkspaceReadinessSignature {
+        metadata: file_stamp(&workspace.metadata_path()),
+        index_format: file_stamp(&workspace.index_format_version_path()),
+        sqlite: file_stamp(&workspace.sqlite_path()),
+        tantivy: dir_stamp(&workspace.tantivy_dir()),
+        hash_vectors: file_stamp(&workspace.vector_path()),
+        overlay_sqlite: file_stamp(&workspace.overlay_sqlite_path()),
+        overlay_tantivy: dir_stamp(&workspace.overlay_tantivy_dir()),
+        overlay_hash_vectors: file_stamp(&workspace.overlay_vector_path()),
+        base_ref: file_stamp(&workspace.base_ref_path()),
+        base_metadata: base_dir.and_then(|dir| file_stamp(&dir.join("workspace.json"))),
+        base_index_format: base_dir.and_then(|dir| file_stamp(&dir.join("index_format_version"))),
+        merkle: file_stamp(&workspace.merkle_snapshot_path()),
+        indexing_pid: file_stamp(&workspace.indexing_pid_path()),
+    }
+}
+
 fn query_cache_key(
     workspaces: &[Workspace],
     signatures: Vec<SearchContextSignature>,
@@ -2388,6 +2473,7 @@ mod tests {
             watchers: Arc::new(Mutex::new(HashMap::new())),
             resolved_workspaces: Arc::new(Mutex::new(HashMap::new())),
             neural_statuses: Arc::new(Mutex::new(HashMap::new())),
+            ready_workspaces: Arc::new(Mutex::new(HashMap::new())),
             search_contexts: Arc::new(Mutex::new(HashMap::new())),
             idle_search_context_count: Arc::new(AtomicUsize::new(0)),
             query_results: Arc::new(Mutex::new(QueryResultCache::default())),
@@ -2395,6 +2481,44 @@ mod tests {
             cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
             web_server: Arc::new(Mutex::new(None)),
         }
+    }
+
+    #[test]
+    #[serial]
+    fn readiness_cache_invalidates_when_index_artifacts_change() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        workspace.ensure_dirs().unwrap();
+
+        let state = test_state();
+        let signature = workspace_readiness_signature(&workspace);
+        assert!(!state.workspace_is_ready(&workspace, false, &signature));
+        state.store_workspace_ready(&workspace, false, signature.clone());
+        assert!(state.workspace_is_ready(&workspace, false, &signature));
+
+        workspace.write_index_format_version().unwrap();
+        let changed = workspace_readiness_signature(&workspace);
+        assert!(!state.workspace_is_ready(&workspace, false, &changed));
+    }
+
+    #[test]
+    #[serial]
+    fn clearing_workspace_contexts_clears_readiness_cache() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        workspace.ensure_dirs().unwrap();
+
+        let state = test_state();
+        let signature = workspace_readiness_signature(&workspace);
+        state.store_workspace_ready(&workspace, false, signature.clone());
+        assert!(state.workspace_is_ready(&workspace, false, &signature));
+
+        state.clear_workspace_contexts(&workspace);
+        assert!(!state.workspace_is_ready(&workspace, false, &signature));
     }
 
     fn write_broken_completed_index_metadata(workspace: &Workspace, skip_gitignore: bool) {

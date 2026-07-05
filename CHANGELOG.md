@@ -4,6 +4,15 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-07-05
+
+### Performance
+- **Daemon hot searches cache workspace readiness after safe artifact checks.** Repeated daemon searches now skip redundant queryability and overlay freshness work when metadata, index format, SQLite/Tantivy/vector stamps, Merkle snapshots, PID files, and worktree base references are unchanged.
+
+### Testing
+- **Million-chunk A/B kept the measured winner.** Warm distinct daemon p95 improved from `6.377 ms` to `0.955 ms`, cache replay p95 from `5.569 ms` to `0.153 ms`, filtered p95 from `6.281 ms` to `0.491 ms`, and concurrent p95 from `10.430 ms` to `0.717 ms`; recall@20 and MRR@20 stayed at `1.0`.
+- **Discarded neutral or slower candidates.** Top-level regex alternation prefiltering preserved hits but slowed local regex median from `179.6 ms` to `183.3 ms`, and extra vector/context reuse work was left out because daemon hot vector search already stays around `9.6 us`.
+
 ## [1.1.2] - 2026-07-05
 
 ### Performance
