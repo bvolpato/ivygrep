@@ -86,7 +86,7 @@ streaming-iterator = "0.1.9"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 zstd = "0.13"
 candle_embed = { version = "0.1.4", default-features = false, optional = true }
-candle-core = { version = "0.10.2", optional = true }
+candle-core = { version = "0.11.0", optional = true }
 hf-hub = { version = "0.3.2", optional = true }
 tokenizers = { version = "0.23.1", optional = true }
 usearch = { version = "=2.24.0", default-features = false, features = ["fp16lib"] }
@@ -106,7 +106,7 @@ openssl = { version = "0.10", features = ["vendored"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 candle_embed = { version = "0.1.4", default-features = false, optional = true, features = ["metal"] }
-candle-core = { version = "0.10.2", optional = true, features = ["accelerate", "metal"] }
+candle-core = { version = "0.11.0", optional = true, features = ["accelerate", "metal"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = [
