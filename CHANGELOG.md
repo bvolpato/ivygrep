@@ -4,6 +4,16 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.1.5] - 2026-07-05
+
+### Performance
+- **Incremental reindex removes stale symbol rows without scanning the full symbol table.** File graph cleanup now recomputes symbols for changed chunks and deletes exact `(normalized_name, chunk_key)` keys. On the million-chunk corpus, one-file reindex median improved from `230.81 ms` to `169.12 ms`, and p95 improved from `242.46 ms` to `182.74 ms`.
+- **Merkle diffs avoid cloned path sets.** Snapshot diff now merges ordered maps directly, cutting allocation work while preserving added, modified, deleted, and ignored-file decisions.
+
+### Testing
+- **A/B kept only measured wins.** A secondary `symbols(chunk_key)` SQLite index improved incremental cleanup but slowed fresh indexing by `5.7%`, and an ASCII tokenizer scanner was within noise with worse tails, so both were discarded.
+- **Fresh indexing and search quality stayed clean.** The stacked winner improved fresh million-chunk indexing from `5234.98 ms` to `5056.88 ms`; search recall@20 and MRR@20 stayed at `1.0`, with warm p95 `0.471 ms`.
+
 ## [1.1.4] - 2026-07-05
 
 ### Performance

@@ -51,11 +51,45 @@ pub(crate) fn append_chunk_definition_rows(
 }
 
 pub fn remove_file_graph(conn: &Connection, file_path: &str) -> Result<()> {
-    conn.execute(
+    let mut chunks = Vec::new();
+    {
+        let mut stmt = conn.prepare_cached(
+            "SELECT chunk_key, start_line, end_line, language, kind, text, vector_key, is_ignored
+             FROM chunks
+             WHERE file_path = ?1",
+        )?;
+        let rows = stmt.query_map([file_path], |row| {
+            let raw: Vec<u8> = row.get(5)?;
+            Ok((
+                row.get::<_, i64>(0)?,
+                IndexedChunk {
+                    chunk_id: String::new(),
+                    file_path: PathBuf::from(file_path),
+                    start_line: row.get::<_, i64>(1)? as usize,
+                    end_line: row.get::<_, i64>(2)? as usize,
+                    language: row.get(3)?,
+                    kind: row.get(4)?,
+                    text: decompress_text(raw),
+                    content_hash: String::new(),
+                    vector_key: row.get::<_, i64>(6)? as u64,
+                    is_ignored: row.get(7)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            chunks.push(row?);
+        }
+    }
+
+    let mut delete = conn.prepare_cached(
         "DELETE FROM symbols
-         WHERE chunk_key IN (SELECT chunk_key FROM chunks WHERE file_path = ?1)",
-        [file_path],
+         WHERE normalized_name = ?1 AND chunk_key = ?2",
     )?;
+    for (chunk_key, chunk) in chunks {
+        for name in definition_names(&chunk) {
+            delete.execute(params![normalize_symbol(&name), chunk_key])?;
+        }
+    }
     Ok(())
 }
 

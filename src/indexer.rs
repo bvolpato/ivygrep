@@ -3928,6 +3928,64 @@ mod tests {
 
     #[test]
     #[serial]
+    fn reindex_removes_stale_symbol_definition_rows() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let source = root.path().join("lib.rs");
+        fs::write(&source, "pub fn old_tax() -> u64 { 1 }\n").unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        assert_eq!(
+            crate::symbols::search_symbols(
+                &workspace,
+                "old_tax",
+                crate::symbols::SymbolSearchMode::Definitions,
+                Some(10),
+                None,
+            )
+            .unwrap()
+            .len(),
+            1
+        );
+
+        fs::write(
+            &source,
+            "pub fn replacement_tax_calculator() -> u64 { 2 }\n",
+        )
+        .unwrap();
+        index_workspace(&workspace, &model).unwrap();
+
+        assert!(
+            crate::symbols::search_symbols(
+                &workspace,
+                "old_tax",
+                crate::symbols::SymbolSearchMode::Definitions,
+                Some(10),
+                None,
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(
+            crate::symbols::search_symbols(
+                &workspace,
+                "replacement_tax_calculator",
+                crate::symbols::SymbolSearchMode::Definitions,
+                Some(10),
+                None,
+            )
+            .unwrap()
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    #[serial]
     fn rust_doc_include_is_indexed_into_owner_and_refreshed_with_dependency() {
         let root = tempdir().unwrap();
         let home = tempdir().unwrap();

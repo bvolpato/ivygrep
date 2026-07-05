@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -247,30 +247,40 @@ impl MerkleSnapshot {
             return MerkleDiff::default();
         }
 
-        let old_paths: BTreeSet<_> = self.files.keys().cloned().collect();
-        let new_paths: BTreeSet<_> = newer.files.keys().cloned().collect();
-
         let mut added_or_modified = Vec::new();
         let mut deleted = Vec::new();
+        let mut old = self.files.iter().peekable();
+        let mut new = newer.files.iter().peekable();
 
-        for path in new_paths.iter() {
-            let new_hash = newer
-                .files
-                .get(path)
-                .expect("path exists in new set and map");
-            let is_ignored = new_hash.ends_with("-1");
-            match self.files.get(path) {
-                Some(old_hash) => {
-                    if old_hash != new_hash {
-                        added_or_modified.push((PathBuf::from(path), is_ignored));
-                    }
+        while let (Some((old_path, old_hash)), Some((new_path, new_hash))) =
+            (old.peek(), new.peek())
+        {
+            match old_path.cmp(new_path) {
+                std::cmp::Ordering::Less => {
+                    deleted.push(PathBuf::from(old_path.as_str()));
+                    old.next();
                 }
-                None => added_or_modified.push((PathBuf::from(path), is_ignored)),
+                std::cmp::Ordering::Equal => {
+                    if old_hash != new_hash {
+                        added_or_modified
+                            .push((PathBuf::from(new_path.as_str()), new_hash.ends_with("-1")));
+                    }
+                    old.next();
+                    new.next();
+                }
+                std::cmp::Ordering::Greater => {
+                    added_or_modified
+                        .push((PathBuf::from(new_path.as_str()), new_hash.ends_with("-1")));
+                    new.next();
+                }
             }
         }
 
-        for path in old_paths.difference(&new_paths) {
+        for (path, _) in old {
             deleted.push(PathBuf::from(path));
+        }
+        for (path, hash) in new {
+            added_or_modified.push((PathBuf::from(path), hash.ends_with("-1")));
         }
 
         MerkleDiff {
