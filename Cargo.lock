@@ -387,16 +387,14 @@ version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6bd9895436c1ba5dc1037a19935d084b838db066ff4e15ef7dded020b7c12a4a"
 dependencies = [
- "accelerate-src",
  "byteorder",
  "candle-kernels 0.10.2",
- "candle-metal-kernels",
+ "candle-metal-kernels 0.10.2",
  "candle-ug 0.10.2",
  "cudarc 0.19.8",
  "float8",
  "gemm 0.19.0",
  "half",
- "libc",
  "libm",
  "memmap2",
  "num-traits",
@@ -419,8 +417,10 @@ version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ecb245093b0f791b89d3420c3df9c6d49c60ab63ba54db896bf8a3baf486706"
 dependencies = [
+ "accelerate-src",
  "byteorder",
  "candle-kernels 0.11.0",
+ "candle-metal-kernels 0.11.0",
  "candle-ug 0.11.0",
  "cudarc 0.19.8",
  "float8",
@@ -431,6 +431,8 @@ dependencies = [
  "memmap2",
  "num-traits",
  "num_cpus",
+ "objc2-foundation",
+ "objc2-metal",
  "rand 0.9.3",
  "rand_distr",
  "rayon",
@@ -476,13 +478,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle-metal-kernels"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "242e83c6acf639bb273c929d73c67a882bb4dd08a140f121096e19ba2f213d3e"
+dependencies = [
+ "block2",
+ "half",
+ "objc2",
+ "objc2-foundation",
+ "objc2-metal",
+ "once_cell",
+ "thiserror 2.0.18",
+ "tracing",
+]
+
+[[package]]
 name = "candle-nn"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a9317a09d6530b758990ed7f625ac69ff43653bc9ee28b0464644ad1169ada87"
 dependencies = [
  "candle-core 0.10.2",
- "candle-metal-kernels",
+ "candle-metal-kernels 0.10.2",
  "half",
  "libc",
  "num-traits",
@@ -531,6 +549,7 @@ checksum = "257411c33abf7d898a31ac20d80813dfe96ff09e23a73039e22ab293aea9b871"
 dependencies = [
  "ug",
  "ug-cuda",
+ "ug-metal",
 ]
 
 [[package]]
@@ -2557,7 +2576,6 @@ dependencies = [
  "anyhow",
  "arboard",
  "assert_cmd",
- "candle-core 0.10.2",
  "candle-core 0.11.0",
  "candle_embed",
  "clap",

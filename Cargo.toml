@@ -106,7 +106,7 @@ openssl = { version = "0.10", features = ["vendored"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 candle_embed = { version = "0.1.4", default-features = false, optional = true, features = ["metal"] }
-candle-core = { version = "0.10.2", optional = true, features = ["accelerate", "metal"] }
+candle-core = { version = "0.11.0", optional = true, features = ["accelerate", "metal"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = [
