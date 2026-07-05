@@ -23,7 +23,8 @@ use crate::search::{
     SearchOptions, hybrid_search, literal_search, validate_forced_neural_workspaces,
 };
 use crate::workspace::{
-    Workspace, WorkspaceIndexState, list_workspaces, resolve_workspace_and_scope,
+    Workspace, WorkspaceIndexState, list_workspace_roots, list_workspaces,
+    resolve_workspace_and_scope,
 };
 
 #[derive(Parser, Debug, Clone)]
@@ -2068,11 +2069,11 @@ fn should_skip_static_daemon_status(watch_configured: bool) -> bool {
 }
 
 fn ensure_no_nested_workspaces(target_root: &Path) -> Result<()> {
-    if let Ok(workspaces) = list_workspaces() {
+    if let Ok(workspace_roots) = list_workspace_roots() {
         let mut conflicts = Vec::new();
-        for ws in workspaces {
-            if ws.root != target_root && ws.root.starts_with(target_root) {
-                conflicts.push(ws.root.clone());
+        for root in workspace_roots {
+            if root != target_root && root.starts_with(target_root) {
+                conflicts.push(root);
             }
         }
         if !conflicts.is_empty() {

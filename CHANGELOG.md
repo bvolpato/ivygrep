@@ -4,6 +4,15 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.1.4] - 2026-07-05
+
+### Performance
+- **Incremental indexing avoids full status scans before nested-workspace checks.** The guard now reads workspace roots from `workspace.json` metadata instead of building full status records with SQLite, dbstat, vector, and compaction checks. On the million-chunk generated corpus, one-file reindex wall time improved from `852 ms` median / `865 ms` p90 to `259 ms` median / `263 ms` p90, while still indexing exactly one changed file.
+
+### Testing
+- **A/B kept only the measured winner.** Larger fresh-index Tantivy writer memory regressed fresh indexing from `5.20 s` to `7.86 s`, a tokenizer lowercase shortcut was neutral/slower, and a daemon search micro-hoist was noisy, so all three were discarded.
+- **Search quality and latency stayed clean.** The final 2000-sample million-chunk run kept recall@20 and MRR@20 at `1.0`, with warm p95 `0.499 ms`, cache p95 `0.125 ms`, and filtered p95 `0.548 ms`.
+
 ## [1.1.3] - 2026-07-05
 
 ### Performance

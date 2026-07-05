@@ -1456,6 +1456,37 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
     Ok(by_id.into_values().collect())
 }
 
+pub fn list_workspace_roots() -> Result<Vec<PathBuf>> {
+    let root = config::indexes_root()?;
+    if !root.exists() {
+        return Ok(vec![]);
+    }
+
+    let mut roots = Vec::new();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+
+        let metadata_path = entry.path().join("workspace.json");
+        if !metadata_path.exists() {
+            continue;
+        }
+
+        let raw = fs::read(&metadata_path).with_context(|| {
+            format!(
+                "failed reading workspace metadata at {}",
+                metadata_path.display()
+            )
+        })?;
+        let metadata: WorkspaceMetadata = serde_json::from_slice(&raw)?;
+        roots.push(metadata.root);
+    }
+
+    Ok(roots)
+}
+
 fn read_sqlite_counts(index_dir: &Path) -> (u64, u64) {
     read_cached_sqlite_counts(index_dir).unwrap_or((0, 0))
 }
@@ -2058,6 +2089,39 @@ mod tests {
             git_common_dir(tmp.path()),
             Some(common_dir.canonicalize().unwrap())
         );
+    }
+
+    #[test]
+    #[serial]
+    fn list_workspace_roots_reads_metadata_only() {
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let mut expected = Vec::new();
+        for repo in [first.path(), second.path()] {
+            let ws = Workspace::resolve(repo).unwrap();
+            ws.ensure_dirs().unwrap();
+            ws.write_metadata(&WorkspaceMetadata {
+                id: ws.id.clone(),
+                root: ws.root.clone(),
+                created_at_unix: 0,
+                last_indexed_at_unix: Some(1),
+                watch_enabled: false,
+                skip_gitignore: false,
+                index_generation: 0,
+            })
+            .unwrap();
+            expected.push(ws.root);
+        }
+
+        std::fs::create_dir_all(config::indexes_root().unwrap().join("not-a-workspace")).unwrap();
+
+        let mut roots = list_workspace_roots().unwrap();
+        roots.sort();
+        expected.sort();
+        assert_eq!(roots, expected);
     }
 
     #[test]
