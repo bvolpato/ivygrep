@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783278472414,
+  "lastUpdate": 1783280906736,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -33347,6 +33347,160 @@ window.BENCHMARK_DATA = {
           {
             "name": "critical_journeys/vector_search_in_50k_hot",
             "value": 21.24,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5b32a43694c08b48ccd96805b2270ba46975d1e5",
+          "message": "chore(deps): bump the cargo group with 6 updates (#162)\n\n* chore(deps): bump the cargo group with 6 updates\n\nBumps the cargo group with 6 updates:\n\n| Package | From | To |\n| --- | --- | --- |\n| [ignore](https://github.com/BurntSushi/ripgrep) | `0.4.26` | `0.4.27` |\n| [smallvec](https://github.com/servo/rust-smallvec) | `1.15.1` | `1.15.2` |\n| [uuid](https://github.com/uuid-rs/uuid) | `1.23.3` | `1.23.4` |\n| [tree-sitter](https://github.com/tree-sitter/tree-sitter) | `0.26.9` | `0.26.10` |\n| [xxhash-rust](https://github.com/DoumanAsh/xxhash-rust) | `0.8.15` | `0.8.16` |\n| [candle-core](https://github.com/huggingface/candle) | `0.10.2` | `0.11.0` |\n\n\nUpdates `ignore` from 0.4.26 to 0.4.27\n- [Release notes](https://github.com/BurntSushi/ripgrep/releases)\n- [Changelog](https://github.com/BurntSushi/ripgrep/blob/master/CHANGELOG.md)\n- [Commits](https://github.com/BurntSushi/ripgrep/compare/ignore-0.4.26...ignore-0.4.27)\n\nUpdates `smallvec` from 1.15.1 to 1.15.2\n- [Release notes](https://github.com/servo/rust-smallvec/releases)\n- [Commits](https://github.com/servo/rust-smallvec/compare/v1.15.1...v1.15.2)\n\nUpdates `uuid` from 1.23.3 to 1.23.4\n- [Release notes](https://github.com/uuid-rs/uuid/releases)\n- [Commits](https://github.com/uuid-rs/uuid/compare/v1.23.3...v1.23.4)\n\nUpdates `tree-sitter` from 0.26.9 to 0.26.10\n- [Release notes](https://github.com/tree-sitter/tree-sitter/releases)\n- [Commits](https://github.com/tree-sitter/tree-sitter/compare/v0.26.9...v0.26.10)\n\nUpdates `xxhash-rust` from 0.8.15 to 0.8.16\n- [Commits](https://github.com/DoumanAsh/xxhash-rust/commits)\n\nUpdates `candle-core` from 0.10.2 to 0.11.0\n- [Changelog](https://github.com/huggingface/candle/blob/main/CHANGELOG.md)\n- [Commits](https://github.com/huggingface/candle/compare/0.10.2...0.11.0)\n\n---\nupdated-dependencies:\n- dependency-name: ignore\n  dependency-version: 0.4.27\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: smallvec\n  dependency-version: 1.15.2\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: uuid\n  dependency-version: 1.23.4\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: tree-sitter\n  dependency-version: 0.26.10\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: xxhash-rust\n  dependency-version: 0.8.16\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: candle-core\n  dependency-version: 0.11.0\n  dependency-type: direct:production\n  update-type: version-update:semver-minor\n  dependency-group: cargo\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>\n\n* fix: refresh cargo dependency lock\n\n* fix: align macOS candle dependency\n\n---------\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>\nCo-authored-by: bvolpato <brunocvcunha@gmail.com>",
+          "timestamp": "2026-07-05T15:19:51-04:00",
+          "tree_id": "76fef50f1b17a7284f92ceefac32658440c1e36c",
+          "url": "https://github.com/bvolpato/ivygrep/commit/5b32a43694c08b48ccd96805b2270ba46975d1e5"
+        },
+        "date": 1783280905890,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 50640.05,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 3960.26,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/worktree_overlay_one_file_delta",
+            "value": 47814.11,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer_bulk/fresh_index_30k_chunks",
+            "value": 215792.01,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_small_file",
+            "value": 13.03,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 1961.39,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 1563.25,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11159.94,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 10910.19,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 1.93,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 126.3,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 4071.42,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 2073.48,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 1171.18,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_simple_symbol_1000_files",
+            "value": 3656.42,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_complex_phrase_1000_files",
+            "value": 3266.45,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/bounded_rerank_100_candidates_1000_files",
+            "value": 3456.01,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/literal_simple_symbol_1000_files",
+            "value": 1025.26,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/regex_symbol_1000_files",
+            "value": 9204.87,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 449365.96,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 177.34,
+            "unit": "µs"
+          },
+          {
+            "name": "hash_vector_build/ingest_5k_hash_vectors",
+            "value": 95252.84,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_one_file_change_10k_chunks",
+            "value": 21751.8,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/quick_health_cached_10k_chunks",
+            "value": 367.97,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k",
+            "value": 788.6,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k_hot",
+            "value": 21.1,
             "unit": "µs"
           }
         ]
