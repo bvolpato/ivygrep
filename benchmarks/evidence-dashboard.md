@@ -967,7 +967,7 @@ deletes them to improve the presentation.
 - [Held-out learned reranker](https://github.com/bvolpato/ivygrep/blob/4b24c627d9bd733edec5d145437e9aa35c2ab2ca/docs/benchmarks/public-reranker-results.json) (`e9ba2fee6fe5bb3e...`)
 - [Public million-chunk benchmark](https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json) (`f4ba8051b2c7cf88...`)
 - [Daemon hot-query cache](https://github.com/bvolpato/ivygrep/blob/a99f5fb6eafef9c41d656a42dccaf44e27972d32/docs/benchmarks/daemon-hot-query-cache-explore-results.tsv) (`bf168523793c2c3f...`)
-- [Release artifact acceptance gate](https://github.com/bvolpato/ivygrep/blob/030e32e275494896d4b5e348c6c370f205c0bb69/.github/workflows/release.yml) (`8217f53005ea93e7...`)
+- [Release artifact acceptance gate](https://github.com/bvolpato/ivygrep/blob/030e32e275494896d4b5e348c6c370f205c0bb69/.github/workflows/release.yml) (`51dac206ad22a613...`)
 - [Release artifact history](https://github.com/bvolpato/ivygrep/blob/b2d5a02608c33ac16c33bce9a15b76c41151c9c3/docs/benchmarks/release-artifact-history.json) (`3f9d87e6409a8285...`)
 
 Raw machine-readable dashboard:
