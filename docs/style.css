@@ -453,6 +453,35 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
     padding-top: 1rem; border-top: 1px solid rgba(255,255,255,0.05); line-height: 1.5;
 }
 
+.benchmark-links {
+    display: flex; flex-wrap: wrap; gap: 0.6rem;
+    margin-top: 1.25rem; padding-top: 1rem;
+    border-top: 1px solid rgba(255,255,255,0.05);
+}
+
+.benchmark-links a {
+    display: inline-flex; align-items: center;
+    min-height: 38px; padding: 0.5rem 0.75rem;
+    border: 1px solid rgba(52, 208, 88, 0.35);
+    border-radius: var(--radius-sm);
+    background: rgba(52, 208, 88, 0.11);
+    color: #e6fff0;
+    font-size: 0.82rem; font-weight: 700;
+    line-height: 1.2; text-decoration: none;
+}
+
+.benchmark-links a:hover,
+.benchmark-links a:focus-visible {
+    background: rgba(52, 208, 88, 0.18);
+    border-color: rgba(52, 208, 88, 0.65);
+    color: #ffffff;
+}
+
+.benchmark-links a:focus-visible {
+    outline: 2px solid rgba(255, 255, 255, 0.9);
+    outline-offset: 3px;
+}
+
 /* ─── Stats Grid ─── */
 .stats-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1.5rem; }
 
