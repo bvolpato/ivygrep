@@ -4,6 +4,16 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-07-05
+
+### Performance
+- **Daemon-backed CLI searches skip unnecessary status preflights.** Already-indexed, no-watch/static query paths now route straight to the daemon when its socket exists, avoiding a redundant runtime-status round trip before hot searches.
+- **Single-literal ASCII verification avoids regex setup.** Exact literal searches use a small case-insensitive byte matcher for the common single-query ASCII path, while multi-query and specificity-ranked searches keep the regex path.
+
+### Testing
+- **Performance and relevance stayed green in A/B checks.** Literal search on the 1k fixture improved from `1.221 ms` to `0.931 ms`; 100k warm distinct CLI median improved from `9.449 ms` to `7.505 ms`; relevance stayed unchanged at MRR `0.5848`, nDCG@10 `0.6219`, precision@1 `0.3913`, and recall@5 `0.7826`.
+- **Discarded noisy candidates before release.** Larger symbol insert batches, fresh-index cached stats, tokenizer scan rewrites, and multi-variant ASCII literal matching were tested independently and left out after neutral or regressive results.
+
 ## [1.1.1] - 2026-07-04
 
 ### Fixed
