@@ -57,7 +57,7 @@ flowchart LR
 Indexing publishes in stages:
 
 ```mermaid
-flowchart TD
+flowchart LR
     Resolve["Resolve workspace"] --> Lock["Acquire index lock"]
     Lock --> Health["Health and format check"]
     Health --> Snapshot["Build or refresh Merkle-style snapshot"]
@@ -315,7 +315,7 @@ found through `included_file_dependencies`. Deleted files remove persisted chunk
 and append vector tombstones.
 
 ```mermaid
-flowchart TD
+flowchart LR
     Old["Old snapshot<br/>BTreeMap path -> hash+suffix"] --> Diff["MerkleSnapshot::diff"]
     New["New snapshot<br/>BTreeMap path -> hash+suffix"] --> Diff
     Diff --> Changed["added_or_modified<br/>PathBuf + is_ignored"]
@@ -551,7 +551,7 @@ without blocking lexical search.
 `hybrid_search` builds several ranked lists and fuses them:
 
 ```mermaid
-flowchart TD
+flowchart LR
     Query["Query"] --> Literal["Literal / regex<br/>Tantivy narrow + SQLite verify"]
     Query --> BM25["BM25F<br/>body, path, signature"]
     Query --> Symbols["Symbols<br/>defs, refs, callers, aliases"]
