@@ -4,6 +4,15 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.1.6] - 2026-07-06
+
+### Performance
+- **Natural-language search skips impossible exact-symbol lookups.** Whitespace prose queries no longer probe the symbol table for a literal full-query symbol name, while single-symbol and qualified-symbol searches keep exact definition lookup. On the million-chunk corpus, warm p95 improved from `0.578 ms` to `0.500 ms`, warm median from `0.405 ms` to `0.377 ms`, and filtered p95 from `0.520 ms` to `0.430 ms`.
+
+### Testing
+- **A/B kept only the measured search-planning win.** ASCII tokenizer scanning, larger Tantivy writer heaps, daemon signature TTL caching, and unsafe no-context indexed previews were discarded after neutral, regressive, or correctness-risk results.
+- **Relevance stayed unchanged.** Public million-chunk recall@20 and MRR@20 stayed at `1.0`; fixture MRR, nDCG@10, precision@1, recall@5, and no-hit count were identical in paired baseline/current runs.
+
 ## [1.1.5] - 2026-07-05
 
 ### Performance

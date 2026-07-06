@@ -2712,7 +2712,10 @@ fn exact_symbol_query_names(query_text: &str) -> Vec<String> {
         return Vec::new();
     }
 
-    let mut names = vec![query.to_string()];
+    let mut names = Vec::new();
+    if !query.chars().any(char::is_whitespace) {
+        names.push(query.to_string());
+    }
     names.extend(qualified_symbol_leaf_names(query));
     if !query.chars().any(char::is_whitespace)
         && let Some(leaf) = query
