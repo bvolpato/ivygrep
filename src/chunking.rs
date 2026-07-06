@@ -1860,8 +1860,12 @@ fn is_probably_text(bytes: &[u8]) -> bool {
         return false;
     }
 
-    if std::str::from_utf8(sample).is_ok() {
-        return true;
+    match std::str::from_utf8(sample) {
+        Ok(_) => return true,
+        Err(err) if err.error_len().is_none() && err.valid_up_to() > 0 => {
+            return true;
+        }
+        Err(_) => {}
     }
 
     let printable = sample
@@ -1971,6 +1975,23 @@ pub fn calculate_total(amount: f64) -> f64 {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].kind, ChunkKind::Function);
         assert!(chunks[0].text.contains("calculate_tax"));
+    }
+
+    #[test]
+    fn chunker_indexes_large_rust_source_file() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/chunking.rs");
+        let src = std::fs::read_to_string(&path).unwrap();
+
+        assert!(
+            is_indexable_file(Path::new("src/chunking.rs"), src.as_bytes()),
+            "large Rust source files should pass indexability"
+        );
+        let chunks = chunk_source(Path::new("src/chunking.rs"), &src);
+
+        assert!(
+            !chunks.is_empty(),
+            "large Rust source files should still produce chunks"
+        );
     }
 
     #[test]

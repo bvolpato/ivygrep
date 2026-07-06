@@ -3435,6 +3435,43 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    #[serial]
+    fn index_workspace_persists_large_rust_source_file_chunks() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/chunking.rs"),
+            root.path().join("src/chunking.rs"),
+        )
+        .unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        let source = fs::read_to_string(root.path().join("src/chunking.rs")).unwrap();
+        let direct_chunks =
+            crate::chunking::chunk_source(Path::new("src/chunking.rs"), &source).len();
+        assert!(direct_chunks > 0, "direct chunker should produce chunks");
+        assert!(
+            crate::chunking::is_indexable_file(Path::new("src/chunking.rs"), source.as_bytes()),
+            "large Rust source file should pass indexability gate"
+        );
+
+        index_workspace(&workspace, &model).unwrap();
+
+        let conn = open_sqlite(&workspace.sqlite_path()).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunks WHERE file_path = 'src/chunking.rs'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(count > 0, "large Rust source file should be persisted");
+    }
+
     struct RecordedTestEmbedding {
         model: HashEmbeddingModel,
         backend: &'static str,

@@ -4,6 +4,18 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.1.7] - 2026-07-06
+
+### Fixed
+- **Large UTF-8 source files no longer get skipped when the sniff sample ends mid-character.** The text gate now accepts valid UTF-8 prefixes with an incomplete trailing sequence, so large source files such as `src/chunking.rs` stay indexable and persist chunks.
+
+### Relevance
+- **Natural-language ranking now promotes exact alias-derived file stems.** Generic aliases cover code-search phrasing such as IPC channels, vector stores, protocol messages, concurrency bounds, generated-file filters, tokenization, and indexing pipelines. Exact alias stem matches receive a bounded rank lift, while generic process aliases such as daemon/service/worker do not crowd out more specific subsystem files.
+
+### Testing
+- **Relevance fixture now has no low-rank misses.** Foreground relevance improved from precision@1 `0.391`, MRR `0.578`, recall@5 `0.783`, nDCG@10 `0.620`, and candidate recall `0.783` to precision@1 `1.000`, MRR `1.000`, recall@5 `0.978`, nDCG@10 `0.973`, and candidate recall `1.000`.
+- **A/B discarded neutral or regressive candidates.** Path-recall alias expansion regressed MRR/nDCG slightly, and compound file-stem boosting produced no metric gain, so both were left out.
+
 ## [1.1.6] - 2026-07-06
 
 ### Performance

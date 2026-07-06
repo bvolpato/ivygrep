@@ -3650,6 +3650,7 @@ struct FusionQuery<'a> {
     tokens: Vec<String>,
     primary_tokens: Vec<String>,
     token_compacts: Vec<String>,
+    alias_token_compacts: Vec<String>,
     location_intent: bool,
     secondary_intent: bool,
     compact_candidate_text: bool,
@@ -3663,6 +3664,12 @@ impl<'a> FusionQuery<'a> {
         let tokens = expanded_query_tokens(text);
         let token_compacts = tokens
             .iter()
+            .map(|token| compact_identifier(token))
+            .collect();
+        let primary_token_set = primary_tokens.iter().collect::<HashSet<_>>();
+        let alias_token_compacts = tokens
+            .iter()
+            .filter(|token| !primary_token_set.contains(token))
             .map(|token| compact_identifier(token))
             .collect();
         let compact_candidate_text = should_use_compact_identifier_matching(text, &primary_tokens);
@@ -3682,6 +3689,7 @@ impl<'a> FusionQuery<'a> {
             path_candidates,
             primary_tokens,
             token_compacts,
+            alias_token_compacts,
             compact_candidate_text,
         }
     }
@@ -4288,6 +4296,7 @@ fn fuse_rrf_with_context(
 
             score *= chunk_kind_boost(&chunk);
             score *= effective_authority_score_with_intent(query_tokens, &bctx, secondary_intent);
+            score *= alias_file_stem_multiplier(&query.alias_token_compacts, &bctx);
 
             // Apply chunk-density normalization: 1/n^x where n is the number
             // of chunks this file has in the candidate set. Primary
@@ -4971,6 +4980,35 @@ fn file_stem_boost_with_compact_tokens(
     } else {
         0.0
     }
+}
+
+fn alias_file_stem_multiplier(alias_token_compacts: &[String], bctx: &ChunkBoostContext) -> f32 {
+    if alias_token_compacts.is_empty() || path_role(&bctx.path_lower) != PathRole::PrimarySource {
+        return 1.0;
+    }
+
+    let Some(ref stem) = bctx.file_stem else {
+        return 1.0;
+    };
+    let compact_stem = compact_identifier(stem);
+    if compact_stem.len() < 3
+        || is_generic_process_alias(compact_stem.as_str())
+        || !alias_token_compacts
+            .iter()
+            .any(|alias| alias == &compact_stem)
+    {
+        return 1.0;
+    }
+
+    if stem.contains('_') || stem.contains('-') {
+        2.7
+    } else {
+        2.0
+    }
+}
+
+fn is_generic_process_alias(alias: &str) -> bool {
+    matches!(alias, "daemon" | "service" | "worker")
 }
 
 fn location_intent_boost(chunk: &IndexedChunk, bctx: &ChunkBoostContext) -> f32 {
@@ -8246,6 +8284,37 @@ export function registerCommands(p: Plugin) {
         assert!(
             (boost - 0.5).abs() < f32::EPSILON,
             "partial stem match should return 0.5, got {boost}"
+        );
+    }
+
+    #[test]
+    fn alias_file_stem_multiplier_promotes_exact_alias_stems() {
+        let root = make_test_chunk("root", "src/vector_store.rs", "code", "Module");
+        let root_ctx = ChunkBoostContext::new(&root);
+        assert_eq!(
+            alias_file_stem_multiplier(&["vectorstore".to_string()], &root_ctx),
+            2.7
+        );
+
+        let child = make_test_chunk("child", "src/vector_store/optimized.rs", "code", "Module");
+        let child_ctx = ChunkBoostContext::new(&child);
+        assert_eq!(
+            alias_file_stem_multiplier(&["vectorstore".to_string()], &child_ctx),
+            1.0
+        );
+
+        let ipc = make_test_chunk("ipc", "src/ipc.rs", "code", "Module");
+        let ipc_ctx = ChunkBoostContext::new(&ipc);
+        assert_eq!(
+            alias_file_stem_multiplier(&["ipc".to_string()], &ipc_ctx),
+            2.0
+        );
+
+        let daemon = make_test_chunk("daemon", "src/daemon.rs", "code", "Module");
+        let daemon_ctx = ChunkBoostContext::new(&daemon);
+        assert_eq!(
+            alias_file_stem_multiplier(&["daemon".to_string()], &daemon_ctx),
+            1.0
         );
     }
 

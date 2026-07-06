@@ -72,6 +72,9 @@ mod tests {
         assert_eq!(token_aliases("composition"), &["compose"]);
         assert_eq!(token_aliases("resolution"), &["resolve", "resolver"]);
         assert_eq!(token_aliases("storage"), &["store"]);
+        assert_eq!(token_aliases("embedding"), &["vector"]);
+        assert_eq!(token_aliases("limit"), &["bound", "cap"]);
+        assert_eq!(token_aliases("similarity"), &["ann", "nearest"]);
         assert!(token_aliases("flags").is_empty());
         assert!(token_aliases("output").is_empty());
         assert!(token_aliases("walker").is_empty());
@@ -97,6 +100,24 @@ mod tests {
 
         let tokens = vec!["form".to_string(), "data".to_string()];
         assert_eq!(phrase_aliases(&tokens), vec!["multipart"]);
+
+        let tokens = vec!["communication".to_string(), "channel".to_string()];
+        assert_eq!(
+            phrase_aliases(&tokens),
+            vec!["ipc", "socket", "protocol", "lock"]
+        );
+
+        let tokens = vec!["minified".to_string(), "bundle".to_string()];
+        assert_eq!(
+            phrase_aliases(&tokens),
+            vec!["blob", "chunking", "minified"]
+        );
+
+        let tokens = vec!["search".to_string(), "run".to_string()];
+        assert_eq!(
+            phrase_aliases(&tokens),
+            vec!["cpu_permits", "semaphore", "permit"]
+        );
 
         let tokens = vec![
             "server".to_string(),
