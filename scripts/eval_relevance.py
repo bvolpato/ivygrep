@@ -56,6 +56,22 @@ class QueryCase:
     judgments: list[Judgment]
 
 
+@dataclass(frozen=True)
+class SearchOutput:
+    paths: list[str]
+    hits: list[dict[str, Any]]
+    sources: set[str]
+
+
+AUDIT_SATISFIED = "satisfied"
+AUDIT_CANDIDATE_BUDGET = "candidate_budget"
+AUDIT_FIRST_USEFUL_LOW = "first_useful_low"
+AUDIT_AFTER_FILTERING = "after_filtering"
+AUDIT_BEFORE_FUSION = "before_fusion"
+AUDIT_NO_PRIMARY = "no_primary_judgment"
+AUDIT_NOT_RUN = "not_audited"
+
+
 def run(cmd: list[str], *, cwd: Path, env: dict[str, str]) -> str:
     result = subprocess.run(cmd, cwd=cwd, env=env, text=True, capture_output=True)
     if result.returncode != 0:
@@ -81,19 +97,31 @@ def load_cases(path: Path) -> list[QueryCase]:
     return cases
 
 
-def ranked_paths(stdout: str) -> list[str]:
+def parse_search_output(stdout: str) -> SearchOutput:
     parsed = json.loads(stdout)
     if not isinstance(parsed, list):
-        return []
+        return SearchOutput(paths=[], hits=[], sources=set())
     paths: list[str] = []
     seen: set[str] = set()
+    hits: list[dict[str, Any]] = []
+    sources: set[str] = set()
     for item in parsed:
         if isinstance(item, dict):
             p = item.get("file_path")
             if isinstance(p, str) and p not in seen:
                 seen.add(p)
                 paths.append(p)
-    return paths
+            item_hits = item.get("hits", [])
+            if isinstance(item_hits, list):
+                for hit in item_hits:
+                    if isinstance(hit, dict):
+                        hits.append(hit)
+                        hit_sources = hit.get("sources", [])
+                        if isinstance(hit_sources, list):
+                            sources.update(
+                                source for source in hit_sources if isinstance(source, str)
+                            )
+    return SearchOutput(paths=paths, hits=hits, sources=sources)
 
 
 def neural_execution_status(hits: list[dict[str, Any]]) -> bool | None:
@@ -142,6 +170,68 @@ def recall_at(paths: list[str], judgments: list[Judgment], k: int) -> float:
     return matched / len(primary)
 
 
+def relevant_judgment_matches(paths: list[str], judgments: list[Judgment]) -> set[int]:
+    matches: set[int] = set()
+    for idx, judgment in enumerate(judgments):
+        if judgment.grade >= RELEVANT_GRADE and any(
+            fnmatch.fnmatchcase(path, judgment.pattern) for path in paths
+        ):
+            matches.add(idx)
+    return matches
+
+
+def relevant_recall(paths: list[str], judgments: list[Judgment]) -> float:
+    primary = [idx for idx, judgment in enumerate(judgments) if judgment.grade >= RELEVANT_GRADE]
+    if not primary:
+        return 0.0
+    return len(relevant_judgment_matches(paths, judgments)) / len(primary)
+
+
+def first_relevant_rank(paths: list[str], judgments: list[Judgment]) -> int | None:
+    primary = [judgment for judgment in judgments if judgment.grade >= RELEVANT_GRADE]
+    if not primary:
+        return None
+    for index, path in enumerate(paths, start=1):
+        if any(fnmatch.fnmatchcase(path, judgment.pattern) for judgment in primary):
+            return index
+    return None
+
+
+def classify_audit_stage(
+    final_first_rank: int | None,
+    deep_first_rank: int | None,
+    candidate_recall: float,
+    satisfaction_k: int,
+    judgments: list[Judgment],
+) -> str:
+    if not any(judgment.grade >= RELEVANT_GRADE for judgment in judgments):
+        return AUDIT_NO_PRIMARY
+    if final_first_rank is not None and final_first_rank <= satisfaction_k:
+        return AUDIT_SATISFIED
+    if final_first_rank is not None:
+        return AUDIT_FIRST_USEFUL_LOW
+    if deep_first_rank is not None:
+        if deep_first_rank <= satisfaction_k:
+            return AUDIT_CANDIDATE_BUDGET
+        return AUDIT_FIRST_USEFUL_LOW
+    if candidate_recall > 0.0:
+        return AUDIT_AFTER_FILTERING
+    return AUDIT_BEFORE_FUSION
+
+
+def audit_stage_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    stages = [
+        AUDIT_SATISFIED,
+        AUDIT_CANDIDATE_BUDGET,
+        AUDIT_FIRST_USEFUL_LOW,
+        AUDIT_AFTER_FILTERING,
+        AUDIT_BEFORE_FUSION,
+        AUDIT_NO_PRIMARY,
+        AUDIT_NOT_RUN,
+    ]
+    return {stage: sum(1 for row in rows if row.get("audit_stage") == stage) for stage in stages}
+
+
 def dcg(grades: list[int]) -> float:
     return sum(((2**g) - 1) / math.log2(i + 2) for i, g in enumerate(grades))
 
@@ -175,11 +265,32 @@ def main() -> int:
     ap.add_argument("--skip-build", action="store_true")
     ap.add_argument("--details", action="store_true")
     ap.add_argument("--json", action="store_true", help="emit aggregate metrics as JSON only")
+    audit = ap.add_mutually_exclusive_group()
+    audit.add_argument(
+        "--audit-recall",
+        action="store_true",
+        default=True,
+        help="run broad source/deep probes to classify relevance misses",
+    )
+    audit.add_argument(
+        "--no-audit-recall",
+        action="store_false",
+        dest="audit_recall",
+        help="skip candidate-recall audit probes",
+    )
+    ap.add_argument(
+        "--satisfaction-k",
+        type=int,
+        default=1,
+        help="first relevant result rank considered useful",
+    )
     ap.add_argument("--check", action="store_true", help="exit non-zero if below thresholds")
     ap.add_argument("--min-mrr", type=float, default=0.0)
     ap.add_argument("--min-p1", type=float, default=0.0, help="min precision@1")
     ap.add_argument("--min-recall5", type=float, default=0.0)
     args = ap.parse_args()
+    if args.satisfaction_k < 1:
+        raise SystemExit("--satisfaction-k must be >= 1")
 
     repo = args.repo.resolve()
     cases = load_cases(args.queries)
@@ -255,14 +366,10 @@ def main() -> int:
                 cwd=REPO_ROOT,
                 env=env,
             )
-            paths = ranked_paths(stdout)
-            parsed = json.loads(stdout)
-            hits = [hit for item in parsed for hit in item.get("hits", [])]
-            sources = {
-                source
-                for hit in hits
-                for source in hit.get("sources", [])
-            }
+            search_output = parse_search_output(stdout)
+            paths = search_output.paths
+            hits = search_output.hits
+            sources = search_output.sources
             execution_status = neural_execution_status(hits)
             neural_executed = execution_status is True
             if "neural" in sources:
@@ -273,6 +380,77 @@ def main() -> int:
                 neural_queries_unobservable += 1
             grades = graded(paths, case.judgments)
             ideal = [j.grade for j in case.judgments]
+            final_first_rank = first_relevant_rank(paths, case.judgments)
+            deep_first_rank = None
+            deep_recall = 0.0
+            candidate_recall = relevant_recall(paths, case.judgments)
+            candidate_audit_sources = ["final"]
+            audit_stage = (
+                AUDIT_SATISFIED
+                if final_first_rank is not None and final_first_rank <= args.satisfaction_k
+                else AUDIT_NOT_RUN
+            )
+            audit_hits = {"final": len(paths)}
+            if args.audit_recall:
+                deep_output = parse_search_output(
+                    run(
+                        [
+                            str(binary),
+                            *query_mode,
+                            "--json",
+                            "--no-watch",
+                            "--no-limit",
+                            case.query,
+                            str(repo),
+                        ],
+                        cwd=REPO_ROOT,
+                        env=env,
+                    )
+                )
+                deep_first_rank = first_relevant_rank(deep_output.paths, case.judgments)
+                deep_recall = relevant_recall(deep_output.paths, case.judgments)
+                audit_hits["hybrid-deep"] = len(deep_output.paths)
+                audit_path_union = set(paths) | set(deep_output.paths)
+                source_runs = {
+                    "lexical": ["--lexical-only"],
+                    "literal": ["--literal"],
+                }
+                candidate_audit_sources = []
+                source_recalls = {
+                    "final": candidate_recall,
+                    "hybrid-deep": deep_recall,
+                }
+                for source_name, source_mode in source_runs.items():
+                    source_output = parse_search_output(
+                        run(
+                            [
+                                str(binary),
+                                *source_mode,
+                                "--json",
+                                "--no-watch",
+                                "--no-limit",
+                                case.query,
+                                str(repo),
+                            ],
+                            cwd=REPO_ROOT,
+                            env=env,
+                        )
+                    )
+                    source_recall = relevant_recall(source_output.paths, case.judgments)
+                    source_recalls[source_name] = source_recall
+                    audit_hits[source_name] = len(source_output.paths)
+                    audit_path_union.update(source_output.paths)
+                candidate_recall = relevant_recall(sorted(audit_path_union), case.judgments)
+                candidate_audit_sources = [
+                    name for name, source_recall in source_recalls.items() if source_recall > 0.0
+                ]
+                audit_stage = classify_audit_stage(
+                    final_first_rank,
+                    deep_first_rank,
+                    candidate_recall,
+                    args.satisfaction_k,
+                    case.judgments,
+                )
             row = {
                 "id": case.id,
                 "p1": precision_at(grades, 1),
@@ -280,6 +458,15 @@ def main() -> int:
                 "mrr": mrr(grades),
                 "recall5": recall_at(paths, case.judgments, 5),
                 "ndcg10": ndcg_at(grades, ideal, 10),
+                "satisfied": final_first_rank is not None
+                and final_first_rank <= args.satisfaction_k,
+                "first_relevant_rank": final_first_rank,
+                "audit_stage": audit_stage,
+                "hybrid_deep_first_relevant_rank": deep_first_rank,
+                "hybrid_deep_recall": deep_recall,
+                "candidate_recall": candidate_recall,
+                "candidate_audit_sources": candidate_audit_sources,
+                "audit_hits": audit_hits,
                 "top3": paths[:3],
                 "hits": len(paths),
                 "retrieval_sources": sorted(sources),
@@ -291,9 +478,12 @@ def main() -> int:
                 print(
                     f"  {case.id:<28} p1={row['p1']:.0f} mrr={row['mrr']:.3f} "
                     f"recall5={row['recall5']:.2f} ndcg10={row['ndcg10']:.3f} "
-                    f"top3={row['top3']}"
+                    f"first={row['first_relevant_rank']} audit={row['audit_stage']} "
+                    f"deep_first={row['hybrid_deep_first_relevant_rank']} "
+                    f"candidate_recall={row['candidate_recall']:.2f} top3={row['top3']}"
                 )
 
+        stage_counts = audit_stage_counts(rows)
         agg = {
             "mode": (
                 "neural"
@@ -308,6 +498,23 @@ def main() -> int:
             "mean_mrr": mean([r["mrr"] for r in rows]),
             "mean_recall5": mean([r["recall5"] for r in rows]),
             "mean_ndcg10": mean([r["ndcg10"] for r in rows]),
+            "satisfaction_k": args.satisfaction_k,
+            "satisfaction_rate": mean([1.0 if r["satisfied"] else 0.0 for r in rows]),
+            "mean_hybrid_deep_recall": mean([r["hybrid_deep_recall"] for r in rows]),
+            "mean_candidate_recall": mean([r["candidate_recall"] for r in rows]),
+            "audit_stage_counts": stage_counts,
+            "candidate_recall_misses": [
+                r["id"] for r in rows if r["audit_stage"] == AUDIT_BEFORE_FUSION
+            ],
+            "filter_misses": [
+                r["id"] for r in rows if r["audit_stage"] == AUDIT_AFTER_FILTERING
+            ],
+            "low_rank_misses": [
+                r["id"] for r in rows if r["audit_stage"] == AUDIT_FIRST_USEFUL_LOW
+            ],
+            "candidate_budget_misses": [
+                r["id"] for r in rows if r["audit_stage"] == AUDIT_CANDIDATE_BUDGET
+            ],
             "no_hit_queries": sum(1 for r in rows if r["hits"] == 0),
             "neural_queries_with_results": neural_queries_with_results,
             "neural_queries_executed": neural_queries_executed,
@@ -339,6 +546,9 @@ def main() -> int:
             f"  MRR         = {agg['mean_mrr']:.3f}\n"
             f"  recall@5    = {agg['mean_recall5']:.3f}\n"
             f"  nDCG@10     = {agg['mean_ndcg10']:.3f}\n"
+            f"  satisfy@{agg['satisfaction_k']} = {agg['satisfaction_rate']:.3f}\n"
+            f"  candidate recall = {agg['mean_candidate_recall']:.3f}\n"
+            f"  audit stages = {agg['audit_stage_counts']}\n"
             f"  no-hit      = {agg['no_hit_queries']}/{agg['queries']}"
         )
 
