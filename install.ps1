@@ -11,8 +11,26 @@ $installDir = if ($configuredInstallDir) {
 }
 $version = if ($configuredVersion) { $configuredVersion } else { "latest" }
 
+function Get-GitHubHeaders {
+    $token = [Environment]::GetEnvironmentVariable("GITHUB_TOKEN")
+    if (-not $token) {
+        $token = [Environment]::GetEnvironmentVariable("GH_TOKEN")
+    }
+
+    $headers = @{
+        "User-Agent" = "ivygrep-installer"
+    }
+    if ($token) {
+        $headers["Authorization"] = "Bearer $token"
+        $headers["X-GitHub-Api-Version"] = "2022-11-28"
+    }
+    return $headers
+}
+
 if ($version -eq "latest") {
-    $release = Invoke-RestMethod "https://api.github.com/repos/$repository/releases/latest"
+    $release = Invoke-RestMethod `
+        -Uri "https://api.github.com/repos/$repository/releases/latest" `
+        -Headers (Get-GitHubHeaders)
     $tag = $release.tag_name
 } elseif ($version.StartsWith("v")) {
     $tag = $version

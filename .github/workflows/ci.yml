@@ -142,6 +142,8 @@ jobs:
       - name: Smoke test PowerShell installer
         if: matrix.name == 'Windows x86_64 (Hash-only fallback)'
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           $env:IVYGREP_INSTALL_DIR = Join-Path $env:RUNNER_TEMP "ivygrep-installer"
           & ./install.ps1
