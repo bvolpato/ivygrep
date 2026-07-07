@@ -11,7 +11,7 @@ import re
 
 REGULATED = {
     "state_of_the_art": re.compile(
-        r"state[- ]of[- ]the[- ]art|\bsota\b",
+        r"state[- ]of[- ]the[- ]art|\bsota\b(?!-challenge)",
         re.IGNORECASE,
     ),
     "competitive": re.compile(r"\bcompetitive\b", re.IGNORECASE),

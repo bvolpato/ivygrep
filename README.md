@@ -362,7 +362,7 @@ uv run scripts/run_public_benchmark_matrix.py \
 ```
 
 The public matrix pins 20 CoIR task/language variants plus a compact
-1,000-query, 48-language baseline. The non-default SOTA challenge profile adds
+1,000-query, 48-language baseline. The non-default challenge retrieval profile adds
 six harder CoIR task families and 600 held-out queries; current neural score is
 nDCG@10 0.5950, MRR@10 0.5654, and recall@20 0.6967. Reports include checksums,
 quality, variance, latency, memory, and index size under
