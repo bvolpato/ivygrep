@@ -4112,7 +4112,7 @@ fn fuse_rrf_with_context(
         entries.len()
     );
 
-    let rerank_limit = rerank_candidate_limit();
+    let rerank_limit = rerank_candidate_limit_for_routing(routing);
     let mut rerank_order = entries
         .iter()
         .map(|(vector_key, entry)| (*vector_key, entry.score))
@@ -4445,11 +4445,43 @@ fn fuse_rrf_with_context(
 }
 
 pub fn rerank_candidate_limit() -> usize {
+    configured_rerank_candidate_limit().unwrap_or_else(|| {
+        if learned_reranker_enabled_by_env() {
+            100
+        } else {
+            30
+        }
+    })
+}
+
+fn rerank_candidate_limit_for_routing(routing: QueryRouting) -> usize {
+    if let Some(configured) = configured_rerank_candidate_limit() {
+        return configured;
+    }
+    if !learned_reranker_enabled_by_env() {
+        return 30;
+    }
+    match routing.intent {
+        QueryIntent::ExactIdentifier | QueryIntent::Path | QueryIntent::LiteralOrError => 30,
+        QueryIntent::NaturalLanguage | QueryIntent::DocsTestsExamples | QueryIntent::Mixed => 100,
+    }
+}
+
+fn configured_rerank_candidate_limit() -> Option<usize> {
     std::env::var("IVYGREP_RERANK_LIMIT")
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .filter(|value| *value > 0)
-        .unwrap_or(30)
+}
+
+fn learned_reranker_enabled_by_env() -> bool {
+    match std::env::var("IVYGREP_RERANKER") {
+        Ok(value) => !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "deterministic" | "disabled" | "off"
+        ),
+        Err(_) => true,
+    }
 }
 
 #[cfg(test)]
@@ -7850,8 +7882,33 @@ export function registerCommands(p: Plugin) {
     fn reranker_candidate_limit_is_configurable_and_bounded() {
         unsafe { std::env::set_var("IVYGREP_RERANK_LIMIT", "7") };
         assert_eq!(rerank_candidate_limit(), 7);
+        assert_eq!(
+            rerank_candidate_limit_for_routing(QueryRouting::classify(
+                "how to route learned query"
+            )),
+            7
+        );
         unsafe { std::env::set_var("IVYGREP_RERANK_LIMIT", "0") };
+        assert_eq!(rerank_candidate_limit(), 100);
+        assert_eq!(
+            rerank_candidate_limit_for_routing(QueryRouting::classify("exact_symbol")),
+            30
+        );
+        assert_eq!(
+            rerank_candidate_limit_for_routing(QueryRouting::classify(
+                "how to route learned query"
+            )),
+            100
+        );
+        unsafe { std::env::set_var("IVYGREP_RERANKER", "deterministic") };
         assert_eq!(rerank_candidate_limit(), 30);
+        assert_eq!(
+            rerank_candidate_limit_for_routing(QueryRouting::classify(
+                "how to route learned query"
+            )),
+            30
+        );
+        unsafe { std::env::remove_var("IVYGREP_RERANKER") };
         unsafe { std::env::remove_var("IVYGREP_RERANK_LIMIT") };
     }
 

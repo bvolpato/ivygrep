@@ -4,6 +4,14 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.1.8] - 2026-07-07
+
+### Relevance
+- **Learned reranking now uses a deeper candidate set for natural-language queries.** Exact identifier, path, and literal/error lookups keep the old narrow rerank pool, while mixed, docs, and natural-language routes expose more candidates to the learned reranker. Deterministic reranking and `IVYGREP_RERANK_LIMIT` overrides keep their previous behavior.
+
+### Testing
+- **A/B kept only the adaptive rerank-depth winner.** On the 600-query SOTA challenge profile across 3 repetitions, nDCG@10 improved from `0.5950` to `0.5963`, MRR@10 from `0.5654` to `0.5661`, precision@5 from `0.1300` to `0.1303`, and recall@20 from `0.6967` to `0.7000`, with no task-level relevance regression. Raw rerank depths 50, 100, and 200, wider result limits, PotionCode defaults, and long-query decomposition were discarded after neutral, slower, or regressive results.
+
 ## [1.1.7] - 2026-07-06
 
 ### Fixed
