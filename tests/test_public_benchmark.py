@@ -58,6 +58,16 @@ class PublicBenchmarkTest(unittest.TestCase):
                 manifest["profiles"]["public-core"]["tasks"]
             )
         )
+        challenge = manifest["profiles"]["sota-challenge"]
+        self.assertGreaterEqual(challenge["minimum_queries"], 600)
+        self.assertEqual(challenge["query_text_limit"], 2048)
+        self.assertEqual(len(challenge["tasks"]), 6)
+        self.assertIn("apps", challenge["tasks"])
+        self.assertIn("CodeSearchNet-python", challenge["tasks"])
+        self.assertIn("CodeSearchNet-java", challenge["tasks"])
+        for task in challenge["tasks"]:
+            self.assertEqual(challenge["task_options"][task]["sample_queries"], 100)
+            self.assertEqual(challenge["task_options"][task]["sample_corpus"], 5000)
 
     def test_cached_datasets_must_meet_profile_query_minimum(self):
         manifest = {
@@ -85,6 +95,27 @@ class PublicBenchmarkTest(unittest.TestCase):
         second = exporter.sampled_query_ids(qrels, 5, 42)
         self.assertEqual(first, second)
         self.assertEqual(len(first), 5)
+
+    def test_query_text_limit_comes_from_profile_or_override(self):
+        manifest = {
+            "profiles": {
+                "plain": {},
+                "challenge": {"query_text_limit": 2048},
+            }
+        }
+        self.assertIsNone(matrix_runner.query_text_limit(manifest, "plain", None))
+        self.assertEqual(
+            matrix_runner.query_text_limit(manifest, "challenge", None),
+            2048,
+        )
+        self.assertEqual(matrix_runner.query_text_limit(manifest, "challenge", 512), 512)
+        with self.assertRaisesRegex(ValueError, "positive"):
+            matrix_runner.query_text_limit(manifest, "plain", 0)
+
+    def test_query_text_can_be_capped_for_prompt_dump_benchmarks(self):
+        query = {"text": "abcdef"}
+        self.assertEqual(evaluator.query_text(query, None), "abcdef")
+        self.assertEqual(evaluator.query_text(query, 3), "abc")
 
     def test_query_partitions_are_disjoint_and_complete(self):
         qrels = [
@@ -196,7 +227,59 @@ class PublicBenchmarkTest(unittest.TestCase):
         report = renderer.markdown(matrix)
         self.assertIn("500", report)
         self.assertIn("0.5000", report)
+        self.assertIn("--profile public-core", report)
         self.assertNotIn("/home/", report)
+
+    def test_renderer_reproduce_command_uses_matrix_profile(self):
+        metrics = {
+            name: {
+                "mean": 0.5,
+                "standard_deviation": 0.0,
+                "coefficient_of_variation": 0.0,
+                "minimum": 0.5,
+                "maximum": 0.5,
+            }
+            for name in (
+                "ndcg_at_10",
+                "mrr_at_10",
+                "precision_at_5",
+                "recall_at_20",
+                "cold_latency_p50_ms",
+                "cold_latency_p95_ms",
+                "warm_latency_p50_ms",
+                "warm_latency_p95_ms",
+                "index_ms",
+                "hash_enhancement_ms",
+                "neural_enhancement_ms",
+                "daemon_startup_ms",
+                "neural_model_ready_ms",
+                "index_size_bytes",
+                "peak_child_rss_bytes",
+            )
+        }
+        matrix = {
+            "ivygrep_commit": "abc123",
+            "profile": "sota-challenge",
+            "tasks": ["one"],
+            "queries": 600,
+            "repetitions": 1,
+            "modes": ["hash"],
+            "summary": {"hash": {"metrics": metrics}},
+        }
+        report = renderer.markdown(matrix)
+        self.assertIn("--profile sota-challenge", report)
+        self.assertIn("--output public-sota-challenge-results.json", report)
+
+        matrix["query_text_limit"] = 2048
+        report = renderer.markdown(matrix)
+        self.assertIn("Query text limit: 2048 characters", report)
+        self.assertIn("--max-query-chars 2048", report)
+
+        html = renderer.html(matrix)
+        self.assertIn("public-sota-challenge-results.json", html)
+        self.assertIn("public-sota-challenge.md", html)
+        self.assertIn("sota-challenge", html)
+        self.assertIn("query char limit", html)
 
     def test_renderer_compares_matching_frozen_baseline(self):
         def matrix(commit: str, ndcg: float) -> dict:
@@ -419,12 +502,14 @@ class PublicBenchmarkTest(unittest.TestCase):
                 "mode": "hash",
                 "binary": {"sha256": "binary"},
                 "dataset_provenance": {"checksums": {"corpus.jsonl": "abc"}},
+                "query_text_limit": 2048,
             }
             matrix_runner.validate_reused_result(
                 result,
                 dataset,
                 "hash",
                 "binary",
+                2048,
             )
             with self.assertRaises(ValueError):
                 matrix_runner.validate_reused_result(
@@ -432,6 +517,15 @@ class PublicBenchmarkTest(unittest.TestCase):
                     dataset,
                     "hash",
                     "different",
+                    2048,
+                )
+            with self.assertRaises(ValueError):
+                matrix_runner.validate_reused_result(
+                    result,
+                    dataset,
+                    "hash",
+                    "binary",
+                    None,
                 )
 
 

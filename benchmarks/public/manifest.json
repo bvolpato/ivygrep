@@ -169,6 +169,51 @@
         }
       }
     },
+    "sota-challenge": {
+      "description": "Harder non-default CoIR challenge profile for relevance work: disjoint task families, long natural-language/code queries, StackOverflow question retrieval, programming contest retrieval, multilingual feedback retrieval, and text-to-SQL retrieval. This is intentionally slower than public-core and should not run in default tests.",
+      "minimum_queries": 600,
+      "query_text_limit": 2048,
+      "tasks": [
+        "stackoverflow-qa",
+        "apps",
+        "codefeedback-mt",
+        "synthetic-text2sql",
+        "CodeSearchNet-python",
+        "CodeSearchNet-java"
+      ],
+      "task_options": {
+        "stackoverflow-qa": {
+          "sample_queries": 100,
+          "sample_corpus": 5000,
+          "seed": 20260707
+        },
+        "apps": {
+          "sample_queries": 100,
+          "sample_corpus": 5000,
+          "seed": 20260707
+        },
+        "codefeedback-mt": {
+          "sample_queries": 100,
+          "sample_corpus": 5000,
+          "seed": 20260707
+        },
+        "synthetic-text2sql": {
+          "sample_queries": 100,
+          "sample_corpus": 5000,
+          "seed": 20260707
+        },
+        "CodeSearchNet-python": {
+          "sample_queries": 100,
+          "sample_corpus": 5000,
+          "seed": 20260707
+        },
+        "CodeSearchNet-java": {
+          "sample_queries": 100,
+          "sample_corpus": 5000,
+          "seed": 20260707
+        }
+      }
+    },
     "full": {
       "description": "Every CoIR task and language-specific CodeSearchNet/CCR subtask exposed by the pinned CoIR loader.",
       "minimum_queries": 500,

@@ -259,6 +259,13 @@ def query_args(mode: str) -> list[str]:
     raise ValueError(f"unsupported mode {mode}")
 
 
+def query_text(query: dict, max_query_chars: int | None) -> str:
+    text = str(query.get("text") or query.get("query") or "")
+    if max_query_chars is not None:
+        return text[:max_query_chars]
+    return text
+
+
 def search_command(binary: Path, mode: str, limit: int, query: str) -> list[str]:
     return [
         str(binary),
@@ -381,7 +388,7 @@ def evaluate(args: argparse.Namespace) -> dict:
         cold_latencies: dict[str, float] = {}
         for query in process_cold_queries(args.mode, queries):
             query_id = str(query["_id"])
-            text = query.get("text") or query.get("query") or ""
+            text = query_text(query, args.max_query_chars)
             command = search_command(binary, args.mode, args.limit, text)
             _, cold_latencies[query_id] = run_json(command, repo, env)
 
@@ -451,7 +458,7 @@ def evaluate(args: argparse.Namespace) -> dict:
             missing_neural_execution = []
             for query in queries:
                 query_id = str(query["_id"])
-                text = query.get("text") or query.get("query") or ""
+                text = query_text(query, args.max_query_chars)
                 command = search_command(binary, args.mode, args.limit, text)
 
                 cold_ms = cold_latencies.get(query_id)
@@ -591,6 +598,7 @@ def evaluate(args: argparse.Namespace) -> dict:
                 "daemon_startup_ms": daemon_startup_ms,
                 "neural_model_ready_ms": neural_model_ready_ms,
                 "warm_query_path": warm_query_path(args.mode),
+                "query_text_limit": args.max_query_chars,
                 "retrieval_provenance": {
                     "force_neural": args.mode == "neural",
                     "queries_with_hash_results": queries_with_hash_results,
@@ -626,12 +634,15 @@ def main() -> int:
         default="hash",
     )
     parser.add_argument("--limit", type=int, default=20)
+    parser.add_argument("--max-query-chars", type=int)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--min-ndcg-at-10", type=float, default=0.0)
     parser.add_argument("--min-mrr-at-10", type=float, default=0.0)
     parser.add_argument("--min-precision-at-5", type=float, default=0.0)
     parser.add_argument("--min-recall-at-20", type=float, default=0.0)
     args = parser.parse_args()
+    if args.max_query_chars is not None and args.max_query_chars < 1:
+        raise SystemExit("--max-query-chars must be positive")
 
     result = evaluate(args)
     payload = json.dumps(result, indent=2, sort_keys=True)

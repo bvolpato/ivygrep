@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ivygrep Public Code-Retrieval Benchmark</title>
+    <meta name="description" content="Pinned public CoIR quality, latency, indexing, memory, and index-size evidence.">
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="report.css">
+    <link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
+</head>
+<body class="report-page">
+    <div class="bg-fx"></div>
+    <div class="bg-fx-glow"></div>
+    <main class="report-shell relative z-10">
+        <nav class="report-nav">
+            <a class="report-brand" href="../"><img src="../assets/icon.svg" alt="ivygrep"><span>ivygrep benchmarks</span></a>
+            <div class="report-links"><a href="index.html">Reports</a><a href="public-sota-challenge-results.json">Raw JSON</a><a href="https://github.com/bvolpato/ivygrep/blob/main/docs/benchmarks/public-sota-challenge.md">Source</a></div>
+        </nav>
+        <section class="report-hero">
+            <div class="report-eyebrow">Pinned Public Evidence</div>
+            <h1>Code-retrieval quality and cost</h1>
+            <p>Profile <code>sota-challenge</code>: 600 held-out queries across 6 public CoIR tasks, repeated 1 times. No private corpus or local path is included.</p>
+        </section>
+        <section class="report-grid">
+            <div class="report-stat"><strong>600</strong><span>held-out queries</span></div>
+            <div class="report-stat"><strong>6</strong><span>public tasks</span></div>
+            <div class="report-stat"><strong>3</strong><span>languages</span></div>
+            <div class="report-stat"><strong>1</strong><span>repetitions</span></div>
+            <div class="report-stat"><strong>2048</strong><span>query char limit</span></div>
+        </section>
+        <section class="report-card">
+            <h2>Aggregate results</h2>
+            <div class="report-table-wrap"><table class="report-table">
+                <thead><tr><th>Mode</th><th>nDCG@10</th><th>MRR@10</th><th>P@5</th><th>R@20</th><th>Warm p95</th><th>Index size</th></tr></thead>
+                <tbody><tr><td><code>hash</code></td><td>0.5895</td><td>0.5586</td><td>0.1287</td><td>0.6950</td><td>657.48 ms</td><td>45.46 MiB</td></tr><tr><td><code>hybrid</code></td><td>0.5895</td><td>0.5586</td><td>0.1287</td><td>0.6950</td><td>662.04 ms</td><td>45.45 MiB</td></tr><tr><td><code>neural</code></td><td>0.5950</td><td>0.5654</td><td>0.1300</td><td>0.6967</td><td>660.33 ms</td><td>65.56 MiB</td></tr></tbody>
+            </table></div>
+            <p>Population variance, phase timings, peak RSS, binary identity, dataset revisions, and checksums are retained in the raw JSON.</p>
+        </section>
+        
+        <section class="report-card">
+            <h2>Per-task quality</h2>
+            <div class="report-table-wrap"><table class="report-table">
+                <thead><tr><th>Task</th><th>Mode</th><th>nDCG@10</th><th>MRR@10</th><th>R@20</th></tr></thead>
+                <tbody><tr><td><code>stackoverflow-qa</code></td><td><code>hash</code></td><td>0.5829</td><td>0.5231</td><td>0.7700</td></tr><tr><td><code>stackoverflow-qa</code></td><td><code>hybrid</code></td><td>0.5829</td><td>0.5231</td><td>0.7700</td></tr><tr><td><code>stackoverflow-qa</code></td><td><code>neural</code></td><td>0.5988</td><td>0.5458</td><td>0.7700</td></tr><tr><td><code>apps</code></td><td><code>hash</code></td><td>0.0033</td><td>0.0014</td><td>0.0200</td></tr><tr><td><code>apps</code></td><td><code>hybrid</code></td><td>0.0033</td><td>0.0014</td><td>0.0200</td></tr><tr><td><code>apps</code></td><td><code>neural</code></td><td>0.0033</td><td>0.0014</td><td>0.0200</td></tr><tr><td><code>codefeedback-mt</code></td><td><code>hash</code></td><td>0.5657</td><td>0.5112</td><td>0.7600</td></tr><tr><td><code>codefeedback-mt</code></td><td><code>hybrid</code></td><td>0.5657</td><td>0.5112</td><td>0.7600</td></tr><tr><td><code>codefeedback-mt</code></td><td><code>neural</code></td><td>0.5788</td><td>0.5243</td><td>0.7600</td></tr><tr><td><code>synthetic-text2sql</code></td><td><code>hash</code></td><td>0.8633</td><td>0.8390</td><td>0.9500</td></tr><tr><td><code>synthetic-text2sql</code></td><td><code>hybrid</code></td><td>0.8633</td><td>0.8390</td><td>0.9500</td></tr><tr><td><code>synthetic-text2sql</code></td><td><code>neural</code></td><td>0.8607</td><td>0.8322</td><td>0.9600</td></tr><tr><td><code>CodeSearchNet-python</code></td><td><code>hash</code></td><td>0.9400</td><td>0.9400</td><td>0.9400</td></tr><tr><td><code>CodeSearchNet-python</code></td><td><code>hybrid</code></td><td>0.9400</td><td>0.9400</td><td>0.9400</td></tr><tr><td><code>CodeSearchNet-python</code></td><td><code>neural</code></td><td>0.9400</td><td>0.9400</td><td>0.9400</td></tr><tr><td><code>CodeSearchNet-java</code></td><td><code>hash</code></td><td>0.5816</td><td>0.5370</td><td>0.7300</td></tr><tr><td><code>CodeSearchNet-java</code></td><td><code>hybrid</code></td><td>0.5816</td><td>0.5370</td><td>0.7300</td></tr><tr><td><code>CodeSearchNet-java</code></td><td><code>neural</code></td><td>0.5885</td><td>0.5488</td><td>0.7300</td></tr></tbody>
+            </table></div>
+            <p>Every retained task remains visible so aggregate improvements cannot hide regressions.</p>
+        </section>
+        <section class="report-card">
+            <h2>Claim boundary</h2>
+            <p>This is a reproducible baseline, not a state-of-the-art claim. Exact-search tools are only compared on exact-query workloads; this matrix covers held-out natural-language and code-to-code retrieval. Neural and external embedding upper bounds use the same matrix when their profiles are evaluated.</p>
+        </section>
+    </main>
+</body>
+</html>

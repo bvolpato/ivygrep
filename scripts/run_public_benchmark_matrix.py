@@ -84,6 +84,20 @@ def parse_modes(value: str) -> list[str]:
     return list(dict.fromkeys(modes))
 
 
+def query_text_limit(manifest: dict, profile: str, override: int | None) -> int | None:
+    if override is not None:
+        if override < 1:
+            raise ValueError("--max-query-chars must be positive")
+        return override
+    value = manifest["profiles"][profile].get("query_text_limit")
+    if value is None:
+        return None
+    value = int(value)
+    if value < 1:
+        raise ValueError(f"profile {profile} has invalid query_text_limit={value}")
+    return value
+
+
 def build_binary(root: Path, modes: list[str]) -> None:
     command = ["cargo", "build", "--release", "--locked", "--bin", "ig"]
     if "neural" not in modes:
@@ -131,6 +145,7 @@ def run_evaluation(
     binary: Path,
     mode: str,
     output: Path,
+    max_query_chars: int | None,
 ) -> dict:
     command = [
         sys.executable,
@@ -144,6 +159,8 @@ def run_evaluation(
         "--output",
         str(output),
     ]
+    if max_query_chars is not None:
+        command.extend(["--max-query-chars", str(max_query_chars)])
     subprocess.run(
         command,
         cwd=root,
@@ -274,6 +291,7 @@ def validate_reused_result(
     dataset: Path,
     mode: str,
     binary_sha256: str,
+    max_query_chars: int | None,
 ) -> None:
     provenance = json.loads((dataset / "provenance.json").read_text(encoding="utf-8"))
     if result.get("dataset") != dataset.name or result.get("mode") != mode:
@@ -285,6 +303,10 @@ def validate_reused_result(
     if result.get("dataset_provenance", {}).get("checksums") != provenance["checksums"]:
         raise ValueError(
             f"reused result has different dataset bytes for {dataset.name}"
+        )
+    if result.get("query_text_limit") != max_query_chars:
+        raise ValueError(
+            f"reused result has different query text limit for {dataset.name}/{mode}"
         )
 
 
@@ -304,6 +326,7 @@ def main() -> int:
     )
     parser.add_argument("--modes", default="lexical,hash,hybrid")
     parser.add_argument("--runs", type=int, default=3)
+    parser.add_argument("--max-query-chars", type=int)
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--skip-export", action="store_true")
     parser.add_argument(
@@ -323,6 +346,7 @@ def main() -> int:
     manifest = export_public_retrieval.load_manifest(args.manifest)
     tasks = export_public_retrieval.selected_tasks(manifest, args.profile, [])
     modes = parse_modes(args.modes)
+    max_query_chars = query_text_limit(manifest, args.profile, args.max_query_chars)
     args.datasets_root.mkdir(parents=True, exist_ok=True)
     args.work_root.mkdir(parents=True, exist_ok=True)
 
@@ -363,9 +387,17 @@ def main() -> int:
                         dataset,
                         mode,
                         binary_sha256,
+                        max_query_chars,
                     )
                 else:
-                    result = run_evaluation(root, dataset, binary, mode, result_path)
+                    result = run_evaluation(
+                        root,
+                        dataset,
+                        binary,
+                        mode,
+                        result_path,
+                        max_query_chars,
+                    )
                 result["run"] = run_number
                 results.append(result)
 
@@ -384,6 +416,7 @@ def main() -> int:
             )
         },
         "profile": args.profile,
+        "query_text_limit": max_query_chars,
         "tasks": tasks,
         "modes": modes,
         "repetitions": args.runs,

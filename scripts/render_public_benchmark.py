@@ -54,6 +54,16 @@ def format_bytes(value: float) -> str:
     raise AssertionError("unreachable")
 
 
+def report_slug(matrix: dict) -> str:
+    if matrix["profile"] == "public-core":
+        return "public-code-retrieval"
+    return f"public-{matrix['profile']}"
+
+
+def default_output_name(matrix: dict) -> str:
+    return f"{report_slug(matrix)}-results.json"
+
+
 def markdown(matrix: dict, baseline: dict | None = None) -> str:
     lines = [
         "# Public code-retrieval benchmark",
@@ -67,12 +77,18 @@ def markdown(matrix: dict, baseline: dict | None = None) -> str:
         f"- Languages: {len(matrix.get('languages', []))}",
         f"- Held-out queries: {matrix['queries']}",
         f"- Repetitions: {matrix['repetitions']}",
-        "",
-        "## Aggregate results",
-        "",
-        "| Mode | nDCG@10 | MRR@10 | P@5 | R@20 | Warm p95 | Index time | Index size | Peak RSS |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
+    if matrix.get("query_text_limit") is not None:
+        lines.append(f"- Query text limit: {matrix['query_text_limit']} characters")
+    lines.extend(
+        (
+            "",
+            "## Aggregate results",
+            "",
+            "| Mode | nDCG@10 | MRR@10 | P@5 | R@20 | Warm p95 | Index time | Index size | Peak RSS |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        )
+    )
     for mode in matrix["modes"]:
         lines.append(
             "| "
@@ -188,6 +204,20 @@ def markdown(matrix: dict, baseline: dict | None = None) -> str:
                     )
                     + " |"
                 )
+    reproduce_command = [
+        "uv run scripts/run_public_benchmark_matrix.py \\",
+        f"  --profile {matrix['profile']} \\",
+        f"  --modes {','.join(matrix['modes'])} \\",
+        f"  --runs {matrix['repetitions']} \\",
+        "  --datasets-root /tmp/ivygrep-public-datasets \\",
+        "  --work-root /tmp/ivygrep-public-results \\",
+        f"  --output {default_output_name(matrix)}",
+    ]
+    if matrix.get("query_text_limit") is not None:
+        reproduce_command.insert(
+            -1,
+            f"  --max-query-chars {matrix['query_text_limit']} \\",
+        )
     lines.extend(
         (
             "",
@@ -204,13 +234,7 @@ def markdown(matrix: dict, baseline: dict | None = None) -> str:
             "## Reproduce",
             "",
             "```bash",
-            "uv run scripts/run_public_benchmark_matrix.py \\",
-            "  --profile public-core \\",
-            f"  --modes {','.join(matrix['modes'])} \\",
-            "  --runs 3 \\",
-            "  --datasets-root /tmp/ivygrep-public-datasets \\",
-            "  --work-root /tmp/ivygrep-public-results \\",
-            "  --output public-code-retrieval-results.json",
+            *reproduce_command,
             "```",
             "",
             "Use `--modes lexical,hash,hybrid,neural` with a default-feature "
@@ -272,6 +296,14 @@ def html(matrix: dict, baseline: dict | None = None) -> str:
             <h2>Change from frozen baseline</h2>
             <p><code>{escape(current_mode)}</code> improves nDCG@10 by {ndcg_change:+.2%} and MRR@10 by {mrr_change:+.2%} over <code>{escape(baseline_mode)}</code> at commit <code>{escape(baseline["ivygrep_commit"][:12])}</code>. The raw JSON retains every task and run.</p>
         </section>"""
+    slug = report_slug(matrix)
+    query_text_limit = matrix.get("query_text_limit")
+    query_limit_stat = (
+        f"""            <div class="report-stat"><strong>{escape(str(query_text_limit))}</strong><span>query char limit</span></div>
+"""
+        if query_text_limit is not None
+        else ""
+    )
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -289,18 +321,19 @@ def html(matrix: dict, baseline: dict | None = None) -> str:
     <main class="report-shell relative z-10">
         <nav class="report-nav">
             <a class="report-brand" href="../"><img src="../assets/icon.svg" alt="ivygrep"><span>ivygrep benchmarks</span></a>
-            <div class="report-links"><a href="index.html">Reports</a><a href="public-code-retrieval-results.json">Raw JSON</a><a href="https://github.com/bvolpato/ivygrep/blob/main/docs/benchmarks/public-code-retrieval.md">Source</a></div>
+            <div class="report-links"><a href="index.html">Reports</a><a href="{escape(default_output_name(matrix))}">Raw JSON</a><a href="https://github.com/bvolpato/ivygrep/blob/main/docs/benchmarks/{escape(slug)}.md">Source</a></div>
         </nav>
         <section class="report-hero">
             <div class="report-eyebrow">Pinned Public Evidence</div>
             <h1>Code-retrieval quality and cost</h1>
-            <p>{matrix["queries"]} held-out queries across {len(matrix["tasks"])} public CoIR tasks, repeated {matrix["repetitions"]} times. No private corpus or local path is included.</p>
+            <p>Profile <code>{escape(matrix["profile"])}</code>: {matrix["queries"]} held-out queries across {len(matrix["tasks"])} public CoIR tasks, repeated {matrix["repetitions"]} times. No private corpus or local path is included.</p>
         </section>
         <section class="report-grid">
             <div class="report-stat"><strong>{matrix["queries"]}</strong><span>held-out queries</span></div>
             <div class="report-stat"><strong>{len(matrix["tasks"])}</strong><span>public tasks</span></div>
             <div class="report-stat"><strong>{len(matrix.get("languages", []))}</strong><span>languages</span></div>
             <div class="report-stat"><strong>{matrix["repetitions"]}</strong><span>repetitions</span></div>
+{query_limit_stat.rstrip()}
         </section>
         <section class="report-card">
             <h2>Aggregate results</h2>
