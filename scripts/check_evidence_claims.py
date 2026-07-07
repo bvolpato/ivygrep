@@ -18,6 +18,17 @@ REGULATED = {
     "portable": re.compile(r"\bportable\b", re.IGNORECASE),
 }
 
+CLAIM_CONTROL_FILES = {
+    "claims-policy.md",
+    "evidence-dashboard.html",
+    "evidence-dashboard.json",
+    "evidence-dashboard.md",
+}
+
+
+def scans_regulated_claims(path: Path) -> bool:
+    return path.name not in CLAIM_CONTROL_FILES
+
 
 def check(dashboard: dict, marketing_paths: list[Path]) -> list[str]:
     failures = []
@@ -25,6 +36,8 @@ def check(dashboard: dict, marketing_paths: list[Path]) -> list[str]:
         if dashboard["claims"][claim]["supported"]:
             continue
         for path in marketing_paths:
+            if not scans_regulated_claims(path):
+                continue
             text = path.read_text(encoding="utf-8")
             if pattern.search(text):
                 failures.append(f"{path}: unsupported {claim} claim")

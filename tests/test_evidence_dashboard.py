@@ -162,6 +162,28 @@ class EvidenceDashboardTest(unittest.TestCase):
             path.write_text("state-of-the-art search", encoding="utf-8")
             self.assertTrue(claims.check(dashboard, [path]))
 
+    def test_claim_control_files_can_describe_claim_policy(self) -> None:
+        dashboard = {
+            "claims": {
+                "state_of_the_art": {"supported": False},
+                "competitive": {"supported": False},
+                "portable": {"supported": True},
+            },
+            "evidence": [
+                {
+                    "id": "daemon-cache",
+                    "summary": {"retained_warm_p95_ms": 4.9},
+                }
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "claims-policy.md"
+            path.write_text(
+                "State of the art: not claimed\nCompetitive: not claimed\n",
+                encoding="utf-8",
+            )
+            self.assertFalse(claims.check(dashboard, [path]))
+
     def test_sub_100_ms_claim_requires_matching_evidence(self) -> None:
         dashboard = {
             "claims": {
