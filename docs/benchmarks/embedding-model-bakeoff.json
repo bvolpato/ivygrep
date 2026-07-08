@@ -254,7 +254,7 @@
       },
       "profile": "code-minilm-l6-v1",
       "queries": 25,
-      "reason": "Crossed both laptop screening limits on its first completed task; the partial quality result is not an aggregate claim.",
+      "reason": "Crossed both laptop screening limits on its first completed task; the partial quality result is a single-task result.",
       "repetitions": 1,
       "source": "https://huggingface.co/isuruwijesiri/all-MiniLM-L6-v2-code-search-512",
       "status": "rejected",

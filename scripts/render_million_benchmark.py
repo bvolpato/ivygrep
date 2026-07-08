@@ -356,8 +356,8 @@ public retrieval quality.
 
 The paired run alternated request order evenly while both daemons were live.
 The host load average was {load[0]:.1f}/{load[1]:.1f}/{load[2]:.1f} on
-{paired_current_cpu_count(report)} logical CPUs, so the absolute latency is not
-a dedicated-host claim.
+{paired_current_cpu_count(report)} logical CPUs, so absolute latency should be
+read as workstation load, not dedicated-host latency.
 
 ## Controlled indexing
 

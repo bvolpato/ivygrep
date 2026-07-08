@@ -22,7 +22,7 @@
       "status": "rejected",
       "source": "https://huggingface.co/isuruwijesiri/all-MiniLM-L6-v2-code-search-512",
       "license": "Apache-2.0",
-      "reason": "Crossed both laptop screening limits on its first completed task; the partial quality result is not an aggregate claim."
+      "reason": "Crossed both laptop screening limits on its first completed task; the partial quality result is a single-task result."
     },
     "code-minilm-l12-v1": {
       "status": "resource-stop",

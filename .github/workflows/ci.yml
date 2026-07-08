@@ -56,15 +56,13 @@ jobs:
       - name: Test Python harnesses
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
 
-      - name: Verify generated evidence and claims
+      - name: Verify generated benchmark dashboard
         run: |
           python3 scripts/render_evidence_dashboard.py
-          python3 scripts/check_evidence_claims.py
           git diff --exit-code -- \
             docs/benchmarks/evidence-dashboard.json \
             docs/benchmarks/evidence-dashboard.md \
-            docs/benchmarks/evidence-dashboard.html \
-            docs/benchmarks/claims-policy.md
+            docs/benchmarks/evidence-dashboard.html
 
       - name: Clippy lints
         run: |

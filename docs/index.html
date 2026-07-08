@@ -305,14 +305,14 @@
         <div class="section-header">
             <span class="section-tag">Architecture</span>
             <h2 class="section-title text-center">Two-tier hybrid index</h2>
-            <p class="text-center subtitle-small">BM25 and literal search are available first; background jobs add vector quality.</p>
+            <p class="text-center subtitle-small">BM25 and literal search are available first; background jobs add hash and neural vectors.</p>
         </div>
 
         <div class="flow-diagram glass-panel fade-in-scroll mt-4">
             <div class="flow-step">
                 <div class="flow-icon pulse-glow">1</div>
-                <h4>Hash index</h4>
-                <p>Sub-second indexing via 128-bit xxh3 SIMD structural hashes. Instant search availability.</p>
+                <h4>Lexical index</h4>
+                <p>File chunks go into SQLite and Tantivy first, so search works before vector jobs finish.</p>
             </div>
             <div class="flow-arrow">
                 <svg width="40" height="20" viewBox="0 0 40 20" fill="none"><path d="M0 10h35M30 5l5 5-5 5" stroke="currentColor" stroke-width="2"/></svg>
@@ -320,15 +320,15 @@
             <div class="flow-step">
                 <div class="flow-icon pulse-glow">2</div>
                 <h4>Hybrid fusion</h4>
-                <p>Lexical BM25 (Tantivy) and semantic ANN (USearch) fuse via Reciprocal Rank Fusion for high-precision results.</p>
+                <p>BM25, literal matches, symbols, paths, and vector hits combine through Reciprocal Rank Fusion.</p>
             </div>
             <div class="flow-arrow">
                 <svg width="40" height="20" viewBox="0 0 40 20" fill="none"><path d="M0 10h35M30 5l5 5-5 5" stroke="currentColor" stroke-width="2"/></svg>
             </div>
             <div class="flow-step">
                 <div class="flow-icon pulse-glow">3</div>
-                <h4>Neural enhancement</h4>
-                <p>Background daemon upgrades to locally cached 256-dimensional static-retrieval-v1 vectors. macOS releases use Accelerate-backed CPU math; the shell installer can select Apple Silicon Metal or Linux CUDA archives when available.</p>
+                <h4>Local vectors</h4>
+                <p>The daemon adds hash vectors and locally cached 256-dimensional static-retrieval-v1 vectors in the background. macOS releases use Accelerate-backed CPU math; the shell installer can select Apple Silicon Metal or Linux CUDA archives when available.</p>
             </div>
         </div>
 
@@ -386,7 +386,7 @@
             <p class="benchmark-links" aria-label="Benchmark evidence links">
                 <a href="benchmarks/public-million.html">Public million-chunk benchmark</a>
                 <a href="benchmarks/public-sota-challenge.html">Challenge retrieval benchmark</a>
-                <a href="benchmarks/evidence-dashboard.html">Evidence dashboard</a>
+                <a href="benchmarks/evidence-dashboard.html">Benchmark dashboard</a>
                 <a href="benchmarks/index.html">Benchmark reports</a>
             </p>
         </div>
@@ -413,7 +413,7 @@
                 </div>
             </div>
             <div class="glass-panel fade-in-scroll">
-                <h3>v1.0.0 Local Smoke</h3>
+                <h3>v1.0.0 local smoke</h3>
                 <p class="text-xs opacity-70 mb-2">release binary, this workstation</p>
                 <div class="perf-bar-group">
                     <div class="perf-label">30k fresh index</div>
@@ -609,7 +609,7 @@
     <!-- Install -->
     <section id="install" class="container relative z-10 section-spacing">
         <div class="section-header">
-            <span class="section-tag">Get Started</span>
+            <span class="section-tag">Get started</span>
             <h2 class="section-title text-center">Install ivygrep</h2>
             <p class="text-center subtitle-small">One command installs the latest release, verifies its SHA-256 checksum, and uses Metal or CUDA archives when the host supports them.</p>
         </div>
@@ -639,7 +639,7 @@
         </div>
 
         <div class="glass-panel fade-in-scroll mt-4 quickstart-panel">
-            <h3 class="text-center" style="margin-bottom: 1.5rem;">Quick Start</h3>
+            <h3 class="text-center" style="margin-bottom: 1.5rem;">Quick start</h3>
             <div class="quickstart-grid">
                 <div class="quickstart-step">
                     <span class="quickstart-number">1</span>

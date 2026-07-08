@@ -226,10 +226,10 @@ def markdown(matrix: dict, baseline: dict | None = None) -> str:
             "",
             "## Interpretation",
             "",
-            "These numbers establish a reproducible baseline; they are not a "
-            "state-of-the-art claim. Exact-search systems are only comparable on "
-            "exact-query workloads, while this matrix evaluates code information "
-            "retrieval using held-out natural-language and code-to-code queries.",
+            "These numbers are reproducible baselines. Exact-search systems are "
+            "only comparable on exact-query workloads, while this matrix evaluates "
+            "code information retrieval using held-out natural-language and "
+            "code-to-code queries.",
             "",
             "## Reproduce",
             "",
@@ -353,8 +353,8 @@ def html(matrix: dict, baseline: dict | None = None) -> str:
             <p>Every retained task remains visible so aggregate improvements cannot hide regressions.</p>
         </section>
         <section class="report-card">
-            <h2>Claim boundary</h2>
-            <p>This is a reproducible baseline, not a state-of-the-art claim. Exact-search tools are only compared on exact-query workloads; this matrix covers held-out natural-language and code-to-code retrieval. Neural and external embedding upper bounds use the same matrix when their profiles are evaluated.</p>
+            <h2>Scope</h2>
+            <p>These numbers are reproducible baselines. Exact-search tools are only compared on exact-query workloads; this matrix covers held-out natural-language and code-to-code retrieval. Neural and external embedding upper bounds use the same matrix when their profiles are evaluated.</p>
         </section>
     </main>
 </body>

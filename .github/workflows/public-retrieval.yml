@@ -14,7 +14,6 @@ on:
       - "scripts/render_embedding_bakeoff.py"
       - "scripts/render_million_benchmark.py"
       - "scripts/render_evidence_dashboard.py"
-      - "scripts/check_evidence_claims.py"
       - "scripts/normalize_release_history.py"
       - "scripts/render_public_benchmark.py"
       - "scripts/check_public_benchmark_privacy.py"
@@ -25,7 +24,6 @@ on:
       - "benchmarks/evidence/**"
       - "docs/benchmarks/public-million*"
       - "docs/benchmarks/evidence-dashboard*"
-      - "docs/benchmarks/claims-policy.md"
       - "docs/benchmarks/release-artifact-history.json"
       - ".github/workflows/public-retrieval.yml"
   schedule:
@@ -76,15 +74,13 @@ jobs:
             tests.test_evidence_dashboard \
             -v
 
-      - name: Verify evidence dashboard and claims
+      - name: Verify benchmark dashboard
         run: |
           python3 scripts/render_evidence_dashboard.py
-          python3 scripts/check_evidence_claims.py
           git diff --exit-code -- \
             docs/benchmarks/evidence-dashboard.json \
             docs/benchmarks/evidence-dashboard.md \
-            docs/benchmarks/evidence-dashboard.html \
-            docs/benchmarks/claims-policy.md
+            docs/benchmarks/evidence-dashboard.html
 
       - name: Check publishable documentation privacy
         run: |
@@ -116,7 +112,6 @@ jobs:
             docs/benchmarks/evidence-dashboard.json \
             docs/benchmarks/evidence-dashboard.md \
             docs/benchmarks/evidence-dashboard.html \
-            docs/benchmarks/claims-policy.md \
             docs/benchmarks/release-artifact-history.json
 
   matrix:

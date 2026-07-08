@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the evidence dashboard from retained machine-readable artifacts."""
+"""Render benchmark history from retained machine-readable artifacts."""
 
 from __future__ import annotations
 
@@ -388,9 +388,8 @@ def build_histories(evidence: list[dict], release_history: dict) -> dict:
     return histories
 
 
-def build_dashboard(root: Path, manifest_path: Path, claims_path: Path) -> dict:
+def build_dashboard(root: Path, manifest_path: Path) -> dict:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    claims = json.loads(claims_path.read_text(encoding="utf-8"))
     evidence = []
     for item in manifest["evidence"]:
         path = root / item["path"]
@@ -418,44 +417,6 @@ def build_dashboard(root: Path, manifest_path: Path, claims_path: Path) -> dict:
         release_history_path,
         manifest.get("release_history_publication_commit"),
     )
-    by_id = {item["id"]: item for item in evidence}
-    million = by_id["million-scale"]["summary"]
-    release_gate = by_id["release-workflow"]["summary"]["artifact_acceptance"]
-    portability = claims["claims"]["portable"]
-    portable_supported = (
-        portability["status"] == "qualified"
-        and release_gate
-        and by_id["release-workflow"]["summary"]["release_targets"]
-        == portability["required_release_targets"]
-        and by_id["release-workflow"]["summary"]["sbom"]
-        and by_id["release-workflow"]["summary"]["provenance"]
-    )
-    pareto_advantage = (
-        million.get("warm_speedup", 0) >= 2.0
-        or million.get("index_size_ratio", 1.0) <= 0.60
-    )
-    top_tier_quality = any(
-        comparison["class"] == "semantic-retrieval"
-        and comparison["status"] == "available"
-        and comparison.get("top_tier", False)
-        for comparison in claims["comparisons"]
-    )
-    claim_status = {
-        "portable": {
-            **portability,
-            "supported": portable_supported,
-        },
-        "competitive": {
-            **claims["claims"]["competitive"],
-            "supported": False,
-        },
-        "state_of_the_art": {
-            **claims["claims"]["state_of_the_art"],
-            "pareto_advantage": pareto_advantage,
-            "top_tier_public_quality": top_tier_quality,
-            "supported": pareto_advantage and top_tier_quality,
-        },
-    }
     return {
         "schema_version": 1,
         "evidence": evidence,
@@ -470,8 +431,6 @@ def build_dashboard(root: Path, manifest_path: Path, claims_path: Path) -> dict:
             ),
         },
         "histories": build_histories(evidence, release_history),
-        "comparisons": claims["comparisons"],
-        "claims": claim_status,
     }
 
 
@@ -510,7 +469,6 @@ def render_markdown(dashboard: dict) -> str:
     million = by_id["million-scale"]["summary"]
     reranker = by_id["learned-reranker"]["summary"]
     daemon = by_id["daemon-cache"]["summary"]
-    claims = dashboard["claims"]
     releases = dashboard["release_history"]["releases"]
     latest_release = releases[0] if releases else None
     release_text = (
@@ -518,10 +476,6 @@ def render_markdown(dashboard: dict) -> str:
         f"{len(latest_release['archives'])} archives"
         if latest_release
         else "unavailable"
-    )
-    comparison_rows = "\n".join(
-        f"| {item['class']} | {item['status']} | {item['reason']} |"
-        for item in dashboard["comparisons"]
     )
     history_rows = "\n".join(
         f"| {name.replace('_', ' ')} | {len(points)} | "
@@ -554,10 +508,10 @@ def render_markdown(dashboard: dict) -> str:
                 f"[source]({point['immutable_url']}) |"
             )
     rendered_points = "\n".join(point_rows)
-    return f"""# Evidence dashboard
+    return f"""# Benchmark dashboard
 
-This page is generated from retained machine-readable benchmark and release
-artifacts. Every evidence link is pinned to the commit that published its bytes.
+This page is generated from retained benchmark and release artifacts. Every
+artifact link is pinned to the commit that published its bytes.
 
 | Area | Latest retained result |
 |---|---|
@@ -581,24 +535,6 @@ reason, source commit, and immutable artifact URL.
 | Family | Comparable series | Revision/tag | Value | Variance | Artifact |
 |---|---|---|---:|---|---|
 {rendered_points}
-
-## Claim status
-
-- Portable: **{"supported" if claims["portable"]["supported"] else "not supported"}** under the qualified five-target artifact definition.
-- Competitive: **not claimed** without a controlled comparable-system result.
-- State of the art: **not claimed**. Pareto evidence is
-  {"present" if claims["state_of_the_art"]["pareto_advantage"] else "absent"},
-  while a top-tier comparable public result is
-  {"present" if claims["state_of_the_art"]["top_tier_public_quality"] else "unavailable"}.
-
-## Comparable-system evidence
-
-| Class | Status | Reason |
-|---|---|---|
-{comparison_rows}
-
-Regressions and unavailable comparisons remain listed; the renderer never
-deletes them to improve the presentation.
 
 ## Immutable source artifacts
 
@@ -627,14 +563,6 @@ def render_html(dashboard: dict, markdown: str) -> str:
         f"<td><code>{escape(release_history_artifact['sha256'][:16])}</code></td>"
         "</tr>"
     )
-    comparison_rows = "".join(
-        "<tr>"
-        f"<td>{escape(item['class'])}</td>"
-        f"<td>{escape(item['status'])}</td>"
-        f"<td>{escape(item['reason'])}</td>"
-        "</tr>"
-        for item in dashboard["comparisons"]
-    )
     history_rows = "".join(
         "<tr>"
         f"<td>{escape(name.replace('_', ' '))}</td>"
@@ -662,7 +590,16 @@ def render_html(dashboard: dict, markdown: str) -> str:
                 "</tr>"
             )
     rendered_points = "".join(point_rows)
-    claims = dashboard["claims"]
+    retrieval = next(
+        item["summary"]
+        for item in dashboard["evidence"]
+        if item["id"] == "public-retrieval-compact-current"
+    )
+    daemon = next(
+        item["summary"]
+        for item in dashboard["evidence"]
+        if item["id"] == "daemon-cache"
+    )
     million = next(
         item["summary"]
         for item in dashboard["evidence"]
@@ -673,52 +610,28 @@ def render_html(dashboard: dict, markdown: str) -> str:
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ivygrep evidence dashboard</title>
-  <meta name="description" content="Immutable quality, latency, footprint, portability, and release evidence for ivygrep.">
+  <title>ivygrep benchmark dashboard</title>
+  <meta name="description" content="Quality, latency, footprint, and release metrics for ivygrep.">
   <link rel="stylesheet" href="../style.css">
   <link rel="stylesheet" href="report.css">
 </head>
 <body class="report-page">
   <main class="report-shell relative z-10">
-    <nav class="report-nav"><a class="report-brand" href="index.html">ivygrep benchmarks</a><div class="report-links"><a href="evidence-dashboard.json">Raw JSON</a><a href="claims-policy.md">Claim policy</a></div></nav>
-    <section class="report-hero"><div class="report-eyebrow">Generated evidence</div><h1>Claim dashboard</h1><p>Commit-pinned artifacts, visible regressions, and explicit unavailable comparisons.</p></section>
+    <nav class="report-nav"><a class="report-brand" href="index.html">ivygrep benchmarks</a><div class="report-links"><a href="evidence-dashboard.json">Raw JSON</a></div></nav>
+    <section class="report-hero"><div class="report-eyebrow">Retained numbers</div><h1>Benchmark dashboard</h1><p>Quality, latency, indexing, memory, footprint, and release metrics.</p></section>
     <section class="report-grid">
+      <article class="report-card"><h2>nDCG@10</h2><div class="metric-value">{retrieval['ndcg_at_10']:.4f}</div></article>
       <article class="report-card"><h2>Warm speedup</h2><div class="metric-value">{million['warm_speedup']:.2f}x</div></article>
       <article class="report-card"><h2>Index footprint</h2><div class="metric-value">{(1.0 - million['index_size_ratio']) * 100:.1f}% smaller</div></article>
-      <article class="report-card"><h2>Portable</h2><div class="metric-value">{"qualified" if claims['portable']['supported'] else "not proven"}</div></article>
-      <article class="report-card"><h2>SOTA</h2><div class="metric-value">{"supported" if claims['state_of_the_art']['supported'] else "not claimed"}</div></article>
+      <article class="report-card"><h2>Daemon p95</h2><div class="metric-value">{daemon['retained_warm_p95_ms']:.2f} ms</div></article>
     </section>
-    <section class="report-card"><h2>Immutable evidence</h2><div class="table-wrap"><table><thead><tr><th>Evidence</th><th>Kind</th><th>Publication</th><th>SHA-256</th></tr></thead><tbody>{evidence_rows}</tbody></table></div></section>
+    <section class="report-card"><h2>Benchmark artifacts</h2><div class="table-wrap"><table><thead><tr><th>Artifact</th><th>Kind</th><th>Publication</th><th>SHA-256</th></tr></thead><tbody>{evidence_rows}</tbody></table></div></section>
     <section class="report-card"><h2>Versioned histories</h2><p>Every point carries unit, context, variance status, and immutable source metadata in the raw JSON.</p><div class="table-wrap"><table><thead><tr><th>Metric family</th><th>Points</th><th>Unavailable</th></tr></thead><tbody>{history_rows}</tbody></table></div></section>
     <section class="report-card"><h2>History points</h2><div class="table-wrap"><table><thead><tr><th>Family</th><th>Comparable series</th><th>Revision/tag</th><th>Value</th><th>Variance</th><th>Artifact</th></tr></thead><tbody>{rendered_points}</tbody></table></div></section>
-    <section class="report-card"><h2>Comparable systems</h2><div class="table-wrap"><table><thead><tr><th>Class</th><th>Status</th><th>Reason</th></tr></thead><tbody>{comparison_rows}</tbody></table></div></section>
   </main>
   <!-- Markdown source length: {len(markdown)} -->
 </body>
 </html>
-"""
-
-
-def render_policy(dashboard: dict) -> str:
-    claims = dashboard["claims"]
-    return f"""# Evidence claim policy
-
-The dashboard applies these definitions mechanically:
-
-- **Portable:** {claims['portable']['definition']}
-- **Competitive:** {claims['competitive']['definition']}
-- **State of the art:** {claims['state_of_the_art']['definition']}
-
-Current status:
-
-- Portable: {"supported" if claims['portable']['supported'] else "not supported"}
-- Competitive: not claimed
-- State of the art: not claimed
-
-Exact search is compared only with exact-search systems. Semantic retrieval is
-compared only with local semantic systems under a comparable corpus, model
-budget, hardware class, and resource budget. Missing comparisons remain
-`unavailable`; they are not inferred from unrelated benchmark numbers.
 """
 
 
@@ -729,11 +642,6 @@ def main() -> int:
         "--manifest",
         type=Path,
         default=root / "benchmarks" / "evidence" / "manifest.json",
-    )
-    parser.add_argument(
-        "--claims",
-        type=Path,
-        default=root / "benchmarks" / "evidence" / "claims.json",
     )
     parser.add_argument(
         "--json",
@@ -750,15 +658,10 @@ def main() -> int:
         type=Path,
         default=root / "docs" / "benchmarks" / "evidence-dashboard.html",
     )
-    parser.add_argument(
-        "--policy",
-        type=Path,
-        default=root / "docs" / "benchmarks" / "claims-policy.md",
-    )
     args = parser.parse_args()
-    dashboard = build_dashboard(root, args.manifest, args.claims)
+    dashboard = build_dashboard(root, args.manifest)
     markdown = render_markdown(dashboard)
-    for path in (args.json, args.markdown, args.html, args.policy):
+    for path in (args.json, args.markdown, args.html):
         path.parent.mkdir(parents=True, exist_ok=True)
     args.json.write_text(
         json.dumps(dashboard, indent=2, sort_keys=True) + "\n",
@@ -766,7 +669,6 @@ def main() -> int:
     )
     args.markdown.write_text(markdown, encoding="utf-8")
     args.html.write_text(render_html(dashboard, markdown), encoding="utf-8")
-    args.policy.write_text(render_policy(dashboard), encoding="utf-8")
     return 0
 
 

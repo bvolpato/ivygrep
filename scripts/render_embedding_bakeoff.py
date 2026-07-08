@@ -236,10 +236,10 @@ def markdown(report: dict) -> str:
             "The static retrieval profile is the portable Pareto winner and the only "
             "candidate promoted through the complete screening matrix. Transformer "
             "candidates that crossed a laptop screening limit were stopped after one "
-            "completed task, so their partial results are not aggregate quality claims.",
+            "completed task, so their partial results stay single-task results.",
             "",
             "The selected model was promoted to the full 1,000-query public matrix; "
-            "screening-only results are not used as headline quality claims.",
+            "screening-only results are not used as headline quality numbers.",
             "",
             "## Reproduce",
             "",
@@ -308,8 +308,8 @@ def html(report: dict) -> str:
       </table></div>
     </section>
     <section class="report-card">
-      <h2>Claim boundary</h2>
-      <p>The static profile is the only candidate that completed the screening matrix within the declared laptop budget. Resource-stopped rows are single-task observations, not aggregate quality claims.</p>
+      <h2>Scope</h2>
+      <p>The static profile is the only candidate that completed the screening matrix within the declared laptop budget. Resource-stopped rows are single-task observations.</p>
     </section>
   </main>
 </body>

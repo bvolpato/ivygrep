@@ -20,7 +20,6 @@ def load_script(name: str):
     return module
 
 
-claims = load_script("check_evidence_claims")
 history = load_script("normalize_release_history")
 renderer = load_script("render_evidence_dashboard")
 
@@ -144,84 +143,32 @@ class EvidenceDashboardTest(unittest.TestCase):
         self.assertTrue(summary["sbom"])
         self.assertTrue(summary["provenance"])
 
-    def test_unsupported_marketing_claim_is_rejected(self) -> None:
-        dashboard = {
-            "claims": {
-                "state_of_the_art": {"supported": False},
-                "competitive": {"supported": False},
-                "portable": {"supported": True},
-            },
-            "evidence": [
-                {
-                    "id": "daemon-cache",
-                    "summary": {"retained_warm_p95_ms": 4.9},
-                }
-            ],
-        }
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "README.md"
-            path.write_text("state-of-the-art search", encoding="utf-8")
-            self.assertTrue(claims.check(dashboard, [path]))
-
-    def test_sota_challenge_profile_slug_is_not_a_claim(self) -> None:
-        dashboard = {
-            "claims": {
-                "state_of_the_art": {"supported": False},
-                "competitive": {"supported": False},
-                "portable": {"supported": True},
-            },
-            "evidence": [
-                {
-                    "id": "daemon-cache",
-                    "summary": {"retained_warm_p95_ms": 4.9},
-                }
-            ],
-        }
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "README.md"
-            path.write_text("--profile sota-challenge\n", encoding="utf-8")
-            self.assertFalse(claims.check(dashboard, [path]))
-
-    def test_claim_control_files_can_describe_claim_policy(self) -> None:
-        dashboard = {
-            "claims": {
-                "state_of_the_art": {"supported": False},
-                "competitive": {"supported": False},
-                "portable": {"supported": True},
-            },
-            "evidence": [
-                {
-                    "id": "daemon-cache",
-                    "summary": {"retained_warm_p95_ms": 4.9},
-                }
-            ],
-        }
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "claims-policy.md"
-            path.write_text(
-                "State of the art: not claimed\nCompetitive: not claimed\n",
-                encoding="utf-8",
+    def test_dashboard_output_is_metrics_only(self) -> None:
+        dashboard = json.loads(
+            (ROOT / "docs" / "benchmarks" / "evidence-dashboard.json").read_text(
+                encoding="utf-8"
             )
-            self.assertFalse(claims.check(dashboard, [path]))
-
-    def test_sub_100_ms_claim_requires_matching_evidence(self) -> None:
-        dashboard = {
-            "claims": {
-                "state_of_the_art": {"supported": False},
-                "competitive": {"supported": False},
-                "portable": {"supported": True},
+        )
+        html = (
+            ROOT / "docs" / "benchmarks" / "evidence-dashboard.html"
+        ).read_text(encoding="utf-8")
+        markdown = (
+            ROOT / "docs" / "benchmarks" / "evidence-dashboard.md"
+        ).read_text(encoding="utf-8")
+        self.assertEqual(
+            {
+                "evidence",
+                "histories",
+                "release_history",
+                "release_history_artifact",
+                "schema_version",
             },
-            "evidence": [
-                {
-                    "id": "daemon-cache",
-                    "summary": {"retained_warm_p95_ms": 120.0},
-                }
-            ],
-        }
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "site.html"
-            path.write_text("Sub-100-ms warm daemon replay", encoding="utf-8")
-            self.assertTrue(claims.check(dashboard, [path]))
+            set(dashboard),
+        )
+        self.assertIn("Benchmark dashboard", html)
+        self.assertIn("nDCG@10", html)
+        self.assertIn("Daemon p95", html)
+        self.assertNotIn("policy", html.lower())
 
 
 if __name__ == "__main__":

@@ -52,7 +52,7 @@ Variance is recorded in the machine-readable JSON as population standard deviati
 
 ## Interpretation
 
-These numbers establish a reproducible baseline; they are not a state-of-the-art claim. Exact-search systems are only comparable on exact-query workloads, while this matrix evaluates code information retrieval using held-out natural-language and code-to-code queries.
+These numbers are reproducible baselines. Exact-search systems are only comparable on exact-query workloads, while this matrix evaluates code information retrieval using held-out natural-language and code-to-code queries.
 
 ## Reproduce
 

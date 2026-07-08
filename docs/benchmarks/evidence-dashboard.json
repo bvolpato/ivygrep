@@ -1,36 +1,4 @@
 {
-  "claims": {
-    "competitive": {
-      "definition": "A controlled public comparison against a comparable local system is available for the same retrieval mode, corpus, hardware class, and resource budget.",
-      "status": "not-claimed",
-      "supported": false
-    },
-    "portable": {
-      "definition": "The downloaded archives execute the documented offline procedure on all six supported targets, with baseline x86 ISA enforcement and no runtime toolchain or service dependency.",
-      "required_release_targets": 6,
-      "status": "qualified",
-      "supported": true
-    },
-    "state_of_the_art": {
-      "definition": "A top-tier public quality result and a documented Pareto advantage in local latency, footprint, or portability are both present.",
-      "pareto_advantage": true,
-      "status": "not-claimed",
-      "supported": false,
-      "top_tier_public_quality": false
-    }
-  },
-  "comparisons": [
-    {
-      "class": "exact-search",
-      "reason": "No retained same-hardware exact-search comparison is available.",
-      "status": "unavailable"
-    },
-    {
-      "class": "semantic-retrieval",
-      "reason": "No retained external local semantic system uses the same corpus, model budget, and hardware.",
-      "status": "unavailable"
-    }
-  ],
   "evidence": [
     {
       "id": "public-retrieval-baseline",
@@ -546,7 +514,7 @@
       "label": "Portable embedding model selection",
       "path": "docs/benchmarks/embedding-model-bakeoff.json",
       "publication_commit": "262cb61f70624a8d0f10844d204ae7593a85a6d8",
-      "sha256": "5b3596feabcdfa836f2c8cea094b4f14db7e91a3cb1bce7b77a8ae47f7de109a",
+      "sha256": "ff4aeb3e5d11db059dd83af43b1122539d975013a16691e0e507b2127a47a337",
       "source_commit": "2c735847d43edbe8a31d516b0fbb7c22b20105c2",
       "summary": {
         "candidates": 7,

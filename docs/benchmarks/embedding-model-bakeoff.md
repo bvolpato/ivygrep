@@ -18,9 +18,9 @@ Generated from pinned public CoIR samples. No private corpus, local path, hostna
 
 ## Decision
 
-The static retrieval profile is the portable Pareto winner and the only candidate promoted through the complete screening matrix. Transformer candidates that crossed a laptop screening limit were stopped after one completed task, so their partial results are not aggregate quality claims.
+The static retrieval profile is the portable Pareto winner and the only candidate promoted through the complete screening matrix. Transformer candidates that crossed a laptop screening limit were stopped after one completed task, so their partial results stay single-task results.
 
-The selected model was promoted to the full 1,000-query public matrix; screening-only results are not used as headline quality claims.
+The selected model was promoted to the full 1,000-query public matrix; screening-only results are not used as headline quality numbers.
 
 ## Reproduce
 

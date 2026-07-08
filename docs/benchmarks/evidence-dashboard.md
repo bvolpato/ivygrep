@@ -1,7 +1,7 @@
-# Evidence dashboard
+# Benchmark dashboard
 
-This page is generated from retained machine-readable benchmark and release
-artifacts. Every evidence link is pinned to the commit that published its bytes.
+This page is generated from retained benchmark and release artifacts. Every
+artifact link is pinned to the commit that published its bytes.
 
 | Area | Latest retained result |
 |---|---|
@@ -939,31 +939,12 @@ reason, source commit, and immutable artifact URL.
 | archive size | release/macos-aarch64 | v0.5.2 | 14.33 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.2/ivygrep-v0.5.2-macos-aarch64.tar.gz) |
 | archive size | release/macos-x86_64 | v0.5.2 | 6.07 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.2/ivygrep-v0.5.2-macos-x86_64.tar.gz) |
 
-## Claim status
-
-- Portable: **supported** under the qualified five-target artifact definition.
-- Competitive: **not claimed** without a controlled comparable-system result.
-- State of the art: **not claimed**. Pareto evidence is
-  present,
-  while a top-tier comparable public result is
-  unavailable.
-
-## Comparable-system evidence
-
-| Class | Status | Reason |
-|---|---|---|
-| exact-search | unavailable | No retained same-hardware exact-search comparison is available. |
-| semantic-retrieval | unavailable | No retained external local semantic system uses the same corpus, model budget, and hardware. |
-
-Regressions and unavailable comparisons remain listed; the renderer never
-deletes them to improve the presentation.
-
 ## Immutable source artifacts
 
 - [Frozen public retrieval baseline](https://github.com/bvolpato/ivygrep/blob/262cb61f70624a8d0f10844d204ae7593a85a6d8/docs/benchmarks/public-code-retrieval-baseline-results.json) (`6c855c4308b45f1c...`)
 - [Current public retrieval matrix](https://github.com/bvolpato/ivygrep/blob/262cb61f70624a8d0f10844d204ae7593a85a6d8/docs/benchmarks/public-code-retrieval-results.json) (`37a4821a98769114...`)
 - [Compact-index public retrieval matrix](https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-quality-current.json) (`0a939ed959689bd9...`)
-- [Portable embedding model selection](https://github.com/bvolpato/ivygrep/blob/262cb61f70624a8d0f10844d204ae7593a85a6d8/docs/benchmarks/embedding-model-bakeoff.json) (`5b3596feabcdfa83...`)
+- [Portable embedding model selection](https://github.com/bvolpato/ivygrep/blob/262cb61f70624a8d0f10844d204ae7593a85a6d8/docs/benchmarks/embedding-model-bakeoff.json) (`ff4aeb3e5d11db05...`)
 - [Held-out learned reranker](https://github.com/bvolpato/ivygrep/blob/4b24c627d9bd733edec5d145437e9aa35c2ab2ca/docs/benchmarks/public-reranker-results.json) (`e9ba2fee6fe5bb3e...`)
 - [Public million-chunk benchmark](https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json) (`f4ba8051b2c7cf88...`)
 - [Daemon hot-query cache](https://github.com/bvolpato/ivygrep/blob/a99f5fb6eafef9c41d656a42dccaf44e27972d32/docs/benchmarks/daemon-hot-query-cache-explore-results.tsv) (`bf168523793c2c3f...`)

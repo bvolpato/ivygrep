@@ -30,7 +30,7 @@
 
 ---
 
-## Quick Start
+## Quick start
 
 **Homebrew:**
 ```bash
@@ -75,9 +75,8 @@ search, daemon equivalence, status/doctor, stale-index rebuild, and removal.
 `ig` needs no Python, compiler, system database, or external service. Neural
 mode may download its pinned model once; `--hash` and hash-only builds do not.
 
-Quality, latency, footprint, release size, unavailable comparisons, and the
-claim policy live in the
-[evidence dashboard](https://bvolpato.github.io/ivygrep/benchmarks/evidence-dashboard.html).
+Quality, latency, footprint, release size, and relevance numbers live in the
+[benchmark dashboard](https://bvolpato.github.io/ivygrep/benchmarks/evidence-dashboard.html).
 
 **Build from source:**
 ```bash
@@ -141,7 +140,7 @@ model artifacts once; `--hash` and hash-only builds do not.
 
 ---
 
-## MCP Server for Agents
+## MCP server for agents
 
 Use `ig --mcp` when an agent needs code search without loading whole files into
 context.
@@ -257,7 +256,7 @@ tool-selection guidance, worktree behavior, and troubleshooting.
 
 ---
 
-## What ivygrep Does
+## What ivygrep does
 
 **ivygrep (`ig`)** is local semantic code search. It mixes BM25/literal lookup
 with vector search, so queries can describe intent instead of exact tokens.
@@ -274,7 +273,7 @@ with vector search, so queries can describe intent instead of exact tokens.
 | Incremental indexing | ❌ | ❌ | ❌ | ✅ |
 | MCP server for AI agents | ❌ | ❌ | ❌ | ✅ |
 
-### 45 Language and File Types
+### 45 language and file types
 
 ivygrep indexes 45 language/file types. 24 use Tree-sitter AST chunking:
 Rust, Python, Go, JavaScript, TypeScript/TSX, Java, C, C++, C#, Scala, Kotlin,
@@ -293,7 +292,7 @@ Unknown extensions are auto-detected and indexed as text.
 
 ---
 
-## Performance Evidence
+## Performance evidence
 
 Current retained public evidence:
 
@@ -394,7 +393,7 @@ symbol/call graph storage,
 
 ---
 
-## Security and Privacy
+## Security and privacy
 
 ivygrep runs search and embedding inference locally. It never sends code,
 queries, or index data to an external service.
@@ -426,7 +425,7 @@ queries, or index data to an external service.
 
 ---
 
-## CLI Reference
+## CLI reference
 
 ```bash
 # Core workflow
