@@ -66,6 +66,29 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("*.spdx.json", workflow)
         self.assertIn("*.provenance.json", workflow)
 
+    def test_release_includes_shell_installer_macos_metal_archive(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn("archive_name: macos-aarch64-metal", workflow)
+        self.assertIn("extra_features: accelerate,metal", workflow)
+        self.assertIn("matrix.archive_name == 'macos-aarch64-metal'", workflow)
+        self.assertIn('--expect-backend "Candle Metal"', workflow)
+
+    def test_release_includes_shell_installer_cuda_archive(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+        self.assertIn("archive_name: linux-x86_64-cuda", workflow)
+        self.assertIn("target: x86_64-unknown-linux-gnu", workflow)
+        self.assertIn("extra_features: cuda", workflow)
+        self.assertIn("CUDA_COMPUTE_CAP", workflow)
+        self.assertIn(
+            "Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76",
+            workflow,
+        )
+        self.assertIn("libcuda.so.1", workflow)
+        self.assertIn("libcublas-dev", workflow)
+        self.assertIn("libcurand-dev", workflow)
+
     def test_windows_release_includes_neural_offline_acceptance(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
         windows_build = workflow.split(

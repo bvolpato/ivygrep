@@ -4,6 +4,7 @@ set -eu
 repository="bvolpato/ivygrep"
 install_dir="${IVYGREP_INSTALL_DIR:-$HOME/.local/bin}"
 version="${IVYGREP_VERSION:-latest}"
+accelerator="${IVYGREP_ACCELERATOR:-auto}"
 
 for command_name in curl tar; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
@@ -29,19 +30,123 @@ if [ -z "$tag" ]; then
     exit 1
 fi
 
-case "$(uname -s)-$(uname -m)" in
+case "$accelerator" in
+    auto | portable | none | cuda | metal) ;;
+    *)
+        echo "ivygrep installer: unsupported IVYGREP_ACCELERATOR=$accelerator" >&2
+        echo "Use auto, portable, cuda, or metal." >&2
+        exit 1
+        ;;
+esac
+
+os="$(uname -s)"
+arch="$(uname -m)"
+case "$os-$arch" in
     Linux-x86_64) target="linux-x86_64-musl" ;;
     Linux-aarch64 | Linux-arm64) target="linux-aarch64-musl" ;;
     Darwin-x86_64) target="macos-x86_64" ;;
     Darwin-arm64 | Darwin-aarch64) target="macos-aarch64" ;;
     *)
-        echo "ivygrep installer: unsupported platform $(uname -s)-$(uname -m)" >&2
+        echo "ivygrep installer: unsupported platform $os-$arch" >&2
         exit 1
         ;;
 esac
 
-archive="ivygrep-$tag-$target.tar.gz"
 base_url="https://github.com/$repository/releases/download/$tag"
+
+has_library() {
+    name=$1
+    if [ -n "${IVYGREP_CUDA_LIBRARY_PATH:-}" ]; then
+        library_dirs="$(printf '%s' "$IVYGREP_CUDA_LIBRARY_PATH" | tr ':' ' ')"
+    else
+        if command -v ldconfig >/dev/null 2>&1 && ldconfig -p 2>/dev/null | grep -Fq "$name"; then
+            return 0
+        fi
+        library_dirs="$(printf '%s' "${LD_LIBRARY_PATH:-}" | tr ':' ' ')"
+        library_dirs="$library_dirs /usr/local/cuda/lib64 /usr/local/cuda/targets/x86_64-linux/lib /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu"
+    fi
+    # shellcheck disable=SC2086
+    for dir in $library_dirs; do
+        [ -n "$dir" ] || continue
+        if [ -e "$dir/$name" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+has_cuda_runtime() {
+    has_library libcuda.so.1 &&
+        has_library libcublas.so.13 &&
+        has_library libcurand.so.10
+}
+
+has_nvidia_cuda() {
+    command -v nvidia-smi >/dev/null 2>&1 &&
+        nvidia-smi -L >/dev/null 2>&1 &&
+        has_cuda_runtime
+}
+
+asset_exists() {
+    curl -fsI "$base_url/$1" >/dev/null 2>&1
+}
+
+accelerator_target=""
+accelerator_label=""
+case "$accelerator" in
+    cuda)
+        if [ "$os-$arch" != "Linux-x86_64" ]; then
+            echo "ivygrep installer: CUDA archive is only supported on Linux x86_64" >&2
+            exit 1
+        fi
+        accelerator_target="linux-x86_64-cuda"
+        accelerator_label="CUDA"
+        ;;
+    metal)
+        case "$os-$arch" in
+            Darwin-arm64 | Darwin-aarch64)
+                accelerator_target="macos-aarch64-metal"
+                ;;
+            Darwin-x86_64)
+                accelerator_target="macos-x86_64-metal"
+                ;;
+            *)
+                echo "ivygrep installer: Metal archive is only supported on macOS" >&2
+                exit 1
+                ;;
+        esac
+        accelerator_label="Metal"
+        ;;
+    auto)
+        case "$os-$arch" in
+            Linux-x86_64)
+                if has_nvidia_cuda; then
+                    accelerator_target="linux-x86_64-cuda"
+                    accelerator_label="CUDA"
+                fi
+                ;;
+            Darwin-arm64 | Darwin-aarch64)
+                accelerator_target="macos-aarch64-metal"
+                accelerator_label="Metal"
+                ;;
+        esac
+        ;;
+esac
+
+if [ -n "$accelerator_target" ]; then
+    accelerator_archive="ivygrep-$tag-$accelerator_target.tar.gz"
+    if asset_exists "$accelerator_archive"; then
+        target="$accelerator_target"
+        echo "ivygrep installer: selected $accelerator_label archive ($target)"
+    elif [ "$accelerator" = "auto" ]; then
+        echo "ivygrep installer: $accelerator_label archive not available for $tag; using $target"
+    else
+        echo "ivygrep installer: requested $accelerator_label archive is not available for $tag" >&2
+        exit 1
+    fi
+fi
+
+archive="ivygrep-$tag-$target.tar.gz"
 tmp_dir="$(mktemp -d)"
 install_tmp=""
 cleanup() {

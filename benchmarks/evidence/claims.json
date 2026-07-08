@@ -2,8 +2,8 @@
   "schema_version": 1,
   "claims": {
     "portable": {
-      "definition": "The downloaded archives execute the documented offline procedure on all five supported targets, with baseline x86 ISA enforcement and no runtime toolchain or service dependency.",
-      "required_release_targets": 5,
+      "definition": "The downloaded archives execute the documented offline procedure on all six supported targets, with baseline x86 ISA enforcement and no runtime toolchain or service dependency.",
+      "required_release_targets": 6,
       "status": "qualified"
     },
     "competitive": {

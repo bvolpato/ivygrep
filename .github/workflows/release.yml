@@ -25,6 +25,7 @@ jobs:
       ARCHIVE_NAME_SUFFIX: ${{ matrix.archive_name }}
       BINARY_NAME: ${{ matrix.binary_name }}
       CARGO_FLAGS: ${{ matrix.cargo_flags }}
+      CUDA_COMPUTE_CAP: ${{ matrix.cuda_compute_cap }}
       EXTRA_FEATURES: ${{ matrix.extra_features }}
       TARGET: ${{ matrix.target }}
       USE_CROSS: ${{ matrix.use_cross }}
@@ -38,6 +39,15 @@ jobs:
             archive: tar.gz
             binary_name: ig
             use_cross: true
+
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            archive_name: linux-x86_64-cuda
+            archive: tar.gz
+            binary_name: ig
+            extra_features: cuda
+            cuda: true
+            cuda_compute_cap: "80"
 
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-latest
@@ -57,6 +67,12 @@ jobs:
             archive: tar.gz
             binary_name: ig
             extra_features: accelerate
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            archive_name: macos-aarch64-metal
+            archive: tar.gz
+            binary_name: ig
+            extra_features: accelerate,metal
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
             archive_name: windows-x86_64
@@ -79,6 +95,29 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.13"
+
+      - name: Install CUDA toolkit
+        if: matrix.cuda
+        uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
+        with:
+          cuda: "13.2.0"
+          method: network
+          sub-packages: '["nvcc", "cudart-dev"]'
+          non-cuda-sub-packages: '["libcublas-dev", "libcurand-dev"]'
+
+      - name: Expose CUDA build libraries
+        if: matrix.cuda
+        shell: bash
+        run: |
+          cuda_root="${CUDA_PATH:-/usr/local/cuda}"
+          stubs="$cuda_root/targets/x86_64-linux/lib/stubs"
+          if [ -e "$stubs/libcuda.so" ] && [ ! -e "$stubs/libcuda.so.1" ]; then
+            sudo ln -s libcuda.so "$stubs/libcuda.so.1"
+          fi
+          {
+            echo "LD_LIBRARY_PATH=$stubs:$cuda_root/lib64:$cuda_root/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
+            echo "LIBRARY_PATH=$stubs:$cuda_root/lib64:$cuda_root/targets/x86_64-linux/lib:${LIBRARY_PATH:-}"
+          } >> "$GITHUB_ENV"
 
       - name: Install cross
         if: matrix.use_cross
@@ -239,6 +278,11 @@ jobs:
             runner: ubuntu-latest
             archive_name: linux-x86_64-musl
             archive: tar.gz
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            archive_name: linux-x86_64-cuda
+            archive: tar.gz
+            cuda: true
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-latest
             archive_name: linux-aarch64-musl
@@ -250,6 +294,10 @@ jobs:
           - target: aarch64-apple-darwin
             runner: macos-latest
             archive_name: macos-aarch64
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            archive_name: macos-aarch64-metal
             archive: tar.gz
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
@@ -265,6 +313,26 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.13"
+
+      - name: Install CUDA runtime libraries
+        if: matrix.cuda
+        uses: Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76 # v0.2.35
+        with:
+          cuda: "13.2.0"
+          method: network
+          sub-packages: '["cudart-dev"]'
+          non-cuda-sub-packages: '["libcublas-dev", "libcurand-dev"]'
+
+      - name: Expose CUDA runtime libraries
+        if: matrix.cuda
+        shell: bash
+        run: |
+          cuda_root="${CUDA_PATH:-/usr/local/cuda}"
+          stubs="$cuda_root/targets/x86_64-linux/lib/stubs"
+          if [ -e "$stubs/libcuda.so" ] && [ ! -e "$stubs/libcuda.so.1" ]; then
+            sudo ln -s libcuda.so "$stubs/libcuda.so.1"
+          fi
+          echo "LD_LIBRARY_PATH=$stubs:$cuda_root/lib64:$cuda_root/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"
 
       - name: Download exact release artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -318,6 +386,17 @@ jobs:
           "$PYTHON" scripts/check_daemon_equivalence.py \
             --skip-build \
             --binary "$BINARY"
+
+      - name: Validate macOS Metal backend
+        if: matrix.archive_name == 'macos-aarch64-metal'
+        shell: bash
+        env:
+          BINARY: ${{ steps.artifact.outputs.binary }}
+        run: |
+          ./scripts/e2e_neural_backend.sh \
+            --binary "$BINARY" \
+            --model-profile general \
+            --expect-backend "Candle Metal"
 
       - name: Run exact Linux aarch64 archive under QEMU
         if: matrix.target == 'aarch64-unknown-linux-musl'

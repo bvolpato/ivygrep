@@ -118,6 +118,7 @@ class EvidenceDashboardTest(unittest.TestCase):
         targets = "\n".join(
             (
                 "x86_64-unknown-linux-musl",
+                "x86_64-unknown-linux-gnu",
                 "aarch64-unknown-linux-musl",
                 "x86_64-apple-darwin",
                 "aarch64-apple-darwin",
@@ -139,7 +140,7 @@ class EvidenceDashboardTest(unittest.TestCase):
             path.write_text(workflow, encoding="utf-8")
             _, summary = renderer.summarize("release-workflow", path)
         self.assertTrue(summary["artifact_acceptance"])
-        self.assertEqual(summary["release_targets"], 5)
+        self.assertEqual(summary["release_targets"], 6)
         self.assertTrue(summary["sbom"])
         self.assertTrue(summary["provenance"])
 

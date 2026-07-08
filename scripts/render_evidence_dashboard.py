@@ -93,6 +93,7 @@ def summarize(evidence_id: str, path: Path) -> tuple[str | None, dict]:
             target
             for target in (
                 "x86_64-unknown-linux-musl",
+                "x86_64-unknown-linux-gnu",
                 "aarch64-unknown-linux-musl",
                 "x86_64-apple-darwin",
                 "aarch64-apple-darwin",

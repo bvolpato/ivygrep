@@ -6,8 +6,8 @@
       "supported": false
     },
     "portable": {
-      "definition": "The downloaded archives execute the documented offline procedure on all five supported targets, with baseline x86 ISA enforcement and no runtime toolchain or service dependency.",
-      "required_release_targets": 5,
+      "definition": "The downloaded archives execute the documented offline procedure on all six supported targets, with baseline x86 ISA enforcement and no runtime toolchain or service dependency.",
+      "required_release_targets": 6,
       "status": "qualified",
       "supported": true
     },
@@ -770,12 +770,12 @@
       "label": "Release artifact acceptance gate",
       "path": ".github/workflows/release.yml",
       "publication_commit": "030e32e275494896d4b5e348c6c370f205c0bb69",
-      "sha256": "51dac206ad22a613dbbdc3b349b9f413bdf19809b63ae62f2b3382d7357a1ac4",
+      "sha256": "a8a2a1292a798bc39d9d4623d628643aab10db8f6a463a7b35797ecdf03f9729",
       "source_commit": null,
       "summary": {
         "artifact_acceptance": true,
         "provenance": true,
-        "release_targets": 5,
+        "release_targets": 6,
         "sbom": true
       }
     }
