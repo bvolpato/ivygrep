@@ -11,7 +11,7 @@
   <a href="https://github.com/bvolpato/ivygrep/actions"><img src="https://github.com/bvolpato/ivygrep/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://github.com/bvolpato/ivygrep/actions/workflows/security.yml"><img src="https://github.com/bvolpato/ivygrep/actions/workflows/security.yml/badge.svg" alt="Security" /></a>
   <a href="https://github.com/bvolpato/ivygrep/actions/workflows/relevance.yml"><img src="https://github.com/bvolpato/ivygrep/actions/workflows/relevance.yml/badge.svg" alt="Relevance" /></a>
-  <a href="https://github.com/bvolpato/ivygrep/releases/tag/v1.1.8"><img src="https://img.shields.io/badge/release-v1.1.8-34d058" alt="Latest Release" /></a>
+  <a href="https://github.com/bvolpato/ivygrep/releases/tag/v1.1.9"><img src="https://img.shields.io/badge/release-v1.1.9-34d058" alt="Latest Release" /></a>
   <a href="https://github.com/bvolpato/ivygrep/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
   <a href="https://github.com/bvolpato/ivygrep/releases"><img src="https://img.shields.io/github/downloads/bvolpato/ivygrep/total?color=%23ff6f00" alt="Downloads" /></a>
 </p>
@@ -292,9 +292,9 @@ Unknown extensions are auto-detected and indexed as text.
 
 ---
 
-## Performance evidence
+## Performance
 
-Current retained public evidence:
+Current retained public results:
 
 | Benchmark | Metric | Result |
 |------|------|-----:|
@@ -322,7 +322,7 @@ indexed files and 4,419,660 chunks:
 | Warm daemon correctness guard | daemon/local hits | 20 / 20 |
 
 Latency depends on CPU, storage, repository shape, index state, and
-virtualization. Public quality, latency, refresh, and resource evidence lives
+virtualization. Public quality, latency, refresh, and resource reports live
 under [`docs/benchmarks/`](docs/benchmarks/).
 
 Indexing publishes BM25/literal search first. A load-aware background process
@@ -359,8 +359,8 @@ uv run scripts/run_public_benchmark_matrix.py \
 
 uv run scripts/run_public_benchmark_matrix.py \
   --profile sota-challenge \
-  --modes hash,hybrid,neural \
-  --runs 1 \
+  --modes hash,hybrid,blended,neural \
+  --runs 3 \
   --datasets-root /tmp/ivygrep-public-datasets \
   --work-root /tmp/ivygrep-public-results \
   --max-query-chars 2048 \
@@ -537,8 +537,7 @@ neural backend check embeds fixture text locally and verifies backend reporting.
 ## Roadmap
 
 - More Tree-sitter languages: add SQL and other mature grammars.
-- Evidence-backed search program: track the quality,
-  latency, footprint, and portability work in
+- Search quality program: track quality, latency, footprint, and portability in
   [#128](https://github.com/bvolpato/ivygrep/issues/128).
 - Learned reranking: evaluate compact local cross-encoders against the
   bounded deterministic reranker without weakening offline portability.

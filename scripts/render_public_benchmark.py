@@ -237,10 +237,10 @@ def markdown(matrix: dict, baseline: dict | None = None) -> str:
             *reproduce_command,
             "```",
             "",
-            "Use `--modes lexical,hash,hybrid,neural` with a default-feature "
-            "build to exercise every ivygrep retrieval mode. Neural runs fail "
-            "if model vectors are unavailable instead of silently reporting a "
-            "hash fallback.",
+            "Use `--modes lexical,hash,hybrid,blended,neural` with a "
+            "default-feature build to exercise every retrieval mode. `blended` "
+            "measures normal production routing with neural vectors available; "
+            "`neural` forces neural retrieval and fails if vectors are unavailable.",
             "",
             "The `full` profile contains every pinned CoIR task and language "
             "subtask. Dataset cards remain the authority for licensing; the "
@@ -310,7 +310,7 @@ def html(matrix: dict, baseline: dict | None = None) -> str:
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ivygrep Public Code-Retrieval Benchmark</title>
-    <meta name="description" content="Pinned public CoIR quality, latency, indexing, memory, and index-size evidence.">
+    <meta name="description" content="Public CoIR quality, latency, indexing, memory, and index-size results.">
     <link rel="stylesheet" href="../style.css">
     <link rel="stylesheet" href="report.css">
     <link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
@@ -324,7 +324,7 @@ def html(matrix: dict, baseline: dict | None = None) -> str:
             <div class="report-links"><a href="index.html">Reports</a><a href="{escape(default_output_name(matrix))}">Raw JSON</a><a href="https://github.com/bvolpato/ivygrep/blob/main/docs/benchmarks/{escape(slug)}.md">Source</a></div>
         </nav>
         <section class="report-hero">
-            <div class="report-eyebrow">Pinned Public Evidence</div>
+            <div class="report-eyebrow">Public benchmark</div>
             <h1>Code-retrieval quality and cost</h1>
             <p>Profile <code>{escape(matrix["profile"])}</code>: {matrix["queries"]} held-out queries across {len(matrix["tasks"])} public CoIR tasks, repeated {matrix["repetitions"]} times. No private corpus or local path is included.</p>
         </section>

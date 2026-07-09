@@ -75,7 +75,7 @@ def benchmark_revision(root: Path, source_commit: str | None) -> str:
 
 def parse_modes(value: str) -> list[str]:
     modes = [mode.strip() for mode in value.split(",") if mode.strip()]
-    allowed = {"lexical", "hash", "hybrid", "neural"}
+    allowed = {"lexical", "hash", "hybrid", "blended", "neural"}
     unknown = sorted(set(modes) - allowed)
     if unknown:
         raise ValueError(f"unknown retrieval modes: {', '.join(unknown)}")
@@ -100,7 +100,7 @@ def query_text_limit(manifest: dict, profile: str, override: int | None) -> int 
 
 def build_binary(root: Path, modes: list[str]) -> None:
     command = ["cargo", "build", "--release", "--locked", "--bin", "ig"]
-    if "neural" not in modes:
+    if not {"blended", "neural"}.intersection(modes):
         command.insert(-2, "--no-default-features")
     subprocess.run(command, cwd=root, check=True)
 
@@ -419,6 +419,16 @@ def main() -> int:
         "query_text_limit": max_query_chars,
         "tasks": tasks,
         "modes": modes,
+        "mode_semantics": {
+            mode: (
+                "blended-routing"
+                if mode == "blended"
+                else "forced-neural"
+                if mode == "neural"
+                else mode
+            )
+            for mode in modes
+        },
         "repetitions": args.runs,
         "neural_models": [
             json.loads(identity)

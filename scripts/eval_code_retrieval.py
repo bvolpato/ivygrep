@@ -254,6 +254,8 @@ def query_args(mode: str) -> list[str]:
         return ["--hash"]
     if mode == "hybrid":
         return []
+    if mode == "blended":
+        return []
     if mode == "neural":
         return ["--force-neural"]
     raise ValueError(f"unsupported mode {mode}")
@@ -295,7 +297,7 @@ def neural_execution_status(hits: list[dict]) -> bool | None:
 def process_cold_queries(mode: str, queries: list[dict]) -> list[dict]:
     # Neural process startup includes loading model weights. Measuring that for
     # every quality query turns a retrieval benchmark into a model-load loop.
-    return queries[:1] if mode == "neural" else queries
+    return queries[:1] if mode in {"blended", "neural"} else queries
 
 
 def stop_process(process: subprocess.Popen) -> None:
@@ -352,7 +354,7 @@ def evaluate(args: argparse.Namespace) -> dict:
         index_ms = (time.perf_counter() - started) * 1000.0
 
         hash_enhancement_ms = 0.0
-        if args.mode in {"hash", "hybrid", "neural"}:
+        if args.mode in {"hash", "hybrid", "blended", "neural"}:
             started = time.perf_counter()
             subprocess.run(
                 [str(binary), "--enhance-hash-internal", str(repo)],
@@ -365,7 +367,7 @@ def evaluate(args: argparse.Namespace) -> dict:
             )
             hash_enhancement_ms = (time.perf_counter() - started) * 1000.0
         neural_enhancement_ms = 0.0
-        if args.mode == "neural":
+        if args.mode in {"blended", "neural"}:
             neural_env = env.copy()
             started = time.perf_counter()
             subprocess.run(
@@ -419,7 +421,7 @@ def evaluate(args: argparse.Namespace) -> dict:
             daemon_startup_ms = (time.perf_counter() - daemon_started) * 1000.0
 
             neural_model_ready_ms = 0.0
-            if args.mode == "neural":
+            if args.mode in {"blended", "neural"}:
                 model_started = time.perf_counter()
                 run_json(
                     search_command(binary, args.mode, 1, "neural model warmup"),
@@ -601,6 +603,13 @@ def evaluate(args: argparse.Namespace) -> dict:
                 "query_text_limit": args.max_query_chars,
                 "retrieval_provenance": {
                     "force_neural": args.mode == "neural",
+                    "mode_semantics": (
+                        "blended-routing"
+                        if args.mode == "blended"
+                        else "forced-neural"
+                        if args.mode == "neural"
+                        else args.mode
+                    ),
                     "queries_with_hash_results": queries_with_hash_results,
                     "queries_with_neural_results": queries_with_neural_results,
                     "queries_with_neural_execution": queries_with_neural_execution,
@@ -630,7 +639,7 @@ def main() -> int:
     parser.add_argument("--binary", type=Path, default=Path("target/release/ig"))
     parser.add_argument(
         "--mode",
-        choices=["lexical", "hash", "hybrid", "neural"],
+        choices=["lexical", "hash", "hybrid", "blended", "neural"],
         default="hash",
     )
     parser.add_argument("--limit", type=int, default=20)

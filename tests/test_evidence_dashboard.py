@@ -132,6 +132,13 @@ class EvidenceDashboardTest(unittest.TestCase):
             "scripts/e2e_cached_model.sh\n"
             "anchore/sbom-action@\n"
             "actions/attest@\n"
+            "archive_name: linux-x86_64-musl\n"
+            "archive_name: linux-x86_64-cuda\n"
+            "archive_name: linux-aarch64-musl\n"
+            "archive_name: macos-x86_64\n"
+            "archive_name: macos-aarch64\n"
+            "archive_name: macos-aarch64-metal\n"
+            "archive_name: windows-x86_64\n"
             f"{targets}\n"
         )
         with tempfile.TemporaryDirectory() as tmp:
@@ -140,8 +147,34 @@ class EvidenceDashboardTest(unittest.TestCase):
             _, summary = renderer.summarize("release-workflow", path)
         self.assertTrue(summary["artifact_acceptance"])
         self.assertEqual(summary["release_targets"], 6)
+        self.assertEqual(summary["release_archives"], 7)
         self.assertTrue(summary["sbom"])
         self.assertTrue(summary["provenance"])
+
+    def test_public_retrieval_summary_prefers_blended_routing(self) -> None:
+        result = {
+            "ivygrep_commit": "a" * 40,
+            "summary": {
+                "blended": {
+                    "metrics": {
+                        "ndcg_at_10": {"mean": 0.31},
+                        "mrr_at_10": {"mean": 0.27},
+                    }
+                },
+                "neural": {
+                    "metrics": {
+                        "ndcg_at_10": {"mean": 0.29},
+                        "mrr_at_10": {"mean": 0.25},
+                    }
+                },
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "retrieval.json"
+            path.write_text(json.dumps(result), encoding="utf-8")
+            _, summary = renderer.summarize("public-retrieval-current", path)
+        self.assertEqual(summary["mode"], "blended")
+        self.assertEqual(summary["ndcg_at_10"], 0.31)
 
     def test_dashboard_output_is_metrics_only(self) -> None:
         dashboard = json.loads(

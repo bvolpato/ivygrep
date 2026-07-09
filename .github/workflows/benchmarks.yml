@@ -58,17 +58,57 @@ jobs:
         if: steps.benchmark-base.outputs.ref != ''
         env:
           BENCHMARK_BASE_REF: ${{ steps.benchmark-base.outputs.ref }}
+          PAIRED_BENCHMARK_DIR: ${{ runner.temp }}/paired-benchmarks
         run: |
+          mkdir -p "$PAIRED_BENCHMARK_DIR"
           python3 scripts/benchmark_guard.py \
             --baseline-ref "$BENCHMARK_BASE_REF" \
             --bench-target indexer_bench \
             --bench-name indexer/incremental_reindex_no_change \
-            --threshold 1.15
+            --threshold 1.15 \
+            --output "$PAIRED_BENCHMARK_DIR/incremental-no-change.json"
           python3 scripts/benchmark_guard.py \
             --baseline-ref "$BENCHMARK_BASE_REF" \
             --bench-target indexer_bench \
             --bench-name indexer_bulk/fresh_index_30k_chunks \
-            --threshold 1.20
+            --threshold 1.20 \
+            --output "$PAIRED_BENCHMARK_DIR/fresh-index.json"
+          python3 scripts/benchmark_guard.py \
+            --baseline-ref "$BENCHMARK_BASE_REF" \
+            --bench-target indexer_bench \
+            --bench-name base_search_patterns/hybrid_complex_phrase_1000_files \
+            --threshold 1.20 \
+            --output "$PAIRED_BENCHMARK_DIR/hybrid-search.json"
+          python3 scripts/benchmark_guard.py \
+            --baseline-ref "$BENCHMARK_BASE_REF" \
+            --bench-target indexer_bench \
+            --bench-name critical_journeys/vector_search_in_50k_hot \
+            --threshold 1.20 \
+            --output "$PAIRED_BENCHMARK_DIR/vector-search-hot.json"
+
+      - name: Report paired benchmark deltas
+        if: always() && steps.benchmark-base.outputs.ref != ''
+        env:
+          PAIRED_BENCHMARK_DIR: ${{ runner.temp }}/paired-benchmarks
+        run: |
+          {
+            echo "### Paired benchmark guards"
+            echo
+            echo "Base and head run on the same runner. Ratios above 1.0 are slower."
+            echo
+            echo "| Benchmark | Base | Head | Ratio | Limit |"
+            echo "| --- | ---: | ---: | ---: | ---: |"
+            for result in "$PAIRED_BENCHMARK_DIR"/*.json; do
+              jq -r '"| `\(.bench)` | \(.baseline_median_ns / 1000000 | . * 100 | round / 100) ms | \(.current_median_ns / 1000000 | . * 100 | round / 100) ms | \(.ratio * 1000 | round / 1000)x | \(.threshold)x |"' "$result"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload paired benchmark results
+        if: always() && steps.benchmark-base.outputs.ref != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: paired-benchmark-guards
+          path: ${{ runner.temp }}/paired-benchmarks/*.json
 
       - name: Install cargo-criterion
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -89,11 +129,11 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: git restore Cargo.lock || true
 
-      - name: Publish benchmark history
+      - name: Publish informational shared-runner history
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
         with:
-          name: Rust Benchmark
+          name: Rust shared-runner history (informational)
           tool: 'customSmallerIsBetter'
           output-file-path: benchmark-data.json
 

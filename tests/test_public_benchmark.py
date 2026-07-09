@@ -33,6 +33,12 @@ reranker_renderer = load_script("render_public_reranker")
 
 
 class PublicBenchmarkTest(unittest.TestCase):
+    def test_matrix_modes_distinguish_production_and_forced_neural(self):
+        self.assertEqual(
+            matrix_runner.parse_modes("hybrid,blended,neural"),
+            ["hybrid", "blended", "neural"],
+        )
+
     def test_source_commit_override_tracks_the_benchmark_binary(self):
         self.assertEqual(
             matrix_runner.benchmark_revision(ROOT, "a" * 40),

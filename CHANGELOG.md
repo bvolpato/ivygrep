@@ -4,6 +4,16 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.1.9] - 2026-07-09
+
+### Added
+- **Shell installs can select accelerator archives.** Linux x86_64 releases now include a CUDA build, Apple Silicon releases include a Metal build, and `install.sh` selects a compatible accelerator archive while retaining portable fallback behavior.
+
+### Testing
+- **Performance gates now use paired base/head measurements for indexing, search, and hot vector lookup.** CI publishes machine-readable guard results and keeps the cross-run shared-runner chart informational.
+- **Release acceptance now covers seven archives.** Portable Linux, macOS, and Windows builds retain existing smoke coverage; accelerator builds add CUDA linkage checks and Metal backend execution.
+- **Recall experiments were rejected after broader checks.** Deeper candidate pools lost `7.9%` challenge nDCG; broad and source-only hash retention also reduced challenge quality or codetrans recall. Search routing remains unchanged.
+
 ## [1.1.8] - 2026-07-07
 
 ### Relevance

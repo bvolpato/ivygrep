@@ -58,6 +58,7 @@ class RetrievalMetricsTest(unittest.TestCase):
         self.assertEqual(eval_code_retrieval.query_args("lexical"), ["--lexical-only"])
         self.assertEqual(eval_code_retrieval.query_args("hash"), ["--hash"])
         self.assertEqual(eval_code_retrieval.query_args("hybrid"), [])
+        self.assertEqual(eval_code_retrieval.query_args("blended"), [])
         self.assertEqual(
             eval_code_retrieval.query_args("neural"), ["--force-neural"]
         )
@@ -90,12 +91,17 @@ class RetrievalMetricsTest(unittest.TestCase):
             eval_code_retrieval.warm_query_path("lexical"), "local-process"
         )
         self.assertEqual(eval_code_retrieval.warm_query_path("hash"), "daemon")
+        self.assertEqual(eval_code_retrieval.warm_query_path("blended"), "daemon")
         self.assertEqual(eval_code_retrieval.warm_query_path("neural"), "daemon")
 
     def test_neural_process_cold_sampling_loads_model_once(self):
         queries = [{"_id": str(index)} for index in range(3)]
         self.assertEqual(
             eval_code_retrieval.process_cold_queries("neural", queries),
+            queries[:1],
+        )
+        self.assertEqual(
+            eval_code_retrieval.process_cold_queries("blended", queries),
             queries[:1],
         )
         self.assertEqual(

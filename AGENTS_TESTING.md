@@ -37,6 +37,11 @@ only when iterating on Rust-only changes.
 
 Benchmark output reports per-operation latency. Microbenchmarks run repeated logical operations so actual timed samples last long enough to be stable.
 
+PR guards run base and head on the same runner for fresh indexing,
+incremental no-change indexing, hybrid search, and hot vector search. Each run
+uploads JSON results. Shared-runner history on `main` is informational because
+host variance makes cross-run ratios unreliable.
+
 ## Static Docs
 
 For `README.md`, `docs/**`, or `assets/**` changes:

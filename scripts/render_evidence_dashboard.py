@@ -8,6 +8,7 @@ from html import escape
 import hashlib
 import json
 from pathlib import Path
+import re
 import subprocess
 
 
@@ -101,6 +102,9 @@ def summarize(evidence_id: str, path: Path) -> tuple[str | None, dict]:
             )
             if target in text
         }
+        archives = set(
+            re.findall(r"^\s*archive_name:\s*([^\s#]+)", text, re.MULTILINE)
+        )
         required_tokens = (
             "artifact-acceptance:",
             "needs: artifact-acceptance",
@@ -111,14 +115,18 @@ def summarize(evidence_id: str, path: Path) -> tuple[str | None, dict]:
         return None, {
             "artifact_acceptance": all(token in text for token in required_tokens),
             "release_targets": len(targets),
+            "release_archives": len(archives),
             "sbom": "anchore/sbom-action@" in text,
             "provenance": "actions/attest@" in text,
         }
     document = json.loads(path.read_text(encoding="utf-8"))
     source_commit = document.get("ivygrep_commit")
     if evidence_id.startswith("public-retrieval"):
-        mode = "neural" if "neural" in document.get("summary", {}) else "hybrid"
         summary = document.get("summary", {})
+        mode = next(
+            (name for name in ("blended", "neural", "hybrid") if name in summary),
+            next(iter(summary), "hybrid"),
+        )
         modes = {
             mode_name: {
                 metric: metric_stats(summary, mode_name, metric)
@@ -508,6 +516,10 @@ def render_markdown(dashboard: dict) -> str:
                 f"[source]({point['immutable_url']}) |"
             )
     rendered_points = "\n".join(point_rows)
+    retrieval_label = {
+        "blended": "Public blended retrieval",
+        "neural": "Public forced-neural retrieval",
+    }.get(retrieval["mode"], f"Public {retrieval['mode']} retrieval")
     return f"""# Benchmark dashboard
 
 This page is generated from retained benchmark and release artifacts. Every
@@ -515,7 +527,7 @@ artifact link is pinned to the commit that published its bytes.
 
 | Area | Latest retained result |
 |---|---|
-| Public neural retrieval | nDCG@10 {format_number(retrieval['ndcg_at_10'], 4)}, MRR@10 {format_number(retrieval['mrr_at_10'], 4)}, {retrieval['queries']} queries x {retrieval['repetitions']} runs |
+| {retrieval_label} | nDCG@10 {format_number(retrieval['ndcg_at_10'], 4)}, MRR@10 {format_number(retrieval['mrr_at_10'], 4)}, {retrieval['queries']} queries x {retrieval['repetitions']} runs |
 | Learned reranker | gate {"passed" if reranker["passed"] else "failed"}, nDCG@10 delta {format_number(reranker["ndcg_at_10_delta"], 4)} |
 | Million-chunk latency | {format_number(million["warm_p95_ms"])} ms warm p95, {format_number(million["warm_speedup"])}x baseline |
 | Million-chunk footprint | {million["index_size_bytes"]} bytes, ratio {format_number(million["index_size_ratio"], 3)} |

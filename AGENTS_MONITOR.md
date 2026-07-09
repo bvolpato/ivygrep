@@ -21,10 +21,13 @@ URL. The live site should show the current release badge and benchmark index.
 1. **CI checks pass**: `https://github.com/bvolpato/ivygrep/actions/workflows/ci.yml`
 2. **Release workflow completes**: `https://github.com/bvolpato/ivygrep/actions/workflows/release.yml`
 3. **GitHub Release published**: `https://github.com/bvolpato/ivygrep/releases/latest`
-4. **All 5 platform binaries present**: linux-x86_64-musl, linux-aarch64-musl,
-   macos-x86_64, macos-aarch64, windows-x86_64
+4. **All 7 archives present**: linux-x86_64-musl, linux-x86_64-cuda,
+   linux-aarch64-musl, macos-x86_64, macos-aarch64,
+   macos-aarch64-metal, windows-x86_64
 5. **Supply-chain assets present for every platform**: SHA256 checksum, SPDX
    SBOM, and build provenance
+6. **Accelerator installer smoke passes**: `IVYGREP_ACCELERATOR=cuda` selects
+   CUDA on a compatible Linux host, and Apple Silicon defaults to Metal
 
 ## Verify Homebrew Tap
 

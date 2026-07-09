@@ -41,7 +41,7 @@ on:
       modes:
         description: "Comma-separated retrieval modes"
         required: true
-        default: "lexical,hash,hybrid,neural"
+        default: "lexical,hash,hybrid,blended,neural"
         type: string
       repetitions:
         description: "Independent repetitions"
@@ -147,7 +147,7 @@ jobs:
           if [[ "$EVENT_NAME" == "schedule" ]]; then
             {
               echo "profile=public-core"
-              echo "modes=lexical,hash,hybrid,neural"
+              echo "modes=lexical,hash,hybrid,blended,neural"
               echo "repetitions=3"
             } >> "$GITHUB_OUTPUT"
           else

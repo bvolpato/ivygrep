@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import io
+import json
 import subprocess
 import sys
 import tempfile
@@ -82,7 +83,9 @@ class BenchmarkGuardCheckoutTests(unittest.TestCase):
         self.assertEqual(benchmark_guard.ratio(10.0, 5.0), 2.0)
         self.assertEqual(benchmark_guard.ratio(10.0, 0.0), float("inf"))
 
-    def run_guard(self, measurements: list[float]) -> tuple[int, mock.Mock]:
+    def run_guard(
+        self, measurements: list[float], output_path: Path | None = None
+    ) -> tuple[int, mock.Mock]:
         measure = mock.Mock(side_effect=measurements)
         argv = [
             "benchmark_guard.py",
@@ -91,6 +94,8 @@ class BenchmarkGuardCheckoutTests(unittest.TestCase):
             "--threshold",
             "1.15",
         ]
+        if output_path is not None:
+            argv.extend(["--output", str(output_path)])
         with (
             mock.patch.object(sys, "argv", argv),
             mock.patch.object(benchmark_guard, "ensure_clean_worktree"),
@@ -120,6 +125,17 @@ class BenchmarkGuardCheckoutTests(unittest.TestCase):
         result, _ = self.run_guard([20.0, 10.0, 10.0, 20.0])
 
         self.assertEqual(result, 1)
+
+    def test_writes_machine_readable_result(self) -> None:
+        output_path = self.repo / "artifacts" / "guard.json"
+
+        result, _ = self.run_guard([11.0, 10.0], output_path)
+
+        self.assertEqual(result, 0)
+        payload = json.loads(output_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["bench"], "indexer/incremental_reindex_no_change")
+        self.assertEqual(payload["ratio"], 1.1)
+        self.assertEqual(payload["threshold"], 1.15)
 
 
 if __name__ == "__main__":

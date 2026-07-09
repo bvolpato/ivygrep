@@ -82,6 +82,11 @@ def ratio(current: float, baseline: float) -> float:
     return current / baseline if baseline else float("inf")
 
 
+def write_result(path: Path, result: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Compare a critical Criterion benchmark against a baseline ref in the same runner."
@@ -90,6 +95,7 @@ def main() -> int:
     parser.add_argument("--bench-target", default="indexer_bench")
     parser.add_argument("--bench-name", default="indexer/incremental_reindex_no_change")
     parser.add_argument("--threshold", type=float, default=1.15)
+    parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parent.parent
@@ -132,6 +138,8 @@ def main() -> int:
         "threshold": args.threshold,
         "confirmation": confirmation,
     }
+    if args.output is not None:
+        write_result(args.output, result)
     print(json.dumps(result, indent=2))
 
     if confirmation is not None and confirmation["ratio"] > args.threshold:
