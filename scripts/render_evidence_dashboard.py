@@ -626,6 +626,7 @@ def render_html(dashboard: dict, markdown: str) -> str:
   <meta name="description" content="Quality, latency, footprint, and release metrics for ivygrep.">
   <link rel="stylesheet" href="../style.css">
   <link rel="stylesheet" href="report.css">
+  <link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
 </head>
 <body class="report-page">
   <main class="report-shell relative z-10">
