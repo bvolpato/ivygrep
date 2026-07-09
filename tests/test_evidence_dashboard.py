@@ -202,6 +202,19 @@ class EvidenceDashboardTest(unittest.TestCase):
         self.assertIn("nDCG@10", html)
         self.assertIn("Daemon p95", html)
         self.assertNotIn("policy", html.lower())
+        current = next(
+            item
+            for item in dashboard["evidence"]
+            if item["id"] == "public-retrieval-current"
+        )
+        release = next(
+            item
+            for item in dashboard["evidence"]
+            if item["id"] == "release-workflow"
+        )
+        self.assertEqual(current["summary"]["mode"], "blended")
+        self.assertEqual(release["summary"]["release_archives"], 7)
+        self.assertIn("Public blended retrieval", markdown)
 
 
 if __name__ == "__main__":

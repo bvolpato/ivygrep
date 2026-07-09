@@ -5,12 +5,12 @@ artifact link is pinned to the commit that published its bytes.
 
 | Area | Latest retained result |
 |---|---|
-| Public neural retrieval | nDCG@10 0.2666, MRR@10 0.2220, 1000 queries x 3 runs |
+| Public blended retrieval | nDCG@10 0.2625, MRR@10 0.2167, 1000 queries x 3 runs |
 | Learned reranker | gate passed, nDCG@10 delta 0.0192 |
 | Million-chunk latency | 15.07 ms warm p95, 3.57x baseline |
 | Million-chunk footprint | 491589780 bytes, ratio 0.430 |
 | Daemon cache | 4.90 ms retained warm p95 |
-| Release archive history | v1.0.2 with 5 archives |
+| Release archive history | v1.1.8 with 5 archives |
 
 ## Versioned histories
 
@@ -21,8 +21,8 @@ artifact link is pinned to the commit that published its bytes.
 | indexing | 2 | 0 |
 | memory | 2 | 0 |
 | index size | 2 | 0 |
-| binary size | 449 | 429 |
-| archive size | 449 | 0 |
+| binary size | 563 | 563 |
+| archive size | 563 | 0 |
 
 Each point in `evidence-dashboard.json` includes its unit, comparison series,
 hardware/corpus/model context, variance or an explicit variance-unavailable
@@ -30,41 +30,111 @@ reason, source commit, and immutable artifact URL.
 
 | Family | Comparable series | Revision/tag | Value | Variance | Artifact |
 |---|---|---|---:|---|---|
-| quality | semantic-retrieval/neural/ndcg_at_10 | 2c735847d43e | 0.2620 | sd 0.0002 | [source](https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json) |
-| quality | semantic-retrieval/neural/ndcg_at_10 | 2c7629e18d40 | 0.2666 | sd 0.0016 | [source](https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json) |
-| latency | million-chunk/warm-distinct-p95 | 4b24c627d9bd | 53.77 ms | ratio CI95 0.247-0.318 | [source](https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json) |
-| latency | million-chunk/warm-distinct-p95 | c1442ebb68f5 | 15.07 ms | ratio CI95 0.247-0.318 | [source](https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json) |
-| indexing | million-chunk/chunks-per-second | 4b24c627d9bd | 4963.32 chunks/s | unavailable | [source](https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json) |
-| indexing | million-chunk/chunks-per-second | 2c7629e18d40 | 109005.50 chunks/s | unavailable | [source](https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json) |
-| memory | million-chunk/peak-rss | 4b24c627d9bd | 468.74 MiB | unavailable | [source](https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json) |
-| memory | million-chunk/peak-rss | 2c7629e18d40 | 284.58 MiB | unavailable | [source](https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json) |
-| index size | million-chunk/final-index | 4b24c627d9bd | 1090.48 MiB | unavailable | [source](https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json) |
-| index size | million-chunk/final-index | 2c7629e18d40 | 468.82 MiB | unavailable | [source](https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json) |
-| binary size | release/linux-aarch64-musl | v1.0.2 | 67.15 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-linux-aarch64-musl.tar.gz) |
-| binary size | release/linux-x86_64-musl | v1.0.2 | 70.59 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-linux-x86_64-musl.tar.gz) |
-| binary size | release/macos-aarch64 | v1.0.2 | 67.65 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-macos-aarch64.tar.gz) |
-| binary size | release/macos-x86_64 | v1.0.2 | 68.14 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-macos-x86_64.tar.gz) |
-| binary size | release/windows-x86_64 | v1.0.2 | 69.89 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-windows-x86_64.zip) |
-| binary size | release/linux-aarch64-musl | v1.0.1 | 67.22 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.1/ivygrep-v1.0.1-linux-aarch64-musl.tar.gz) |
-| binary size | release/linux-x86_64-musl | v1.0.1 | 70.68 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.1/ivygrep-v1.0.1-linux-x86_64-musl.tar.gz) |
-| binary size | release/macos-aarch64 | v1.0.1 | 67.71 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.1/ivygrep-v1.0.1-macos-aarch64.tar.gz) |
-| binary size | release/macos-x86_64 | v1.0.1 | 68.16 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.1/ivygrep-v1.0.1-macos-x86_64.tar.gz) |
-| binary size | release/windows-x86_64 | v1.0.1 | 69.95 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.1/ivygrep-v1.0.1-windows-x86_64.zip) |
-| binary size | release/linux-aarch64-musl | v1.0.0 | 67.22 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.0/ivygrep-v1.0.0-linux-aarch64-musl.tar.gz) |
-| binary size | release/linux-x86_64-musl | v1.0.0 | 70.68 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.0/ivygrep-v1.0.0-linux-x86_64-musl.tar.gz) |
-| binary size | release/macos-aarch64 | v1.0.0 | 67.70 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.0/ivygrep-v1.0.0-macos-aarch64.tar.gz) |
-| binary size | release/macos-x86_64 | v1.0.0 | 68.15 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.0/ivygrep-v1.0.0-macos-x86_64.tar.gz) |
-| binary size | release/windows-x86_64 | v1.0.0 | 69.95 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.0/ivygrep-v1.0.0-windows-x86_64.zip) |
+| quality | semantic-retrieval/neural/ndcg_at_10 | 2c735847d43e | 0.2620 | sd 0.0002 | [source](https://github.com/bvolpato/ivygrep/blob/14efc6643aadaf5114768d575610399ee48d5085/docs/benchmarks/public-million-results.json) |
+| quality | semantic-retrieval/neural/ndcg_at_10 | 2c7629e18d40 | 0.2666 | sd 0.0016 | [source](https://github.com/bvolpato/ivygrep/blob/14efc6643aadaf5114768d575610399ee48d5085/docs/benchmarks/public-million-results.json) |
+| latency | million-chunk/warm-distinct-p95 | 4b24c627d9bd | 53.77 ms | ratio CI95 0.247-0.318 | [source](https://github.com/bvolpato/ivygrep/blob/14efc6643aadaf5114768d575610399ee48d5085/docs/benchmarks/public-million-results.json) |
+| latency | million-chunk/warm-distinct-p95 | c1442ebb68f5 | 15.07 ms | ratio CI95 0.247-0.318 | [source](https://github.com/bvolpato/ivygrep/blob/14efc6643aadaf5114768d575610399ee48d5085/docs/benchmarks/public-million-results.json) |
+| indexing | million-chunk/chunks-per-second | 4b24c627d9bd | 4963.32 chunks/s | unavailable | [source](https://github.com/bvolpato/ivygrep/blob/14efc6643aadaf5114768d575610399ee48d5085/docs/benchmarks/public-million-results.json) |
+| indexing | million-chunk/chunks-per-second | 2c7629e18d40 | 109005.50 chunks/s | unavailable | [source](https://github.com/bvolpato/ivygrep/blob/14efc6643aadaf5114768d575610399ee48d5085/docs/benchmarks/public-million-results.json) |
+| memory | million-chunk/peak-rss | 4b24c627d9bd | 468.74 MiB | unavailable | [source](https://github.com/bvolpato/ivygrep/blob/14efc6643aadaf5114768d575610399ee48d5085/docs/benchmarks/public-million-results.json) |
+| memory | million-chunk/peak-rss | 2c7629e18d40 | 284.58 MiB | unavailable | [source](https://github.com/bvolpato/ivygrep/blob/14efc6643aadaf5114768d575610399ee48d5085/docs/benchmarks/public-million-results.json) |
+| index size | million-chunk/final-index | 4b24c627d9bd | 1090.48 MiB | unavailable | [source](https://github.com/bvolpato/ivygrep/blob/14efc6643aadaf5114768d575610399ee48d5085/docs/benchmarks/public-million-results.json) |
+| index size | million-chunk/final-index | 2c7629e18d40 | 468.82 MiB | unavailable | [source](https://github.com/bvolpato/ivygrep/blob/14efc6643aadaf5114768d575610399ee48d5085/docs/benchmarks/public-million-results.json) |
+| binary size | release/linux-aarch64-musl | v1.1.8 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.8/ivygrep-v1.1.8-linux-aarch64-musl.tar.gz) |
+| binary size | release/linux-x86_64-musl | v1.1.8 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.8/ivygrep-v1.1.8-linux-x86_64-musl.tar.gz) |
+| binary size | release/macos-aarch64 | v1.1.8 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.8/ivygrep-v1.1.8-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v1.1.8 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.8/ivygrep-v1.1.8-macos-x86_64.tar.gz) |
+| binary size | release/windows-x86_64 | v1.1.8 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.8/ivygrep-v1.1.8-windows-x86_64.zip) |
+| binary size | release/linux-aarch64-musl | v1.1.7 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.7/ivygrep-v1.1.7-linux-aarch64-musl.tar.gz) |
+| binary size | release/linux-x86_64-musl | v1.1.7 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.7/ivygrep-v1.1.7-linux-x86_64-musl.tar.gz) |
+| binary size | release/macos-aarch64 | v1.1.7 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.7/ivygrep-v1.1.7-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v1.1.7 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.7/ivygrep-v1.1.7-macos-x86_64.tar.gz) |
+| binary size | release/windows-x86_64 | v1.1.7 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.7/ivygrep-v1.1.7-windows-x86_64.zip) |
+| binary size | release/linux-aarch64-musl | v1.1.6 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.6/ivygrep-v1.1.6-linux-aarch64-musl.tar.gz) |
+| binary size | release/linux-x86_64-musl | v1.1.6 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.6/ivygrep-v1.1.6-linux-x86_64-musl.tar.gz) |
+| binary size | release/macos-aarch64 | v1.1.6 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.6/ivygrep-v1.1.6-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v1.1.6 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.6/ivygrep-v1.1.6-macos-x86_64.tar.gz) |
+| binary size | release/windows-x86_64 | v1.1.6 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.6/ivygrep-v1.1.6-windows-x86_64.zip) |
+| binary size | release/linux-aarch64-musl | v1.1.5 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.5/ivygrep-v1.1.5-linux-aarch64-musl.tar.gz) |
+| binary size | release/linux-x86_64-musl | v1.1.5 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.5/ivygrep-v1.1.5-linux-x86_64-musl.tar.gz) |
+| binary size | release/macos-aarch64 | v1.1.5 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.5/ivygrep-v1.1.5-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v1.1.5 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.5/ivygrep-v1.1.5-macos-x86_64.tar.gz) |
+| binary size | release/windows-x86_64 | v1.1.5 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.5/ivygrep-v1.1.5-windows-x86_64.zip) |
+| binary size | release/linux-aarch64-musl | v1.1.4 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.4/ivygrep-v1.1.4-linux-aarch64-musl.tar.gz) |
+| binary size | release/linux-x86_64-musl | v1.1.4 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.4/ivygrep-v1.1.4-linux-x86_64-musl.tar.gz) |
+| binary size | release/macos-aarch64 | v1.1.4 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.4/ivygrep-v1.1.4-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v1.1.4 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.4/ivygrep-v1.1.4-macos-x86_64.tar.gz) |
+| binary size | release/windows-x86_64 | v1.1.4 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.4/ivygrep-v1.1.4-windows-x86_64.zip) |
+| binary size | release/linux-aarch64-musl | v1.1.3 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.3/ivygrep-v1.1.3-linux-aarch64-musl.tar.gz) |
+| binary size | release/linux-x86_64-musl | v1.1.3 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.3/ivygrep-v1.1.3-linux-x86_64-musl.tar.gz) |
+| binary size | release/macos-aarch64 | v1.1.3 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.3/ivygrep-v1.1.3-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v1.1.3 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.3/ivygrep-v1.1.3-macos-x86_64.tar.gz) |
+| binary size | release/windows-x86_64 | v1.1.3 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.3/ivygrep-v1.1.3-windows-x86_64.zip) |
+| binary size | release/linux-aarch64-musl | v1.1.2 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.2/ivygrep-v1.1.2-linux-aarch64-musl.tar.gz) |
+| binary size | release/linux-x86_64-musl | v1.1.2 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.2/ivygrep-v1.1.2-linux-x86_64-musl.tar.gz) |
+| binary size | release/macos-aarch64 | v1.1.2 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.2/ivygrep-v1.1.2-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v1.1.2 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.2/ivygrep-v1.1.2-macos-x86_64.tar.gz) |
+| binary size | release/windows-x86_64 | v1.1.2 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.2/ivygrep-v1.1.2-windows-x86_64.zip) |
+| binary size | release/linux-aarch64-musl | v1.1.1 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.1/ivygrep-v1.1.1-linux-aarch64-musl.tar.gz) |
+| binary size | release/linux-x86_64-musl | v1.1.1 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.1/ivygrep-v1.1.1-linux-x86_64-musl.tar.gz) |
+| binary size | release/macos-aarch64 | v1.1.1 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.1/ivygrep-v1.1.1-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v1.1.1 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.1/ivygrep-v1.1.1-macos-x86_64.tar.gz) |
+| binary size | release/windows-x86_64 | v1.1.1 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.1/ivygrep-v1.1.1-windows-x86_64.zip) |
+| binary size | release/linux-aarch64-musl | v1.1.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.0/ivygrep-v1.1.0-linux-aarch64-musl.tar.gz) |
+| binary size | release/linux-x86_64-musl | v1.1.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.0/ivygrep-v1.1.0-linux-x86_64-musl.tar.gz) |
+| binary size | release/macos-aarch64 | v1.1.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.0/ivygrep-v1.1.0-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v1.1.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.0/ivygrep-v1.1.0-macos-x86_64.tar.gz) |
+| binary size | release/windows-x86_64 | v1.1.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.0/ivygrep-v1.1.0-windows-x86_64.zip) |
+| binary size | release/linux-aarch64-musl | v1.0.7 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.7/ivygrep-v1.0.7-linux-aarch64-musl.tar.gz) |
+| binary size | release/linux-x86_64-musl | v1.0.7 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.7/ivygrep-v1.0.7-linux-x86_64-musl.tar.gz) |
+| binary size | release/macos-aarch64 | v1.0.7 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.7/ivygrep-v1.0.7-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v1.0.7 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.7/ivygrep-v1.0.7-macos-x86_64.tar.gz) |
+| binary size | release/windows-x86_64 | v1.0.7 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.7/ivygrep-v1.0.7-windows-x86_64.zip) |
+| binary size | release/linux-aarch64-musl | v1.0.6 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.6/ivygrep-v1.0.6-linux-aarch64-musl.tar.gz) |
+| binary size | release/linux-x86_64-musl | v1.0.6 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.6/ivygrep-v1.0.6-linux-x86_64-musl.tar.gz) |
+| binary size | release/macos-aarch64 | v1.0.6 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.6/ivygrep-v1.0.6-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v1.0.6 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.6/ivygrep-v1.0.6-macos-x86_64.tar.gz) |
+| binary size | release/windows-x86_64 | v1.0.6 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.6/ivygrep-v1.0.6-windows-x86_64.zip) |
+| binary size | release/linux-aarch64-musl | v1.0.5 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.5/ivygrep-v1.0.5-linux-aarch64-musl.tar.gz) |
+| binary size | release/linux-x86_64-musl | v1.0.5 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.5/ivygrep-v1.0.5-linux-x86_64-musl.tar.gz) |
+| binary size | release/macos-aarch64 | v1.0.5 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.5/ivygrep-v1.0.5-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v1.0.5 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.5/ivygrep-v1.0.5-macos-x86_64.tar.gz) |
+| binary size | release/windows-x86_64 | v1.0.5 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.5/ivygrep-v1.0.5-windows-x86_64.zip) |
+| binary size | release/linux-aarch64-musl | v1.0.4 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.4/ivygrep-v1.0.4-linux-aarch64-musl.tar.gz) |
+| binary size | release/linux-x86_64-musl | v1.0.4 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.4/ivygrep-v1.0.4-linux-x86_64-musl.tar.gz) |
+| binary size | release/macos-aarch64 | v1.0.4 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.4/ivygrep-v1.0.4-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v1.0.4 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.4/ivygrep-v1.0.4-macos-x86_64.tar.gz) |
+| binary size | release/windows-x86_64 | v1.0.4 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.4/ivygrep-v1.0.4-windows-x86_64.zip) |
+| binary size | release/linux-aarch64-musl | v1.0.3 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.3/ivygrep-v1.0.3-linux-aarch64-musl.tar.gz) |
+| binary size | release/linux-x86_64-musl | v1.0.3 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.3/ivygrep-v1.0.3-linux-x86_64-musl.tar.gz) |
+| binary size | release/macos-aarch64 | v1.0.3 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.3/ivygrep-v1.0.3-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v1.0.3 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.3/ivygrep-v1.0.3-macos-x86_64.tar.gz) |
+| binary size | release/windows-x86_64 | v1.0.3 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.3/ivygrep-v1.0.3-windows-x86_64.zip) |
+| binary size | release/linux-aarch64-musl | v1.0.2 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-linux-aarch64-musl.tar.gz) |
+| binary size | release/linux-x86_64-musl | v1.0.2 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-linux-x86_64-musl.tar.gz) |
+| binary size | release/macos-aarch64 | v1.0.2 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v1.0.2 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-macos-x86_64.tar.gz) |
+| binary size | release/windows-x86_64 | v1.0.2 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-windows-x86_64.zip) |
+| binary size | release/linux-aarch64-musl | v1.0.1 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.1/ivygrep-v1.0.1-linux-aarch64-musl.tar.gz) |
+| binary size | release/linux-x86_64-musl | v1.0.1 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.1/ivygrep-v1.0.1-linux-x86_64-musl.tar.gz) |
+| binary size | release/macos-aarch64 | v1.0.1 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.1/ivygrep-v1.0.1-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v1.0.1 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.1/ivygrep-v1.0.1-macos-x86_64.tar.gz) |
+| binary size | release/windows-x86_64 | v1.0.1 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.1/ivygrep-v1.0.1-windows-x86_64.zip) |
+| binary size | release/linux-aarch64-musl | v1.0.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.0/ivygrep-v1.0.0-linux-aarch64-musl.tar.gz) |
+| binary size | release/linux-x86_64-musl | v1.0.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.0/ivygrep-v1.0.0-linux-x86_64-musl.tar.gz) |
+| binary size | release/macos-aarch64 | v1.0.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.0/ivygrep-v1.0.0-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v1.0.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.0/ivygrep-v1.0.0-macos-x86_64.tar.gz) |
+| binary size | release/windows-x86_64 | v1.0.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.0/ivygrep-v1.0.0-windows-x86_64.zip) |
 | binary size | release/linux-aarch64-musl | v0.12.21 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.12.21/ivygrep-v0.12.21-linux-aarch64-musl.tar.gz) |
 | binary size | release/linux-x86_64-musl | v0.12.21 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.12.21/ivygrep-v0.12.21-linux-x86_64-musl.tar.gz) |
 | binary size | release/macos-aarch64 | v0.12.21 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.12.21/ivygrep-v0.12.21-macos-aarch64.tar.gz) |
 | binary size | release/macos-x86_64 | v0.12.21 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.12.21/ivygrep-v0.12.21-macos-x86_64.tar.gz) |
 | binary size | release/windows-x86_64 | v0.12.21 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.12.21/ivygrep-v0.12.21-windows-x86_64.zip) |
-| binary size | release/linux-aarch64-musl | v0.12.20 | 67.21 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.12.20/ivygrep-v0.12.20-linux-aarch64-musl.tar.gz) |
-| binary size | release/linux-x86_64-musl | v0.12.20 | 70.66 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.12.20/ivygrep-v0.12.20-linux-x86_64-musl.tar.gz) |
-| binary size | release/macos-aarch64 | v0.12.20 | 67.67 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.12.20/ivygrep-v0.12.20-macos-aarch64.tar.gz) |
-| binary size | release/macos-x86_64 | v0.12.20 | 68.16 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.12.20/ivygrep-v0.12.20-macos-x86_64.tar.gz) |
-| binary size | release/windows-x86_64 | v0.12.20 | 69.94 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.12.20/ivygrep-v0.12.20-windows-x86_64.zip) |
+| binary size | release/linux-aarch64-musl | v0.12.20 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.12.20/ivygrep-v0.12.20-linux-aarch64-musl.tar.gz) |
+| binary size | release/linux-x86_64-musl | v0.12.20 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.12.20/ivygrep-v0.12.20-linux-x86_64-musl.tar.gz) |
+| binary size | release/macos-aarch64 | v0.12.20 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.12.20/ivygrep-v0.12.20-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v0.12.20 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.12.20/ivygrep-v0.12.20-macos-x86_64.tar.gz) |
+| binary size | release/windows-x86_64 | v0.12.20 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.12.20/ivygrep-v0.12.20-windows-x86_64.zip) |
 | binary size | release/linux-aarch64-musl | v0.12.19 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.12.19/ivygrep-v0.12.19-linux-aarch64-musl.tar.gz) |
 | binary size | release/linux-x86_64-musl | v0.12.19 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.12.19/ivygrep-v0.12.19-linux-x86_64-musl.tar.gz) |
 | binary size | release/macos-aarch64 | v0.12.19 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.12.19/ivygrep-v0.12.19-macos-aarch64.tar.gz) |
@@ -489,6 +559,120 @@ reason, source commit, and immutable artifact URL.
 | binary size | release/linux-x86_64 | v0.5.2 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.2/ivygrep-v0.5.2-linux-x86_64.tar.gz) |
 | binary size | release/macos-aarch64 | v0.5.2 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.2/ivygrep-v0.5.2-macos-aarch64.tar.gz) |
 | binary size | release/macos-x86_64 | v0.5.2 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.2/ivygrep-v0.5.2-macos-x86_64.tar.gz) |
+| binary size | release/linux-aarch64 | v0.5.1 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.1/ivygrep-v0.5.1-linux-aarch64.tar.gz) |
+| binary size | release/linux-x86_64 | v0.5.1 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.1/ivygrep-v0.5.1-linux-x86_64.tar.gz) |
+| binary size | release/macos-aarch64 | v0.5.1 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.1/ivygrep-v0.5.1-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v0.5.1 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.1/ivygrep-v0.5.1-macos-x86_64.tar.gz) |
+| binary size | release/linux-aarch64 | v0.5.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.0/ivygrep-v0.5.0-linux-aarch64.tar.gz) |
+| binary size | release/linux-x86_64 | v0.5.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.0/ivygrep-v0.5.0-linux-x86_64.tar.gz) |
+| binary size | release/macos-aarch64 | v0.5.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.0/ivygrep-v0.5.0-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v0.5.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.0/ivygrep-v0.5.0-macos-x86_64.tar.gz) |
+| binary size | release/linux-aarch64 | v0.4.7 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.7/ivygrep-v0.4.7-linux-aarch64.tar.gz) |
+| binary size | release/linux-x86_64 | v0.4.7 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.7/ivygrep-v0.4.7-linux-x86_64.tar.gz) |
+| binary size | release/macos-aarch64 | v0.4.7 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.7/ivygrep-v0.4.7-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v0.4.7 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.7/ivygrep-v0.4.7-macos-x86_64.tar.gz) |
+| binary size | release/linux-aarch64 | v0.4.6 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.6/ivygrep-v0.4.6-linux-aarch64.tar.gz) |
+| binary size | release/linux-x86_64 | v0.4.6 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.6/ivygrep-v0.4.6-linux-x86_64.tar.gz) |
+| binary size | release/macos-aarch64 | v0.4.6 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.6/ivygrep-v0.4.6-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v0.4.6 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.6/ivygrep-v0.4.6-macos-x86_64.tar.gz) |
+| binary size | release/linux-aarch64 | v0.4.5 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.5/ivygrep-v0.4.5-linux-aarch64.tar.gz) |
+| binary size | release/linux-x86_64 | v0.4.5 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.5/ivygrep-v0.4.5-linux-x86_64.tar.gz) |
+| binary size | release/macos-aarch64 | v0.4.5 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.5/ivygrep-v0.4.5-macos-aarch64.tar.gz) |
+| binary size | release/macos-x86_64 | v0.4.5 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.5/ivygrep-v0.4.5-macos-x86_64.tar.gz) |
+| binary size | release/aarch64-apple-darwin | v0.3.2 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.2/ivygrep-v0.3.2-aarch64-apple-darwin.tar.gz) |
+| binary size | release/aarch64-unknown-linux-gnu | v0.3.2 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.2/ivygrep-v0.3.2-aarch64-unknown-linux-gnu.tar.gz) |
+| binary size | release/x86_64-apple-darwin | v0.3.2 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.2/ivygrep-v0.3.2-x86_64-apple-darwin.tar.gz) |
+| binary size | release/x86_64-unknown-linux-gnu | v0.3.2 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.2/ivygrep-v0.3.2-x86_64-unknown-linux-gnu.tar.gz) |
+| binary size | release/aarch64-apple-darwin | v0.3.1 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.1/ivygrep-v0.3.1-aarch64-apple-darwin.tar.gz) |
+| binary size | release/aarch64-unknown-linux-gnu | v0.3.1 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.1/ivygrep-v0.3.1-aarch64-unknown-linux-gnu.tar.gz) |
+| binary size | release/x86_64-apple-darwin | v0.3.1 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.1/ivygrep-v0.3.1-x86_64-apple-darwin.tar.gz) |
+| binary size | release/x86_64-unknown-linux-gnu | v0.3.1 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.1/ivygrep-v0.3.1-x86_64-unknown-linux-gnu.tar.gz) |
+| binary size | release/aarch64-apple-darwin | v0.3.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.0/ivygrep-v0.3.0-aarch64-apple-darwin.tar.gz) |
+| binary size | release/aarch64-unknown-linux-gnu | v0.3.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.0/ivygrep-v0.3.0-aarch64-unknown-linux-gnu.tar.gz) |
+| binary size | release/x86_64-apple-darwin | v0.3.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.0/ivygrep-v0.3.0-x86_64-apple-darwin.tar.gz) |
+| binary size | release/x86_64-unknown-linux-gnu | v0.3.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.0/ivygrep-v0.3.0-x86_64-unknown-linux-gnu.tar.gz) |
+| binary size | release/aarch64-apple-darwin | v0.2.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.2.0/ivygrep-v0.2.0-aarch64-apple-darwin.tar.gz) |
+| binary size | release/aarch64-unknown-linux-gnu | v0.2.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.2.0/ivygrep-v0.2.0-aarch64-unknown-linux-gnu.tar.gz) |
+| binary size | release/x86_64-apple-darwin | v0.2.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.2.0/ivygrep-v0.2.0-x86_64-apple-darwin.tar.gz) |
+| binary size | release/x86_64-unknown-linux-gnu | v0.2.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.2.0/ivygrep-v0.2.0-x86_64-unknown-linux-gnu.tar.gz) |
+| binary size | release/aarch64-apple-darwin | v0.1.1 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.1.1/ivygrep-v0.1.1-aarch64-apple-darwin.tar.gz) |
+| binary size | release/aarch64-unknown-linux-gnu | v0.1.1 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.1.1/ivygrep-v0.1.1-aarch64-unknown-linux-gnu.tar.gz) |
+| binary size | release/x86_64-apple-darwin | v0.1.1 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.1.1/ivygrep-v0.1.1-x86_64-apple-darwin.tar.gz) |
+| binary size | release/x86_64-unknown-linux-gnu | v0.1.1 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.1.1/ivygrep-v0.1.1-x86_64-unknown-linux-gnu.tar.gz) |
+| binary size | release/aarch64-apple-darwin | v0.1.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.1.0/ivygrep-v0.1.0-aarch64-apple-darwin.tar.gz) |
+| binary size | release/aarch64-unknown-linux-gnu | v0.1.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.1.0/ivygrep-v0.1.0-aarch64-unknown-linux-gnu.tar.gz) |
+| binary size | release/x86_64-apple-darwin | v0.1.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.1.0/ivygrep-v0.1.0-x86_64-apple-darwin.tar.gz) |
+| binary size | release/x86_64-unknown-linux-gnu | v0.1.0 | unavailable | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.1.0/ivygrep-v0.1.0-x86_64-unknown-linux-gnu.tar.gz) |
+| archive size | release/linux-aarch64-musl | v1.1.8 | 13.45 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.8/ivygrep-v1.1.8-linux-aarch64-musl.tar.gz) |
+| archive size | release/linux-x86_64-musl | v1.1.8 | 14.26 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.8/ivygrep-v1.1.8-linux-x86_64-musl.tar.gz) |
+| archive size | release/macos-aarch64 | v1.1.8 | 13.47 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.8/ivygrep-v1.1.8-macos-aarch64.tar.gz) |
+| archive size | release/macos-x86_64 | v1.1.8 | 13.74 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.8/ivygrep-v1.1.8-macos-x86_64.tar.gz) |
+| archive size | release/windows-x86_64 | v1.1.8 | 13.09 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.8/ivygrep-v1.1.8-windows-x86_64.zip) |
+| archive size | release/linux-aarch64-musl | v1.1.7 | 13.45 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.7/ivygrep-v1.1.7-linux-aarch64-musl.tar.gz) |
+| archive size | release/linux-x86_64-musl | v1.1.7 | 14.26 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.7/ivygrep-v1.1.7-linux-x86_64-musl.tar.gz) |
+| archive size | release/macos-aarch64 | v1.1.7 | 13.47 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.7/ivygrep-v1.1.7-macos-aarch64.tar.gz) |
+| archive size | release/macos-x86_64 | v1.1.7 | 13.74 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.7/ivygrep-v1.1.7-macos-x86_64.tar.gz) |
+| archive size | release/windows-x86_64 | v1.1.7 | 13.08 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.7/ivygrep-v1.1.7-windows-x86_64.zip) |
+| archive size | release/linux-aarch64-musl | v1.1.6 | 13.45 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.6/ivygrep-v1.1.6-linux-aarch64-musl.tar.gz) |
+| archive size | release/linux-x86_64-musl | v1.1.6 | 14.26 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.6/ivygrep-v1.1.6-linux-x86_64-musl.tar.gz) |
+| archive size | release/macos-aarch64 | v1.1.6 | 13.45 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.6/ivygrep-v1.1.6-macos-aarch64.tar.gz) |
+| archive size | release/macos-x86_64 | v1.1.6 | 13.73 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.6/ivygrep-v1.1.6-macos-x86_64.tar.gz) |
+| archive size | release/windows-x86_64 | v1.1.6 | 13.08 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.6/ivygrep-v1.1.6-windows-x86_64.zip) |
+| archive size | release/linux-aarch64-musl | v1.1.5 | 13.45 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.5/ivygrep-v1.1.5-linux-aarch64-musl.tar.gz) |
+| archive size | release/linux-x86_64-musl | v1.1.5 | 14.26 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.5/ivygrep-v1.1.5-linux-x86_64-musl.tar.gz) |
+| archive size | release/macos-aarch64 | v1.1.5 | 13.45 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.5/ivygrep-v1.1.5-macos-aarch64.tar.gz) |
+| archive size | release/macos-x86_64 | v1.1.5 | 13.72 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.5/ivygrep-v1.1.5-macos-x86_64.tar.gz) |
+| archive size | release/windows-x86_64 | v1.1.5 | 13.08 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.5/ivygrep-v1.1.5-windows-x86_64.zip) |
+| archive size | release/linux-aarch64-musl | v1.1.4 | 13.44 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.4/ivygrep-v1.1.4-linux-aarch64-musl.tar.gz) |
+| archive size | release/linux-x86_64-musl | v1.1.4 | 14.25 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.4/ivygrep-v1.1.4-linux-x86_64-musl.tar.gz) |
+| archive size | release/macos-aarch64 | v1.1.4 | 13.46 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.4/ivygrep-v1.1.4-macos-aarch64.tar.gz) |
+| archive size | release/macos-x86_64 | v1.1.4 | 13.72 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.4/ivygrep-v1.1.4-macos-x86_64.tar.gz) |
+| archive size | release/windows-x86_64 | v1.1.4 | 13.08 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.4/ivygrep-v1.1.4-windows-x86_64.zip) |
+| archive size | release/linux-aarch64-musl | v1.1.3 | 13.44 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.3/ivygrep-v1.1.3-linux-aarch64-musl.tar.gz) |
+| archive size | release/linux-x86_64-musl | v1.1.3 | 14.25 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.3/ivygrep-v1.1.3-linux-x86_64-musl.tar.gz) |
+| archive size | release/macos-aarch64 | v1.1.3 | 13.45 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.3/ivygrep-v1.1.3-macos-aarch64.tar.gz) |
+| archive size | release/macos-x86_64 | v1.1.3 | 13.72 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.3/ivygrep-v1.1.3-macos-x86_64.tar.gz) |
+| archive size | release/windows-x86_64 | v1.1.3 | 13.08 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.3/ivygrep-v1.1.3-windows-x86_64.zip) |
+| archive size | release/linux-aarch64-musl | v1.1.2 | 13.41 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.2/ivygrep-v1.1.2-linux-aarch64-musl.tar.gz) |
+| archive size | release/linux-x86_64-musl | v1.1.2 | 14.20 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.2/ivygrep-v1.1.2-linux-x86_64-musl.tar.gz) |
+| archive size | release/macos-aarch64 | v1.1.2 | 13.21 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.2/ivygrep-v1.1.2-macos-aarch64.tar.gz) |
+| archive size | release/macos-x86_64 | v1.1.2 | 13.40 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.2/ivygrep-v1.1.2-macos-x86_64.tar.gz) |
+| archive size | release/windows-x86_64 | v1.1.2 | 13.03 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.2/ivygrep-v1.1.2-windows-x86_64.zip) |
+| archive size | release/linux-aarch64-musl | v1.1.1 | 13.40 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.1/ivygrep-v1.1.1-linux-aarch64-musl.tar.gz) |
+| archive size | release/linux-x86_64-musl | v1.1.1 | 14.20 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.1/ivygrep-v1.1.1-linux-x86_64-musl.tar.gz) |
+| archive size | release/macos-aarch64 | v1.1.1 | 13.19 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.1/ivygrep-v1.1.1-macos-aarch64.tar.gz) |
+| archive size | release/macos-x86_64 | v1.1.1 | 13.42 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.1/ivygrep-v1.1.1-macos-x86_64.tar.gz) |
+| archive size | release/windows-x86_64 | v1.1.1 | 13.02 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.1/ivygrep-v1.1.1-windows-x86_64.zip) |
+| archive size | release/linux-aarch64-musl | v1.1.0 | 13.40 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.0/ivygrep-v1.1.0-linux-aarch64-musl.tar.gz) |
+| archive size | release/linux-x86_64-musl | v1.1.0 | 14.18 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.0/ivygrep-v1.1.0-linux-x86_64-musl.tar.gz) |
+| archive size | release/macos-aarch64 | v1.1.0 | 13.20 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.0/ivygrep-v1.1.0-macos-aarch64.tar.gz) |
+| archive size | release/macos-x86_64 | v1.1.0 | 13.40 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.0/ivygrep-v1.1.0-macos-x86_64.tar.gz) |
+| archive size | release/windows-x86_64 | v1.1.0 | 13.00 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.1.0/ivygrep-v1.1.0-windows-x86_64.zip) |
+| archive size | release/linux-aarch64-musl | v1.0.7 | 13.12 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.7/ivygrep-v1.0.7-linux-aarch64-musl.tar.gz) |
+| archive size | release/linux-x86_64-musl | v1.0.7 | 13.92 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.7/ivygrep-v1.0.7-linux-x86_64-musl.tar.gz) |
+| archive size | release/macos-aarch64 | v1.0.7 | 12.94 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.7/ivygrep-v1.0.7-macos-aarch64.tar.gz) |
+| archive size | release/macos-x86_64 | v1.0.7 | 13.14 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.7/ivygrep-v1.0.7-macos-x86_64.tar.gz) |
+| archive size | release/windows-x86_64 | v1.0.7 | 12.72 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.7/ivygrep-v1.0.7-windows-x86_64.zip) |
+| archive size | release/linux-aarch64-musl | v1.0.6 | 13.12 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.6/ivygrep-v1.0.6-linux-aarch64-musl.tar.gz) |
+| archive size | release/linux-x86_64-musl | v1.0.6 | 13.92 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.6/ivygrep-v1.0.6-linux-x86_64-musl.tar.gz) |
+| archive size | release/macos-aarch64 | v1.0.6 | 12.94 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.6/ivygrep-v1.0.6-macos-aarch64.tar.gz) |
+| archive size | release/macos-x86_64 | v1.0.6 | 13.13 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.6/ivygrep-v1.0.6-macos-x86_64.tar.gz) |
+| archive size | release/windows-x86_64 | v1.0.6 | 12.72 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.6/ivygrep-v1.0.6-windows-x86_64.zip) |
+| archive size | release/linux-aarch64-musl | v1.0.5 | 13.13 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.5/ivygrep-v1.0.5-linux-aarch64-musl.tar.gz) |
+| archive size | release/linux-x86_64-musl | v1.0.5 | 13.91 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.5/ivygrep-v1.0.5-linux-x86_64-musl.tar.gz) |
+| archive size | release/macos-aarch64 | v1.0.5 | 12.94 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.5/ivygrep-v1.0.5-macos-aarch64.tar.gz) |
+| archive size | release/macos-x86_64 | v1.0.5 | 13.13 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.5/ivygrep-v1.0.5-macos-x86_64.tar.gz) |
+| archive size | release/windows-x86_64 | v1.0.5 | 12.72 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.5/ivygrep-v1.0.5-windows-x86_64.zip) |
+| archive size | release/linux-aarch64-musl | v1.0.4 | 13.12 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.4/ivygrep-v1.0.4-linux-aarch64-musl.tar.gz) |
+| archive size | release/linux-x86_64-musl | v1.0.4 | 13.90 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.4/ivygrep-v1.0.4-linux-x86_64-musl.tar.gz) |
+| archive size | release/macos-aarch64 | v1.0.4 | 12.92 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.4/ivygrep-v1.0.4-macos-aarch64.tar.gz) |
+| archive size | release/macos-x86_64 | v1.0.4 | 13.13 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.4/ivygrep-v1.0.4-macos-x86_64.tar.gz) |
+| archive size | release/windows-x86_64 | v1.0.4 | 12.71 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.4/ivygrep-v1.0.4-windows-x86_64.zip) |
+| archive size | release/linux-aarch64-musl | v1.0.3 | 13.12 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.3/ivygrep-v1.0.3-linux-aarch64-musl.tar.gz) |
+| archive size | release/linux-x86_64-musl | v1.0.3 | 13.89 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.3/ivygrep-v1.0.3-linux-x86_64-musl.tar.gz) |
+| archive size | release/macos-aarch64 | v1.0.3 | 12.94 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.3/ivygrep-v1.0.3-macos-aarch64.tar.gz) |
+| archive size | release/macos-x86_64 | v1.0.3 | 13.13 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.3/ivygrep-v1.0.3-macos-x86_64.tar.gz) |
+| archive size | release/windows-x86_64 | v1.0.3 | 12.72 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.3/ivygrep-v1.0.3-windows-x86_64.zip) |
 | archive size | release/linux-aarch64-musl | v1.0.2 | 13.13 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-linux-aarch64-musl.tar.gz) |
 | archive size | release/linux-x86_64-musl | v1.0.2 | 13.90 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-linux-x86_64-musl.tar.gz) |
 | archive size | release/macos-aarch64 | v1.0.2 | 12.94 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v1.0.2/ivygrep-v1.0.2-macos-aarch64.tar.gz) |
@@ -938,18 +1122,63 @@ reason, source commit, and immutable artifact URL.
 | archive size | release/linux-x86_64 | v0.5.2 | 55.04 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.2/ivygrep-v0.5.2-linux-x86_64.tar.gz) |
 | archive size | release/macos-aarch64 | v0.5.2 | 14.33 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.2/ivygrep-v0.5.2-macos-aarch64.tar.gz) |
 | archive size | release/macos-x86_64 | v0.5.2 | 6.07 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.2/ivygrep-v0.5.2-macos-x86_64.tar.gz) |
+| archive size | release/linux-aarch64 | v0.5.1 | 50.64 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.1/ivygrep-v0.5.1-linux-aarch64.tar.gz) |
+| archive size | release/linux-x86_64 | v0.5.1 | 55.04 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.1/ivygrep-v0.5.1-linux-x86_64.tar.gz) |
+| archive size | release/macos-aarch64 | v0.5.1 | 14.33 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.1/ivygrep-v0.5.1-macos-aarch64.tar.gz) |
+| archive size | release/macos-x86_64 | v0.5.1 | 6.07 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.1/ivygrep-v0.5.1-macos-x86_64.tar.gz) |
+| archive size | release/linux-aarch64 | v0.5.0 | 50.60 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.0/ivygrep-v0.5.0-linux-aarch64.tar.gz) |
+| archive size | release/linux-x86_64 | v0.5.0 | 55.05 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.0/ivygrep-v0.5.0-linux-x86_64.tar.gz) |
+| archive size | release/macos-aarch64 | v0.5.0 | 14.33 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.0/ivygrep-v0.5.0-macos-aarch64.tar.gz) |
+| archive size | release/macos-x86_64 | v0.5.0 | 6.07 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.5.0/ivygrep-v0.5.0-macos-x86_64.tar.gz) |
+| archive size | release/linux-aarch64 | v0.4.7 | 50.52 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.7/ivygrep-v0.4.7-linux-aarch64.tar.gz) |
+| archive size | release/linux-x86_64 | v0.4.7 | 54.86 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.7/ivygrep-v0.4.7-linux-x86_64.tar.gz) |
+| archive size | release/macos-aarch64 | v0.4.7 | 14.31 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.7/ivygrep-v0.4.7-macos-aarch64.tar.gz) |
+| archive size | release/macos-x86_64 | v0.4.7 | 6.05 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.7/ivygrep-v0.4.7-macos-x86_64.tar.gz) |
+| archive size | release/linux-aarch64 | v0.4.6 | 50.19 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.6/ivygrep-v0.4.6-linux-aarch64.tar.gz) |
+| archive size | release/linux-x86_64 | v0.4.6 | 54.56 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.6/ivygrep-v0.4.6-linux-x86_64.tar.gz) |
+| archive size | release/macos-aarch64 | v0.4.6 | 14.25 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.6/ivygrep-v0.4.6-macos-aarch64.tar.gz) |
+| archive size | release/macos-x86_64 | v0.4.6 | 5.99 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.6/ivygrep-v0.4.6-macos-x86_64.tar.gz) |
+| archive size | release/linux-aarch64 | v0.4.5 | 50.15 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.5/ivygrep-v0.4.5-linux-aarch64.tar.gz) |
+| archive size | release/linux-x86_64 | v0.4.5 | 54.61 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.5/ivygrep-v0.4.5-linux-x86_64.tar.gz) |
+| archive size | release/macos-aarch64 | v0.4.5 | 14.24 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.5/ivygrep-v0.4.5-macos-aarch64.tar.gz) |
+| archive size | release/macos-x86_64 | v0.4.5 | 5.98 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.4.5/ivygrep-v0.4.5-macos-x86_64.tar.gz) |
+| archive size | release/aarch64-apple-darwin | v0.3.2 | 13.98 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.2/ivygrep-v0.3.2-aarch64-apple-darwin.tar.gz) |
+| archive size | release/aarch64-unknown-linux-gnu | v0.3.2 | 5.91 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.2/ivygrep-v0.3.2-aarch64-unknown-linux-gnu.tar.gz) |
+| archive size | release/x86_64-apple-darwin | v0.3.2 | 5.63 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.2/ivygrep-v0.3.2-x86_64-apple-darwin.tar.gz) |
+| archive size | release/x86_64-unknown-linux-gnu | v0.3.2 | 15.74 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.2/ivygrep-v0.3.2-x86_64-unknown-linux-gnu.tar.gz) |
+| archive size | release/aarch64-apple-darwin | v0.3.1 | 13.98 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.1/ivygrep-v0.3.1-aarch64-apple-darwin.tar.gz) |
+| archive size | release/aarch64-unknown-linux-gnu | v0.3.1 | 5.91 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.1/ivygrep-v0.3.1-aarch64-unknown-linux-gnu.tar.gz) |
+| archive size | release/x86_64-apple-darwin | v0.3.1 | 5.63 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.1/ivygrep-v0.3.1-x86_64-apple-darwin.tar.gz) |
+| archive size | release/x86_64-unknown-linux-gnu | v0.3.1 | 15.72 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.1/ivygrep-v0.3.1-x86_64-unknown-linux-gnu.tar.gz) |
+| archive size | release/aarch64-apple-darwin | v0.3.0 | 13.97 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.0/ivygrep-v0.3.0-aarch64-apple-darwin.tar.gz) |
+| archive size | release/aarch64-unknown-linux-gnu | v0.3.0 | 5.91 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.0/ivygrep-v0.3.0-aarch64-unknown-linux-gnu.tar.gz) |
+| archive size | release/x86_64-apple-darwin | v0.3.0 | 5.63 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.0/ivygrep-v0.3.0-x86_64-apple-darwin.tar.gz) |
+| archive size | release/x86_64-unknown-linux-gnu | v0.3.0 | 15.71 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.3.0/ivygrep-v0.3.0-x86_64-unknown-linux-gnu.tar.gz) |
+| archive size | release/aarch64-apple-darwin | v0.2.0 | 4.74 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.2.0/ivygrep-v0.2.0-aarch64-apple-darwin.tar.gz) |
+| archive size | release/aarch64-unknown-linux-gnu | v0.2.0 | 5.35 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.2.0/ivygrep-v0.2.0-aarch64-unknown-linux-gnu.tar.gz) |
+| archive size | release/x86_64-apple-darwin | v0.2.0 | 5.06 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.2.0/ivygrep-v0.2.0-x86_64-apple-darwin.tar.gz) |
+| archive size | release/x86_64-unknown-linux-gnu | v0.2.0 | 5.43 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.2.0/ivygrep-v0.2.0-x86_64-unknown-linux-gnu.tar.gz) |
+| archive size | release/aarch64-apple-darwin | v0.1.1 | 4.74 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.1.1/ivygrep-v0.1.1-aarch64-apple-darwin.tar.gz) |
+| archive size | release/aarch64-unknown-linux-gnu | v0.1.1 | 5.35 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.1.1/ivygrep-v0.1.1-aarch64-unknown-linux-gnu.tar.gz) |
+| archive size | release/x86_64-apple-darwin | v0.1.1 | 5.06 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.1.1/ivygrep-v0.1.1-x86_64-apple-darwin.tar.gz) |
+| archive size | release/x86_64-unknown-linux-gnu | v0.1.1 | 5.43 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.1.1/ivygrep-v0.1.1-x86_64-unknown-linux-gnu.tar.gz) |
+| archive size | release/aarch64-apple-darwin | v0.1.0 | 4.72 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.1.0/ivygrep-v0.1.0-aarch64-apple-darwin.tar.gz) |
+| archive size | release/aarch64-unknown-linux-gnu | v0.1.0 | 5.33 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.1.0/ivygrep-v0.1.0-aarch64-unknown-linux-gnu.tar.gz) |
+| archive size | release/x86_64-apple-darwin | v0.1.0 | 5.05 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.1.0/ivygrep-v0.1.0-x86_64-apple-darwin.tar.gz) |
+| archive size | release/x86_64-unknown-linux-gnu | v0.1.0 | 5.41 MiB | not-applicable | [source](https://github.com/bvolpato/ivygrep/releases/download/v0.1.0/ivygrep-v0.1.0-x86_64-unknown-linux-gnu.tar.gz) |
 
 ## Immutable source artifacts
 
-- [Frozen public retrieval baseline](https://github.com/bvolpato/ivygrep/blob/262cb61f70624a8d0f10844d204ae7593a85a6d8/docs/benchmarks/public-code-retrieval-baseline-results.json) (`6c855c4308b45f1c...`)
-- [Current public retrieval matrix](https://github.com/bvolpato/ivygrep/blob/262cb61f70624a8d0f10844d204ae7593a85a6d8/docs/benchmarks/public-code-retrieval-results.json) (`37a4821a98769114...`)
-- [Compact-index public retrieval matrix](https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-quality-current.json) (`0a939ed959689bd9...`)
-- [Portable embedding model selection](https://github.com/bvolpato/ivygrep/blob/262cb61f70624a8d0f10844d204ae7593a85a6d8/docs/benchmarks/embedding-model-bakeoff.json) (`ff4aeb3e5d11db05...`)
-- [Held-out learned reranker](https://github.com/bvolpato/ivygrep/blob/4b24c627d9bd733edec5d145437e9aa35c2ab2ca/docs/benchmarks/public-reranker-results.json) (`e9ba2fee6fe5bb3e...`)
-- [Public million-chunk benchmark](https://github.com/bvolpato/ivygrep/blob/107e3b0726cf15dc1d4d45178aad3f732168a793/docs/benchmarks/public-million-results.json) (`f4ba8051b2c7cf88...`)
+- [Frozen public retrieval baseline](https://github.com/bvolpato/ivygrep/blob/14efc6643aadaf5114768d575610399ee48d5085/docs/benchmarks/public-code-retrieval-baseline-results.json) (`6c855c4308b45f1c...`)
+- [Current public retrieval matrix](https://github.com/bvolpato/ivygrep/blob/83e32213c58ae16a9b7cadecad0138910225ce70/docs/benchmarks/public-code-retrieval-results.json) (`f8c1907ec42bc57c...`)
+- [Current challenge retrieval matrix](https://github.com/bvolpato/ivygrep/blob/83e32213c58ae16a9b7cadecad0138910225ce70/docs/benchmarks/public-sota-challenge-results.json) (`531bc5985d4f3313...`)
+- [Compact-index public retrieval matrix](https://github.com/bvolpato/ivygrep/blob/14efc6643aadaf5114768d575610399ee48d5085/docs/benchmarks/public-million-quality-current.json) (`0a939ed959689bd9...`)
+- [Portable embedding model selection](https://github.com/bvolpato/ivygrep/blob/e80163aa82d2ccc296f071ad01d322462f026790/docs/benchmarks/embedding-model-bakeoff.json) (`ff4aeb3e5d11db05...`)
+- [Held-out learned reranker](https://github.com/bvolpato/ivygrep/blob/14efc6643aadaf5114768d575610399ee48d5085/docs/benchmarks/public-reranker-results.json) (`e9ba2fee6fe5bb3e...`)
+- [Public million-chunk benchmark](https://github.com/bvolpato/ivygrep/blob/14efc6643aadaf5114768d575610399ee48d5085/docs/benchmarks/public-million-results.json) (`f4ba8051b2c7cf88...`)
 - [Daemon hot-query cache](https://github.com/bvolpato/ivygrep/blob/a99f5fb6eafef9c41d656a42dccaf44e27972d32/docs/benchmarks/daemon-hot-query-cache-explore-results.tsv) (`bf168523793c2c3f...`)
-- [Release artifact acceptance gate](https://github.com/bvolpato/ivygrep/blob/030e32e275494896d4b5e348c6c370f205c0bb69/.github/workflows/release.yml) (`a8a2a1292a798bc3...`)
-- [Release artifact history](https://github.com/bvolpato/ivygrep/blob/b2d5a02608c33ac16c33bce9a15b76c41151c9c3/docs/benchmarks/release-artifact-history.json) (`3f9d87e6409a8285...`)
+- [Release artifact acceptance gate](https://github.com/bvolpato/ivygrep/blob/7de250bef5a54bbd4c5f43f54e6b605ba44e842b/.github/workflows/release.yml) (`a8a2a1292a798bc3...`)
+- [Release artifact history](https://github.com/bvolpato/ivygrep/blob/2daeb1bcdea5d4daac658c59d6662bb7e63751d2/docs/benchmarks/release-artifact-history.json) (`8142eb4c33ba7330...`)
 
 Raw machine-readable dashboard:
 [`evidence-dashboard.json`](evidence-dashboard.json).

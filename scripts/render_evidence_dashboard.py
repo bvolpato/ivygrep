@@ -473,7 +473,7 @@ def format_variance(variance: dict) -> str:
 
 def render_markdown(dashboard: dict) -> str:
     by_id = {item["id"]: item for item in dashboard["evidence"]}
-    retrieval = by_id["public-retrieval-compact-current"]["summary"]
+    retrieval = by_id["public-retrieval-current"]["summary"]
     million = by_id["million-scale"]["summary"]
     reranker = by_id["learned-reranker"]["summary"]
     daemon = by_id["daemon-cache"]["summary"]
@@ -605,7 +605,7 @@ def render_html(dashboard: dict, markdown: str) -> str:
     retrieval = next(
         item["summary"]
         for item in dashboard["evidence"]
-        if item["id"] == "public-retrieval-compact-current"
+        if item["id"] == "public-retrieval-current"
     )
     daemon = next(
         item["summary"]

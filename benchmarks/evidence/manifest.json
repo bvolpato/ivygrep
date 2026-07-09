@@ -6,42 +6,49 @@
       "kind": "quality",
       "label": "Frozen public retrieval baseline",
       "path": "docs/benchmarks/public-code-retrieval-baseline-results.json",
-      "publication_commit": "262cb61f70624a8d0f10844d204ae7593a85a6d8"
+      "publication_commit": "14efc6643aadaf5114768d575610399ee48d5085"
     },
     {
       "id": "public-retrieval-current",
       "kind": "quality",
       "label": "Current public retrieval matrix",
       "path": "docs/benchmarks/public-code-retrieval-results.json",
-      "publication_commit": "262cb61f70624a8d0f10844d204ae7593a85a6d8"
+      "publication_commit": "83e32213c58ae16a9b7cadecad0138910225ce70"
+    },
+    {
+      "id": "public-retrieval-challenge-current",
+      "kind": "quality",
+      "label": "Current challenge retrieval matrix",
+      "path": "docs/benchmarks/public-sota-challenge-results.json",
+      "publication_commit": "83e32213c58ae16a9b7cadecad0138910225ce70"
     },
     {
       "id": "public-retrieval-compact-current",
       "kind": "quality",
       "label": "Compact-index public retrieval matrix",
       "path": "docs/benchmarks/public-million-quality-current.json",
-      "publication_commit": "107e3b0726cf15dc1d4d45178aad3f732168a793"
+      "publication_commit": "14efc6643aadaf5114768d575610399ee48d5085"
     },
     {
       "id": "embedding-selection",
       "kind": "model",
       "label": "Portable embedding model selection",
       "path": "docs/benchmarks/embedding-model-bakeoff.json",
-      "publication_commit": "262cb61f70624a8d0f10844d204ae7593a85a6d8"
+      "publication_commit": "e80163aa82d2ccc296f071ad01d322462f026790"
     },
     {
       "id": "learned-reranker",
       "kind": "quality",
       "label": "Held-out learned reranker",
       "path": "docs/benchmarks/public-reranker-results.json",
-      "publication_commit": "4b24c627d9bd733edec5d145437e9aa35c2ab2ca"
+      "publication_commit": "14efc6643aadaf5114768d575610399ee48d5085"
     },
     {
       "id": "million-scale",
       "kind": "scale",
       "label": "Public million-chunk benchmark",
       "path": "docs/benchmarks/public-million-results.json",
-      "publication_commit": "107e3b0726cf15dc1d4d45178aad3f732168a793"
+      "publication_commit": "14efc6643aadaf5114768d575610399ee48d5085"
     },
     {
       "id": "daemon-cache",
@@ -55,9 +62,9 @@
       "kind": "portability",
       "label": "Release artifact acceptance gate",
       "path": ".github/workflows/release.yml",
-      "publication_commit": "030e32e275494896d4b5e348c6c370f205c0bb69"
+      "publication_commit": "7de250bef5a54bbd4c5f43f54e6b605ba44e842b"
     }
   ],
   "release_history": "docs/benchmarks/release-artifact-history.json",
-  "release_history_publication_commit": "b2d5a02608c33ac16c33bce9a15b76c41151c9c3"
+  "release_history_publication_commit": "2daeb1bcdea5d4daac658c59d6662bb7e63751d2"
 }
