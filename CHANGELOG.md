@@ -12,6 +12,7 @@ All notable changes to ivygrep are documented in this file.
 ### Testing
 - **Performance gates now use paired base/head measurements for indexing, search, and hot vector lookup.** CI publishes machine-readable guard results and keeps the cross-run shared-runner chart informational.
 - **Release acceptance now covers seven archives.** Portable Linux, macOS, and Windows builds retain existing smoke coverage; accelerator builds add CUDA linkage checks and Metal backend execution.
+- **Retrieval reports now distinguish production blended routing from forced neural retrieval.** The 600-query challenge matrix ran three times under active LLM load; blended quality held nDCG@10 `0.5955`, MRR@10 `0.5652`, and recall@20 `0.7000`.
 - **Recall experiments were rejected after broader checks.** Deeper candidate pools lost `7.9%` challenge nDCG; broad and source-only hash retention also reduced challenge quality or codetrans recall. Search routing remains unchanged.
 
 ## [1.1.8] - 2026-07-07

@@ -68,8 +68,8 @@ def markdown(matrix: dict, baseline: dict | None = None) -> str:
     lines = [
         "# Public code-retrieval benchmark",
         "",
-        "This report is generated from pinned public CoIR datasets. It contains no "
-        "hostnames, user paths, private repository names, or source text.",
+        "Pinned public CoIR datasets. Report excludes hostnames, user paths, "
+        "private repository names, and source text.",
         "",
         f"- Commit: `{matrix['ivygrep_commit']}`",
         f"- Profile: `{matrix['profile']}`",
@@ -224,12 +224,10 @@ def markdown(matrix: dict, baseline: dict | None = None) -> str:
             "Variance is recorded in the machine-readable JSON as population "
             "standard deviation, coefficient of variation, minimum, and maximum.",
             "",
-            "## Interpretation",
+            "## Scope",
             "",
-            "These numbers are reproducible baselines. Exact-search systems are "
-            "only comparable on exact-query workloads, while this matrix evaluates "
-            "code information retrieval using held-out natural-language and "
-            "code-to-code queries.",
+            "Matrix covers held-out natural-language and code-to-code retrieval. "
+            "Exact-search tools require a separate exact-query workload.",
             "",
             "## Reproduce",
             "",
@@ -354,7 +352,7 @@ def html(matrix: dict, baseline: dict | None = None) -> str:
         </section>
         <section class="report-card">
             <h2>Scope</h2>
-            <p>These numbers are reproducible baselines. Exact-search tools are only compared on exact-query workloads; this matrix covers held-out natural-language and code-to-code retrieval. Neural and external embedding upper bounds use the same matrix when their profiles are evaluated.</p>
+            <p>Matrix covers held-out natural-language and code-to-code retrieval. Exact-search tools require a separate exact-query workload.</p>
         </section>
     </main>
 </body>
