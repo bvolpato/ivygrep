@@ -76,6 +76,9 @@ class ReleaseWorkflowTest(unittest.TestCase):
 
     def test_release_includes_shell_installer_cuda_archive(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        cuda_toolkit = workflow.split(
+            "- name: Install CUDA toolkit", maxsplit=1
+        )[1].split("- name: Expose CUDA build libraries", maxsplit=1)[0]
 
         self.assertIn("archive_name: linux-x86_64-cuda", workflow)
         self.assertIn("target: x86_64-unknown-linux-gnu", workflow)
@@ -86,6 +89,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
             workflow,
         )
         self.assertIn("libcuda.so.1", workflow)
+        self.assertIn('"nvrtc-dev"', cuda_toolkit)
         self.assertIn("libcublas-dev", workflow)
         self.assertIn("libcurand-dev", workflow)
 

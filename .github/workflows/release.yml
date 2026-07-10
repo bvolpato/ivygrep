@@ -102,7 +102,7 @@ jobs:
         with:
           cuda: "13.2.0"
           method: network
-          sub-packages: '["nvcc", "cudart-dev"]'
+          sub-packages: '["nvcc", "nvrtc-dev", "cudart-dev"]'
           non-cuda-sub-packages: '["libcublas-dev", "libcurand-dev"]'
 
       - name: Expose CUDA build libraries
