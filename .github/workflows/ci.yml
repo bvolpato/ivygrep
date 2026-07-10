@@ -272,3 +272,19 @@ jobs:
           ALLOWED_BACKEND: ${{ matrix.allow_backend }}
           EXPECTED_BACKEND: ${{ matrix.validate_backend }}
           IVYGREP_MODEL_PROFILE: ${{ matrix.model_profile }}
+
+  ci-gate:
+    name: CI gate
+    if: always()
+    needs: [check, test, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every CI job
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          CHECK_RESULT: ${{ needs.check.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          test "$CHECK_RESULT" = success
+          test "$TEST_RESULT" = success
+          test "$BUILD_RESULT" = success
