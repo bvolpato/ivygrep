@@ -5,6 +5,84 @@
         {
           "binary_size_bytes": null,
           "checksum": true,
+          "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.1.9/ivygrep-v1.1.9-linux-aarch64-musl.tar.gz",
+          "name": "ivygrep-v1.1.9-linux-aarch64-musl.tar.gz",
+          "provenance": true,
+          "sbom": true,
+          "size_bytes": 14013695,
+          "target": "linux-aarch64-musl"
+        },
+        {
+          "binary_size_bytes": null,
+          "checksum": true,
+          "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.1.9/ivygrep-v1.1.9-linux-x86_64-cuda.tar.gz",
+          "name": "ivygrep-v1.1.9-linux-x86_64-cuda.tar.gz",
+          "provenance": true,
+          "sbom": true,
+          "size_bytes": 15658998,
+          "target": "linux-x86_64-cuda"
+        },
+        {
+          "binary_size_bytes": null,
+          "checksum": true,
+          "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.1.9/ivygrep-v1.1.9-linux-x86_64-musl.tar.gz",
+          "name": "ivygrep-v1.1.9-linux-x86_64-musl.tar.gz",
+          "provenance": true,
+          "sbom": true,
+          "size_bytes": 14849743,
+          "target": "linux-x86_64-musl"
+        },
+        {
+          "binary_size_bytes": null,
+          "checksum": true,
+          "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.1.9/ivygrep-v1.1.9-macos-aarch64.tar.gz",
+          "name": "ivygrep-v1.1.9-macos-aarch64.tar.gz",
+          "provenance": true,
+          "sbom": true,
+          "size_bytes": 14027844,
+          "target": "macos-aarch64"
+        },
+        {
+          "binary_size_bytes": null,
+          "checksum": true,
+          "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.1.9/ivygrep-v1.1.9-macos-aarch64-metal.tar.gz",
+          "name": "ivygrep-v1.1.9-macos-aarch64-metal.tar.gz",
+          "provenance": true,
+          "sbom": true,
+          "size_bytes": 14027441,
+          "target": "macos-aarch64-metal"
+        },
+        {
+          "binary_size_bytes": null,
+          "checksum": true,
+          "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.1.9/ivygrep-v1.1.9-macos-x86_64.tar.gz",
+          "name": "ivygrep-v1.1.9-macos-x86_64.tar.gz",
+          "provenance": true,
+          "sbom": true,
+          "size_bytes": 14289887,
+          "target": "macos-x86_64"
+        },
+        {
+          "binary_size_bytes": null,
+          "checksum": true,
+          "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.1.9/ivygrep-v1.1.9-windows-x86_64.zip",
+          "name": "ivygrep-v1.1.9-windows-x86_64.zip",
+          "provenance": true,
+          "sbom": true,
+          "size_bytes": 13648315,
+          "target": "windows-x86_64"
+        }
+      ],
+      "published_at": "2026-07-10T01:42:26Z",
+      "release_url": "https://github.com/bvolpato/ivygrep/releases/tag/v1.1.9",
+      "tag": "v1.1.9",
+      "total_archive_bytes": 100515923
+    },
+    {
+      "archives": [
+        {
+          "binary_size_bytes": null,
+          "checksum": true,
           "download_url": "https://github.com/bvolpato/ivygrep/releases/download/v1.1.8/ivygrep-v1.1.8-linux-aarch64-musl.tar.gz",
           "name": "ivygrep-v1.1.8-linux-aarch64-musl.tar.gz",
           "provenance": true,
