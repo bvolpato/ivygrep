@@ -29,23 +29,34 @@ use crate::workspace::{
 
 #[derive(Parser, Debug, Clone)]
 #[command(
-    name = "ivygrep", version, about = "Semantic grep that stays local", long_about = None)]
+    name = "ivygrep",
+    version,
+    about = "Semantic grep that stays local",
+    long_about = None,
+    after_help = "Examples:\n  ig \"where is authentication checked?\"\n  ig --literal validate_token src/\n  ig --symbol UserService\n  ig --add . --wait-for-enhancement\n  ig --status\n  ig --web"
+)]
 pub struct Cli {
+    /// Natural-language question, keyword, identifier, or exact search text.
     #[arg(value_name = "QUERY", required = false)]
     pub query: Option<String>,
 
+    /// Workspace, subdirectory, or file to search. Defaults to current directory.
     #[arg(value_name = "PATH", required = false)]
     pub query_path: Option<PathBuf>,
 
+    /// Index PATH and register it for incremental updates. Defaults to current directory.
     #[arg(long = "add", value_name = "PATH", num_args = 0..=1, default_missing_value = ".")]
     pub add_path: Option<PathBuf>,
 
+    /// Remove PATH's saved index. Defaults to current directory.
     #[arg(long = "rm", value_name = "PATH", num_args = 0..=1, default_missing_value = ".")]
     pub rm_path: Option<PathBuf>,
 
+    /// Show tracked workspaces, index health, vector coverage, and disk usage.
     #[arg(long, default_value_t = false)]
     pub status: bool,
 
+    /// Diagnose index, daemon, watcher, and model health for PATH.
     #[arg(long, default_value_t = false)]
     pub doctor: bool,
 
@@ -57,6 +68,7 @@ pub struct Cli {
     #[arg(long, default_value_t = false, requires = "doctor")]
     pub deep: bool,
 
+    /// Run long-lived indexing, search, MCP, and web services.
     #[arg(long, default_value_t = false)]
     pub daemon: bool,
 
@@ -64,7 +76,7 @@ pub struct Cli {
     #[arg(long, default_value_t = false)]
     pub web: bool,
 
-    /// Host for --web. Defaults to loopback; use 0.0.0.0 to expose on the LAN.
+    /// Host for --web. Non-loopback access requires the token in the printed URL.
     #[arg(long, default_value = "127.0.0.1", requires = "web")]
     pub host: String,
 
@@ -72,12 +84,15 @@ pub struct Cli {
     #[arg(long, default_value_t = 4747, requires = "web")]
     pub port: u16,
 
+    /// Serve Model Context Protocol tools over stdio.
     #[arg(long, default_value_t = false)]
     pub mcp: bool,
 
+    /// Wait for requested vector enhancement and report worker failures.
     #[arg(long, default_value_t = false)]
     pub wait_for_enhancement: bool,
 
+    /// Rebuild workspace index from scratch when used with --add.
     #[arg(short, long, global = true)]
     pub force: bool,
 
@@ -106,6 +121,7 @@ pub struct Cli {
     #[arg(long, global = true, conflicts_with_all = ["symbol", "refs", "literal", "regex"])]
     pub callers: bool,
 
+    /// Emit machine-readable JSON without ANSI styling.
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -127,12 +143,15 @@ pub struct Cli {
     )]
     pub type_filter: Option<String>,
 
+    /// Search every tracked workspace instead of resolving one PATH.
     #[arg(long, alias = "all", global = true)]
     pub all_indices: bool,
 
+    /// Include only comma-separated path globs. May be repeated.
     #[arg(long, value_name = "GLOBS", value_delimiter = ',', global = true)]
     pub include: Vec<String>,
 
+    /// Exclude comma-separated path globs. May be repeated.
     #[arg(long, value_name = "GLOBS", value_delimiter = ',', global = true)]
     pub exclude: Vec<String>,
 
@@ -146,6 +165,7 @@ pub struct Cli {
     #[arg(long, global = true, conflicts_with = "limit")]
     pub no_limit: bool,
 
+    /// Index once without starting or registering a filesystem watcher.
     #[arg(long, global = true)]
     pub no_watch: bool,
 
@@ -158,9 +178,11 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub file_name_only: bool,
 
+    /// Include source-signal explanations and detailed progress diagnostics.
     #[arg(long, global = true)]
     pub verbose: bool,
 
+    /// Include files excluded by .gitignore and other standard ignore files.
     #[arg(long, global = true)]
     pub skip_gitignore: bool,
 
@@ -269,7 +291,10 @@ pub async fn run() -> Result<()> {
     }
 
     if cli.doctor {
-        let path = cli.query_path.as_deref();
+        let path = cli
+            .query_path
+            .as_deref()
+            .or_else(|| cli.query.as_deref().map(Path::new));
         run_doctor(path, cli.fix, cli.deep, cli.json)?;
         return Ok(());
     }
@@ -282,6 +307,7 @@ pub async fn run() -> Result<()> {
             cli.skip_gitignore,
             cli.json,
             cli.hash,
+            cli.wait_for_enhancement,
         )
         .await;
     }
@@ -294,21 +320,27 @@ pub async fn run() -> Result<()> {
         let workspace = Workspace::resolve(path)?;
         workspace.ensure_dirs()?;
         let hash_model = crate::embedding::create_hash_model();
-        crate::indexer::enhance_workspace_hash(&workspace, hash_model.as_ref())?;
-        let enhancement_status = jobs::job_status(
-            &workspace,
-            JobKind::Enhancement,
-            jobs::ENHANCEMENT_HEARTBEAT_TTL_SECS,
-        );
-        if !enhancement_status.process_alive {
-            let _ = std::fs::remove_file(workspace.enhancing_pid_path());
-            let _ = std::fs::remove_file(workspace.enhancing_progress_path());
-            let _ = std::fs::remove_file(workspace.enhancing_phase_path());
-            let _ = std::fs::remove_file(workspace.enhancing_paused_path());
+        let result = crate::indexer::enhance_workspace_hash(&workspace, hash_model.as_ref());
+        if let Err(error) = &result {
+            let _ = std::fs::write(
+                workspace.index_dir.join(".enhancing.error"),
+                format!("Hash enhancement error: {error:#}"),
+            );
+            let _ = jobs::finish_job(
+                &workspace,
+                JobKind::Enhancement,
+                "hash-failed",
+                Some(error.to_string()),
+            );
+        } else {
             let _ = std::fs::remove_file(workspace.index_dir.join(".enhancing.error"));
             let _ = jobs::finish_job(&workspace, JobKind::Enhancement, "hash-completed", None);
         }
-        return Ok(());
+        let _ = std::fs::remove_file(workspace.enhancing_pid_path());
+        let _ = std::fs::remove_file(workspace.enhancing_progress_path());
+        let _ = std::fs::remove_file(workspace.enhancing_phase_path());
+        let _ = std::fs::remove_file(workspace.enhancing_paused_path());
+        return result.map(|_| ());
     }
 
     if let Some(path) = &cli.enhance_internal {
@@ -461,7 +493,9 @@ async fn run_status(json: bool) -> Result<()> {
     } else if workspaces.is_empty() {
         println!("No indexed workspaces.");
         println!(
-            "\n  Run \x1b[1mig \"query\"\x1b[0m in a project to auto-index, or \x1b[1mig --add .\x1b[0m to register one."
+            "\n  Run {} in a project to auto-index, or {} to register one.",
+            "ig \"query\"".bold(),
+            "ig --add .".bold()
         );
     } else {
         let mut grouped: std::collections::BTreeMap<
@@ -488,8 +522,14 @@ async fn run_status(json: bool) -> Result<()> {
                 .map(|w| w.base_repo_root.is_some())
                 .unwrap_or(false)
             {
-                println!("\x1b[1;36m⟐ {}\x1b[0m", base_root.display());
-                println!("  \x1b[90m(Base repository not directly tracked by ivygrep)\x1b[0m\n");
+                println!(
+                    "{}",
+                    format!("⟐ {}", base_root.display()).bright_cyan().bold()
+                );
+                println!(
+                    "  {}\n",
+                    "(Base repository not directly tracked by ivygrep)".bright_black()
+                );
             }
 
             for ws in wss {
@@ -497,9 +537,17 @@ async fn run_status(json: bool) -> Result<()> {
                 let prefix = if is_overlay { "  " } else { "" };
 
                 if is_overlay {
-                    println!("  \x1b[1;35m↳ Overlay: {}\x1b[0m", ws.root.display());
+                    println!(
+                        "  {}",
+                        format!("↳ Overlay: {}", ws.root.display())
+                            .bright_magenta()
+                            .bold()
+                    );
                 } else {
-                    println!("\x1b[1;36m⟐ {}\x1b[0m", ws.root.display());
+                    println!(
+                        "{}",
+                        format!("⟐ {}", ws.root.display()).bright_cyan().bold()
+                    );
                 }
 
                 println!("{prefix}  ID:     {}", ws.id);
@@ -508,23 +556,26 @@ async fn run_status(json: bool) -> Result<()> {
                 match ws.last_indexed_at_unix {
                     Some(ts) => {
                         let ago = format_timestamp_ago(ts);
-                        println!("{prefix}  Index:  \x1b[32m✓ indexed\x1b[0m ({ago})");
+                        println!("{prefix}  Index:  {} ({ago})", "✓ indexed".green());
                     }
                     None if ws.indexing_in_progress => {
-                        println!("{prefix}  Index:  \x1b[1;33m⟳ initial indexing\x1b[0m");
+                        println!("{prefix}  Index:  {}", "⟳ initial indexing".yellow().bold());
                     }
                     None => {
-                        println!("{prefix}  Index:  \x1b[33m⚠ never indexed\x1b[0m");
+                        println!("{prefix}  Index:  {}", "⚠ never indexed".yellow());
                     }
                 }
 
                 // Daemon/watcher
                 if ws.watch_enabled && ws.watcher_alive {
-                    println!("{prefix}  Watch:  \x1b[32m● configured + live\x1b[0m");
+                    println!("{prefix}  Watch:  {}", "● configured + live".green());
                 } else if ws.watch_enabled {
-                    println!("{prefix}  Watch:  \x1b[1;33m◐ configured, watcher offline\x1b[0m");
+                    println!(
+                        "{prefix}  Watch:  {}",
+                        "◐ configured, watcher offline".yellow().bold()
+                    );
                 } else {
-                    println!("{prefix}  Watch:  \x1b[90m○ static\x1b[0m");
+                    println!("{prefix}  Watch:  {}", "○ static".bright_black());
                 }
 
                 // Chunk stats
@@ -580,16 +631,19 @@ async fn run_status(json: bool) -> Result<()> {
 
                     if let Some(reason) = &ws.enhancing_paused_reason {
                         println!(
-                            "{prefix}  Search: \x1b[1;33m⟳ enhancing {phase} [PAUSED]\x1b[0m {progress_str}(Paused: {reason})"
+                            "{prefix}  Search: {} {progress_str}(Paused: {reason})",
+                            format!("⟳ enhancing {phase} [PAUSED]").yellow().bold()
                         );
                     } else {
                         println!(
-                            "{prefix}  Search: \x1b[1;33m⟳ enhancing {phase}\x1b[0m {progress_str}(computing local vectors in background...)"
+                            "{prefix}  Search: {} {progress_str}(computing local vectors in background...)",
+                            format!("⟳ enhancing {phase}").yellow().bold()
                         );
                     }
                 } else if ws.enhancing_stalled {
                     println!(
-                        "{prefix}  Search: \x1b[1;31m⚠ stalled neural upgrade\x1b[0m (run `ig --doctor` or retry a query)"
+                        "{prefix}  Search: {} (run `ig --doctor` or retry a query)",
+                        "⚠ stalled neural upgrade".red().bold()
                     );
                 } else if ws.has_neural_vectors {
                     let pct = format!("{:.0}%", ws.neural_coverage_percent);
@@ -599,8 +653,11 @@ async fn run_status(json: bool) -> Result<()> {
                         .unwrap_or("local backend unrecorded");
                     let profile = ws.neural_profile.as_deref().unwrap_or("general");
                     println!(
-                        "{prefix}  Search: \x1b[1;32m★ neural\x1b[0m ({} / {} vectors, {pct}, {profile} {}d, last enhanced with {backend})",
-                        ws.neural_vector_count, ws.vector_key_count, ws.neural_dimensions
+                        "{prefix}  Search: {} ({} / {} vectors, {pct}, {profile} {}d, last enhanced with {backend})",
+                        "★ neural".green().bold(),
+                        ws.neural_vector_count,
+                        ws.vector_key_count,
+                        ws.neural_dimensions
                     );
                 } else if ws.indexing_in_progress {
                     let progress_str = ws.indexing_progress.as_deref().unwrap_or("starting");
@@ -611,19 +668,25 @@ async fn run_status(json: bool) -> Result<()> {
                     } else {
                         progress_str.to_string()
                     };
-                    println!("{prefix}  Search: \x1b[1;33m⟳ indexing\x1b[0m ({detail})");
+                    println!(
+                        "{prefix}  Search: {} ({detail})",
+                        "⟳ indexing".yellow().bold()
+                    );
                 } else if ws.indexing_stalled {
                     println!(
-                        "{prefix}  Search: \x1b[1;31m⚠ stalled indexing\x1b[0m (run `ig --doctor --fix`)"
+                        "{prefix}  Search: {} (run `ig --doctor --fix`)",
+                        "⚠ stalled indexing".red().bold()
                     );
                 } else if is_overlay {
                     if ws.chunk_count > 0 {
                         println!(
-                            "{prefix}  Search: \x1b[33m◆ hash\x1b[0m (+ base neural/hash delegation)"
+                            "{prefix}  Search: {} (+ base neural/hash delegation)",
+                            "◆ hash".yellow()
                         );
                     } else {
                         println!(
-                            "{prefix}  Search: \x1b[35m⟐ overlay\x1b[0m (fully delegated to base)"
+                            "{prefix}  Search: {} (fully delegated to base)",
+                            "⟐ overlay".magenta()
                         );
                     }
                 } else if let Some(err) = &ws.enhancing_error {
@@ -631,21 +694,24 @@ async fn run_status(json: bool) -> Result<()> {
                     if err_line.contains("neural feature not compiled") {
                         // Expected for static/musl builds — not an error
                         println!(
-                            "{prefix}  Search: \x1b[33m◆ hash\x1b[0m (neural not available in this build)"
+                            "{prefix}  Search: {} (neural not available in this build)",
+                            "◆ hash".yellow()
                         );
                     } else {
                         // Real neural-model failure
                         println!(
-                            "{prefix}  Search: \x1b[1;31m⚠️ neural upgrade failed\x1b[0m (run `ig query` to retry, or check .enhancing.error)"
+                            "{prefix}  Search: {} (run `ig query` to retry, or check .enhancing.error)",
+                            "⚠️ neural upgrade failed".red().bold()
                         );
-                        println!("{prefix}          Error: \x1b[31m{err_line}\x1b[0m");
+                        println!("{prefix}          Error: {}", err_line.red());
                     }
                 } else if ws.chunk_count > 0 {
                     println!(
-                        "{prefix}  Search: \x1b[33m◆ hash\x1b[0m (fast, run a query to trigger neural upgrade)"
+                        "{prefix}  Search: {} (fast, run a query to trigger neural upgrade)",
+                        "◆ hash".yellow()
                     );
                 } else {
-                    println!("{prefix}  Search: \x1b[90m○ empty\x1b[0m");
+                    println!("{prefix}  Search: {}", "○ empty".bright_black());
                 }
                 let reranker_model = ws
                     .reranker_model
@@ -670,13 +736,17 @@ async fn run_status(json: bool) -> Result<()> {
         let total_size: u64 = workspaces.iter().map(|w| w.index_size_bytes).sum();
         let neural_count = workspaces.iter().filter(|w| w.has_neural_vectors).count();
         println!(
-            "\x1b[90m{} workspace(s), {} files, {} chunks, {} on disk, {}/{} neural\x1b[0m",
-            workspaces.len(),
-            total_files,
-            total_chunks,
-            format_bytes(total_size),
-            neural_count,
-            workspaces.len(),
+            "{}",
+            format!(
+                "{} workspace(s), {} files, {} chunks, {} on disk, {}/{} neural",
+                workspaces.len(),
+                total_files,
+                total_chunks,
+                format_bytes(total_size),
+                neural_count,
+                workspaces.len(),
+            )
+            .bright_black()
         );
     }
 
@@ -730,7 +800,8 @@ async fn run_add(
     force: bool,
     skip_gitignore: bool,
     json: bool,
-    _hash: bool,
+    hash: bool,
+    wait_for_enhancement: bool,
 ) -> Result<()> {
     let workspace = Workspace::resolve(path)?;
 
@@ -788,7 +859,11 @@ async fn run_add(
     if let Some(response) =
         daemon::request::<fn(String, usize, usize)>(&request, watch, None).await?
     {
-        return print_daemon_response(response, json);
+        print_daemon_response(response, json)?;
+        if wait_for_enhancement {
+            trigger_workspace_enhancement(&workspace, hash, true).await?;
+        }
+        return Ok(());
     }
 
     let model = crate::embedding::create_hash_model();
@@ -803,6 +878,115 @@ async fn run_add(
         );
     }
 
+    if wait_for_enhancement {
+        trigger_workspace_enhancement(&workspace, hash, true).await?;
+    }
+
+    Ok(())
+}
+
+async fn trigger_workspace_enhancement(
+    workspace: &Workspace,
+    hash_only: bool,
+    wait: bool,
+) -> Result<()> {
+    let active = workspace.is_enhancing_active();
+    let needs_enhancement = if hash_only {
+        workspace.needs_hash_enhancement()
+    } else {
+        workspace.needs_neural_enhancement()
+    };
+    if !active && !needs_enhancement {
+        return Ok(());
+    }
+
+    if !active {
+        if !config::background_enhancement_enabled() {
+            if wait {
+                bail!("background enhancement is disabled by environment configuration");
+            }
+            return Ok(());
+        }
+        if hash_only {
+            workspace.trigger_background_hash_enhancement()?;
+        } else {
+            workspace.trigger_background_enhancement()?;
+        }
+    }
+    if wait {
+        wait_for_workspace_enhancement(workspace, hash_only).await?;
+    }
+    Ok(())
+}
+
+async fn wait_for_workspace_enhancement(workspace: &Workspace, hash_only: bool) -> Result<()> {
+    let terminal_error;
+    loop {
+        let workspaces = crate::workspace::list_workspaces()?;
+        let status = workspaces
+            .iter()
+            .find(|status| status.id == workspace.id)
+            .with_context(|| {
+                format!(
+                    "workspace disappeared while waiting for enhancement: {}",
+                    workspace.root.display()
+                )
+            })?;
+        if status.enhancing_stalled {
+            bail!(
+                "background enhancement stalled{}",
+                status
+                    .enhancing_error
+                    .as_deref()
+                    .map(|error| format!(": {error}"))
+                    .unwrap_or_default()
+            );
+        }
+        if !workspace.is_enhancing_active() {
+            terminal_error = status.enhancing_error.clone();
+            break;
+        }
+
+        if std::io::stderr().is_terminal() {
+            let phase = status.enhancing_phase.as_deref().unwrap_or("background");
+            let progress = if let Some(count) = status.enhancing_progress_count {
+                let percent = if status.chunk_count > 0 {
+                    (count as f64 / status.chunk_count as f64 * 100.0).min(100.0) as u64
+                } else {
+                    100
+                };
+                format!(
+                    " ({} / {} chunks, ~{}%)",
+                    count, status.chunk_count, percent
+                )
+            } else {
+                String::new()
+            };
+            eprint!("\r\x1b[K  waiting for background {phase} enhancement{progress}...");
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    }
+
+    let hash_complete = !workspace.needs_hash_enhancement();
+    let expected_neural_unavailable = terminal_error
+        .as_deref()
+        .is_some_and(|error| error.contains("neural feature not compiled"))
+        && hash_complete;
+    if let Some(error) = terminal_error
+        && !expected_neural_unavailable
+    {
+        bail!("background enhancement failed: {error}");
+    }
+    if !hash_complete {
+        bail!("background enhancement exited before hash vectors were complete");
+    }
+    if !hash_only && workspace.needs_neural_enhancement() && !expected_neural_unavailable {
+        bail!("background enhancement exited before neural vectors were complete");
+    }
+
+    if std::io::stderr().is_terminal() {
+        eprintln!("\r\x1b[K  ✓ background enhancement complete");
+    }
     Ok(())
 }
 
@@ -1128,50 +1312,6 @@ async fn run_query(cli: Cli) -> Result<()> {
         // slow for every query. Users can `ig --add .` to force re-index.
     }
 
-    if cli.wait_for_enhancement && !cli.all_indices {
-        loop {
-            let ws_map = crate::workspace::list_workspaces().unwrap_or_default();
-            if let Some(status) = ws_map.iter().find(|ws| ws.id == workspace.id) {
-                if status.enhancing_stalled {
-                    break;
-                }
-                if !status.enhancing_in_progress {
-                    break;
-                }
-
-                if std::io::stderr().is_terminal() {
-                    let phase = status.enhancing_phase.as_deref().unwrap_or("background");
-                    let progress_str = if let Some(count) = status.enhancing_progress_count {
-                        let pct = if status.chunk_count > 0 {
-                            (count as f64 / status.chunk_count as f64 * 100.0).min(100.0) as u64
-                        } else {
-                            100
-                        };
-                        format!(" ({} / {} chunks, ~{}%)", count, status.chunk_count, pct)
-                    } else {
-                        String::new()
-                    };
-                    eprint!(
-                        "\r\x1b[K  waiting for background {phase} enhancement{progress_str}..."
-                    );
-                }
-            } else {
-                break;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        }
-        if std::io::stderr().is_terminal()
-            && let Ok(ws_map) = crate::workspace::list_workspaces()
-            && let Some(status) = ws_map.iter().find(|ws| ws.id == workspace.id)
-        {
-            if status.enhancing_stalled {
-                eprintln!("\r\x1b[K  ⚠ background enhancement stalled");
-            } else {
-                eprintln!("\r\x1b[K  ✓ background enhancement complete");
-            }
-        }
-    }
-
     if cli.skip_gitignore && !cli.all_indices && (!cli.regex || cli.literal) {
         #[allow(clippy::collapsible_if)]
         if let Ok(Some(mut meta)) = workspace.read_metadata() {
@@ -1467,21 +1607,23 @@ async fn run_query(cli: Cli) -> Result<()> {
     )?;
 
     // Kick off background hash and neural enhancement if not already done.
-    // This runs after results are returned so the user is never blocked.
+    // Normal queries return immediately; --wait-for-enhancement propagates
+    // worker failures and exits only after requested vectors are durable.
     // We launch it as a separate hidden CLI process to prevent segmentation faults
     // observed while tearing down neural-model state when the main process exits.
     // Skipped in CI/test environments (IVYGREP_NO_AUTOSPAWN=1).
     if !cli.all_indices
-        && !cli.hash
         && !cli.regex
         && !cli.lexical_only
         && !cli.symbol
         && !cli.refs
         && !cli.callers
-        && config::background_enhancement_enabled()
-        && workspace.needs_neural_enhancement()
     {
-        let _ = workspace.trigger_background_enhancement();
+        let result =
+            trigger_workspace_enhancement(&workspace, cli.hash, cli.wait_for_enhancement).await;
+        if cli.wait_for_enhancement {
+            result?;
+        }
     }
 
     std::process::exit(0);

@@ -7,42 +7,50 @@ Semantic grep that stays local
 Usage: ig [OPTIONS] [QUERY] [PATH]
 
 Arguments:
-  [QUERY]  
-  [PATH]   
+  [QUERY]  Natural-language question, keyword, identifier, or exact search text
+  [PATH]   Workspace, subdirectory, or file to search. Defaults to current directory
 
 Options:
-      --add [<PATH>]          
-      --rm [<PATH>]           
-      --status                
-      --doctor                
+      --add [<PATH>]          Index PATH and register it for incremental updates. Defaults to current directory
+      --rm [<PATH>]           Remove PATH's saved index. Defaults to current directory
+      --status                Show tracked workspaces, index health, vector coverage, and disk usage
+      --doctor                Diagnose index, daemon, watcher, and model health for PATH
       --fix                   Repair a broken or stale index (used with --doctor)
       --deep                  Perform full cross-store integrity scans (used with --doctor)
-      --daemon                
+      --daemon                Run long-lived indexing, search, MCP, and web services
       --web                   Open the daemon-backed local web UI
-      --host <HOST>           Host for --web. Defaults to loopback; use 0.0.0.0 to expose on the LAN [default: 127.0.0.1]
+      --host <HOST>           Host for --web. Non-loopback access requires the token in the printed URL [default: 127.0.0.1]
       --port <PORT>           Port for --web. Use 0 to let the OS choose a free port [default: 4747]
-      --mcp                   
-      --wait-for-enhancement  
-  -f, --force                 
+      --mcp                   Serve Model Context Protocol tools over stdio
+      --wait-for-enhancement  Wait for requested vector enhancement and report worker failures
+  -f, --force                 Rebuild workspace index from scratch when used with --add
       --interactive           Launch the interactive terminal UI [aliases: --ui]
   -l, --literal               Fast exact-match search backed by the index. Deterministic results, orders of magnitude faster than grep/rg for indexed repos
       --symbol                Find exact symbol definitions
       --refs                  Find exact symbol references
       --callers               Find functions or methods that call the named symbol
-      --json                  
+      --json                  Emit machine-readable JSON without ANSI styling
   -C, --context <LINES>       Lines before and after the focused match to include in each snippet. This changes output size, not retrieval ranking [default: 2]
       --type <TYPE_FILTER>    Filter by language name, extension, or alias (e.g. rust, rs, py, python, c++, bash, md)
-      --all-indices           
-      --include <GLOBS>       
-      --exclude <GLOBS>       
+      --all-indices           Search every tracked workspace instead of resolving one PATH
+      --include <GLOBS>       Include only comma-separated path globs. May be repeated
+      --exclude <GLOBS>       Exclude comma-separated path globs. May be repeated
   -n, --limit <FILES>         Retrieval breadth and maximum ranked result files, not a token, line, or confidence limit. Larger values search deeper and may improve recall
       --no-limit              Use maximum candidate budgets and return all surviving results. This can produce large, slower responses
-      --no-watch              
+      --no-watch              Index once without starting or registering a filesystem watcher
       --first-line-only       Return only the first non-empty preview line. Ranking is unchanged
       --file-name-only        Return only file paths. Without --limit, this also uses maximum candidate budgets; combine with --limit for a bounded path list
-      --verbose               
-      --skip-gitignore        
+      --verbose               Include source-signal explanations and detailed progress diagnostics
+      --skip-gitignore        Include files excluded by .gitignore and other standard ignore files
       --hash                  Use lightweight hash-based embeddings instead of the default neural model. Faster startup, no model download, lower quality
       --lexical-only          Use BM25/path/signature retrieval without vector search
   -h, --help                  Print help
   -V, --version               Print version
+
+Examples:
+  ig "where is authentication checked?"
+  ig --literal validate_token src/
+  ig --symbol UserService
+  ig --add . --wait-for-enhancement
+  ig --status
+  ig --web

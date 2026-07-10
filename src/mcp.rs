@@ -24,6 +24,14 @@ use crate::search::{SearchOptions, hybrid_search, literal_search};
 use crate::workspace::{Workspace, WorkspaceMetadata, resolve_workspace_and_scope};
 
 const JSONRPC_VERSION: &str = "2.0";
+const LEGACY_PROTOCOL_VERSION: &str = "2024-11-05";
+const LATEST_PROTOCOL_VERSION: &str = "2025-11-25";
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[
+    LATEST_PROTOCOL_VERSION,
+    "2025-06-18",
+    "2025-03-26",
+    LEGACY_PROTOCOL_VERSION,
+];
 const TOOL_IG_SEARCH: &str = "ig_search";
 const TOOL_IG_STATUS: &str = "ig_status";
 
@@ -53,6 +61,28 @@ struct JsonRpcError {
     message: String,
 }
 
+#[derive(Debug)]
+struct DispatchError {
+    code: i64,
+    message: String,
+}
+
+impl DispatchError {
+    fn method_not_found(method: &str) -> Self {
+        Self {
+            code: -32601,
+            message: format!("method not found: {method}"),
+        }
+    }
+
+    fn invalid_params(error: anyhow::Error) -> Self {
+        Self {
+            code: -32602,
+            message: error.to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ToolCallParams {
     name: String,
@@ -61,6 +91,7 @@ struct ToolCallParams {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct IvygrepSearchArgs {
     query: Option<String>,
     path: Option<String>,
@@ -77,6 +108,10 @@ struct IvygrepSearchArgs {
     verbose: Option<bool>,
     skip_gitignore: Option<bool>,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct IvygrepStatusArgs {}
 
 pub fn serve_stdio() -> Result<()> {
     config::ensure_app_dirs()?;
@@ -152,40 +187,55 @@ fn handle_request(request: JsonRpcRequest) -> Option<JsonRpcResponse> {
             id,
             result: None,
             error: Some(JsonRpcError {
-                code: -32000,
-                message: err.to_string(),
+                code: err.code,
+                message: err.message,
             }),
         }),
     }
 }
 
-fn dispatch(method: &str, params: Value) -> Result<Value> {
+fn dispatch(method: &str, params: Value) -> std::result::Result<Value, DispatchError> {
     match method {
-        "initialize" => Ok(json!({
-            "protocolVersion": "2024-11-05",
-            "capabilities": {
-                "tools": {
-                    "listChanged": false
-                }
-            },
-            "serverInfo": {
-                "name": "ig",
-                "version": env!("CARGO_PKG_VERSION")
-            },
-            "instructions": "Use ig_search with an absolute path to the active workspace so searches stay scoped to the intended repository. Use natural-language queries for discovery and literal=true for exact identifiers. Set limit explicitly; start with limit=5-10 and context=2. Increase context when a promising hit needs more evidence; increase limit when you need more candidate files. Use ig_status to inspect indexing health. Workspaces are indexed on first use and watched for incremental updates."
-        })),
+        "initialize" => Ok(initialize_result(&params)),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools": [search_tool_schema(), status_tool_schema()]})),
-        "tools/call" => run_tool_call(params),
+        "tools/call" => run_tool_call(params).map_err(DispatchError::invalid_params),
         "notifications/initialized" => Ok(json!({})),
         "shutdown" => Ok(json!({})),
-        other => bail!("unsupported method: {other}"),
+        other => Err(DispatchError::method_not_found(other)),
     }
+}
+
+fn initialize_result(params: &Value) -> Value {
+    let requested = params.get("protocolVersion").and_then(Value::as_str);
+    let protocol_version = match requested {
+        Some(version) if SUPPORTED_PROTOCOL_VERSIONS.contains(&version) => version,
+        Some(_) => LATEST_PROTOCOL_VERSION,
+        None => LEGACY_PROTOCOL_VERSION,
+    };
+
+    json!({
+        "protocolVersion": protocol_version,
+        "capabilities": {
+            "tools": {
+                "listChanged": false
+            }
+        },
+        "serverInfo": {
+            "name": "ig",
+            "title": "ivygrep",
+            "version": env!("CARGO_PKG_VERSION"),
+            "description": "Local hybrid semantic and lexical code search",
+            "websiteUrl": env!("CARGO_PKG_HOMEPAGE")
+        },
+        "instructions": "Use ig_search with an absolute path to the active workspace so searches stay scoped to the intended repository. Use natural-language queries for discovery and literal=true for exact identifiers. Set limit explicitly; start with limit=5-10 and context=2. Increase context when a promising hit needs more evidence; increase limit when you need more candidate files. Use ig_status to inspect indexing health. Workspaces are indexed on first use and watched for incremental updates."
+    })
 }
 
 fn search_tool_schema() -> Value {
     json!({
         "name": TOOL_IG_SEARCH,
+        "title": "Search local code",
         "description": "Hybrid semantic+lexical code search. Auto-indexes on first query. Respects .gitignore and restricts results to the provided path scope. Use limit for result-file count and context for snippet radius.",
         "inputSchema": {
             "type": "object",
@@ -195,11 +245,13 @@ fn search_tool_schema() -> Value {
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
+                    "maximum": 1000,
                     "description": "Retrieval breadth and maximum number of ranked result files, not a token, line, or confidence limit. Larger values search a deeper candidate pool and may improve recall while adding lower-ranked matches. If omitted, normal candidate budgets remain bounded but no explicit final file cap is applied."
                 },
                 "context": {
                     "type": "integer",
                     "minimum": 0,
+                    "maximum": 100,
                     "default": 2,
                     "description": "Lines before and after each focused match. Changes snippet size, not retrieval ranking."
                 },
@@ -213,7 +265,15 @@ fn search_tool_schema() -> Value {
                 "verbose": {"type": "boolean", "description": "Include reason pointers in JSON output."},
                 "skip_gitignore": {"type": "boolean", "description": "Include files ignored by .gitignore."}
             },
-            "required": ["query"]
+            "required": ["query"],
+            "additionalProperties": false
+        },
+        "outputSchema": search_output_schema(),
+        "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
         }
     })
 }
@@ -221,25 +281,150 @@ fn search_tool_schema() -> Value {
 fn status_tool_schema() -> Value {
     json!({
         "name": TOOL_IG_STATUS,
+        "title": "Inspect ivygrep indexes",
         "description": "Returns the list of indexed projects (workspaces) and their current indexing status, detailing if they are ready to query.",
         "inputSchema": {
             "type": "object",
             "properties": {},
-            "required": []
+            "required": [],
+            "additionalProperties": false
+        },
+        "outputSchema": status_output_schema(),
+        "annotations": {
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
         }
+    })
+}
+
+fn search_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "workspace_root": {"type": "string"},
+            "scope_path": {"type": ["string", "null"]},
+            "scope_is_file": {"type": "boolean"},
+            "query": {"type": "string"},
+            "mode": {"type": "string", "enum": ["hybrid", "literal", "regex"]},
+            "result_count": {"type": "integer", "minimum": 0},
+            "include": {"type": "array", "items": {"type": "string"}},
+            "exclude": {"type": "array", "items": {"type": "string"}},
+            "results": {"type": "array", "items": {"type": "object"}},
+            "file_paths": {"type": "array", "items": {"type": "string"}}
+        },
+        "required": [
+            "workspace_root",
+            "scope_path",
+            "scope_is_file",
+            "query",
+            "mode",
+            "result_count",
+            "include",
+            "exclude"
+        ],
+        "oneOf": [
+            {"required": ["results"]},
+            {"required": ["file_paths"]}
+        ],
+        "additionalProperties": false
+    })
+}
+
+fn status_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "workspaces": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "workspace_root": {"type": "string"},
+                        "ready_to_query": {"type": "boolean"},
+                        "status": {"type": "string"},
+                        "chunk_count": {"type": "integer", "minimum": 0},
+                        "file_count": {"type": "integer", "minimum": 0},
+                        "indexing_in_progress": {"type": "boolean"},
+                        "enhancing_in_progress": {"type": "boolean"},
+                        "watch_enabled": {"type": "boolean"},
+                        "watcher_alive": {"type": "boolean"},
+                        "indexing_stalled": {"type": "boolean"},
+                        "enhancing_stalled": {"type": "boolean"}
+                    },
+                    "required": [
+                        "workspace_root",
+                        "ready_to_query",
+                        "status",
+                        "chunk_count",
+                        "file_count",
+                        "indexing_in_progress",
+                        "enhancing_in_progress",
+                        "watch_enabled",
+                        "watcher_alive",
+                        "indexing_stalled",
+                        "enhancing_stalled"
+                    ],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["workspaces"],
+        "additionalProperties": false
     })
 }
 
 fn run_tool_call(params: Value) -> Result<Value> {
     let call: ToolCallParams = serde_json::from_value(params)?;
     if call.name == TOOL_IG_SEARCH {
-        let args: IvygrepSearchArgs = serde_json::from_value(call.arguments)?;
-        execute_ivygrep_search(args)
+        let result = serde_json::from_value(call.arguments)
+            .map_err(anyhow::Error::from)
+            .and_then(execute_ivygrep_search);
+        Ok(result.unwrap_or_else(tool_error_result))
     } else if call.name == TOOL_IG_STATUS {
-        execute_ivygrep_status()
+        let arguments = if call.arguments.is_null() {
+            json!({})
+        } else {
+            call.arguments
+        };
+        let result = serde_json::from_value::<IvygrepStatusArgs>(arguments)
+            .map_err(anyhow::Error::from)
+            .and_then(|_| execute_ivygrep_status());
+        Ok(result.unwrap_or_else(tool_error_result))
     } else {
         bail!("unknown tool: {}", call.name);
     }
+}
+
+fn tool_error_result(error: anyhow::Error) -> Value {
+    json!({
+        "content": [
+            {
+                "type": "text",
+                "text": error.to_string()
+            }
+        ],
+        "isError": true
+    })
+}
+
+fn tool_success_result(payload: Value, pretty: bool) -> Result<Value> {
+    let text = if pretty {
+        serde_json::to_string_pretty(&payload)?
+    } else {
+        serde_json::to_string(&payload)?
+    };
+    Ok(json!({
+        "content": [
+            {
+                "type": "text",
+                "text": text
+            }
+        ],
+        "structuredContent": payload,
+        "isError": false
+    }))
 }
 
 fn execute_ivygrep_status() -> Result<Value> {
@@ -285,17 +470,7 @@ fn execute_ivygrep_status() -> Result<Value> {
         "workspaces": projects
     });
 
-    let text = serde_json::to_string_pretty(&payload)?;
-
-    Ok(json!({
-        "content": [
-            {
-                "type": "text",
-                "text": text
-            }
-        ],
-        "isError": false
-    }))
+    tool_success_result(payload, true)
 }
 
 /// The neural query model for this MCP process, loaded once and reused across
@@ -400,6 +575,18 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
         .query
         .as_deref()
         .context("missing required argument: query")?;
+    if query.trim().is_empty() {
+        bail!("query must not be empty");
+    }
+    if args.literal.unwrap_or(false) && args.regex.unwrap_or(false) {
+        bail!("literal and regex modes are mutually exclusive");
+    }
+    if args.limit == Some(0) || args.limit.is_some_and(|limit| limit > 1000) {
+        bail!("limit must be between 1 and 1000");
+    }
+    if args.context.is_some_and(|context| context > 100) {
+        bail!("context must be between 0 and 100");
+    }
 
     let input_path = match args.path {
         Some(path) => PathBuf::from(path),
@@ -596,17 +783,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
         })
     };
 
-    let text = serde_json::to_string(&payload)?;
-
-    Ok(json!({
-        "content": [
-            {
-                "type": "text",
-                "text": text
-            }
-        ],
-        "isError": false
-    }))
+    tool_success_result(payload, false)
 }
 
 /// Detected framing mode for the stdio transport.
@@ -934,11 +1111,28 @@ mod tests {
     #[test]
     fn mcp_initialize_returns_protocol_version_and_capabilities() {
         let result = dispatch("initialize", json!({})).unwrap();
-        assert_eq!(result["protocolVersion"], "2024-11-05");
+        assert_eq!(result["protocolVersion"], LEGACY_PROTOCOL_VERSION);
         assert!(result["capabilities"]["tools"].is_object());
         assert_eq!(result["serverInfo"]["name"], "ig");
         let version = result["serverInfo"]["version"].as_str().unwrap();
         assert!(!version.is_empty());
+    }
+
+    #[test]
+    fn mcp_initialize_negotiates_current_protocol_version() {
+        let result = dispatch(
+            "initialize",
+            json!({"protocolVersion": LATEST_PROTOCOL_VERSION}),
+        )
+        .unwrap();
+        assert_eq!(result["protocolVersion"], LATEST_PROTOCOL_VERSION);
+
+        let fallback = dispatch(
+            "initialize",
+            json!({"protocolVersion": "unsupported-version"}),
+        )
+        .unwrap();
+        assert_eq!(fallback["protocolVersion"], LATEST_PROTOCOL_VERSION);
     }
 
     #[test]
@@ -951,23 +1145,110 @@ mod tests {
         assert!(schema["properties"]["query"].is_object());
         assert!(schema["properties"]["regex"].is_object());
         assert_eq!(schema["properties"]["limit"]["minimum"], 1);
+        assert_eq!(schema["properties"]["limit"]["maximum"], 1000);
         assert_eq!(schema["properties"]["context"]["minimum"], 0);
+        assert_eq!(schema["properties"]["context"]["maximum"], 100);
         assert_eq!(schema["properties"]["context"]["default"], 2);
+        assert_eq!(schema["additionalProperties"], false);
         let required = schema["required"].as_array().unwrap();
         assert!(required.contains(&json!("query")));
+        assert!(tools[0]["outputSchema"].is_object());
+        assert_eq!(tools[0]["annotations"]["readOnlyHint"], false);
         assert_eq!(tools[1]["name"], "ig_status");
+        assert!(tools[1]["outputSchema"].is_object());
+        assert_eq!(tools[1]["inputSchema"]["additionalProperties"], false);
+        assert_eq!(tools[1]["annotations"]["readOnlyHint"], true);
     }
 
     #[test]
-    fn mcp_unknown_method_returns_error() {
-        let result = dispatch("tools/nonexistent", json!({}));
-        assert!(result.is_err());
+    fn mcp_known_tool_errors_are_recoverable_tool_results() {
+        let response = dispatch(
+            "tools/call",
+            json!({
+                "name": "ig_search",
+                "arguments": {}
+            }),
+        )
+        .unwrap();
+        assert_eq!(response["isError"], true);
         assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("unsupported method")
+            response["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("missing required argument: query")
         );
+
+        let conflicting_modes = dispatch(
+            "tools/call",
+            json!({
+                "name": "ig_search",
+                "arguments": {
+                    "query": "needle",
+                    "literal": true,
+                    "regex": true
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(conflicting_modes["isError"], true);
+        assert!(
+            conflicting_modes["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("mutually exclusive")
+        );
+
+        let unknown_argument = dispatch(
+            "tools/call",
+            json!({
+                "name": "ig_search",
+                "arguments": {
+                    "query": "needle",
+                    "limt": 5
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(unknown_argument["isError"], true);
+        assert!(
+            unknown_argument["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("unknown field `limt`")
+        );
+
+        let unknown_status_argument = dispatch(
+            "tools/call",
+            json!({
+                "name": "ig_status",
+                "arguments": {"unexpected": true}
+            }),
+        )
+        .unwrap();
+        assert_eq!(unknown_status_argument["isError"], true);
+    }
+
+    #[test]
+    fn mcp_returns_standard_json_rpc_error_codes() {
+        let unknown_method = handle_request(JsonRpcRequest {
+            id: Some(json!(1)),
+            method: "tools/nonexistent".to_string(),
+            params: json!({}),
+        })
+        .unwrap();
+        let error = unknown_method.error.unwrap();
+        assert_eq!(error.code, -32601);
+        assert!(error.message.contains("method not found"));
+
+        for params in [json!({}), json!({"name": "unknown_tool", "arguments": {}})] {
+            let invalid_params = handle_request(JsonRpcRequest {
+                id: Some(json!(2)),
+                method: "tools/call".to_string(),
+                params,
+            })
+            .unwrap();
+            assert_eq!(invalid_params.error.unwrap().code, -32602);
+        }
     }
 
     #[test]
@@ -1140,6 +1421,18 @@ mod tests {
     }
 
     fn tool_json_payload(response: &Value) -> Value {
+        if let Some(payload) = response.get("structuredContent") {
+            let content = response
+                .get("content")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| arr.first())
+                .and_then(|item| item.get("text"))
+                .and_then(|v| v.as_str())
+                .expect("tool response content text");
+            let text_payload: Value = serde_json::from_str(content).expect("valid JSON payload");
+            assert_eq!(payload.is_object(), text_payload.is_object());
+            return payload.clone();
+        }
         let content = response
             .get("content")
             .and_then(|v| v.as_array())
@@ -1166,5 +1459,7 @@ mod tests {
             .and_then(|v| v.as_array())
             .unwrap();
         let _ = workspaces.len();
+        assert_eq!(response["isError"], false);
+        assert!(response["structuredContent"].is_object());
     }
 }

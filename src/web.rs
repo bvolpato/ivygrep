@@ -3,12 +3,14 @@ use std::io::Read;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Instant;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::daemon::DaemonState;
@@ -18,8 +20,20 @@ use crate::protocol::{
 use crate::workspace::{Workspace, list_workspaces};
 
 const MAX_HTTP_HEADER_BYTES: usize = 64 * 1024;
+const MAX_CONCURRENT_HTTP_CONNECTIONS: usize = 128;
+const HTTP_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 const DEFAULT_SEARCH_LIMIT: usize = 50;
+const WEB_AUTH_COOKIE: &str = "ivygrep_web_token";
+const SECURITY_HEADERS: &str = concat!(
+    "Content-Security-Policy: default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'none'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'\r\n",
+    "Cross-Origin-Opener-Policy: same-origin\r\n",
+    "Cross-Origin-Resource-Policy: same-origin\r\n",
+    "Permissions-Policy: camera=(), geolocation=(), microphone=(), payment=(), usb=()\r\n",
+    "Referrer-Policy: no-referrer\r\n",
+    "X-Content-Type-Options: nosniff\r\n",
+    "X-Frame-Options: DENY\r\n",
+);
 
 include!(concat!(env!("OUT_DIR"), "/web_assets.rs"));
 
@@ -34,6 +48,25 @@ pub(crate) struct WebConfig {
 struct HttpRequest {
     method: String,
     target: String,
+    headers: HashMap<String, String>,
+}
+
+enum TimedHttpRequest {
+    Received(Option<HttpRequest>),
+    TimedOut,
+}
+
+fn web_auth_token() -> &'static str {
+    static TOKEN: OnceLock<String> = OnceLock::new();
+    TOKEN
+        .get_or_init(|| {
+            format!(
+                "{}{}",
+                uuid::Uuid::new_v4().simple(),
+                uuid::Uuid::new_v4().simple()
+            )
+        })
+        .as_str()
 }
 
 pub(crate) fn bind_addr(host: &str, port: u16) -> Result<SocketAddr> {
@@ -65,6 +98,9 @@ pub(crate) fn initial_url(config: &WebConfig, local_addr: SocketAddr) -> String 
             percent_encode(&path.display().to_string())
         ));
     }
+    if !local_addr.ip().is_loopback() {
+        params.push(format!("token={}", percent_encode(web_auth_token())));
+    }
     let mut url = format!("http://{host}:{}/", local_addr.port());
     if !params.is_empty() {
         url.push('?');
@@ -78,12 +114,16 @@ pub(crate) async fn serve(
     state: DaemonState,
     config: WebConfig,
 ) -> Result<()> {
+    let auth_token = (!listener.local_addr()?.ip().is_loopback()).then_some(web_auth_token());
+    let connections = Arc::new(Semaphore::new(MAX_CONCURRENT_HTTP_CONNECTIONS));
     loop {
+        let permit = connections.clone().acquire_owned().await?;
         let (stream, _) = listener.accept().await?;
         let state = state.clone();
         let config = config.clone();
         tokio::spawn(async move {
-            if let Err(err) = handle_connection(stream, state, config).await {
+            let _permit = permit;
+            if let Err(err) = handle_connection(stream, state, config, auth_token).await {
                 tracing::warn!("web request failed: {err:#}");
             }
         });
@@ -94,71 +134,151 @@ async fn handle_connection(
     mut stream: TcpStream,
     state: DaemonState,
     config: WebConfig,
+    auth_token: Option<&'static str>,
 ) -> Result<()> {
-    let Some(request) = read_http_request(&mut stream).await? else {
-        return Ok(());
-    };
-    if request.method != "GET" {
+    let request =
+        match read_http_request_with_timeout(&mut stream, HTTP_HEADER_READ_TIMEOUT).await? {
+            TimedHttpRequest::Received(Some(request)) => request,
+            TimedHttpRequest::Received(None) => return Ok(()),
+            TimedHttpRequest::TimedOut => {
+                return write_json(
+                    &mut stream,
+                    "408 Request Timeout",
+                    &json!({"error": "HTTP request headers timed out"}),
+                )
+                .await;
+            }
+        };
+    let (path, params) = parse_target(&request.target)?;
+    if !valid_host(&request, auth_token.is_some()) {
         return write_json(
             &mut stream,
-            "405 Method Not Allowed",
-            &json!({"error": "method not allowed"}),
+            "403 Forbidden",
+            &json!({"error": "invalid Host header"}),
         )
         .await;
     }
 
-    let (path, params) = parse_target(&request.target)?;
     if path == "/" || path == "/index.html" {
+        if request.method != "GET" {
+            return method_not_allowed(&mut stream, "GET").await;
+        }
+        if let Some(expected) = auth_token {
+            if let Some(presented) = param(&params, "token") {
+                if !tokens_match(presented, expected) {
+                    return unauthorized(&mut stream).await;
+                }
+                return establish_web_session(&mut stream, &path, &params, expected).await;
+            }
+            if !request_has_auth(&request, expected) {
+                return unauthorized(&mut stream).await;
+            }
+        }
         return write_html(&mut stream, &render_app_html(&config)).await;
     }
     if let Some(asset) = embedded_asset(&path) {
+        if request.method != "GET" {
+            return method_not_allowed(&mut stream, "GET").await;
+        }
         return write_response(&mut stream, "200 OK", asset.content_type, asset.bytes).await;
+    }
+
+    if path.starts_with("/api/") {
+        if !valid_api_origin(&request) {
+            return write_json(
+                &mut stream,
+                "403 Forbidden",
+                &json!({"error": "cross-origin API request denied"}),
+            )
+            .await;
+        }
+        if let Some(expected) = auth_token
+            && !request_has_auth(&request, expected)
+        {
+            return unauthorized(&mut stream).await;
+        }
     }
 
     match path.as_str() {
         "/api/status" => {
+            if request.method != "GET" {
+                return method_not_allowed(&mut stream, "GET").await;
+            }
             let response = crate::daemon::handle_web_request(state, DaemonRequest::Status).await;
             write_json(&mut stream, "200 OK", &serde_json::to_value(response)?).await
         }
         "/api/search" => {
+            if request.method != "GET" {
+                return method_not_allowed(&mut stream, "GET").await;
+            }
             let value = run_search(state, &params).await;
             write_json(&mut stream, "200 OK", &value).await
         }
-        "/api/search/stream" => write_search_stream(&mut stream, state, &params).await,
-        "/api/file" => match read_tracked_file(&params) {
-            Ok(value) => write_json(&mut stream, "200 OK", &value).await,
-            Err(err) => {
-                write_json(
-                    &mut stream,
-                    "400 Bad Request",
-                    &json!({"error": err.to_string()}),
-                )
-                .await
+        "/api/search/stream" => {
+            if request.method != "GET" {
+                return method_not_allowed(&mut stream, "GET").await;
             }
-        },
-        "/api/open" => match open_tracked_file(&params) {
-            Ok(value) => write_json(&mut stream, "200 OK", &value).await,
-            Err(err) => {
-                write_json(
-                    &mut stream,
-                    "400 Bad Request",
-                    &json!({"error": err.to_string()}),
-                )
-                .await
+            write_search_stream(&mut stream, state, &params).await
+        }
+        "/api/file" => {
+            if request.method != "GET" {
+                return method_not_allowed(&mut stream, "GET").await;
             }
-        },
-        "/api/tree" => match read_tracked_tree(&params) {
-            Ok(value) => write_json(&mut stream, "200 OK", &value).await,
-            Err(err) => {
-                write_json(
-                    &mut stream,
-                    "400 Bad Request",
-                    &json!({"error": err.to_string()}),
-                )
-                .await
+            match read_tracked_file(&params) {
+                Ok(value) => write_json(&mut stream, "200 OK", &value).await,
+                Err(err) => {
+                    write_json(
+                        &mut stream,
+                        "400 Bad Request",
+                        &json!({"error": err.to_string()}),
+                    )
+                    .await
+                }
             }
-        },
+        }
+        "/api/open" => {
+            if request.method != "POST" {
+                return method_not_allowed(&mut stream, "POST").await;
+            }
+            match open_tracked_file(&params) {
+                Ok(value) => write_json(&mut stream, "200 OK", &value).await,
+                Err(err) => {
+                    write_json(
+                        &mut stream,
+                        "400 Bad Request",
+                        &json!({"error": err.to_string()}),
+                    )
+                    .await
+                }
+            }
+        }
+        "/api/tree" => {
+            if request.method != "GET" {
+                return method_not_allowed(&mut stream, "GET").await;
+            }
+            match read_tracked_tree(&params) {
+                Ok(value) => write_json(&mut stream, "200 OK", &value).await,
+                Err(err) => {
+                    write_json(
+                        &mut stream,
+                        "400 Bad Request",
+                        &json!({"error": err.to_string()}),
+                    )
+                    .await
+                }
+            }
+        }
         _ => write_json(&mut stream, "404 Not Found", &json!({"error": "not found"})).await,
+    }
+}
+
+async fn read_http_request_with_timeout(
+    stream: &mut TcpStream,
+    timeout: Duration,
+) -> Result<TimedHttpRequest> {
+    match tokio::time::timeout(timeout, read_http_request(stream)).await {
+        Ok(request) => Ok(TimedHttpRequest::Received(request?)),
+        Err(_) => Ok(TimedHttpRequest::TimedOut),
     }
 }
 
@@ -174,17 +294,23 @@ async fn read_http_request(stream: &mut TcpStream) -> Result<Option<HttpRequest>
             break;
         }
         buf.extend_from_slice(&chunk[..n]);
-        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
-            break;
-        }
         if buf.len() > MAX_HTTP_HEADER_BYTES {
             bail!("HTTP headers exceed {MAX_HTTP_HEADER_BYTES} bytes");
         }
+        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
     }
 
-    let text = std::str::from_utf8(&buf).context("HTTP request headers are not UTF-8")?;
-    let request_line = text
-        .lines()
+    let header_end = buf
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| index + 4)
+        .unwrap_or(buf.len());
+    let text =
+        std::str::from_utf8(&buf[..header_end]).context("HTTP request headers are not UTF-8")?;
+    let mut lines = text.lines();
+    let request_line = lines
         .next()
         .ok_or_else(|| anyhow!("missing HTTP request line"))?;
     let mut parts = request_line.split_whitespace();
@@ -193,7 +319,127 @@ async fn read_http_request(stream: &mut TcpStream) -> Result<Option<HttpRequest>
     if method.is_empty() || target.is_empty() {
         bail!("malformed HTTP request line");
     }
-    Ok(Some(HttpRequest { method, target }))
+    let mut headers = HashMap::new();
+    for line in lines.filter(|line| !line.is_empty()) {
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| anyhow!("malformed HTTP header"))?;
+        let name = name.trim().to_ascii_lowercase();
+        if name.is_empty() {
+            bail!("malformed HTTP header name");
+        }
+        if matches!(name.as_str(), "host" | "origin" | "authorization")
+            && headers.contains_key(&name)
+        {
+            bail!("duplicate {name} header");
+        }
+        let value = value.trim();
+        headers
+            .entry(name)
+            .and_modify(|current: &mut String| {
+                current.push_str("; ");
+                current.push_str(value);
+            })
+            .or_insert_with(|| value.to_string());
+    }
+    Ok(Some(HttpRequest {
+        method,
+        target,
+        headers,
+    }))
+}
+
+fn valid_host(request: &HttpRequest, auth_required: bool) -> bool {
+    let Some(authority) = request.headers.get("host") else {
+        return false;
+    };
+    let Some(host) = authority_host(authority) else {
+        return false;
+    };
+    if !auth_required {
+        return host.eq_ignore_ascii_case("localhost")
+            || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    }
+    host.eq_ignore_ascii_case("localhost") || host.parse::<IpAddr>().is_ok()
+}
+
+fn authority_host(authority: &str) -> Option<&str> {
+    if authority.is_empty()
+        || authority.contains(['/', '\\', '@'])
+        || authority.chars().any(char::is_whitespace)
+    {
+        return None;
+    }
+    if let Some(rest) = authority.strip_prefix('[') {
+        let end = rest.find(']')?;
+        let host = &rest[..end];
+        let suffix = &rest[end + 1..];
+        if !suffix.is_empty() && (!suffix.starts_with(':') || suffix[1..].parse::<u16>().is_err()) {
+            return None;
+        }
+        return (!host.is_empty()).then_some(host);
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok() => Some(host),
+        Some(_) => None,
+        None => Some(authority),
+    }
+}
+
+fn valid_api_origin(request: &HttpRequest) -> bool {
+    if request
+        .headers
+        .get("sec-fetch-site")
+        .is_some_and(|value| value.eq_ignore_ascii_case("cross-site"))
+    {
+        return false;
+    }
+    let Some(origin) = request.headers.get("origin") else {
+        return true;
+    };
+    let Some(authority) = request.headers.get("host") else {
+        return false;
+    };
+    let Some(origin_authority) = origin
+        .strip_prefix("http://")
+        .and_then(|value| value.split('/').next())
+    else {
+        return false;
+    };
+    origin_authority.eq_ignore_ascii_case(authority)
+}
+
+fn request_has_auth(request: &HttpRequest, expected: &str) -> bool {
+    let bearer_matches = request
+        .headers
+        .get("authorization")
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|value| tokens_match(value.trim(), expected));
+    bearer_matches
+        || request
+            .headers
+            .get("cookie")
+            .and_then(|cookies| cookie_value(cookies, WEB_AUTH_COOKIE))
+            .is_some_and(|value| tokens_match(value, expected))
+}
+
+fn cookie_value<'a>(cookies: &'a str, name: &str) -> Option<&'a str> {
+    cookies.split(';').find_map(|cookie| {
+        let (cookie_name, value) = cookie.trim().split_once('=')?;
+        (cookie_name == name).then_some(value)
+    })
+}
+
+fn tokens_match(presented: &str, expected: &str) -> bool {
+    if presented.len() != expected.len() {
+        return false;
+    }
+    presented
+        .as_bytes()
+        .iter()
+        .zip(expected.as_bytes())
+        .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+        == 0
 }
 
 fn parse_target(target: &str) -> Result<(String, HashMap<String, Vec<String>>)> {
@@ -207,6 +453,52 @@ fn parse_target(target: &str) -> Result<(String, HashMap<String, Vec<String>>)> 
             .push(percent_decode(value)?);
     }
     Ok((path.to_string(), params))
+}
+
+async fn establish_web_session(
+    stream: &mut TcpStream,
+    path: &str,
+    params: &HashMap<String, Vec<String>>,
+    token: &str,
+) -> Result<()> {
+    let location = target_without_param(path, params, "token");
+    let cookie = format!("{WEB_AUTH_COOKIE}={token}; HttpOnly; Path=/; SameSite=Strict");
+    write_response_with_headers(
+        stream,
+        "303 See Other",
+        "text/plain; charset=utf-8",
+        b"",
+        &[
+            ("Cache-Control", "no-store"),
+            ("Location", location.as_str()),
+            ("Set-Cookie", cookie.as_str()),
+        ],
+    )
+    .await
+}
+
+fn target_without_param(
+    path: &str,
+    params: &HashMap<String, Vec<String>>,
+    excluded: &str,
+) -> String {
+    let mut pairs = params
+        .iter()
+        .filter(|(key, _)| key.as_str() != excluded)
+        .flat_map(|(key, values)| values.iter().map(move |value| (key, value)))
+        .collect::<Vec<_>>();
+    pairs.sort_by(|left, right| left.0.cmp(right.0).then_with(|| left.1.cmp(right.1)));
+    if pairs.is_empty() {
+        return path.to_string();
+    }
+    format!(
+        "{path}?{}",
+        pairs
+            .into_iter()
+            .map(|(key, value)| format!("{}={}", percent_encode(key), percent_encode(value)))
+            .collect::<Vec<_>>()
+            .join("&")
+    )
 }
 
 fn param<'a>(params: &'a HashMap<String, Vec<String>>, key: &str) -> Option<&'a str> {
@@ -345,7 +637,10 @@ async fn write_search_stream(
 ) -> Result<()> {
     stream
         .write_all(
-            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream; charset=utf-8\r\nCache-Control: no-store\r\nConnection: close\r\n{SECURITY_HEADERS}\r\n"
+            )
+            .as_bytes(),
         )
         .await?;
 
@@ -769,18 +1064,55 @@ fn read_tracked_tree(params: &HashMap<String, Vec<String>>) -> Result<Value> {
 }
 
 async fn write_html(stream: &mut TcpStream, html: &str) -> Result<()> {
-    write_response(
+    write_response_with_headers(
         stream,
         "200 OK",
         "text/html; charset=utf-8",
         html.as_bytes(),
+        &[("Cache-Control", "no-store")],
     )
     .await
 }
 
 async fn write_json(stream: &mut TcpStream, status: &str, value: &Value) -> Result<()> {
     let body = serde_json::to_vec(value)?;
-    write_response(stream, status, "application/json; charset=utf-8", &body).await
+    write_response_with_headers(
+        stream,
+        status,
+        "application/json; charset=utf-8",
+        &body,
+        &[("Cache-Control", "no-store")],
+    )
+    .await
+}
+
+async fn unauthorized(stream: &mut TcpStream) -> Result<()> {
+    let body = serde_json::to_vec(&json!({
+        "error": "authentication required; open the URL printed by `ig --web`"
+    }))?;
+    write_response_with_headers(
+        stream,
+        "401 Unauthorized",
+        "application/json; charset=utf-8",
+        &body,
+        &[
+            ("Cache-Control", "no-store"),
+            ("WWW-Authenticate", "Bearer realm=\"ivygrep web\""),
+        ],
+    )
+    .await
+}
+
+async fn method_not_allowed(stream: &mut TcpStream, allow: &str) -> Result<()> {
+    let body = serde_json::to_vec(&json!({"error": "method not allowed"}))?;
+    write_response_with_headers(
+        stream,
+        "405 Method Not Allowed",
+        "application/json; charset=utf-8",
+        &body,
+        &[("Allow", allow)],
+    )
+    .await
 }
 
 async fn write_response(
@@ -789,8 +1121,25 @@ async fn write_response(
     content_type: &str,
     body: &[u8],
 ) -> Result<()> {
+    write_response_with_headers(stream, status, content_type, body, &[]).await
+}
+
+async fn write_response_with_headers(
+    stream: &mut TcpStream,
+    status: &str,
+    content_type: &str,
+    body: &[u8],
+    extra_headers: &[(&str, &str)],
+) -> Result<()> {
+    let mut extra = String::new();
+    for (name, value) in extra_headers {
+        extra.push_str(name);
+        extra.push_str(": ");
+        extra.push_str(value);
+        extra.push_str("\r\n");
+    }
     let header = format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\n\r\n",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n{SECURITY_HEADERS}{extra}\r\n",
         body.len()
     );
     stream.write_all(header.as_bytes()).await?;
@@ -804,7 +1153,19 @@ fn render_app_html(config: &WebConfig) -> String {
         "query": config.initial_query,
         "workspace": config.initial_path.as_ref().map(|path| path.display().to_string()),
     });
-    WEB_INDEX_HTML.replace("__IVYGREP_BOOT__", &serde_json::to_string(&boot).unwrap())
+    WEB_INDEX_HTML.replace(
+        "__IVYGREP_BOOT__",
+        &escape_html_attribute(&serde_json::to_string(&boot).unwrap()),
+    )
+}
+
+fn escape_html_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 fn embedded_asset(path: &str) -> Option<&'static WebAsset> {
@@ -863,6 +1224,83 @@ mod tests {
     #[test]
     fn bind_addr_accepts_localhost() {
         assert_eq!(bind_addr("localhost", 4747).unwrap().port(), 4747);
+    }
+
+    #[tokio::test]
+    async fn incomplete_http_headers_hit_read_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+            .await
+            .unwrap();
+
+        let result = read_http_request_with_timeout(&mut server, Duration::from_millis(20))
+            .await
+            .unwrap();
+        assert!(matches!(result, TimedHttpRequest::TimedOut));
+    }
+
+    #[test]
+    fn non_loopback_url_contains_process_token_but_loopback_url_does_not() {
+        let config = WebConfig {
+            host: "127.0.0.1".to_string(),
+            port: 4747,
+            initial_query: None,
+            initial_path: None,
+        };
+        let loopback = initial_url(&config, "127.0.0.1:4747".parse().unwrap());
+        assert!(!loopback.contains("token="));
+
+        let exposed = initial_url(&config, "0.0.0.0:4747".parse().unwrap());
+        assert!(exposed.contains(&format!("token={}", web_auth_token())));
+    }
+
+    #[test]
+    fn auth_accepts_cookie_or_bearer_and_rejects_other_values() {
+        let expected = "0123456789abcdef";
+        let cookie_request = HttpRequest {
+            method: "GET".to_string(),
+            target: "/api/status".to_string(),
+            headers: HashMap::from([(
+                "cookie".to_string(),
+                format!("other=1; {WEB_AUTH_COOKIE}={expected}"),
+            )]),
+        };
+        assert!(request_has_auth(&cookie_request, expected));
+
+        let bearer_request = HttpRequest {
+            method: "GET".to_string(),
+            target: "/api/status".to_string(),
+            headers: HashMap::from([("authorization".to_string(), format!("Bearer {expected}"))]),
+        };
+        assert!(request_has_auth(&bearer_request, expected));
+        assert!(!request_has_auth(&bearer_request, "different-token"));
+    }
+
+    #[test]
+    fn session_redirect_removes_only_token() {
+        let (_, params) = parse_target("/?q=auth+flow&token=secret&workspace=/tmp/repo").unwrap();
+        let target = target_without_param("/", &params, "token");
+        assert!(!target.contains("token="));
+        assert!(target.contains("q=auth%20flow"));
+        assert!(target.contains("workspace=/tmp/repo"));
+    }
+
+    #[test]
+    fn boot_config_is_html_attribute_escaped() {
+        let config = WebConfig {
+            host: "127.0.0.1".to_string(),
+            port: 4747,
+            initial_query: Some("\"><script>bad()</script>".to_string()),
+            initial_path: None,
+        };
+        let html = render_app_html(&config);
+        assert!(!html.contains("<script>bad()</script>"));
+        assert!(html.contains("&quot;"));
     }
 
     #[test]

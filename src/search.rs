@@ -3597,15 +3597,30 @@ fn score_filtered_semantic_candidates(
     primary_store: Option<&VectorStore>,
     base_store: Option<&VectorStore>,
 ) -> Result<Vec<(IndexedChunk, f32)>> {
+    let keys = filtered
+        .iter()
+        .map(|chunk| chunk.vector_key)
+        .collect::<Vec<_>>();
+    let mut scores = HashMap::<u64, f32>::with_capacity(candidate_limit * 2);
+    for store in [primary_store, base_store].into_iter().flatten() {
+        for vector_match in store.score_many_top_k(&keys, query_vector, candidate_limit) {
+            scores
+                .entry(vector_match.key)
+                .and_modify(|score| {
+                    if vector_match.score.total_cmp(score).is_gt() {
+                        *score = vector_match.score;
+                    }
+                })
+                .or_insert(vector_match.score);
+        }
+    }
     let mut scored = filtered
         .into_iter()
         .filter_map(|chunk| {
-            let score = primary_store
-                .and_then(|store| store.score(chunk.vector_key, query_vector))
-                .into_iter()
-                .chain(base_store.and_then(|store| store.score(chunk.vector_key, query_vector)))
-                .max_by(|a, b| a.total_cmp(b))?;
-            Some((chunk.vector_key, score))
+            scores
+                .get(&chunk.vector_key)
+                .copied()
+                .map(|score| (chunk.vector_key, score))
         })
         .collect::<Vec<_>>();
     scored.sort_by(|left, right| {
@@ -4657,14 +4672,33 @@ fn filter_semantic_only_scores(
             && second_score > f32::EPSILON
             && best.score / second_score >= decisive_ratio);
 
-    if authority >= authority_floor
-        && decisive
-        && support.is_enough_for_semantic_only(precise_query)
+    if authority < authority_floor
+        || !decisive
+        || !support.is_enough_for_semantic_only(precise_query)
     {
-        ranked.into_iter().take(1).collect()
-    } else {
-        vec![]
+        return vec![];
     }
+
+    // Exact-looking queries stay single-result to avoid turning embedding
+    // collisions into identifier answers. Natural-language discovery may have
+    // several equally strong implementation files, so retain a small cluster
+    // when every candidate independently clears authority and support gates.
+    let max_results = if precise_query { 1 } else { 3 };
+    let score_threshold = (best.score * 0.85).max(score_floor * 0.8);
+    ranked
+        .into_iter()
+        .filter(|item| {
+            if item.score < score_threshold {
+                return false;
+            }
+            let bctx = ChunkBoostContext::new(&item.chunk);
+            let support = support_signals(query.text, &query.tokens, &bctx);
+            let authority =
+                effective_authority_score_with_intent(&query.tokens, &bctx, query.secondary_intent);
+            authority >= authority_floor && support.is_enough_for_semantic_only(precise_query)
+        })
+        .take(max_results)
+        .collect()
 }
 
 fn has_direct_source(sources: SourceMask) -> bool {
@@ -8139,6 +8173,45 @@ export function registerCommands(p: Plugin) {
         let filtered = filter_meaningful_scores(ranked, "binary file detection");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].0.chunk_id, "strong");
+    }
+
+    #[test]
+    fn filter_keeps_strong_semantic_only_result_cluster_for_discovery() {
+        let detect = make_chunk_with_path(
+            "detect",
+            "src/binary_file_detection/detect.rs",
+            "pub fn detect_binary_file(bytes: &[u8]) -> bool { bytes.contains(&0) }",
+        );
+        let classify = make_chunk_with_path(
+            "classify",
+            "src/binary_file_detection/classify.rs",
+            "pub fn classify_binary_file_detection(bytes: &[u8]) -> FileKind { inspect(bytes) }",
+        );
+        let inspect = make_chunk_with_path(
+            "inspect",
+            "src/binary_file_detection/inspect.rs",
+            "pub fn inspect_binary_file_detection_header(bytes: &[u8]) -> Header { parse(bytes) }",
+        );
+        let unrelated = make_chunk_with_path(
+            "unrelated",
+            "src/runtime/metrics.rs",
+            "pub fn record_process_metrics() {}",
+        );
+        let ranked = make_ranked_with_chunks(&[
+            (detect, 0.12, &["semantic"]),
+            (classify, 0.115, &["semantic"]),
+            (inspect, 0.11, &["semantic"]),
+            (unrelated, 0.09, &["semantic"]),
+        ]);
+
+        let filtered = filter_meaningful_scores(ranked, "binary file detection");
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|item| item.0.chunk_id.as_str())
+                .collect::<Vec<_>>(),
+            ["detect", "classify", "inspect"]
+        );
     }
 
     #[test]

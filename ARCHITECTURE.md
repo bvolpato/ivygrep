@@ -609,6 +609,15 @@ port = 4747
 free port. `ig --web "query" .` enables web on the current daemon when possible
 and opens the UI with that workspace and query preselected.
 
+Loopback listeners require no authentication. Non-loopback listeners generate a
+strong process-local token and include it in the printed launch URL. The first
+page request exchanges that token for an HttpOnly, same-site session cookie and
+redirects to a URL without the token. Every `/api` route checks that session or
+an equivalent bearer token. Host and Origin checks reject DNS-rebinding and
+cross-site requests, and `/api/open` accepts POST only. Non-loopback transport
+remains plain HTTP, so operators should use a trusted network, Tailscale, or an
+encrypted tunnel rather than exposing the listener publicly.
+
 `src/web.rs` is a small HTTP server with JSON endpoints and SSE search
 streaming. Frontend source lives in `web/`, uses pnpm, and builds into
 `web/dist/`. Cargo embeds the built assets into the `ig` binary through the
@@ -620,6 +629,14 @@ generated `web_assets.rs`.
 limit, context, and optional literal mode. It scopes search to the supplied
 workspace, auto-indexes on first use, and starts watching when configured.
 `ig_status` reports workspace/index health for agents before broader scans.
+
+Initialization negotiates supported MCP protocol versions through
+`2025-11-25`. Tool definitions include strict input and output schemas plus
+accurate side-effect annotations: status is read-only, while search may create
+or update a local index but remains non-destructive. Successful calls return
+both JSON text for older clients and `structuredContent` for schema-aware
+clients. Expected tool failures use `isError`; malformed JSON-RPC requests
+remain protocol errors.
 
 ## Build Variants
 

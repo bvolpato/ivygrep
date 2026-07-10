@@ -5,12 +5,13 @@
   "packageManager": "pnpm@10.33.0",
   "scripts": {
     "build": "vite build",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit && vitest run"
   },
   "devDependencies": {
     "@types/markdown-it": "^14.1.2",
     "typescript": "^5.9.3",
-    "vite": "^7.2.7"
+    "vite": "^7.2.7",
+    "vitest": "^3.2.4"
   },
   "dependencies": {
     "highlight.js": "^11.11.1",

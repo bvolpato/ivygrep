@@ -11,7 +11,7 @@ use std::cell::OnceCell;
 use std::fmt::Write as _;
 use std::fs;
 use std::hint::black_box;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -66,6 +66,30 @@ where
         }
     }
     start.elapsed() / repetitions
+}
+
+fn setup_ann_fixture() -> (tempfile::TempDir, PathBuf, Vec<f32>) {
+    let ann_dir = tempfile::tempdir().unwrap();
+    let ann_path = ann_dir.path().join("ann.usearch");
+    {
+        let mut store = VectorStore::open(
+            &ann_path,
+            EMBEDDING_DIMENSIONS,
+            ivygrep::vector_store::NEURAL_VECTOR_QUANTIZATION,
+        )
+        .unwrap();
+        for i in 0..50_000u64 {
+            let vector = (0..EMBEDDING_DIMENSIONS)
+                .map(|dimension| (((i as usize * 31 + dimension * 17) % 97) as f32) / 97.0)
+                .collect();
+            store.upsert(i, vector).unwrap();
+        }
+        store.save().unwrap();
+    }
+    let query = (0..EMBEDDING_DIMENSIONS)
+        .map(|dimension| ((dimension * 13 % 97) as f32) / 97.0)
+        .collect();
+    (ann_dir, ann_path, query)
 }
 
 /// Create a temp workspace with `n` small Rust files and return handles.
@@ -832,6 +856,38 @@ fn bench_critical_journeys(c: &mut Criterion) {
         })
     });
 
+    let burst_fixture = OnceCell::new();
+    let mut burst_revision = 0u64;
+    group.bench_function("incremental_100_file_burst_10k_chunks", |b| {
+        let (_staging, _home, workspace, model) =
+            burst_fixture.get_or_init(|| setup_bulk_indexed_workspace(200, 50));
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iters {
+                burst_revision += 1;
+                for file_index in 0..100 {
+                    let mut source = String::with_capacity(50 * 112);
+                    for function_index in 0..50 {
+                        writeln!(
+                            source,
+                            "pub fn burst_{burst_revision}_{file_index}_{function_index}() -> u64 {{ {function_index} }}"
+                        )
+                        .unwrap();
+                    }
+                    fs::write(workspace.root.join(format!("bulk_{file_index}.rs")), source)
+                        .unwrap();
+                }
+
+                let start = Instant::now();
+                let summary = index_workspace(workspace, model).unwrap();
+                elapsed += start.elapsed();
+                assert_eq!(summary.indexed_files, 100);
+                black_box(summary);
+            }
+            elapsed
+        })
+    });
+
     let health_fixture = OnceCell::new();
     group.bench_function("quick_health_cached_10k_chunks", |b| {
         let (_staging, _home, workspace, _model) =
@@ -847,29 +903,7 @@ fn bench_critical_journeys(c: &mut Criterion) {
     // enough to exercise usearch HNSW behaviour rather than a trivial set.
     let ann_fixture = OnceCell::new();
     group.bench_function("vector_search_in_50k", |b| {
-        let (_ann_dir, ann_path, query) = ann_fixture.get_or_init(|| {
-            let ann_dir = tempfile::tempdir().unwrap();
-            let ann_path = ann_dir.path().join("ann.usearch");
-            {
-                let mut store = ivygrep::vector_store::VectorStore::open(
-                    &ann_path,
-                    EMBEDDING_DIMENSIONS,
-                    ivygrep::vector_store::NEURAL_VECTOR_QUANTIZATION,
-                )
-                .unwrap();
-                for i in 0..50_000u64 {
-                    let v: Vec<f32> = (0..EMBEDDING_DIMENSIONS)
-                        .map(|j| (((i as usize * 31 + j * 17) % 97) as f32) / 97.0)
-                        .collect();
-                    store.upsert(i, v).unwrap();
-                }
-                store.save().unwrap();
-            }
-            let query: Vec<f32> = (0..EMBEDDING_DIMENSIONS)
-                .map(|j| ((j * 13 % 97) as f32) / 97.0)
-                .collect();
-            (ann_dir, ann_path, query)
-        });
+        let (_ann_dir, ann_path, query) = ann_fixture.get_or_init(setup_ann_fixture);
 
         b.iter_custom(|iters| {
             let start = Instant::now();
@@ -889,29 +923,7 @@ fn bench_critical_journeys(c: &mut Criterion) {
     });
 
     group.bench_function("vector_search_in_50k_hot", |b| {
-        let (_ann_dir, ann_path, query) = ann_fixture.get_or_init(|| {
-            let ann_dir = tempfile::tempdir().unwrap();
-            let ann_path = ann_dir.path().join("ann.usearch");
-            {
-                let mut store = VectorStore::open(
-                    &ann_path,
-                    EMBEDDING_DIMENSIONS,
-                    ivygrep::vector_store::NEURAL_VECTOR_QUANTIZATION,
-                )
-                .unwrap();
-                for i in 0..50_000u64 {
-                    let v: Vec<f32> = (0..EMBEDDING_DIMENSIONS)
-                        .map(|j| (((i as usize * 31 + j * 17) % 97) as f32) / 97.0)
-                        .collect();
-                    store.upsert(i, v).unwrap();
-                }
-                store.save().unwrap();
-            }
-            let query: Vec<f32> = (0..EMBEDDING_DIMENSIONS)
-                .map(|j| ((j * 13 % 97) as f32) / 97.0)
-                .collect();
-            (ann_dir, ann_path, query)
-        });
+        let (_ann_dir, ann_path, query) = ann_fixture.get_or_init(setup_ann_fixture);
         let store = VectorStore::open_readonly(
             ann_path,
             EMBEDDING_DIMENSIONS,
@@ -925,6 +937,24 @@ fn bench_critical_journeys(c: &mut Criterion) {
                 assert!(!results.is_empty());
                 black_box(results);
             })
+        })
+    });
+
+    let exact_keys = (0..50_000u64).collect::<Vec<_>>();
+    group.bench_function("exact_filtered_vector_top_50_in_50k_hot", |b| {
+        let (_ann_dir, ann_path, query) = ann_fixture.get_or_init(setup_ann_fixture);
+        let store = VectorStore::open_readonly(
+            ann_path,
+            EMBEDDING_DIMENSIONS,
+            ivygrep::vector_store::NEURAL_VECTOR_QUANTIZATION,
+        )
+        .unwrap();
+
+        b.iter(|| {
+            let results =
+                store.score_many_top_k(black_box(&exact_keys), black_box(query), black_box(50));
+            assert_eq!(results.len(), 50);
+            black_box(results);
         })
     });
 

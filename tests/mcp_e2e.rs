@@ -77,7 +77,7 @@ fn e2e_mcp_initialize() {
         "id": 1,
         "method": "initialize",
         "params": {
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": "2025-11-25",
             "capabilities": {},
             "clientInfo": { "name": "test-client", "version": "1.0.0" }
         }
@@ -103,7 +103,7 @@ fn e2e_mcp_initialize() {
     // Assert expectations
     assert_eq!(response["id"], 1);
     assert_eq!(response["jsonrpc"], "2.0");
-    assert!(response["result"]["protocolVersion"].is_string());
+    assert_eq!(response["result"]["protocolVersion"], "2025-11-25");
     assert!(response["result"]["capabilities"].is_object());
 
     // Wait for the server to spin down now that standard input is closed
@@ -163,6 +163,14 @@ fn e2e_mcp_full_session() {
     );
     let init_res = read_response(&mut reader);
     assert_eq!(init_res["id"], 1);
+    send_request(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }),
+    );
 
     // 2. tools/list
     send_request(
@@ -198,6 +206,7 @@ fn e2e_mcp_full_session() {
     let status_res = read_response(&mut reader);
     assert_eq!(status_res["id"], 3);
     assert!(status_res["result"]["content"].as_array().is_some());
+    assert!(status_res["result"]["structuredContent"].is_object());
 
     // 4. tools/call ig_search
     send_request(
@@ -218,6 +227,7 @@ fn e2e_mcp_full_session() {
     );
     let search_res = read_response(&mut reader);
     assert_eq!(search_res["id"], 4);
+    assert!(search_res["result"]["structuredContent"].is_object());
     let payload = search_payload(&search_res);
     assert!(payload["result_count"].as_u64().unwrap() > 0);
     assert_eq!(payload["results"][0]["file_path"], "test.rs");

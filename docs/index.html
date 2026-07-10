@@ -69,7 +69,7 @@
         <div class="container hero-content">
             <div class="hero-badge slide-up">
                 <span class="badge-dot"></span>
-                v1.1.9 - accelerator archives
+                v1.1.10 - faster search and safer integrations
             </div>
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" onerror="this.src='assets/logo.png'"/>
@@ -183,7 +183,7 @@
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">🖥️</span></div>
                 <h3>Web workspace browser</h3>
-                <p>Run <code>ig --web</code> for local HTTP search across indexed projects, folder focus, daemon status, streaming results, syntax-highlighted files, and Markdown preview.</p>
+                <p>Run <code>ig --web</code> for local HTTP search across indexed projects, folder focus, daemon status, streaming results, syntax-highlighted files, and Markdown preview. Non-loopback listeners use a per-daemon access token.</p>
             </div>
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">🏗️</span></div>
@@ -199,6 +199,8 @@
                     <h3>Daemon-backed web UI</h3>
                     <p>Open a browser UI without leaving local mode. Search all tracked workspaces, drill into one folder, browse indexed files, and keep result and file panes independently scrollable.</p>
                     <p>Result cards show language icons, syntax-highlighted snippets, line markers, and selected-state highlighting. The file viewer highlights focused result lines and previews Markdown with a source toggle.</p>
+                    <p>Loopback stays zero-config. A non-loopback bind prints an authenticated URL. On another device, replace only <code>127.0.0.1</code> with the server's LAN or Tailscale address and preserve the complete <code>token=...</code> query string. Open it directly and do not share it: the browser exchanges it for an HttpOnly session cookie, then removes it from the address. Restart the daemon to invalidate access.</p>
+                    <p>Non-loopback serving uses plain HTTP: the token authenticates requests but does not encrypt source or results. Use a trusted network only, preferably Tailscale or an SSH tunnel. Never expose the port directly to the internet or untrusted Wi-Fi.</p>
                 </div>
                 <div class="install-code relative">
                     <pre class="code-block"><span class="prompt">$</span> ig --web
@@ -698,7 +700,7 @@
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md" class="footer-link">Changelog</a>
                 </div>
                 <div class="footer-copy">
-                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v1.1.9</p>
+                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v1.1.10</p>
                 </div>
             </div>
         </div>

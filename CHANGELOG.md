@@ -4,6 +4,31 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.1.10] - 2026-07-10
+
+### Added
+- **MCP tools expose strict, version-negotiated contracts.** Clients can negotiate four protocol versions through `2025-11-25`; tool definitions now include titles, output schemas, side-effect annotations, bounded inputs, structured results, and standard JSON-RPC errors.
+- **Web search supports authenticated non-loopback access.** Each daemon creates a process-local token, exchanges it for an HttpOnly same-site cookie, and accepts equivalent bearer authentication for API clients.
+
+### Performance
+- **Filtered exact vector search batches scoring and keeps only top candidates.** Query normalization and retrieval buffers are reused once per store, while a bounded heap replaces full-result sorting. The 50,000-vector top-50 benchmark improved from `34.960 ms` to `23.685 ms` (`1.48x`).
+- **Incremental deletion journals sync once per transaction.** A 32-file reindex reduced expected hash/neural durability syncs from 64 per-file calls to 2 traced `fdatasync` calls while preserving pre-commit crash ordering.
+
+### Fixed
+- **`--add --wait-for-enhancement` waits for requested vector work.** Hash and neural workflows now start the correct background worker, surface launch or stall failures, and verify durable completion before returning.
+- **CLI diagnostics honor explicit paths and terminal color settings.** `--doctor PATH` uses the requested workspace, and status output respects `NO_COLOR`.
+- **Web UI rejects stale asynchronous updates.** Superseded search streams, file loads, and tree loads can no longer overwrite current state; partial workspace failures remain visible.
+
+### Security
+- **Web APIs validate request origin and bound connection work.** Host and same-origin checks protect every API route, file opening is POST-only, security headers cover embedded content, and request handling is limited to 128 connections with a five-second header deadline.
+
+### Documentation
+- **CLI, MCP, and web guidance now matches runtime behavior.** Help text documents every argument and option, runnable examples cover common workflows, and non-loopback web instructions explain token handling and plain-HTTP limits.
+
+### Testing
+- **Performance and relevance changes have paired evidence.** Filtered vector scoring improved by `32.3%`; a repeated 100-query public retrieval matrix showed no proven aggregate relevance gain, so broader semantic-only results remain guarded by score and authority thresholds.
+- **New regression coverage exercises durability, protocol contracts, authenticated web access, asynchronous UI ordering, and enhancement waiting.** Full default-feature validation passed 624 Rust tests, 112 Python tests, and 3 frontend tests.
+
 ## [1.1.9] - 2026-07-09
 
 ### Added
