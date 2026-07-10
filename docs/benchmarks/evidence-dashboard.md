@@ -1177,7 +1177,7 @@ reason, source commit, and immutable artifact URL.
 - [Held-out learned reranker](https://github.com/bvolpato/ivygrep/blob/14efc6643aadaf5114768d575610399ee48d5085/docs/benchmarks/public-reranker-results.json) (`e9ba2fee6fe5bb3e...`)
 - [Public million-chunk benchmark](https://github.com/bvolpato/ivygrep/blob/14efc6643aadaf5114768d575610399ee48d5085/docs/benchmarks/public-million-results.json) (`f4ba8051b2c7cf88...`)
 - [Daemon hot-query cache](https://github.com/bvolpato/ivygrep/blob/a99f5fb6eafef9c41d656a42dccaf44e27972d32/docs/benchmarks/daemon-hot-query-cache-explore-results.tsv) (`bf168523793c2c3f...`)
-- [Release artifact acceptance gate](https://github.com/bvolpato/ivygrep/blob/7de250bef5a54bbd4c5f43f54e6b605ba44e842b/.github/workflows/release.yml) (`a8a2a1292a798bc3...`)
+- [Release artifact acceptance gate](https://github.com/bvolpato/ivygrep/blob/23f26c420a69af70561f402ad7d056005d696d62/.github/workflows/release.yml) (`0cb882d17462cfcd...`)
 - [Release artifact history](https://github.com/bvolpato/ivygrep/blob/2daeb1bcdea5d4daac658c59d6662bb7e63751d2/docs/benchmarks/release-artifact-history.json) (`8142eb4c33ba7330...`)
 
 Raw machine-readable dashboard:

@@ -1013,12 +1013,12 @@
     },
     {
       "id": "release-workflow",
-      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/7de250bef5a54bbd4c5f43f54e6b605ba44e842b/.github/workflows/release.yml",
+      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/23f26c420a69af70561f402ad7d056005d696d62/.github/workflows/release.yml",
       "kind": "portability",
       "label": "Release artifact acceptance gate",
       "path": ".github/workflows/release.yml",
-      "publication_commit": "7de250bef5a54bbd4c5f43f54e6b605ba44e842b",
-      "sha256": "a8a2a1292a798bc39d9d4623d628643aab10db8f6a463a7b35797ecdf03f9729",
+      "publication_commit": "23f26c420a69af70561f402ad7d056005d696d62",
+      "sha256": "0cb882d17462cfcd540a2dd64efe2ce7528b9f601fbe1d712636538969dffdd7",
       "source_commit": null,
       "summary": {
         "artifact_acceptance": true,

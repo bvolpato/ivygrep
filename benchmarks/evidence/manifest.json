@@ -62,7 +62,7 @@
       "kind": "portability",
       "label": "Release artifact acceptance gate",
       "path": ".github/workflows/release.yml",
-      "publication_commit": "7de250bef5a54bbd4c5f43f54e6b605ba44e842b"
+      "publication_commit": "23f26c420a69af70561f402ad7d056005d696d62"
     }
   ],
   "release_history": "docs/benchmarks/release-artifact-history.json",
