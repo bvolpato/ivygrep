@@ -523,11 +523,44 @@ impl Workspace {
     /// Checks if an enhancement process is currently running for this workspace.
     pub fn is_enhancing_active(&self) -> bool {
         let status = jobs::job_status(self, JobKind::Enhancement, ENHANCEMENT_HEARTBEAT_TTL_SECS);
-        if status.record.is_some() {
-            status.active()
+        status.active() || is_active_pid_alive(&self.enhancing_pid_path())
+    }
+
+    /// Checks whether hash vectors or their deletion journals lag the lexical index.
+    pub fn needs_hash_enhancement(&self) -> bool {
+        let use_overlay = self.has_overlay() || self.base_ref_path().exists();
+        let hash_path = if use_overlay {
+            self.overlay_vector_path()
         } else {
-            is_active_pid_alive(&self.enhancing_pid_path())
+            self.vector_path()
+        };
+        let index_generation = self
+            .read_metadata()
+            .ok()
+            .flatten()
+            .map(|metadata| metadata.index_generation)
+            .unwrap_or(0);
+        let hash_enhanced_generation =
+            std::fs::read_to_string(self.hash_enhanced_generation_path())
+                .ok()
+                .and_then(|value| value.trim().parse::<u64>().ok());
+        let hash_tombstones_pending =
+            self.hash_tombstones_path().exists() || self.hash_tombstones_processing_path().exists();
+        let (chunk_count, _) = read_sqlite_counts(&self.index_dir);
+        if chunk_count == 0 {
+            return false;
         }
+        if hash_enhanced_generation != Some(index_generation) || hash_tombstones_pending {
+            return true;
+        }
+
+        let vector_key_count = read_sqlite_vector_key_count(&self.index_dir);
+        vector_store_size(
+            &hash_path,
+            crate::EMBEDDING_DIMENSIONS,
+            crate::vector_store::HASH_VECTOR_QUANTIZATION,
+        )
+        .is_none_or(|enhanced| enhanced < vector_key_count)
     }
 
     /// Checks if background hash or neural enhancement still has work to do.
@@ -650,6 +683,15 @@ impl Workspace {
     /// Uses O_EXCL file lock mechanics to mathematically prevent race conditions
     /// even if multiple threads or processes try to spawn this simultaneously.
     pub fn trigger_background_enhancement(&self) -> Result<()> {
+        self.trigger_background_enhancement_command("--enhance-internal", false)
+    }
+
+    /// Triggers only hash-vector enhancement for explicit hash-mode workflows.
+    pub fn trigger_background_hash_enhancement(&self) -> Result<()> {
+        self.trigger_background_enhancement_command("--enhance-hash-internal", true)
+    }
+
+    fn trigger_background_enhancement_command(&self, command: &str, hash_only: bool) -> Result<()> {
         let exe = std::env::current_exe()?;
         let pid_path = self.enhancing_pid_path();
 
@@ -676,29 +718,32 @@ impl Workspace {
             .create_new(true)
             .open(&pid_path);
 
-        if lock.is_ok() {
-            let mut cmd = std::process::Command::new(&exe);
-            cmd.arg("--enhance-internal").arg(&self.root);
-            cmd.stdin(std::process::Stdio::null());
-            cmd.stdout(std::process::Stdio::null());
-            cmd.stderr(std::process::Stdio::null());
+        match lock {
+            Ok(_) => {
+                let mut cmd = std::process::Command::new(&exe);
+                cmd.arg(command).arg(&self.root);
+                cmd.stdin(std::process::Stdio::null());
+                cmd.stdout(std::process::Stdio::null());
+                cmd.stderr(std::process::Stdio::null());
 
-            // Lower the scheduling priority of the background process so
-            // interactive work (editor, shell, search) is never starved.
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::CommandExt;
-                // SAFETY: nice(2) is async-signal-safe and has no side effects
-                // beyond adjusting the process niceness.
-                unsafe {
-                    cmd.pre_exec(|| {
-                        libc::nice(10);
-                        Ok(())
-                    });
+                // Lower the scheduling priority of the background process so
+                // interactive work (editor, shell, search) is never starved.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt;
+                    // SAFETY: nice(2) is async-signal-safe and has no side effects
+                    // beyond adjusting the process niceness.
+                    unsafe {
+                        cmd.pre_exec(|| {
+                            libc::nice(10);
+                            Ok(())
+                        });
+                    }
                 }
-            }
 
-            if let Ok(mut child) = cmd.spawn() {
+                let mut child = cmd.spawn().inspect_err(|_| {
+                    let _ = std::fs::remove_file(&pid_path);
+                })?;
                 let _ = std::fs::write(&pid_path, child.id().to_string());
 
                 // Spawn a detached thread solely to waitpid() the child.
@@ -708,9 +753,9 @@ impl Workspace {
                 std::thread::spawn(move || {
                     let _ = child.wait();
                 });
-            } else {
-                let _ = std::fs::remove_file(&pid_path);
             }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
         }
 
         // If this is a worktree overlay, its hybrid search strongly relies on the
@@ -720,7 +765,11 @@ impl Workspace {
             && let Ok(base_ws) = Workspace::resolve(&main_root)
             && base_ws.needs_neural_enhancement()
         {
-            let _ = base_ws.trigger_background_enhancement();
+            let _ = if hash_only {
+                base_ws.trigger_background_hash_enhancement()
+            } else {
+                base_ws.trigger_background_enhancement()
+            };
         }
 
         Ok(())

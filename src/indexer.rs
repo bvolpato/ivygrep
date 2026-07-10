@@ -61,6 +61,9 @@ const NEURAL_CUDA_ACTIVE_UTILIZATION_PERCENT: u32 = 25;
 const NEURAL_BATCH_SIZE_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CONFIGURED_NEURAL_BATCH_SIZE: usize = 4096;
 const SYMBOL_INSERT_BATCH_ROWS: usize = 256;
+// Soft per-transaction target, checked after each file. One file's bounded
+// chunk-key batch may exceed it before the journal and SQLite commit checkpoint.
+const MAX_VECTOR_TOMBSTONE_TRANSACTION_BYTES: usize = 1024 * 1024;
 
 fn indexing_worker_count() -> usize {
     let logical = num_cpus::get().max(1);
@@ -1302,41 +1305,42 @@ fn index_workspace_inner(
     let mut writer = writer.context("writer must be acquired after retries")?;
 
     ensure_hash_vector_store(&vector_path, crate::EMBEDDING_DIMENSIONS)?;
-    let hash_tombstones_path = workspace.hash_tombstones_path();
-    let neural_tombstones_path = (!use_overlay).then(|| workspace.neural_tombstones_path());
+    let mut vector_tombstones = VectorTombstoneJournals::new(
+        workspace.hash_tombstones_path(),
+        (!use_overlay).then(|| workspace.neural_tombstones_path()),
+    );
 
     // Batch SQLite writes in a transaction for ~10-50x speedup.
     // Mutable so we can periodically commit and avert massive WAL files.
     let mut tx = sqlite.transaction()?;
 
+    macro_rules! checkpoint_deletion_tombstones {
+        () => {
+            if vector_tombstones.should_checkpoint() {
+                commit_with_vector_tombstones(tx, &mut vector_tombstones)?;
+                if !is_fresh_index {
+                    writer.commit()?;
+                }
+                tx = sqlite.transaction()?;
+            }
+        };
+    }
+
     // Overlay state shadows only paths backed by the base index. Clear paths
     // that have returned to base content or were removed after being overlay-only.
     if use_overlay {
         for rel_path in &clear_overlay_paths {
-            remove_file_chunks(
-                &tx,
-                &mut writer,
-                &fields,
-                &hash_tombstones_path,
-                neural_tombstones_path.as_deref(),
-                rel_path,
-            )?;
+            remove_file_chunks(&tx, &mut writer, &fields, &mut vector_tombstones, rel_path)?;
             tx.execute(
                 "DELETE FROM tombstones WHERE file_path = ?1",
                 params![index_path_string(rel_path)],
             )?;
+            checkpoint_deletion_tombstones!();
         }
 
         for rel_path in &diff.deleted {
             let rel_str = index_path_string(rel_path);
-            remove_file_chunks(
-                &tx,
-                &mut writer,
-                &fields,
-                &hash_tombstones_path,
-                neural_tombstones_path.as_deref(),
-                rel_path,
-            )?;
+            remove_file_chunks(&tx, &mut writer, &fields, &mut vector_tombstones, rel_path)?;
             if path_exists_in_base(rel_path) {
                 tx.execute(
                     "INSERT OR IGNORE INTO tombstones (file_path) VALUES (?1)",
@@ -1348,6 +1352,7 @@ fn index_workspace_inner(
                     params![rel_str],
                 )?;
             }
+            checkpoint_deletion_tombstones!();
         }
 
         // Insert before chunking so a base file replaced by empty/binary
@@ -1361,14 +1366,10 @@ fn index_workspace_inner(
             }
         }
     } else {
-        apply_deletions(
-            &tx,
-            &mut writer,
-            &fields,
-            &hash_tombstones_path,
-            neural_tombstones_path.as_deref(),
-            &diff.deleted,
-        )?;
+        for rel_path in &diff.deleted {
+            remove_file_chunks(&tx, &mut writer, &fields, &mut vector_tombstones, rel_path)?;
+            checkpoint_deletion_tombstones!();
+        }
     }
 
     let total = diff.added_or_modified.len();
@@ -1520,8 +1521,7 @@ fn index_workspace_inner(
                     &tx,
                     &mut writer,
                     &fields,
-                    &hash_tombstones_path,
-                    neural_tombstones_path.as_deref(),
+                    &mut vector_tombstones,
                     &rel_path,
                 ));
             }
@@ -1550,21 +1550,21 @@ fn index_workspace_inner(
                 ));
                 persist_or_stop!(writer.add_document(prepared.tantivy_doc));
             }
-        }
 
-        // Bound SQLite WAL growth independently from Tantivy publication.
-        // Fresh indexes publish Tantivy once at the end: committing every
-        // SQLite batch forces repeated segment merges and multiplies disk I/O.
-        if chunks_since_commit >= 25_000 {
-            persist_or_stop!(persist_statements.flush_symbols());
-            drop(persist_statements);
-            persist_or_stop!(tx.commit());
-            if !is_fresh_index {
-                persist_or_stop!(writer.commit());
+            // Bound SQLite WAL growth and deletion journal memory. Fresh
+            // indexes publish Tantivy once at the end; incremental indexes
+            // publish each committed deletion batch.
+            if chunks_since_commit >= 25_000 || vector_tombstones.should_checkpoint() {
+                persist_or_stop!(persist_statements.flush_symbols());
+                drop(persist_statements);
+                persist_or_stop!(commit_with_vector_tombstones(tx, &mut vector_tombstones));
+                if !is_fresh_index {
+                    persist_or_stop!(writer.commit());
+                }
+                tx = persist_or_stop!(sqlite.transaction());
+                persist_statements = persist_or_stop!(PersistStatements::prepare(&tx));
+                chunks_since_commit = 0;
             }
-            tx = persist_or_stop!(sqlite.transaction());
-            persist_statements = persist_or_stop!(PersistStatements::prepare(&tx));
-            chunks_since_commit = 0;
         }
     }
 
@@ -1616,7 +1616,7 @@ fn index_workspace_inner(
         params![vector_key_count],
     )?;
 
-    tx.commit()?;
+    commit_with_vector_tombstones(tx, &mut vector_tombstones)?;
 
     writer.commit()?;
     writer.wait_merging_threads()?;
@@ -2645,33 +2645,11 @@ fn create_overlay_tables(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn apply_deletions(
-    sqlite: &Connection,
-    writer: &mut tantivy::IndexWriter,
-    fields: &TantivyFields,
-    hash_tombstones_path: &Path,
-    neural_tombstones_path: Option<&Path>,
-    deleted: &[PathBuf],
-) -> Result<()> {
-    for rel_path in deleted {
-        remove_file_chunks(
-            sqlite,
-            writer,
-            fields,
-            hash_tombstones_path,
-            neural_tombstones_path,
-            rel_path,
-        )?;
-    }
-    Ok(())
-}
-
 fn remove_file_chunks(
     sqlite: &Connection,
     writer: &mut tantivy::IndexWriter,
     fields: &TantivyFields,
-    hash_tombstones_path: &Path,
-    neural_tombstones_path: Option<&Path>,
+    vector_tombstones: &mut VectorTombstoneJournals,
     rel_path: &Path,
 ) -> Result<()> {
     let rel_str = index_path_string(rel_path);
@@ -2679,10 +2657,7 @@ fn remove_file_chunks(
 
     writer.delete_term(Term::from_field_text(fields.file_path, &rel_str));
 
-    append_vector_tombstones(hash_tombstones_path, &keys)?;
-    if let Some(path) = neural_tombstones_path {
-        append_vector_tombstones(path, &keys)?;
-    }
+    vector_tombstones.record(&keys);
 
     crate::symbols::remove_file_graph(sqlite, &rel_str)?;
     sqlite.execute("DELETE FROM chunks WHERE file_path = ?1", params![rel_str])?;
@@ -2693,8 +2668,64 @@ fn remove_file_chunks(
     Ok(())
 }
 
-fn append_vector_tombstones(path: &Path, keys: &[u64]) -> Result<()> {
-    if keys.is_empty() {
+/// Stale vector keys collected for one SQLite transaction. The matching
+/// journals are synced immediately before that transaction commits.
+struct VectorTombstoneJournals {
+    hash_path: PathBuf,
+    neural_path: Option<PathBuf>,
+    pending_payload: Vec<u8>,
+    max_pending_bytes: usize,
+}
+
+impl VectorTombstoneJournals {
+    fn new(hash_path: PathBuf, neural_path: Option<PathBuf>) -> Self {
+        Self::with_max_pending_bytes(
+            hash_path,
+            neural_path,
+            MAX_VECTOR_TOMBSTONE_TRANSACTION_BYTES,
+        )
+    }
+
+    fn with_max_pending_bytes(
+        hash_path: PathBuf,
+        neural_path: Option<PathBuf>,
+        max_pending_bytes: usize,
+    ) -> Self {
+        Self {
+            hash_path,
+            neural_path,
+            pending_payload: Vec::new(),
+            max_pending_bytes: max_pending_bytes.max(1),
+        }
+    }
+
+    fn record(&mut self, keys: &[u64]) {
+        for key in keys {
+            writeln!(&mut self.pending_payload, "{key}")
+                .expect("writing vector tombstones to memory cannot fail");
+        }
+    }
+
+    fn should_checkpoint(&self) -> bool {
+        self.pending_payload.len() >= self.max_pending_bytes
+    }
+
+    fn flush(&mut self) -> Result<()> {
+        if self.pending_payload.is_empty() {
+            return Ok(());
+        }
+
+        append_and_sync_vector_tombstones(&self.hash_path, &self.pending_payload)?;
+        if let Some(path) = &self.neural_path {
+            append_and_sync_vector_tombstones(path, &self.pending_payload)?;
+        }
+        self.pending_payload.clear();
+        Ok(())
+    }
+}
+
+fn append_and_sync_vector_tombstones(path: &Path, payload: &[u8]) -> Result<()> {
+    if payload.is_empty() {
         return Ok(());
     }
 
@@ -2702,10 +2733,19 @@ fn append_vector_tombstones(path: &Path, keys: &[u64]) -> Result<()> {
         .create(true)
         .append(true)
         .open(path)?;
-    for key in keys {
-        writeln!(file, "{key}")?;
-    }
+    file.write_all(payload)?;
     file.sync_data()?;
+    Ok(())
+}
+
+fn commit_with_vector_tombstones(
+    tx: rusqlite::Transaction<'_>,
+    vector_tombstones: &mut VectorTombstoneJournals,
+) -> Result<()> {
+    // Conservative ordering is intentional: a crash between these operations
+    // may cause harmless extra vector repair, never committed stale vectors.
+    vector_tombstones.flush()?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -3399,7 +3439,7 @@ pub fn diff_for_workspace(workspace: &Workspace) -> Result<MerkleDiff> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashSet};
     use std::fs;
 
     use serial_test::serial;
@@ -3680,6 +3720,103 @@ mod tests {
             )
             .unwrap();
         assert_eq!(tail_count, 1);
+    }
+
+    #[test]
+    fn vector_tombstone_journals_batch_keys_until_flush() {
+        let dir = tempdir().unwrap();
+        let hash_path = dir.path().join("hash.tombstones");
+        let neural_path = dir.path().join("neural.tombstones");
+        let mut journals =
+            VectorTombstoneJournals::new(hash_path.clone(), Some(neural_path.clone()));
+
+        journals.record(&[11, 12]);
+        journals.record(&[21, 22, 23]);
+        assert!(!hash_path.exists());
+        assert!(!neural_path.exists());
+
+        journals.flush().unwrap();
+        let expected = "11\n12\n21\n22\n23\n";
+        assert_eq!(fs::read_to_string(&hash_path).unwrap(), expected);
+        assert_eq!(fs::read_to_string(&neural_path).unwrap(), expected);
+
+        journals.flush().unwrap();
+        assert_eq!(fs::read_to_string(hash_path).unwrap(), expected);
+        assert_eq!(fs::read_to_string(neural_path).unwrap(), expected);
+    }
+
+    #[test]
+    fn mass_delete_tombstones_checkpoint_with_bounded_payload() {
+        let dir = tempdir().unwrap();
+        let hash_path = dir.path().join("hash.tombstones");
+        let mut journals =
+            VectorTombstoneJournals::with_max_pending_bytes(hash_path.clone(), None, 128);
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE deleted_keys (key INTEGER PRIMARY KEY)", [])
+            .unwrap();
+        let mut tx = conn.transaction().unwrap();
+        let mut checkpoints = 0;
+        let mut largest_payload = 0;
+
+        for key in 0..10_000u64 {
+            tx.execute(
+                "INSERT INTO deleted_keys (key) VALUES (?1)",
+                params![key as i64],
+            )
+            .unwrap();
+            journals.record(&[key]);
+            largest_payload = largest_payload.max(journals.pending_payload.len());
+            if journals.should_checkpoint() {
+                commit_with_vector_tombstones(tx, &mut journals).unwrap();
+                checkpoints += 1;
+                tx = conn.transaction().unwrap();
+            }
+        }
+        commit_with_vector_tombstones(tx, &mut journals).unwrap();
+
+        assert!(checkpoints > 100);
+        assert!(
+            largest_payload < 160,
+            "payload grew to {largest_payload} bytes"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM deleted_keys", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            10_000
+        );
+        assert_eq!(
+            fs::read_to_string(hash_path).unwrap().lines().count(),
+            10_000
+        );
+    }
+
+    #[test]
+    fn failed_sqlite_commit_leaves_precommit_vector_tombstones() {
+        let dir = tempdir().unwrap();
+        let hash_path = dir.path().join("hash.tombstones");
+        let mut journals = VectorTombstoneJournals::new(hash_path.clone(), None);
+        journals.record(&[42]);
+
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE parents (id INTEGER PRIMARY KEY);
+             CREATE TABLE children (
+                 parent_id INTEGER NOT NULL,
+                 FOREIGN KEY (parent_id) REFERENCES parents(id)
+                     DEFERRABLE INITIALLY DEFERRED
+             );",
+        )
+        .unwrap();
+        let tx = conn.transaction().unwrap();
+        tx.execute("INSERT INTO children (parent_id) VALUES (1)", [])
+            .unwrap();
+
+        let error = commit_with_vector_tombstones(tx, &mut journals).unwrap_err();
+        assert!(error.to_string().contains("FOREIGN KEY constraint failed"));
+        assert_eq!(fs::read_to_string(hash_path).unwrap(), "42\n");
     }
 
     #[test]
@@ -4573,6 +4710,68 @@ mod tests {
             n2 > n1,
             "neural enhancement should cover new chunks: before={n1} after={n2}"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn foreground_reindex_batches_vector_tombstones_for_file_burst() {
+        const FILES: usize = 32;
+        const FUNCTIONS_PER_FILE: usize = 4;
+
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        for file_index in 0..FILES {
+            let source = (0..FUNCTIONS_PER_FILE)
+                .map(|function_index| {
+                    format!(
+                        "pub fn original_{file_index}_{function_index}() -> usize {{ {function_index} }}\n"
+                    )
+                })
+                .collect::<String>();
+            fs::write(root.path().join(format!("file_{file_index}.rs")), source).unwrap();
+        }
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let expected = {
+            let conn = open_sqlite_readonly(&workspace.sqlite_path()).unwrap();
+            let mut stmt = conn.prepare("SELECT vector_key FROM chunks").unwrap();
+            stmt.query_map([], |row| row.get::<_, i64>(0))
+                .unwrap()
+                .map(|row| row.unwrap() as u64)
+                .collect::<HashSet<_>>()
+        };
+        assert_eq!(expected.len(), FILES * FUNCTIONS_PER_FILE);
+
+        for file_index in 0..FILES {
+            let source = (0..FUNCTIONS_PER_FILE)
+                .map(|function_index| {
+                    format!(
+                        "pub fn replacement_{file_index}_{function_index}() -> usize {{ {} }}\n",
+                        function_index + 100
+                    )
+                })
+                .collect::<String>();
+            fs::write(root.path().join(format!("file_{file_index}.rs")), source).unwrap();
+        }
+
+        let summary = index_workspace(&workspace, &model).unwrap();
+        assert_eq!(summary.indexed_files, FILES);
+        for path in [
+            workspace.hash_tombstones_path(),
+            workspace.neural_tombstones_path(),
+        ] {
+            let keys = fs::read_to_string(path)
+                .unwrap()
+                .lines()
+                .map(|line| line.parse::<u64>().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(keys.len(), expected.len());
+            assert_eq!(keys.into_iter().collect::<HashSet<_>>(), expected);
+        }
     }
 
     #[test]

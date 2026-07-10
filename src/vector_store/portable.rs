@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use super::{ScalarKind, VectorMatch};
+use super::{ScalarKind, VectorMatch, top_vector_matches};
 
 const MAGIC: &[u8; 8] = b"IVYVEC01";
 const BACKUP_EXTENSION: &str = "usearch.bak";
@@ -209,6 +209,30 @@ impl VectorStore {
         (query.len() == self.dimensions).then(|| cosine_similarity(vector, query))
     }
 
+    pub fn score_many_top_k(&self, keys: &[u64], query: &[f32], count: usize) -> Vec<VectorMatch> {
+        if count == 0 || query.len() != self.dimensions {
+            return Vec::new();
+        }
+
+        let query_norm = query.iter().map(|value| value * value).sum::<f32>().sqrt();
+        let matches = keys.iter().filter_map(|key| {
+            let vector = self.vectors.get(key)?;
+            let dot = vector
+                .iter()
+                .zip(query)
+                .map(|(left, right)| left * right)
+                .sum::<f32>();
+            let vector_norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+            let score = if vector_norm > 0.0 && query_norm > 0.0 {
+                dot / (vector_norm * query_norm)
+            } else {
+                0.0
+            };
+            Some(VectorMatch { key: *key, score })
+        });
+        top_vector_matches(matches, count)
+    }
+
     fn validate_vector(&self, vector: &[f32]) -> Result<()> {
         anyhow::ensure!(
             vector.len() == self.dimensions,
@@ -336,6 +360,10 @@ mod tests {
         assert_eq!(reopened.size(), 2);
         assert_eq!(reopened.search(&[0.9, 0.1, 0.0, 0.0], 1)[0].key, 7);
         assert!(reopened.score(7, &[1.0, 0.0, 0.0, 0.0]).unwrap() > 0.99);
+        assert_eq!(
+            reopened.score_many_top_k(&[9, 7], &[1.0, 0.0, 0.0, 0.0], 1)[0].key,
+            7
+        );
     }
 
     #[test]

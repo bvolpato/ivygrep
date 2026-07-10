@@ -11,7 +11,7 @@
   <a href="https://github.com/bvolpato/ivygrep/actions"><img src="https://github.com/bvolpato/ivygrep/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://github.com/bvolpato/ivygrep/actions/workflows/security.yml"><img src="https://github.com/bvolpato/ivygrep/actions/workflows/security.yml/badge.svg" alt="Security" /></a>
   <a href="https://github.com/bvolpato/ivygrep/actions/workflows/relevance.yml"><img src="https://github.com/bvolpato/ivygrep/actions/workflows/relevance.yml/badge.svg" alt="Relevance" /></a>
-  <a href="https://github.com/bvolpato/ivygrep/releases/tag/v1.1.9"><img src="https://img.shields.io/badge/release-v1.1.9-34d058" alt="Latest Release" /></a>
+  <a href="https://github.com/bvolpato/ivygrep/releases/tag/v1.1.10"><img src="https://img.shields.io/badge/release-v1.1.10-34d058" alt="Latest Release" /></a>
   <a href="https://github.com/bvolpato/ivygrep/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
   <a href="https://github.com/bvolpato/ivygrep/releases"><img src="https://img.shields.io/github/downloads/bvolpato/ivygrep/total?color=%23ff6f00" alt="Downloads" /></a>
 </p>
@@ -110,7 +110,7 @@ ig --all "database migrations"      # search across all indexed projects
 ```bash
 ig --web                            # open http://127.0.0.1:4747
 ig --web "authentication flow" .    # open with query + current workspace
-ig --web --host 0.0.0.0 --port 4747 # bind beyond loopback
+ig --web --host 0.0.0.0 --port 4747 # print authenticated non-loopback URL
 ```
 
 The web UI runs from the daemon and embeds into the `ig` binary. By default it
@@ -118,6 +118,18 @@ binds `127.0.0.1:4747`, opens in your browser, and searches all indexed
 workspaces. Use `--host`/`--port` to choose the listener. `ig --web "query" .`
 enables web on the current daemon when possible and opens with that folder
 selected.
+
+Loopback access stays zero-config. A non-loopback listener generates a strong
+per-daemon token and prints it in the launch URL. Open that exact URL. For
+another device, replace only `127.0.0.1` with the server's LAN or Tailscale
+address; preserve the full path and query string containing `token=...`. The
+browser exchanges the token for an HttpOnly, same-site session cookie and
+removes it from the address before loading the UI. Treat the printed URL as a
+password: do not paste it into logs, chat, or public issue reports. Restart the
+daemon to invalidate it. Non-loopback serving uses plain HTTP: the token
+authenticates requests but does not encrypt source or search results. Use a
+trusted network only. Prefer Tailscale or an SSH tunnel, and never expose the
+port directly to the internet or untrusted Wi-Fi.
 
 Web UI capabilities:
 
@@ -424,6 +436,10 @@ queries, or index data to an external service.
   can appear in search snippets. Keep secrets out of the workspace or in
   `.gitignore`.
 - `ig_search` only searches the workspace at the supplied `path`.
+- `ig --web` is unauthenticated only on loopback. Non-loopback binds require the
+  per-daemon token from the printed URL on every API request. The file-open API
+  is POST-only and same-origin protected. Non-loopback transport is plain HTTP;
+  use a trusted network, Tailscale, or an encrypted tunnel.
 
 ---
 
@@ -464,7 +480,7 @@ ig --file-name-only "query"        # file paths only
 ig --daemon                        # start background watcher
 ig --web                           # start daemon + local browser UI
 ig --web "query" .                 # preload query and selected workspace
-ig --web --host 0.0.0.0 --port 4747
+ig --web --host 0.0.0.0 --port 4747 # prints authenticated URL
 ig --mcp                           # start MCP server (stdio)
 ```
 

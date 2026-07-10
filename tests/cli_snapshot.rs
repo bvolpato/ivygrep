@@ -82,6 +82,26 @@ fn cli_help_snapshot() {
 
 #[test]
 #[serial]
+fn cli_status_honors_no_color() {
+    let home = tempfile::tempdir().unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    let output = cmd
+        .arg("--status")
+        .env("IVYGREP_HOME", home.path())
+        .env("NO_COLOR", "1")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(
+        !output.contains(&0x1b),
+        "NO_COLOR output must not contain ANSI escapes"
+    );
+}
+
+#[test]
+#[serial]
 fn cli_interactive_long_flags_are_accepted() {
     for flag in ["--interactive", "--ui"] {
         let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
@@ -250,15 +270,22 @@ fn cli_query_word_add_is_treated_as_query() {
 
 #[test]
 #[serial]
-fn cli_add_flag_indexes_workspace() {
+fn cli_add_waits_for_hash_enhancement() {
     let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
     let output = cmd
         .current_dir(&target_root)
         .env("IVYGREP_HOME", &home)
-        .env("IVYGREP_NO_AUTOSPAWN", "1")
-        .args(["--add", "--hash", "."])
+        .env_remove("IVYGREP_NO_AUTOSPAWN")
+        .env_remove("IVYGREP_DISABLE_BACKGROUND_ENHANCEMENT")
+        .args([
+            "--add",
+            "--hash",
+            "--no-watch",
+            "--wait-for-enhancement",
+            ".",
+        ])
         .assert()
         .success()
         .get_output()
@@ -267,6 +294,13 @@ fn cli_add_flag_indexes_workspace() {
 
     let text = String::from_utf8(output).unwrap();
     assert!(text.contains("Indexed") || text.contains("indexed"));
+
+    unsafe { std::env::set_var("IVYGREP_HOME", &home) };
+    let workspace = Workspace::resolve(&target_root).unwrap();
+    assert!(
+        !workspace.needs_hash_enhancement(),
+        "--wait-for-enhancement returned before hash vectors completed"
+    );
 }
 
 #[test]
@@ -650,9 +684,14 @@ fn cli_doctor_json_reports_unhealthy_zero_chunk_index() {
 
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
     let output = cmd
-        .current_dir(&root)
+        .current_dir(tmp.path())
         .env("IVYGREP_HOME", &home)
-        .args(["--doctor", "--deep", "--json"])
+        .args([
+            "--doctor",
+            "--deep",
+            "--json",
+            root.to_str().expect("UTF-8 fixture path"),
+        ])
         .assert()
         .success()
         .get_output()

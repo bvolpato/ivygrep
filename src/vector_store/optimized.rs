@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use usearch::{Index, IndexOptions, MetricKind};
 
-use super::{ScalarKind, VectorMatch};
+use super::{ScalarKind, VectorMatch, top_vector_matches};
 
 const HASH_VECTOR_DIMENSIONS: usize = 256;
 const HASH_CONNECTIVITY: usize = 2;
@@ -342,6 +342,38 @@ impl VectorStore {
         }
     }
 
+    /// Exactly score selected vectors and retain only the best matches.
+    ///
+    /// Unlike repeated [`Self::score`] calls, this allocates one retrieval
+    /// buffer and computes the query norm once for the whole batch.
+    pub fn score_many_top_k(&self, keys: &[u64], query: &[f32], count: usize) -> Vec<VectorMatch> {
+        if count == 0 || query.len() != self.index.dimensions() {
+            return Vec::new();
+        }
+
+        let query_norm = query.iter().map(|value| value * value).sum::<f32>().sqrt();
+        let mut stored = vec![0.0f32; query.len()];
+        let matches = keys.iter().filter_map(|key| {
+            if !self.index.contains(*key) || self.index.get(*key, &mut stored).is_err() {
+                return None;
+            }
+
+            let dot = stored
+                .iter()
+                .zip(query)
+                .map(|(left, right)| left * right)
+                .sum::<f32>();
+            let stored_norm = stored.iter().map(|value| value * value).sum::<f32>().sqrt();
+            let score = if stored_norm > 0.0 && query_norm > 0.0 {
+                dot / (stored_norm * query_norm)
+            } else {
+                0.0
+            };
+            Some(VectorMatch { key: *key, score })
+        });
+        top_vector_matches(matches, count)
+    }
+
     fn ensure_capacity_for_insert(&mut self) -> Result<()> {
         if let Some(target) = self.next_capacity(1) {
             self.index.reserve(target)?;
@@ -604,6 +636,64 @@ mod tests {
         assert!(score.unwrap() > 0.9);
 
         assert!(store.score(999, &[1.0, 0.0, 0.0, 0.0]).is_none());
+    }
+
+    #[test]
+    fn batch_exact_top_k_matches_scalar_scoring() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+        let mut store = VectorStore::open(&path, 16, ScalarKind::F16).unwrap();
+        let keys = (0..128u64).rev().collect::<Vec<_>>();
+        for key in &keys {
+            let vector = (0..16)
+                .map(|dimension| (((*key + 3) * (dimension + 5) as u64) % 29) as f32 / 29.0 - 0.5)
+                .collect::<Vec<_>>();
+            store.add_unchecked(*key, vector).unwrap();
+        }
+        let query = (0..16)
+            .map(|dimension| ((dimension * 7 + 3) % 19) as f32 / 19.0 - 0.5)
+            .collect::<Vec<_>>();
+
+        let mut expected = keys
+            .iter()
+            .filter_map(|key| {
+                store
+                    .score(*key, &query)
+                    .map(|score| VectorMatch { key: *key, score })
+            })
+            .collect::<Vec<_>>();
+        expected.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then_with(|| left.key.cmp(&right.key))
+        });
+        expected.truncate(17);
+
+        let actual = store.score_many_top_k(&keys, &query, 17);
+        assert_eq!(
+            actual.iter().map(|item| item.key).collect::<Vec<_>>(),
+            expected.iter().map(|item| item.key).collect::<Vec<_>>()
+        );
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert_eq!(actual.score.to_bits(), expected.score.to_bits());
+        }
+    }
+
+    #[test]
+    fn batch_exact_top_k_uses_key_order_for_tied_scores() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        for key in [9, 3, 7, 1] {
+            store.add_unchecked(key, vec![0.0, 1.0, 0.0, 0.0]).unwrap();
+        }
+
+        let matches = store.score_many_top_k(&[9, 3, 7, 1], &[1.0, 0.0, 0.0, 0.0], 3);
+        assert_eq!(
+            matches.iter().map(|item| item.key).collect::<Vec<_>>(),
+            [1, 3, 7]
+        );
     }
 
     #[test]

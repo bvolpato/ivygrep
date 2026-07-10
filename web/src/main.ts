@@ -1,6 +1,11 @@
 import "highlight.js/styles/github-dark.css";
 import hljs from "highlight.js/lib/common";
 import MarkdownIt from "markdown-it";
+import {
+  guardCurrentStream,
+  LatestRequestGuard,
+  searchCompletionStatus
+} from "./event-source-session";
 import "./styles.css";
 
 const logoUrl = new URL("./assets/ivygrep-icon.svg", import.meta.url).href;
@@ -39,8 +44,13 @@ type SearchHit = {
 
 type SearchPayload = {
   error?: string;
+  errors?: string[];
   hits?: SearchHit[];
   elapsed_ms?: number;
+};
+
+type SearchDonePayload = {
+  ok?: boolean;
 };
 
 type TreeEntry = {
@@ -87,6 +97,7 @@ type AppState = {
   currentFileEnd: number;
   currentHitKey: string;
   pinnedHitKeys: Set<string>;
+  searchErrors: string[];
 };
 
 const ALL_WORKSPACES = "__all__";
@@ -95,6 +106,8 @@ const LOAD_MORE_STEP = 50;
 const MAX_LIMIT = 500;
 const boot = readBoot();
 const queryParams = new URLSearchParams(location.search);
+const fileRequests = new LatestRequestGuard();
+const treeRequests = new LatestRequestGuard();
 const markdown = new MarkdownIt({
   html: false,
   linkify: true,
@@ -120,11 +133,12 @@ const state: AppState = {
   currentFileStart: 1,
   currentFileEnd: 1,
   currentHitKey: "",
-  pinnedHitKeys: new Set()
+  pinnedHitKeys: new Set(),
+  searchErrors: []
 };
 
 function readBoot(): BootConfig {
-  const text = document.getElementById("ivygrep-boot")?.textContent?.trim();
+  const text = document.querySelector<HTMLMetaElement>("meta[name='ivygrep-boot']")?.content.trim();
   if (!text || text === "__IVYGREP_BOOT__") return {};
   try {
     return JSON.parse(text) as BootConfig;
@@ -151,9 +165,10 @@ function renderShell(): void {
           <div class="mark"><img src="${logoUrl}" alt="" /></div>
           <div>ivygrep web</div>
         </div>
-        <div class="searchbar">
+        <div class="searchbar" role="search">
+          <label class="sr-only" for="query">Search query</label>
           <input id="query" type="search" placeholder="Search code, symbols, paths" />
-          <select id="mode" title="Search mode">
+          <select id="mode" aria-label="Search mode">
             <option value="hybrid">Hybrid</option>
             <option value="literal">Literal</option>
             <option value="regex">Regex</option>
@@ -161,19 +176,20 @@ function renderShell(): void {
           <button class="btn" id="search" type="button">Search</button>
           <button class="btn secondary" id="refresh" type="button">Refresh</button>
         </div>
-        <div class="statusline"><span class="dot"></span><span id="status">Starting</span></div>
+        <div class="statusline" role="status" aria-live="polite" aria-atomic="true"><span class="dot" aria-hidden="true"></span><span id="status">Starting</span></div>
       </header>
       <main class="layout">
         <aside class="sidebar">
           <div class="section-title">Workspaces</div>
+          <label class="sr-only" for="workspace-filter">Filter workspaces</label>
           <input id="workspace-filter" class="workspace-filter" type="search" placeholder="Filter workspaces" />
           <div id="workspaces"></div>
           <div class="section-title">Filters</div>
           <div class="filters">
-            <input id="type" placeholder="type" />
-            <input id="limit" type="number" min="1" max="${MAX_LIMIT}" value="${DEFAULT_LIMIT}" title="Limit" />
-            <input id="include" placeholder="include globs" />
-            <input id="exclude" placeholder="exclude globs" />
+            <input id="type" placeholder="type" aria-label="Language or file type" />
+            <input id="limit" type="number" min="1" max="${MAX_LIMIT}" value="${DEFAULT_LIMIT}" aria-label="Result limit" />
+            <input id="include" placeholder="include globs" aria-label="Include path globs" />
+            <input id="exclude" placeholder="exclude globs" aria-label="Exclude path globs" />
           </div>
           <div class="scopebar">
             <span id="scope-label">Scope: all folders</span>
@@ -184,13 +200,13 @@ function renderShell(): void {
         </aside>
         <section class="results">
           <div class="results-head">
-            <div class="summary" id="summary">No search yet.</div>
+            <div class="summary" id="summary" aria-live="polite" aria-atomic="true">No search yet.</div>
             <div class="copy-tools">
-              <select id="copy-scope" title="Copy scope">
+              <select id="copy-scope" aria-label="Copy scope">
                 <option value="visible">Visible</option>
                 <option value="pinned">Pinned</option>
               </select>
-              <select id="copy-format" title="Copy format">
+              <select id="copy-format" aria-label="Copy format">
                 <option value="files">File names</option>
                 <option value="raw">Raw output</option>
                 <option value="json">JSON</option>
@@ -241,6 +257,10 @@ function enc(value: string): string {
   return encodeURIComponent(value || "");
 }
 
+function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  return fetch(input, { ...init, credentials: "same-origin" });
+}
+
 function setStatus(text: string): void {
   byId("status").textContent = text;
 }
@@ -289,9 +309,11 @@ function workspaceMeta(ws: WorkspaceStatus): string {
 }
 
 async function loadStatus(): Promise<void> {
-  const response = await fetch("/api/status");
-  const payload = await response.json() as { type?: string; message?: string; version?: string; workspaces?: WorkspaceStatus[] };
-  if (payload.type === "error") throw new Error(payload.message || "status failed");
+  const response = await apiFetch("/api/status");
+  const payload = await response.json() as { type?: string; error?: string; message?: string; version?: string; workspaces?: WorkspaceStatus[] };
+  if (!response.ok || payload.error || payload.type === "error") {
+    throw new Error(payload.error || payload.message || "status failed");
+  }
   state.workspaces = payload.workspaces || [];
   resolveRequestedWorkspace();
   renderWorkspaces();
@@ -329,7 +351,9 @@ function renderWorkspaces(): void {
     if (!filter || haystack.includes(filter)) root.appendChild(workspaceButton(ws, label));
   }
   for (const button of root.querySelectorAll<HTMLButtonElement>(".workspace")) {
-    button.classList.toggle("active", button.dataset.workspace === state.workspace);
+    const active = button.dataset.workspace === state.workspace;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
   }
 }
 
@@ -338,8 +362,10 @@ function workspaceButton(ws: WorkspaceStatus, label: string): HTMLButtonElement 
   button.type = "button";
   button.className = "workspace";
   button.dataset.workspace = ws.root;
+  button.setAttribute("aria-pressed", String(ws.root === state.workspace));
   button.innerHTML = `<div class="path">${escapeHtml(label)}</div><div class="meta">${escapeHtml(workspaceMeta(ws))}</div>`;
   button.addEventListener("click", () => {
+    fileRequests.cancel();
     state.workspace = ws.root;
     state.scope = "";
     syncUrlState();
@@ -360,13 +386,23 @@ function shortPath(path: string): string {
 async function loadTree(path = "."): Promise<void> {
   const tree = byId("tree");
   if (state.workspace === ALL_WORKSPACES) {
+    treeRequests.cancel();
     tree.innerHTML = '<div class="empty">Select one workspace to browse files.</div>';
     return;
   }
-  const response = await fetch(`/api/tree?workspace=${enc(state.workspace)}&path=${enc(path || ".")}`);
-  const payload = await response.json() as TreePayload;
-  if (payload.error) throw new Error(payload.error);
-  renderTree(payload);
+  const signal = treeRequests.start();
+  try {
+    const response = await apiFetch(
+      `/api/tree?workspace=${enc(state.workspace)}&path=${enc(path || ".")}`,
+      { signal }
+    );
+    const payload = await response.json() as TreePayload;
+    if (!treeRequests.isCurrent(signal)) return;
+    if (payload.error) throw new Error(payload.error);
+    renderTree(payload);
+  } catch (error) {
+    if (treeRequests.isCurrent(signal)) throw error;
+  }
 }
 
 function renderTree(payload: TreePayload): void {
@@ -394,11 +430,13 @@ function treeButton(entry: TreeEntry, kind: "parent" | "folder" | "file", active
   button.className = `tree-row ${kind}${active ? " active" : ""}`;
   button.dataset.kind = kind;
   button.dataset.path = entry.path;
+  if (active) button.setAttribute("aria-current", "true");
   const icon = kind === "parent" ? "up" : kind === "folder" ? "folder" : "file";
   const meta = kind === "folder" ? "folder" : kind === "parent" ? "up" : fileExtension(entry.name);
   button.innerHTML = `<span class="tree-icon">${svgIcon(icon)}</span><span class="tree-name">${escapeHtml(entry.name)}</span><span class="tree-meta">${escapeHtml(meta)}</span>`;
   button.addEventListener("click", () => {
     if (entry.is_dir) {
+      fileRequests.cancel();
       state.scope = pathText(entry.path);
       updateScopeLabel();
       syncUrlState();
@@ -431,18 +469,24 @@ function updateScopeLabel(): void {
 
 function runSearch(options: { preserveSelection?: boolean } = {}): void {
   const q = byId<HTMLInputElement>("query").value.trim();
+  if (!options.preserveSelection) fileRequests.cancel();
+  if (state.events) {
+    state.events.close();
+    state.events = null;
+  }
   if (!q) {
     state.hits = [];
     state.currentHitKey = "";
     state.pinnedHitKeys.clear();
+    state.searchErrors = [];
     setSearching(false);
     updateCopyAvailability();
     byId("summary").textContent = "Enter a query.";
     byId("results").innerHTML = '<div class="empty">Enter a query to search tracked workspaces.</div>';
     return;
   }
-  if (state.events) state.events.close();
   syncUrlState();
+  state.searchErrors = [];
   if (options.preserveSelection) {
     state.manualOpen = true;
     state.autoOpenKey = state.currentHitKey;
@@ -466,23 +510,39 @@ function runSearch(options: { preserveSelection?: boolean } = {}): void {
     exclude: byId<HTMLInputElement>("exclude").value || ""
   });
   if (state.workspace !== ALL_WORKSPACES && state.scope) params.set("scope", state.scope);
-  state.events = new EventSource(`/api/search/stream?${params.toString()}`);
-  state.events.addEventListener("status", () => setStatus("Searching"));
-  state.events.addEventListener("results", (event) => {
-    renderResults(JSON.parse((event as MessageEvent<string>).data) as SearchPayload);
-  });
-  state.events.addEventListener("done", () => {
-    state.events?.close();
-    state.events = null;
-    setSearching(false);
-    setStatus("Ready");
-  });
-  state.events.onerror = () => {
-    state.events?.close();
-    state.events = null;
-    setSearching(false);
-    setStatus("Search connection closed");
-  };
+  const events = new EventSource(`/api/search/stream?${params.toString()}`, { withCredentials: true });
+  state.events = events;
+  events.addEventListener("status", guardCurrentStream(
+    () => state.events,
+    events,
+    () => setStatus("Searching")
+  ));
+  events.addEventListener("results", guardCurrentStream(
+    () => state.events,
+    events,
+    (event) => renderResults(JSON.parse((event as MessageEvent<string>).data) as SearchPayload)
+  ));
+  events.addEventListener("done", guardCurrentStream(
+    () => state.events,
+    events,
+    (event) => {
+      const payload = JSON.parse((event as MessageEvent<string>).data) as SearchDonePayload;
+      events.close();
+      state.events = null;
+      setSearching(false);
+      setStatus(searchCompletionStatus(payload.ok, state.searchErrors));
+    }
+  ));
+  events.onerror = guardCurrentStream(
+    () => state.events,
+    events,
+    () => {
+      events.close();
+      state.events = null;
+      setSearching(false);
+      setStatus("Search connection closed");
+    }
+  );
 }
 
 function refreshSearchIfQuery(): void {
@@ -491,6 +551,7 @@ function refreshSearchIfQuery(): void {
 
 function renderResults(payload: SearchPayload): void {
   if (payload.error) {
+    state.searchErrors = [payload.error];
     state.hits = [];
     state.currentHitKey = "";
     setSearching(false);
@@ -498,11 +559,15 @@ function renderResults(payload: SearchPayload): void {
     byId("results").innerHTML = `<div class="empty">${escapeHtml(payload.error)}</div>`;
     return;
   }
+  state.searchErrors = payload.errors || [];
   const hits = payload.hits || [];
   state.hits = hits;
   pruneResultKeySets();
   updateCopyAvailability();
-  byId("summary").textContent = `${hits.length} hit(s) in ${Number(payload.elapsed_ms || 0).toFixed(1)} ms`;
+  const errorSummary = state.searchErrors.length
+    ? `, ${state.searchErrors.length} workspace error(s): ${state.searchErrors.join("; ")}`
+    : "";
+  byId("summary").textContent = `${hits.length} hit(s) in ${Number(payload.elapsed_ms || 0).toFixed(1)} ms${errorSummary}`;
   if (!hits.length) {
     state.currentHitKey = "";
     byId("results").innerHTML = '<div class="empty">No hits. Try a broader query, fewer filters, or a different search mode.</div>';
@@ -525,12 +590,14 @@ function renderResults(payload: SearchPayload): void {
           <div class="score">score ${Number(hit.score).toFixed(3)}${sourceBadges(hit.sources || [])}</div>
         </button>
         <div class="hit-actions">
-          <button class="small-action pin-hit${state.pinnedHitKeys.has(key) ? " active" : ""}" type="button">${state.pinnedHitKeys.has(key) ? "Pinned" : "Pin"}</button>
+          <button class="small-action pin-hit${state.pinnedHitKeys.has(key) ? " active" : ""}" type="button" aria-pressed="${state.pinnedHitKeys.has(key)}">${state.pinnedHitKeys.has(key) ? "Pinned" : "Pin"}</button>
           <button class="small-action open-hit" type="button">Open</button>
         </div>
       </div>
       <pre class="snippet hljs">${renderSnippet(hit)}</pre>`;
-    item.querySelector(".hit-main")?.addEventListener("click", () => selectHit(hit));
+    const hitMain = item.querySelector<HTMLButtonElement>(".hit-main");
+    if (key === state.currentHitKey) hitMain?.setAttribute("aria-current", "true");
+    hitMain?.addEventListener("click", () => selectHit(hit));
     item.querySelector(".pin-hit")?.addEventListener("click", () => togglePinnedHit(key));
     item.querySelector(".open-hit")?.addEventListener("click", () => {
       void openHitInEditor(hit).catch((err: Error) => setStatus(err.message));
@@ -702,27 +769,33 @@ async function openCurrentInEditor(): Promise<void> {
 async function openPathInEditor(path: string, line: number, workspace: string): Promise<void> {
   const params = new URLSearchParams({ path, line: String(Math.max(1, line || 1)) });
   if (workspace && workspace !== ALL_WORKSPACES) params.set("workspace", workspace);
-  const response = await fetch(`/api/open?${params.toString()}`);
+  const response = await apiFetch(`/api/open?${params.toString()}`, { method: "POST" });
   const payload = await response.json() as { ok?: boolean; error?: string; program?: string };
   if (payload.error || !payload.ok) throw new Error(payload.error || "open failed");
   setStatus(`Opened ${shortPath(path)}`);
 }
 
 async function openFilePath(path: string, start = 1, end = 1, workspace = state.workspace, hitKeyValue = ""): Promise<void> {
-  const response = await fetch(`/api/file?workspace=${enc(workspace)}&path=${enc(path)}`);
-  const payload = await response.json() as FilePayload;
-  if (payload.error) throw new Error(payload.error);
-  state.currentFilePath = pathText(payload.path);
-  state.currentFileAbsolutePath = pathText(payload.absolute_path);
-  state.currentFileText = payload.text || "";
-  state.currentFileStart = start;
-  state.currentFileEnd = end;
-  state.currentHitKey = hitKeyValue;
-  state.viewerMode = isMarkdownPath(state.currentFilePath) ? "preview" : "source";
-  byId("viewer-title").textContent = payload.path;
-  byId("viewer-meta").textContent = `${payload.line_count} lines${payload.truncated ? ", truncated" : ""}`;
-  renderViewerFile();
-  updateResultRows();
+  const signal = fileRequests.start();
+  try {
+    const response = await apiFetch(`/api/file?workspace=${enc(workspace)}&path=${enc(path)}`, { signal });
+    const payload = await response.json() as FilePayload;
+    if (!fileRequests.isCurrent(signal)) return;
+    if (payload.error) throw new Error(payload.error);
+    state.currentFilePath = pathText(payload.path);
+    state.currentFileAbsolutePath = pathText(payload.absolute_path);
+    state.currentFileText = payload.text || "";
+    state.currentFileStart = start;
+    state.currentFileEnd = end;
+    state.currentHitKey = hitKeyValue;
+    state.viewerMode = isMarkdownPath(state.currentFilePath) ? "preview" : "source";
+    byId("viewer-title").textContent = payload.path;
+    byId("viewer-meta").textContent = `${payload.line_count} lines${payload.truncated ? ", truncated" : ""}`;
+    renderViewerFile();
+    updateResultRows();
+  } catch (error) {
+    if (fileRequests.isCurrent(signal)) throw error;
+  }
 }
 
 function renderViewerFile(): void {
@@ -732,6 +805,8 @@ function renderViewerFile(): void {
   actions.hidden = !markdownFile;
   byId("preview-mode").classList.toggle("active", markdownFile && state.viewerMode === "preview");
   byId("source-mode").classList.toggle("active", !markdownFile || state.viewerMode === "source");
+  byId("preview-mode").setAttribute("aria-pressed", String(markdownFile && state.viewerMode === "preview"));
+  byId("source-mode").setAttribute("aria-pressed", String(!markdownFile || state.viewerMode === "source"));
   if (markdownFile && state.viewerMode === "preview") {
     byId("file-view").innerHTML = `<article class="markdown-preview">${markdown.render(state.currentFileText)}</article>`;
     return;
@@ -745,7 +820,7 @@ function renderCode(text: string, start: number, end: number, path: string): voi
   byId("file-view").innerHTML = `<pre class="code">${lines.map((line, index) => {
     const number = index + 1;
     const focus = number >= start && number <= end ? " focus" : "";
-    return `<span class="line${focus}"><span class="line-number">${number}</span><span>${highlightLine(line, language) || " "}</span></span>`;
+    return `<span class="line${focus}"><span class="line-number" aria-hidden="true">${number}</span><span><span class="sr-only">Line ${number}: </span>${highlightLine(line, language) || " "}</span></span>`;
   }).join("")}</pre>`;
   scrollFocusedLine();
 }
@@ -754,7 +829,7 @@ function renderSnippet(hit: SearchHit): string {
   const language = languageForPath(hit.file_path);
   return (hit.preview || "").split(/\r?\n/).map((line, index) => {
     const number = hit.start_line + index;
-    return `<span class="snippet-line"><span class="snippet-line-number">${number}</span><span>${markQueryTerms(highlightLine(line, language) || " ")}</span></span>`;
+    return `<span class="snippet-line"><span class="snippet-line-number" aria-hidden="true">${number}</span><span><span class="sr-only">Line ${number}: </span>${markQueryTerms(highlightLine(line, language) || " ")}</span></span>`;
   }).join("");
 }
 
@@ -805,6 +880,13 @@ function updateResultRows(): void {
     if (pin) {
       pin.classList.toggle("active", pinned);
       pin.textContent = pinned ? "Pinned" : "Pin";
+      pin.setAttribute("aria-pressed", String(pinned));
+    }
+    const hitMain = hit.querySelector<HTMLButtonElement>(".hit-main");
+    if (key === state.currentHitKey) {
+      hitMain?.setAttribute("aria-current", "true");
+    } else {
+      hitMain?.removeAttribute("aria-current");
     }
   }
   for (const row of document.querySelectorAll<HTMLButtonElement>(".tree-row")) {
@@ -812,6 +894,11 @@ function updateResultRows(): void {
     const path = row.dataset.path || "";
     const active = kind === "file" ? samePath(path, state.currentFilePath) : kind === "folder" && path === state.scope;
     row.classList.toggle("active", active);
+    if (active) {
+      row.setAttribute("aria-current", "true");
+    } else {
+      row.removeAttribute("aria-current");
+    }
   }
   document.querySelector(".hit.active")?.scrollIntoView({ block: "nearest" });
 }
@@ -1079,7 +1166,7 @@ function scopedWorkspacePath(): string {
 
 function handleGlobalKeyDown(event: KeyboardEvent): void {
   const target = event.target;
-  const editing = target instanceof Element && Boolean(target.closest("input, textarea, select, [contenteditable='true']"));
+  const editing = target instanceof Element && Boolean(target.closest("input, textarea, select, button, a, [contenteditable='true']"));
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
     event.preventDefault();
     const query = byId<HTMLInputElement>("query");
@@ -1118,6 +1205,7 @@ function attachEvents(): void {
     void openCurrentInEditor().catch((err: Error) => setStatus(err.message));
   });
   byId("clear-scope").addEventListener("click", () => {
+    fileRequests.cancel();
     state.scope = "";
     updateScopeLabel();
     syncUrlState();

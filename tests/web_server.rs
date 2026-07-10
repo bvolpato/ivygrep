@@ -3,6 +3,7 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+use std::{collections::HashMap, fmt::Write as _};
 
 use serial_test::serial;
 use tempfile::tempdir;
@@ -91,27 +92,59 @@ fn percent_encode(value: &str) -> String {
     out
 }
 
-fn http_get(port: u16, path: &str) -> String {
+struct HttpResponse {
+    status: u16,
+    headers: HashMap<String, String>,
+    body: String,
+}
+
+fn http_request(port: u16, method: &str, path: &str, headers: &[(&str, &str)]) -> HttpResponse {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    stream
-        .write_all(
-            format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
-                .as_bytes(),
-        )
-        .unwrap();
+    let mut request = format!("{method} {path} HTTP/1.1\r\n");
+    if !headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("host"))
+    {
+        write!(request, "Host: 127.0.0.1:{port}\r\n").unwrap();
+    }
+    for (name, value) in headers {
+        write!(request, "{name}: {value}\r\n").unwrap();
+    }
+    request.push_str("Content-Length: 0\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).unwrap();
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
-    response
-        .split_once("\r\n\r\n")
-        .map(|(_, body)| body.to_string())
-        .unwrap_or(response)
+    let (head, body) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
+    let mut lines = head.lines();
+    let status = lines
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_default();
+    let headers = lines
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_string()))
+        .collect();
+    HttpResponse {
+        status,
+        headers,
+        body: body.to_string(),
+    }
+}
+
+fn http_get(port: u16, path: &str) -> String {
+    http_request(port, "GET", path, &[]).body
 }
 
 fn run_web_until_ready(home: &Path, repo: &Path, query: &str) -> String {
+    run_web_until_ready_on_host(home, repo, query, "127.0.0.1")
+}
+
+fn run_web_until_ready_on_host(home: &Path, repo: &Path, query: &str, host: &str) -> String {
     let started = Instant::now();
     while started.elapsed() < Duration::from_secs(10) {
         let output = Command::new(bin())
-            .args(["--web", "--host", "127.0.0.1", "--port", "0", query])
+            .args(["--web", "--host", host, "--port", "0", query])
             .arg(repo)
             .env("IVYGREP_HOME", home)
             .env("IVYGREP_NO_AUTOSPAWN", "1")
@@ -182,7 +215,29 @@ fn web_server_serves_status_search_and_file() {
         "second --web should reuse the current daemon web listener"
     );
 
-    let status: serde_json::Value = serde_json::from_str(&http_get(port, "/api/status")).unwrap();
+    let status_response = http_request(port, "GET", "/api/status", &[]);
+    assert_eq!(status_response.status, 200);
+    assert_eq!(
+        status_response
+            .headers
+            .get("x-frame-options")
+            .map(String::as_str),
+        Some("DENY")
+    );
+    assert_eq!(
+        status_response
+            .headers
+            .get("referrer-policy")
+            .map(String::as_str),
+        Some("no-referrer")
+    );
+    assert!(
+        status_response
+            .headers
+            .get("content-security-policy")
+            .is_some_and(|value| value.contains("frame-ancestors 'none'"))
+    );
+    let status: serde_json::Value = serde_json::from_str(&status_response.body).unwrap();
     assert_eq!(status["type"], "status");
     assert!(
         status["workspaces"]
@@ -252,7 +307,15 @@ fn web_server_serves_status_search_and_file() {
     );
 
     let open_path = format!("/api/open?workspace={workspace}&path=web.rs&line=1");
-    let open: serde_json::Value = serde_json::from_str(&http_get(port, &open_path)).unwrap();
+    let get_open = http_request(port, "GET", &open_path, &[]);
+    assert_eq!(get_open.status, 405);
+    assert_eq!(
+        get_open.headers.get("allow").map(String::as_str),
+        Some("POST")
+    );
+    let open_response = http_request(port, "POST", &open_path, &[]);
+    assert_eq!(open_response.status, 200);
+    let open: serde_json::Value = serde_json::from_str(&open_response.body).unwrap();
     assert_eq!(open["ok"], true, "open response: {open:#}");
     assert_eq!(open["line"], 1);
 
@@ -265,5 +328,171 @@ fn web_server_serves_status_search_and_file() {
             .iter()
             .any(|entry| entry["path"].as_str().unwrap() == "web.rs"),
         "tree response: {tree:#}"
+    );
+
+    assert_eq!(
+        http_request(port, "GET", "/api/status", &[("Host", "attacker.example")]).status,
+        403
+    );
+    assert_eq!(
+        http_request(
+            port,
+            "GET",
+            "/api/status",
+            &[("Origin", "https://attacker.example")]
+        )
+        .status,
+        403
+    );
+}
+
+#[test]
+#[serial]
+fn non_loopback_web_uses_token_cookie_and_rejects_unauthorized_api_calls() {
+    let home = tempdir().unwrap();
+    let repo = tempdir().unwrap();
+    create_repo(repo.path());
+
+    let add = Command::new(bin())
+        .args(["--add"])
+        .arg(repo.path())
+        .args(["--force", "--no-watch", "--hash"])
+        .env("IVYGREP_HOME", home.path())
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .output()
+        .unwrap();
+    assert!(
+        add.status.success(),
+        "ig --add failed\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&add.stdout),
+        String::from_utf8_lossy(&add.stderr)
+    );
+
+    let daemon = Command::new(bin())
+        .arg("--daemon")
+        .env("IVYGREP_HOME", home.path())
+        .env("IVYGREP_WEB_EDITOR", create_editor_stub(home.path()))
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let _daemon_guard = ChildGuard(daemon);
+
+    let url = run_web_until_ready_on_host(home.path(), repo.path(), "web_marker", "0.0.0.0");
+    let port = port_from_url(&url);
+    let target = url
+        .strip_prefix(&format!("http://127.0.0.1:{port}"))
+        .unwrap_or_else(|| panic!("unexpected URL {url}"));
+    let token = url
+        .split("token=")
+        .nth(1)
+        .and_then(|value| value.split('&').next())
+        .unwrap_or_else(|| panic!("authenticated URL did not contain token: {url}"));
+    assert_eq!(
+        token.len(),
+        64,
+        "token should contain two UUIDs encoded as 64 hex characters"
+    );
+    assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
+
+    assert_eq!(http_request(port, "GET", "/api/status", &[]).status, 401);
+    assert_eq!(
+        http_request(port, "GET", "/api/not-found", &[]).status,
+        401,
+        "unknown API routes must not reveal unauthenticated behavior"
+    );
+
+    let bootstrap = http_request(port, "GET", target, &[]);
+    assert_eq!(
+        bootstrap.status, 303,
+        "bootstrap response: {}",
+        bootstrap.body
+    );
+    let cookie_header = bootstrap
+        .headers
+        .get("set-cookie")
+        .expect("bootstrap must establish an auth cookie");
+    assert!(cookie_header.contains("HttpOnly"));
+    assert!(cookie_header.contains("SameSite=Strict"));
+    let cookie = cookie_header.split(';').next().unwrap().to_string();
+    let location = bootstrap
+        .headers
+        .get("location")
+        .expect("bootstrap must strip token through a redirect");
+    assert!(!location.contains("token="));
+
+    let html = http_request(port, "GET", location, &[("Cookie", &cookie)]);
+    assert_eq!(html.status, 200);
+    assert!(html.body.contains("name=\"ivygrep-boot\""));
+    assert!(!html.body.contains(token), "token leaked into HTML source");
+
+    let status = http_request(port, "GET", "/api/status", &[("Cookie", &cookie)]);
+    assert_eq!(status.status, 200);
+    assert_eq!(
+        http_request(
+            port,
+            "GET",
+            "/api/status",
+            &[("Cookie", &cookie), ("Origin", "https://attacker.example")]
+        )
+        .status,
+        403
+    );
+    assert_eq!(
+        http_request(
+            port,
+            "GET",
+            "/api/status",
+            &[("Authorization", &format!("Bearer {token}"))]
+        )
+        .status,
+        200,
+        "bearer auth should remain available to non-browser clients"
+    );
+    assert_eq!(
+        http_request(
+            port,
+            "GET",
+            "/api/status",
+            &[
+                ("Host", "attacker.example/path"),
+                ("Authorization", &format!("Bearer {token}"))
+            ]
+        )
+        .status,
+        403,
+        "token must not bypass Host syntax validation"
+    );
+    assert_eq!(
+        http_request(
+            port,
+            "GET",
+            "/api/status",
+            &[
+                ("Host", "attacker.example"),
+                ("Authorization", &format!("Bearer {token}"))
+            ]
+        )
+        .status,
+        403,
+        "non-loopback web access accepts literal IP hosts only"
+    );
+
+    let workspace = percent_encode(&repo.path().canonicalize().unwrap().display().to_string());
+    let open_path = format!("/api/open?workspace={workspace}&path=web.rs&line=1");
+    assert_eq!(
+        http_request(port, "GET", &open_path, &[("Cookie", &cookie)]).status,
+        405
+    );
+    let origin = format!("http://127.0.0.1:{port}");
+    assert_eq!(
+        http_request(
+            port,
+            "POST",
+            &open_path,
+            &[("Cookie", &cookie), ("Origin", &origin)]
+        )
+        .status,
+        200
     );
 }
