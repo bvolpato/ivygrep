@@ -28,8 +28,8 @@ use crate::protocol::{
 };
 use crate::regex_search::regex_search;
 use crate::search::{
-    SearchContext, SearchOptions, hybrid_search_with_context_and_neural_job,
-    literal_search_with_context, workspace_neural_model_identity,
+    NeuralQueryVectorJob, SearchContext, SearchOptions, hybrid_search_with_context_and_neural_job,
+    literal_search_with_context, query_uses_neural, workspace_neural_model_identity,
 };
 use crate::workspace::{Workspace, WorkspaceIndexState, WorkspaceScope, list_workspaces};
 
@@ -38,6 +38,7 @@ const WATCH_MAX_DEBOUNCE: Duration = Duration::from_secs(30);
 const MAX_DAEMON_LOG_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_DAEMON_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_QUERY_CACHE_ENTRIES: usize = 128;
+const MAX_NEURAL_QUERY_CACHE_ENTRIES: usize = 128;
 /// Cap on cached workspace/dimension keys. Idle contexts additionally share a
 /// global retention cap, keeping open SQLite/Tantivy/vector views bounded when
 /// `--all` searches touch many workspaces.
@@ -285,6 +286,32 @@ struct QueryResultCache {
     order: VecDeque<QueryCacheKey>,
 }
 
+#[derive(Default)]
+struct NeuralQueryCache {
+    vectors: HashMap<String, Vec<f32>>,
+    order: VecDeque<String>,
+}
+
+impl NeuralQueryCache {
+    fn get(&self, query: &str) -> Option<Vec<f32>> {
+        self.vectors.get(query.trim()).cloned()
+    }
+
+    fn insert(&mut self, query: String, vector: Vec<f32>) {
+        let query = query.trim().to_string();
+        if !self.vectors.contains_key(&query) {
+            self.order.push_back(query.clone());
+        }
+        self.vectors.insert(query, vector);
+        while self.vectors.len() > MAX_NEURAL_QUERY_CACHE_ENTRIES {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.vectors.remove(&oldest);
+        }
+    }
+}
+
 impl QueryResultCache {
     fn get(&self, key: &QueryCacheKey) -> Option<Vec<crate::protocol::SearchHit>> {
         self.results.get(key).cloned()
@@ -407,6 +434,7 @@ pub(crate) struct DaemonState {
     search_contexts: Arc<Mutex<HashMap<SearchContextCacheKey, CachedSearchContext>>>,
     idle_search_context_count: Arc<AtomicUsize>,
     query_results: Arc<Mutex<QueryResultCache>>,
+    neural_queries: Arc<Mutex<NeuralQueryCache>>,
     query_result_cache_enabled: bool,
     /// Bounds concurrent CPU-heavy work (hybrid/literal/regex search + index).
     /// Without this, a burst of clients each spawn a `spawn_blocking` task on
@@ -475,6 +503,20 @@ impl DaemonState {
             },
         );
         identity
+    }
+
+    fn can_precompute_neural_query(
+        &self,
+        workspaces: &[Workspace],
+        model: &dyn EmbeddingModel,
+        query: &str,
+        force_neural: bool,
+    ) -> bool {
+        workspaces.len() == 1
+            && query_uses_neural(query, force_neural)
+            && model.model_identity().is_some_and(|active_identity| {
+                self.cached_neural_identity(&workspaces[0]).as_ref() == Some(active_identity)
+            })
     }
 
     fn validate_forced_neural_workspaces(
@@ -701,6 +743,14 @@ impl DaemonState {
         }
         self.query_results.lock().insert(key, hits.to_vec());
     }
+
+    fn cached_neural_query(&self, query: &str) -> Option<Vec<f32>> {
+        self.neural_queries.lock().get(query)
+    }
+
+    fn store_neural_query(&self, query: String, vector: Vec<f32>) {
+        self.neural_queries.lock().insert(query, vector);
+    }
 }
 
 fn create_daemon_state() -> DaemonState {
@@ -718,6 +768,7 @@ fn create_daemon_state() -> DaemonState {
         search_contexts: Arc::new(Mutex::new(HashMap::new())),
         idle_search_context_count: Arc::new(AtomicUsize::new(0)),
         query_results: Arc::new(Mutex::new(QueryResultCache::default())),
+        neural_queries: Arc::new(Mutex::new(NeuralQueryCache::default())),
         query_result_cache_enabled: config::query_result_cache_enabled(),
         cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
         web_server: Arc::new(Mutex::new(None)),
@@ -1261,14 +1312,26 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     return (cached_hits, all_errors);
                 }
 
-                let mut neural_query_vector_job = if workspaces.len() == 1
-                    && model.model_identity().is_some()
-                    && model.backend_info().is_some_and(|backend| {
-                        backend.contains("Candle CUDA") || backend.contains("Candle Metal")
-                    }) {
-                    let model = model.clone();
-                    let query = query.clone();
-                    Some(std::thread::spawn(move || model.embed(&query)))
+                let mut neural_query_vector_job = if state_clone.can_precompute_neural_query(
+                    &workspaces,
+                    model.as_ref(),
+                    &query,
+                    options.force_neural,
+                ) {
+                    let neural_query = query.trim().to_string();
+                    if let Some(vector) = state_clone.cached_neural_query(&neural_query) {
+                        Some(NeuralQueryVectorJob::Ready(vector))
+                    } else {
+                        let model = model.clone();
+                        let state = state_clone.clone();
+                        Some(NeuralQueryVectorJob::Pending(std::thread::spawn(
+                            move || {
+                                let vector = model.embed(&neural_query);
+                                state.store_neural_query(neural_query, vector.clone());
+                                vector
+                            },
+                        )))
+                    }
                 } else {
                     None
                 };
@@ -2477,10 +2540,30 @@ mod tests {
             search_contexts: Arc::new(Mutex::new(HashMap::new())),
             idle_search_context_count: Arc::new(AtomicUsize::new(0)),
             query_results: Arc::new(Mutex::new(QueryResultCache::default())),
+            neural_queries: Arc::new(Mutex::new(NeuralQueryCache::default())),
             query_result_cache_enabled: true,
             cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
             web_server: Arc::new(Mutex::new(None)),
         }
+    }
+
+    #[test]
+    fn neural_query_cache_normalizes_and_bounds_entries() {
+        let mut cache = NeuralQueryCache::default();
+        cache.insert("  same query  ".to_string(), vec![1.0, 2.0]);
+        assert_eq!(cache.get("same query"), Some(vec![1.0, 2.0]));
+
+        for index in 0..=MAX_NEURAL_QUERY_CACHE_ENTRIES {
+            cache.insert(format!("query {index}"), vec![index as f32]);
+        }
+
+        assert_eq!(cache.vectors.len(), MAX_NEURAL_QUERY_CACHE_ENTRIES);
+        assert!(cache.get("same query").is_none());
+        assert!(cache.get("query 0").is_none());
+        assert_eq!(
+            cache.get(&format!("query {MAX_NEURAL_QUERY_CACHE_ENTRIES}")),
+            Some(vec![MAX_NEURAL_QUERY_CACHE_ENTRIES as f32])
+        );
     }
 
     #[test]
@@ -2599,10 +2682,27 @@ mod tests {
         let workspace = Workspace::resolve(repo.path()).unwrap();
         let hash_model = create_hash_model();
         index_workspace(&workspace, hash_model.as_ref()).unwrap();
-        crate::indexer::enhance_workspace_neural(&workspace, &TestNeuralModel).unwrap();
 
         let state = test_state();
+        assert!(
+            !state.can_precompute_neural_query(
+                std::slice::from_ref(&workspace),
+                &TestNeuralModel,
+                "cached neural search",
+                false,
+            ),
+            "hash-only workspaces must not start neural query embedding"
+        );
+
+        crate::indexer::enhance_workspace_neural(&workspace, &TestNeuralModel).unwrap();
+
         assert!(state.cached_neural_identity(&workspace).is_some());
+        assert!(state.can_precompute_neural_query(
+            std::slice::from_ref(&workspace),
+            &TestNeuralModel,
+            "cached neural search",
+            false,
+        ));
         assert_eq!(state.neural_statuses.lock().len(), 1);
 
         std::fs::remove_file(workspace.vector_neural_path()).unwrap();
@@ -2610,6 +2710,12 @@ mod tests {
             state.cached_neural_identity(&workspace).is_none(),
             "vector-store deletion must invalidate cached neural readiness"
         );
+        assert!(!state.can_precompute_neural_query(
+            std::slice::from_ref(&workspace),
+            &TestNeuralModel,
+            "cached neural search",
+            false,
+        ));
     }
 
     #[test]

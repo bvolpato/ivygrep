@@ -69,7 +69,7 @@
         <div class="container hero-content">
             <div class="hero-badge slide-up">
                 <span class="badge-dot"></span>
-                v1.1.13 - up to 7.09x faster filtered semantic scoring
+                v1.1.14 - faster general search, five independent A/B trials
             </div>
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" onerror="this.src='assets/logo.png'"/>
@@ -360,6 +360,36 @@
             <span class="section-tag">Benchmarks</span>
             <h2 class="section-title text-center">Performance evidence</h2>
             <p class="text-center subtitle-small">Current filtered-vector, public million-chunk, relevance, and retained release evidence.</p>
+        </div>
+
+        <div class="glass-panel fade-in-scroll mt-4">
+            <h3>v1.1.14 general search A/B study</h3>
+            <p class="text-xs opacity-70 mb-2">Five independent experiments against clean v1.1.13 on a Ryzen 9 3950X</p>
+            <div class="stats-grid">
+                <div class="stat-box">
+                    <div class="stat-value">-13.03%</div>
+                    <div class="stat-label">Simple symbol, 3.131 to 2.723 ms</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value">-4.10%</div>
+                    <div class="stat-label">Complex phrase, 3.340 to 3.203 ms</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value">1.98x</div>
+                    <div class="stat-label">Option-changing neural query median</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value">2 / 5</div>
+                    <div class="stat-label">Optimizations retained</div>
+                </div>
+            </div>
+            <p class="benchmark-note">Independent lexical expansions run concurrently on multi-core hosts. Hydration, max-score deduplication, and ranking remain deterministic; one-thread hosts retain sequential execution.</p>
+            <p class="benchmark-note">Fused hydration, Boolean-union elision, and semantic-source bit masks were discarded after neutral results or rerank regression. Results are profile-guided and include reverse-order repeats.</p>
+            <p class="benchmark-links">
+                <a href="https://github.com/bvolpato/ivygrep/releases/tag/v1.1.14">v1.1.14 release</a>
+                <a href="benchmarks/general-search-ab-2026-07-11.html">Full A/B report</a>
+                <a href="benchmarks/general-search-ab-2026-07-11.json">Raw JSON</a>
+            </p>
         </div>
 
         <div class="glass-panel fade-in-scroll mt-4">
@@ -758,7 +788,7 @@
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md" class="footer-link">Changelog</a>
                 </div>
                 <div class="footer-copy">
-                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v1.1.13</p>
+                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v1.1.14</p>
                 </div>
             </div>
         </div>
