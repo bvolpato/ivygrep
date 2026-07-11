@@ -4,6 +4,15 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.1.12] - 2026-07-11
+
+### Relevance
+- **Natural-language subject stems receive a bounded primary-source lift.** Partial derivational matches such as `walk` to `walker.rs` and `job` to `jobs.rs` now break close fused-score ties, while exact generic stems, short queries, tests, docs, and generated files receive no multiplier. On the deterministic 23-query fixture, precision@1 improved from `0.913` to `1.000`, MRR from `0.957` to `1.000`, and nDCG@10 from `0.933` to `0.965`; recall@5 held at `0.957` and candidate recall held at `1.000`.
+
+### Testing
+- **Relevance CI now protects the measured baseline.** Minimum precision@1 rises from `0.38` to `1.00`, MRR from `0.52` to `1.00`, and recall@5 from `0.70` to `0.95`.
+- **Profile-driven experiments remain evidence-gated.** Native key-addressed exact-vector scoring was discarded after slowing the 50K-vector benchmark from `15.912 ms` to `2.789 s`; profiles showed no indexing or complex-search hotspot capable of a credible isolated `2x` win.
+
 ## [1.1.11] - 2026-07-10
 
 ### Performance
