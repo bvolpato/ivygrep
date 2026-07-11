@@ -306,124 +306,25 @@ Unknown extensions are auto-detected and indexed as text.
 
 ## Performance
 
-### v1.1.14 general search A/B results
+ivygrep publishes lexical search first, then builds local vectors in the
+background. Search reuses daemon state, parallelizes independent work on
+multi-core hosts, and keeps deterministic ranking.
 
-Independent lexical query expansions run concurrently on multi-core hosts.
-Candidate filtering, max-score deduplication, score fusion, and tie ordering
-stay sequential and deterministic. One-thread environments use the original
-sequential path.
+Large-scale results use a deterministic one-million-chunk corpus:
 
-Ryzen 9 3950X, 32 logical CPUs, 1K-file hash-enhanced fixture, Criterion time
-point estimates:
+| Metric | Result |
+|---|---:|
+| Warm distinct-query p95 | 15.07 ms |
+| Controlled indexing | 109,006 chunks/s |
+| Final index size | 0.46 GiB |
 
-| Search path | v1.1.13 | v1.1.14 | Change |
-|---|---:|---:|---:|
-| Simple symbol | 3.131 ms | 2.723 ms | -13.03% |
-| Complex phrase | 3.340 ms | 3.203 ms | -4.10% |
-| Bounded rerank | 3.538 ms | 3.554 ms | +0.46%, not significant |
-| 200-file hybrid | 4.751 ms | 4.871 ms | +1.27%, not significant |
+See the [public million-chunk report](docs/benchmarks/public-million.md) and
+[benchmark dashboard](docs/benchmarks/evidence-dashboard.md). Results vary by
+hardware, repository shape, index state, and system load.
 
-Daemon searches also cache 128 neural query vectors independently from complete
-results. Repeating query text while changing options improved a real-model
-micro-fixture from `0.790 ms` to `0.399 ms` median (`1.98x`). See the
-[full five-experiment A/B report](docs/benchmarks/general-search-ab-2026-07-11.md)
-for confidence intervals, repeat runs, profile data, and discarded ideas.
-
-### v1.1.13 filtered semantic scoring
-
-Profile-guided AVX2/FMA scoring handles eight dimensions per instruction on
-supported x86 CPUs. Filters with at least 5,000 vector candidates also use
-parallel local top-K heaps and an exact deterministic merge. ARM, older x86,
-and single-threaded environments retain portable scalar scoring.
-
-Ryzen 9 3950X, 32 logical CPUs, 256-dimensional F16 vectors, hot 50K-vector
-store, top 50, Criterion time point estimates:
-
-| Filter candidates | v1.1.12 | v1.1.13 | Speedup |
-|---:|---:|---:|---:|
-| 500 | 164.3 µs | 91.9 µs | 1.79x |
-| 5,000 | 1.525 ms | 0.343 ms | 4.45x |
-| 25,000 | 7.904 ms | 1.222 ms | 6.47x |
-| 50,000 | 15.808 ms | 2.230 ms | 7.09x |
-
-Reproduce the density sweep with:
-
-```bash
-cargo bench --locked --no-default-features \
-  --bench indexer_bench -- exact_filtered_vector
-```
-
-SIMD accumulation can differ from scalar accumulation by less than `1e-4`.
-Top-result keys, missing-key behavior, and score/key tie ordering are covered by
-focused tests; release relevance gates validate end-to-end ranking separately.
-
-### v1.1.12 relevance validation
-
-v1.1.12 adds a bounded ranking lift for natural-language subject terms that
-derivationally match a primary source file stem, such as `walk` matching
-`walker.rs`. It does not boost exact generic stems, queries shorter than three
-terms, tests, docs, or generated files.
-
-| Deterministic 23-query metric | v1.1.11 | v1.1.12 |
-|---|---:|---:|
-| Precision@1 | 0.913 | 1.000 |
-| MRR | 0.957 | 1.000 |
-| nDCG@10 | 0.933 | 0.965 |
-| Recall@5 | 0.957 | 0.957 |
-| Candidate recall | 1.000 | 1.000 |
-
-The separate 4-query public retrieval fixture remained at MRR@10 `1.000`,
-nDCG@10 `1.000`, and recall@20 `1.000`. Criterion detected no latency change:
-complex search moved from `3.245 ms` to `3.275 ms` (`p=0.44`), while the
-100-candidate rerank moved from `3.575 ms` to `3.520 ms` (`p=0.26`). These
-fixtures provide regression evidence, not proof of universal generalization.
-
-Reproduce the deterministic relevance result after building a release binary:
-
-```bash
-uv run scripts/eval_relevance.py \
-  --skip-build \
-  --binary target/release/ig \
-  --check --min-mrr 1.00 --min-p1 1.00 --min-recall5 0.95
-```
-
-Current retained public results:
-
-| Benchmark | Metric | Result |
-|------|------|-----:|
-| Public million-chunk search | warm distinct-query p95 | 53.77 ms -> 15.07 ms, 3.57x faster |
-| Public million-chunk indexing | controlled throughput | 4,963 -> 109,006 chunks/s, 21.96x faster |
-| Public million-chunk index size | final index footprint | 1.06 GiB -> 0.46 GiB, -57.0% |
-| Public retrieval quality | nDCG@10 / MRR@10 / precision@5 | 0.2666 / 0.2220 / 0.0601 |
-| Public retrieval recall | recall@20 / no-hit queries | 0.4890 / 0 |
-| v1.0.0 Tantivy postings A/B | hybrid 200 / literal 200 / simple symbol / complex phrase | 3.66 -> 3.50 ms / 2.41 -> 2.05 ms / 3.19 -> 2.96 ms / 4.45 -> 2.79 ms |
-| v0.12.20 generated Rust index A/B | fresh index / warm p95 | 6505.5 -> 6354.9 ms / 0.655 -> 0.632 ms |
-
-Large Linux-kernel validation used a checkout with 93,502
-indexed files and 4,419,660 chunks:
-
-| Scenario | Metric | Result |
-|------|------|-----:|
-| Fresh lexical-first Linux kernel index | full rebuild | ~270 sec |
-| Large-repo natural query | process-cold p95 | ~137 ms |
-| Warm daemon identical-query replay | end-to-end p95 | ~79 ms |
-| Warm daemon distinct queries | end-to-end p95 | ~116 ms |
-| Portable Linux intent relevance | 13 labeled queries | 41.20 |
-| Best retained dedicated-host daemon run | identical-query p95 | ~4.9 ms |
-| Historical eager-vector Linux kernel index | full rebuild | ~27.3 min |
-| Lexical-first scoped stress probe | 10,501 files | ~3 sec |
-| Warm daemon correctness guard | daemon/local hits | 20 / 20 |
-
-Latency depends on CPU, storage, repository shape, index state, and
-virtualization. Public quality, latency, refresh, and resource reports live
-under [`docs/benchmarks/`](docs/benchmarks/).
-
-Indexing publishes BM25/literal search first. A load-aware background process
-builds hash ANN vectors, then upgrades to the portable 256-dimensional
-`static-retrieval-v1` model selected by the public embedding bake-off. Optional
-profiles remain available through `IVYGREP_MODEL_PROFILE`: `potion-code`,
-`general`, `code`, and `code-hq`. Model identity is stored with the index, so
-incompatible vectors are rebuilt.
+The default neural profile is the local 256-dimensional
+`static-retrieval-v1` model. Optional profiles are selected with
+`IVYGREP_MODEL_PROFILE`: `potion-code`, `general`, `code`, or `code-hq`.
 
 Resource knobs:
 
@@ -433,41 +334,6 @@ Resource knobs:
 - `IVYGREP_NEURAL_BATCH_SIZE`: local benchmark override for background batches.
 - `IVYGREP_NEURAL_ACCELERATOR_HANDLES`: shared-model CUDA/Metal concurrency.
 - `IVYGREP_NEURAL_FOREGROUND_ACCELERATOR=0`: force CPU query embedding.
-
-CUDA builds read `nvidia-smi` free VRAM, total VRAM, and utilization before
-choosing batch size. Linux memory accounting honors effective cgroup limits,
-including containers.
-
-Relevance evaluation separates foreground readiness from post-background hash
-quality:
-
-```bash
-uv run scripts/eval_relevance.py
-uv run scripts/eval_relevance.py --enhance-hash
-uv run scripts/run_public_benchmark_matrix.py \
-  --profile public-core \
-  --modes blended,neural \
-  --runs 3 \
-  --datasets-root /tmp/ivygrep-public-datasets \
-  --work-root /tmp/ivygrep-public-results \
-  --output public-code-retrieval-results.json
-
-uv run scripts/run_public_benchmark_matrix.py \
-  --profile sota-challenge \
-  --modes hash,hybrid,blended,neural \
-  --runs 3 \
-  --datasets-root /tmp/ivygrep-public-datasets \
-  --work-root /tmp/ivygrep-public-results \
-  --max-query-chars 2048 \
-  --output public-sota-challenge-results.json
-```
-
-The public matrix pins 20 CoIR task/language variants plus a compact
-1,000-query, 48-language baseline. The non-default challenge profile adds six
-harder CoIR task families and 600 held-out queries. Production blended routing
-scores nDCG@10 `0.5955`, MRR@10 `0.5652`, and recall@20 `0.7000` across three
-runs. Reports include checksums, quality, variance, latency, memory, and index size under
-[`docs/benchmarks/`](docs/benchmarks/).
 
 ---
 
