@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ivygrep General Search A/B Study</title>
+    <meta name="description" content="Independent ivygrep general-search optimization A/B results with keep and discard decisions.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&amp;family=Outfit:wght@300;400;600;800&amp;family=Inter:wght@400;500;600&amp;display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="report.css">
+    <link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
+</head>
+<body class="report-page">
+    <div class="bg-fx"></div>
+    <div class="bg-fx-glow"></div>
+    <main class="report-shell relative z-10">
+        <nav class="report-nav">
+            <a class="report-brand" href="../"><img src="../assets/icon.svg" alt="ivygrep"><span>ivygrep benchmarks</span></a>
+            <div class="report-links">
+                <a href="index.html">Reports</a>
+                <a href="general-search-ab-2026-07-11.json">Raw JSON</a>
+                <a href="https://github.com/bvolpato/ivygrep/blob/main/docs/benchmarks/general-search-ab-2026-07-11.md">Source</a>
+            </div>
+        </nav>
+
+        <section class="report-hero">
+            <div class="report-eyebrow">General Search A/B Study</div>
+            <h1>Five ideas tested independently</h1>
+            <p>Profile-guided Criterion and real-neural daemon tests against clean v1.1.13, with explicit keep or discard decisions.</p>
+        </section>
+
+        <section class="report-grid" aria-label="benchmark highlights">
+            <div class="report-stat"><strong>-13.03%</strong><span>simple-symbol search</span></div>
+            <div class="report-stat"><strong>-4.10%</strong><span>complex-phrase search</span></div>
+            <div class="report-stat"><strong>1.98x</strong><span>option-changing neural query</span></div>
+            <div class="report-stat"><strong>2 / 5</strong><span>optimizations retained</span></div>
+        </section>
+
+        <section class="report-card">
+            <h2>Independent decisions</h2>
+            <div class="report-table-wrap">
+                <table class="report-table">
+                    <thead><tr><th>Experiment</th><th>Representative result</th><th>Decision</th></tr></thead>
+                    <tbody>
+                        <tr><td>Fused hydration</td><td>Complex +0.30%; all confidence intervals crossed zero</td><td>Discard</td></tr>
+                        <tr><td>Boolean-union elision</td><td>Complex -1.24%, repeat -0.26%; rerank +1.35%</td><td>Discard</td></tr>
+                        <tr><td>Semantic source bit mask</td><td>Complex +0.03%; rerank +3.60%, p=0.02</td><td>Discard</td></tr>
+                        <tr><td>Neural query-vector cache</td><td>Warm median 0.790 to 0.399 ms, 1.98x</td><td>Keep</td></tr>
+                        <tr><td>Parallel lexical expansions</td><td>Final repeat: simple -13.03%; complex -4.10%</td><td>Keep</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <section class="report-card">
+            <h2>Retained lexical results</h2>
+            <div class="report-table-wrap">
+                <table class="report-table">
+                    <thead><tr><th>Search path</th><th>v1.1.13</th><th>Retained</th><th>Change, 95% CI</th></tr></thead>
+                    <tbody>
+                        <tr><td>1K simple symbol</td><td>3.131 ms</td><td>2.723 ms</td><td>-13.03%, -14.95% to -11.14%</td></tr>
+                        <tr><td>1K complex phrase</td><td>3.340 ms</td><td>3.203 ms</td><td>-4.10%, -5.61% to -2.62%</td></tr>
+                        <tr><td>1K bounded rerank</td><td>3.538 ms</td><td>3.554 ms</td><td>+0.46%, -2.27% to +3.12%</td></tr>
+                        <tr><td>200-file hybrid</td><td>4.751 ms</td><td>4.871 ms</td><td>+1.27%, -1.26% to +3.76%</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <p>A one-thread sequential fallback measured +0.58% on simple symbol and -1.37% on complex phrase, both nonsignificant.</p>
+        </section>
+
+        <section class="report-card">
+            <h2>Method</h2>
+            <ul>
+                <li>Baseline commit <code>977418b</code>, Ryzen 9 3950X, 32 logical CPUs.</li>
+                <li>Criterion 20 flat samples, 5-second warmup, 15-second measurement, 95% confidence intervals.</li>
+                <li>Real default neural model and neural index; every request changed <code>--limit</code> to defeat full-result cache.</li>
+                <li>Reverse-order repeats for borderline and retained results.</li>
+            </ul>
+            <p><a href="general-search-ab-2026-07-11.json">Raw structured results</a></p>
+        </section>
+    </main>
+</body>
+</html>

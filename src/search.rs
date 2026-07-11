@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
 use anyhow::Result;
+use rayon::prelude::*;
 use rusqlite::Connection;
 use tantivy::TantivyDocument;
 use tantivy::collector::TopDocs;
@@ -356,6 +357,11 @@ struct CachedFileContent {
 }
 
 type SemanticCandidatesById = HashMap<u64, (IndexedChunk, f32, HashSet<&'static str>)>;
+
+pub(crate) enum NeuralQueryVectorJob {
+    Ready(Vec<f32>),
+    Pending(std::thread::JoinHandle<Vec<f32>>),
+}
 
 #[derive(Clone, Copy)]
 struct LineSpan {
@@ -1163,6 +1169,68 @@ fn simple_lexical_query(
     }
 }
 
+struct LexicalQueryExecutor<'a> {
+    fields: &'a TantivyFields,
+    parser: &'a QueryParser,
+    conjunctive_numeric_query: bool,
+    scope_filter: Option<&'a WorkspaceScope>,
+    glob_path_filter: &'a GlobPathQueryFilter,
+    can_pushdown_languages: bool,
+    allowed_languages: &'a [String],
+    searchers: &'a [tantivy::Searcher],
+}
+
+impl LexicalQueryExecutor<'_> {
+    fn collect_docs(
+        &self,
+        lexical_query: &str,
+        query_candidate_limit: usize,
+    ) -> Result<Vec<(usize, f32, TantivyDocument)>> {
+        let Some(mut parsed_query) =
+            simple_lexical_query(self.fields, lexical_query, self.conjunctive_numeric_query)
+                .or_else(|| self.parser.parse_query(lexical_query).ok())
+        else {
+            return Ok(Vec::new());
+        };
+        parsed_query = constrain_query_to_scope(parsed_query, self.fields, self.scope_filter)?;
+        parsed_query =
+            constrain_query_to_glob_paths(parsed_query, self.fields, self.glob_path_filter);
+
+        if self.can_pushdown_languages && !self.allowed_languages.is_empty() {
+            let lang_queries = self
+                .allowed_languages
+                .iter()
+                .map(|language| {
+                    let term = tantivy::Term::from_field_text(self.fields.language, language);
+                    (
+                        Occur::Should,
+                        Box::new(TermQuery::new(term, IndexRecordOption::Basic)) as Box<dyn Query>,
+                    )
+                })
+                .collect();
+            parsed_query = Box::new(BooleanQuery::new(vec![
+                (Occur::Must, parsed_query),
+                (Occur::Must, Box::new(BooleanQuery::new(lang_queries))),
+            ]));
+        }
+
+        let mut docs = Vec::new();
+        for (searcher_index, searcher) in self.searchers.iter().enumerate() {
+            for (score, address) in searcher.search(
+                &parsed_query,
+                &TopDocs::with_limit(query_candidate_limit).order_by_score(),
+            )? {
+                docs.push((
+                    searcher_index,
+                    score,
+                    searcher.doc::<TantivyDocument>(address)?,
+                ));
+            }
+        }
+        Ok(docs)
+    }
+}
+
 fn simple_lexical_term_query(fields: &TantivyFields, term_text: &str) -> Box<dyn Query> {
     Box::new(BooleanQuery::new(simple_lexical_term_clauses(
         fields, term_text,
@@ -1365,6 +1433,10 @@ pub fn hybrid_search(
     hybrid_search_with_context(&ctx, workspace, query_text, embedding_model, options)
 }
 
+pub(crate) fn query_uses_neural(query_text: &str, force_neural: bool) -> bool {
+    force_neural || QueryRouting::classify(query_text.trim()).use_neural
+}
+
 pub fn hybrid_search_with_context(
     ctx: &SearchContext,
     workspace: &Workspace,
@@ -1388,7 +1460,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     query_text: &str,
     embedding_model: Option<&dyn EmbeddingModel>,
     options: &SearchOptions,
-    mut neural_query_vector_job: Option<std::thread::JoinHandle<Vec<f32>>>,
+    mut neural_query_vector_job: Option<NeuralQueryVectorJob>,
 ) -> Result<Vec<SearchHit>> {
     let query_text = query_text.trim();
     // An empty/whitespace query has no lexical or literal terms; without this
@@ -1547,68 +1619,51 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
         lexical_search_queries_for_routing(&lexical_queries, routing, conjunctive_numeric_query);
     let lexical_query_limits =
         lexical_query_candidate_limits(candidate_limit, lexical_search_queries.len());
-    for (lexical_query, query_candidate_limit) in
-        lexical_search_queries.iter().zip(lexical_query_limits)
-    {
-        let mut parsed_query =
-            match simple_lexical_query(&ctx.fields, lexical_query, conjunctive_numeric_query)
-                .or_else(|| parser.parse_query(lexical_query).ok())
+    let executor = LexicalQueryExecutor {
+        fields: &ctx.fields,
+        parser: &parser,
+        conjunctive_numeric_query,
+        scope_filter: options.scope_filter.as_ref(),
+        glob_path_filter: &glob_path_filter,
+        can_pushdown_languages,
+        allowed_languages: &allowed_languages,
+        searchers: &ctx.searchers,
+    };
+    let collect_docs = |(lexical_query, query_candidate_limit): (&String, usize)| {
+        executor.collect_docs(lexical_query, query_candidate_limit)
+    };
+    let lexical_doc_batches =
+        if lexical_search_queries.len() > 1 && rayon::current_num_threads() > 1 {
+            lexical_search_queries
+                .par_iter()
+                .zip(lexical_query_limits)
+                .map(collect_docs)
+                .collect::<Result<Vec<_>>>()?
+        } else {
+            lexical_search_queries
+                .iter()
+                .zip(lexical_query_limits)
+                .map(collect_docs)
+                .collect::<Result<Vec<_>>>()?
+        };
+    for docs in lexical_doc_batches {
+        for (i, score, doc) in docs {
+            if let Some(chunk) = fetch_chunk_by_id(doc, &ctx.fields)
+                .filter(|c| !ctx.is_shadowed_base_file(i, &c.file_path))
+                .filter(|chunk| type_matches(chunk, options.type_filter.as_deref()))
+                .filter(|chunk| scope_matches(chunk, options.scope_filter.as_ref()))
+                .filter(|chunk| path_matches(chunk, &path_matcher))
+                .filter(|chunk| options.skip_gitignore || !chunk.is_ignored)
             {
-                Some(query) => query,
-                None => continue,
-            };
-        parsed_query =
-            constrain_query_to_scope(parsed_query, &ctx.fields, options.scope_filter.as_ref())?;
-        parsed_query = constrain_query_to_glob_paths(parsed_query, &ctx.fields, &glob_path_filter);
-
-        if can_pushdown_languages && !allowed_languages.is_empty() {
-            let mut lang_queries: Vec<(tantivy::query::Occur, Box<dyn tantivy::query::Query>)> =
-                Vec::new();
-            for lang in &allowed_languages {
-                let term = tantivy::Term::from_field_text(ctx.fields.language, lang);
-                let q = Box::new(tantivy::query::TermQuery::new(
-                    term,
-                    tantivy::schema::IndexRecordOption::Basic,
-                ));
-                lang_queries.push((tantivy::query::Occur::Should, q));
-            }
-            let lang_boolean = Box::new(tantivy::query::BooleanQuery::new(lang_queries));
-
-            let combined_queries = vec![
-                (tantivy::query::Occur::Must, parsed_query),
-                (
-                    tantivy::query::Occur::Must,
-                    lang_boolean as Box<dyn tantivy::query::Query>,
-                ),
-            ];
-            parsed_query = Box::new(tantivy::query::BooleanQuery::new(combined_queries));
-        }
-
-        for (i, searcher) in ctx.searchers.iter().enumerate() {
-            let lexical_docs = searcher.search(
-                &parsed_query,
-                &TopDocs::with_limit(query_candidate_limit).order_by_score(),
-            )?;
-
-            for (score, addr) in lexical_docs {
-                let doc: TantivyDocument = searcher.doc(addr)?;
-                if let Some(chunk) = fetch_chunk_by_id(doc, &ctx.fields)
-                    .filter(|c| !ctx.is_shadowed_base_file(i, &c.file_path))
-                    .filter(|chunk| type_matches(chunk, options.type_filter.as_deref()))
-                    .filter(|chunk| scope_matches(chunk, options.scope_filter.as_ref()))
-                    .filter(|chunk| path_matches(chunk, &path_matcher))
-                    .filter(|chunk| options.skip_gitignore || !chunk.is_ignored)
-                {
-                    let boosted = if is_definition_kind(&chunk.kind) {
-                        score * 2.0
-                    } else {
-                        score
-                    };
-                    lexical_by_id
-                        .entry(chunk.vector_key)
-                        .and_modify(|(_, best)| *best = best.max(boosted))
-                        .or_insert((chunk, boosted));
-                }
+                let boosted = if is_definition_kind(&chunk.kind) {
+                    score * 2.0
+                } else {
+                    score
+                };
+                lexical_by_id
+                    .entry(chunk.vector_key)
+                    .and_modify(|(_, best)| *best = best.max(boosted))
+                    .or_insert((chunk, boosted));
             }
         }
     }
@@ -3560,15 +3615,24 @@ fn collect_semantic_vector_matches(
 fn neural_query_vector(
     model: &dyn EmbeddingModel,
     query_text: &str,
-    job: &mut Option<std::thread::JoinHandle<Vec<f32>>>,
+    job: &mut Option<NeuralQueryVectorJob>,
 ) -> Vec<f32> {
     if let Some(job) = job.take() {
-        match job.join() {
-            Ok(vector) if vector.len() == model.dimensions() => return vector,
-            Ok(_) => {
-                tracing::warn!("discarding precomputed neural query vector with wrong dimensions")
+        let vector = match job {
+            NeuralQueryVectorJob::Ready(vector) => Some(vector),
+            NeuralQueryVectorJob::Pending(job) => match job.join() {
+                Ok(vector) => Some(vector),
+                Err(_) => {
+                    tracing::warn!("precomputed neural query vector task panicked");
+                    None
+                }
+            },
+        };
+        if let Some(vector) = vector {
+            if vector.len() == model.dimensions() {
+                return vector;
             }
-            Err(_) => tracing::warn!("precomputed neural query vector task panicked"),
+            tracing::warn!("discarding precomputed neural query vector with wrong dimensions");
         }
     }
     model.embed(query_text)
@@ -5579,6 +5643,13 @@ mod tests {
     }
 
     #[test]
+    fn neural_query_precompute_follows_search_routing() {
+        assert!(!query_uses_neural("NeuralQueryVectorJob", false));
+        assert!(query_uses_neural("where is query caching handled", false));
+        assert!(query_uses_neural("NeuralQueryVectorJob", true));
+    }
+
+    #[test]
     fn corpus_candidate_budgets_scale_at_stable_boundaries() {
         assert_eq!(corpus_candidate_multiplier(50_000), 1);
         assert_eq!(corpus_candidate_multiplier(50_001), 2);
@@ -5706,7 +5777,21 @@ mod tests {
     #[test]
     fn neural_query_vector_uses_precomputed_job() {
         let model = CountingEmbeddingModel::new(3);
-        let mut job = Some(std::thread::spawn(|| vec![0.25, 0.5, 0.75]));
+        let mut job = Some(NeuralQueryVectorJob::Pending(std::thread::spawn(|| {
+            vec![0.25, 0.5, 0.75]
+        })));
+
+        let vector = neural_query_vector(&model, "ignored", &mut job);
+
+        assert_eq!(vector, vec![0.25, 0.5, 0.75]);
+        assert_eq!(model.calls.load(Ordering::Relaxed), 0);
+        assert!(job.is_none());
+    }
+
+    #[test]
+    fn neural_query_vector_uses_cached_vector() {
+        let model = CountingEmbeddingModel::new(3);
+        let mut job = Some(NeuralQueryVectorJob::Ready(vec![0.25, 0.5, 0.75]));
 
         let vector = neural_query_vector(&model, "ignored", &mut job);
 
@@ -5718,7 +5803,9 @@ mod tests {
     #[test]
     fn neural_query_vector_falls_back_on_wrong_dimensions() {
         let model = CountingEmbeddingModel::new(3);
-        let mut job = Some(std::thread::spawn(|| vec![0.25, 0.5]));
+        let mut job = Some(NeuralQueryVectorJob::Pending(std::thread::spawn(|| {
+            vec![0.25, 0.5]
+        })));
 
         let vector = neural_query_vector(&model, "fallback", &mut job);
 

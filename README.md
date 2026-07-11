@@ -11,7 +11,7 @@
   <a href="https://github.com/bvolpato/ivygrep/actions"><img src="https://github.com/bvolpato/ivygrep/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://github.com/bvolpato/ivygrep/actions/workflows/security.yml"><img src="https://github.com/bvolpato/ivygrep/actions/workflows/security.yml/badge.svg" alt="Security" /></a>
   <a href="https://github.com/bvolpato/ivygrep/actions/workflows/relevance.yml"><img src="https://github.com/bvolpato/ivygrep/actions/workflows/relevance.yml/badge.svg" alt="Relevance" /></a>
-  <a href="https://github.com/bvolpato/ivygrep/releases/tag/v1.1.13"><img src="https://img.shields.io/badge/release-v1.1.13-34d058" alt="Latest Release" /></a>
+  <a href="https://github.com/bvolpato/ivygrep/releases/tag/v1.1.14"><img src="https://img.shields.io/badge/release-v1.1.14-34d058" alt="Latest Release" /></a>
   <a href="https://github.com/bvolpato/ivygrep/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
   <a href="https://github.com/bvolpato/ivygrep/releases"><img src="https://img.shields.io/github/downloads/bvolpato/ivygrep/total?color=%23ff6f00" alt="Downloads" /></a>
 </p>
@@ -305,6 +305,29 @@ Unknown extensions are auto-detected and indexed as text.
 ---
 
 ## Performance
+
+### v1.1.14 general search A/B results
+
+Independent lexical query expansions run concurrently on multi-core hosts.
+Candidate filtering, max-score deduplication, score fusion, and tie ordering
+stay sequential and deterministic. One-thread environments use the original
+sequential path.
+
+Ryzen 9 3950X, 32 logical CPUs, 1K-file hash-enhanced fixture, Criterion time
+point estimates:
+
+| Search path | v1.1.13 | v1.1.14 | Change |
+|---|---:|---:|---:|
+| Simple symbol | 3.131 ms | 2.723 ms | -13.03% |
+| Complex phrase | 3.340 ms | 3.203 ms | -4.10% |
+| Bounded rerank | 3.538 ms | 3.554 ms | +0.46%, not significant |
+| 200-file hybrid | 4.751 ms | 4.871 ms | +1.27%, not significant |
+
+Daemon searches also cache 128 neural query vectors independently from complete
+results. Repeating query text while changing options improved a real-model
+micro-fixture from `0.790 ms` to `0.399 ms` median (`1.98x`). See the
+[full five-experiment A/B report](docs/benchmarks/general-search-ab-2026-07-11.md)
+for confidence intervals, repeat runs, profile data, and discarded ideas.
 
 ### v1.1.13 filtered semantic scoring
 
