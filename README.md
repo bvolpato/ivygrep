@@ -306,6 +306,36 @@ Unknown extensions are auto-detected and indexed as text.
 
 ## Performance
 
+### v1.1.12 relevance validation
+
+v1.1.12 adds a bounded ranking lift for natural-language subject terms that
+derivationally match a primary source file stem, such as `walk` matching
+`walker.rs`. It does not boost exact generic stems, queries shorter than three
+terms, tests, docs, or generated files.
+
+| Deterministic 23-query metric | v1.1.11 | v1.1.12 |
+|---|---:|---:|
+| Precision@1 | 0.913 | 1.000 |
+| MRR | 0.957 | 1.000 |
+| nDCG@10 | 0.933 | 0.965 |
+| Recall@5 | 0.957 | 0.957 |
+| Candidate recall | 1.000 | 1.000 |
+
+The separate 4-query public retrieval fixture remained at MRR@10 `1.000`,
+nDCG@10 `1.000`, and recall@20 `1.000`. Criterion detected no latency change:
+complex search moved from `3.245 ms` to `3.275 ms` (`p=0.44`), while the
+100-candidate rerank moved from `3.575 ms` to `3.520 ms` (`p=0.26`). These
+fixtures provide regression evidence, not proof of universal generalization.
+
+Reproduce the deterministic relevance result after building a release binary:
+
+```bash
+uv run scripts/eval_relevance.py \
+  --skip-build \
+  --binary target/release/ig \
+  --check --min-mrr 1.00 --min-p1 1.00 --min-recall5 0.95
+```
+
 Current retained public results:
 
 | Benchmark | Metric | Result |
