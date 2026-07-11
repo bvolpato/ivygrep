@@ -505,6 +505,20 @@ impl DaemonState {
         identity
     }
 
+    fn can_precompute_neural_query(
+        &self,
+        workspaces: &[Workspace],
+        model: &dyn EmbeddingModel,
+        query: &str,
+        force_neural: bool,
+    ) -> bool {
+        workspaces.len() == 1
+            && query_uses_neural(query, force_neural)
+            && model.model_identity().is_some_and(|active_identity| {
+                self.cached_neural_identity(&workspaces[0]).as_ref() == Some(active_identity)
+            })
+    }
+
     fn validate_forced_neural_workspaces(
         &self,
         workspaces: &[Workspace],
@@ -1298,10 +1312,12 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     return (cached_hits, all_errors);
                 }
 
-                let mut neural_query_vector_job = if workspaces.len() == 1
-                    && model.model_identity().is_some()
-                    && query_uses_neural(&query, options.force_neural)
-                {
+                let mut neural_query_vector_job = if state_clone.can_precompute_neural_query(
+                    &workspaces,
+                    model.as_ref(),
+                    &query,
+                    options.force_neural,
+                ) {
                     let neural_query = query.trim().to_string();
                     if let Some(vector) = state_clone.cached_neural_query(&neural_query) {
                         Some(NeuralQueryVectorJob::Ready(vector))
@@ -2666,10 +2682,27 @@ mod tests {
         let workspace = Workspace::resolve(repo.path()).unwrap();
         let hash_model = create_hash_model();
         index_workspace(&workspace, hash_model.as_ref()).unwrap();
-        crate::indexer::enhance_workspace_neural(&workspace, &TestNeuralModel).unwrap();
 
         let state = test_state();
+        assert!(
+            !state.can_precompute_neural_query(
+                std::slice::from_ref(&workspace),
+                &TestNeuralModel,
+                "cached neural search",
+                false,
+            ),
+            "hash-only workspaces must not start neural query embedding"
+        );
+
+        crate::indexer::enhance_workspace_neural(&workspace, &TestNeuralModel).unwrap();
+
         assert!(state.cached_neural_identity(&workspace).is_some());
+        assert!(state.can_precompute_neural_query(
+            std::slice::from_ref(&workspace),
+            &TestNeuralModel,
+            "cached neural search",
+            false,
+        ));
         assert_eq!(state.neural_statuses.lock().len(), 1);
 
         std::fs::remove_file(workspace.vector_neural_path()).unwrap();
@@ -2677,6 +2710,12 @@ mod tests {
             state.cached_neural_identity(&workspace).is_none(),
             "vector-store deletion must invalidate cached neural readiness"
         );
+        assert!(!state.can_precompute_neural_query(
+            std::slice::from_ref(&workspace),
+            &TestNeuralModel,
+            "cached neural search",
+            false,
+        ));
     }
 
     #[test]
