@@ -7,11 +7,11 @@ All notable changes to ivygrep are documented in this file.
 ## [1.1.14] - 2026-07-11
 
 ### Performance
-- **Independent lexical expansions execute in parallel on multi-core hosts.** Tantivy search work runs concurrently, while candidate filtering and max-score deduplication stay sequential and deterministic. On a Ryzen 9 3950X, final-artifact Criterion repeats improved from `3.131 ms` to `2.723 ms` for 1K-file simple-symbol search (`13.03%`) and from `3.340 ms` to `3.203 ms` for complex-phrase search (`4.10%`). One-thread environments retain sequential execution with no significant regression.
-- **Daemon neural queries reuse bounded query vectors across option changes.** Complete-result cache misses caused by different limits, context, or filters no longer repeat identical model inference. A real-model micro-fixture improved warm daemon median from `0.790 ms` to `0.399 ms` (`1.98x`); cached embedding fell from `64-126 µs` to `0.2-0.6 µs`. The 128-entry cache uses about 128 KiB with the default 256-dimensional model.
+- **General search uses multi-core hosts more effectively.** Independent lexical work runs concurrently while filtering, deduplication, and ranking remain deterministic. Single-threaded hosts keep the sequential path.
+- **Repeated neural queries reuse bounded query vectors.** Changing limits, context, or filters no longer repeats identical model inference when compatible neural vectors are available.
 
 ### Testing
-- **Five profile-guided search prototypes were tested independently.** Fused full-row hydration, one-child Boolean-union elision, and semantic-source bit masks were discarded after neutral results or rerank regression. Parallel lexical expansions and neural query-vector caching passed reverse-order repeats, one-thread checks, output parity, and relevance gates. Full data lives in [`docs/benchmarks/general-search-ab-2026-07-11.md`](docs/benchmarks/general-search-ab-2026-07-11.md).
+- **Search output and relevance remain covered by release gates.** Multi-platform tests verify hash-only, neural, daemon, CLI, and MCP paths.
 
 ## [1.1.13] - 2026-07-11
 

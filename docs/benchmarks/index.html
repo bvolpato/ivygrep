@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ivygrep Benchmarks</title>
-    <meta name="description" content="ivygrep benchmark reports, charts, raw data, and validation notes.">
+    <meta name="description" content="ivygrep large-scale and public benchmark results.">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500&family=Outfit:wght@300;400;600;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
@@ -31,22 +31,16 @@
         <section class="report-hero">
             <div class="report-eyebrow">Benchmark reports</div>
             <h1>Measured results</h1>
-            <p>Quality, latency, indexing, memory, and footprint results with raw data and reproduction commands.</p>
+            <p>Large-scale performance and public retrieval quality.</p>
         </section>
 
         <section class="report-card">
             <h2>Reports</h2>
             <ul>
-                <li><a href="evidence-dashboard.html">Benchmark dashboard</a> - retained quality, latency, indexing, memory, footprint, and release metrics.</li>
-                <li><a href="general-search-ab-2026-07-11.html">General search A/B study</a> - five independent profile-guided experiments, two retained wins, and exact keep/discard evidence.</li>
-                <li><a href="daemon-hot-query-cache.html">Daemon hot-query cache benchmark</a> - warm daemon query p95 improved from 455.37 ms to 4.90 ms while preserving daemon/local result equivalence.</li>
-                <li><a href="linux-kernel-autoresearch-2026-05-13.html">Linux kernel cold-index benchmark</a> - fresh-index primary score improved by 10.62% on a 93,493-file Linux checkout.</li>
-                <li><a href="public-code-retrieval.html">Public code-retrieval benchmark</a> - pinned CoIR quality, latency, indexing, memory, size, and variance with raw machine-readable results.</li>
-                <li><a href="public-sota-challenge.html">Public challenge retrieval benchmark</a> - six harder CoIR task families, 600 held-out queries, four retrieval modes, and three runs.</li>
-                <li><a href="public-million.html">Public million-chunk benchmark</a> - warm p95 53.77 ms -> 15.07 ms, indexing 4,963 -> 109,006 chunks/s, final index 1.06 GiB -> 0.46 GiB.</li>
-                <li><a href="embedding-model-bakeoff.html">Portable embedding model bake-off</a> - public quality, latency, memory, and model selection for the default neural profile.</li>
-                <li><a href="public-reranker.html">Bounded learned reranker</a> - held-out public quality, per-task regression, latency, model identity, and deterministic fallback.</li>
-                <li><a href="../dev/bench/">Shared-runner microbenchmark history</a> - informational cross-run Criterion trends. CI release decisions use paired base/head guards on the same runner.</li>
+                <li><a href="public-million.html">Million-chunk performance</a></li>
+                <li><a href="public-code-retrieval.html">Public code retrieval</a></li>
+                <li><a href="public-sota-challenge.html">Challenge retrieval</a></li>
+                <li><a href="evidence-dashboard.html">Benchmark dashboard</a></li>
             </ul>
         </section>
     </main>

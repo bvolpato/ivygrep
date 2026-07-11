@@ -69,7 +69,7 @@
         <div class="container hero-content">
             <div class="hero-badge slide-up">
                 <span class="badge-dot"></span>
-                v1.1.14 - faster general search, five independent A/B trials
+                v1.1.14
             </div>
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" onerror="this.src='assets/logo.png'"/>
@@ -358,96 +358,8 @@
     <section id="performance" class="container relative z-10 section-spacing">
         <div class="section-header">
             <span class="section-tag">Benchmarks</span>
-            <h2 class="section-title text-center">Performance evidence</h2>
-            <p class="text-center subtitle-small">Current filtered-vector, public million-chunk, relevance, and retained release evidence.</p>
-        </div>
-
-        <div class="glass-panel fade-in-scroll mt-4">
-            <h3>v1.1.14 general search A/B study</h3>
-            <p class="text-xs opacity-70 mb-2">Five independent experiments against clean v1.1.13 on a Ryzen 9 3950X</p>
-            <div class="stats-grid">
-                <div class="stat-box">
-                    <div class="stat-value">-13.03%</div>
-                    <div class="stat-label">Simple symbol, 3.131 to 2.723 ms</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-value">-4.10%</div>
-                    <div class="stat-label">Complex phrase, 3.340 to 3.203 ms</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-value">1.98x</div>
-                    <div class="stat-label">Option-changing neural query median</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-value">2 / 5</div>
-                    <div class="stat-label">Optimizations retained</div>
-                </div>
-            </div>
-            <p class="benchmark-note">Independent lexical expansions run concurrently on multi-core hosts. Hydration, max-score deduplication, and ranking remain deterministic; one-thread hosts retain sequential execution.</p>
-            <p class="benchmark-note">Fused hydration, Boolean-union elision, and semantic-source bit masks were discarded after neutral results or rerank regression. Results are profile-guided and include reverse-order repeats.</p>
-            <p class="benchmark-links">
-                <a href="https://github.com/bvolpato/ivygrep/releases/tag/v1.1.14">v1.1.14 release</a>
-                <a href="benchmarks/general-search-ab-2026-07-11.html">Full A/B report</a>
-                <a href="benchmarks/general-search-ab-2026-07-11.json">Raw JSON</a>
-            </p>
-        </div>
-
-        <div class="glass-panel fade-in-scroll mt-4">
-            <h3>v1.1.13 filtered semantic scoring</h3>
-            <p class="text-xs opacity-70 mb-2">Ryzen 9 3950X, 256-dimensional F16 vectors, hot 50K-vector store, top 50</p>
-            <div class="stats-grid">
-                <div class="stat-box">
-                    <div class="stat-value">7.09x</div>
-                    <div class="stat-label">50K candidates, 15.808 to 2.230 ms</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-value">6.47x</div>
-                    <div class="stat-label">25K candidates, 7.904 to 1.222 ms</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-value">4.45x</div>
-                    <div class="stat-label">5K candidates, 1.525 to 0.343 ms</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-value">1.79x</div>
-                    <div class="stat-label">500 candidates, 164.3 to 91.9 µs</div>
-                </div>
-            </div>
-            <p class="benchmark-note">Runtime-dispatched AVX2/FMA handles eight dimensions per instruction. Broad filters use parallel local top-K heaps and an exact deterministic merge. Unsupported CPUs retain portable scalar scoring.</p>
-            <p class="benchmark-note">Focused tests protect scalar/SIMD score agreement within 1e-4, non-multiple-of-eight dimensions, missing keys, and deterministic score/key tie ordering.</p>
-            <p class="benchmark-links">
-                <a href="https://github.com/bvolpato/ivygrep/releases/tag/v1.1.13">v1.1.13 release</a>
-                <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md#1113---2026-07-11">Release evidence</a>
-            </p>
-        </div>
-
-        <div class="glass-panel fade-in-scroll mt-4">
-            <h3>v1.1.12 relevance validation</h3>
-            <p class="text-xs opacity-70 mb-2">Deterministic 23-query fixture, compared with v1.1.11</p>
-            <div class="stats-grid">
-                <div class="stat-box">
-                    <div class="stat-value">1.000</div>
-                    <div class="stat-label">Precision@1, from 0.913</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-value">1.000</div>
-                    <div class="stat-label">MRR, from 0.957</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-value">0.965</div>
-                    <div class="stat-label">nDCG@10, from 0.933</div>
-                </div>
-                <div class="stat-box">
-                    <div class="stat-value">0.957</div>
-                    <div class="stat-label">Recall@5, unchanged</div>
-                </div>
-            </div>
-            <p class="benchmark-note">A bounded 1.25x lift promotes derivational natural-language subject matches such as <code>walk</code> to <code>walker.rs</code>. Exact generic stems, short queries, tests, docs, and generated files receive no multiplier.</p>
-            <p class="benchmark-note">The separate 4-query public retrieval fixture stayed at MRR@10 1.000, nDCG@10 1.000, and recall@20 1.000. Complex-search and 100-candidate rerank latency showed no statistically significant change. These fixtures are regression evidence, not proof of universal generalization.</p>
-            <p class="benchmark-links">
-                <a href="https://github.com/bvolpato/ivygrep/releases/tag/v1.1.12">v1.1.12 release</a>
-                <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md#1112---2026-07-11">Release evidence</a>
-            </p>
+            <h2 class="section-title text-center">Performance at scale</h2>
+            <p class="text-center subtitle-small">Public results from a deterministic one-million-chunk corpus.</p>
         </div>
 
         <div class="glass-panel fade-in-scroll benchmark-panel mt-4">
@@ -466,67 +378,11 @@
                 <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-rg" data-width="65%"><span class="benchmark-time">0.46 GiB</span></div></div>
                 <div class="benchmark-speed benchmark-speed-hero">-57.0%</div>
             </div>
-            <div class="benchmark-row benchmark-row-highlight">
-                <div class="benchmark-tool"><code>v1.0.0 A/B</code><span class="benchmark-mode">search paths</span></div>
-                <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig" data-width="63%"><span class="benchmark-time">2.05 ms</span></div></div>
-                <div class="benchmark-speed benchmark-speed-hero">1.04x+</div>
-            </div>
-            <p class="benchmark-note">Public million-chunk results improved warm distinct-query p95 from 53.77 ms to 15.07 ms, controlled indexing from 4,963 to 109,006 chunks/s, and final index size from 1.06 GiB to 0.46 GiB. Public retrieval quality is nDCG@10 0.2666, MRR@10 0.2220, precision@5 0.0601, recall@20 0.4890, and no-hit queries 0.</p>
-            <p class="benchmark-note">The 600-query challenge matrix scores production blended routing at nDCG@10 0.5955, MRR@10 0.5652, and recall@20 0.7000 across three runs.</p>
-            <p class="benchmark-note">v1.0.0 Tantivy postings A/B improved hybrid 200, literal 200, simple symbol, and complex phrase latency from 3.66 -> 3.50 ms, 2.41 -> 2.05 ms, 3.19 -> 2.96 ms, and 4.45 -> 2.79 ms.</p>
+            <p class="benchmark-note">Results vary with hardware, repository shape, index state, and system load.</p>
             <p class="benchmark-links" aria-label="Benchmark links">
                 <a href="benchmarks/public-million.html">Public million-chunk benchmark</a>
-                <a href="benchmarks/public-sota-challenge.html">Challenge retrieval benchmark</a>
                 <a href="benchmarks/evidence-dashboard.html">Benchmark dashboard</a>
-                <a href="benchmarks/index.html">Benchmark reports</a>
             </p>
-        </div>
-
-        <div class="grid grid-2 align-center mt-4">
-            <div class="fade-in-scroll">
-                <div class="stats-grid">
-                    <div class="stat-box">
-                        <div class="stat-value">15.07ms</div>
-                        <div class="stat-label">Million-chunk warm p95</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-value">109K/s</div>
-                        <div class="stat-label">Controlled chunk throughput</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-value">0.46GiB</div>
-                        <div class="stat-label">Million-chunk index size</div>
-                    </div>
-                    <div class="stat-box">
-                        <div class="stat-value">0.2666</div>
-                        <div class="stat-label">Public nDCG@10</div>
-                    </div>
-                </div>
-            </div>
-            <div class="glass-panel fade-in-scroll">
-                <h3>v1.0.0 local smoke</h3>
-                <p class="text-xs opacity-70 mb-2">release binary, this workstation</p>
-                <div class="perf-bar-group">
-                    <div class="perf-label">30k fresh index</div>
-                    <div class="perf-bar-wrapper"><div class="perf-bar fill-blue" style="width: 74%">271.69 ms</div></div>
-                </div>
-                <div class="perf-bar-group">
-                    <div class="perf-label">Hybrid search, 200 files</div>
-                    <div class="perf-bar-wrapper"><div class="perf-bar fill-green" style="width: 58%">3.86 ms</div></div>
-                </div>
-                <div class="perf-bar-group">
-                    <div class="perf-label">Literal search, 200 files</div>
-                    <div class="perf-bar-wrapper"><div class="perf-bar fill-green opacity-80" style="width: 50%;">2.43 ms</div></div>
-                </div>
-                <div class="perf-bar-group">
-                    <div class="perf-label">Regex search, 200 files</div>
-                    <div class="perf-bar-wrapper"><div class="perf-bar fill-green opacity-80" style="width: 42%">1.23 ms</div></div>
-                </div>
-                <div class="perf-bar-group">
-                    <div class="perf-label">Incremental one-file change</div>
-                    <div class="perf-bar-wrapper"><div class="perf-bar fill-blue opacity-80" style="width: 44%">31.40 ms</div></div>
-                </div>
-            </div>
         </div>
     </section>
 
