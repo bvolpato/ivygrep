@@ -4,6 +4,15 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.1.13] - 2026-07-11
+
+### Performance
+- **Broad filtered semantic scoring is 4.45x to 7.09x faster.** Runtime-dispatched AVX2/FMA scores eight dimensions per instruction, and filters with at least 5,000 candidates use parallel local top-K heaps followed by an exact deterministic merge. On a Ryzen 9 3950X, Criterion time point estimates for 5K, 25K, and 50K candidates fell from `1.525 ms`, `7.904 ms`, and `15.808 ms` to `0.343 ms`, `1.222 ms`, and `2.230 ms`. The serial 500-candidate path also improved from `164.3 µs` to `91.9 µs` (`1.79x`). Unsupported CPUs retain the scalar path.
+
+### Testing
+- **Vector arithmetic and parallel selection have focused regression coverage.** Tests compare SIMD scores with scalar scores, exercise non-multiple-of-eight dimensions, verify missing-key handling, and force a two-thread local/global top-K merge with tied scores.
+- **Rejected prototypes stay rejected.** Full-store key validation improved only `4.6%`; native hash-filter traversal made 500-candidate search `3.07x` slower; a native bitmap filter peaked at `17%`. Indexing and complex lexical-search profiles remained distributed, with no isolated hotspot supporting a credible `2x` claim.
+
 ## [1.1.12] - 2026-07-11
 
 ### Relevance

@@ -5,6 +5,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use rayon::prelude::*;
 use usearch::{Index, IndexOptions, MetricKind};
 
 use super::{ScalarKind, VectorMatch, top_vector_matches};
@@ -19,8 +20,76 @@ const SERIALIZED_MAGIC: &[u8] = b"usearch";
 const MIN_CAPACITY: usize = 1_024;
 const MAX_CAPACITY_GROWTH: usize = 262_144;
 const MAX_CAPACITY_GROWTH_BYTES: usize = 128 * 1024 * 1024;
+const PARALLEL_SCORE_MIN_KEYS: usize = 5_000;
 #[cfg(target_os = "windows")]
 const BACKUP_EXTENSION: &str = "usearch.bak";
+
+type DotAndNormSquared = fn(&[f32], &[f32]) -> (f32, f32);
+
+fn scalar_dot_and_norm_squared(left: &[f32], right: &[f32]) -> (f32, f32) {
+    debug_assert_eq!(left.len(), right.len());
+    left.iter()
+        .zip(right)
+        .fold((0.0f32, 0.0f32), |(dot, norm), (left, right)| {
+            (dot + left * right, norm + left * left)
+        })
+}
+
+fn select_dot_and_norm_squared() -> DotAndNormSquared {
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma") {
+        return dot_and_norm_squared_avx2_dispatch;
+    }
+    scalar_dot_and_norm_squared
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn dot_and_norm_squared_avx2_dispatch(left: &[f32], right: &[f32]) -> (f32, f32) {
+    // SAFETY: selector checks AVX2 and FMA before returning this function.
+    unsafe { dot_and_norm_squared_avx2(left, right) }
+}
+
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn dot_and_norm_squared_avx2(left: &[f32], right: &[f32]) -> (f32, f32) {
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
+
+    let mut dot = _mm256_setzero_ps();
+    let mut norm = _mm256_setzero_ps();
+    let mut offset = 0;
+    while offset + 8 <= left.len() {
+        // SAFETY: loop bounds guarantee eight readable values from each slice.
+        let (left_values, right_values) = unsafe {
+            (
+                _mm256_loadu_ps(left.as_ptr().add(offset)),
+                _mm256_loadu_ps(right.as_ptr().add(offset)),
+            )
+        };
+        dot = _mm256_fmadd_ps(left_values, right_values, dot);
+        norm = _mm256_fmadd_ps(left_values, left_values, norm);
+        offset += 8;
+    }
+
+    let mut dot_lanes = [0.0f32; 8];
+    let mut norm_lanes = [0.0f32; 8];
+    // SAFETY: both arrays contain eight writable f32 values.
+    unsafe {
+        _mm256_storeu_ps(dot_lanes.as_mut_ptr(), dot);
+        _mm256_storeu_ps(norm_lanes.as_mut_ptr(), norm);
+    }
+    let mut totals = (
+        dot_lanes.into_iter().sum::<f32>(),
+        norm_lanes.into_iter().sum::<f32>(),
+    );
+    for offset in offset..left.len() {
+        totals.0 += left[offset] * right[offset];
+        totals.1 += left[offset] * left[offset];
+    }
+    totals
+}
 
 pub struct VectorStore {
     path: PathBuf,
@@ -352,27 +421,37 @@ impl VectorStore {
         }
 
         let query_norm = query.iter().map(|value| value * value).sum::<f32>().sqrt();
-        let mut stored = vec![0.0f32; query.len()];
-        let matches = keys.iter().filter_map(|key| {
-            if !matches!(self.index.get(*key, &mut stored), Ok(count) if count > 0) {
-                return None;
-            }
+        let dot_and_norm_squared = select_dot_and_norm_squared();
+        let score_chunk = |keys: &[u64]| {
+            let mut stored = vec![0.0f32; query.len()];
+            let matches = keys.iter().filter_map(|key| {
+                if !matches!(self.index.get(*key, &mut stored), Ok(count) if count > 0) {
+                    return None;
+                }
 
-            let (dot, stored_norm_squared) = stored
-                .iter()
-                .zip(query)
-                .fold((0.0f32, 0.0f32), |(dot, norm), (left, right)| {
-                    (dot + left * right, norm + left * left)
-                });
-            let stored_norm = stored_norm_squared.sqrt();
-            let score = if stored_norm > 0.0 && query_norm > 0.0 {
-                dot / (stored_norm * query_norm)
-            } else {
-                0.0
-            };
-            Some(VectorMatch { key: *key, score })
-        });
-        top_vector_matches(matches, count)
+                let (dot, stored_norm_squared) = dot_and_norm_squared(&stored, query);
+                let stored_norm = stored_norm_squared.sqrt();
+                let score = if stored_norm > 0.0 && query_norm > 0.0 {
+                    dot / (stored_norm * query_norm)
+                } else {
+                    0.0
+                };
+                Some(VectorMatch { key: *key, score })
+            });
+            top_vector_matches(matches, count)
+        };
+
+        let threads = rayon::current_num_threads();
+        if keys.len() >= PARALLEL_SCORE_MIN_KEYS && threads > 1 {
+            let chunk_size = keys.len().div_ceil(threads * 4).max(256);
+            let local_matches = keys
+                .par_chunks(chunk_size)
+                .flat_map_iter(score_chunk)
+                .collect::<Vec<_>>();
+            top_vector_matches(local_matches, count)
+        } else {
+            score_chunk(keys)
+        }
     }
 
     fn ensure_capacity_for_insert(&mut self) -> Result<()> {
@@ -479,6 +558,20 @@ fn replace_file(source: &Path, destination: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_vector_math_matches_scalar_with_tail_dimensions() {
+        let left = (0..259)
+            .map(|index| (index as f32 * 0.03125).sin())
+            .collect::<Vec<_>>();
+        let right = (0..259)
+            .map(|index| (index as f32 * 0.0625).cos())
+            .collect::<Vec<_>>();
+        let expected = scalar_dot_and_norm_squared(&left, &right);
+        let actual = select_dot_and_norm_squared()(&left, &right);
+        assert!((actual.0 - expected.0).abs() < 1e-4);
+        assert!((actual.1 - expected.1).abs() < 1e-4);
+    }
 
     #[test]
     fn search_score_is_cosine_similarity_not_clamped_to_zero() {
@@ -677,7 +770,13 @@ mod tests {
             expected.iter().map(|item| item.key).collect::<Vec<_>>()
         );
         for (actual, expected) in actual.iter().zip(expected) {
-            assert_eq!(actual.score.to_bits(), expected.score.to_bits());
+            let delta = (actual.score - expected.score).abs();
+            assert!(
+                delta < 1e-4,
+                "native/scalar score delta {delta} exceeded tolerance: {} vs {}",
+                actual.score,
+                expected.score
+            );
         }
     }
 
@@ -694,6 +793,29 @@ mod tests {
         assert_eq!(
             matches.iter().map(|item| item.key).collect::<Vec<_>>(),
             [1, 3, 7]
+        );
+    }
+
+    #[test]
+    fn parallel_batch_exact_top_k_preserves_tie_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        let keys = (0..PARALLEL_SCORE_MIN_KEYS as u64)
+            .rev()
+            .collect::<Vec<_>>();
+        for key in &keys {
+            store.add_unchecked(*key, vec![0.0, 1.0, 0.0, 0.0]).unwrap();
+        }
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .unwrap();
+        let matches = pool.install(|| store.score_many_top_k(&keys, &[1.0, 0.0, 0.0, 0.0], 50));
+        assert_eq!(
+            matches.iter().map(|item| item.key).collect::<Vec<_>>(),
+            (0..50).collect::<Vec<_>>()
         );
     }
 
