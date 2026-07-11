@@ -69,7 +69,7 @@
         <div class="container hero-content">
             <div class="hero-badge slide-up">
                 <span class="badge-dot"></span>
-                v1.1.12 - stronger natural-language relevance
+                v1.1.13 - up to 7.09x faster filtered semantic scoring
             </div>
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" onerror="this.src='assets/logo.png'"/>
@@ -359,7 +359,36 @@
         <div class="section-header">
             <span class="section-tag">Benchmarks</span>
             <h2 class="section-title text-center">Performance evidence</h2>
-            <p class="text-center subtitle-small">Current public million-chunk evidence, v1.1.12 relevance validation, and retained release benchmarks.</p>
+            <p class="text-center subtitle-small">Current filtered-vector, public million-chunk, relevance, and retained release evidence.</p>
+        </div>
+
+        <div class="glass-panel fade-in-scroll mt-4">
+            <h3>v1.1.13 filtered semantic scoring</h3>
+            <p class="text-xs opacity-70 mb-2">Ryzen 9 3950X, 256-dimensional F16 vectors, hot 50K-vector store, top 50</p>
+            <div class="stats-grid">
+                <div class="stat-box">
+                    <div class="stat-value">7.09x</div>
+                    <div class="stat-label">50K candidates, 15.808 to 2.230 ms</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value">6.47x</div>
+                    <div class="stat-label">25K candidates, 7.904 to 1.222 ms</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value">4.45x</div>
+                    <div class="stat-label">5K candidates, 1.525 to 0.343 ms</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value">1.79x</div>
+                    <div class="stat-label">500 candidates, 164.3 to 91.9 µs</div>
+                </div>
+            </div>
+            <p class="benchmark-note">Runtime-dispatched AVX2/FMA handles eight dimensions per instruction. Broad filters use parallel local top-K heaps and an exact deterministic merge. Unsupported CPUs retain portable scalar scoring.</p>
+            <p class="benchmark-note">Focused tests protect scalar/SIMD score agreement within 1e-4, non-multiple-of-eight dimensions, missing keys, and deterministic score/key tie ordering.</p>
+            <p class="benchmark-links">
+                <a href="https://github.com/bvolpato/ivygrep/releases/tag/v1.1.13">v1.1.13 release</a>
+                <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md#1113---2026-07-11">Release evidence</a>
+            </p>
         </div>
 
         <div class="glass-panel fade-in-scroll mt-4">
@@ -729,7 +758,7 @@
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md" class="footer-link">Changelog</a>
                 </div>
                 <div class="footer-copy">
-                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v1.1.12</p>
+                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v1.1.13</p>
                 </div>
             </div>
         </div>

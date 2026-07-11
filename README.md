@@ -11,7 +11,7 @@
   <a href="https://github.com/bvolpato/ivygrep/actions"><img src="https://github.com/bvolpato/ivygrep/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://github.com/bvolpato/ivygrep/actions/workflows/security.yml"><img src="https://github.com/bvolpato/ivygrep/actions/workflows/security.yml/badge.svg" alt="Security" /></a>
   <a href="https://github.com/bvolpato/ivygrep/actions/workflows/relevance.yml"><img src="https://github.com/bvolpato/ivygrep/actions/workflows/relevance.yml/badge.svg" alt="Relevance" /></a>
-  <a href="https://github.com/bvolpato/ivygrep/releases/tag/v1.1.12"><img src="https://img.shields.io/badge/release-v1.1.12-34d058" alt="Latest Release" /></a>
+  <a href="https://github.com/bvolpato/ivygrep/releases/tag/v1.1.13"><img src="https://img.shields.io/badge/release-v1.1.13-34d058" alt="Latest Release" /></a>
   <a href="https://github.com/bvolpato/ivygrep/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
   <a href="https://github.com/bvolpato/ivygrep/releases"><img src="https://img.shields.io/github/downloads/bvolpato/ivygrep/total?color=%23ff6f00" alt="Downloads" /></a>
 </p>
@@ -305,6 +305,34 @@ Unknown extensions are auto-detected and indexed as text.
 ---
 
 ## Performance
+
+### v1.1.13 filtered semantic scoring
+
+Profile-guided AVX2/FMA scoring handles eight dimensions per instruction on
+supported x86 CPUs. Filters with at least 5,000 vector candidates also use
+parallel local top-K heaps and an exact deterministic merge. ARM, older x86,
+and single-threaded environments retain portable scalar scoring.
+
+Ryzen 9 3950X, 32 logical CPUs, 256-dimensional F16 vectors, hot 50K-vector
+store, top 50, Criterion time point estimates:
+
+| Filter candidates | v1.1.12 | v1.1.13 | Speedup |
+|---:|---:|---:|---:|
+| 500 | 164.3 µs | 91.9 µs | 1.79x |
+| 5,000 | 1.525 ms | 0.343 ms | 4.45x |
+| 25,000 | 7.904 ms | 1.222 ms | 6.47x |
+| 50,000 | 15.808 ms | 2.230 ms | 7.09x |
+
+Reproduce the density sweep with:
+
+```bash
+cargo bench --locked --no-default-features \
+  --bench indexer_bench -- exact_filtered_vector
+```
+
+SIMD accumulation can differ from scalar accumulation by less than `1e-4`.
+Top-result keys, missing-key behavior, and score/key tie ordering are covered by
+focused tests; release relevance gates validate end-to-end ranking separately.
 
 ### v1.1.12 relevance validation
 
