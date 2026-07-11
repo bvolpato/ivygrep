@@ -2815,7 +2815,19 @@ fn build_chunk_doc(
     chunk: &IndexedChunk,
     file_path: &str,
 ) -> TantivyDocument {
-    let mut doc = TantivyDocument::default();
+    let signature = fields
+        .signature
+        .map(|_| extract_signature(chunk))
+        .unwrap_or_default();
+    let serialized_capacity = chunk
+        .text
+        .len()
+        .saturating_add(file_path.len().saturating_mul(2))
+        .saturating_add(chunk.language.len())
+        .saturating_add(chunk.kind.len())
+        .saturating_add(signature.len())
+        .saturating_add(128);
+    let mut doc = TantivyDocument::with_capacity(serialized_capacity);
     doc.add_u64(fields.vector_key, chunk.vector_key);
     doc.add_text(fields.file_path, file_path);
     doc.add_u64(fields.start_line, chunk.start_line as u64);
@@ -2829,11 +2841,10 @@ fn build_chunk_doc(
     if let Some(f) = fields.file_path_text {
         doc.add_text(f, file_path);
     }
-    if let Some(f) = fields.signature {
-        let sig = extract_signature(chunk);
-        if !sig.is_empty() {
-            doc.add_text(f, sig);
-        }
+    if let Some(f) = fields.signature
+        && !signature.is_empty()
+    {
+        doc.add_text(f, signature);
     }
     doc
 }

@@ -354,16 +354,17 @@ impl VectorStore {
         let query_norm = query.iter().map(|value| value * value).sum::<f32>().sqrt();
         let mut stored = vec![0.0f32; query.len()];
         let matches = keys.iter().filter_map(|key| {
-            if !self.index.contains(*key) || self.index.get(*key, &mut stored).is_err() {
+            if !matches!(self.index.get(*key, &mut stored), Ok(count) if count > 0) {
                 return None;
             }
 
-            let dot = stored
+            let (dot, stored_norm_squared) = stored
                 .iter()
                 .zip(query)
-                .map(|(left, right)| left * right)
-                .sum::<f32>();
-            let stored_norm = stored.iter().map(|value| value * value).sum::<f32>().sqrt();
+                .fold((0.0f32, 0.0f32), |(dot, norm), (left, right)| {
+                    (dot + left * right, norm + left * left)
+                });
+            let stored_norm = stored_norm_squared.sqrt();
             let score = if stored_norm > 0.0 && query_norm > 0.0 {
                 dot / (stored_norm * query_norm)
             } else {
@@ -694,6 +695,18 @@ mod tests {
             matches.iter().map(|item| item.key).collect::<Vec<_>>(),
             [1, 3, 7]
         );
+    }
+
+    #[test]
+    fn batch_exact_top_k_skips_missing_keys_without_reusing_the_buffer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        store.add_unchecked(1, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        let matches = store.score_many_top_k(&[1, 999], &[1.0, 0.0, 0.0, 0.0], 2);
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].key, 1);
     }
 
     #[test]

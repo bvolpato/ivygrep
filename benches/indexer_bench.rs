@@ -1,4 +1,4 @@
-use criterion::{BatchSize, Criterion, SamplingMode, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, SamplingMode, criterion_group, criterion_main};
 use ivygrep::EMBEDDING_DIMENSIONS;
 use ivygrep::chunking::chunk_source;
 use ivygrep::embedding::{EmbeddingModel, HashEmbeddingModel};
@@ -957,6 +957,30 @@ fn bench_critical_journeys(c: &mut Criterion) {
             black_box(results);
         })
     });
+
+    for selected in [500usize, 5_000, 25_000] {
+        group.bench_with_input(
+            BenchmarkId::new("exact_filtered_vector_subset_top_50_in_50k_hot", selected),
+            &selected,
+            |b, &selected| {
+                let (_ann_dir, ann_path, query) = ann_fixture.get_or_init(setup_ann_fixture);
+                let store = VectorStore::open_readonly(
+                    ann_path,
+                    EMBEDDING_DIMENSIONS,
+                    ivygrep::vector_store::NEURAL_VECTOR_QUANTIZATION,
+                )
+                .unwrap();
+                let keys = &exact_keys[..selected];
+
+                b.iter(|| {
+                    let results =
+                        store.score_many_top_k(black_box(keys), black_box(query), black_box(50));
+                    assert_eq!(results.len(), 50);
+                    black_box(results);
+                })
+            },
+        );
+    }
 
     group.finish();
 }
