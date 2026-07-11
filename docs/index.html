@@ -359,7 +359,36 @@
         <div class="section-header">
             <span class="section-tag">Benchmarks</span>
             <h2 class="section-title text-center">Performance evidence</h2>
-            <p class="text-center subtitle-small">Current public million-chunk evidence plus v1.0.0 retained release benchmarks.</p>
+            <p class="text-center subtitle-small">Current public million-chunk evidence, v1.1.12 relevance validation, and retained release benchmarks.</p>
+        </div>
+
+        <div class="glass-panel fade-in-scroll mt-4">
+            <h3>v1.1.12 relevance validation</h3>
+            <p class="text-xs opacity-70 mb-2">Deterministic 23-query fixture, compared with v1.1.11</p>
+            <div class="stats-grid">
+                <div class="stat-box">
+                    <div class="stat-value">1.000</div>
+                    <div class="stat-label">Precision@1, from 0.913</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value">1.000</div>
+                    <div class="stat-label">MRR, from 0.957</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value">0.965</div>
+                    <div class="stat-label">nDCG@10, from 0.933</div>
+                </div>
+                <div class="stat-box">
+                    <div class="stat-value">0.957</div>
+                    <div class="stat-label">Recall@5, unchanged</div>
+                </div>
+            </div>
+            <p class="benchmark-note">A bounded 1.25x lift promotes derivational natural-language subject matches such as <code>walk</code> to <code>walker.rs</code>. Exact generic stems, short queries, tests, docs, and generated files receive no multiplier.</p>
+            <p class="benchmark-note">The separate 4-query public retrieval fixture stayed at MRR@10 1.000, nDCG@10 1.000, and recall@20 1.000. Complex-search and 100-candidate rerank latency showed no statistically significant change. These fixtures are regression evidence, not proof of universal generalization.</p>
+            <p class="benchmark-links">
+                <a href="https://github.com/bvolpato/ivygrep/releases/tag/v1.1.12">v1.1.12 release</a>
+                <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md#1112---2026-07-11">Release evidence</a>
+            </p>
         </div>
 
         <div class="glass-panel fade-in-scroll benchmark-panel mt-4">
