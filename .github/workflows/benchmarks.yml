@@ -85,6 +85,12 @@ jobs:
             --bench-name critical_journeys/vector_search_in_50k_hot \
             --threshold 1.20 \
             --output "$PAIRED_BENCHMARK_DIR/vector-search-hot.json"
+          python3 scripts/benchmark_guard.py \
+            --baseline-ref "$BENCHMARK_BASE_REF" \
+            --bench-target indexer_bench \
+            --bench-name critical_journeys/exact_filtered_vector_top_50_in_50k_hot \
+            --threshold 1.20 \
+            --output "$PAIRED_BENCHMARK_DIR/vector-filtered-exact.json"
 
       - name: Report paired benchmark deltas
         if: always() && steps.benchmark-base.outputs.ref != ''

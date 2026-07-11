@@ -4,6 +4,16 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.1.11] - 2026-07-10
+
+### Performance
+- **Fresh indexing sizes Tantivy document buffers from their content.** A three-run 30K-chunk profile reduced median peak RSS from `94,780 KiB` to `74,756 KiB` (`21.1%`) and minor faults from `22,735` to `17,433` (`23.3%`) with neutral wall time.
+- **Filtered exact vector scoring performs one lookup and one arithmetic pass per key.** Removing the redundant existence lookup and fusing dot-product/norm accumulation improved the 50K-vector top-50 benchmark from `24.128 ms` to `15.548 ms` (`35.6%`) without changing score bits or tie ordering.
+- **Three-term disjunctive lexical queries use a flat boosted clause list.** Removing one Tantivy union layer improved the 1K-file complex phrase benchmark from `3.394 ms` to `3.179 ms` (`6.3%`); other query shapes keep the nested layout after adjacent rerank benchmarks rejected broad flattening.
+
+### Testing
+- **Filtered vector benchmarks cover 1%, 10%, 50%, and 100% candidate subsets.** CI now guards the full exact-filter path alongside fresh indexing, incremental indexing, hybrid search, and hot ANN search.
+
 ## [1.1.10] - 2026-07-10
 
 ### Added

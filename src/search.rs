@@ -1139,6 +1139,14 @@ fn simple_lexical_query(
         return None;
     }
 
+    if !conjunction_by_default && terms.len() == 3 {
+        let clauses = terms
+            .iter()
+            .flat_map(|term| simple_lexical_term_clauses(fields, term))
+            .collect::<Vec<_>>();
+        return Some(Box::new(BooleanQuery::new(clauses)));
+    }
+
     let occur = if conjunction_by_default {
         Occur::Must
     } else {
@@ -1156,6 +1164,15 @@ fn simple_lexical_query(
 }
 
 fn simple_lexical_term_query(fields: &TantivyFields, term_text: &str) -> Box<dyn Query> {
+    Box::new(BooleanQuery::new(simple_lexical_term_clauses(
+        fields, term_text,
+    )))
+}
+
+fn simple_lexical_term_clauses(
+    fields: &TantivyFields,
+    term_text: &str,
+) -> Vec<(Occur, Box<dyn Query>)> {
     let mut field_queries = Vec::with_capacity(3);
     field_queries.push((
         Occur::Should,
@@ -1188,7 +1205,7 @@ fn simple_lexical_term_query(fields: &TantivyFields, term_text: &str) -> Box<dyn
             )),
         ));
     }
-    Box::new(BooleanQuery::new(field_queries))
+    field_queries
 }
 
 fn literal_queries_need_specificity_ranking(queries: &[String]) -> bool {
