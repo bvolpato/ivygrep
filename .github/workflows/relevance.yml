@@ -51,15 +51,14 @@ jobs:
       - name: Build ig (hash-only)
         run: cargo build --release --locked --no-default-features --bin ig
 
-      # Thresholds sit a margin below the current hash baseline over the labeled
-      # query set (MRR ~0.58, p@1 ~0.44, recall@5 ~0.76), so the gate catches
-      # real regressions without flaking. Raise them as relevance improves.
+      # Thresholds sit below the current deterministic hash baseline over the
+      # labeled query set (MRR 1.00, p@1 1.00, recall@5 0.96).
       - name: Relevance gate
         run: |
           python3 scripts/eval_relevance.py \
             --skip-build \
             --binary target/release/ig \
-            --check --min-mrr 0.52 --min-p1 0.38 --min-recall5 0.70
+            --check --min-mrr 1.00 --min-p1 1.00 --min-recall5 0.95
 
       - name: Public retrieval fixture
         run: |

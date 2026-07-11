@@ -3681,6 +3681,7 @@ struct FusionQuery<'a> {
     path_candidates: [String; 4],
     tokens: Vec<String>,
     primary_tokens: Vec<String>,
+    primary_token_compacts: Vec<String>,
     token_compacts: Vec<String>,
     alias_token_compacts: Vec<String>,
     location_intent: bool,
@@ -3693,6 +3694,10 @@ impl<'a> FusionQuery<'a> {
         let text = query_text.trim();
         let lower = text.to_ascii_lowercase();
         let primary_tokens = tokenize_query(text);
+        let primary_token_compacts = primary_tokens
+            .iter()
+            .map(|token| compact_identifier(token))
+            .collect();
         let tokens = expanded_query_tokens(text);
         let token_compacts = tokens
             .iter()
@@ -3720,6 +3725,7 @@ impl<'a> FusionQuery<'a> {
             lower,
             path_candidates,
             primary_tokens,
+            primary_token_compacts,
             token_compacts,
             alias_token_compacts,
             compact_candidate_text,
@@ -4271,11 +4277,14 @@ fn fuse_rrf_with_context(
             additive_boost +=
                 path_exact_match_boost_with_query(query, &bctx) * PATH_EXACT_MATCH_WEIGHT;
 
-            if !query_tokens.is_empty() {
-                additive_boost +=
-                    file_stem_boost_with_compact_tokens(query_tokens, &query.token_compacts, &bctx)
-                        * FILE_STEM_WEIGHT;
-            }
+            let (file_stem_score, primary_file_stem_derivation) = file_stem_signals(
+                query_tokens,
+                &query.token_compacts,
+                primary_query_tokens,
+                &query.primary_token_compacts,
+                &bctx,
+            );
+            additive_boost += file_stem_score * FILE_STEM_WEIGHT;
 
             if !query_tokens.is_empty() {
                 additive_boost +=
@@ -4328,6 +4337,11 @@ fn fuse_rrf_with_context(
 
             score *= chunk_kind_boost(&chunk);
             score *= effective_authority_score_with_intent(query_tokens, &bctx, secondary_intent);
+            score *= primary_file_stem_multiplier(
+                primary_query_tokens,
+                primary_file_stem_derivation,
+                &bctx,
+            );
             score *= alias_file_stem_multiplier(&query.alias_token_compacts, &bctx);
 
             // Apply chunk-density normalization: 1/n^x where n is the number
@@ -5036,12 +5050,22 @@ fn file_stem_boost_with_compact_tokens(
     compact_tokens: &[String],
     bctx: &ChunkBoostContext,
 ) -> f32 {
+    file_stem_signals(query_tokens, compact_tokens, &[], &[], bctx).0
+}
+
+fn file_stem_signals(
+    query_tokens: &[String],
+    compact_tokens: &[String],
+    primary_tokens: &[String],
+    primary_compact_tokens: &[String],
+    bctx: &ChunkBoostContext,
+) -> (f32, bool) {
     if query_tokens.is_empty() {
-        return 0.0;
+        return (0.0, false);
     }
 
     let Some(ref stem) = bctx.file_stem else {
-        return 0.0;
+        return (0.0, false);
     };
 
     let compact_stem = compact_identifier(stem);
@@ -5049,20 +5073,31 @@ fn file_stem_boost_with_compact_tokens(
         .iter()
         .zip(compact_tokens)
         .any(|(token, compact_token)| *stem == *token || compact_stem == *compact_token);
+    let primary_exact_match = primary_tokens
+        .iter()
+        .zip(primary_compact_tokens)
+        .any(|(token, compact_token)| *stem == *token || compact_stem == *compact_token);
     let stem_terms = split_identifier_segments(stem);
     let partial_match = query_tokens.iter().any(|token| {
         stem_terms
             .iter()
             .any(|stem_term| code_term_matches(token, stem_term))
     });
+    let primary_derivational_match = !primary_exact_match
+        && primary_tokens.iter().any(|token| {
+            stem_terms
+                .iter()
+                .any(|stem_term| token != stem_term && code_term_matches(token, stem_term))
+        });
 
-    if exact_match {
+    let boost = if exact_match {
         1.0
     } else if partial_match {
         0.5
     } else {
         0.0
-    }
+    };
+    (boost, primary_derivational_match)
 }
 
 fn alias_file_stem_multiplier(alias_token_compacts: &[String], bctx: &ChunkBoostContext) -> f32 {
@@ -5088,6 +5123,20 @@ fn alias_file_stem_multiplier(alias_token_compacts: &[String], bctx: &ChunkBoost
     } else {
         2.0
     }
+}
+
+fn primary_file_stem_multiplier(
+    query_tokens: &[String],
+    derivational_match: bool,
+    bctx: &ChunkBoostContext,
+) -> f32 {
+    if query_tokens.len() < 3
+        || !derivational_match
+        || path_role(&bctx.path_lower) != PathRole::PrimarySource
+    {
+        return 1.0;
+    }
+    1.25
 }
 
 fn is_generic_process_alias(alias: &str) -> bool {
@@ -8432,6 +8481,17 @@ export function registerCommands(p: Plugin) {
             (boost - 0.5).abs() < f32::EPSILON,
             "partial stem match should return 0.5, got {boost}"
         );
+        let (_, derivational) = file_stem_signals(&tokens, &tokens, &tokens, &tokens, &bctx);
+        assert!(
+            !derivational,
+            "exact stem terms are not derivational matches"
+        );
+
+        let walker = make_test_chunk("b", "src/walker.rs", "code", "Module");
+        let walk = vec!["walk".to_string()];
+        let (_, derivational) =
+            file_stem_signals(&walk, &walk, &walk, &walk, &ChunkBoostContext::new(&walker));
+        assert!(derivational, "walk should derivationally match walker");
     }
 
     #[test]
@@ -8461,6 +8521,64 @@ export function registerCommands(p: Plugin) {
         let daemon_ctx = ChunkBoostContext::new(&daemon);
         assert_eq!(
             alias_file_stem_multiplier(&["daemon".to_string()], &daemon_ctx),
+            1.0
+        );
+    }
+
+    #[test]
+    fn primary_file_stem_multiplier_promotes_natural_language_subjects() {
+        let walker = make_test_chunk("walker", "src/walker.rs", "code", "Module");
+        assert_eq!(
+            primary_file_stem_multiplier(
+                &[
+                    "walk".to_string(),
+                    "directory".to_string(),
+                    "tree".to_string(),
+                ],
+                true,
+                &ChunkBoostContext::new(&walker),
+            ),
+            1.25
+        );
+
+        let jobs = make_test_chunk("jobs", "src/jobs.rs", "code", "Module");
+        assert_eq!(
+            primary_file_stem_multiplier(
+                &[
+                    "track".to_string(),
+                    "progress".to_string(),
+                    "job".to_string()
+                ],
+                true,
+                &ChunkBoostContext::new(&jobs),
+            ),
+            1.25
+        );
+    }
+
+    #[test]
+    fn primary_file_stem_multiplier_stays_bounded_to_prose_and_primary_source() {
+        let source = make_test_chunk("search", "src/search.rs", "code", "Module");
+        assert_eq!(
+            primary_file_stem_multiplier(
+                &["find".to_string(), "code".to_string(), "search".to_string(),],
+                false,
+                &ChunkBoostContext::new(&source),
+            ),
+            1.0
+        );
+
+        let fixture = make_test_chunk("walker-test", "tests/walker.rs", "code", "Module");
+        assert_eq!(
+            primary_file_stem_multiplier(
+                &[
+                    "walk".to_string(),
+                    "directory".to_string(),
+                    "tree".to_string(),
+                ],
+                true,
+                &ChunkBoostContext::new(&fixture),
+            ),
             1.0
         );
     }
