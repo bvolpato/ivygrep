@@ -21,6 +21,7 @@ def load_script(name: str):
 
 exporter = load_script("export_public_retrieval")
 sys.modules["export_public_retrieval"] = exporter
+coreb_exporter = load_script("export_coreb")
 evaluator = load_script("eval_code_retrieval")
 sys.modules["eval_code_retrieval"] = evaluator
 privacy = load_script("check_public_benchmark_privacy")
@@ -33,6 +34,29 @@ reranker_renderer = load_script("render_public_reranker")
 
 
 class PublicBenchmarkTest(unittest.TestCase):
+    def test_coreb_hard_negatives_are_not_exported_as_relevant(self):
+        rows = [
+            {"query_id": "q1", "doc_id": "positive", "relevance": 2},
+            {"query_id": "q1", "doc_id": "hard-negative", "relevance": 1},
+            {"query_id": "q1", "doc_id": "irrelevant", "relevance": 0},
+        ]
+        self.assertEqual(
+            coreb_exporter.positive_qrels(rows),
+            [("q1", "positive", 2)],
+        )
+
+    def test_coreb_code_paths_preserve_language_extensions(self):
+        document = coreb_exporter.code_document(
+            {"code_id": "code-1", "code": "fn main() {}", "language": "cpp"},
+            7,
+        )
+        self.assertEqual(document["metadata"]["path"], "documents/000007-code-1.cpp")
+
+    def test_coreb_default_split_rejects_changed_files(self):
+        with self.assertRaisesRegex(ValueError, "SHA-256 changed"):
+            coreb_exporter.validate_hash("code_corpus", "0" * 64, "release_v2603")
+        coreb_exporter.validate_hash("code_corpus", "0" * 64, "experimental")
+
     def test_matrix_modes_distinguish_production_and_forced_neural(self):
         self.assertEqual(
             matrix_runner.parse_modes("hybrid,blended,neural"),

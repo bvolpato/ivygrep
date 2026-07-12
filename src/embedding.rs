@@ -53,7 +53,8 @@ impl NeuralProfile {
             .as_str()
         {
             "static" | "portable" | "static-retrieval" | "static-retrieval-v1" => Self::Static,
-            "potion" | "potion-code" | "potion-code-16m" | "model2vec-code" => Self::PotionCode,
+            "potion" | "potion-code" | "potion-code-16m" | "potion-code-16m-v1"
+            | "model2vec-code" => Self::PotionCode,
             "general" | "minilm" | "all-minilm-l6-v2" => Self::General,
             "code" | "codesearchnet" | "code-minilm-l6-v1" => Self::Code,
             "code-hq" | "code-high-quality" | "code-minilm-l12-v1" => Self::CodeHighQuality,
@@ -1145,6 +1146,8 @@ mod tests {
         assert_eq!(NeuralProfile::configured(), NeuralProfile::PotionCode);
         assert_eq!(NeuralProfile::PotionCode.name(), "potion-code-16m-v1");
         assert_eq!(NeuralProfile::PotionCode.dimensions(), 256);
+        unsafe { std::env::set_var("IVYGREP_MODEL_PROFILE", NeuralProfile::PotionCode.name()) };
+        assert_eq!(NeuralProfile::configured(), NeuralProfile::PotionCode);
 
         unsafe { std::env::set_var("IVYGREP_MODEL_PROFILE", "code") };
         assert_eq!(NeuralProfile::configured(), NeuralProfile::Code);
