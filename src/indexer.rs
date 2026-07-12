@@ -47,6 +47,7 @@ const MAX_RUST_DOC_INCLUDE_BYTES: u64 = MIB;
 const MAX_RUST_DOC_INCLUDE_TOTAL_BYTES: u64 = 2 * MIB;
 const MAX_RUST_DOC_INCLUDE_CHUNKS_PER_SOURCE: usize = 128;
 const NEURAL_CPU_BATCH_SIZE: usize = 64;
+const NEURAL_STATIC_BATCH_SIZE: usize = 1024;
 const NEURAL_CUDA_BATCH_SIZE: usize = 8;
 const NEURAL_METAL_BATCH_SIZE: usize = 256;
 const NEURAL_CUDA_HIGH_PRESSURE_FREE_BYTES: u64 = 2 * 1024 * MIB;
@@ -222,7 +223,10 @@ fn neural_enhance_batch_size_for(
     let Some(backend) = backend else {
         return NEURAL_CPU_BATCH_SIZE;
     };
-    let default_batch_size = if backend.contains("Candle CUDA") {
+    let default_batch_size = if backend.contains("StaticEmbedding") || backend.contains("Model2Vec")
+    {
+        NEURAL_STATIC_BATCH_SIZE
+    } else if backend.contains("Candle CUDA") {
         cuda_neural_enhance_batch_size(cuda_resources)
     } else if backend.contains("Candle Metal") {
         NEURAL_METAL_BATCH_SIZE
@@ -3895,6 +3899,18 @@ mod tests {
         assert_eq!(
             neural_enhance_batch_size_for(Some("BERT embedding via Candle CPU"), None, None),
             NEURAL_CPU_BATCH_SIZE
+        );
+        assert_eq!(
+            neural_enhance_batch_size_for(Some("StaticEmbedding token mean via Rust"), None, None,),
+            NEURAL_STATIC_BATCH_SIZE
+        );
+        assert_eq!(
+            neural_enhance_batch_size_for(
+                Some("Model2Vec weighted token mean via Rust"),
+                None,
+                None,
+            ),
+            NEURAL_STATIC_BATCH_SIZE
         );
         assert_eq!(
             neural_enhance_batch_size_for(

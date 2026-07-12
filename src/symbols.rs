@@ -117,14 +117,15 @@ pub fn search_symbols_with_options(
     let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
     reconcile_worktree_overlay(workspace, &model)?;
 
-    let normalized = normalize_symbol(name);
+    let candidate_name = canonical_symbol(name);
+    let normalized = normalize_symbol(candidate_name);
     if normalized.is_empty() {
         return Ok(Vec::new());
     }
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
 
     if mode != SymbolSearchMode::Definitions {
-        return search_call_sites(workspace, &normalized, mode, options);
+        return search_call_sites(workspace, candidate_name, &normalized, mode, options);
     }
 
     let primary_sqlite = if workspace.has_overlay() {
@@ -359,6 +360,7 @@ fn query_workspace_db(
 
 fn search_call_sites(
     workspace: &Workspace,
+    name: &str,
     normalized: &str,
     mode: SymbolSearchMode,
     options: &SearchOptions,
@@ -375,7 +377,7 @@ fn search_call_sites(
     };
     let mut candidate_options = options.clone();
     candidate_options.limit = options.limit.map(|limit| limit.saturating_mul(4));
-    let query = format!("{normalized}(");
+    let query = format!("{}(", name.trim());
     let candidates = if options.limit.is_some() {
         crate::search::exact_literal_chunks(workspace, &query, &candidate_options)?
     } else {
@@ -933,10 +935,13 @@ fn identifier_prefix(value: &str) -> &str {
 }
 
 fn normalize_symbol(value: &str) -> String {
+    canonical_symbol(value).to_ascii_lowercase()
+}
+
+fn canonical_symbol(value: &str) -> &str {
     value
         .trim()
         .trim_matches(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-        .to_ascii_lowercase()
 }
 
 fn file_stem_matches_symbol(chunk: &IndexedChunk, name: &str) -> bool {

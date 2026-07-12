@@ -4,6 +4,21 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.1.15] - 2026-07-11
+
+### Added
+- **MCP search supports symbol definitions, references, and callers.** `ig_search` now matches CLI symbol-navigation modes while preserving scope, type, and glob filters.
+- **CoREB can be exported as a pinned external relevance suite.** The exporter covers text-to-code, code-to-code, and code-to-text retrieval, verifies source hashes, and excludes labeled hard negatives from positive judgments.
+
+### Performance
+- **Lightweight neural indexing uses larger embedding batches.** StaticEmbedding and Model2Vec enhancement improved a shared 100,000-chunk median from `7.96 s` to `7.42 s` (`6.8%`) with unchanged memory and byte-identical vector stores. Transformer CPU batching remains unchanged.
+
+### Fixed
+- **The canonical PotionCode profile name selects the requested model.** `potion-code-16m-v1` no longer falls back to the default profile.
+
+### Testing
+- **Search relevance remains unchanged.** The final 1,000-query public-core guard held nDCG@10, MRR@10, recall@20, and warm p95 within measurement noise; query-truncation candidates that improved latency but reduced held-out relevance were discarded.
+
 ## [1.1.14] - 2026-07-11
 
 ### Performance

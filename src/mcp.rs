@@ -21,6 +21,7 @@ use crate::path_glob::parse_glob_csv;
 use crate::protocol::{DaemonRequest, DaemonResponse, group_hits_by_file};
 use crate::regex_search::regex_search;
 use crate::search::{SearchOptions, hybrid_search, literal_search};
+use crate::symbols::{SymbolSearchMode, search_symbols_with_options};
 use crate::workspace::{Workspace, WorkspaceMetadata, resolve_workspace_and_scope};
 
 const JSONRPC_VERSION: &str = "2.0";
@@ -101,6 +102,9 @@ struct IvygrepSearchArgs {
     type_filter: Option<String>,
     regex: Option<bool>,
     literal: Option<bool>,
+    symbol: Option<bool>,
+    refs: Option<bool>,
+    callers: Option<bool>,
     include: Option<String>,
     exclude: Option<String>,
     first_line_only: Option<bool>,
@@ -258,6 +262,9 @@ fn search_tool_schema() -> Value {
                 "type": {"type": "string", "description": "Language filter - accepts names (rust, python), extensions (rs, py, md), or aliases (c++, bash, js)."},
                 "regex": {"type": "boolean", "description": "Use regex mode (index-prefiltered when possible; otherwise walks raw files). Prefer 'literal' for exact matches."},
                 "literal": {"type": "boolean", "description": "Fast exact-match search backed by the index. Deterministic, orders of magnitude faster than regex."},
+                "symbol": {"type": "boolean", "description": "Find exact symbol definitions."},
+                "refs": {"type": "boolean", "description": "Find exact references to the named symbol."},
+                "callers": {"type": "boolean", "description": "Find functions or methods that call the named symbol."},
                 "include": {"type": "string", "description": "Comma-separated include globs, e.g. \"*.md,src/**/*.rs\"."},
                 "exclude": {"type": "string", "description": "Comma-separated exclude globs, e.g. \"target/**,*.lock\"."},
                 "first_line_only": {"type": "boolean", "description": "Return only the first non-empty preview line for each hit. Ranking is unchanged."},
@@ -307,7 +314,7 @@ fn search_output_schema() -> Value {
             "scope_path": {"type": ["string", "null"]},
             "scope_is_file": {"type": "boolean"},
             "query": {"type": "string"},
-            "mode": {"type": "string", "enum": ["hybrid", "literal", "regex"]},
+            "mode": {"type": "string", "enum": ["hybrid", "literal", "regex", "symbol", "references", "callers"]},
             "result_count": {"type": "integer", "minimum": 0},
             "include": {"type": "array", "items": {"type": "string"}},
             "exclude": {"type": "array", "items": {"type": "string"}},
@@ -578,8 +585,20 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
     if query.trim().is_empty() {
         bail!("query must not be empty");
     }
-    if args.literal.unwrap_or(false) && args.regex.unwrap_or(false) {
-        bail!("literal and regex modes are mutually exclusive");
+    let requested_modes = [
+        args.literal.unwrap_or(false),
+        args.regex.unwrap_or(false),
+        args.symbol.unwrap_or(false),
+        args.refs.unwrap_or(false),
+        args.callers.unwrap_or(false),
+    ];
+    if requested_modes
+        .into_iter()
+        .filter(|enabled| *enabled)
+        .count()
+        > 1
+    {
+        bail!("literal, regex, symbol, refs, and callers modes are mutually exclusive");
     }
     if args.limit == Some(0) || args.limit.is_some_and(|limit| limit > 1000) {
         bail!("limit must be between 1 and 1000");
@@ -607,8 +626,19 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
 
     let literal = args.literal.unwrap_or(false);
     let regex = args.regex.unwrap_or(false);
-    let daemon_request = if literal {
-        DaemonRequest::LiteralSearch {
+    let symbol_mode = if args.symbol.unwrap_or(false) {
+        Some(SymbolSearchMode::Definitions)
+    } else if args.refs.unwrap_or(false) {
+        Some(SymbolSearchMode::References)
+    } else if args.callers.unwrap_or(false) {
+        Some(SymbolSearchMode::Callers)
+    } else {
+        None
+    };
+    let daemon_request = if symbol_mode.is_some() {
+        None
+    } else if literal {
+        Some(DaemonRequest::LiteralSearch {
             path: Some(workspace.root.clone()),
             query: query.to_string(),
             limit: args.limit,
@@ -619,9 +649,9 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
             scope_path: scope_filter.as_ref().map(|scope| scope.rel_path.clone()),
             scope_is_file: scope_filter.as_ref().is_some_and(|scope| scope.is_file),
             skip_gitignore: args.skip_gitignore.unwrap_or(false),
-        }
+        })
     } else if regex {
-        DaemonRequest::RegexSearch {
+        Some(DaemonRequest::RegexSearch {
             path: Some(workspace.root.clone()),
             pattern: query.to_string(),
             limit: args.limit,
@@ -630,9 +660,9 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
             scope_path: scope_filter.as_ref().map(|scope| scope.rel_path.clone()),
             scope_is_file: scope_filter.as_ref().is_some_and(|scope| scope.is_file),
             skip_gitignore: args.skip_gitignore.unwrap_or(false),
-        }
+        })
     } else {
-        DaemonRequest::Search {
+        Some(DaemonRequest::Search {
             path: Some(workspace.root.clone()),
             query: query.to_string(),
             limit: args.limit,
@@ -644,23 +674,45 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
             scope_is_file: scope_filter.as_ref().is_some_and(|scope| scope.is_file),
             skip_gitignore: args.skip_gitignore.unwrap_or(false),
             force_neural: false,
-        }
+        })
     };
-    let daemon_hits = match crate::daemon::request_blocking(&daemon_request, false)? {
-        Some(DaemonResponse::SearchResults { hits }) => Some(hits),
-        Some(DaemonResponse::Error { message }) => {
-            tracing::warn!("MCP daemon search unavailable, searching locally: {message}");
-            None
+    let daemon_hits = if let Some(daemon_request) = daemon_request {
+        match crate::daemon::request_blocking(&daemon_request, false)? {
+            Some(DaemonResponse::SearchResults { hits }) => Some(hits),
+            Some(DaemonResponse::Error { message }) => {
+                tracing::warn!("MCP daemon search unavailable, searching locally: {message}");
+                None
+            }
+            Some(response) => {
+                tracing::warn!("unexpected MCP daemon search response: {response:?}");
+                None
+            }
+            None => None,
         }
-        Some(response) => {
-            tracing::warn!("unexpected MCP daemon search response: {response:?}");
-            None
-        }
-        None => None,
+    } else {
+        None
     };
 
     let mut hits = if let Some(hits) = daemon_hits {
         hits
+    } else if let Some(mode) = symbol_mode {
+        search_symbols_with_options(
+            &workspace,
+            query,
+            mode,
+            &SearchOptions {
+                limit: args.limit,
+                context: args.context.unwrap_or(2),
+                type_filter: args.type_filter.clone(),
+                include_globs: include_globs.clone(),
+                exclude_globs: exclude_globs.clone(),
+                scope_filter: scope_filter.clone(),
+                skip_gitignore: args.skip_gitignore.unwrap_or(false),
+                force_neural: false,
+                progress_tx: None,
+                cancel_token: None,
+            },
+        )?
     } else if literal {
         literal_search(
             &workspace,
@@ -757,13 +809,25 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
         }
     }
 
+    let mode_name = if literal {
+        "literal"
+    } else if regex {
+        "regex"
+    } else {
+        match symbol_mode {
+            Some(SymbolSearchMode::Definitions) => "symbol",
+            Some(SymbolSearchMode::References) => "references",
+            Some(SymbolSearchMode::Callers) => "callers",
+            None => "hybrid",
+        }
+    };
     let payload = if file_name_only {
         json!({
             "workspace_root": current_workspace.root,
             "scope_path": scope_filter.as_ref().map(|scope| scope.rel_path.clone()),
             "scope_is_file": scope_filter.as_ref().is_some_and(|scope| scope.is_file),
             "query": query,
-            "mode": if literal { "literal" } else if regex { "regex" } else { "hybrid" },
+            "mode": mode_name,
             "result_count": grouped.len(),
             "include": include_globs,
             "exclude": exclude_globs,
@@ -775,7 +839,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
             "scope_path": scope_filter.as_ref().map(|scope| scope.rel_path.clone()),
             "scope_is_file": scope_filter.as_ref().is_some_and(|scope| scope.is_file),
             "query": query,
-            "mode": if literal { "literal" } else if regex { "regex" } else { "hybrid" },
+            "mode": mode_name,
             "result_count": grouped.len(),
             "include": include_globs,
             "exclude": exclude_globs,
@@ -963,6 +1027,9 @@ mod tests {
             type_filter: None,
             regex: Some(false),
             literal: None,
+            symbol: None,
+            refs: None,
+            callers: None,
             include: None,
             exclude: None,
             first_line_only: Some(false),
@@ -1008,6 +1075,9 @@ mod tests {
             type_filter: None,
             regex: Some(false),
             literal: None,
+            symbol: None,
+            refs: None,
+            callers: None,
             include: None,
             exclude: None,
             first_line_only: Some(false),
@@ -1059,6 +1129,9 @@ mod tests {
             type_filter: None,
             regex: Some(false),
             literal: None,
+            symbol: None,
+            refs: None,
+            callers: None,
             include: Some("*.md".to_string()),
             exclude: None,
             first_line_only: Some(false),
@@ -1088,6 +1161,9 @@ mod tests {
             type_filter: None,
             regex: Some(false),
             literal: None,
+            symbol: None,
+            refs: None,
+            callers: None,
             include: Some("*.md".to_string()),
             exclude: Some("match.md".to_string()),
             first_line_only: Some(false),
@@ -1144,6 +1220,9 @@ mod tests {
         let schema = &tools[0]["inputSchema"];
         assert!(schema["properties"]["query"].is_object());
         assert!(schema["properties"]["regex"].is_object());
+        assert!(schema["properties"]["symbol"].is_object());
+        assert!(schema["properties"]["refs"].is_object());
+        assert!(schema["properties"]["callers"].is_object());
         assert_eq!(schema["properties"]["limit"]["minimum"], 1);
         assert_eq!(schema["properties"]["limit"]["maximum"], 1000);
         assert_eq!(schema["properties"]["context"]["minimum"], 0);
@@ -1274,6 +1353,9 @@ mod tests {
             type_filter: None,
             regex: Some(true),
             literal: None,
+            symbol: None,
+            refs: None,
+            callers: None,
             include: None,
             exclude: None,
             first_line_only: Some(false),
@@ -1312,6 +1394,9 @@ mod tests {
             type_filter: None,
             regex: None,
             literal: Some(true),
+            symbol: None,
+            refs: None,
+            callers: None,
             include: None,
             exclude: None,
             first_line_only: Some(false),
@@ -1325,6 +1410,107 @@ mod tests {
         assert_eq!(result["mode"], "literal");
         let count = result["result_count"].as_u64().unwrap();
         assert!(count > 0, "literal search should find results");
+    }
+
+    #[test]
+    #[serial]
+    fn mcp_search_symbol_modes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(
+            root.join("match.rs"),
+            "pub fn calculate_tax(amount: f64) -> f64 { amount * 0.2 }\n\
+             pub fn checkout() -> f64 { calculate_tax(10.0) }\n\
+             pub fn applyFilter(value: bool) -> bool { value }\n\
+             pub fn render() -> bool { applyFilter(true) }\n",
+        )
+        .unwrap();
+
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        for (symbol, refs, callers, expected_mode) in [
+            (true, false, false, "symbol"),
+            (false, true, false, "references"),
+            (false, false, true, "callers"),
+        ] {
+            let response = execute_ivygrep_search(IvygrepSearchArgs {
+                query: Some("calculate_tax".to_string()),
+                path: Some(root.to_string_lossy().to_string()),
+                limit: Some(5),
+                context: Some(2),
+                type_filter: None,
+                regex: None,
+                literal: None,
+                symbol: Some(symbol),
+                refs: Some(refs),
+                callers: Some(callers),
+                include: None,
+                exclude: None,
+                first_line_only: Some(false),
+                file_name_only: Some(false),
+                verbose: Some(false),
+                skip_gitignore: None,
+            })
+            .unwrap();
+            let result = tool_json_payload(&response);
+            assert_eq!(result["mode"], expected_mode);
+            assert!(result["result_count"].as_u64().unwrap() > 0);
+        }
+
+        for query in ["applyFilter", "applyFilter()"] {
+            for (refs, callers, expected_mode) in
+                [(true, false, "references"), (false, true, "callers")]
+            {
+                let response = execute_ivygrep_search(IvygrepSearchArgs {
+                    query: Some(query.to_string()),
+                    path: Some(root.to_string_lossy().to_string()),
+                    limit: Some(5),
+                    context: Some(2),
+                    type_filter: None,
+                    regex: None,
+                    literal: None,
+                    symbol: None,
+                    refs: Some(refs),
+                    callers: Some(callers),
+                    include: None,
+                    exclude: None,
+                    first_line_only: Some(false),
+                    file_name_only: Some(false),
+                    verbose: Some(false),
+                    skip_gitignore: None,
+                })
+                .unwrap();
+                let result = tool_json_payload(&response);
+                assert_eq!(result["mode"], expected_mode);
+                assert!(result["result_count"].as_u64().unwrap() > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn mcp_search_rejects_conflicting_modes() {
+        let error = execute_ivygrep_search(IvygrepSearchArgs {
+            query: Some("calculate_tax".to_string()),
+            path: None,
+            limit: Some(5),
+            context: Some(2),
+            type_filter: None,
+            regex: None,
+            literal: Some(true),
+            symbol: None,
+            refs: Some(true),
+            callers: None,
+            include: None,
+            exclude: None,
+            first_line_only: Some(false),
+            file_name_only: Some(false),
+            verbose: Some(false),
+            skip_gitignore: None,
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("mutually exclusive"));
     }
 
     #[test]
@@ -1357,6 +1543,9 @@ mod tests {
             type_filter: None,
             regex: Some(false),
             literal: None,
+            symbol: None,
+            refs: None,
+            callers: None,
             include: None,
             exclude: None,
             first_line_only: Some(false),
