@@ -194,12 +194,16 @@ contains "$out_dir/doctor.json" "\"healthy\": true" "doctor healthy"
 
 agent_home="$tmp_root/agent-home"
 fake_bin="$tmp_root/fake-bin"
+cursor_executable=cursor
+if [ "${RUNNER_OS:-}" = "Windows" ]; then
+  cursor_executable=cursor.exe
+fi
 mkdir -p "$agent_home/.cursor" "$fake_bin"
-cat > "$fake_bin/cursor" <<'EOF'
+cat > "$fake_bin/$cursor_executable" <<'EOF'
 #!/bin/sh
 exit 0
 EOF
-chmod +x "$fake_bin/cursor"
+chmod +x "$fake_bin/$cursor_executable"
 cat > "$agent_home/.cursor/mcp.json" <<'EOF'
 {
   "mcpServers": {
