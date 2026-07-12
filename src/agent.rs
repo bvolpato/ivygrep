@@ -100,7 +100,7 @@ impl Drop for SmokeWorkspace {
 }
 
 pub fn install(client: AgentClient) -> Result<()> {
-    let home = dirs::home_dir().context("cannot locate home directory")?;
+    let home = agent_home()?;
     let Some(detected_by) = detect_client(client, &home) else {
         bail!("{} not detected. {}", client.label(), client.install_hint());
     };
@@ -137,7 +137,7 @@ pub fn install(client: AgentClient) -> Result<()> {
 }
 
 pub fn doctor() -> Result<()> {
-    let home = dirs::home_dir().context("cannot locate home directory")?;
+    let home = agent_home()?;
     let executable = current_executable()?;
     let clients = [AgentClient::Claude, AgentClient::Codex, AgentClient::Cursor]
         .into_iter()
@@ -184,6 +184,13 @@ pub fn doctor() -> Result<()> {
     );
     println!("Agent setup healthy.");
     Ok(())
+}
+
+fn agent_home() -> Result<PathBuf> {
+    env::var_os("IVYGREP_AGENT_HOME")
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
+        .context("cannot locate home directory")
 }
 
 #[derive(Debug)]

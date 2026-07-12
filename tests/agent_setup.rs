@@ -37,6 +37,7 @@ fn cursor_install_preserves_config_and_doctor_runs_real_search() {
     install
         .env("HOME", &home)
         .env("USERPROFILE", &home)
+        .env("IVYGREP_AGENT_HOME", &home)
         .env("PATH", &path)
         .args(["agent", "install", "cursor"])
         .assert()
@@ -58,6 +59,7 @@ fn cursor_install_preserves_config_and_doctor_runs_real_search() {
     repeat
         .env("HOME", &home)
         .env("USERPROFILE", &home)
+        .env("IVYGREP_AGENT_HOME", &home)
         .env("PATH", &path)
         .args(["agent", "install", "cursor"])
         .assert()
@@ -68,6 +70,7 @@ fn cursor_install_preserves_config_and_doctor_runs_real_search() {
     doctor
         .env("HOME", &home)
         .env("USERPROFILE", &home)
+        .env("IVYGREP_AGENT_HOME", &home)
         .env("PATH", &path)
         .args(["agent", "doctor"])
         .assert()
@@ -97,6 +100,7 @@ fn missing_client_prints_exact_remediation() {
     Command::new(assert_cmd::cargo::cargo_bin!("ig"))
         .env("HOME", &home)
         .env("USERPROFILE", &home)
+        .env("IVYGREP_AGENT_HOME", &home)
         .env("PATH", &bin)
         .args(["agent", "install", "claude"])
         .assert()

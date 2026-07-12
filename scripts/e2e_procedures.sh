@@ -210,12 +210,12 @@ cat > "$agent_home/.cursor/mcp.json" <<'EOF'
 }
 EOF
 
-run env HOME="$agent_home" PATH="$fake_bin:$PATH" "$ig_bin" agent install cursor > "$out_dir/agent-install.txt"
+run env HOME="$agent_home" IVYGREP_AGENT_HOME="$agent_home" PATH="$fake_bin:$PATH" "$ig_bin" agent install cursor > "$out_dir/agent-install.txt"
 contains "$out_dir/agent-install.txt" "MCP handshake: 2025-11-25" "agent install handshake"
 contains "$out_dir/agent-install.txt" "Real search: 1 result(s)" "agent install real search"
 contains "$agent_home/.cursor/mcp.json" '"existing"' "agent install preserves config"
 
-run env HOME="$agent_home" PATH="$fake_bin:$PATH" "$ig_bin" agent doctor > "$out_dir/agent-doctor.txt"
+run env HOME="$agent_home" IVYGREP_AGENT_HOME="$agent_home" PATH="$fake_bin:$PATH" "$ig_bin" agent doctor > "$out_dir/agent-doctor.txt"
 contains "$out_dir/agent-doctor.txt" "Cursor: configured" "agent doctor detects config"
 contains "$out_dir/agent-doctor.txt" "Tool discovery: ig_search" "agent doctor discovers search tool"
 contains "$out_dir/agent-doctor.txt" "Agent setup healthy" "agent doctor healthy"
