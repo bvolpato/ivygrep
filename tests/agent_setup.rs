@@ -81,7 +81,12 @@ fn cursor_install_preserves_config_and_doctor_runs_real_search() {
 
 #[test]
 fn agent_help_is_focused() {
+    let temp = tempfile::tempdir().unwrap();
+    let blocked_home = temp.path().join("not-a-directory");
+    fs::write(&blocked_home, "blocked").unwrap();
+
     Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .env("IVYGREP_HOME", blocked_home)
         .args(["agent", "--help"])
         .assert()
         .success()
