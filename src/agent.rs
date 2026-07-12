@@ -593,7 +593,9 @@ fn codex_document_matches(document: &DocumentMut, executable: &Path) -> bool {
         .and_then(Item::as_bool)
         .unwrap_or(true);
     enabled
-        && command.is_some_and(|command| command_matches(command, executable))
+        && command.is_some_and(|command| {
+            Path::new(command).is_absolute() && command_matches(command, executable)
+        })
         && args.is_some_and(|args| args.iter().filter_map(TomlValue::as_str).eq(["--mcp"]))
 }
 
@@ -712,6 +714,29 @@ mod tests {
             .unwrap();
         assert!(codex_document_matches(&document, &executable));
         assert!(!write_codex_config(&path, &executable).unwrap());
+    }
+
+    #[test]
+    fn codex_config_rewrites_path_relative_server() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let executable = env::current_exe().unwrap().canonicalize().unwrap();
+        fs::write(
+            &path,
+            "[mcp_servers.ig]\ncommand = \"ig\"\nargs = [\"--mcp\"]\nenabled = true\n",
+        )
+        .unwrap();
+
+        assert!(write_codex_config(&path, &executable).unwrap());
+        let document = fs::read_to_string(&path)
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        assert!(codex_document_matches(&document, &executable));
+        assert_eq!(
+            document["mcp_servers"]["ig"]["command"].as_str(),
+            Some(executable.to_string_lossy().as_ref())
+        );
     }
 
     #[test]

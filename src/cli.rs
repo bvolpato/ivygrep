@@ -1500,10 +1500,12 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         } else {
             print!("{}", crate::context::render_markdown(&bundle));
         }
-        let result =
-            trigger_workspace_enhancement(&workspace, cli.hash, cli.wait_for_enhancement).await;
-        if cli.wait_for_enhancement {
-            result?;
+        if !cli.lexical_only {
+            let result =
+                trigger_workspace_enhancement(&workspace, cli.hash, cli.wait_for_enhancement).await;
+            if cli.wait_for_enhancement {
+                result?;
+            }
         }
         std::process::exit(0);
     }

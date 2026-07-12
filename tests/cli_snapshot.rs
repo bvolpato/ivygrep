@@ -333,6 +333,28 @@ fn cli_context_json_respects_budget_and_captures_relationships() {
 }
 
 #[test]
+#[serial]
+fn cli_lexical_context_never_requests_neural_enhancement() {
+    let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(&target_root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--hash", "-f", "add"])
+        .assert()
+        .success();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(&target_root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--lexical-only", "--wait-for-enhancement", "context", "add"])
+        .assert()
+        .success();
+}
+
+#[test]
 fn cli_context_help_lists_only_relevant_options() {
     Command::new(assert_cmd::cargo::cargo_bin!("ig"))
         .args(["context", "--help"])
