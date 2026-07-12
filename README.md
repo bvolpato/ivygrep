@@ -104,7 +104,20 @@ install -m 0755 ./target/release/ig ~/.local/bin/ig
 ig "authentication flow"            # auto-indexes on first run, then searches
 ig "error handling" src/api/         # scope to a directory
 ig --all "database migrations"      # search across all indexed projects
+ig context "fix refresh-token races" # gather one task-aware context bundle
 ```
+
+**Task context:**
+```bash
+ig context "fix refresh-token races" --budget 8000
+ig --json context "fix refresh-token races" --budget 8000
+```
+
+`ig context` gathers primary implementations, matching definitions and callers,
+tests, and supporting files into one Markdown or JSON bundle. It fuses several
+targeted searches by rank, removes overlapping snippets, and keeps gathered
+evidence within a deterministic model-independent token estimate. The default
+budget is 8,000 tokens. It uses existing local indexes and adds no MCP tool.
 
 **Web UI:**
 ```bash
@@ -166,6 +179,21 @@ launches it. GUI applications may not inherit your interactive shell's `PATH`;
 use the absolute path to `ig` or `ig.exe` in that case.
 
 ### Setup for coding agents
+
+Automatic setup detects the client, preserves existing configuration, writes
+an absolute `ig` command, verifies the MCP handshake, and runs a real search:
+
+```bash
+ig agent install claude
+ig agent install codex
+ig agent install cursor
+ig agent doctor
+```
+
+Restart an open client after installation. Prefer manual setup when you need a
+project-scoped MCP entry or custom environment variables.
+
+### Manual setup
 
 <details>
 <summary><b>Claude Code</b></summary>
@@ -395,6 +423,7 @@ queries, or index data to an external service.
 ```bash
 # Core workflow
 ig "your query"                    # search current workspace
+ig context "task" --budget 8000    # task-aware context bundle
 ig "query" ~/other/project         # search a different workspace
 ig --add .                         # register & index a workspace
 ig --rm .                          # unregister a workspace
@@ -451,7 +480,7 @@ Neither is a relevance threshold.
 - Agents should start with `-n 5` to `-n 10` and `-C 2`. Increase context for
   more lines from the same file; increase limit for more candidate files.
 - Scores order one query's results. They are not global confidence values.
-- ivygrep does not expose a total token-budget parameter.
+- MCP search has no total token budget. CLI `ig context` does.
 
 ---
 

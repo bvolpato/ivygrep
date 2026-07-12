@@ -4,7 +4,12 @@ expression: text
 ---
 Semantic grep that stays local
 
-Usage: ig [OPTIONS] [QUERY] [PATH]
+Usage: ig [OPTIONS] [QUERY] [PATH] [COMMAND]
+
+Commands:
+  context  Build one task-aware, token-budgeted context bundle
+  agent    Install and verify ivygrep for coding agents
+  help     Print this message or the help of the given subcommand(s)
 
 Arguments:
   [QUERY]  Natural-language question, keyword, identifier, or exact search text
@@ -49,6 +54,8 @@ Options:
 
 Examples:
   ig "where is authentication checked?"
+  ig context "fix refresh-token races" --budget 8000
+  ig agent install claude
   ig --literal validate_token src/
   ig --symbol UserService
   ig --add . --wait-for-enhancement

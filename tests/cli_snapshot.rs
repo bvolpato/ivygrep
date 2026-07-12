@@ -6,6 +6,7 @@ use ivygrep::embedding::create_hash_model;
 use ivygrep::indexer::index_workspace;
 use ivygrep::workspace::{Workspace, WorkspaceMetadata};
 use ivygrep::{config, ipc};
+use predicates::prelude::PredicateBooleanExt;
 use serial_test::serial;
 
 fn stage_fixture_repo(name: &str) -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
@@ -266,6 +267,92 @@ fn cli_query_word_add_is_treated_as_query() {
         .clone();
 
     let _value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+}
+
+#[test]
+#[serial]
+fn cli_context_json_respects_budget_and_captures_relationships() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("workspace");
+    let home = tmp.path().join("ivygrep_home");
+    init_git_repo(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("src/auth.rs"),
+        "pub fn validate_token(token: &str) -> bool { !token.is_empty() }\n\
+         pub fn authenticate(token: &str) -> bool { validate_token(token) }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("tests/auth_test.rs"),
+        "#[test]\nfn empty_tokens_are_rejected() {\n    assert!(!validate_token(\"\"));\n}\n",
+    )
+    .unwrap();
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args([
+            "--json",
+            "--hash",
+            "context",
+            "--budget",
+            "1200",
+            "change validate_token behavior",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let used = value["used_tokens"].as_u64().unwrap();
+    assert!(used <= 1200, "bundle exceeded budget: {value:#}");
+    assert_eq!(
+        value["anchor_symbols"],
+        serde_json::json!(["validate_token"])
+    );
+    let items = value["items"].as_array().unwrap();
+    assert!(!items.is_empty());
+    let roles = items
+        .iter()
+        .flat_map(|item| item["roles"].as_array().unwrap())
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(roles.contains(&"primary"), "{value:#}");
+    assert!(roles.contains(&"caller"), "{value:#}");
+    assert!(roles.contains(&"test"), "{value:#}");
+    assert!(
+        items
+            .iter()
+            .any(|item| item["file_path"] == "tests/auth_test.rs"),
+        "{value:#}"
+    );
+}
+
+#[test]
+fn cli_context_help_lists_only_relevant_options() {
+    Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .args(["context", "--help"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("--budget"))
+        .stdout(predicates::str::contains("--lexical-only"))
+        .stdout(predicates::str::contains("--literal").not())
+        .stdout(predicates::str::contains("--limit").not());
+}
+
+#[test]
+fn cli_context_rejects_out_of_range_budget() {
+    Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .args(["context", "--budget", "255", "task"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "context --budget must be between 256 and 131072 tokens",
+        ));
 }
 
 #[test]

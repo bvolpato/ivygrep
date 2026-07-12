@@ -69,7 +69,7 @@
         <div class="container hero-content">
             <div class="hero-badge slide-up">
                 <span class="badge-dot"></span>
-                v1.1.15
+                v1.1.16
             </div>
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" onerror="this.src='assets/logo.png'"/>
@@ -459,9 +459,42 @@
             <div class="section-header">
                 <span class="section-tag">Model Context Protocol</span>
                 <h2 class="section-title text-center">MCP for coding agents</h2>
-                <p class="text-center subtitle-small">Agents query the local index instead of loading whole repos into context.</p>
+                <p class="text-center subtitle-small">Automatic setup for common clients. Manual configuration remains available.</p>
             </div>
 
+            <div class="glass-panel fade-in-scroll mt-4 setup-panel">
+                <h3>One-command setup</h3>
+                <p>Preserves existing config, verifies MCP, and runs a real search.</p>
+                <div class="grid agent-grid">
+                    <div class="agent-card glass-card">
+                        <h4 class="agent-title">Claude Code</h4>
+                        <div class="agent-cmd">
+                            <code>ig agent install claude</code>
+                            <button class="agent-copy-btn" data-copy="ig agent install claude" onclick="copyAgentCmd(this)">Copy</button>
+                        </div>
+                    </div>
+                    <div class="agent-card glass-card">
+                        <h4 class="agent-title">Codex</h4>
+                        <div class="agent-cmd">
+                            <code>ig agent install codex</code>
+                            <button class="agent-copy-btn" data-copy="ig agent install codex" onclick="copyAgentCmd(this)">Copy</button>
+                        </div>
+                    </div>
+                    <div class="agent-card glass-card">
+                        <h4 class="agent-title">Cursor</h4>
+                        <div class="agent-cmd">
+                            <code>ig agent install cursor</code>
+                            <button class="agent-copy-btn" data-copy="ig agent install cursor" onclick="copyAgentCmd(this)">Copy</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="agent-cmd setup-doctor">
+                    <code>ig agent doctor</code>
+                    <button class="agent-copy-btn" data-copy="ig agent doctor" onclick="copyAgentCmd(this)">Copy</button>
+                </div>
+            </div>
+
+            <h3 class="text-center mt-4">Manual MCP setup</h3>
             <div class="grid agent-grid mt-4">
                 <div class="agent-card glass-card fade-in-scroll">
                     <h4 class="agent-title">
@@ -620,7 +653,7 @@
                     <span class="quickstart-number">5</span>
                     <div>
                         <h4>Connect AI agents</h4>
-                        <code class="quickstart-code">claude mcp add -s user ig -- ig --mcp</code>
+                        <code class="quickstart-code">ig agent install claude</code>
                     </div>
                 </div>
             </div>
@@ -644,7 +677,7 @@
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md" class="footer-link">Changelog</a>
                 </div>
                 <div class="footer-copy">
-                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v1.1.15</p>
+                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v1.1.16</p>
                 </div>
             </div>
         </div>

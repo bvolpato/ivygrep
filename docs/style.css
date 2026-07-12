@@ -560,6 +560,10 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
 .agent-copy-btn:hover { background: rgba(255,255,255,0.12); color: #fff; }
 .agent-copy-btn.copied { background: rgba(16,185,129,0.15); border-color: #10b981; color: #10b981; }
 
+.setup-panel { display: grid; gap: 1rem; }
+.setup-panel > p { color: var(--text-muted); }
+.setup-doctor { max-width: 24rem; width: 100%; }
+
 /* ─── MCP Workflow ─── */
 .agent-guidance {
     display: grid;
