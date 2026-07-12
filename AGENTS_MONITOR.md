@@ -10,7 +10,8 @@ gh run list --limit 10 --json workflowName,headBranch,headSha,status,conclusion,
 curl -fsSL https://bvolpato.github.io/ivygrep/ >/tmp/ivygrep-site.html
 curl -fsSL https://bvolpato.github.io/ivygrep/benchmarks/ >/tmp/ivygrep-benchmarks.html
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
-rg -n "v${version}|Performance evidence|Daemon hot-query" /tmp/ivygrep-site.html /tmp/ivygrep-benchmarks.html
+rg -n "v${version}|ig agent install claude|Manual MCP setup" /tmp/ivygrep-site.html
+rg -n "Measured results|Million-chunk performance|Benchmark dashboard" /tmp/ivygrep-benchmarks.html
 ```
 
 Docs Pages should complete successfully and report the GitHub Pages deployment

@@ -677,6 +677,28 @@ fn definition_names(chunk: &IndexedChunk) -> Vec<String> {
         .collect()
 }
 
+pub(crate) fn likely_definition_names(text: &str) -> Vec<String> {
+    const KEYWORDS: &[&str] = &[
+        "fn",
+        "def",
+        "func",
+        "function",
+        "class",
+        "struct",
+        "trait",
+        "enum",
+        "interface",
+        "type",
+        "union",
+        "module",
+    ];
+    let mut seen = HashSet::new();
+    text.lines()
+        .filter_map(|line| definition_name_from_signature(line.trim(), KEYWORDS, false, false))
+        .filter(|name| seen.insert(normalize_symbol(name)))
+        .collect()
+}
+
 pub(crate) fn chunk_defines_exact_name(chunk: &IndexedChunk, name: &str) -> bool {
     exact_name_namespace_depth(chunk, name).is_some()
 }

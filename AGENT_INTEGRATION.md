@@ -21,7 +21,28 @@ shell. If the MCP server fails with an executable-not-found error, replace
 
 ## Client Configuration
 
-### Claude Code
+### Automatic setup
+
+Each installer preserves unrelated client settings and MCP servers, writes the
+absolute path to the running `ig`, verifies MCP initialization and tool
+discovery, then runs one real indexed search.
+
+```bash
+ig agent install claude
+ig agent install codex
+ig agent install cursor
+ig agent doctor
+```
+
+Restart an open client after installation. `ig agent doctor` reports detected,
+missing, malformed, and working configurations with a remediation command.
+
+Use manual configuration below for project-scoped servers, custom environment
+variables, Gemini CLI, or OpenCode.
+
+### Manual setup
+
+#### Claude Code
 
 ```bash
 claude mcp add -s user ig -- ig --mcp
@@ -42,7 +63,7 @@ The equivalent user configuration is:
 }
 ```
 
-### Codex
+#### Codex
 
 ```bash
 codex mcp add ig -- ig --mcp
@@ -59,7 +80,7 @@ command = "ig"
 args = ["--mcp"]
 ```
 
-### Cursor
+#### Cursor
 
 Create `.cursor/mcp.json` for one repository or `~/.cursor/mcp.json` globally:
 
@@ -77,7 +98,7 @@ Create `.cursor/mcp.json` for one repository or `~/.cursor/mcp.json` globally:
 
 Refresh MCP servers in Cursor settings after changing the file.
 
-### Gemini CLI
+#### Gemini CLI
 
 ```bash
 gemini mcp add --scope user --transport stdio ig ig --mcp
@@ -100,7 +121,7 @@ The equivalent user configuration in `~/.gemini/settings.json` is:
 Gemini disables user MCP servers in untrusted folders. Trust the project before
 testing the connection.
 
-### OpenCode
+#### OpenCode
 
 Add this to `opencode.json`:
 
@@ -185,10 +206,9 @@ Recommended agent flow:
    or supporting files. Narrow `path`, `type`, `include`, or `exclude` when the
    results are topically correct but too broad.
 
-There is no total `max_tokens` parameter today. Result count and per-hit context
-must be controlled separately. A smaller response is cheaper to place in an
-agent context window, but it is only better when the returned snippets remain
-sufficient for the task.
+MCP `ig_search` has no total `max_tokens` parameter. Use CLI
+`ig context "task" --budget TOKENS` for one task-aware, budgeted bundle.
+Otherwise control MCP result count and per-hit context separately.
 
 Fewer snippet tokens do not mean fewer result files, better relevance, or worse
 relevance. They mean less source text was returned for the selected files.

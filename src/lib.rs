@@ -1,6 +1,8 @@
+pub mod agent;
 pub mod chunking;
 pub mod cli;
 pub mod config;
+pub mod context;
 pub mod daemon;
 pub mod doctor;
 pub mod embedding;

@@ -33,6 +33,21 @@ class AgentDocumentationTest(unittest.TestCase):
                 self.assertIn(command, self.guide)
                 self.assertIn(command, self.site)
 
+    def test_one_command_agent_setup_is_documented(self) -> None:
+        commands = [
+            "ig agent install claude",
+            "ig agent install codex",
+            "ig agent install cursor",
+            "ig agent doctor",
+        ]
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertIn(command, self.readme)
+                self.assertIn(command, self.guide)
+                self.assertIn(command, self.site)
+        self.assertIn("Manual MCP setup", self.site)
+        self.assertIn("preserves existing", self.readme)
+
     def test_opencode_uses_current_local_server_shape(self) -> None:
         self.assertIn('"type": "local"', self.readme)
         self.assertIn('"command": ["ig", "--mcp"]', self.readme)

@@ -21,8 +21,8 @@ Options:
 Covered procedures:
   --help, --version, --status --json, first-run auto-index search,
   --add, scoped search, --include, --exclude, --literal, --regex,
-  --file-name-only, --first-line-only, stale-index upgrade, --doctor,
-  and --rm.
+  --file-name-only, --first-line-only, context packs, agent install,
+  agent doctor, stale-index upgrade, --doctor, and --rm.
 EOF
 }
 
@@ -149,6 +149,11 @@ not_contains "$out_dir/first-search.json" "vendor/" "first-run search should not
 run "$ig_bin" --add "$project" --force --json --no-watch --hash > "$out_dir/add.json"
 contains "$out_dir/add.json" "\"indexed_files\"" "add json"
 
+run "$ig_bin" context --json --hash --budget 700 "change calculate_sales_tax behavior" "$project" > "$out_dir/context.json"
+contains "$out_dir/context.json" "\"budget_tokens\": 700" "context token budget"
+contains "$out_dir/context.json" "src/payments/tax.rs" "context source path"
+contains "$out_dir/context.json" "calculate_sales_tax" "context source content"
+
 run "$ig_bin" --status --json > "$out_dir/status.json"
 contains "$out_dir/status.json" "\"chunk_count\":" "status lists indexed project"
 contains "$out_dir/status.json" "\"file_count\":" "status includes file count"
@@ -186,6 +191,38 @@ contains "$out_dir/upgrade-search.json" "src/payments/tax.rs" "stale index rebui
 
 (cd "$project" && run "$ig_bin" --doctor --json) > "$out_dir/doctor.json"
 contains "$out_dir/doctor.json" "\"healthy\": true" "doctor healthy"
+
+agent_home="$tmp_root/agent-home"
+fake_bin="$tmp_root/fake-bin"
+cursor_executable=cursor
+if [ "${RUNNER_OS:-}" = "Windows" ]; then
+  cursor_executable=cursor.exe
+fi
+mkdir -p "$agent_home/.cursor" "$fake_bin"
+cat > "$fake_bin/$cursor_executable" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$fake_bin/$cursor_executable"
+cat > "$agent_home/.cursor/mcp.json" <<'EOF'
+{
+  "mcpServers": {
+    "existing": {
+      "command": "existing-server"
+    }
+  }
+}
+EOF
+
+run env HOME="$agent_home" IVYGREP_AGENT_HOME="$agent_home" PATH="$fake_bin:$PATH" "$ig_bin" agent install cursor > "$out_dir/agent-install.txt"
+contains "$out_dir/agent-install.txt" "MCP handshake: 2025-11-25" "agent install handshake"
+contains "$out_dir/agent-install.txt" "Real search: 1 result(s)" "agent install real search"
+contains "$agent_home/.cursor/mcp.json" '"existing"' "agent install preserves config"
+
+run env HOME="$agent_home" IVYGREP_AGENT_HOME="$agent_home" PATH="$fake_bin:$PATH" "$ig_bin" agent doctor > "$out_dir/agent-doctor.txt"
+contains "$out_dir/agent-doctor.txt" "Cursor: configured" "agent doctor detects config"
+contains "$out_dir/agent-doctor.txt" "Tool discovery: ig_search" "agent doctor discovers search tool"
+contains "$out_dir/agent-doctor.txt" "Agent setup healthy" "agent doctor healthy"
 
 run "$ig_bin" --rm "$project" --json > "$out_dir/rm.json"
 contains "$out_dir/rm.json" "\"removed\"" "remove json"

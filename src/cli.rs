@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use colored::Colorize;
 use std::io::IsTerminal;
 
@@ -33,9 +33,12 @@ use crate::workspace::{
     version,
     about = "Semantic grep that stays local",
     long_about = None,
-    after_help = "Examples:\n  ig \"where is authentication checked?\"\n  ig --literal validate_token src/\n  ig --symbol UserService\n  ig --add . --wait-for-enhancement\n  ig --status\n  ig --web"
+    after_help = "Examples:\n  ig \"where is authentication checked?\"\n  ig context \"fix refresh-token races\" --budget 8000\n  ig agent install claude\n  ig --literal validate_token src/\n  ig --symbol UserService\n  ig --add . --wait-for-enhancement\n  ig --status\n  ig --web"
 )]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<CliCommand>,
+
     /// Natural-language question, keyword, identifier, or exact search text.
     #[arg(value_name = "QUERY", required = false)]
     pub query: Option<String>,
@@ -93,112 +96,104 @@ pub struct Cli {
     pub wait_for_enhancement: bool,
 
     /// Rebuild workspace index from scratch when used with --add.
-    #[arg(short, long, global = true)]
+    #[arg(short, long)]
     pub force: bool,
 
     /// Launch the interactive terminal UI.
-    #[arg(long = "interactive", visible_alias = "ui", global = true)]
+    #[arg(long = "interactive", visible_alias = "ui")]
     pub ui: bool,
 
     /// Fast exact-match search backed by the index. Deterministic results,
     /// orders of magnitude faster than grep/rg for indexed repos.
-    #[arg(long, short = 'l', global = true)]
+    #[arg(long, short = 'l')]
     pub literal: bool,
 
     /// Legacy regex mode. Uses an index prefilter when possible, otherwise walks files.
-    #[arg(long, global = true, hide = true)]
+    #[arg(long, hide = true)]
     pub regex: bool,
 
     /// Find exact symbol definitions.
-    #[arg(long, global = true, conflicts_with_all = ["refs", "callers", "literal", "regex"])]
+    #[arg(long, conflicts_with_all = ["refs", "callers", "literal", "regex"])]
     pub symbol: bool,
 
     /// Find exact symbol references.
-    #[arg(long, global = true, conflicts_with_all = ["symbol", "callers", "literal", "regex"])]
+    #[arg(long, conflicts_with_all = ["symbol", "callers", "literal", "regex"])]
     pub refs: bool,
 
     /// Find functions or methods that call the named symbol.
-    #[arg(long, global = true, conflicts_with_all = ["symbol", "refs", "literal", "regex"])]
+    #[arg(long, conflicts_with_all = ["symbol", "refs", "literal", "regex"])]
     pub callers: bool,
 
     /// Emit machine-readable JSON without ANSI styling.
-    #[arg(long, global = true)]
+    #[arg(long)]
     pub json: bool,
 
     /// Lines before and after the focused match to include in each snippet.
     /// This changes output size, not retrieval ranking.
-    #[arg(
-        short = 'C',
-        long,
-        value_name = "LINES",
-        default_value_t = 2,
-        global = true
-    )]
+    #[arg(short = 'C', long, value_name = "LINES", default_value_t = 2)]
     pub context: usize,
 
     #[arg(
         long = "type",
-        global = true,
         help = "Filter by language name, extension, or alias (e.g. rust, rs, py, python, c++, bash, md)"
     )]
     pub type_filter: Option<String>,
 
     /// Search every tracked workspace instead of resolving one PATH.
-    #[arg(long, alias = "all", global = true)]
+    #[arg(long, alias = "all")]
     pub all_indices: bool,
 
     /// Include only comma-separated path globs. May be repeated.
-    #[arg(long, value_name = "GLOBS", value_delimiter = ',', global = true)]
+    #[arg(long, value_name = "GLOBS", value_delimiter = ',')]
     pub include: Vec<String>,
 
     /// Exclude comma-separated path globs. May be repeated.
-    #[arg(long, value_name = "GLOBS", value_delimiter = ',', global = true)]
+    #[arg(long, value_name = "GLOBS", value_delimiter = ',')]
     pub exclude: Vec<String>,
 
     /// Retrieval breadth and maximum ranked result files, not a token, line, or
     /// confidence limit. Larger values search deeper and may improve recall.
-    #[arg(short = 'n', long, value_name = "FILES", global = true)]
+    #[arg(short = 'n', long, value_name = "FILES")]
     pub limit: Option<usize>,
 
     /// Use maximum candidate budgets and return all surviving results. This can
     /// produce large, slower responses.
-    #[arg(long, global = true, conflicts_with = "limit")]
+    #[arg(long, conflicts_with = "limit")]
     pub no_limit: bool,
 
     /// Index once without starting or registering a filesystem watcher.
-    #[arg(long, global = true)]
+    #[arg(long)]
     pub no_watch: bool,
 
     /// Return only the first non-empty preview line. Ranking is unchanged.
-    #[arg(long, global = true)]
+    #[arg(long)]
     pub first_line_only: bool,
 
     /// Return only file paths. Without --limit, this also uses maximum candidate
     /// budgets; combine with --limit for a bounded path list.
-    #[arg(long, global = true)]
+    #[arg(long)]
     pub file_name_only: bool,
 
     /// Include source-signal explanations and detailed progress diagnostics.
-    #[arg(long, global = true)]
+    #[arg(long)]
     pub verbose: bool,
 
     /// Include files excluded by .gitignore and other standard ignore files.
-    #[arg(long, global = true)]
+    #[arg(long)]
     pub skip_gitignore: bool,
 
     /// Use lightweight hash-based embeddings instead of the default neural
     /// model. Faster startup, no model download, lower quality.
-    #[arg(long, global = true)]
+    #[arg(long)]
     pub hash: bool,
 
     /// Use BM25/path/signature retrieval without vector search.
-    #[arg(long, global = true, conflicts_with_all = ["hash", "literal", "regex"])]
+    #[arg(long, conflicts_with_all = ["hash", "literal", "regex"])]
     pub lexical_only: bool,
 
     /// Force neural retrieval for benchmarking and diagnostics.
     #[arg(
         long,
-        global = true,
         hide = true,
         conflicts_with_all = ["hash", "lexical_only", "literal", "regex"]
     )]
@@ -211,6 +206,97 @@ pub struct Cli {
     pub enhance_hash_internal: Option<PathBuf>,
 }
 
+#[derive(Subcommand, Debug, Clone)]
+pub enum CliCommand {
+    /// Build one task-aware, token-budgeted context bundle.
+    Context(ContextArgs),
+    /// Install and verify ivygrep for coding agents.
+    Agent(AgentArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct ContextArgs {
+    /// Development task or question to gather context for.
+    #[arg(value_name = "TASK")]
+    pub task: String,
+
+    /// Workspace or subdirectory. Defaults to current directory.
+    #[arg(value_name = "PATH")]
+    pub path: Option<PathBuf>,
+
+    /// Maximum model-independent estimated tokens in gathered evidence.
+    #[arg(long, value_name = "TOKENS", default_value_t = 8000)]
+    pub budget: usize,
+
+    /// Use BM25/path/signature retrieval without vector search.
+    #[arg(long, conflicts_with = "hash")]
+    pub lexical_only: bool,
+
+    /// Emit machine-readable JSON.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Filter by language name, extension, or alias.
+    #[arg(long = "type")]
+    pub type_filter: Option<String>,
+
+    /// Include only comma-separated path globs. May be repeated.
+    #[arg(long, value_name = "GLOBS", value_delimiter = ',')]
+    pub include: Vec<String>,
+
+    /// Exclude comma-separated path globs. May be repeated.
+    #[arg(long, value_name = "GLOBS", value_delimiter = ',')]
+    pub exclude: Vec<String>,
+
+    /// Index once without starting a filesystem watcher.
+    #[arg(long)]
+    pub no_watch: bool,
+
+    /// Include detailed progress diagnostics.
+    #[arg(long)]
+    pub verbose: bool,
+
+    /// Include files excluded by .gitignore.
+    #[arg(long)]
+    pub skip_gitignore: bool,
+
+    /// Use lightweight hash-based embeddings.
+    #[arg(long, conflicts_with = "lexical_only")]
+    pub hash: bool,
+}
+
+#[derive(Args, Debug, Clone)]
+pub struct AgentArgs {
+    #[command(subcommand)]
+    pub command: AgentCommand,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum AgentCommand {
+    /// Configure one client, verify MCP, and run a real search.
+    Install {
+        /// Coding agent to configure.
+        #[arg(value_enum)]
+        client: crate::agent::AgentClient,
+    },
+    /// Detect clients and verify configuration, MCP, and search.
+    Doctor,
+}
+
+fn apply_context_args(cli: &mut Cli, args: &ContextArgs) {
+    cli.query = Some(args.task.clone());
+    cli.query_path = args.path.clone();
+    cli.lexical_only |= args.lexical_only;
+    cli.json |= args.json;
+    cli.type_filter = args.type_filter.clone().or(cli.type_filter.take());
+    cli.include.extend(args.include.iter().cloned());
+    cli.exclude.extend(args.exclude.iter().cloned());
+    cli.no_watch |= args.no_watch;
+    cli.verbose |= args.verbose;
+    cli.skip_gitignore |= args.skip_gitignore;
+    cli.hash |= args.hash;
+}
+
 pub async fn run() -> Result<()> {
     init_tracing();
     config::ensure_app_dirs()?;
@@ -220,6 +306,18 @@ pub async fn run() -> Result<()> {
     }
 
     let mut cli = Cli::parse();
+    let mut agent_command = None;
+    let context_args = match cli.command.take() {
+        Some(CliCommand::Context(args)) => {
+            apply_context_args(&mut cli, &args);
+            Some(args)
+        }
+        Some(CliCommand::Agent(args)) => {
+            agent_command = Some(args.command);
+            None
+        }
+        None => None,
+    };
 
     // Resolve --type aliases: "rs" → "rust", "py" → "python", "c++" → "cpp", etc.
     if let Some(ref tf) = cli.type_filter
@@ -235,6 +333,8 @@ pub async fn run() -> Result<()> {
         cli.daemon,
         cli.web,
         cli.mcp,
+        context_args.is_some(),
+        agent_command.is_some(),
     ]
     .iter()
     .filter(|flag| **flag)
@@ -242,8 +342,39 @@ pub async fn run() -> Result<()> {
 
     if action_count > 1 {
         bail!(
-            "use only one action at a time: --add, --rm, --status, --doctor, --daemon, --web, or --mcp"
+            "use only one action at a time: context, agent, --add, --rm, --status, --doctor, --daemon, --web, or --mcp"
         );
+    }
+
+    if let Some(command) = agent_command {
+        match command {
+            AgentCommand::Install { client } => crate::agent::install(client)?,
+            AgentCommand::Doctor => crate::agent::doctor()?,
+        }
+        return Ok(());
+    }
+
+    if context_args.is_some()
+        && (cli.all_indices
+            || cli.literal
+            || cli.regex
+            || cli.symbol
+            || cli.refs
+            || cli.callers
+            || cli.ui
+            || cli.no_limit
+            || cli.limit.is_some()
+            || cli.first_line_only
+            || cli.file_name_only)
+    {
+        bail!(
+            "context uses its task and token budget directly; do not combine it with search modes, --all-indices, --limit, --no-limit, --interactive, or compact-output flags"
+        );
+    }
+    if let Some(args) = &context_args
+        && !(256..=131_072).contains(&args.budget)
+    {
+        bail!("context --budget must be between 256 and 131072 tokens");
     }
 
     if cli.daemon {
@@ -446,7 +577,7 @@ pub async fn run() -> Result<()> {
         return crate::tui::run_tui(cli).await;
     }
 
-    run_query(cli).await
+    run_query(cli, context_args).await
 }
 
 fn open_browser(url: &str) {
@@ -1012,7 +1143,7 @@ async fn run_remove(path: &Path, json: bool) -> Result<()> {
     Ok(())
 }
 
-async fn run_query(cli: Cli) -> Result<()> {
+async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
     let query = cli
         .query
         .as_deref()
@@ -1335,6 +1466,48 @@ async fn run_query(cli: Cli) -> Result<()> {
                 }
             }
         }
+    }
+
+    if let Some(context_args) = context_args {
+        let options = SearchOptions {
+            limit: None,
+            context: 12,
+            type_filter: cli.type_filter.clone(),
+            include_globs: cli.include.clone(),
+            exclude_globs: cli.exclude.clone(),
+            scope_filter: scope_filter.clone(),
+            skip_gitignore: cli.skip_gitignore,
+            force_neural: cli.force_neural,
+            progress_tx: None,
+            cancel_token: None,
+        };
+        let model = local_hybrid_search_model(
+            std::slice::from_ref(&workspace),
+            query,
+            cli.hash,
+            cli.lexical_only,
+            cli.force_neural,
+        )?;
+        let bundle = crate::context::build_context_bundle(
+            &workspace,
+            query,
+            model.as_deref(),
+            &options,
+            context_args.budget,
+        )?;
+        if cli.json {
+            println!("{}", serde_json::to_string_pretty(&bundle)?);
+        } else {
+            print!("{}", crate::context::render_markdown(&bundle));
+        }
+        if !cli.lexical_only {
+            let result =
+                trigger_workspace_enhancement(&workspace, cli.hash, cli.wait_for_enhancement).await;
+            if cli.wait_for_enhancement {
+                result?;
+            }
+        }
+        std::process::exit(0);
     }
 
     let hits = if cli.symbol || cli.refs || cli.callers {
@@ -2248,6 +2421,16 @@ mod tests {
     use crate::embedding::create_hash_model;
     use crate::indexer::index_workspace;
     use crate::workspace::WorkspaceMetadata;
+
+    #[test]
+    fn context_inherits_parent_lexical_only_flag() {
+        let mut cli = Cli::try_parse_from(["ig", "--lexical-only", "context", "task"]).unwrap();
+        let Some(CliCommand::Context(args)) = cli.command.take() else {
+            panic!("context subcommand was not parsed");
+        };
+        apply_context_args(&mut cli, &args);
+        assert!(cli.lexical_only);
+    }
 
     #[test]
     #[serial]

@@ -4,6 +4,12 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.1.16] - 2026-07-12
+
+### Added
+- **`ig context` builds task-aware context bundles.** One command gathers implementations, definitions, callers, tests, and supporting evidence within a token budget.
+- **`ig agent install` configures Claude Code, Codex, and Cursor.** Existing settings are preserved, then `ig agent doctor` verifies MCP initialization, tool discovery, and one real search.
+
 ## [1.1.15] - 2026-07-11
 
 ### Added
