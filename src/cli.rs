@@ -283,6 +283,20 @@ pub enum AgentCommand {
     Doctor,
 }
 
+fn apply_context_args(cli: &mut Cli, args: &ContextArgs) {
+    cli.query = Some(args.task.clone());
+    cli.query_path = args.path.clone();
+    cli.lexical_only |= args.lexical_only;
+    cli.json |= args.json;
+    cli.type_filter = args.type_filter.clone().or(cli.type_filter.take());
+    cli.include.extend(args.include.iter().cloned());
+    cli.exclude.extend(args.exclude.iter().cloned());
+    cli.no_watch |= args.no_watch;
+    cli.verbose |= args.verbose;
+    cli.skip_gitignore |= args.skip_gitignore;
+    cli.hash |= args.hash;
+}
+
 pub async fn run() -> Result<()> {
     init_tracing();
     config::ensure_app_dirs()?;
@@ -295,17 +309,7 @@ pub async fn run() -> Result<()> {
     let mut agent_command = None;
     let context_args = match cli.command.take() {
         Some(CliCommand::Context(args)) => {
-            cli.query = Some(args.task.clone());
-            cli.query_path = args.path.clone();
-            cli.lexical_only = args.lexical_only;
-            cli.json |= args.json;
-            cli.type_filter = args.type_filter.clone().or(cli.type_filter);
-            cli.include.extend(args.include.iter().cloned());
-            cli.exclude.extend(args.exclude.iter().cloned());
-            cli.no_watch |= args.no_watch;
-            cli.verbose |= args.verbose;
-            cli.skip_gitignore |= args.skip_gitignore;
-            cli.hash |= args.hash;
+            apply_context_args(&mut cli, &args);
             Some(args)
         }
         Some(CliCommand::Agent(args)) => {
@@ -2415,6 +2419,16 @@ mod tests {
     use crate::embedding::create_hash_model;
     use crate::indexer::index_workspace;
     use crate::workspace::WorkspaceMetadata;
+
+    #[test]
+    fn context_inherits_parent_lexical_only_flag() {
+        let mut cli = Cli::try_parse_from(["ig", "--lexical-only", "context", "task"]).unwrap();
+        let Some(CliCommand::Context(args)) = cli.command.take() else {
+            panic!("context subcommand was not parsed");
+        };
+        apply_context_args(&mut cli, &args);
+        assert!(cli.lexical_only);
+    }
 
     #[test]
     #[serial]

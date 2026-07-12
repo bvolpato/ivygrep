@@ -541,6 +541,7 @@ fn write_codex_config(path: &Path, executable: &Path) -> Result<bool> {
     let mut args = Array::new();
     args.push("--mcp");
     server["args"] = Item::Value(TomlValue::Array(args));
+    server["enabled"] = value(true);
     servers.insert("ig", Item::Table(server));
     write_atomic(path, document.to_string().as_bytes())?;
     Ok(true)
@@ -587,7 +588,12 @@ fn codex_document_matches(document: &DocumentMut, executable: &Path) -> bool {
     };
     let command = server.get("command").and_then(Item::as_str);
     let args = server.get("args").and_then(Item::as_array);
-    command.is_some_and(|command| command_matches(command, executable))
+    let enabled = server
+        .get("enabled")
+        .and_then(Item::as_bool)
+        .unwrap_or(true);
+    enabled
+        && command.is_some_and(|command| command_matches(command, executable))
         && args.is_some_and(|args| args.iter().filter_map(TomlValue::as_str).eq(["--mcp"]))
 }
 
@@ -682,6 +688,29 @@ mod tests {
         assert!(text.contains("model = \"gpt-test\""));
         assert!(text.contains("[mcp_servers.other]"));
         assert!(text.contains("[mcp_servers.ig]"));
+        assert!(!write_codex_config(&path, &executable).unwrap());
+    }
+
+    #[test]
+    fn codex_config_reenables_disabled_server() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let executable = env::current_exe().unwrap().canonicalize().unwrap();
+        fs::write(
+            &path,
+            format!(
+                "[mcp_servers.ig]\ncommand = {:?}\nargs = [\"--mcp\"]\nenabled = false\n",
+                executable.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        assert!(write_codex_config(&path, &executable).unwrap());
+        let document = fs::read_to_string(&path)
+            .unwrap()
+            .parse::<DocumentMut>()
+            .unwrap();
+        assert!(codex_document_matches(&document, &executable));
         assert!(!write_codex_config(&path, &executable).unwrap());
     }
 
