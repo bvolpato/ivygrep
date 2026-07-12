@@ -1421,7 +1421,9 @@ mod tests {
         std::fs::write(
             root.join("match.rs"),
             "pub fn calculate_tax(amount: f64) -> f64 { amount * 0.2 }\n\
-             pub fn checkout() -> f64 { calculate_tax(10.0) }\n",
+             pub fn checkout() -> f64 { calculate_tax(10.0) }\n\
+             pub fn applyFilter(value: bool) -> bool { value }\n\
+             pub fn render() -> bool { applyFilter(true) }\n",
         )
         .unwrap();
 
@@ -1442,6 +1444,33 @@ mod tests {
                 regex: None,
                 literal: None,
                 symbol: Some(symbol),
+                refs: Some(refs),
+                callers: Some(callers),
+                include: None,
+                exclude: None,
+                first_line_only: Some(false),
+                file_name_only: Some(false),
+                verbose: Some(false),
+                skip_gitignore: None,
+            })
+            .unwrap();
+            let result = tool_json_payload(&response);
+            assert_eq!(result["mode"], expected_mode);
+            assert!(result["result_count"].as_u64().unwrap() > 0);
+        }
+
+        for (refs, callers, expected_mode) in
+            [(true, false, "references"), (false, true, "callers")]
+        {
+            let response = execute_ivygrep_search(IvygrepSearchArgs {
+                query: Some("applyFilter".to_string()),
+                path: Some(root.to_string_lossy().to_string()),
+                limit: Some(5),
+                context: Some(2),
+                type_filter: None,
+                regex: None,
+                literal: None,
+                symbol: None,
                 refs: Some(refs),
                 callers: Some(callers),
                 include: None,

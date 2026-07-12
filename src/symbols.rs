@@ -124,7 +124,7 @@ pub fn search_symbols_with_options(
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
 
     if mode != SymbolSearchMode::Definitions {
-        return search_call_sites(workspace, &normalized, mode, options);
+        return search_call_sites(workspace, name, &normalized, mode, options);
     }
 
     let primary_sqlite = if workspace.has_overlay() {
@@ -359,6 +359,7 @@ fn query_workspace_db(
 
 fn search_call_sites(
     workspace: &Workspace,
+    name: &str,
     normalized: &str,
     mode: SymbolSearchMode,
     options: &SearchOptions,
@@ -375,7 +376,7 @@ fn search_call_sites(
     };
     let mut candidate_options = options.clone();
     candidate_options.limit = options.limit.map(|limit| limit.saturating_mul(4));
-    let query = format!("{normalized}(");
+    let query = format!("{}(", name.trim());
     let candidates = if options.limit.is_some() {
         crate::search::exact_literal_chunks(workspace, &query, &candidate_options)?
     } else {
