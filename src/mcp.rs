@@ -1459,31 +1459,33 @@ mod tests {
             assert!(result["result_count"].as_u64().unwrap() > 0);
         }
 
-        for (refs, callers, expected_mode) in
-            [(true, false, "references"), (false, true, "callers")]
-        {
-            let response = execute_ivygrep_search(IvygrepSearchArgs {
-                query: Some("applyFilter".to_string()),
-                path: Some(root.to_string_lossy().to_string()),
-                limit: Some(5),
-                context: Some(2),
-                type_filter: None,
-                regex: None,
-                literal: None,
-                symbol: None,
-                refs: Some(refs),
-                callers: Some(callers),
-                include: None,
-                exclude: None,
-                first_line_only: Some(false),
-                file_name_only: Some(false),
-                verbose: Some(false),
-                skip_gitignore: None,
-            })
-            .unwrap();
-            let result = tool_json_payload(&response);
-            assert_eq!(result["mode"], expected_mode);
-            assert!(result["result_count"].as_u64().unwrap() > 0);
+        for query in ["applyFilter", "applyFilter()"] {
+            for (refs, callers, expected_mode) in
+                [(true, false, "references"), (false, true, "callers")]
+            {
+                let response = execute_ivygrep_search(IvygrepSearchArgs {
+                    query: Some(query.to_string()),
+                    path: Some(root.to_string_lossy().to_string()),
+                    limit: Some(5),
+                    context: Some(2),
+                    type_filter: None,
+                    regex: None,
+                    literal: None,
+                    symbol: None,
+                    refs: Some(refs),
+                    callers: Some(callers),
+                    include: None,
+                    exclude: None,
+                    first_line_only: Some(false),
+                    file_name_only: Some(false),
+                    verbose: Some(false),
+                    skip_gitignore: None,
+                })
+                .unwrap();
+                let result = tool_json_payload(&response);
+                assert_eq!(result["mode"], expected_mode);
+                assert!(result["result_count"].as_u64().unwrap() > 0);
+            }
         }
     }
 
