@@ -572,6 +572,7 @@ fn anchor_symbols(task: &str, primary_hits: &[SearchHit]) -> Vec<String> {
     }
 
     let mut scored = BTreeMap::<String, usize>::new();
+    let mut fallback = None;
     let mut task_terms = significant_task_terms(task);
     if task_terms
         .iter()
@@ -586,8 +587,8 @@ fn anchor_symbols(task: &str, primary_hits: &[SearchHit]) -> Vec<String> {
         } else {
             likely_definition_names(&hit.preview)
         };
-        names.sort();
-        names.dedup();
+        let mut seen_names = HashSet::new();
+        names.retain(|name| seen_names.insert(name.clone()));
         let path_terms = hit
             .file_path
             .to_string_lossy()
@@ -600,6 +601,7 @@ fn anchor_symbols(task: &str, primary_hits: &[SearchHit]) -> Vec<String> {
             .count();
         for symbol in names {
             if symbol.len() >= 3 && !is_generic_symbol(&symbol) {
+                fallback.get_or_insert_with(|| symbol.clone());
                 let symbol_terms = crate::text::split_identifier_segments(&symbol);
                 let overlap = symbol_terms
                     .iter()
@@ -625,6 +627,11 @@ fn anchor_symbols(task: &str, primary_hits: &[SearchHit]) -> Vec<String> {
                 }
             }
         }
+    }
+    if scored.is_empty()
+        && let Some(symbol) = fallback
+    {
+        scored.insert(symbol, 1);
     }
     let mut symbols = scored.into_iter().collect::<Vec<_>>();
     symbols.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
@@ -700,15 +707,31 @@ fn task_symbols(task: &str) -> Vec<String> {
         part.contains('_')
             || part.contains("::")
             || part.contains('.') && !looks_like_file_name(part)
-            || part
-                .chars()
-                .zip(part.chars().skip(1))
-                .any(|(left, right)| left.is_ascii_lowercase() && right.is_ascii_uppercase())
+            || looks_like_mixed_case_identifier(part)
     })
     .filter(|part| !is_generic_symbol(part))
     .filter(|part| seen.insert(part.to_ascii_lowercase()))
     .map(ToOwned::to_owned)
     .collect()
+}
+
+fn looks_like_mixed_case_identifier(token: &str) -> bool {
+    let lower_to_upper = token
+        .chars()
+        .zip(token.chars().skip(1))
+        .any(|(left, right)| left.is_ascii_lowercase() && right.is_ascii_uppercase());
+    let leading_uppercase = token
+        .chars()
+        .take_while(|character| character.is_ascii_uppercase())
+        .count();
+    lower_to_upper
+        || leading_uppercase >= 2
+            && token
+                .chars()
+                .skip(leading_uppercase)
+                .filter(|character| character.is_ascii_lowercase())
+                .count()
+                >= 2
 }
 
 fn looks_like_file_name(token: &str) -> bool {
@@ -1187,6 +1210,10 @@ mod tests {
             task_symbols("change UserService and std::io and client.send"),
             ["UserService", "std::io", "client.send"]
         );
+        assert_eq!(
+            task_symbols("fix HTTPServer, URLParser, and JSONDecoder"),
+            ["HTTPServer", "URLParser", "JSONDecoder"]
+        );
     }
 
     #[test]
@@ -1219,6 +1246,25 @@ mod tests {
         assert_eq!(
             anchor_symbols("add token budgeted context packs", &primary),
             ["build_context_bundle"]
+        );
+    }
+
+    #[test]
+    fn inferred_anchors_fall_back_for_synonym_heavy_tasks() {
+        let primary = vec![SearchHit {
+            file_path: PathBuf::from("src/auth.rs"),
+            start_line: 1,
+            end_line: 1,
+            preview: "pub fn validate_token(token: &str) -> bool { !token.is_empty() }".to_string(),
+            reason: String::new(),
+            score: 1.0,
+            sources: Vec::new(),
+            neural_requested: false,
+            neural_executed: false,
+        }];
+        assert_eq!(
+            anchor_symbols("fix authentication failures", &primary),
+            ["validate_token"]
         );
     }
 
