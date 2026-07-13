@@ -22,10 +22,23 @@ class ReleaseWorkflowTest(unittest.TestCase):
 
     def test_release_waits_for_archive_acceptance(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        builds = workflow.split("  build:\n", maxsplit=1)[1].split(
+            "  artifact-acceptance:\n", maxsplit=1
+        )[0]
+        acceptance = workflow.split("  artifact-acceptance:\n", maxsplit=1)[1].split(
+            "  release:\n", maxsplit=1
+        )[0]
+
         self.assertIn("artifact-acceptance:", workflow)
         self.assertIn("needs: artifact-acceptance", workflow)
         self.assertIn("scripts/verify_release_artifact.py", workflow)
         self.assertIn("scripts/e2e_x86_baseline.sh", workflow)
+        self.assertNotIn("scripts/cache_neural_model.py", builds)
+        self.assertIn("scripts/cache_neural_model.py", acceptance)
+        self.assertLess(
+            acceptance.index("Install uv for neural model caching"),
+            acceptance.index("Cache pinned neural model through Xet"),
+        )
 
     def test_native_daemon_acceptance_uses_platform_temp_default(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
@@ -120,6 +133,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("VCRUNTIME", workflow)
         self.assertIn("MSVCP", workflow)
         self.assertIn("scripts/e2e_cached_model.sh", windows_acceptance)
+        self.assertIn("IVYGREP_RELEASE_HF_CACHE", windows_acceptance)
         self.assertIn("StaticEmbedding token mean via Rust", windows_acceptance)
         self.assertIn("HTTP_PROXY=http://127.0.0.1:9", windows_acceptance)
 

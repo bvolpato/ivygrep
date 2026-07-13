@@ -8,6 +8,23 @@ CI_WORKFLOW = (
 
 
 class CIWorkflowTest(unittest.TestCase):
+    def test_neural_builds_prime_models_with_xet(self) -> None:
+        workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+        tests = workflow.split("  test:\n", maxsplit=1)[1].split(
+            "  build:\n", maxsplit=1
+        )[0]
+        builds = workflow.split("  build:\n", maxsplit=1)[1].split(
+            "  ci-gate:\n", maxsplit=1
+        )[0]
+
+        self.assertNotIn("Install uv for neural model caching", tests)
+        self.assertIn("Install uv for neural model caching", builds)
+        self.assertIn("uv run scripts/cache_neural_model.py", builds)
+        self.assertLess(
+            builds.index("Install uv for neural model caching"),
+            builds.index("Validate local neural execution"),
+        )
+
     def test_ci_gate_requires_every_matrix(self) -> None:
         workflow = CI_WORKFLOW.read_text(encoding="utf-8")
         gate = workflow.split("  ci-gate:\n", maxsplit=1)[1]

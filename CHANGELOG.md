@@ -15,6 +15,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 - **Cross-platform release checks tolerate transient model-host failures.** Xet CAS signed-URL failures retry without treating generic authorization errors as transient, and daemon-equivalence output is decoded as UTF-8 on Windows.
+- **Neural acceptance uses Hugging Face's native Xet client.** CI and release checks cache pinned, checksum-verified model assets before testing online and offline loading.
 
 ## [1.1.18] - 2026-07-12
 
