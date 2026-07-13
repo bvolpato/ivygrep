@@ -1,4 +1,5 @@
 import importlib.util
+import os
 from unittest import mock
 import sys
 import tempfile
@@ -15,6 +16,19 @@ SPEC.loader.exec_module(check_daemon_equivalence)
 
 
 class DaemonEquivalenceFixtureTest(unittest.TestCase):
+    def test_subprocess_output_is_decoded_as_utf8(self) -> None:
+        result = check_daemon_equivalence.run(
+            [
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.buffer.write('✓'.encode('utf-8'))",
+            ],
+            cwd=SCRIPT.parent,
+            env=os.environ.copy(),
+        )
+
+        self.assertEqual(result.stdout, "✓")
+
     def test_fixture_marks_its_workspace_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp) / "fixture"

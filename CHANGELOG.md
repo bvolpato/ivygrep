@@ -13,6 +13,9 @@ All notable changes to ivygrep are documented in this file.
 ### Documentation
 - **Context packs are a first-class product workflow.** README, agent guide, CLI help, metadata, comparison table, and dedicated website section explain one-command task handoffs and useful budget sizes.
 
+### Fixed
+- **Cross-platform release checks tolerate transient model-host failures.** Xet CAS signed-URL failures retry without treating generic authorization errors as transient, and daemon-equivalence output is decoded as UTF-8 on Windows.
+
 ## [1.1.18] - 2026-07-12
 
 ### Added
