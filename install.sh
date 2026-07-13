@@ -78,6 +78,7 @@ has_library() {
 has_cuda_runtime() {
     has_library libcuda.so.1 &&
         has_library libcublas.so.13 &&
+        has_library libcublasLt.so.13 &&
         has_library libcurand.so.10
 }
 
@@ -104,7 +105,7 @@ has_supported_cuda_gpu() {
 
 missing_cuda_libraries() {
     missing=""
-    for library in libcuda.so.1 libcublas.so.13 libcurand.so.10; do
+    for library in libcuda.so.1 libcublas.so.13 libcublasLt.so.13 libcurand.so.10; do
         if ! has_library "$library"; then
             missing="${missing}${missing:+, }$library"
         fi

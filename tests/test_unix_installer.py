@@ -128,7 +128,12 @@ esac
         cuda_lib_dir = self.root / "cuda-lib"
         if cuda_runtime:
             cuda_lib_dir.mkdir()
-            for library in ("libcuda.so.1", "libcublas.so.13", "libcurand.so.10"):
+            for library in (
+                "libcuda.so.1",
+                "libcublas.so.13",
+                "libcublasLt.so.13",
+                "libcurand.so.10",
+            ):
                 (cuda_lib_dir / library).write_text("", encoding="utf-8")
         env = os.environ.copy()
         env.update(
@@ -196,6 +201,7 @@ esac
         self.assertNotIn("selected CUDA archive", result.stdout)
         self.assertIn("NVIDIA GPU detected, but CUDA 13 runtime is incomplete", result.stdout)
         self.assertIn("libcublas.so.13", result.stdout)
+        self.assertIn("libcublasLt.so.13", result.stdout)
         self.assertIn("selected portable archive", result.stdout)
         self.assertIn("linux-x86_64-musl", result.stdout)
 
@@ -251,6 +257,7 @@ esac
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("CUDA 13 runtime is incomplete", result.stderr)
         self.assertIn("libcublas.so.13", result.stderr)
+        self.assertIn("libcublasLt.so.13", result.stderr)
 
     def test_explicit_cuda_rejects_unsupported_gpu(self) -> None:
         self.make_archive("linux-x86_64-cuda")

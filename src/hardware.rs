@@ -7,6 +7,13 @@ use serde::Serialize;
 
 use crate::embedding::NeuralProfile;
 
+const CUDA_RUNTIME_LIBRARIES: [&str; 4] = [
+    "libcuda.so.1",
+    "libcublas.so.13",
+    "libcublasLt.so.13",
+    "libcurand.so.10",
+];
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HardwareReport {
     pub platform: String,
@@ -60,7 +67,7 @@ pub fn inspect() -> HardwareReport {
             "Shipped CUDA 13 build requires NVIDIA compute capability 7.5 or newer.".to_string()
         });
     if recommended_build == "cuda" {
-        for library in ["libcuda.so.1", "libcublas.so.13", "libcurand.so.10"] {
+        for library in CUDA_RUNTIME_LIBRARIES {
             if !library_available(library) {
                 missing_libraries.push(library.to_string());
             }
