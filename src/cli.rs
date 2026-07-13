@@ -371,14 +371,10 @@ pub async fn run() -> Result<()> {
             println!("Installed build: {}", report.installed_build);
             println!("Recommended build: {}", report.recommended_build);
             println!("Model profile: {}", report.model_profile);
-            let profile_acceleration = if !report.accelerator_applies_to_profile {
-                "CPU optimized".to_string()
-            } else if report.installed_build == "portable" {
-                "CPU (accelerator-capable profile)".to_string()
-            } else {
-                format!("{} enabled", report.installed_build)
-            };
-            println!("Profile acceleration: {}", profile_acceleration);
+            println!(
+                "Profile acceleration: {}",
+                report.profile_acceleration_label()
+            );
             if !report.missing_libraries.is_empty() {
                 println!("Missing runtime: {}", report.missing_libraries.join(", "));
             }

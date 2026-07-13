@@ -1,4 +1,5 @@
 use std::env;
+use std::ffi::OsStr;
 use std::path::Path;
 use std::process::Command;
 
@@ -23,6 +24,17 @@ pub struct HardwareReport {
     pub remediation: Option<String>,
     pub install_command: Option<String>,
     pub note: String,
+}
+
+impl HardwareReport {
+    pub fn profile_acceleration_label(&self) -> String {
+        profile_acceleration_label(
+            &self.installed_build,
+            &self.recommended_build,
+            self.recommended_runtime_ready,
+            self.accelerator_applies_to_profile,
+        )
+    }
 }
 
 pub fn inspect() -> HardwareReport {
@@ -121,6 +133,24 @@ fn cuda_13_supports(capability: &str) -> bool {
     major > 7 || (major == 7 && minor >= 5)
 }
 
+fn profile_acceleration_label(
+    installed_build: &str,
+    recommended_build: &str,
+    recommended_runtime_ready: bool,
+    accelerator_applies_to_profile: bool,
+) -> String {
+    if !accelerator_applies_to_profile {
+        "CPU optimized".to_string()
+    } else if installed_build != "portable"
+        && installed_build == recommended_build
+        && recommended_runtime_ready
+    {
+        format!("{installed_build} enabled")
+    } else {
+        "CPU (accelerator-capable profile)".to_string()
+    }
+}
+
 fn compiled_build() -> &'static str {
     if cfg!(feature = "cuda") {
         "cuda"
@@ -165,8 +195,12 @@ fn parse_nvidia_info(output: &str) -> (Option<String>, Option<String>) {
 }
 
 fn library_available(name: &str) -> bool {
-    if let Ok(path) = env::var("IVYGREP_CUDA_LIBRARY_PATH")
-        && env::split_paths(&path).any(|directory| directory.join(name).exists())
+    let configured_path = env::var_os("IVYGREP_CUDA_LIBRARY_PATH")
+        .filter(|path| !path.is_empty())
+        .or_else(|| env::var_os("LD_LIBRARY_PATH"));
+    if configured_path
+        .as_deref()
+        .is_some_and(|path| library_in_search_path(path, name))
     {
         return true;
     }
@@ -187,6 +221,10 @@ fn library_available(name: &str) -> bool {
     ]
     .iter()
     .any(|directory| Path::new(directory).join(name).exists())
+}
+
+fn library_in_search_path(path: &OsStr, name: &str) -> bool {
+    env::split_paths(path).any(|directory| directory.join(name).exists())
 }
 
 #[cfg(test)]
@@ -241,5 +279,44 @@ mod tests {
             )
         );
         assert_eq!(parse_nvidia_info(""), (None, None));
+    }
+
+    #[test]
+    fn library_search_path_finds_runtime_library() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("libcublas.so.13"), "").unwrap();
+
+        assert!(library_in_search_path(
+            directory.path().as_os_str(),
+            "libcublas.so.13"
+        ));
+        assert!(!library_in_search_path(
+            directory.path().as_os_str(),
+            "libcurand.so.10"
+        ));
+    }
+
+    #[test]
+    fn acceleration_label_requires_usable_matching_build() {
+        assert_eq!(
+            profile_acceleration_label("portable", "cuda", true, true),
+            "CPU (accelerator-capable profile)"
+        );
+        assert_eq!(
+            profile_acceleration_label("cuda", "cuda", true, true),
+            "cuda enabled"
+        );
+        assert_eq!(
+            profile_acceleration_label("cuda", "portable", true, true),
+            "CPU (accelerator-capable profile)"
+        );
+        assert_eq!(
+            profile_acceleration_label("cuda", "cuda", false, true),
+            "CPU (accelerator-capable profile)"
+        );
+        assert_eq!(
+            profile_acceleration_label("cuda", "cuda", true, false),
+            "CPU optimized"
+        );
     }
 }

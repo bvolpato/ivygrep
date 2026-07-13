@@ -142,9 +142,15 @@ fn cli_hardware_reports_transformer_acceleration_truthfully() {
         .clone();
     let text = String::from_utf8(output).unwrap();
 
-    let expected = if text.contains("Installed build: metal") {
+    let expected = if text.contains("Installed build: metal")
+        && text.contains("Recommended build: metal")
+        && !text.contains("Missing runtime:")
+    {
         "Profile acceleration: metal enabled"
-    } else if text.contains("Installed build: cuda") {
+    } else if text.contains("Installed build: cuda")
+        && text.contains("Recommended build: cuda")
+        && !text.contains("Missing runtime:")
+    {
         "Profile acceleration: cuda enabled"
     } else {
         "Profile acceleration: CPU (accelerator-capable profile)"
