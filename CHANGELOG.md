@@ -4,6 +4,11 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.1.17] - 2026-07-12
+
+### Fixed
+- **Help works without writable application storage.** CLI parsing now handles `--help` before creating index directories, including cross-architecture and restricted-home environments.
+
 ## [1.1.16] - 2026-07-12
 
 ### Added

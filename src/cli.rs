@@ -299,13 +299,13 @@ fn apply_context_args(cli: &mut Cli, args: &ContextArgs) {
 
 pub async fn run() -> Result<()> {
     init_tracing();
-    config::ensure_app_dirs()?;
 
     if maybe_run_legacy_mcp_stdio()? {
         return Ok(());
     }
 
     let mut cli = Cli::parse();
+    config::ensure_app_dirs()?;
     let mut agent_command = None;
     let context_args = match cli.command.take() {
         Some(CliCommand::Context(args)) => {
