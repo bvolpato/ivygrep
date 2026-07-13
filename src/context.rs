@@ -201,9 +201,6 @@ pub fn build_context_bundle(
             }
             Err(error) => tracing::debug!("context definition expansion failed: {error:#}"),
         }
-        if looks_like_type_symbol(symbol) {
-            continue;
-        }
         match search_symbol_relationships_in_current_index(workspace, symbol, &symbol_options) {
             Ok((callers, references)) => {
                 for (role, hits, weight, verb, prefer_last) in [
@@ -238,19 +235,6 @@ pub fn build_context_bundle(
         anchor_symbols,
         candidates.into_values().collect(),
     ))
-}
-
-fn looks_like_type_symbol(symbol: &str) -> bool {
-    symbol
-        .chars()
-        .next()
-        .is_some_and(|character| character.is_ascii_uppercase())
-        && symbol
-            .chars()
-            .any(|character| character.is_ascii_lowercase())
-        && !symbol
-            .chars()
-            .any(|character| matches!(character, '_' | ':' | '.'))
 }
 
 fn focus_hit_on_symbol(
@@ -1203,9 +1187,6 @@ mod tests {
             task_symbols("change UserService and std::io and client.send"),
             ["UserService", "std::io", "client.send"]
         );
-        assert!(looks_like_type_symbol("NeuralBackend"));
-        assert!(!looks_like_type_symbol("build_context_bundle"));
-        assert!(!looks_like_type_symbol("client.send"));
     }
 
     #[test]

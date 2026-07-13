@@ -437,6 +437,61 @@ fn cli_context_json_respects_budget_and_captures_relationships() {
 
 #[test]
 #[serial]
+fn cli_context_captures_type_constructor_relationships() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("workspace");
+    let home = tmp.path().join("ivygrep_home");
+    init_git_repo(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/service.rs"),
+        "pub struct UserService(pub u64);\n\
+         pub fn load_user_service() -> UserService {\n\
+             UserService(7)\n\
+         }\n",
+    )
+    .unwrap();
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args([
+            "--json",
+            "--hash",
+            "context",
+            "--budget",
+            "2000",
+            "change UserService construction",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(value["anchor_symbols"], serde_json::json!(["UserService"]));
+    assert!(
+        value["coverage"]["callers"].as_u64().unwrap() >= 1,
+        "{value:#}"
+    );
+    assert!(
+        value["coverage"]["references"].as_u64().unwrap() >= 1,
+        "{value:#}"
+    );
+    assert!(
+        value["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["preview"].as_str().unwrap().contains("UserService(7)")),
+        "{value:#}"
+    );
+}
+
+#[test]
+#[serial]
 fn cli_lexical_context_never_requests_neural_enhancement() {
     let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
 
