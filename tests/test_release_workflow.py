@@ -39,6 +39,10 @@ class ReleaseWorkflowTest(unittest.TestCase):
             acceptance.index("Install uv for neural model caching"),
             acceptance.index("Cache pinned neural model through Xet"),
         )
+        uv_setup = acceptance.split(
+            "- name: Install uv for neural model caching", maxsplit=1
+        )[1].split("- name: Cache pinned neural model through Xet", maxsplit=1)[0]
+        self.assertIn("enable-cache: false", uv_setup)
 
     def test_native_daemon_acceptance_uses_platform_temp_default(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
