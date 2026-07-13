@@ -280,6 +280,10 @@ jobs:
         env:
           ALLOWED_BACKEND: ${{ matrix.allow_backend }}
           EXPECTED_BACKEND: ${{ matrix.validate_backend }}
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          ALL_PROXY: http://127.0.0.1:9
+          NO_PROXY: ''
           IVYGREP_MODEL_PROFILE: ${{ matrix.model_profile }}
           MODEL_PROFILE: ${{ matrix.model_profile }}
 

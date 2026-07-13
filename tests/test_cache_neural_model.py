@@ -47,6 +47,33 @@ class CacheNeuralModelTest(unittest.TestCase):
                 MODULE.file_sha256(path), hashlib.sha256(content).hexdigest()
             )
 
+    def test_writes_revision_ref_for_rust_cache_reader(self) -> None:
+        profile = MODULE.PROFILES["static"]
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "hub" / "models--sentence-transformers--static"
+            snapshot = repo / "snapshots" / profile.revision
+            downloaded = {
+                asset: snapshot / asset
+                for asset in profile.assets
+            }
+            for path in downloaded.values():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.touch()
+
+            ref = MODULE.write_rust_revision_ref(profile, downloaded)
+
+            self.assertEqual(ref, repo / "refs" / profile.revision)
+            self.assertEqual(ref.read_text(encoding="utf-8"), profile.revision)
+
+    def test_rejects_snapshot_that_does_not_match_pinned_revision(self) -> None:
+        profile = MODULE.PROFILES["general"]
+        with tempfile.TemporaryDirectory() as tmp:
+            snapshot = Path(tmp) / "hub" / "model" / "snapshots" / ("0" * 40)
+            downloaded = {asset: snapshot / asset for asset in profile.assets}
+
+            with self.assertRaisesRegex(SystemExit, "unexpected model snapshot"):
+                MODULE.write_rust_revision_ref(profile, downloaded)
+
 
 if __name__ == "__main__":
     unittest.main()

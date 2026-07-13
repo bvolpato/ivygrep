@@ -20,6 +20,8 @@ class CIWorkflowTest(unittest.TestCase):
         self.assertNotIn("Install uv for neural model caching", tests)
         self.assertIn("Install uv for neural model caching", builds)
         self.assertIn("uv run scripts/cache_neural_model.py", builds)
+        self.assertIn("HTTP_PROXY: http://127.0.0.1:9", builds)
+        self.assertIn("NO_PROXY: ''", builds)
         self.assertLess(
             builds.index("Install uv for neural model caching"),
             builds.index("Validate local neural execution"),

@@ -56,6 +56,26 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertNotIn("--bench-home", native_acceptance)
         self.assertNotIn("${RUNNER_TEMP:-$TEMP}", workflow)
 
+    def test_primed_model_acceptance_blocks_network_on_first_load(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        metal = workflow.split("- name: Validate macOS Metal backend", maxsplit=1)[
+            1
+        ].split("- name: Run exact Linux aarch64 archive under QEMU", maxsplit=1)[0]
+        linux = workflow.split(
+            "- name: Prime and import cached neural model without network", maxsplit=1
+        )[1].split(
+            "- name: Validate Windows neural backend and cached offline reuse",
+            maxsplit=1,
+        )[0]
+        windows = workflow.split(
+            "- name: Validate Windows neural backend and cached offline reuse",
+            maxsplit=1,
+        )[1].split("  release:", maxsplit=1)[0]
+
+        self.assertIn("HTTP_PROXY: http://127.0.0.1:9", metal)
+        self.assertIn("HTTP_PROXY=http://127.0.0.1:9", linux)
+        self.assertEqual(windows.count("HTTP_PROXY=http://127.0.0.1:9"), 2)
+
     def test_linux_arm_acceptance_has_git_without_network_access(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
         arm_acceptance = workflow.split(

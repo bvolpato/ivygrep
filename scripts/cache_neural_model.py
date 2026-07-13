@@ -53,6 +53,26 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def write_rust_revision_ref(
+    profile: ModelProfile, downloaded: dict[str, Path]
+) -> Path:
+    snapshot_roots = {
+        path.parents[len(Path(asset).parts) - 1]
+        for asset, path in downloaded.items()
+    }
+    if len(snapshot_roots) != 1:
+        raise SystemExit(f"model assets span multiple snapshots for {profile.repo_id}")
+    snapshot = snapshot_roots.pop()
+    if snapshot.parent.name != "snapshots" or snapshot.name != profile.revision:
+        raise SystemExit(
+            f"unexpected model snapshot for {profile.repo_id}: {snapshot}"
+        )
+    ref = snapshot.parent.parent / "refs" / profile.revision
+    ref.parent.mkdir(parents=True, exist_ok=True)
+    ref.write_text(snapshot.name, encoding="utf-8")
+    return ref
+
+
 def cache_profile(name: str, cache: Path) -> None:
     from huggingface_hub import hf_hub_download
 
@@ -76,6 +96,7 @@ def cache_profile(name: str, cache: Path) -> None:
             f"model checksum mismatch for {profile.repo_id}: "
             f"expected {profile.weights_sha256}, got {digest}"
         )
+    write_rust_revision_ref(profile, downloaded)
     print(f"cached {name} neural model at {cache}")
 
 
