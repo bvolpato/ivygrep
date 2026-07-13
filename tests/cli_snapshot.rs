@@ -83,6 +83,86 @@ fn cli_help_snapshot() {
 
 #[test]
 #[serial]
+fn cli_hardware_works_without_writable_app_storage() {
+    let home_file = tempfile::NamedTempFile::new().unwrap();
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    let output = cmd
+        .arg("hardware")
+        .env("IVYGREP_HOME", home_file.path())
+        .env_remove("IVYGREP_MODEL_PROFILE")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).unwrap();
+
+    assert!(text.contains("Installed build:"));
+    assert!(text.contains("Recommended build:"));
+    assert!(text.contains("Model profile: static-retrieval-v1"));
+    assert!(text.contains("Profile acceleration: CPU optimized"));
+}
+
+#[test]
+#[serial]
+fn cli_hardware_json_is_machine_readable() {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    let output = cmd
+        .args(["--json", "hardware"])
+        .env_remove("IVYGREP_MODEL_PROFILE")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let report: serde_json::Value = serde_json::from_slice(&output).unwrap();
+
+    assert!(report["cpu_threads"].as_u64().unwrap() > 0);
+    assert_eq!(report["model_profile"], "static-retrieval-v1");
+    assert_eq!(report["accelerator_applies_to_profile"], false);
+    assert!(report["recommended_runtime_ready"].is_boolean());
+    assert!(report["optimal_build"].is_boolean());
+    assert!(matches!(
+        report["recommended_build"].as_str().unwrap(),
+        "portable" | "cuda" | "metal"
+    ));
+}
+
+#[test]
+#[serial]
+fn cli_hardware_reports_transformer_acceleration_truthfully() {
+    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+    let output = cmd
+        .arg("hardware")
+        .env("IVYGREP_MODEL_PROFILE", "general")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).unwrap();
+
+    let expected = if text.contains("Installed build: metal")
+        && text.contains("Recommended build: metal")
+        && !text.contains("Missing runtime:")
+    {
+        "Profile acceleration: metal enabled"
+    } else if text.contains("Installed build: cuda")
+        && text.contains("Recommended build: cuda")
+        && !text.contains("Missing runtime:")
+    {
+        "Profile acceleration: cuda enabled"
+    } else {
+        "Profile acceleration: CPU (accelerator-capable profile)"
+    };
+    assert!(
+        text.contains(expected),
+        "unexpected hardware report:\n{text}"
+    );
+}
+
+#[test]
+#[serial]
 fn cli_status_honors_no_color() {
     let home = tempfile::tempdir().unwrap();
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));

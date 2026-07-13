@@ -23,6 +23,7 @@ class UnixInstallerTest(unittest.TestCase):
         self.install_dir.mkdir()
         self.fake_bin.mkdir()
         self.write_executable(self.fake_bin / "ldconfig", "#!/bin/sh\nexit 1\n")
+        self.write_executable(self.fake_bin / "nvidia-smi", "#!/bin/sh\nexit 1\n")
         self.write_executable(
             self.fake_bin / "curl",
             """#!/bin/sh
@@ -115,16 +116,24 @@ esac
         accelerator: str = "auto",
         nvidia: bool = False,
         cuda_runtime: bool = False,
+        nvidia_compute: str = "8.6",
     ) -> subprocess.CompletedProcess[str]:
         if nvidia:
             self.write_executable(
                 self.fake_bin / "nvidia-smi",
-                "#!/bin/sh\n[ \"${1:-}\" = '-L' ] && echo 'GPU 0: NVIDIA RTX' && exit 0\nexit 0\n",
+                "#!/bin/sh\n"
+                "[ \"${1:-}\" = '-L' ] && echo 'GPU 0: NVIDIA RTX' && exit 0\n"
+                f"echo '{nvidia_compute}'\n",
             )
         cuda_lib_dir = self.root / "cuda-lib"
         if cuda_runtime:
             cuda_lib_dir.mkdir()
-            for library in ("libcuda.so.1", "libcublas.so.13", "libcurand.so.10"):
+            for library in (
+                "libcuda.so.1",
+                "libcublas.so.13",
+                "libcublasLt.so.13",
+                "libcurand.so.10",
+            ):
                 (cuda_lib_dir / library).write_text("", encoding="utf-8")
         env = os.environ.copy()
         env.update(
@@ -190,7 +199,36 @@ esac
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("selected CUDA archive", result.stdout)
+        self.assertIn("NVIDIA GPU detected, but CUDA 13 runtime is incomplete", result.stdout)
+        self.assertIn("libcublas.so.13", result.stdout)
+        self.assertIn("libcublasLt.so.13", result.stdout)
+        self.assertIn("selected portable archive", result.stdout)
         self.assertIn("linux-x86_64-musl", result.stdout)
+
+    def test_auto_rejects_gpu_unsupported_by_shipped_cuda_build(self) -> None:
+        self.make_archive("linux-x86_64-musl")
+        self.make_archive("linux-x86_64-cuda")
+
+        result = self.run_installer(
+            os_name="Linux",
+            arch="x86_64",
+            nvidia=True,
+            cuda_runtime=True,
+            nvidia_compute="6.1",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("compute capability 6.1 is unsupported", result.stdout)
+        self.assertIn("selected portable archive", result.stdout)
+
+    def test_auto_explains_portable_selection_without_nvidia(self) -> None:
+        self.make_archive("linux-x86_64-musl")
+
+        result = self.run_installer(os_name="Linux", arch="x86_64")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no ready NVIDIA CUDA GPU detected", result.stdout)
+        self.assertIn("selected portable archive", result.stdout)
 
     def test_explicit_cuda_fails_when_archive_is_missing(self) -> None:
         self.make_archive("linux-x86_64-musl")
@@ -200,10 +238,42 @@ esac
             arch="x86_64",
             accelerator="cuda",
             nvidia=True,
+            cuda_runtime=True,
         )
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("requested CUDA archive is not available", result.stderr)
+
+    def test_explicit_cuda_fails_with_exact_missing_runtime(self) -> None:
+        self.make_archive("linux-x86_64-cuda")
+
+        result = self.run_installer(
+            os_name="Linux",
+            arch="x86_64",
+            accelerator="cuda",
+            nvidia=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("CUDA 13 runtime is incomplete", result.stderr)
+        self.assertIn("libcublas.so.13", result.stderr)
+        self.assertIn("libcublasLt.so.13", result.stderr)
+
+    def test_explicit_cuda_rejects_unsupported_gpu(self) -> None:
+        self.make_archive("linux-x86_64-cuda")
+
+        result = self.run_installer(
+            os_name="Linux",
+            arch="x86_64",
+            accelerator="cuda",
+            nvidia=True,
+            cuda_runtime=True,
+            nvidia_compute="7.5",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("compute capability 8.0 or newer", result.stderr)
+        self.assertIn("detected 7.5", result.stderr)
 
 
 if __name__ == "__main__":

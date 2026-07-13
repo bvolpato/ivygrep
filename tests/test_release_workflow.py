@@ -74,6 +74,18 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("matrix.archive_name == 'macos-aarch64-metal'", workflow)
         self.assertIn('--expect-backend "Candle Metal"', workflow)
 
+    def test_homebrew_uses_metal_archive_on_apple_silicon(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        formula = workflow.split(
+            "- name: Generate formula", maxsplit=1
+        )[1].split("- name: Commit and push formula", maxsplit=1)[0]
+
+        self.assertIn("SHA_MACOS_ARM64_METAL", formula)
+        self.assertIn("macos-aarch64-metal.tar.gz", formula)
+        self.assertNotIn(
+            'ivygrep-${FORMULA_TAG}-macos-aarch64.tar.gz"', formula
+        )
+
     def test_release_includes_shell_installer_cuda_archive(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
         cuda_toolkit = workflow.split(

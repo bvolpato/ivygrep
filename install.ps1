@@ -43,6 +43,7 @@ $baseUrl = "https://github.com/$repository/releases/download/$tag"
 $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) "ivygrep-$([guid]::NewGuid())"
 
 try {
+    Write-Host "ivygrep installer: selected portable archive (windows-x86_64)"
     New-Item $tempDir -ItemType Directory -Force | Out-Null
     $archivePath = Join-Path $tempDir $asset
     $checksumPath = "$archivePath.sha256"

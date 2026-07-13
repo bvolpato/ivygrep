@@ -78,13 +78,39 @@ has_library() {
 has_cuda_runtime() {
     has_library libcuda.so.1 &&
         has_library libcublas.so.13 &&
+        has_library libcublasLt.so.13 &&
         has_library libcurand.so.10
 }
 
-has_nvidia_cuda() {
+has_nvidia_gpu() {
     command -v nvidia-smi >/dev/null 2>&1 &&
-        nvidia-smi -L >/dev/null 2>&1 &&
-        has_cuda_runtime
+        nvidia-smi -L >/dev/null 2>&1
+}
+
+nvidia_compute_capability() {
+    nvidia-smi --query-gpu=compute_cap --format=csv,noheader,nounits 2>/dev/null |
+        sed -n '1{s/[[:space:]]//g;p;}'
+}
+
+has_supported_cuda_gpu() {
+    capability="$(nvidia_compute_capability)"
+    [ -n "$capability" ] || return 1
+    major=${capability%%.*}
+    minor=${capability#*.}
+    case "$major:$minor" in
+        [89]:* | [1-9][0-9]:*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+missing_cuda_libraries() {
+    missing=""
+    for library in libcuda.so.1 libcublas.so.13 libcublasLt.so.13 libcurand.so.10; do
+        if ! has_library "$library"; then
+            missing="${missing}${missing:+, }$library"
+        fi
+    done
+    printf '%s' "$missing"
 }
 
 asset_exists() {
@@ -97,6 +123,18 @@ case "$accelerator" in
     cuda)
         if [ "$os-$arch" != "Linux-x86_64" ]; then
             echo "ivygrep installer: CUDA archive is only supported on Linux x86_64" >&2
+            exit 1
+        fi
+        if ! has_nvidia_gpu; then
+            echo "ivygrep installer: CUDA requested, but no NVIDIA GPU is visible through nvidia-smi" >&2
+            exit 1
+        fi
+        if ! has_supported_cuda_gpu; then
+            echo "ivygrep installer: shipped CUDA build requires NVIDIA compute capability 8.0 or newer (detected $(nvidia_compute_capability))" >&2
+            exit 1
+        fi
+        if ! has_cuda_runtime; then
+            echo "ivygrep installer: CUDA requested, but CUDA 13 runtime is incomplete ($(missing_cuda_libraries))" >&2
             exit 1
         fi
         accelerator_target="linux-x86_64-cuda"
@@ -120,9 +158,17 @@ case "$accelerator" in
     auto)
         case "$os-$arch" in
             Linux-x86_64)
-                if has_nvidia_cuda; then
-                    accelerator_target="linux-x86_64-cuda"
-                    accelerator_label="CUDA"
+                if has_nvidia_gpu; then
+                    if ! has_supported_cuda_gpu; then
+                        echo "ivygrep installer: NVIDIA compute capability $(nvidia_compute_capability) is unsupported by shipped CUDA build; using portable CPU archive"
+                    elif has_cuda_runtime; then
+                        accelerator_target="linux-x86_64-cuda"
+                        accelerator_label="CUDA"
+                    else
+                        echo "ivygrep installer: NVIDIA GPU detected, but CUDA 13 runtime is incomplete ($(missing_cuda_libraries)); using portable CPU archive"
+                    fi
+                else
+                    echo "ivygrep installer: no ready NVIDIA CUDA GPU detected; using portable CPU archive"
                 fi
                 ;;
             Darwin-arm64 | Darwin-aarch64)
@@ -144,6 +190,10 @@ if [ -n "$accelerator_target" ]; then
         echo "ivygrep installer: requested $accelerator_label archive is not available for $tag" >&2
         exit 1
     fi
+fi
+
+if [ -z "$accelerator_target" ] || [ "$target" != "$accelerator_target" ]; then
+    echo "ivygrep installer: selected portable archive ($target)"
 fi
 
 archive="ivygrep-$tag-$target.tar.gz"
