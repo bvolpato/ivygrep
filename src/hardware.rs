@@ -53,7 +53,7 @@ pub fn inspect() -> HardwareReport {
 
     let cuda_compatible = nvidia_compute_capability
         .as_deref()
-        .is_some_and(cuda_13_supports);
+        .is_some_and(shipped_cuda_supports);
     let recommended_build = recommended_build(
         env::consts::OS,
         env::consts::ARCH,
@@ -63,9 +63,7 @@ pub fn inspect() -> HardwareReport {
         && env::consts::ARCH == "x86_64"
         && nvidia_gpu.is_some()
         && !cuda_compatible)
-        .then(|| {
-            "Shipped CUDA 13 build requires NVIDIA compute capability 7.5 or newer.".to_string()
-        });
+        .then(|| "Shipped CUDA build targets NVIDIA compute capability 8.0 or newer.".to_string());
     if recommended_build == "cuda" {
         for library in CUDA_RUNTIME_LIBRARIES {
             if !library_available(library) {
@@ -128,16 +126,12 @@ fn recommended_build(os: &str, arch: &str, has_nvidia_gpu: bool) -> &'static str
     }
 }
 
-fn cuda_13_supports(capability: &str) -> bool {
+fn shipped_cuda_supports(capability: &str) -> bool {
     let mut parts = capability.trim().split('.');
     let Some(major) = parts.next().and_then(|value| value.parse::<u32>().ok()) else {
         return false;
     };
-    let minor = parts
-        .next()
-        .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or(0);
-    major > 7 || (major == 7 && minor >= 5)
+    major >= 8
 }
 
 fn profile_acceleration_label(
@@ -266,14 +260,15 @@ mod tests {
     }
 
     #[test]
-    fn cuda_13_requires_turing_or_newer() {
-        assert!(!cuda_13_supports("5.2"));
-        assert!(!cuda_13_supports("6.1"));
-        assert!(!cuda_13_supports("7.0"));
-        assert!(cuda_13_supports("7.5"));
-        assert!(cuda_13_supports("8.6"));
-        assert!(cuda_13_supports("12.0"));
-        assert!(!cuda_13_supports("unknown"));
+    fn shipped_cuda_build_requires_ampere_or_newer() {
+        assert!(!shipped_cuda_supports("5.2"));
+        assert!(!shipped_cuda_supports("6.1"));
+        assert!(!shipped_cuda_supports("7.0"));
+        assert!(!shipped_cuda_supports("7.5"));
+        assert!(shipped_cuda_supports("8.0"));
+        assert!(shipped_cuda_supports("8.6"));
+        assert!(shipped_cuda_supports("12.0"));
+        assert!(!shipped_cuda_supports("unknown"));
     }
 
     #[test]

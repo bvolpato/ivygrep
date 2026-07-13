@@ -205,7 +205,7 @@ esac
         self.assertIn("selected portable archive", result.stdout)
         self.assertIn("linux-x86_64-musl", result.stdout)
 
-    def test_auto_rejects_gpu_unsupported_by_cuda_13(self) -> None:
+    def test_auto_rejects_gpu_unsupported_by_shipped_cuda_build(self) -> None:
         self.make_archive("linux-x86_64-musl")
         self.make_archive("linux-x86_64-cuda")
 
@@ -268,12 +268,12 @@ esac
             accelerator="cuda",
             nvidia=True,
             cuda_runtime=True,
-            nvidia_compute="7.0",
+            nvidia_compute="7.5",
         )
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("compute capability 7.5 or newer", result.stderr)
-        self.assertIn("detected 7.0", result.stderr)
+        self.assertIn("compute capability 8.0 or newer", result.stderr)
+        self.assertIn("detected 7.5", result.stderr)
 
 
 if __name__ == "__main__":

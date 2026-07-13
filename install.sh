@@ -98,7 +98,7 @@ has_supported_cuda_gpu() {
     major=${capability%%.*}
     minor=${capability#*.}
     case "$major:$minor" in
-        7:[5-9] | [89]:* | [1-9][0-9]:*) return 0 ;;
+        [89]:* | [1-9][0-9]:*) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -130,7 +130,7 @@ case "$accelerator" in
             exit 1
         fi
         if ! has_supported_cuda_gpu; then
-            echo "ivygrep installer: CUDA 13 requires NVIDIA compute capability 7.5 or newer (detected $(nvidia_compute_capability))" >&2
+            echo "ivygrep installer: shipped CUDA build requires NVIDIA compute capability 8.0 or newer (detected $(nvidia_compute_capability))" >&2
             exit 1
         fi
         if ! has_cuda_runtime; then
@@ -160,7 +160,7 @@ case "$accelerator" in
             Linux-x86_64)
                 if has_nvidia_gpu; then
                     if ! has_supported_cuda_gpu; then
-                        echo "ivygrep installer: NVIDIA compute capability $(nvidia_compute_capability) is unsupported by CUDA 13; using portable CPU archive"
+                        echo "ivygrep installer: NVIDIA compute capability $(nvidia_compute_capability) is unsupported by shipped CUDA build; using portable CPU archive"
                     elif has_cuda_runtime; then
                         accelerator_target="linux-x86_64-cuda"
                         accelerator_label="CUDA"

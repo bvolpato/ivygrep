@@ -10,7 +10,7 @@ All notable changes to ivygrep are documented in this file.
 - **`ig hardware` selects and explains best supported build.** Diagnostics report CPU threads, NVIDIA model and compute capability, active model profile, installed backend, recommended backend, missing runtime libraries, compatibility limits, and exact reinstall command in text or JSON.
 
 ### Fixed
-- **Installers avoid unusable accelerator builds.** Unix auto-selection requires complete CUDA 13 libraries and compute capability 7.5+, explicit CUDA requests fail with exact remediation, Apple Silicon Homebrew installs Metal build, and every installer states selected archive.
+- **Installers avoid unusable accelerator builds.** Unix auto-selection requires complete CUDA 13 libraries and compute capability 8.0+, matching shipped `sm_80` kernels. Explicit CUDA requests fail with exact remediation, Apple Silicon Homebrew installs Metal build, and every installer states selected archive.
 
 ### Testing
 - **Hardware decisions have platform and installer regression coverage.** Tests cover Linux CUDA success, incomplete runtime, unsupported NVIDIA generations, no-GPU fallback, Apple Metal, Windows portable selection, Homebrew formula output, CLI text/JSON, and diagnostics without writable application storage.
