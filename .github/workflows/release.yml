@@ -560,7 +560,7 @@ jobs:
             echo "sha_linux_amd64_musl=$(get_sha "ivygrep-${TAG}-linux-x86_64-musl.tar.gz.sha256")"
             echo "sha_linux_arm64_musl=$(get_sha "ivygrep-${TAG}-linux-aarch64-musl.tar.gz.sha256")"
             echo "sha_macos_amd64=$(get_sha "ivygrep-${TAG}-macos-x86_64.tar.gz.sha256")"
-            echo "sha_macos_arm64=$(get_sha "ivygrep-${TAG}-macos-aarch64.tar.gz.sha256")"
+            echo "sha_macos_arm64_metal=$(get_sha "ivygrep-${TAG}-macos-aarch64-metal.tar.gz.sha256")"
           } >> "$GITHUB_OUTPUT"
 
       - name: Checkout homebrew-tap
@@ -571,7 +571,7 @@ jobs:
           path: homebrew-tap
           persist-credentials: false
 
-      - name: Generate formula (default — static/musl on Linux)
+      - name: Generate formula (hardware-aware macOS, static/musl Linux)
         shell: bash
         env:
           FORMULA_TAG: ${{ steps.sha.outputs.tag }}
@@ -579,7 +579,7 @@ jobs:
           SHA_LINUX_AMD64: ${{ steps.sha.outputs.sha_linux_amd64_musl }}
           SHA_LINUX_ARM64: ${{ steps.sha.outputs.sha_linux_arm64_musl }}
           SHA_MACOS_AMD64: ${{ steps.sha.outputs.sha_macos_amd64 }}
-          SHA_MACOS_ARM64: ${{ steps.sha.outputs.sha_macos_arm64 }}
+          SHA_MACOS_ARM64_METAL: ${{ steps.sha.outputs.sha_macos_arm64_metal }}
         run: |
           cat > homebrew-tap/Formula/ivygrep.rb << FORMULA_EOF
           # typed: false
@@ -598,8 +598,8 @@ jobs:
                 sha256 "${SHA_MACOS_AMD64}"
               end
               if Hardware::CPU.arm?
-                url "https://github.com/bvolpato/ivygrep/releases/download/${FORMULA_TAG}/ivygrep-${FORMULA_TAG}-macos-aarch64.tar.gz"
-                sha256 "${SHA_MACOS_ARM64}"
+                url "https://github.com/bvolpato/ivygrep/releases/download/${FORMULA_TAG}/ivygrep-${FORMULA_TAG}-macos-aarch64-metal.tar.gz"
+                sha256 "${SHA_MACOS_ARM64_METAL}"
               end
             end
 

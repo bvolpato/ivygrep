@@ -51,11 +51,14 @@ Installers choose the right archive, verify SHA-256, install `ig`, and print
 the installed version. The Unix installer uses accelerator archives when they
 are available; set `IVYGREP_ACCELERATOR=portable` to force the baseline build,
 or `IVYGREP_ACCELERATOR=metal` / `cuda` to require a specific accelerator
-archive. `auto` selects CUDA only when NVIDIA and CUDA runtime libraries are
-visible. Homebrew uses the default portable archives. PowerShell also updates
-the user `PATH`. Windows uses the same USearch ANN backend as Linux and macOS,
-Rust-managed persistence, long-path support, and a statically linked Visual C++
-runtime.
+archive. `auto` selects CUDA only when a compute capability 7.5+ NVIDIA GPU and
+CUDA 13 runtime libraries are visible. Homebrew uses Metal automatically on
+Apple Silicon and portable builds elsewhere. Run `ig hardware` to see detected
+hardware, model profile, installed and recommended builds, compatibility limits,
+missing runtime libraries, and an exact reinstall command. PowerShell also
+updates user `PATH`. Windows uses the same USearch ANN
+backend as Linux and macOS, Rust-managed persistence, long-path support, and a
+statically linked Visual C++ runtime.
 
 Every release ships checksums, SPDX JSON SBOMs, and provenance sidecars. CI
 extracts and runs the exact archive bytes before publishing:
@@ -63,10 +66,10 @@ extracts and runs the exact archive bytes before publishing:
 | Target | Release behavior | Offline fallback |
 |---|---|---|
 | Linux x86_64 musl | Static binary, baseline x86-64 exercised under QEMU `qemu64` | Hash search, no model or service |
-| Linux x86_64 CUDA | Shell-installer archive with CUDA neural inference for NVIDIA systems with CUDA runtime libraries | Hash search |
+| Linux x86_64 CUDA | Shell-installer archive for compute capability 7.5+ NVIDIA systems with CUDA 13 runtime libraries | Hash search |
 | Linux aarch64 musl | Static binary exercised under ARM64 QEMU in Alpine | Hash search, no model or service |
 | macOS Intel | Native archive with Accelerate-backed local neural inference | Hash search |
-| macOS Apple Silicon | Native archive with Accelerate-backed local neural inference | Hash search |
+| macOS Apple Silicon | Native archive with Metal and Accelerate-backed local neural inference | Hash search |
 | macOS Apple Silicon Metal | Shell-installer archive with Metal neural inference, validated on native Apple Silicon | Hash search |
 | Windows x86_64 | Native USearch ANN plus local CPU neural inference | Hash search |
 

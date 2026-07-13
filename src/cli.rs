@@ -33,7 +33,7 @@ use crate::workspace::{
     version,
     about = "Semantic grep that stays local",
     long_about = None,
-    after_help = "Examples:\n  ig \"where is authentication checked?\"\n  ig context \"fix refresh-token races\" --budget 8000\n  ig agent install claude\n  ig --literal validate_token src/\n  ig --symbol UserService\n  ig --add . --wait-for-enhancement\n  ig --status\n  ig --web"
+    after_help = "Examples:\n  ig \"where is authentication checked?\"\n  ig context \"fix refresh-token races\" --budget 8000\n  ig agent install claude\n  ig hardware\n  ig --literal validate_token src/\n  ig --symbol UserService\n  ig --add . --wait-for-enhancement\n  ig --status\n  ig --web"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -212,6 +212,8 @@ pub enum CliCommand {
     Context(ContextArgs),
     /// Install and verify ivygrep for coding agents.
     Agent(AgentArgs),
+    /// Detect hardware, installed backend, and best available build.
+    Hardware,
 }
 
 #[derive(Args, Debug, Clone)]
@@ -305,8 +307,8 @@ pub async fn run() -> Result<()> {
     }
 
     let mut cli = Cli::parse();
-    config::ensure_app_dirs()?;
     let mut agent_command = None;
+    let mut hardware = false;
     let context_args = match cli.command.take() {
         Some(CliCommand::Context(args)) => {
             apply_context_args(&mut cli, &args);
@@ -314,6 +316,10 @@ pub async fn run() -> Result<()> {
         }
         Some(CliCommand::Agent(args)) => {
             agent_command = Some(args.command);
+            None
+        }
+        Some(CliCommand::Hardware) => {
+            hardware = true;
             None
         }
         None => None,
@@ -335,6 +341,7 @@ pub async fn run() -> Result<()> {
         cli.mcp,
         context_args.is_some(),
         agent_command.is_some(),
+        hardware,
     ]
     .iter()
     .filter(|flag| **flag)
@@ -342,9 +349,56 @@ pub async fn run() -> Result<()> {
 
     if action_count > 1 {
         bail!(
-            "use only one action at a time: context, agent, --add, --rm, --status, --doctor, --daemon, --web, or --mcp"
+            "use only one action at a time: context, agent, hardware, --add, --rm, --status, --doctor, --daemon, --web, or --mcp"
         );
     }
+
+    if hardware {
+        let report = crate::hardware::inspect();
+        if cli.json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            println!("Platform: {}", report.platform);
+            println!("CPU threads: {}", report.cpu_threads);
+            if let Some(gpu) = &report.nvidia_gpu {
+                let capability = report
+                    .nvidia_compute_capability
+                    .as_deref()
+                    .map(|value| format!(" (compute {value})"))
+                    .unwrap_or_default();
+                println!("NVIDIA GPU: {gpu}{capability}");
+            }
+            println!("Installed build: {}", report.installed_build);
+            println!("Recommended build: {}", report.recommended_build);
+            println!("Model profile: {}", report.model_profile);
+            let profile_acceleration = if !report.accelerator_applies_to_profile {
+                "CPU optimized".to_string()
+            } else if report.installed_build == "portable" {
+                "CPU (accelerator-capable profile)".to_string()
+            } else {
+                format!("{} enabled", report.installed_build)
+            };
+            println!("Profile acceleration: {}", profile_acceleration);
+            if !report.missing_libraries.is_empty() {
+                println!("Missing runtime: {}", report.missing_libraries.join(", "));
+            }
+            if let Some(limitation) = &report.limitation {
+                println!("Limitation: {limitation}");
+            }
+            if let Some(remediation) = &report.remediation {
+                println!("Fix: {remediation}");
+            }
+            println!("{}", report.note);
+            if let Some(command) = &report.install_command {
+                println!("Install: {command}");
+            } else if report.optimal_build {
+                println!("Hardware setup: optimal");
+            }
+        }
+        return Ok(());
+    }
+
+    config::ensure_app_dirs()?;
 
     if let Some(command) = agent_command {
         match command {

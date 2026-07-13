@@ -69,7 +69,7 @@
         <div class="container hero-content">
             <div class="hero-badge slide-up">
                 <span class="badge-dot"></span>
-                v1.1.17
+                v1.1.18
             </div>
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" onerror="this.src='assets/logo.png'"/>
@@ -591,7 +591,7 @@
         <div class="section-header">
             <span class="section-tag">Get started</span>
             <h2 class="section-title text-center">Install ivygrep</h2>
-            <p class="text-center subtitle-small">One command installs the latest release, verifies its SHA-256 checksum, and uses Metal or CUDA archives when the host supports them.</p>
+            <p class="text-center subtitle-small">Automatic CUDA on NVIDIA Linux hosts with compute capability 7.5+. Automatic Metal on Apple Silicon. Run <code>ig hardware</code> for selected build and exact fixes.</p>
         </div>
 
         <div class="grid grid-3 mt-4">
@@ -601,6 +601,7 @@
                     <pre class="code-block"><span class="prompt">$</span> brew install bvolpato/tap/ivygrep</pre>
                     <button class="copy-btn" onclick="copyInstallCmd(this)">Copy</button>
                 </div>
+                <p class="benchmark-note">Metal on Apple Silicon. Portable elsewhere.</p>
             </div>
             <div class="glass-panel fade-in-scroll install-card">
                 <h3 class="install-title">📦 Linux / macOS</h3>
@@ -608,6 +609,7 @@
                     <pre class="code-block"><span class="prompt">$</span> curl -fsSL https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.sh | sh</pre>
                     <button class="copy-btn" onclick="copyInstallCmd(this)">Copy</button>
                 </div>
+                <p class="benchmark-note">Detects CUDA, Metal, and missing runtime libraries.</p>
             </div>
             <div class="glass-panel fade-in-scroll install-card">
                 <h3 class="install-title">🪟 Windows PowerShell</h3>
@@ -615,6 +617,7 @@
                     <pre class="code-block">irm https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.ps1 | iex</pre>
                     <button class="copy-btn" onclick="copyInstallCmd(this)">Copy</button>
                 </div>
+                <p class="benchmark-note">Portable Windows build.</p>
             </div>
         </div>
 
@@ -677,7 +680,7 @@
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md" class="footer-link">Changelog</a>
                 </div>
                 <div class="footer-copy">
-                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v1.1.17</p>
+                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v1.1.18</p>
                 </div>
             </div>
         </div>
