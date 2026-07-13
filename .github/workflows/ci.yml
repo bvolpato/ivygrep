@@ -276,14 +276,14 @@ jobs:
           if [[ -n "$ALLOWED_BACKEND" ]]; then
             args+=(--allow-backend "$ALLOWED_BACKEND")
           fi
-          ./scripts/e2e_neural_backend.sh "${args[@]}"
+          HTTP_PROXY=http://127.0.0.1:9 \
+          HTTPS_PROXY=http://127.0.0.1:9 \
+          ALL_PROXY=http://127.0.0.1:9 \
+          NO_PROXY='' \
+            ./scripts/e2e_neural_backend.sh "${args[@]}"
         env:
           ALLOWED_BACKEND: ${{ matrix.allow_backend }}
           EXPECTED_BACKEND: ${{ matrix.validate_backend }}
-          HTTP_PROXY: http://127.0.0.1:9
-          HTTPS_PROXY: http://127.0.0.1:9
-          ALL_PROXY: http://127.0.0.1:9
-          NO_PROXY: ''
           IVYGREP_MODEL_PROFILE: ${{ matrix.model_profile }}
           MODEL_PROFILE: ${{ matrix.model_profile }}
 

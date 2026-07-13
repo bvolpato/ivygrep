@@ -20,8 +20,16 @@ class CIWorkflowTest(unittest.TestCase):
         self.assertNotIn("Install uv for neural model caching", tests)
         self.assertIn("Install uv for neural model caching", builds)
         self.assertIn("uv run scripts/cache_neural_model.py", builds)
-        self.assertIn("HTTP_PROXY: http://127.0.0.1:9", builds)
-        self.assertIn("NO_PROXY: ''", builds)
+        neural_validation = builds.split(
+            "- name: Validate local neural execution", maxsplit=1
+        )[1]
+        priming, offline_load = neural_validation.split(
+            "HTTP_PROXY=http://127.0.0.1:9", maxsplit=1
+        )
+        self.assertIn("uv run scripts/cache_neural_model.py", priming)
+        self.assertNotIn("HTTP_PROXY", priming)
+        self.assertIn("NO_PROXY=''", offline_load)
+        self.assertIn("./scripts/e2e_neural_backend.sh", offline_load)
         self.assertLess(
             builds.index("Install uv for neural model caching"),
             builds.index("Validate local neural execution"),
