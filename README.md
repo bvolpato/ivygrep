@@ -3,15 +3,15 @@
 </p>
 
 <p align="center">
-  <strong>Local semantic code search. No code upload.</strong><br/>
-  Ask English questions, get ranked code answers, run inference locally.
+  <strong>Local semantic code search and task-ready context packs. No code upload.</strong><br/>
+  Search by intent, trace relationships, hand agents focused evidence.
 </p>
 
 <p align="center">
   <a href="https://github.com/bvolpato/ivygrep/actions"><img src="https://github.com/bvolpato/ivygrep/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://github.com/bvolpato/ivygrep/actions/workflows/security.yml"><img src="https://github.com/bvolpato/ivygrep/actions/workflows/security.yml/badge.svg" alt="Security" /></a>
   <a href="https://github.com/bvolpato/ivygrep/actions/workflows/relevance.yml"><img src="https://github.com/bvolpato/ivygrep/actions/workflows/relevance.yml/badge.svg" alt="Relevance" /></a>
-  <a href="https://github.com/bvolpato/ivygrep/releases/tag/v1.1.15"><img src="https://img.shields.io/badge/release-v1.1.15-34d058" alt="Latest Release" /></a>
+  <a href="https://github.com/bvolpato/ivygrep/releases/tag/v1.1.19"><img src="https://img.shields.io/badge/release-v1.1.19-34d058" alt="Latest Release" /></a>
   <a href="https://github.com/bvolpato/ivygrep/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
   <a href="https://github.com/bvolpato/ivygrep/releases"><img src="https://img.shields.io/github/downloads/bvolpato/ivygrep/total?color=%23ff6f00" alt="Downloads" /></a>
 </p>
@@ -29,6 +29,17 @@
 </p>
 
 ---
+
+## One task. One context pack.
+
+```bash
+ig context "fix refresh-token races" --budget 8000
+```
+
+`ig context` retrieves implementation chunks, definitions, callers, exact
+references, tests, configuration, and documentation. It merges overlapping
+evidence, labels why each snippet matters, and keeps the complete Markdown pack
+inside the requested token budget. Add `--json` for structured output.
 
 ## Quick start
 
@@ -107,20 +118,20 @@ install -m 0755 ./target/release/ig ~/.local/bin/ig
 ig "authentication flow"            # auto-indexes on first run, then searches
 ig "error handling" src/api/         # scope to a directory
 ig --all "database migrations"      # search across all indexed projects
-ig context "fix refresh-token races" # gather one task-aware context bundle
+ig context "fix refresh-token races" # gather one task-ready context pack
 ```
 
 **Task context:**
 ```bash
-ig context "fix refresh-token races" --budget 8000
-ig --json context "fix refresh-token races" --budget 8000
+ig context "fix refresh-token races" --budget 2000  # quick orientation
+ig context "fix refresh-token races" --budget 8000  # implementation default
+ig --json context "fix refresh-token races" --budget 16000
 ```
 
-`ig context` gathers primary implementations, matching definitions and callers,
-tests, and supporting files into one Markdown or JSON bundle. It fuses several
-targeted searches by rank, removes overlapping snippets, and keeps gathered
-evidence within a deterministic model-independent token estimate. The default
-budget is 8,000 tokens. It uses existing local indexes and adds no MCP tool.
+Packs include role coverage, retrieval signals, source locations, candidate and
+selected counts, anchor symbols, and exact-reference expansion. Default budget:
+8,000 tokens. Filters such as `--type`, `--include`, and `--exclude` apply to the
+whole pack. Existing local indexes stay local. No extra MCP call is added.
 
 **Web UI:**
 ```bash
@@ -172,6 +183,10 @@ model artifacts once; `--hash` and hash-only builds do not.
 
 Use `ig --mcp` when an agent needs code search without loading whole files into
 context.
+
+Use MCP search for iterative discovery. Use `ig context "task" --budget 8000`
+when a shell-capable agent needs one bounded implementation pack with callers,
+references, tests, config, and docs.
 
 ```bash
 ig --mcp    # starts MCP server on stdio
@@ -426,7 +441,7 @@ queries, or index data to an external service.
 ```bash
 # Core workflow
 ig "your query"                    # search current workspace
-ig context "task" --budget 8000    # task-aware context bundle
+ig context "task" --budget 8000    # task-ready context pack
 ig "query" ~/other/project         # search a different workspace
 ig --add .                         # register & index a workspace
 ig --rm .                          # unregister a workspace

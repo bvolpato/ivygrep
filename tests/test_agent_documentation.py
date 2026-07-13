@@ -48,6 +48,18 @@ class AgentDocumentationTest(unittest.TestCase):
         self.assertIn("Manual MCP setup", self.site)
         self.assertIn("preserves existing", self.readme)
 
+    def test_task_context_packs_are_prominent_and_consistent(self) -> None:
+        for document in [self.readme, self.guide, self.site]:
+            with self.subTest(document=document[:20]):
+                self.assertIn('ig context "fix refresh-token races" --budget 8000', document)
+                self.assertIn("definitions", document)
+                self.assertIn("callers", document)
+                self.assertIn("references", document)
+                self.assertIn("configuration", document)
+        self.assertIn('id="context-packs"', self.site)
+        self.assertIn("complete Markdown pack", self.readme)
+        self.assertIn("complete-pack", self.guide)
+
     def test_opencode_uses_current_local_server_shape(self) -> None:
         self.assertIn('"type": "local"', self.readme)
         self.assertIn('"command": ["ig", "--mcp"]', self.readme)

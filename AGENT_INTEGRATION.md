@@ -19,6 +19,27 @@ shell. If the MCP server fails with an executable-not-found error, replace
 `"ig"` with an absolute path such as `/home/me/.local/bin/ig`,
 `/opt/homebrew/bin/ig`, or `C:\\Users\\me\\AppData\\Local\\ivygrep\\bin\\ig.exe`.
 
+## Task Context Packs
+
+Use MCP search for iterative discovery. Use CLI context packs when a
+shell-capable agent needs one bounded handoff for planning or implementation:
+
+```bash
+ig context "fix refresh-token races" --budget 8000
+ig --json context "fix refresh-token races" --budget 8000
+```
+
+One pack combines primary hits, definitions, callers, exact references, tests,
+configuration, and documentation. Markdown output reports role coverage,
+retrieval signals, source lines, anchors, selected candidates, and complete-pack
+token use. `--type`, `--include`, and `--exclude` narrow every retrieval pass.
+
+| Budget | Use |
+|---:|---|
+| 2,000 | Quick orientation |
+| 8,000 | Implementation default |
+| 16,000+ | Broad cross-cutting change |
+
 ## Client Configuration
 
 ### Automatic setup
@@ -207,7 +228,8 @@ Recommended agent flow:
    results are topically correct but too broad.
 
 MCP `ig_search` has no total `max_tokens` parameter. Use CLI
-`ig context "task" --budget TOKENS` for one task-aware, budgeted bundle.
+`ig context "task" --budget TOKENS` for one task-aware pack whose rendered
+Markdown fits the requested estimate.
 Otherwise control MCP result count and per-hit context separately.
 
 Fewer snippet tokens do not mean fewer result files, better relevance, or worse

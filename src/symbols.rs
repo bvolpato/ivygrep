@@ -117,6 +117,15 @@ pub fn search_symbols_with_options(
     let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
     reconcile_worktree_overlay(workspace, &model)?;
 
+    search_symbols_in_current_index(workspace, name, mode, options)
+}
+
+pub(crate) fn search_symbols_in_current_index(
+    workspace: &Workspace,
+    name: &str,
+    mode: SymbolSearchMode,
+    options: &SearchOptions,
+) -> Result<Vec<SearchHit>> {
     let candidate_name = canonical_symbol(name);
     let normalized = normalize_symbol(candidate_name);
     if normalized.is_empty() {
@@ -365,16 +374,34 @@ fn search_call_sites(
     mode: SymbolSearchMode,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
-    let source = match mode {
-        SymbolSearchMode::References => "reference",
-        SymbolSearchMode::Callers => "caller",
+    let (callers, references) =
+        search_call_sites_with_references(workspace, name, normalized, options)?;
+    match mode {
+        SymbolSearchMode::Callers => Ok(callers),
+        SymbolSearchMode::References => Ok(references),
         SymbolSearchMode::Definitions => unreachable!(),
-    };
-    let score = if mode == SymbolSearchMode::Callers {
-        8.0
-    } else {
-        6.0
-    };
+    }
+}
+
+pub(crate) fn search_symbol_relationships_in_current_index(
+    workspace: &Workspace,
+    name: &str,
+    options: &SearchOptions,
+) -> Result<(Vec<SearchHit>, Vec<SearchHit>)> {
+    let candidate_name = canonical_symbol(name);
+    let normalized = normalize_symbol(candidate_name);
+    if normalized.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    search_call_sites_with_references(workspace, candidate_name, &normalized, options)
+}
+
+fn search_call_sites_with_references(
+    workspace: &Workspace,
+    name: &str,
+    normalized: &str,
+    options: &SearchOptions,
+) -> Result<(Vec<SearchHit>, Vec<SearchHit>)> {
     let mut candidate_options = options.clone();
     candidate_options.limit = options.limit.map(|limit| limit.saturating_mul(4));
     let query = format!("{}(", name.trim());
@@ -383,7 +410,8 @@ fn search_call_sites(
     } else {
         crate::search::exact_literal_chunks_unbounded(workspace, &query, &candidate_options)?
     };
-    let mut hits = Vec::new();
+    let mut callers = Vec::new();
+    let mut references = Vec::new();
     let mut seen_call_sites = HashSet::new();
     let mut chunks_by_file = BTreeMap::<PathBuf, Vec<IndexedChunk>>::new();
     for chunk in candidates {
@@ -411,40 +439,43 @@ fn search_call_sites(
             if call_lines.is_empty() {
                 continue;
             }
-            if mode == SymbolSearchMode::Callers {
-                hits.push(SearchHit {
-                    file_path: chunk.file_path,
+            if options.limit.is_none_or(|limit| callers.len() < limit) {
+                callers.push(SearchHit {
+                    file_path: chunk.file_path.clone(),
                     start_line: chunk.start_line,
                     end_line: chunk.end_line,
-                    preview: chunk.text,
-                    reason: format!("exact {source} match"),
-                    score,
-                    sources: vec![source.to_string()],
+                    preview: chunk.text.clone(),
+                    reason: "exact caller match".to_string(),
+                    score: 8.0,
+                    sources: vec!["caller".to_string()],
                     neural_requested: false,
                     neural_executed: false,
                 });
-            } else {
-                for (line, preview) in call_lines {
-                    hits.push(SearchHit {
+            }
+            for (line, preview) in call_lines {
+                if options.limit.is_none_or(|limit| references.len() < limit) {
+                    references.push(SearchHit {
                         file_path: chunk.file_path.clone(),
                         start_line: line,
                         end_line: line,
                         preview,
-                        reason: format!("exact {source} match"),
-                        score,
-                        sources: vec![source.to_string()],
+                        reason: "exact reference match".to_string(),
+                        score: 6.0,
+                        sources: vec!["reference".to_string()],
                         neural_requested: false,
                         neural_executed: false,
                     });
                 }
             }
-            if options.limit.is_some_and(|limit| hits.len() >= limit) {
-                hits.truncate(options.limit.unwrap_or(hits.len()));
-                return Ok(hits);
+            if options
+                .limit
+                .is_some_and(|limit| callers.len() >= limit && references.len() >= limit)
+            {
+                return Ok((callers, references));
             }
         }
     }
-    Ok(hits)
+    Ok((callers, references))
 }
 
 fn matching_call_lines(

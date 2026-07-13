@@ -208,7 +208,7 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum CliCommand {
-    /// Build one task-aware, token-budgeted context bundle.
+    /// Build one task-aware context pack with relationships and supporting evidence.
     Context(ContextArgs),
     /// Install and verify ivygrep for coding agents.
     Agent(AgentArgs),
@@ -226,7 +226,7 @@ pub struct ContextArgs {
     #[arg(value_name = "PATH")]
     pub path: Option<PathBuf>,
 
-    /// Maximum model-independent estimated tokens in gathered evidence.
+    /// Maximum model-independent estimated tokens in the rendered Markdown pack.
     #[arg(long, value_name = "TOKENS", default_value_t = 8000)]
     pub budget: usize,
 

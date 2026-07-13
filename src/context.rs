@@ -8,7 +8,10 @@ use crate::embedding::{EmbeddingModel, HashEmbeddingModel};
 use crate::indexer::reconcile_worktree_overlay;
 use crate::protocol::SearchHit;
 use crate::search::{SearchContext, SearchOptions, hybrid_search_with_context};
-use crate::symbols::{SymbolSearchMode, likely_definition_names, search_symbols_with_options};
+use crate::symbols::{
+    SymbolSearchMode, likely_definition_names, search_symbol_relationships_in_current_index,
+    search_symbols_in_current_index,
+};
 use crate::workspace::Workspace;
 
 const MAX_ITEMS: usize = 20;
@@ -21,8 +24,10 @@ pub enum ContextRole {
     Primary,
     Definition,
     Caller,
+    Reference,
     Test,
-    Support,
+    Config,
+    Documentation,
     Related,
 }
 
@@ -32,11 +37,25 @@ impl ContextRole {
             Self::Primary => "primary",
             Self::Definition => "definition",
             Self::Caller => "caller",
+            Self::Reference => "reference",
             Self::Test => "test",
-            Self::Support => "support",
+            Self::Config => "config",
+            Self::Documentation => "documentation",
             Self::Related => "related",
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ContextCoverage {
+    pub files: usize,
+    pub primary: usize,
+    pub definitions: usize,
+    pub callers: usize,
+    pub references: usize,
+    pub tests: usize,
+    pub config: usize,
+    pub documentation: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -60,6 +79,7 @@ pub struct ContextBundle {
     pub candidate_count: usize,
     pub truncated: bool,
     pub anchor_symbols: Vec<String>,
+    pub coverage: ContextCoverage,
     pub items: Vec<ContextItem>,
 }
 
@@ -100,18 +120,25 @@ pub fn build_context_bundle(
     let mut candidates = BTreeMap::<(PathBuf, usize, usize), Candidate>::new();
 
     let query_specs = [
-        (task.to_string(), ContextRole::Primary, 1.0, 14usize),
-        (format!("test {task}"), ContextRole::Test, 0.72, 8),
         (
-            format!("documentation example {task}"),
-            ContextRole::Support,
-            0.58,
+            task.to_string(),
+            ContextRole::Primary,
+            1.0,
+            14usize,
+            "primary",
+        ),
+        (format!("test {task}"), ContextRole::Test, 0.72, 8, "test"),
+        (
+            format!("configuration documentation example {task}"),
+            ContextRole::Related,
+            0.64,
             8,
+            "supporting",
         ),
     ];
 
     let mut primary_hits = Vec::new();
-    for (query, requested_role, weight, context_lines) in query_specs {
+    for (query, requested_role, weight, context_lines, retrieval_label) in query_specs {
         let mut options = base_options.clone();
         options.limit = Some(candidate_limit);
         options.context = context_lines;
@@ -129,18 +156,22 @@ pub fn build_context_bundle(
             if requested_role == ContextRole::Primary && rank > 0 && !hit_matches_task(&hit, task) {
                 continue;
             }
+            let role = classify_role(&hit, requested_role);
             if requested_role != ContextRole::Primary
                 && (!hit_matches_task(&hit, task)
-                    || classify_role(&hit, requested_role) != requested_role)
+                    || if requested_role == ContextRole::Related {
+                        !matches!(role, ContextRole::Config | ContextRole::Documentation)
+                    } else {
+                        role != requested_role
+                    })
             {
                 continue;
             }
-            let role = classify_role(&hit, requested_role);
             add_candidate(
                 &mut candidates,
                 hit,
                 role,
-                format!("rank {} for {} retrieval", rank + 1, requested_role.label()),
+                format!("rank {} for {retrieval_label} retrieval", rank + 1),
                 weight / (RRF_K + rank as f64 + 1.0),
             );
         }
@@ -151,40 +182,52 @@ pub fn build_context_bundle(
     symbol_options.limit = Some(4);
     symbol_options.context = 10;
     for symbol in &anchor_symbols {
-        for (mode, role, weight, verb) in [
-            (
-                SymbolSearchMode::Definitions,
-                ContextRole::Definition,
-                0.82,
-                "defines",
-            ),
-            (
-                SymbolSearchMode::Callers,
-                ContextRole::Caller,
-                0.76,
-                "calls",
-            ),
-        ] {
-            match search_symbols_with_options(workspace, symbol, mode, &symbol_options) {
-                Ok(hits) => {
+        match search_symbols_in_current_index(
+            workspace,
+            symbol,
+            SymbolSearchMode::Definitions,
+            &symbol_options,
+        ) {
+            Ok(hits) => {
+                for (rank, hit) in hits.into_iter().enumerate() {
+                    add_candidate(
+                        &mut candidates,
+                        focus_hit_on_symbol(hit, symbol, symbol_options.context, false),
+                        ContextRole::Definition,
+                        format!("defines {symbol}"),
+                        0.82 / (RRF_K + rank as f64 + 1.0),
+                    );
+                }
+            }
+            Err(error) => tracing::debug!("context definition expansion failed: {error:#}"),
+        }
+        if looks_like_type_symbol(symbol) {
+            continue;
+        }
+        match search_symbol_relationships_in_current_index(workspace, symbol, &symbol_options) {
+            Ok((callers, references)) => {
+                for (role, hits, weight, verb, prefer_last) in [
+                    (ContextRole::Caller, callers, 0.76, "calls", true),
+                    (
+                        ContextRole::Reference,
+                        references,
+                        0.68,
+                        "references",
+                        false,
+                    ),
+                ] {
                     for (rank, hit) in hits.into_iter().enumerate() {
-                        let hit = focus_hit_on_symbol(
-                            hit,
-                            symbol,
-                            symbol_options.context,
-                            mode == SymbolSearchMode::Callers,
-                        );
                         add_candidate(
                             &mut candidates,
-                            hit,
+                            focus_hit_on_symbol(hit, symbol, symbol_options.context, prefer_last),
                             role,
                             format!("{verb} {symbol}"),
                             weight / (RRF_K + rank as f64 + 1.0),
                         );
                     }
                 }
-                Err(error) => tracing::debug!("context relationship expansion failed: {error:#}"),
             }
+            Err(error) => tracing::debug!("context relationship expansion failed: {error:#}"),
         }
     }
 
@@ -195,6 +238,19 @@ pub fn build_context_bundle(
         anchor_symbols,
         candidates.into_values().collect(),
     ))
+}
+
+fn looks_like_type_symbol(symbol: &str) -> bool {
+    symbol
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_uppercase())
+        && symbol
+            .chars()
+            .any(|character| character.is_ascii_lowercase())
+        && !symbol
+            .chars()
+            .any(|character| matches!(character, '_' | ':' | '.'))
 }
 
 fn focus_hit_on_symbol(
@@ -242,11 +298,14 @@ fn add_candidate(
         .cloned()
         .unwrap_or_else(|| (hit.file_path.clone(), hit.start_line, hit.end_line));
     let candidate = candidates.entry(key).or_insert_with(|| Candidate {
-        hit,
+        hit: hit.clone(),
         roles: BTreeSet::new(),
         reasons: BTreeSet::new(),
         fused_score: 0.0,
     });
+    candidate.hit.sources.extend(hit.sources);
+    candidate.hit.sources.sort();
+    candidate.hit.sources.dedup();
     candidate.roles.insert(role);
     candidate.reasons.insert(reason);
     candidate.fused_score += fused_score;
@@ -287,10 +346,12 @@ fn assemble_bundle(
     let mut claimed = HashSet::new();
     for role in [
         ContextRole::Primary,
-        ContextRole::Caller,
-        ContextRole::Test,
         ContextRole::Definition,
-        ContextRole::Support,
+        ContextRole::Caller,
+        ContextRole::Reference,
+        ContextRole::Test,
+        ContextRole::Config,
+        ContextRole::Documentation,
     ] {
         if let Some((index, _)) = candidates
             .iter()
@@ -309,7 +370,13 @@ fn assemble_bundle(
     );
 
     let mut items: Vec<ContextItem> = Vec::new();
-    let mut used_tokens = 0usize;
+    let mut used_tokens = estimated_header_tokens(
+        task,
+        workspace,
+        budget_tokens,
+        &anchor_symbols,
+        candidate_count,
+    );
     let mut file_counts = HashMap::<PathBuf, usize>::new();
     let mut truncated = false;
     for candidate in ordered {
@@ -329,14 +396,19 @@ fn assemble_bundle(
 
         let roles = candidate.roles.into_iter().collect::<Vec<_>>();
         let reasons = candidate.reasons.into_iter().collect::<Vec<_>>();
-        let metadata_tokens = estimate_tokens(&candidate.hit.file_path.to_string_lossy())
-            + roles.len().saturating_mul(2)
-            + reasons
-                .iter()
-                .map(|reason| estimate_tokens(reason))
-                .sum::<usize>()
-            + 12;
-        let remaining = budget_tokens.saturating_sub(used_tokens + metadata_tokens);
+        let mut item = ContextItem {
+            file_path: candidate.hit.file_path,
+            start_line: candidate.hit.start_line,
+            end_line: candidate.hit.end_line,
+            roles,
+            reasons,
+            sources: candidate.hit.sources,
+            preview: String::new(),
+            estimated_tokens: 0,
+        };
+        let item_number = items.len() + 1;
+        let wrapper_tokens = estimate_tokens(&render_markdown_item(item_number, &item));
+        let remaining = budget_tokens.saturating_sub(used_tokens + wrapper_tokens);
         if remaining < 64 {
             truncated = true;
             break;
@@ -348,30 +420,23 @@ fn assemble_bundle(
             truncated = true;
             break;
         }
-        let estimated_tokens = metadata_tokens + estimate_tokens(&preview);
-        if preview.trim().is_empty() || estimated_tokens > budget_tokens.saturating_sub(used_tokens)
+        item.preview = preview;
+        item.start_line = item.start_line.saturating_add(start_offset);
+        item.end_line = item
+            .start_line
+            .saturating_add(item.preview.lines().count().saturating_sub(1));
+        item.estimated_tokens = estimate_tokens(&render_markdown_item(item_number, &item));
+        if item.preview.trim().is_empty()
+            || item.estimated_tokens > budget_tokens.saturating_sub(used_tokens)
         {
             continue;
         }
         truncated |= preview_truncated;
-        used_tokens += estimated_tokens;
-        *file_counts
-            .entry(candidate.hit.file_path.clone())
-            .or_default() += 1;
-        let start_line = candidate.hit.start_line.saturating_add(start_offset);
-        let end_line = start_line.saturating_add(preview.lines().count().saturating_sub(1));
-        items.push(ContextItem {
-            file_path: candidate.hit.file_path,
-            start_line,
-            end_line,
-            roles,
-            reasons,
-            sources: candidate.hit.sources,
-            preview,
-            estimated_tokens,
-        });
+        used_tokens += item.estimated_tokens;
+        *file_counts.entry(item.file_path.clone()).or_default() += 1;
+        items.push(item);
     }
-    ContextBundle {
+    let mut bundle = ContextBundle {
         task: task.to_string(),
         workspace: workspace.to_path_buf(),
         budget_tokens,
@@ -379,11 +444,96 @@ fn assemble_bundle(
         candidate_count,
         truncated,
         anchor_symbols,
+        coverage: ContextCoverage::default(),
         items,
+    };
+    finalize_bundle_metrics(&mut bundle);
+    while bundle.used_tokens > bundle.budget_tokens && !bundle.items.is_empty() {
+        bundle.items.pop();
+        bundle.truncated = true;
+        finalize_bundle_metrics(&mut bundle);
+    }
+    bundle
+}
+
+fn estimated_header_tokens(
+    task: &str,
+    workspace: &Path,
+    budget_tokens: usize,
+    anchor_symbols: &[String],
+    candidate_count: usize,
+) -> usize {
+    let bundle = ContextBundle {
+        task: task.to_string(),
+        workspace: workspace.to_path_buf(),
+        budget_tokens,
+        used_tokens: budget_tokens,
+        candidate_count,
+        truncated: true,
+        anchor_symbols: anchor_symbols.to_vec(),
+        coverage: ContextCoverage {
+            files: MAX_ITEMS,
+            primary: MAX_ITEMS,
+            definitions: MAX_ITEMS,
+            callers: MAX_ITEMS,
+            references: MAX_ITEMS,
+            tests: MAX_ITEMS,
+            config: MAX_ITEMS,
+            documentation: MAX_ITEMS,
+        },
+        items: Vec::new(),
+    };
+    estimate_tokens(&render_markdown(&bundle)) + 8
+}
+
+fn finalize_bundle_metrics(bundle: &mut ContextBundle) {
+    let mut files = HashSet::new();
+    let mut coverage = ContextCoverage::default();
+    for item in &bundle.items {
+        files.insert(&item.file_path);
+        for role in &item.roles {
+            match role {
+                ContextRole::Primary => coverage.primary += 1,
+                ContextRole::Definition => coverage.definitions += 1,
+                ContextRole::Caller => coverage.callers += 1,
+                ContextRole::Reference => coverage.references += 1,
+                ContextRole::Test => coverage.tests += 1,
+                ContextRole::Config => coverage.config += 1,
+                ContextRole::Documentation => coverage.documentation += 1,
+                ContextRole::Related => {}
+            }
+        }
+    }
+    coverage.files = files.len();
+    bundle.coverage = coverage;
+
+    for _ in 0..4 {
+        let estimated = estimate_tokens(&render_markdown(bundle));
+        if estimated == bundle.used_tokens {
+            break;
+        }
+        bundle.used_tokens = estimated;
     }
 }
 
 fn classify_role(hit: &SearchHit, requested: ContextRole) -> ContextRole {
+    if requested == ContextRole::Primary {
+        return ContextRole::Primary;
+    }
+    let file_role = classify_file_role(hit);
+    match requested {
+        ContextRole::Test if file_role == Some(ContextRole::Test) => ContextRole::Test,
+        ContextRole::Config if file_role == Some(ContextRole::Config) => ContextRole::Config,
+        ContextRole::Documentation if file_role == Some(ContextRole::Documentation) => {
+            ContextRole::Documentation
+        }
+        ContextRole::Definition | ContextRole::Caller | ContextRole::Reference => requested,
+        ContextRole::Related => file_role.unwrap_or(ContextRole::Related),
+        _ => ContextRole::Related,
+    }
+}
+
+fn classify_file_role(hit: &SearchHit) -> Option<ContextRole> {
     let path = &hit.file_path;
     let normalized = path.to_string_lossy().to_ascii_lowercase();
     let file = path
@@ -406,43 +556,68 @@ fn classify_role(hit: &SearchHit, requested: ContextRole) -> ContextRole {
         || preview_lower.contains("describe(")
         || preview_lower.contains("it(");
     if is_test {
-        return ContextRole::Test;
+        return Some(ContextRole::Test);
     }
-    let is_support = normalized
+    let is_documentation = normalized
         .split('/')
-        .any(|part| matches!(part, "docs" | "doc" | "examples" | "example" | "config"))
+        .any(|part| matches!(part, "docs" | "doc" | "examples" | "example"))
+        || path.extension().and_then(|extension| extension.to_str()) == Some("md");
+    if is_documentation {
+        return Some(ContextRole::Documentation);
+    }
+    let is_config = normalized.split('/').any(|part| part == "config")
+        || file.starts_with('.')
+        || file.contains("config")
         || matches!(
             path.extension().and_then(|extension| extension.to_str()),
-            Some("md" | "toml" | "yaml" | "yml" | "json")
+            Some("toml" | "yaml" | "yml" | "json")
         );
-    if is_support {
-        return ContextRole::Support;
+    if is_config {
+        return Some(ContextRole::Config);
     }
-    match requested {
-        ContextRole::Test | ContextRole::Support => ContextRole::Related,
-        role => role,
-    }
+    None
 }
 
 fn anchor_symbols(task: &str, primary_hits: &[SearchHit]) -> Vec<String> {
-    let mut scored = BTreeMap::<String, usize>::new();
     let explicit_symbols = task_symbols(task);
-    for symbol in &explicit_symbols {
-        scored.insert(symbol.clone(), 20);
-    }
     if !explicit_symbols.is_empty() {
-        return scored
-            .into_keys()
+        return explicit_symbols
+            .into_iter()
             .take(MAX_ANCHOR_SYMBOLS)
             .collect::<Vec<_>>();
     }
-    let task_terms = significant_task_terms(task);
-    let mut fallback = None;
-    for (rank, hit) in primary_hits.iter().take(3).enumerate() {
-        for symbol in likely_definition_names(&hit.preview) {
+
+    let mut scored = BTreeMap::<String, usize>::new();
+    let mut task_terms = significant_task_terms(task);
+    if task_terms
+        .iter()
+        .any(|term| term == "pack" || term == "packs")
+    {
+        task_terms.push("bundle".to_string());
+    }
+    for (rank, hit) in primary_hits.iter().take(5).enumerate() {
+        let file_role = classify_file_role(hit);
+        let mut names = if file_role == Some(ContextRole::Test) {
+            likely_called_names(&hit.preview)
+        } else {
+            likely_definition_names(&hit.preview)
+        };
+        names.sort();
+        names.dedup();
+        let path_terms = hit
+            .file_path
+            .to_string_lossy()
+            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .flat_map(crate::text::split_identifier_segments)
+            .collect::<HashSet<_>>();
+        let path_overlap = task_terms
+            .iter()
+            .filter(|term| path_terms.contains(*term))
+            .count();
+        for symbol in names {
             if symbol.len() >= 3 && !is_generic_symbol(&symbol) {
-                fallback.get_or_insert_with(|| symbol.clone());
-                let overlap = crate::text::split_identifier_segments(&symbol)
+                let symbol_terms = crate::text::split_identifier_segments(&symbol);
+                let overlap = symbol_terms
                     .iter()
                     .filter(|segment| {
                         task_terms.iter().any(|term| {
@@ -455,27 +630,79 @@ fn anchor_symbols(task: &str, primary_hits: &[SearchHit]) -> Vec<String> {
                     })
                     .count();
                 if overlap > 0 {
-                    *scored.entry(symbol).or_default() +=
-                        overlap.saturating_mul(8) + 3usize.saturating_sub(rank);
+                    let score = overlap.saturating_mul(12)
+                        + path_overlap.saturating_mul(8)
+                        + symbol_terms.len().min(4)
+                        + 5usize.saturating_sub(rank);
+                    scored
+                        .entry(symbol)
+                        .and_modify(|current| *current = (*current).max(score))
+                        .or_insert(score);
                 }
             }
         }
     }
-    if scored.is_empty()
-        && let Some(symbol) = fallback
-    {
-        scored.insert(symbol, 1);
-    }
     let mut symbols = scored.into_iter().collect::<Vec<_>>();
     symbols.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    let best = symbols.first().map(|(_, score)| *score).unwrap_or_default();
     symbols
         .into_iter()
+        .filter(|(_, score)| score.saturating_mul(3) >= best.saturating_mul(2))
         .map(|(symbol, _)| symbol)
-        .take(1)
+        .take(MAX_ANCHOR_SYMBOLS)
         .collect()
 }
 
+fn likely_called_names(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for line in text.lines() {
+        let bytes = line.as_bytes();
+        for (open, _) in line.match_indices('(') {
+            let mut start = open;
+            while start > 0 {
+                let byte = bytes[start - 1];
+                if byte.is_ascii_alphanumeric() || byte == b'_' {
+                    start -= 1;
+                } else {
+                    break;
+                }
+            }
+            let name = &line[start..open];
+            let prefix = line[..start].trim_end();
+            let is_definition = ["def", "fn", "func", "function", "fun"]
+                .iter()
+                .any(|keyword| prefix.ends_with(keyword));
+            if name.len() >= 3 && !is_definition && !is_generic_call(name) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names
+}
+
+fn is_generic_call(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "assert"
+            | "assert_eq"
+            | "assert_ne"
+            | "debug_assert"
+            | "debug_assert_eq"
+            | "eprint"
+            | "eprintln"
+            | "format"
+            | "if"
+            | "match"
+            | "ok"
+            | "print"
+            | "println"
+            | "some"
+            | "vec"
+    )
+}
+
 fn task_symbols(task: &str) -> Vec<String> {
+    let mut seen = HashSet::new();
     task.split(|character: char| {
         !character.is_ascii_alphanumeric()
             && character != '_'
@@ -488,15 +715,60 @@ fn task_symbols(task: &str) -> Vec<String> {
     .filter(|part| {
         part.contains('_')
             || part.contains("::")
-            || part.contains('.')
+            || part.contains('.') && !looks_like_file_name(part)
             || part
                 .chars()
-                .skip(1)
-                .any(|character| character.is_ascii_uppercase())
+                .zip(part.chars().skip(1))
+                .any(|(left, right)| left.is_ascii_lowercase() && right.is_ascii_uppercase())
     })
     .filter(|part| !is_generic_symbol(part))
+    .filter(|part| seen.insert(part.to_ascii_lowercase()))
     .map(ToOwned::to_owned)
     .collect()
+}
+
+fn looks_like_file_name(token: &str) -> bool {
+    let Some((_, extension)) = token.rsplit_once('.') else {
+        return false;
+    };
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "c" | "cc"
+            | "cpp"
+            | "cs"
+            | "css"
+            | "dart"
+            | "ex"
+            | "exs"
+            | "go"
+            | "h"
+            | "hpp"
+            | "html"
+            | "java"
+            | "js"
+            | "json"
+            | "jsx"
+            | "kt"
+            | "kts"
+            | "lua"
+            | "md"
+            | "php"
+            | "proto"
+            | "py"
+            | "rb"
+            | "rs"
+            | "scala"
+            | "sh"
+            | "sql"
+            | "swift"
+            | "toml"
+            | "ts"
+            | "tsx"
+            | "xml"
+            | "yaml"
+            | "yml"
+            | "zig"
+    )
 }
 
 fn is_generic_symbol(symbol: &str) -> bool {
@@ -517,6 +789,8 @@ fn is_generic_symbol(symbol: &str) -> bool {
             | "query"
             | "options"
             | "context"
+            | "token"
+            | "token_mut"
             | "run"
     )
 }
@@ -543,6 +817,15 @@ fn significant_task_terms(task: &str) -> Vec<String> {
                     | "change"
                     | "update"
                     | "make"
+                    | "create"
+                    | "ensure"
+                    | "implement"
+                    | "improve"
+                    | "refactor"
+                    | "remove"
+                    | "support"
+                    | "task"
+                    | "behavior"
             )
         })
         .flat_map(|term| crate::text::split_identifier_segments(&term))
@@ -712,28 +995,52 @@ pub fn render_markdown(bundle: &ContextBundle) -> String {
     if !bundle.anchor_symbols.is_empty() {
         output.push_str(&format!("Anchors: {}\n", bundle.anchor_symbols.join(", ")));
     }
+    output.push_str(&format!(
+        "Coverage: {} files | {} primary | {} definitions | {} callers | {} references | {} tests | {} config | {} docs\n",
+        bundle.coverage.files,
+        bundle.coverage.primary,
+        bundle.coverage.definitions,
+        bundle.coverage.callers,
+        bundle.coverage.references,
+        bundle.coverage.tests,
+        bundle.coverage.config,
+        bundle.coverage.documentation,
+    ));
+    output.push_str(&format!(
+        "Candidates: {} retrieved | {} selected\n",
+        bundle.candidate_count,
+        bundle.items.len()
+    ));
     output.push_str("\n## Evidence\n");
     for (index, item) in bundle.items.iter().enumerate() {
-        let roles = item
-            .roles
-            .iter()
-            .map(|role| role.label())
-            .collect::<Vec<_>>()
-            .join(", ");
-        output.push_str(&format!(
-            "\n### {}. {}:{}-{} [{}]\n\n",
-            index + 1,
-            item.file_path.display(),
-            item.start_line,
-            item.end_line,
-            roles
-        ));
-        if !item.reasons.is_empty() {
-            output.push_str(&format!("Why: {}.\n\n", item.reasons.join("; ")));
-        }
-        let language = language_fence(&item.file_path);
-        output.push_str(&format!("```{language}\n{}\n```\n", item.preview));
+        output.push_str(&render_markdown_item(index + 1, item));
     }
+    output
+}
+
+fn render_markdown_item(index: usize, item: &ContextItem) -> String {
+    let roles = item
+        .roles
+        .iter()
+        .map(|role| role.label())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut output = format!(
+        "\n### {}. {}:{}-{} [{}]\n\n",
+        index,
+        item.file_path.display(),
+        item.start_line,
+        item.end_line,
+        roles
+    );
+    if !item.reasons.is_empty() {
+        output.push_str(&format!("Why: {}.\n\n", item.reasons.join("; ")));
+    }
+    if !item.sources.is_empty() {
+        output.push_str(&format!("Signals: {}.\n\n", item.sources.join(", ")));
+    }
+    let language = language_fence(&item.file_path);
+    output.push_str(&format!("```{language}\n{}\n```\n", item.preview));
     output
 }
 
@@ -817,11 +1124,15 @@ mod tests {
         let bundle = assemble_bundle(
             "change validate_token",
             Path::new("/repo"),
-            180,
+            500,
             vec!["validate_token".to_string()],
             candidates,
         );
         assert!(bundle.used_tokens <= bundle.budget_tokens);
+        assert_eq!(
+            bundle.used_tokens,
+            estimate_tokens(&render_markdown(&bundle))
+        );
         assert!(
             bundle
                 .items
@@ -834,6 +1145,39 @@ mod tests {
                 .iter()
                 .any(|item| item.roles.contains(&ContextRole::Caller))
         );
+    }
+
+    #[test]
+    fn rendered_pack_never_exceeds_requested_budget() {
+        for budget in [256, 384, 800, 4_000] {
+            let candidates = (0..30)
+                .map(|index| {
+                    candidate(
+                        &format!("src/module_{index}.rs"),
+                        1,
+                        ContextRole::Primary,
+                        &format!(
+                            "pub fn implementation_{index}() {{\n{}\n}}",
+                            "    execute_work();\n".repeat(80)
+                        ),
+                        1.0 / (index + 1) as f64,
+                    )
+                })
+                .collect();
+            let bundle = assemble_bundle(
+                "change implementation behavior",
+                Path::new("/repo"),
+                budget,
+                Vec::new(),
+                candidates,
+            );
+            assert!(bundle.used_tokens <= budget, "{bundle:#?}");
+            assert_eq!(
+                bundle.used_tokens,
+                estimate_tokens(&render_markdown(&bundle))
+            );
+            assert!(bundle.items.len() <= MAX_ITEMS);
+        }
     }
 
     #[test]
@@ -853,22 +1197,44 @@ mod tests {
             ["validateToken", "calculate_tax"]
         );
         assert!(task_symbols("where is authentication handled").is_empty());
+        assert!(task_symbols("choose HTTP TLS APIs").is_empty());
+        assert!(task_symbols("fix src/auth.rs and config.yaml").is_empty());
+        assert_eq!(
+            task_symbols("change UserService and std::io and client.send"),
+            ["UserService", "std::io", "client.send"]
+        );
+        assert!(looks_like_type_symbol("NeuralBackend"));
+        assert!(!looks_like_type_symbol("build_context_bundle"));
+        assert!(!looks_like_type_symbol("client.send"));
     }
 
     #[test]
     fn inferred_anchors_prefer_task_overlap() {
-        let primary = vec![SearchHit {
-            file_path: PathBuf::from("src/context.rs"),
-            start_line: 1,
-            end_line: 3,
-            preview: "struct Candidate;\npub fn build_context_bundle() {}\nstruct SearchPool;"
-                .to_string(),
-            reason: String::new(),
-            score: 1.0,
-            sources: Vec::new(),
-            neural_requested: false,
-            neural_executed: false,
-        }];
+        let primary = vec![
+            SearchHit {
+                file_path: PathBuf::from("tests/context_test.rs"),
+                start_line: 1,
+                end_line: 1,
+                preview: "fn bundle_respects_budget_and_keeps_relationship_roles() {}".to_string(),
+                reason: String::new(),
+                score: 2.0,
+                sources: Vec::new(),
+                neural_requested: false,
+                neural_executed: false,
+            },
+            SearchHit {
+                file_path: PathBuf::from("src/context.rs"),
+                start_line: 1,
+                end_line: 3,
+                preview: "struct Candidate;\npub fn build_context_bundle() {}\nstruct SearchPool;"
+                    .to_string(),
+                reason: String::new(),
+                score: 1.0,
+                sources: Vec::new(),
+                neural_requested: false,
+                neural_executed: false,
+            },
+        ];
         assert_eq!(
             anchor_symbols("add token budgeted context packs", &primary),
             ["build_context_bundle"]
