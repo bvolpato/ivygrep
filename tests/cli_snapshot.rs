@@ -130,15 +130,29 @@ fn cli_hardware_json_is_machine_readable() {
 
 #[test]
 #[serial]
-fn cli_hardware_does_not_claim_portable_transformer_is_accelerated() {
+fn cli_hardware_reports_transformer_acceleration_truthfully() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
-    cmd.arg("hardware")
+    let output = cmd
+        .arg("hardware")
         .env("IVYGREP_MODEL_PROFILE", "general")
         .assert()
         .success()
-        .stdout(predicates::str::contains(
-            "Profile acceleration: CPU (accelerator-capable profile)",
-        ));
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(output).unwrap();
+
+    let expected = if text.contains("Installed build: metal") {
+        "Profile acceleration: metal enabled"
+    } else if text.contains("Installed build: cuda") {
+        "Profile acceleration: cuda enabled"
+    } else {
+        "Profile acceleration: CPU (accelerator-capable profile)"
+    };
+    assert!(
+        text.contains(expected),
+        "unexpected hardware report:\n{text}"
+    );
 }
 
 #[test]
