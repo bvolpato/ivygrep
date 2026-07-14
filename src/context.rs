@@ -572,7 +572,8 @@ fn anchor_symbols(task: &str, primary_hits: &[SearchHit]) -> Vec<String> {
     }
 
     let mut scored = BTreeMap::<String, usize>::new();
-    let mut fallback = None;
+    let mut source_fallback = None;
+    let mut test_fallback = None;
     let mut task_terms = significant_task_terms(task);
     if task_terms
         .iter()
@@ -581,9 +582,9 @@ fn anchor_symbols(task: &str, primary_hits: &[SearchHit]) -> Vec<String> {
         task_terms.push("bundle".to_string());
     }
     for (rank, hit) in primary_hits.iter().take(5).enumerate() {
-        let file_role = classify_file_role(hit);
-        let mut names = if file_role == Some(ContextRole::Test) {
-            likely_called_names(&hit.preview)
+        let is_test = classify_file_role(hit) == Some(ContextRole::Test);
+        let mut names = if is_test {
+            likely_test_subject_names(&hit.preview)
         } else {
             likely_definition_names(&hit.preview)
         };
@@ -601,7 +602,11 @@ fn anchor_symbols(task: &str, primary_hits: &[SearchHit]) -> Vec<String> {
             .count();
         for symbol in names {
             if symbol.len() >= 3 && !is_generic_symbol(&symbol) {
-                fallback.get_or_insert_with(|| symbol.clone());
+                if is_test {
+                    test_fallback.get_or_insert_with(|| symbol.clone());
+                } else {
+                    source_fallback.get_or_insert_with(|| symbol.clone());
+                }
                 let symbol_terms = crate::text::split_identifier_segments(&symbol);
                 let overlap = symbol_terms
                     .iter()
@@ -629,7 +634,7 @@ fn anchor_symbols(task: &str, primary_hits: &[SearchHit]) -> Vec<String> {
         }
     }
     if scored.is_empty()
-        && let Some(symbol) = fallback
+        && let Some(symbol) = source_fallback.or(test_fallback)
     {
         scored.insert(symbol, 1);
     }
@@ -642,6 +647,43 @@ fn anchor_symbols(task: &str, primary_hits: &[SearchHit]) -> Vec<String> {
         .map(|(symbol, _)| symbol)
         .take(MAX_ANCHOR_SYMBOLS)
         .collect()
+}
+
+fn likely_test_subject_names(text: &str) -> Vec<String> {
+    let mut names = likely_jsx_component_names(text);
+    names.extend(likely_called_names(text));
+    names
+}
+
+fn likely_jsx_component_names(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('<') {
+        rest = &rest[open + 1..];
+        if rest.starts_with('/') {
+            continue;
+        }
+        let Some(first) = rest.chars().next() else {
+            break;
+        };
+        if !first.is_ascii_uppercase() {
+            continue;
+        }
+        let end = rest
+            .find(|character: char| {
+                !character.is_ascii_alphanumeric()
+                    && character != '_'
+                    && character != '$'
+                    && character != '.'
+            })
+            .unwrap_or(rest.len());
+        let name = rest[..end].rsplit('.').next().unwrap_or_default();
+        if name.len() >= 3 && !names.iter().any(|existing| existing == name) {
+            names.push(name.to_string());
+        }
+    }
+    names.reverse();
+    names
 }
 
 fn likely_called_names(text: &str) -> Vec<String> {
@@ -666,7 +708,7 @@ fn likely_called_names(text: &str) -> Vec<String> {
             if name.len() >= 3
                 && !is_definition
                 && !is_generic_call(name)
-                && !has_assertion_receiver(prefix)
+                && !has_test_harness_receiver(prefix)
             {
                 names.push(name.to_string());
             }
@@ -677,16 +719,29 @@ fn likely_called_names(text: &str) -> Vec<String> {
 
 fn is_generic_call(name: &str) -> bool {
     let normalized = name.to_ascii_lowercase().replace('_', "");
-    if normalized.starts_with("assert") {
+    if normalized.starts_with("assert")
+        || [
+            "findallby",
+            "findby",
+            "getallby",
+            "getby",
+            "queryallby",
+            "queryby",
+        ]
+        .iter()
+        .any(|prefix| normalized.starts_with(prefix))
+    {
         return true;
     }
     matches!(
         normalized.as_str(),
         "afterall"
             | "aftereach"
+            | "act"
             | "beforeall"
             | "beforeeach"
             | "context"
+            | "cleanup"
             | "debugassert"
             | "debugasserteq"
             | "deepequal"
@@ -709,6 +764,7 @@ fn is_generic_call(name: &str) -> bool {
             | "it"
             | "match"
             | "mock"
+            | "mount"
             | "notdeepequal"
             | "notequal"
             | "notstrictequal"
@@ -719,23 +775,29 @@ fn is_generic_call(name: &str) -> bool {
             | "println"
             | "raises"
             | "rejects"
+            | "render"
+            | "renderhook"
             | "setuptest"
             | "some"
             | "specify"
             | "spyon"
             | "strictequal"
             | "suite"
+            | "shallow"
             | "teardowntest"
             | "test"
             | "throws"
             | "vec"
+            | "waitfor"
+            | "waitforelementtoberemoved"
+            | "within"
             | "xdescribe"
             | "xit"
             | "xtest"
     )
 }
 
-fn has_assertion_receiver(prefix: &str) -> bool {
+fn has_test_harness_receiver(prefix: &str) -> bool {
     let Some(receiver) = prefix.strip_suffix('.').and_then(|prefix| {
         prefix
             .rsplit(|character: char| !character.is_ascii_alphanumeric() && character != '_')
@@ -744,7 +806,18 @@ fn has_assertion_receiver(prefix: &str) -> bool {
         return false;
     };
     let receiver = receiver.to_ascii_lowercase().replace('_', "");
-    matches!(receiver.as_str(), "assert" | "expect" | "should") || receiver.ends_with("assert")
+    matches!(
+        receiver.as_str(),
+        "assert"
+            | "expect"
+            | "fireevent"
+            | "jest"
+            | "screen"
+            | "should"
+            | "sinon"
+            | "userevent"
+            | "vi"
+    ) || receiver.ends_with("assert")
 }
 
 fn task_symbols(task: &str) -> Vec<String> {
@@ -1366,6 +1439,48 @@ mod tests {
                 "{preview}"
             );
         }
+    }
+
+    #[test]
+    fn inferred_anchors_prefer_source_subjects_over_test_helpers() {
+        let primary = vec![
+            SearchHit {
+                file_path: PathBuf::from("src/user-card.test.tsx"),
+                start_line: 1,
+                end_line: 1,
+                preview: "render(<UserCard />); screen.getByText('profile');".to_string(),
+                reason: String::new(),
+                score: 2.0,
+                sources: Vec::new(),
+                neural_requested: false,
+                neural_executed: false,
+            },
+            SearchHit {
+                file_path: PathBuf::from("src/user-card.tsx"),
+                start_line: 1,
+                end_line: 1,
+                preview: "export function UserCard() { return <section />; }".to_string(),
+                reason: String::new(),
+                score: 1.0,
+                sources: Vec::new(),
+                neural_requested: false,
+                neural_executed: false,
+            },
+        ];
+        assert_eq!(
+            anchor_symbols("fix profile display failures", &primary),
+            ["UserCard"]
+        );
+    }
+
+    #[test]
+    fn jsx_components_are_test_subjects_without_source_hits() {
+        assert_eq!(
+            likely_test_subject_names(
+                "render(<Provider><UserCard /></Provider>); screen.getByRole('article');"
+            ),
+            ["UserCard", "Provider"]
+        );
     }
 
     #[test]
