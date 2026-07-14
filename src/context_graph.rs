@@ -331,17 +331,16 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                 if let Some(value) = line.strip_prefix("from ") {
                     if let Some((module, members)) = value.split_once(" import ") {
                         let module = module.trim();
+                        let members = python_import_members(members);
                         if !module.is_empty() && module.chars().all(|character| character == '.') {
-                            for member in members
-                                .trim_matches(['(', ')'])
-                                .split(',')
-                                .filter_map(|member| member.split_whitespace().next())
-                                .filter(|member| !member.is_empty() && *member != "*")
-                            {
+                            for member in members {
                                 specs.insert(format!("{module}{member}"));
                             }
                         } else {
                             specs.insert(module.to_string());
+                            for member in members {
+                                specs.insert(format!("{module}.{member}"));
+                            }
                         }
                     }
                 } else if let Some(value) = line.strip_prefix("import ") {
@@ -492,6 +491,14 @@ fn strip_rust_visibility(line: &str) -> &str {
         .unwrap_or(line)
 }
 
+fn python_import_members(value: &str) -> impl Iterator<Item = &str> {
+    value
+        .trim_matches(['(', ')'])
+        .split(',')
+        .filter_map(|member| member.split_whitespace().next())
+        .filter(|member| !member.is_empty() && *member != "*")
+}
+
 fn expand_grouped_spec(value: &str) -> Vec<String> {
     let value = value.trim();
     let Some((prefix, rest)) = value.split_once('{') else {
@@ -570,6 +577,11 @@ fn resolve_local_dependency(
     let source_dir = source_path.parent().unwrap_or_else(|| Path::new(""));
     let mut normalized = spec.replace("::", "/").replace('\\', "/");
     let python_relative = language == "python" && spec.starts_with('.');
+    let starlark_relative = language == "starlark" && spec.starts_with(':');
+    let starlark_workspace = language == "starlark" && spec.starts_with("//");
+    if language == "starlark" && spec.starts_with('@') {
+        return None;
+    }
     if python_relative {
         let levels = spec
             .chars()
@@ -577,6 +589,10 @@ fn resolve_local_dependency(
             .count();
         let module = spec[levels..].replace('.', "/");
         normalized = format!("{}{module}", "../".repeat(levels.saturating_sub(1)));
+    } else if starlark_relative {
+        normalized = spec.trim_start_matches(':').replace(':', "/");
+    } else if starlark_workspace {
+        normalized = spec.trim_start_matches('/').replace(':', "/");
     } else if matches!(
         language,
         "python" | "java" | "kotlin" | "scala" | "csharp" | "haskell" | "elixir"
@@ -588,7 +604,8 @@ fn resolve_local_dependency(
         || normalized.starts_with("super/")
         || normalized.starts_with("./")
         || normalized.starts_with("../")
-        || python_relative;
+        || python_relative
+        || starlark_relative;
     if language == "rust" && !crate_relative && !source_relative && normalized.contains('/') {
         let mut module_candidates = Vec::new();
         let mut prefix = Some(Path::new(&normalized));
@@ -1471,6 +1488,44 @@ mod tests {
             edge.kind == FileEdgeKind::Dependency
                 && edge.target_path == Path::new("app/auth/helper.py")
         }));
+    }
+
+    #[test]
+    fn python_absolute_import_members_resolve_submodules() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("app")).unwrap();
+        fs::write(root.path().join("app/__init__.py"), "").unwrap();
+        fs::write(root.path().join("app/helper.py"), "def work(): pass\n").unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("service.py"),
+            "from app import helper\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency && edge.target_path == Path::new("app/helper.py")
+        }));
+    }
+
+    #[test]
+    fn starlark_labels_resolve_local_and_workspace_loads() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("tools")).unwrap();
+        fs::write(
+            root.path().join("tools/defs.bzl"),
+            "def rule_impl(): pass\n",
+        )
+        .unwrap();
+
+        for spec in [":defs.bzl", "//tools:defs.bzl"] {
+            let content = format!("load(\"{spec}\", \"rule_impl\")\n");
+            let edges = extract_file_edges(root.path(), None, Path::new("tools/BUILD"), &content);
+            assert!(edges.iter().any(|edge| {
+                edge.kind == FileEdgeKind::Dependency
+                    && edge.target_path == Path::new("tools/defs.bzl")
+            }));
+        }
     }
 
     #[test]

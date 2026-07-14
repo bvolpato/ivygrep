@@ -520,6 +520,78 @@ fn cli_context_graph_tracks_dependencies_across_incremental_reindex() {
 
 #[test]
 #[serial]
+fn cli_context_e2e_resolves_python_and_bazel_dependencies() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("workspace");
+    let home = tmp.path().join("ivygrep_home");
+    init_git_repo(&root);
+    std::fs::create_dir_all(root.join("app")).unwrap();
+    std::fs::create_dir_all(root.join("tools")).unwrap();
+    std::fs::write(root.join("app/__init__.py"), "").unwrap();
+    std::fs::write(
+        root.join("service.py"),
+        "from app import helper\n\ndef run_release_helper():\n    return helper.work()\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("tools/BUILD.bazel"),
+        "load(\":defs.bzl\", \"rule_impl\")\n\ndef configure_release_widget():\n    return rule_impl()\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("tools/defs.bzl"),
+        "def rule_impl():\n    return \"configured\"\n",
+    )
+    .unwrap();
+
+    let run_context = |query: &str| {
+        let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+            .current_dir(&root)
+            .env("IVYGREP_HOME", &home)
+            .env("IVYGREP_NO_AUTOSPAWN", "1")
+            .args(["--json", "--hash", "context", "--budget", "3000", query])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+    };
+    let has_dependency = |value: &serde_json::Value, expected: &str| {
+        value["items"].as_array().unwrap().iter().any(|item| {
+            item["file_path"] == expected
+                && item["roles"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("dependency"))
+        })
+    };
+
+    let before = run_context("change run_release_helper");
+    assert!(!has_dependency(&before, "app/helper.py"), "{before:#}");
+
+    std::fs::write(
+        root.join("app/helper.py"),
+        "def work():\n    return \"done\"\n",
+    )
+    .unwrap();
+    Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--add", "--hash", "--no-watch", "."])
+        .assert()
+        .success();
+
+    let python = run_context("change run_release_helper");
+    assert!(has_dependency(&python, "app/helper.py"), "{python:#}");
+
+    let bazel = run_context("change configure_release_widget");
+    assert!(has_dependency(&bazel, "tools/defs.bzl"), "{bazel:#}");
+}
+
+#[test]
+#[serial]
 fn cli_context_captures_type_constructor_relationships() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("workspace");

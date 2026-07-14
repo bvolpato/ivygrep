@@ -118,6 +118,13 @@ fn e2e_mcp_full_session() {
     let repo = tmp.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
     std::fs::write(repo.join("test.rs"), "fn foo() {}").unwrap();
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(
+        repo.join("src/lib.rs"),
+        "mod helper;\npub fn execute_helper() -> u64 { helper::value() }\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("src/helper.rs"), "pub fn value() -> u64 { 42 }\n").unwrap();
     std::fs::create_dir_all(repo.join(".git")).unwrap();
 
     let bin_path = assert_cmd::cargo::cargo_bin("ig");
@@ -242,7 +249,7 @@ fn e2e_mcp_full_session() {
             "params": {
                 "name": "ig_search",
                 "arguments": {
-                    "query": "implement foo behavior",
+                    "query": "change execute_helper behavior",
                     "path": repo.to_string_lossy().to_string(),
                     "output": "context_pack",
                     "budget_tokens": 1000
@@ -260,6 +267,19 @@ fn e2e_mcp_full_session() {
             .as_u64()
             .unwrap()
             <= 1000
+    );
+    let context_items = context_payload["context_pack"]["items"]
+        .as_array()
+        .expect("context pack items should be an array");
+    assert!(
+        context_items.iter().any(|item| {
+            item["file_path"] == "src/helper.rs"
+                && item["roles"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("dependency"))
+        }),
+        "MCP context pack should expand Rust dependencies: {context_payload:#}"
     );
     assert_eq!(context_res["result"]["structuredContent"], context_payload);
 
