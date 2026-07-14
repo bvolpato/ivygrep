@@ -4624,6 +4624,45 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn adding_python_relative_member_reindexes_importer() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("app/auth")).unwrap();
+        fs::write(
+            root.path().join("app/auth/service.py"),
+            "from . import helper\n\ndef run(): return helper.work()\n",
+        )
+        .unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        fs::write(
+            root.path().join("app/auth/helper.py"),
+            "def work(): return True\n",
+        )
+        .unwrap();
+        let summary = index_workspace(&workspace, &model).unwrap();
+        assert_eq!(summary.indexed_files, 2);
+
+        let conn = open_sqlite_readonly(&workspace.sqlite_path()).unwrap();
+        let edge = conn
+            .query_row(
+                "SELECT COUNT(*) FROM file_edges
+                 WHERE source_path = 'app/auth/service.py'
+                   AND target_path = 'app/auth/helper.py'
+                   AND kind = ?1",
+                [crate::context_graph::FileEdgeKind::Dependency as i64],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(edge, 1);
+    }
+
+    #[test]
     fn rust_doc_include_rejects_workspace_escape_and_oversized_file() {
         assert_eq!(
             normalize_workspace_relative_include(

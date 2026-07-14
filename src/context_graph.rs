@@ -297,8 +297,20 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
             }
             "python" => {
                 if let Some(value) = line.strip_prefix("from ") {
-                    if let Some((module, _)) = value.split_once(" import ") {
-                        specs.insert(module.trim().to_string());
+                    if let Some((module, members)) = value.split_once(" import ") {
+                        let module = module.trim();
+                        if !module.is_empty() && module.chars().all(|character| character == '.') {
+                            for member in members
+                                .trim_matches(['(', ')'])
+                                .split(',')
+                                .filter_map(|member| member.split_whitespace().next())
+                                .filter(|member| !member.is_empty() && *member != "*")
+                            {
+                                specs.insert(format!("{module}{member}"));
+                            }
+                        } else {
+                            specs.insert(module.to_string());
+                        }
                     }
                 } else if let Some(value) = line.strip_prefix("import ") {
                     for part in value.split(',') {
@@ -1341,6 +1353,24 @@ mod tests {
         assert!(edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Dependency
                 && edge.target_path == Path::new("app/auth/token.py")
+        }));
+    }
+
+    #[test]
+    fn python_relative_import_members_resolve_from_source_directory() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("app/auth")).unwrap();
+        fs::write(root.path().join("app/auth/helper.py"), "def work(): pass\n").unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("app/auth/service.py"),
+            "from . import helper\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("app/auth/helper.py")
         }));
     }
 
