@@ -573,13 +573,14 @@ impl SearchContext {
         &self,
         file_path: &Path,
         task: &str,
+        skip_gitignore: bool,
     ) -> Result<Option<SearchHit>> {
-        let mut chunks = query_chunks_for_file(&self.sqlite, file_path)?;
+        let mut chunks = query_chunks_for_file(&self.sqlite, file_path, skip_gitignore)?;
         if chunks.is_empty()
             && let Some(base_sqlite) = &self.base_sqlite
             && !self.is_shadowed_base_file(1, file_path)
         {
-            chunks = query_chunks_for_file(base_sqlite, file_path)?;
+            chunks = query_chunks_for_file(base_sqlite, file_path, skip_gitignore)?;
         }
         if chunks.is_empty() {
             return Ok(None);
@@ -696,13 +697,19 @@ impl SearchContext {
     }
 }
 
-fn query_chunks_for_file(conn: &Connection, file_path: &Path) -> Result<Vec<IndexedChunk>> {
+fn query_chunks_for_file(
+    conn: &Connection,
+    file_path: &Path,
+    skip_gitignore: bool,
+) -> Result<Vec<IndexedChunk>> {
     let path = crate::workspace::index_path_string(file_path);
     let mut statement = conn.prepare_cached(
         "SELECT file_path, start_line, end_line, language, kind, text, vector_key, is_ignored
-         FROM chunks WHERE file_path = ?1 ORDER BY start_line LIMIT 96",
+         FROM chunks
+         WHERE file_path = ?1 AND (?2 OR is_ignored = 0)
+         ORDER BY start_line LIMIT 96",
     )?;
-    let rows = statement.query_map([path], |row| {
+    let rows = statement.query_map(rusqlite::params![path, skip_gitignore], |row| {
         let raw: Vec<u8> = row.get(5)?;
         Ok(IndexedChunk {
             chunk_id: String::new(),

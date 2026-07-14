@@ -252,7 +252,11 @@ pub fn build_context_bundle(
     match expand_context_graph(workspace, &seed_paths, base_options) {
         Ok(expansions) => {
             for (rank, expansion) in expansions.into_iter().enumerate() {
-                match search_context.representative_hit_for_file(&expansion.file_path, task) {
+                match search_context.representative_hit_for_file(
+                    &expansion.file_path,
+                    task,
+                    base_options.skip_gitignore,
+                ) {
                     Ok(Some(mut hit)) => {
                         if matches!(
                             expansion.kind,

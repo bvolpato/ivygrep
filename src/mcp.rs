@@ -1319,6 +1319,96 @@ mod tests {
 
     #[test]
     #[serial]
+    fn mcp_context_pack_respects_gitignore_after_all_files_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::fs::write(root.join(".gitignore"), "src/secret.rs\n").unwrap();
+        std::fs::write(
+            root.join("src/auth.rs"),
+            "use crate::secret::load_seed;\npub fn rotate_refresh_token() { load_seed(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/secret.rs"),
+            "pub fn load_seed() -> &'static str { \"private\" }\n",
+        )
+        .unwrap();
+
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let indexed = execute_ivygrep_search(IvygrepSearchArgs {
+            query: Some("load_seed".to_string()),
+            path: Some(root.to_string_lossy().to_string()),
+            output: None,
+            budget_tokens: None,
+            limit: Some(10),
+            context: Some(2),
+            type_filter: None,
+            regex: None,
+            literal: None,
+            symbol: None,
+            refs: None,
+            callers: None,
+            include: None,
+            exclude: None,
+            first_line_only: None,
+            file_name_only: None,
+            verbose: None,
+            skip_gitignore: Some(true),
+        })
+        .unwrap();
+        let indexed = tool_json_payload(&indexed);
+        assert!(
+            indexed["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["file_path"] == "src/secret.rs"),
+            "{indexed:#}"
+        );
+
+        for (skip_gitignore, expects_secret) in [(None, false), (Some(true), true)] {
+            let response = execute_ivygrep_search(IvygrepSearchArgs {
+                query: Some("rotate refresh token".to_string()),
+                path: Some(root.to_string_lossy().to_string()),
+                output: Some("context_pack".to_string()),
+                budget_tokens: Some(4_000),
+                limit: None,
+                context: Some(2),
+                type_filter: None,
+                regex: None,
+                literal: None,
+                symbol: None,
+                refs: None,
+                callers: None,
+                include: None,
+                exclude: None,
+                first_line_only: None,
+                file_name_only: None,
+                verbose: None,
+                skip_gitignore,
+            })
+            .unwrap();
+            let payload = tool_json_payload(&response);
+            let contains_secret = payload["context_pack"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|item| item["file_path"] == "src/secret.rs");
+            assert_eq!(contains_secret, expects_secret, "{payload:#}");
+        }
+    }
+
+    #[test]
+    #[serial]
     fn mcp_search_omits_reason_by_default() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("repo");
