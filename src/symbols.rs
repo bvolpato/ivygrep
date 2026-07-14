@@ -546,8 +546,43 @@ fn looks_like_definition(line: &str, name_offset: usize) -> bool {
         return true;
     }
 
-    after_parameters.is_some_and(|after| after.starts_with(';'))
-        && looks_like_prototype_prefix(prefix)
+    after_parameters.is_some_and(looks_like_prototype_suffix) && looks_like_prototype_prefix(prefix)
+}
+
+fn looks_like_prototype_suffix(suffix: &str) -> bool {
+    let Some(mut suffix) = suffix.trim_end().strip_suffix(';').map(str::trim) else {
+        return false;
+    };
+    while !suffix.is_empty() {
+        if let Some(default) = suffix.strip_prefix('=').map(str::trim) {
+            return matches!(default, "0" | "default" | "delete");
+        }
+        if let Some(rest) = suffix
+            .strip_prefix("&&")
+            .or_else(|| suffix.strip_prefix('&'))
+        {
+            suffix = rest.trim_start();
+            continue;
+        }
+        let qualifier_end = suffix
+            .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .unwrap_or(suffix.len());
+        let qualifier = &suffix[..qualifier_end];
+        if !matches!(
+            qualifier,
+            "const" | "final" | "noexcept" | "override" | "volatile"
+        ) {
+            return false;
+        }
+        suffix = suffix[qualifier_end..].trim_start();
+        if qualifier == "noexcept" && suffix.starts_with('(') {
+            let Some(after) = after_parameter_list(suffix) else {
+                return false;
+            };
+            suffix = after;
+        }
+    }
+    true
 }
 
 fn after_parameter_list(suffix: &str) -> Option<&str> {
@@ -1556,6 +1591,12 @@ mod tests {
             ("public abstract void send();", "send"),
             ("int parser::parse();", "parse"),
             ("int parse(void (*callback)());", "parse"),
+            ("int parse() const;", "parse"),
+            ("void send() noexcept;", "send"),
+            ("virtual bool send() = 0;", "send"),
+            ("Widget make() const noexcept final;", "make"),
+            ("Result parse() && override;", "parse"),
+            ("void send() noexcept(noexcept(flush()));", "send"),
         ] {
             assert!(
                 matching_call_lines(source, symbol, 1, 1).is_empty(),
@@ -1568,6 +1609,7 @@ mod tests {
             ("parser::parse();", "parse"),
             ("return parse();", "parse"),
             ("await parse();", "parse"),
+            ("ready && parse() && accepted;", "parse"),
         ] {
             assert_eq!(
                 matching_call_lines(source, symbol, 1, 1),

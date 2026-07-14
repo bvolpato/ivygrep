@@ -513,6 +513,12 @@ fn cli_context_qualified_method_anchor_finds_definition() {
          }\n",
     )
     .unwrap();
+    std::fs::write(
+        root.join("src/unrelated.rs"),
+        "pub fn send() -> bool { true }\n\
+         pub fn queue_message() -> bool { send() }\n",
+    )
+    .unwrap();
 
     let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
         .current_dir(&root)
@@ -550,6 +556,10 @@ fn cli_context_qualified_method_anchor_finds_definition() {
         .collect::<Vec<_>>();
     assert!(reasons.contains(&"defines send"), "{value:#}");
     assert!(reasons.contains(&"defines receive"), "{value:#}");
+    assert!(reasons.contains(&"calls client.send"), "{value:#}");
+    assert!(reasons.contains(&"calls server.receive"), "{value:#}");
+    assert!(!reasons.contains(&"calls send"), "{value:#}");
+    assert!(!reasons.contains(&"references send"), "{value:#}");
     let definition_previews = value["items"]
         .as_array()
         .unwrap()

@@ -178,6 +178,7 @@ pub fn build_context_bundle(
     }
 
     let anchor_symbols = anchor_symbols(task, &primary_hits);
+    let relationship_anchors = relationship_anchor_keys(task, &anchor_symbols);
     let mut symbol_options = base_options.clone();
     symbol_options.limit = Some(4);
     symbol_options.context = 10;
@@ -200,6 +201,9 @@ pub fn build_context_bundle(
                 }
             }
             Err(error) => tracing::debug!("context definition expansion failed: {error:#}"),
+        }
+        if !relationship_anchors.contains(&symbol.to_ascii_lowercase()) {
+            continue;
         }
         match search_symbol_relationships_in_current_index(workspace, symbol, &symbol_options) {
             Ok((callers, references)) => {
@@ -653,6 +657,21 @@ fn anchor_symbols(task: &str, primary_hits: &[SearchHit]) -> Vec<String> {
         .filter(|(_, score)| score.saturating_mul(3) >= best.saturating_mul(2))
         .map(|(symbol, _)| symbol)
         .take(MAX_ANCHOR_SYMBOLS)
+        .collect()
+}
+
+fn relationship_anchor_keys(task: &str, anchors: &[String]) -> HashSet<String> {
+    let explicit = task_symbols(task);
+    if explicit.is_empty() {
+        return anchors
+            .iter()
+            .map(|symbol| symbol.to_ascii_lowercase())
+            .collect();
+    }
+    explicit
+        .into_iter()
+        .take(MAX_ANCHOR_SYMBOLS)
+        .map(|symbol| symbol.to_ascii_lowercase())
         .collect()
 }
 
@@ -1411,6 +1430,13 @@ mod tests {
         assert_eq!(
             anchor_symbols("change UserService.handle through std::io", &[]),
             ["UserService.handle", "handle", "std::io"]
+        );
+        assert_eq!(
+            relationship_anchor_keys(
+                "fix client.send and server.receive retries",
+                &anchor_symbols("fix client.send and server.receive retries", &[]),
+            ),
+            HashSet::from(["client.send".to_string(), "server.receive".to_string()])
         );
     }
 
