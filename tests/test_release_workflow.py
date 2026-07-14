@@ -73,6 +73,8 @@ class ReleaseWorkflowTest(unittest.TestCase):
         )[1].split("  release:", maxsplit=1)[0]
 
         self.assertIn("HTTP_PROXY: http://127.0.0.1:9", metal)
+        self.assertIn('HF_HOME="$IVYGREP_RELEASE_HF_CACHE"', metal)
+        self.assertNotIn("HF_HOME: ${{ env.IVYGREP_RELEASE_HF_CACHE }}", metal)
         self.assertIn("HTTP_PROXY=http://127.0.0.1:9", linux)
         self.assertEqual(windows.count("HTTP_PROXY=http://127.0.0.1:9"), 2)
 

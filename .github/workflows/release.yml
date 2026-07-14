@@ -410,16 +410,16 @@ jobs:
         shell: bash
         env:
           BINARY: ${{ steps.artifact.outputs.binary }}
-          HF_HOME: ${{ env.IVYGREP_RELEASE_HF_CACHE }}
           HTTP_PROXY: http://127.0.0.1:9
           HTTPS_PROXY: http://127.0.0.1:9
           ALL_PROXY: http://127.0.0.1:9
           NO_PROXY: ''
         run: |
-          ./scripts/e2e_neural_backend.sh \
-            --binary "$BINARY" \
-            --model-profile general \
-            --expect-backend "Candle Metal"
+          HF_HOME="$IVYGREP_RELEASE_HF_CACHE" \
+            ./scripts/e2e_neural_backend.sh \
+              --binary "$BINARY" \
+              --model-profile general \
+              --expect-backend "Candle Metal"
 
       - name: Run exact Linux aarch64 archive under QEMU
         if: matrix.target == 'aarch64-unknown-linux-musl'
