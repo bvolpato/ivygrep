@@ -550,6 +550,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::create_dir_all(root.join("src/main/groovy/com/acme/project/util")).unwrap();
     std::fs::create_dir_all(root.join("src/main/java/com/acme/project/module")).unwrap();
     std::fs::create_dir_all(root.join("src/main/java/com/acme/project/util")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
     std::fs::create_dir_all(root.join("tools")).unwrap();
     std::fs::write(root.join("app/__init__.py"), "").unwrap();
     std::fs::write(
@@ -615,6 +616,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::write(
         root.join("src/main/scala/com/acme/project/module/GroupedService.scala"),
         "package com.acme.project.module\nimport com.acme.project.grouped.{Auth, Clock}\nclass GroupedService { def assembleScalaGroupedRelease() = Auth.check() && Clock.ready() }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("tests/release_integration.rs"),
+        "use mixed_workspace::crate_auth::verify_crate_auth;\n#[test]\nfn verify_crate_package_release() { verify_crate_auth(); }\n",
     )
     .unwrap();
 
@@ -731,6 +737,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
             "{before_grouped_scala:#}"
         );
     }
+    let before_crate_package = run_context("change verify_crate_package_release");
+    assert!(
+        !has_graph_dependency(&before_crate_package, "src/crate_auth.rs"),
+        "{before_crate_package:#}"
+    );
 
     std::fs::write(
         root.join("app/helper.py"),
@@ -795,6 +806,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         )
         .unwrap();
     }
+    std::fs::write(
+        root.join("src/crate_auth.rs"),
+        "pub fn verify_crate_auth() {}\n",
+    )
+    .unwrap();
     Command::new(assert_cmd::cargo::cargo_bin!("ig"))
         .current_dir(&root)
         .env("IVYGREP_HOME", &home)
@@ -899,6 +915,12 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
             "{grouped_scala:#}"
         );
     }
+
+    let crate_package = run_context("change verify_crate_package_release");
+    assert!(
+        has_graph_dependency(&crate_package, "src/crate_auth.rs"),
+        "{crate_package:#}"
+    );
 }
 
 #[test]
@@ -909,6 +931,8 @@ fn cli_context_e2e_preserves_adjacent_tests_after_source_edits() {
     let home = tmp.path().join("ivygrep_home");
     init_git_repo(&root);
     std::fs::create_dir_all(root.join("src/__tests__")).unwrap();
+    std::fs::create_dir_all(root.join("lib")).unwrap();
+    std::fs::create_dir_all(root.join("spec")).unwrap();
     std::fs::write(
         root.join("src/widget.ts"),
         "export function render_release_widget() { return 1; }\n",
@@ -927,6 +951,11 @@ fn cli_context_e2e_preserves_adjacent_tests_after_source_edits() {
     std::fs::write(
         root.join("src/test_auth.py"),
         "def test_refresh_colocated_auth():\n    assert refresh_colocated_auth() == 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("lib/user.rb"),
+        "class User\n  def refresh_rspec_user = 1\nend\n",
     )
     .unwrap();
 
@@ -967,6 +996,29 @@ fn cli_context_e2e_preserves_adjacent_tests_after_source_edits() {
         includes_graph_test(&before_pytest, "src/test_auth.py"),
         "{before_pytest:#}"
     );
+    let before_rspec = run_context("change refresh_rspec_user");
+    assert!(
+        !includes_graph_test(&before_rspec, "spec/user_spec.rb"),
+        "{before_rspec:#}"
+    );
+
+    std::fs::write(
+        root.join("spec/user_spec.rb"),
+        "RSpec.describe User do\n  it { expect(User.new.refresh_rspec_user).to eq(1) }\nend\n",
+    )
+    .unwrap();
+    Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--add", "--hash", "--no-watch", "."])
+        .assert()
+        .success();
+    let added_rspec = run_context("change refresh_rspec_user");
+    assert!(
+        includes_graph_test(&added_rspec, "spec/user_spec.rb"),
+        "{added_rspec:#}"
+    );
 
     std::fs::write(
         root.join("src/widget.ts"),
@@ -976,6 +1028,11 @@ fn cli_context_e2e_preserves_adjacent_tests_after_source_edits() {
     std::fs::write(
         root.join("src/auth.py"),
         "def refresh_colocated_auth():\n    return 2\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("lib/user.rb"),
+        "class User\n  def refresh_rspec_user = 2\nend\n",
     )
     .unwrap();
     Command::new(assert_cmd::cargo::cargo_bin!("ig"))
@@ -995,6 +1052,11 @@ fn cli_context_e2e_preserves_adjacent_tests_after_source_edits() {
     assert!(
         includes_graph_test(&after_pytest, "src/test_auth.py"),
         "{after_pytest:#}"
+    );
+    let after_rspec = run_context("change refresh_rspec_user");
+    assert!(
+        includes_graph_test(&after_rspec, "spec/user_spec.rb"),
+        "{after_rspec:#}"
     );
 }
 

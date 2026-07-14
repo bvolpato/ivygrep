@@ -151,12 +151,20 @@ pub(crate) fn extract_file_graph(
     let mut edges = BTreeSet::new();
     let mut unresolved_dependencies = BTreeSet::new();
     let language = language_for_path(rel_path).unwrap_or("text");
+    let local_rust_crate_name = (language == "rust" && rust_file_may_import_library(rel_path))
+        .then(|| rust_crate_name(root, snapshot, rel_path))
+        .flatten();
 
     if supports_dependency_scan(language) {
         for spec in dependency_specs(language, content) {
-            if let Some(target_path) =
-                resolve_local_dependency(root, snapshot, rel_path, language, &spec)
-            {
+            if let Some(target_path) = resolve_local_dependency(
+                root,
+                snapshot,
+                rel_path,
+                language,
+                &spec,
+                local_rust_crate_name.as_deref(),
+            ) {
                 insert_edge(&mut edges, rel_path, &target_path, FileEdgeKind::Dependency);
             } else {
                 for lookup_key in dependency_lookup_keys(&spec) {
@@ -189,7 +197,7 @@ pub(crate) fn extract_file_graph(
     if language == "markdown" {
         for spec in markdown_specs(content) {
             if let Some(target) =
-                resolve_local_dependency(root, snapshot, rel_path, "markdown", &spec)
+                resolve_local_dependency(root, snapshot, rel_path, "markdown", &spec, None)
             {
                 insert_edge(&mut edges, rel_path, &target, FileEdgeKind::Documentation);
             } else {
@@ -221,7 +229,17 @@ pub(crate) fn resolve_dependency_spec(
     language: &str,
     spec: &str,
 ) -> Option<PathBuf> {
-    resolve_local_dependency(root, snapshot, source_path, language, spec)
+    let local_rust_crate_name = (language == "rust" && rust_file_may_import_library(source_path))
+        .then(|| rust_crate_name(root, snapshot, source_path))
+        .flatten();
+    resolve_local_dependency(
+        root,
+        snapshot,
+        source_path,
+        language,
+        spec,
+        local_rust_crate_name.as_deref(),
+    )
 }
 
 pub(crate) fn dependency_lookup_keys(value: &str) -> BTreeSet<String> {
@@ -621,6 +639,7 @@ fn resolve_local_dependency(
     source_path: &Path,
     language: &str,
     spec: &str,
+    local_rust_crate_name: Option<&str>,
 ) -> Option<PathBuf> {
     let spec = spec
         .trim()
@@ -666,6 +685,13 @@ fn resolve_local_dependency(
         "python" | "java" | "kotlin" | "scala" | "groovy" | "csharp" | "haskell" | "elixir"
     ) {
         normalized = normalized.replace('.', "/");
+    }
+    if language == "rust"
+        && let Some(crate_name) = local_rust_crate_name
+        && let Some(local_spec) = normalized.strip_prefix(crate_name)
+        && let Some(local_spec) = local_spec.strip_prefix('/')
+    {
+        normalized = format!("crate/{local_spec}");
     }
     let crate_relative = normalized.starts_with("crate/");
     let source_relative = normalized.starts_with("self/")
@@ -1005,6 +1031,71 @@ fn manifest_names_for_language(language: &str) -> &'static [&'static str] {
     }
 }
 
+fn rust_crate_name(
+    root: &Path,
+    snapshot: Option<&MerkleSnapshot>,
+    rel_path: &Path,
+) -> Option<String> {
+    let manifest = nearest_manifest(root, snapshot, rel_path, "rust")?;
+    let package_root = manifest.parent().unwrap_or_else(|| Path::new(""));
+    if let Ok(relative) = rel_path.strip_prefix(package_root.join("src"))
+        && relative != Path::new("main.rs")
+        && !relative.starts_with("bin")
+    {
+        return None;
+    }
+    let content = fs::read_to_string(root.join(manifest)).ok()?;
+    let document = content.parse::<toml_edit::DocumentMut>().ok()?;
+    let name = document
+        .get("lib")
+        .and_then(toml_edit::Item::as_table_like)
+        .and_then(|table| table.get("name"))
+        .and_then(toml_edit::Item::as_str)
+        .or_else(|| {
+            document
+                .get("package")
+                .and_then(toml_edit::Item::as_table_like)
+                .and_then(|table| table.get("name"))
+                .and_then(toml_edit::Item::as_str)
+        })?;
+    Some(name.replace('-', "_"))
+}
+
+fn rust_file_may_import_library(path: &Path) -> bool {
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(src_index) = components.iter().rposition(|component| *component == "src") else {
+        return true;
+    };
+    matches!(
+        components
+            .get(src_index + 1)
+            .and_then(|value| value.to_str()),
+        Some("main.rs" | "bin")
+    )
+}
+
+fn test_suffixes(extension: &str) -> &'static [&'static str] {
+    if extension == "rb" {
+        &["_test", "_tests", "_spec", ".test", ".spec"]
+    } else {
+        &["_test", "_tests", ".test", ".spec"]
+    }
+}
+
+fn test_directories(extension: &str) -> &'static [&'static str] {
+    if extension == "rb" {
+        &["test", "tests", "spec", "specs"]
+    } else {
+        &["test", "tests"]
+    }
+}
+
 fn likely_test_edges(
     root: &Path,
     snapshot: Option<&MerkleSnapshot>,
@@ -1023,6 +1114,7 @@ fn likely_test_edges(
         .strip_prefix("test_")
         .or_else(|| stem.strip_suffix("_test"))
         .or_else(|| stem.strip_suffix("_tests"))
+        .or_else(|| stem.strip_suffix("_spec"))
         .or_else(|| stem.strip_suffix(".test"))
         .or_else(|| stem.strip_suffix(".spec"))
         .unwrap_or(stem);
@@ -1039,7 +1131,7 @@ fn likely_test_edges(
         }
     } else {
         candidates.insert(parent.join(format!("test_{stem}.{extension}")));
-        for suffix in ["_test", "_tests", ".test", ".spec"] {
+        for suffix in test_suffixes(extension) {
             candidates.insert(parent.join(format!("{stem}{suffix}.{extension}")));
         }
         let adjacent_tests = parent.join("__tests__");
@@ -1051,21 +1143,23 @@ fn likely_test_edges(
             .strip_prefix("src")
             .or_else(|_| rel_path.strip_prefix("lib"))
             .unwrap_or(rel_path);
-        candidates.insert(PathBuf::from("tests").join(relative_under_source));
-        candidates.insert(PathBuf::from("test").join(relative_under_source));
+        for directory in test_directories(extension) {
+            candidates.insert(PathBuf::from(directory).join(relative_under_source));
+        }
         let mirrored_parent = relative_under_source
             .parent()
             .unwrap_or_else(|| Path::new(""));
-        for directory in ["tests", "test"] {
+        for directory in test_directories(extension) {
             let mirrored_base = PathBuf::from(directory).join(mirrored_parent);
-            for suffix in ["_test", "_tests", ".test", ".spec"] {
+            for suffix in test_suffixes(extension) {
                 candidates.insert(mirrored_base.join(format!("{stem}{suffix}.{extension}")));
             }
             candidates.insert(mirrored_base.join(format!("test_{stem}.{extension}")));
         }
         if let Some(file_name) = rel_path.file_name() {
-            candidates.insert(PathBuf::from("tests").join(file_name));
-            candidates.insert(PathBuf::from("test").join(file_name));
+            for directory in test_directories(extension) {
+                candidates.insert(PathBuf::from(directory).join(file_name));
+            }
         }
     }
 
@@ -1082,7 +1176,11 @@ fn strip_test_component(path: &Path) -> PathBuf {
     path.components()
         .filter_map(|component| match component {
             Component::Normal(value)
-                if value != "test" && value != "tests" && value != "__tests__" =>
+                if value != "test"
+                    && value != "tests"
+                    && value != "spec"
+                    && value != "specs"
+                    && value != "__tests__" =>
             {
                 Some(value)
             }
@@ -1093,13 +1191,14 @@ fn strip_test_component(path: &Path) -> PathBuf {
 
 fn path_looks_like_test(path: &Path) -> bool {
     path.components().any(|component| {
-        matches!(component, Component::Normal(value) if value == "test" || value == "tests" || value == "__tests__")
+        matches!(component, Component::Normal(value) if value == "test" || value == "tests" || value == "spec" || value == "specs" || value == "__tests__")
     }) || path
         .file_stem()
         .and_then(|value| value.to_str())
         .is_some_and(|stem| {
             stem.ends_with("_test")
                 || stem.ends_with("_tests")
+                || stem.ends_with("_spec")
                 || stem.ends_with(".test")
                 || stem.ends_with(".spec")
                 || stem.starts_with("test_")
@@ -1592,6 +1691,29 @@ mod tests {
     }
 
     #[test]
+    fn rust_package_import_resolves_local_library_module() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::create_dir_all(root.path().join("tests")).unwrap();
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[package]\nname = 'my-package'\nversion = '0.1.0'\n",
+        )
+        .unwrap();
+        fs::write(root.path().join("src/auth.rs"), "pub struct Session;\n").unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("tests/integration.rs"),
+            "use my_package::auth::Session;\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency && edge.target_path == Path::new("src/auth.rs")
+        }));
+    }
+
+    #[test]
     fn source_file_finds_common_root_test_names() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("src")).unwrap();
@@ -1634,6 +1756,28 @@ mod tests {
                 && edge.source_path == Path::new("src/auth.py")
                 && edge.target_path == Path::new("src/test_auth.py")
         }));
+    }
+
+    #[test]
+    fn ruby_spec_files_link_to_production_in_both_directions() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::create_dir_all(root.path().join("spec")).unwrap();
+        fs::write(root.path().join("src/user.rb"), "class User; end\n").unwrap();
+        fs::write(
+            root.path().join("spec/user_spec.rb"),
+            "RSpec.describe User do; end\n",
+        )
+        .unwrap();
+
+        for path in ["src/user.rb", "spec/user_spec.rb"] {
+            let edges = extract_file_edges(root.path(), None, Path::new(path), "");
+            assert!(edges.iter().any(|edge| {
+                edge.kind == FileEdgeKind::Test
+                    && edge.source_path == Path::new("src/user.rb")
+                    && edge.target_path == Path::new("spec/user_spec.rb")
+            }));
+        }
     }
 
     #[test]
