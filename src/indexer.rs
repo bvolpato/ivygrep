@@ -4600,7 +4600,7 @@ mod tests {
         fs::create_dir_all(root.path().join("src")).unwrap();
         fs::write(
             root.path().join("src/lib.rs"),
-            "mod helper;\npub fn run() { helper::work(); }\n",
+            "pub(crate) mod helper;\npub fn run() { helper::work(); }\n",
         )
         .unwrap();
 

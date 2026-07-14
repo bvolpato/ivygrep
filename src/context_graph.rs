@@ -319,9 +319,9 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
         }
         match language {
             "rust" => {
+                let line = strip_rust_visibility(line);
                 let value = line
-                    .strip_prefix("pub use ")
-                    .or_else(|| line.strip_prefix("use "))
+                    .strip_prefix("use ")
                     .or_else(|| line.strip_prefix("mod "));
                 if let Some(value) = value {
                     specs.extend(expand_grouped_spec(value.trim_end_matches(';')));
@@ -481,6 +481,15 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
         .filter(|spec| !spec.trim().is_empty())
         .take(128)
         .collect()
+}
+
+fn strip_rust_visibility(line: &str) -> &str {
+    if let Some(line) = line.strip_prefix("pub ") {
+        return line;
+    }
+    line.strip_prefix("pub(")
+        .and_then(|line| line.split_once(") ").map(|(_, line)| line))
+        .unwrap_or(line)
 }
 
 fn expand_grouped_spec(value: &str) -> Vec<String> {
@@ -1387,6 +1396,27 @@ mod tests {
         assert!(edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Dependency
                 && edge.target_path == Path::new("app/auth/helper.py")
+        }));
+    }
+
+    #[test]
+    fn rust_visible_module_declarations_resolve() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::write(root.path().join("src/public.rs"), "pub fn run() {}\n").unwrap();
+        fs::write(root.path().join("src/scoped.rs"), "pub fn run() {}\n").unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("src/lib.rs"),
+            "pub mod public;\npub(crate) mod scoped;\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency && edge.target_path == Path::new("src/public.rs")
+        }));
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency && edge.target_path == Path::new("src/scoped.rs")
         }));
     }
 
