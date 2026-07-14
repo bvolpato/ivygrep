@@ -1685,6 +1685,8 @@ fn sqlite_tier_bytes(path: &Path) -> (u64, u64) {
             "idx_symbols_name",
             "file_edges",
             "idx_file_edges_target",
+            "unresolved_file_dependencies",
+            "idx_unresolved_file_dependencies_lookup",
             "symbol_edges",
             "sqlite_autoindex_symbol_edges_1",
             "idx_symbol_edges_source_chunk",

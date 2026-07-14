@@ -13,6 +13,7 @@ use crate::search::SearchOptions;
 use crate::workspace::{Workspace, index_path_string};
 
 const MAX_EDGES_PER_FILE: usize = 64;
+const MAX_UNRESOLVED_DEPENDENCIES_PER_FILE: usize = 256;
 const MAX_GRAPH_EDGES: usize = 192;
 const MAX_GRAPH_EXPANSIONS: usize = 12;
 const MIN_STATIC_EDGES_BEFORE_COCHANGE: usize = 2;
@@ -68,6 +69,20 @@ pub(crate) struct FileEdge {
     pub kind: FileEdgeKind,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub(crate) struct UnresolvedDependency {
+    pub source_path: PathBuf,
+    pub language: String,
+    pub spec: String,
+    pub lookup_key: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FileGraphExtraction {
+    pub edges: Vec<FileEdge>,
+    pub unresolved_dependencies: Vec<UnresolvedDependency>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct GraphExpansion {
     pub file_path: PathBuf,
@@ -85,7 +100,8 @@ impl GraphExpansion {
         match (self.kind, self.outgoing) {
             (FileEdgeKind::Dependency, true) => format!("{seed} depends on {file}"),
             (FileEdgeKind::Dependency, false) => format!("{file} depends on {seed}"),
-            (FileEdgeKind::Test, _) => format!("tests {seed}"),
+            (FileEdgeKind::Test, true) => format!("{file} tests {seed}"),
+            (FileEdgeKind::Test, false) => format!("{seed} tests {file}"),
             (FileEdgeKind::Config, _) => format!("configures {seed}"),
             (FileEdgeKind::Documentation, _) => format!("documents {seed}"),
             (FileEdgeKind::CoChange, _) => format!(
@@ -97,13 +113,24 @@ impl GraphExpansion {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn extract_file_edges(
     root: &Path,
     snapshot: Option<&MerkleSnapshot>,
     rel_path: &Path,
     content: &str,
 ) -> Vec<FileEdge> {
+    extract_file_graph(root, snapshot, rel_path, content).edges
+}
+
+pub(crate) fn extract_file_graph(
+    root: &Path,
+    snapshot: Option<&MerkleSnapshot>,
+    rel_path: &Path,
+    content: &str,
+) -> FileGraphExtraction {
     let mut edges = BTreeSet::new();
+    let mut unresolved_dependencies = BTreeSet::new();
     let language = language_for_path(rel_path).unwrap_or("text");
 
     if supports_dependency_scan(language) {
@@ -112,6 +139,15 @@ pub(crate) fn extract_file_edges(
                 resolve_local_dependency(root, snapshot, rel_path, language, &spec)
             {
                 insert_edge(&mut edges, rel_path, &target_path, FileEdgeKind::Dependency);
+            } else {
+                for lookup_key in dependency_lookup_keys(&spec) {
+                    unresolved_dependencies.insert(UnresolvedDependency {
+                        source_path: rel_path.to_path_buf(),
+                        language: language.to_string(),
+                        spec: spec.clone(),
+                        lookup_key,
+                    });
+                }
             }
             if edges.len() >= MAX_EDGES_PER_FILE {
                 break;
@@ -125,7 +161,11 @@ pub(crate) fn extract_file_edges(
         insert_edge(&mut edges, rel_path, &manifest, FileEdgeKind::Config);
     }
     for related in likely_test_edges(root, snapshot, rel_path) {
-        insert_edge(&mut edges, rel_path, &related, FileEdgeKind::Test);
+        if path_looks_like_test(rel_path) {
+            insert_edge(&mut edges, &related, rel_path, FileEdgeKind::Test);
+        } else {
+            insert_edge(&mut edges, rel_path, &related, FileEdgeKind::Test);
+        }
     }
     if language == "markdown" {
         for target in markdown_targets(root, snapshot, rel_path, content) {
@@ -133,7 +173,42 @@ pub(crate) fn extract_file_edges(
         }
     }
 
-    edges.into_iter().take(MAX_EDGES_PER_FILE).collect()
+    FileGraphExtraction {
+        edges: edges.into_iter().take(MAX_EDGES_PER_FILE).collect(),
+        unresolved_dependencies: unresolved_dependencies
+            .into_iter()
+            .take(MAX_UNRESOLVED_DEPENDENCIES_PER_FILE)
+            .collect(),
+    }
+}
+
+pub(crate) fn resolve_dependency_spec(
+    root: &Path,
+    snapshot: Option<&MerkleSnapshot>,
+    source_path: &Path,
+    language: &str,
+    spec: &str,
+) -> Option<PathBuf> {
+    resolve_local_dependency(root, snapshot, source_path, language, spec)
+}
+
+pub(crate) fn dependency_lookup_keys(value: &str) -> BTreeSet<String> {
+    value
+        .split(|character: char| !character.is_alphanumeric() && character != '_')
+        .map(str::trim)
+        .filter(|component| !component.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+pub(crate) fn path_lookup_keys(path: &Path) -> BTreeSet<String> {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => value.to_str(),
+            _ => None,
+        })
+        .flat_map(dependency_lookup_keys)
+        .collect()
 }
 
 fn supports_dependency_scan(language: &str) -> bool {
@@ -1205,6 +1280,30 @@ mod tests {
         );
         assert!(edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Test && edge.target_path == Path::new("tests/auth_test.rs")
+        }));
+    }
+
+    #[test]
+    fn test_file_edges_point_from_production_to_test() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::create_dir_all(root.path().join("tests")).unwrap();
+        fs::write(
+            root.path().join("src/auth.rs"),
+            "pub fn authenticate() {}\n",
+        )
+        .unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("tests/auth_test.rs"),
+            "#[test]\nfn authenticates() {}\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Test
+                && edge.source_path == Path::new("src/auth.rs")
+                && edge.target_path == Path::new("tests/auth_test.rs")
         }));
     }
 

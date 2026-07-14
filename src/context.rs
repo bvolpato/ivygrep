@@ -265,16 +265,7 @@ pub fn build_context_bundle(
                         {
                             continue;
                         }
-                        let role = match expansion.kind {
-                            FileEdgeKind::Dependency if expansion.outgoing => {
-                                ContextRole::Dependency
-                            }
-                            FileEdgeKind::Dependency => ContextRole::Dependent,
-                            FileEdgeKind::Test => ContextRole::Test,
-                            FileEdgeKind::Config => ContextRole::Config,
-                            FileEdgeKind::Documentation => ContextRole::Documentation,
-                            FileEdgeKind::CoChange => ContextRole::Related,
-                        };
+                        let role = graph_context_role(expansion.kind, expansion.outgoing);
                         hit.sources.push(expansion.kind.source_label().to_string());
                         add_candidate(
                             &mut candidates,
@@ -301,6 +292,18 @@ pub fn build_context_bundle(
         anchor_symbols,
         candidates.into_values().collect(),
     ))
+}
+
+fn graph_context_role(kind: FileEdgeKind, outgoing: bool) -> ContextRole {
+    match (kind, outgoing) {
+        (FileEdgeKind::Dependency, true) => ContextRole::Dependency,
+        (FileEdgeKind::Dependency, false) => ContextRole::Dependent,
+        (FileEdgeKind::Test, true) => ContextRole::Test,
+        (FileEdgeKind::Test, false) => ContextRole::Dependency,
+        (FileEdgeKind::Config, _) => ContextRole::Config,
+        (FileEdgeKind::Documentation, _) => ContextRole::Documentation,
+        (FileEdgeKind::CoChange, _) => ContextRole::Related,
+    }
 }
 
 fn focus_hit_on_symbol(
@@ -1397,6 +1400,18 @@ mod tests {
             estimate_tokens("fn x() {\n  x();\n}")
         );
         assert_eq!(truncate_to_token_budget("", 100, "task").0, "");
+    }
+
+    #[test]
+    fn test_edges_label_only_test_files_as_tests() {
+        assert_eq!(
+            graph_context_role(FileEdgeKind::Test, true),
+            ContextRole::Test
+        );
+        assert_eq!(
+            graph_context_role(FileEdgeKind::Test, false),
+            ContextRole::Dependency
+        );
     }
 
     #[test]

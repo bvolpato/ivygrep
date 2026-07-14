@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::{IsTerminal, Write};
 use std::path::{Component, Path, PathBuf};
@@ -373,6 +373,7 @@ struct IndexedFile {
     chunks: Vec<PreparedIndexedChunk>,
     included_paths: Vec<PathBuf>,
     file_edges: Vec<crate::context_graph::FileEdge>,
+    unresolved_dependencies: Vec<crate::context_graph::UnresolvedDependency>,
 }
 
 type IndexedFileBatch = Vec<IndexedFile>;
@@ -1214,6 +1215,7 @@ fn index_workspace_inner(
         &clear_overlay_paths,
         current_snapshot.as_deref(),
     )?;
+    add_file_edge_dependents(workspace, &mut diff, current_snapshot.as_deref())?;
 
     let discovery_ms = index_started.elapsed().as_secs_f64() * 1_000.0;
     let persist_started = std::time::Instant::now();
@@ -1420,6 +1422,7 @@ fn index_workspace_inner(
                                     chunks: Vec::new(),
                                     included_paths: Vec::new(),
                                     file_edges: Vec::new(),
+                                    unresolved_dependencies: Vec::new(),
                                 })
                             }
                         };
@@ -1447,7 +1450,7 @@ fn index_workspace_inner(
                         };
 
                         let mut chunked = chunk_source_with_metadata(rel_path, &content);
-                        let file_edges = crate::context_graph::extract_file_edges(
+                        let file_graph = crate::context_graph::extract_file_graph(
                             &root_clone,
                             current_snapshot_clone.as_deref(),
                             rel_path,
@@ -1479,7 +1482,10 @@ fn index_workspace_inner(
                             let _ = fs::write(&progress_path_clone, format!("{n}/{total}"));
                         }
 
-                        if indexed.is_empty() && included_paths.is_empty() && file_edges.is_empty()
+                        if indexed.is_empty()
+                            && included_paths.is_empty()
+                            && file_graph.edges.is_empty()
+                            && file_graph.unresolved_dependencies.is_empty()
                         {
                             return nothing(rel_path);
                         }
@@ -1487,7 +1493,8 @@ fn index_workspace_inner(
                             rel_path: rel_path.clone(),
                             chunks: indexed,
                             included_paths,
-                            file_edges,
+                            file_edges: file_graph.edges,
+                            unresolved_dependencies: file_graph.unresolved_dependencies,
                         })
                     })
                     .collect()
@@ -1548,6 +1555,9 @@ fn index_workspace_inner(
             }
             for edge in indexed_file.file_edges {
                 persist_or_stop!(persist_statements.insert_file_edge(&edge));
+            }
+            for dependency in indexed_file.unresolved_dependencies {
+                persist_or_stop!(persist_statements.insert_unresolved_dependency(&dependency));
             }
 
             // Batch the timestamp syscall per file, not per chunk.
@@ -1798,6 +1808,174 @@ fn add_included_file_dependents(
     }
 
     Ok(())
+}
+
+fn add_file_edge_dependents(
+    workspace: &Workspace,
+    diff: &mut MerkleDiff,
+    current_snapshot: Option<&MerkleSnapshot>,
+) -> Result<()> {
+    let Some(current_snapshot) = current_snapshot else {
+        return Ok(());
+    };
+    if diff.added_or_modified.is_empty() && diff.deleted.is_empty() {
+        return Ok(());
+    }
+
+    let changed = diff
+        .added_or_modified
+        .iter()
+        .map(|(path, _)| index_path_string(path))
+        .chain(diff.deleted.iter().map(|path| index_path_string(path)))
+        .collect::<HashSet<_>>();
+    let deleted = diff
+        .deleted
+        .iter()
+        .map(|path| index_path_string(path))
+        .collect::<HashSet<_>>();
+    let added_or_modified = diff
+        .added_or_modified
+        .iter()
+        .map(|(path, _)| index_path_string(path))
+        .collect::<HashSet<_>>();
+    let candidate_lookup_keys = diff
+        .added_or_modified
+        .iter()
+        .flat_map(|(path, _)| crate::context_graph::path_lookup_keys(path))
+        .collect::<BTreeSet<_>>();
+
+    let mut sqlite_paths = vec![workspace.sqlite_path(), workspace.overlay_sqlite_path()];
+    if let Some(base_index_dir) = &workspace.base_index_dir {
+        sqlite_paths.push(base_index_dir.join("metadata.sqlite3"));
+    }
+    sqlite_paths.sort();
+    sqlite_paths.dedup();
+
+    let mut persisted_paths = HashSet::new();
+    let mut owners = HashSet::new();
+    let mut unresolved = BTreeSet::new();
+    for sqlite_path in sqlite_paths {
+        if !sqlite_path.is_file() {
+            continue;
+        }
+        let Ok(conn) = Connection::open_with_flags(
+            &sqlite_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        ) else {
+            continue;
+        };
+
+        if sqlite_table_exists(&conn, "chunks") {
+            let Ok(mut statement) = conn
+                .prepare_cached("SELECT EXISTS(SELECT 1 FROM chunks WHERE file_path = ?1 LIMIT 1)")
+            else {
+                continue;
+            };
+            for path in &added_or_modified {
+                if statement
+                    .query_row([path], |row| row.get::<_, bool>(0))
+                    .unwrap_or(false)
+                {
+                    persisted_paths.insert(path.clone());
+                }
+            }
+        }
+
+        if sqlite_table_exists(&conn, "file_edges") {
+            let Ok(mut statement) = conn.prepare_cached(
+                "SELECT source_path FROM file_edges
+                 WHERE target_path = ?1 AND kind = ?2",
+            ) else {
+                continue;
+            };
+            for path in &deleted {
+                let Ok(rows) = statement.query_map(
+                    params![path, crate::context_graph::FileEdgeKind::Dependency as i64],
+                    |row| row.get::<_, String>(0),
+                ) else {
+                    continue;
+                };
+                owners.extend(rows.filter_map(Result::ok));
+            }
+        }
+
+        if sqlite_table_exists(&conn, "unresolved_file_dependencies") {
+            let Ok(mut statement) = conn.prepare_cached(
+                "SELECT source_path, language, spec
+                 FROM unresolved_file_dependencies
+                 WHERE lookup_key = ?1
+                 ORDER BY source_path, language, spec",
+            ) else {
+                continue;
+            };
+            for lookup_key in &candidate_lookup_keys {
+                let Ok(rows) = statement.query_map([lookup_key], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                }) else {
+                    continue;
+                };
+                unresolved.extend(rows.filter_map(Result::ok));
+            }
+        }
+    }
+
+    let new_targets = added_or_modified
+        .difference(&persisted_paths)
+        .cloned()
+        .collect::<HashSet<_>>();
+    if !new_targets.is_empty() {
+        for (source, language, spec) in unresolved {
+            if changed.contains(&source) || deleted.contains(&source) {
+                continue;
+            }
+            let Some(target) = crate::context_graph::resolve_dependency_spec(
+                &workspace.root,
+                Some(current_snapshot),
+                Path::new(&source),
+                &language,
+                &spec,
+            ) else {
+                continue;
+            };
+            if new_targets.contains(&index_path_string(&target)) {
+                owners.insert(source);
+            }
+        }
+    }
+
+    let mut owners = owners.into_iter().collect::<Vec<_>>();
+    owners.sort();
+    for owner in owners {
+        if changed.contains(&owner) || deleted.contains(&owner) {
+            continue;
+        }
+        let Some(snapshot_hash) = current_snapshot.files.get(&owner) else {
+            continue;
+        };
+        let owner_path = PathBuf::from(&owner);
+        if !workspace.root.join(&owner_path).is_file() {
+            continue;
+        }
+        diff.added_or_modified
+            .push((owner_path, snapshot_hash.ends_with("-1")));
+    }
+
+    Ok(())
+}
+
+fn sqlite_table_exists(conn: &Connection, table: &str) -> bool {
+    conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+        )",
+        [table],
+        |row| row.get::<_, bool>(0),
+    )
+    .unwrap_or(false)
 }
 
 fn load_rust_doc_includes(
@@ -2686,6 +2864,14 @@ fn remove_file_chunks(
         "DELETE FROM file_edges WHERE source_path = ?1",
         params![rel_str],
     )?;
+    sqlite.execute(
+        "DELETE FROM file_edges WHERE target_path = ?1 AND kind = ?2",
+        params![rel_str, crate::context_graph::FileEdgeKind::Test as i64],
+    )?;
+    sqlite.execute(
+        "DELETE FROM unresolved_file_dependencies WHERE source_path = ?1",
+        params![rel_str],
+    )?;
     Ok(())
 }
 
@@ -2898,6 +3084,7 @@ struct PersistStatements<'conn> {
     chunk_insert: Statement<'conn>,
     dependency_insert: Statement<'conn>,
     file_edge_insert: Statement<'conn>,
+    unresolved_dependency_insert: Statement<'conn>,
     symbol_rows: Vec<(String, i64)>,
     symbol_insert_sql: String,
 }
@@ -2929,6 +3116,11 @@ impl<'conn> PersistStatements<'conn> {
                     source_path, target_path, kind
                 ) VALUES (?1, ?2, ?3)",
             )?,
+            unresolved_dependency_insert: conn.prepare(
+                "INSERT OR IGNORE INTO unresolved_file_dependencies (
+                    source_path, language, spec, lookup_key
+                ) VALUES (?1, ?2, ?3, ?4)",
+            )?,
             symbol_rows: Vec::with_capacity(SYMBOL_INSERT_BATCH_ROWS),
             symbol_insert_sql: String::with_capacity(
                 "INSERT OR REPLACE INTO symbols (normalized_name, chunk_key) VALUES ".len()
@@ -2945,6 +3137,19 @@ impl<'conn> PersistStatements<'conn> {
 
     fn insert_file_edge(&mut self, edge: &crate::context_graph::FileEdge) -> Result<()> {
         crate::context_graph::persist_file_edge(&mut self.file_edge_insert, edge)
+    }
+
+    fn insert_unresolved_dependency(
+        &mut self,
+        dependency: &crate::context_graph::UnresolvedDependency,
+    ) -> Result<()> {
+        self.unresolved_dependency_insert.execute(params![
+            index_path_string(&dependency.source_path),
+            &dependency.language,
+            &dependency.spec,
+            &dependency.lookup_key,
+        ])?;
+        Ok(())
     }
 
     fn queue_symbols(&mut self, chunk: &IndexedChunk, chunk_key: i64) -> Result<()> {
@@ -3120,6 +3325,14 @@ fn create_tables_schema(conn: &Connection, create_indexes: bool) -> Result<()> {
             PRIMARY KEY (source_path, target_path, kind)
         ) WITHOUT ROWID;
 
+        CREATE TABLE IF NOT EXISTS unresolved_file_dependencies (
+            source_path TEXT NOT NULL,
+            language TEXT NOT NULL,
+            spec TEXT NOT NULL,
+            lookup_key TEXT NOT NULL,
+            PRIMARY KEY (source_path, language, spec, lookup_key)
+        ) WITHOUT ROWID;
+
         "#,
     )?;
     if create_indexes {
@@ -3178,6 +3391,8 @@ fn create_secondary_indexes(conn: &Connection) -> Result<()> {
             ON included_file_dependencies(included_path);
         CREATE INDEX IF NOT EXISTS idx_file_edges_target
             ON file_edges(target_path, source_path);
+        CREATE INDEX IF NOT EXISTS idx_unresolved_file_dependencies_lookup
+            ON unresolved_file_dependencies(lookup_key, source_path);
         "#,
     )?;
     Ok(())
@@ -4350,6 +4565,62 @@ mod tests {
                 .iter()
                 .any(|text| text.contains("private cardinal documentation"))
         );
+    }
+
+    #[test]
+    #[serial]
+    fn adding_dependency_reindexes_importer_with_unresolved_spec() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::write(
+            root.path().join("src/lib.rs"),
+            "mod helper;\npub fn run() { helper::work(); }\n",
+        )
+        .unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let conn = open_sqlite_readonly(&workspace.sqlite_path()).unwrap();
+        let unresolved = conn
+            .query_row(
+                "SELECT COUNT(*) FROM unresolved_file_dependencies
+                 WHERE source_path = 'src/lib.rs' AND spec = 'helper'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(unresolved, 1);
+        drop(conn);
+
+        fs::write(root.path().join("src/helper.rs"), "pub fn work() {}\n").unwrap();
+        let summary = index_workspace(&workspace, &model).unwrap();
+        assert_eq!(summary.indexed_files, 2);
+
+        let conn = open_sqlite_readonly(&workspace.sqlite_path()).unwrap();
+        let edge = conn
+            .query_row(
+                "SELECT COUNT(*) FROM file_edges
+                 WHERE source_path = 'src/lib.rs'
+                   AND target_path = 'src/helper.rs'
+                   AND kind = ?1",
+                [crate::context_graph::FileEdgeKind::Dependency as i64],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(edge, 1);
+        let unresolved = conn
+            .query_row(
+                "SELECT COUNT(*) FROM unresolved_file_dependencies
+                 WHERE source_path = 'src/lib.rs' AND spec = 'helper'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(unresolved, 0);
     }
 
     #[test]
