@@ -672,23 +672,48 @@ fn likely_called_names(text: &str) -> Vec<String> {
 }
 
 fn is_generic_call(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase().replace('_', "");
+    if normalized.starts_with("assert") {
+        return true;
+    }
     matches!(
-        name.to_ascii_lowercase().as_str(),
-        "assert"
-            | "assert_eq"
-            | "assert_ne"
-            | "debug_assert"
-            | "debug_assert_eq"
+        normalized.as_str(),
+        "afterall"
+            | "aftereach"
+            | "beforeall"
+            | "beforeeach"
+            | "context"
+            | "debugassert"
+            | "debugasserteq"
+            | "describe"
             | "eprint"
             | "eprintln"
+            | "expect"
+            | "fail"
+            | "fixture"
+            | "fit"
             | "format"
             | "if"
+            | "it"
             | "match"
+            | "mock"
             | "ok"
+            | "parametrize"
+            | "patch"
             | "print"
             | "println"
+            | "raises"
+            | "setuptest"
             | "some"
+            | "specify"
+            | "spyon"
+            | "suite"
+            | "teardowntest"
+            | "test"
             | "vec"
+            | "xdescribe"
+            | "xit"
+            | "xtest"
     )
 }
 
@@ -1266,6 +1291,41 @@ mod tests {
             anchor_symbols("fix authentication failures", &primary),
             ["validate_token"]
         );
+    }
+
+    #[test]
+    fn inferred_anchors_skip_test_harness_calls() {
+        let primary = vec![SearchHit {
+            file_path: PathBuf::from("src/auth.test.ts"),
+            start_line: 1,
+            end_line: 3,
+            preview: "describe('auth', () => {\n  test('rejects invalid tokens', () => { expect(validateToken('')).toBe(false); });\n});"
+                .to_string(),
+            reason: String::new(),
+            score: 1.0,
+            sources: Vec::new(),
+            neural_requested: false,
+            neural_executed: false,
+        }];
+        assert_eq!(
+            anchor_symbols("fix authentication failures", &primary),
+            ["validateToken"]
+        );
+    }
+
+    #[test]
+    fn generic_test_calls_cover_common_framework_shapes() {
+        for call in [
+            "assertEqual",
+            "beforeEach",
+            "describe",
+            "expect",
+            "raises",
+            "spyOn",
+        ] {
+            assert!(is_generic_call(call), "{call}");
+        }
+        assert!(!is_generic_call("validateToken"));
     }
 
     #[test]
