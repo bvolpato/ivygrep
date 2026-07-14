@@ -565,10 +565,20 @@ fn classify_file_role(hit: &SearchHit) -> Option<ContextRole> {
 fn anchor_symbols(task: &str, primary_hits: &[SearchHit]) -> Vec<String> {
     let explicit_symbols = task_symbols(task);
     if !explicit_symbols.is_empty() {
-        return explicit_symbols
-            .into_iter()
-            .take(MAX_ANCHOR_SYMBOLS)
-            .collect::<Vec<_>>();
+        let mut anchors = Vec::new();
+        let mut seen = HashSet::new();
+        for symbol in explicit_symbols {
+            let terminal = terminal_symbol_member(&symbol).map(ToOwned::to_owned);
+            for candidate in std::iter::once(symbol).chain(terminal) {
+                if seen.insert(candidate.to_ascii_lowercase()) {
+                    anchors.push(candidate);
+                    if anchors.len() == MAX_ANCHOR_SYMBOLS {
+                        return anchors;
+                    }
+                }
+            }
+        }
+        return anchors;
     }
 
     let mut scored = BTreeMap::<String, usize>::new();
@@ -647,6 +657,19 @@ fn anchor_symbols(task: &str, primary_hits: &[SearchHit]) -> Vec<String> {
         .map(|(symbol, _)| symbol)
         .take(MAX_ANCHOR_SYMBOLS)
         .collect()
+}
+
+fn terminal_symbol_member(symbol: &str) -> Option<&str> {
+    let member = symbol
+        .rsplit_once('.')
+        .map(|(_, member)| member)
+        .or_else(|| symbol.rsplit_once("::").map(|(_, member)| member))?;
+    (member.len() >= 3
+        && member
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_' || first == '$'))
+    .then_some(member)
 }
 
 fn likely_test_subject_names(text: &str) -> Vec<String> {
@@ -1352,6 +1375,18 @@ mod tests {
         assert_eq!(
             task_symbols("fix HTTPServer, URLParser, and JSONDecoder"),
             ["HTTPServer", "URLParser", "JSONDecoder"]
+        );
+    }
+
+    #[test]
+    fn qualified_explicit_anchors_include_terminal_members() {
+        assert_eq!(
+            anchor_symbols("fix client.send retries", &[]),
+            ["client.send", "send"]
+        );
+        assert_eq!(
+            anchor_symbols("change UserService.handle through std::io", &[]),
+            ["UserService.handle", "handle", "std::io"]
         );
     }
 

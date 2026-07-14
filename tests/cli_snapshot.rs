@@ -492,6 +492,64 @@ fn cli_context_captures_type_constructor_relationships() {
 
 #[test]
 #[serial]
+fn cli_context_qualified_method_anchor_finds_definition() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("workspace");
+    let home = tmp.path().join("ivygrep_home");
+    init_git_repo(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/client.rs"),
+        "pub struct Client;\n\
+         impl Client {\n\
+             pub fn send(&self) -> bool { true }\n\
+         }\n\
+         pub fn deliver(client: &Client) -> bool { client.send() }\n",
+    )
+    .unwrap();
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args([
+            "--json",
+            "--hash",
+            "context",
+            "--budget",
+            "2000",
+            "fix client.send behavior",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(
+        value["anchor_symbols"],
+        serde_json::json!(["client.send", "send"])
+    );
+    assert!(
+        value["coverage"]["definitions"].as_u64().unwrap() >= 1,
+        "{value:#}"
+    );
+    assert!(
+        value["items"].as_array().unwrap().iter().any(|item| {
+            item["roles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|role| role == "definition")
+                && item["preview"].as_str().unwrap().contains("fn send")
+        }),
+        "{value:#}"
+    );
+}
+
+#[test]
+#[serial]
 fn cli_lexical_context_never_requests_neural_enhancement() {
     let (_tmp, target_root, home) = stage_fixture_repo("rust_repo");
 
