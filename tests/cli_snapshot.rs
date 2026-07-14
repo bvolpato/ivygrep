@@ -725,18 +725,18 @@ fn cli_context_e2e_resolves_late_markdown_links() {
             .clone();
         serde_json::from_slice::<serde_json::Value>(&output).unwrap()
     };
-    let includes_guide = |value: &serde_json::Value| {
+    let includes_graph_guide = |value: &serde_json::Value| {
         value["items"].as_array().unwrap().iter().any(|item| {
             item["file_path"] == "docs/release-guide.md"
-                && item["roles"]
+                && item["sources"]
                     .as_array()
                     .unwrap()
-                    .contains(&serde_json::json!("documentation"))
+                    .contains(&serde_json::json!("graph_documentation"))
         })
     };
 
     let before = run_context();
-    assert!(!includes_guide(&before), "{before:#}");
+    assert!(!includes_graph_guide(&before), "{before:#}");
 
     std::fs::write(
         root.join("docs/release-guide.md"),
@@ -752,7 +752,7 @@ fn cli_context_e2e_resolves_late_markdown_links() {
         .success();
 
     let after = run_context();
-    assert!(includes_guide(&after), "{after:#}");
+    assert!(includes_graph_guide(&after), "{after:#}");
 }
 
 #[test]
