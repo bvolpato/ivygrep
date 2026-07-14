@@ -529,6 +529,8 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::create_dir_all(root.join("cmd/server")).unwrap();
     std::fs::create_dir_all(root.join("frontend")).unwrap();
     std::fs::create_dir_all(root.join("internal/auth")).unwrap();
+    std::fs::create_dir_all(root.join("src/main/java/com/acme/project/module")).unwrap();
+    std::fs::create_dir_all(root.join("src/main/java/com/acme/project/util")).unwrap();
     std::fs::create_dir_all(root.join("tools")).unwrap();
     std::fs::write(root.join("app/__init__.py"), "").unwrap();
     std::fs::write(
@@ -561,6 +563,16 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         "def rule_impl():\n    return \"configured\"\n",
     )
     .unwrap();
+    std::fs::write(
+        root.join("src/main/java/com/acme/project/module/Service.java"),
+        "package com.acme.project.module;\nimport com.acme.project.util.Helper;\nclass Service { void assembleMavenRelease() { Helper.run(); } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("BUILD.bazel"),
+        "load(\"//:root_defs.bzl\", \"root_rule\")\n\ndef assemble_root_release():\n    return root_rule()\n",
+    )
+    .unwrap();
 
     let run_context = |query: &str| {
         let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
@@ -575,18 +587,34 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
             .clone();
         serde_json::from_slice::<serde_json::Value>(&output).unwrap()
     };
-    let has_dependency = |value: &serde_json::Value, expected: &str| {
+    let has_graph_dependency = |value: &serde_json::Value, expected: &str| {
         value["items"].as_array().unwrap().iter().any(|item| {
             item["file_path"] == expected
-                && item["roles"]
+                && item["sources"]
                     .as_array()
                     .unwrap()
-                    .contains(&serde_json::json!("dependency"))
+                    .contains(&serde_json::json!("graph_dependency"))
         })
     };
 
     let before = run_context("change run_release_helper");
-    assert!(!has_dependency(&before, "app/helper.py"), "{before:#}");
+    assert!(
+        !has_graph_dependency(&before, "app/helper.py"),
+        "{before:#}"
+    );
+    let before_maven = run_context("change assembleMavenRelease");
+    assert!(
+        !has_graph_dependency(
+            &before_maven,
+            "src/main/java/com/acme/project/util/Helper.java"
+        ),
+        "{before_maven:#}"
+    );
+    let before_bazel_root = run_context("change assemble_root_release");
+    assert!(
+        !has_graph_dependency(&before_bazel_root, "root_defs.bzl"),
+        "{before_bazel_root:#}"
+    );
 
     std::fs::write(
         root.join("app/helper.py"),
@@ -598,6 +626,16 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         "package auth\n\nfunc Connect() {}\n",
     )
     .unwrap();
+    std::fs::write(
+        root.join("src/main/java/com/acme/project/util/Helper.java"),
+        "package com.acme.project.util;\nclass Helper { static void run() {} }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("root_defs.bzl"),
+        "def root_rule():\n    return \"root configured\"\n",
+    )
+    .unwrap();
     Command::new(assert_cmd::cargo::cargo_bin!("ig"))
         .current_dir(&root)
         .env("IVYGREP_HOME", &home)
@@ -607,19 +645,34 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         .success();
 
     let python = run_context("change run_release_helper");
-    assert!(has_dependency(&python, "app/helper.py"), "{python:#}");
+    assert!(has_graph_dependency(&python, "app/helper.py"), "{python:#}");
 
     let typescript = run_context("change start_nodenext_widget");
     assert!(
-        has_dependency(&typescript, "frontend/helper.ts"),
+        has_graph_dependency(&typescript, "frontend/helper.ts"),
         "{typescript:#}"
     );
 
     let go = run_context("change start_auth_server");
-    assert!(has_dependency(&go, "internal/auth/client.go"), "{go:#}");
+    assert!(
+        has_graph_dependency(&go, "internal/auth/client.go"),
+        "{go:#}"
+    );
 
     let bazel = run_context("change configure_release_widget");
-    assert!(has_dependency(&bazel, "tools/defs.bzl"), "{bazel:#}");
+    assert!(has_graph_dependency(&bazel, "tools/defs.bzl"), "{bazel:#}");
+
+    let maven = run_context("change assembleMavenRelease");
+    assert!(
+        has_graph_dependency(&maven, "src/main/java/com/acme/project/util/Helper.java"),
+        "{maven:#}"
+    );
+
+    let bazel_root = run_context("change assemble_root_release");
+    assert!(
+        has_graph_dependency(&bazel_root, "root_defs.bzl"),
+        "{bazel_root:#}"
+    );
 }
 
 #[test]

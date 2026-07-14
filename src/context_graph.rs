@@ -606,7 +606,10 @@ fn resolve_local_dependency(
     } else if starlark_relative {
         normalized = spec.trim_start_matches(':').replace(':', "/");
     } else if starlark_workspace {
-        normalized = spec.trim_start_matches('/').replace(':', "/");
+        normalized = spec
+            .trim_start_matches('/')
+            .trim_start_matches(':')
+            .replace(':', "/");
     } else if matches!(
         language,
         "python" | "java" | "kotlin" | "scala" | "csharp" | "haskell" | "elixir"
@@ -691,6 +694,22 @@ fn resolve_local_dependency(
         PathBuf::from("lib"),
         PathBuf::from("app"),
     ]);
+    if matches!(language, "java" | "kotlin" | "scala" | "groovy") {
+        for ancestor in source_dir.ancestors() {
+            let Some(parent) = ancestor.parent() else {
+                continue;
+            };
+            if ancestor
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| matches!(name, "java" | "kotlin" | "scala" | "groovy"))
+            {
+                for source_root in ["java", "kotlin", "scala", "groovy"] {
+                    bases.push(parent.join(source_root));
+                }
+            }
+        }
+    }
     for ancestor in source_dir.ancestors().take(4) {
         bases.push(ancestor.to_path_buf());
     }
@@ -828,9 +847,10 @@ fn common_extensions(language: &str) -> &'static [&'static str] {
         "go" => &["go"],
         "c" => &["h", "c"],
         "cpp" => &["h", "hpp", "hh", "cpp", "cc", "cxx"],
-        "java" => &["java"],
-        "kotlin" => &["kt", "kts"],
-        "scala" => &["scala"],
+        "java" => &["java", "kt", "scala", "groovy"],
+        "kotlin" => &["kt", "java", "scala", "groovy", "kts"],
+        "scala" => &["scala", "java", "kt", "groovy"],
+        "groovy" => &["groovy", "java", "kt", "scala"],
         "csharp" => &["cs"],
         "ruby" => &["rb"],
         "php" => &["php"],
@@ -1673,6 +1693,7 @@ mod tests {
     fn starlark_labels_resolve_local_and_workspace_loads() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("tools")).unwrap();
+        fs::write(root.path().join("defs.bzl"), "def root_rule(): pass\n").unwrap();
         fs::write(
             root.path().join("tools/defs.bzl"),
             "def rule_impl(): pass\n",
@@ -1687,6 +1708,40 @@ mod tests {
                     && edge.target_path == Path::new("tools/defs.bzl")
             }));
         }
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("BUILD.bazel"),
+            "load(\"//:defs.bzl\", \"root_rule\")\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency && edge.target_path == Path::new("defs.bzl")
+        }));
+    }
+
+    #[test]
+    fn jvm_imports_resolve_from_deep_source_packages() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src/main/java/com/acme/project/util")).unwrap();
+        fs::create_dir_all(root.path().join("src/main/kotlin/com/acme/project/module")).unwrap();
+        fs::write(
+            root.path()
+                .join("src/main/java/com/acme/project/util/Helper.java"),
+            "package com.acme.project.util; public class Helper {}\n",
+        )
+        .unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("src/main/kotlin/com/acme/project/module/Service.kt"),
+            "import com.acme.project.util.Helper\nclass Service(val helper: Helper)\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("src/main/java/com/acme/project/util/Helper.java")
+        }));
     }
 
     #[test]
