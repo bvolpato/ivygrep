@@ -818,16 +818,41 @@ fn is_generic_call(name: &str) -> bool {
 }
 
 fn has_test_harness_receiver(prefix: &str) -> bool {
-    let Some(receiver) = prefix.strip_suffix('.').and_then(|prefix| {
-        prefix
-            .rsplit(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-            .find(|part| !part.is_empty())
-    }) else {
+    let Some(chain) = prefix.strip_suffix('.') else {
         return false;
     };
-    let receiver = receiver.to_ascii_lowercase().replace('_', "");
+    let expression = receiver_expression_suffix(chain.trim_end());
+    let mut identifiers = expression
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .filter(|part| !part.is_empty());
+    let Some(root) = identifiers.next() else {
+        return false;
+    };
+    let receiver = identifiers.next_back().unwrap_or(root);
+    is_test_harness_identifier(root) || is_test_harness_identifier(receiver)
+}
+
+fn receiver_expression_suffix(value: &str) -> &str {
+    let mut depth = 0usize;
+    let mut start = value.len();
+    for (index, character) in value.char_indices().rev() {
+        match character {
+            ')' | ']' | '}' => depth += 1,
+            '(' | '[' | '{' if depth > 0 => depth -= 1,
+            '(' | '[' | '{' => break,
+            _ if depth > 0 => {}
+            _ if character.is_ascii_alphanumeric() || matches!(character, '_' | '$' | '.') => {}
+            _ => break,
+        }
+        start = index;
+    }
+    &value[start..]
+}
+
+fn is_test_harness_identifier(identifier: &str) -> bool {
+    let identifier = identifier.to_ascii_lowercase().replace('_', "");
     matches!(
-        receiver.as_str(),
+        identifier.as_str(),
         "assert"
             | "expect"
             | "fireevent"
@@ -837,7 +862,9 @@ fn has_test_harness_receiver(prefix: &str) -> bool {
             | "sinon"
             | "userevent"
             | "vi"
-    ) || receiver.ends_with("assert")
+    ) || identifier.starts_with("assert")
+        || identifier.starts_with("expect")
+        || identifier.ends_with("assert")
 }
 
 fn task_symbols(task: &str) -> Vec<String> {
@@ -1485,6 +1512,7 @@ mod tests {
         for preview in [
             "assert.equal(validateToken(''), false);",
             "should.equal(validateToken(''), false);",
+            "expect(result).toEqual(validateToken(''));",
         ] {
             let primary = vec![SearchHit {
                 file_path: PathBuf::from("src/auth.test.ts"),
@@ -1561,6 +1589,9 @@ mod tests {
             assert!(is_generic_call(call), "{call}");
         }
         assert!(!is_generic_call("validateToken"));
+        assert!(has_test_harness_receiver("expect(result)."));
+        assert!(has_test_harness_receiver("expect(result).not."));
+        assert!(!has_test_harness_receiver("expect(result); client."));
     }
 
     #[test]
