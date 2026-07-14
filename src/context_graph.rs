@@ -1062,22 +1062,18 @@ fn rust_crate_name(
 }
 
 fn rust_file_may_import_library(path: &Path) -> bool {
-    let components = path
-        .components()
-        .filter_map(|component| match component {
-            Component::Normal(value) => Some(value),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let Some(src_index) = components.iter().rposition(|component| *component == "src") else {
-        return true;
-    };
-    matches!(
-        components
-            .get(src_index + 1)
-            .and_then(|value| value.to_str()),
-        Some("main.rs" | "bin")
-    )
+    for parent in path.ancestors().skip(1) {
+        if parent.file_name().is_some_and(|name| name == "src") {
+            return path
+                .strip_prefix(parent)
+                .ok()
+                .and_then(|relative| relative.components().next())
+                .is_some_and(|component| {
+                    matches!(component, Component::Normal(value) if value == "main.rs" || value == "bin")
+                });
+        }
+    }
+    true
 }
 
 fn test_suffixes(extension: &str) -> &'static [&'static str] {
@@ -1711,6 +1707,21 @@ mod tests {
         assert!(edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Dependency && edge.target_path == Path::new("src/auth.rs")
         }));
+    }
+
+    #[test]
+    fn rust_crate_name_lookup_is_limited_to_external_consumers() {
+        for path in ["src/lib.rs", "src/auth.rs", "crates/core/src/auth.rs"] {
+            assert!(!rust_file_may_import_library(Path::new(path)), "{path}");
+        }
+        for path in [
+            "src/main.rs",
+            "src/bin/server.rs",
+            "tests/integration.rs",
+            "crates/core/tests/integration.rs",
+        ] {
+            assert!(rust_file_may_import_library(Path::new(path)), "{path}");
+        }
     }
 
     #[test]
