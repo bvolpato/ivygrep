@@ -712,6 +712,24 @@ fn resolve_local_dependency(
     normalized = normalized.trim_start_matches("./").to_string();
 
     let mut targets = vec![PathBuf::from(&normalized)];
+    if language == "kotlin" {
+        let path = Path::new(&normalized);
+        let member_starts_lowercase = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .and_then(|value| value.chars().next())
+            .is_some_and(char::is_lowercase);
+        let owner = path.parent().filter(|owner| {
+            owner
+                .file_name()
+                .and_then(|value| value.to_str())
+                .and_then(|value| value.chars().next())
+                .is_some_and(char::is_uppercase)
+        });
+        if member_starts_lowercase && let Some(owner) = owner {
+            targets.push(owner.to_path_buf());
+        }
+    }
     if language == "rust" {
         let mut parent = Path::new(&normalized);
         while let Some(next) = parent.parent() {
@@ -2058,6 +2076,28 @@ mod tests {
         assert!(edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Dependency
                 && edge.target_path == Path::new("src/main/scala/com/acme/util/Helpers.scala")
+        }));
+    }
+
+    #[test]
+    fn kotlin_member_imports_resolve_owner_file() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src/main/kotlin/com/acme/util")).unwrap();
+        fs::write(
+            root.path().join("src/main/kotlin/com/acme/util/Auth.kt"),
+            "package com.acme.util\nobject Auth { fun check() = true }\n",
+        )
+        .unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("src/main/kotlin/com/acme/service/Service.kt"),
+            "import com.acme.util.Auth.check\nclass Service\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("src/main/kotlin/com/acme/util/Auth.kt")
         }));
     }
 

@@ -542,6 +542,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::create_dir_all(root.join("src/Acme/Service")).unwrap();
     std::fs::create_dir_all(root.join("src/Acme/Util")).unwrap();
     std::fs::create_dir_all(root.join("src/main/kotlin/com/acme/project/alias")).unwrap();
+    std::fs::create_dir_all(root.join("src/main/kotlin/com/acme/project/member")).unwrap();
     std::fs::create_dir_all(root.join("src/main/kotlin/com/acme/project/module")).unwrap();
     std::fs::create_dir_all(root.join("src/main/scala/com/acme/project/grouped")).unwrap();
     std::fs::create_dir_all(root.join("src/main/scala/com/acme/project/module")).unwrap();
@@ -604,6 +605,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::write(
         root.join("src/main/kotlin/com/acme/project/module/AliasService.kt"),
         "package com.acme.project.module\nimport com.acme.project.alias.Helper as AliasHelper\nclass AliasService { fun assembleKotlinAliasRelease() = AliasHelper.run() }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/main/kotlin/com/acme/project/module/MemberService.kt"),
+        "package com.acme.project.module\nimport com.acme.project.member.Auth.check\nclass MemberService { fun assembleKotlinMemberRelease() = check() }\n",
     )
     .unwrap();
     std::fs::write(
@@ -709,6 +715,14 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         ),
         "{before_alias_kotlin:#}"
     );
+    let before_member_kotlin = run_context("change assembleKotlinMemberRelease");
+    assert!(
+        !has_graph_dependency(
+            &before_member_kotlin,
+            "src/main/kotlin/com/acme/project/member/Auth.kt"
+        ),
+        "{before_member_kotlin:#}"
+    );
     let before_grouped_scala = run_context("change assembleScalaGroupedRelease");
     for target in ["Auth.scala", "Clock.scala"] {
         let expected = format!("src/main/scala/com/acme/project/grouped/{target}");
@@ -763,6 +777,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::write(
         root.join("src/main/kotlin/com/acme/project/alias/Helper.kt"),
         "package com.acme.project.alias\nclass Helper { companion object { fun run() = true } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/main/kotlin/com/acme/project/member/Auth.kt"),
+        "package com.acme.project.member\nobject Auth { fun check() = true }\n",
     )
     .unwrap();
     for (owner, member) in [("Auth", "check"), ("Clock", "ready")] {
@@ -861,6 +880,15 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
             "src/main/kotlin/com/acme/project/alias/Helper.kt"
         ),
         "{alias_kotlin:#}"
+    );
+
+    let member_kotlin = run_context("change assembleKotlinMemberRelease");
+    assert!(
+        has_graph_dependency(
+            &member_kotlin,
+            "src/main/kotlin/com/acme/project/member/Auth.kt"
+        ),
+        "{member_kotlin:#}"
     );
 
     let grouped_scala = run_context("change assembleScalaGroupedRelease");
