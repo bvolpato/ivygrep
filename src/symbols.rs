@@ -536,15 +536,62 @@ fn looks_like_definition(line: &str, name_offset: usize) -> bool {
     }
 
     let suffix = &line[name_offset..];
-    suffix
-        .find(')')
-        .map(|close| suffix[close + 1..].trim_start())
-        .is_some_and(|after| {
-            after.starts_with('{')
-                || after.starts_with("->")
-                || after.starts_with(':')
-                || after.starts_with("throws ")
+    let after_parameters = after_parameter_list(suffix);
+    if after_parameters.is_some_and(|after| {
+        after.starts_with('{')
+            || after.starts_with("->")
+            || after.starts_with(':')
+            || after.starts_with("throws ")
+    }) {
+        return true;
+    }
+
+    after_parameters.is_some_and(|after| after.starts_with(';'))
+        && looks_like_prototype_prefix(prefix)
+}
+
+fn after_parameter_list(suffix: &str) -> Option<&str> {
+    let mut depth = 0usize;
+    for (offset, character) in suffix.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' if depth == 1 => return Some(suffix[offset + 1..].trim_start()),
+            ')' if depth > 1 => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn looks_like_prototype_prefix(prefix: &str) -> bool {
+    if prefix.is_empty() || prefix.ends_with('.') || prefix.ends_with("->") {
+        return false;
+    }
+    if prefix.ends_with("::") && !prefix.contains(char::is_whitespace) {
+        return false;
+    }
+
+    let first_word = prefix
+        .trim_start_matches(|character: char| {
+            !character.is_ascii_alphanumeric() && character != '_'
         })
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .next()
+        .unwrap_or_default();
+    !matches!(
+        first_word,
+        "await"
+            | "co_await"
+            | "co_return"
+            | "co_yield"
+            | "defer"
+            | "delete"
+            | "new"
+            | "return"
+            | "throw"
+            | "try"
+            | "yield"
+    )
 }
 
 fn type_matches(language: &str, type_filter: Option<&str>) -> bool {
@@ -1499,6 +1546,35 @@ mod tests {
             matching_call_lines("let service = UserService(7);", "userservice", 1, 1),
             [(1, "let service = UserService(7);".to_string())]
         );
+    }
+
+    #[test]
+    fn function_prototypes_are_not_call_sites() {
+        for (source, symbol) in [
+            ("int parse();", "parse"),
+            ("void send();", "send"),
+            ("public abstract void send();", "send"),
+            ("int parser::parse();", "parse"),
+            ("int parse(void (*callback)());", "parse"),
+        ] {
+            assert!(
+                matching_call_lines(source, symbol, 1, 1).is_empty(),
+                "{source}"
+            );
+        }
+        for (source, symbol) in [
+            ("parse();", "parse"),
+            ("client.send();", "send"),
+            ("parser::parse();", "parse"),
+            ("return parse();", "parse"),
+            ("await parse();", "parse"),
+        ] {
+            assert_eq!(
+                matching_call_lines(source, symbol, 1, 1),
+                [(1, source.to_string())],
+                "{source}"
+            );
+        }
     }
 
     #[test]
