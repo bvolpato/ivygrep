@@ -344,6 +344,7 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                         .unwrap_or(value)
                         .trim_end()
                         .trim_end_matches(';');
+                    let value = import_target_without_alias(language, value);
                     specs.extend(expand_grouped_spec(value));
                 }
             }
@@ -403,6 +404,13 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                 if let Some(value) = line
                     .strip_prefix("import ")
                     .or_else(|| line.strip_prefix("using "))
+                    .or_else(|| {
+                        if language == "csharp" {
+                            line.strip_prefix("global using ")
+                        } else {
+                            None
+                        }
+                    })
                 {
                     let value = value
                         .split("//")
@@ -410,9 +418,15 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                         .unwrap_or(value)
                         .trim_end()
                         .trim_end_matches(';');
+                    let value = import_target_without_alias(language, value);
                     let static_import = value.starts_with("static ");
                     let value = if matches!(language, "java" | "groovy" | "csharp") {
                         value.strip_prefix("static ").unwrap_or(value)
+                    } else {
+                        value
+                    };
+                    let value = if language == "csharp" {
+                        value.strip_prefix("global::").unwrap_or(value)
                     } else {
                         value
                     };
@@ -437,7 +451,9 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
             }
             "php" => {
                 if let Some(value) = line.strip_prefix("use ") {
-                    specs.insert(value.trim_end_matches(';').replace('\\', "/"));
+                    let value = value.trim_end_matches(';');
+                    let value = import_target_without_alias(language, value);
+                    specs.insert(value.replace('\\', "/"));
                 }
                 if (line.starts_with("require") || line.starts_with("include"))
                     && let Some(spec) = first_quoted_value(line)
@@ -533,6 +549,21 @@ fn python_import_members(value: &str) -> impl Iterator<Item = &str> {
         .split(',')
         .filter_map(|member| member.split_whitespace().next())
         .filter(|member| !member.is_empty() && *member != "*")
+}
+
+fn import_target_without_alias<'a>(language: &str, value: &'a str) -> &'a str {
+    if language == "csharp"
+        && let Some((_, target)) = value.split_once('=')
+    {
+        return target.trim();
+    }
+    if matches!(language, "rust" | "kotlin" | "scala" | "groovy" | "php")
+        && !value.contains('{')
+        && let Some((target, _)) = value.split_once(" as ")
+    {
+        return target.trim();
+    }
+    value
 }
 
 fn expand_grouped_spec(value: &str) -> Vec<String> {
@@ -1829,12 +1860,70 @@ mod tests {
             root.path(),
             None,
             Path::new("src/Acme/Service/Service.cs"),
-            "using static Acme.Util.Auth; // access check\nclass Service { bool Run() => Check(); }\n",
+            "global using static global::Acme.Util.Auth; // access check\nclass Service { bool Run() => Check(); }\n",
         );
         assert!(edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Dependency
                 && edge.target_path == Path::new("src/Acme/Util/Auth.cs")
         }));
+    }
+
+    #[test]
+    fn import_aliases_resolve_owning_files() {
+        let root = tempfile::tempdir().unwrap();
+        for (path, content) in [
+            ("src/alias_clock.rs", "pub fn now() {}\n"),
+            (
+                "src/main/kotlin/com/acme/util/Auth.kt",
+                "package com.acme.util\nclass Auth\n",
+            ),
+            (
+                "src/main/groovy/com/acme/util/Auth.groovy",
+                "package com.acme.util\nclass Auth {}\n",
+            ),
+            (
+                "src/Acme/Util/Auth.cs",
+                "namespace Acme.Util; class Auth {}\n",
+            ),
+            ("app/Acme/Util/Auth.php", "<?php namespace Acme\\Util;\n"),
+        ] {
+            let path = root.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, content).unwrap();
+        }
+
+        for (language_path, import, target) in [
+            (
+                "src/service.rs",
+                "use crate::alias_clock as clock;\n",
+                "src/alias_clock.rs",
+            ),
+            (
+                "src/main/kotlin/com/acme/service/Service.kt",
+                "import com.acme.util.Auth as AliasAuth\n",
+                "src/main/kotlin/com/acme/util/Auth.kt",
+            ),
+            (
+                "src/main/groovy/com/acme/service/Service.groovy",
+                "import com.acme.util.Auth as AliasAuth\n",
+                "src/main/groovy/com/acme/util/Auth.groovy",
+            ),
+            (
+                "src/Acme/Service/Service.cs",
+                "global using AliasAuth = global::Acme.Util.Auth;\n",
+                "src/Acme/Util/Auth.cs",
+            ),
+            (
+                "app/Service.php",
+                "<?php\nuse Acme\\Util\\Auth as AliasAuth;\n",
+                "app/Acme/Util/Auth.php",
+            ),
+        ] {
+            let edges = extract_file_edges(root.path(), None, Path::new(language_path), import);
+            assert!(edges.iter().any(|edge| {
+                edge.kind == FileEdgeKind::Dependency && edge.target_path == Path::new(target)
+            }));
+        }
     }
 
     #[test]

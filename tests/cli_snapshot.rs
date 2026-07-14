@@ -531,6 +531,8 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::create_dir_all(root.join("internal/auth")).unwrap();
     std::fs::create_dir_all(root.join("src/Acme/Service")).unwrap();
     std::fs::create_dir_all(root.join("src/Acme/Util")).unwrap();
+    std::fs::create_dir_all(root.join("src/main/kotlin/com/acme/project/alias")).unwrap();
+    std::fs::create_dir_all(root.join("src/main/kotlin/com/acme/project/module")).unwrap();
     std::fs::create_dir_all(root.join("src/main/groovy/com/acme/project/module")).unwrap();
     std::fs::create_dir_all(root.join("src/main/groovy/com/acme/project/util")).unwrap();
     std::fs::create_dir_all(root.join("src/main/java/com/acme/project/module")).unwrap();
@@ -584,7 +586,12 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     .unwrap();
     std::fs::write(
         root.join("src/Acme/Service/Service.cs"),
-        "using static Acme.Util.Auth;\nclass Service { bool verifyCsharpRelease() => Check(); }\n",
+        "global using static global::Acme.Util.Auth;\nglobal using AliasAuth = global::Acme.Alias.Util.Auth;\nclass Service { bool verifyCsharpRelease() => Check(); bool verifyCsharpAliasRelease() => AliasAuth.Check(); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/main/kotlin/com/acme/project/module/AliasService.kt"),
+        "package com.acme.project.module\nimport com.acme.project.alias.Helper as AliasHelper\nclass AliasService { fun assembleKotlinAliasRelease() = AliasHelper.run() }\n",
     )
     .unwrap();
 
@@ -655,6 +662,19 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         !has_graph_dependency(&before_static_csharp, "src/Acme/Util/Auth.cs"),
         "{before_static_csharp:#}"
     );
+    let before_alias_csharp = run_context("change verifyCsharpAliasRelease");
+    assert!(
+        !has_graph_dependency(&before_alias_csharp, "src/Acme/Alias/Util/Auth.cs"),
+        "{before_alias_csharp:#}"
+    );
+    let before_alias_kotlin = run_context("change assembleKotlinAliasRelease");
+    assert!(
+        !has_graph_dependency(
+            &before_alias_kotlin,
+            "src/main/kotlin/com/acme/project/alias/Helper.kt"
+        ),
+        "{before_alias_kotlin:#}"
+    );
 
     std::fs::write(
         root.join("app/helper.py"),
@@ -690,6 +710,17 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::write(
         root.join("src/Acme/Util/Auth.cs"),
         "namespace Acme.Util; static class Auth { public static bool Check() => true; }\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("src/Acme/Alias/Util")).unwrap();
+    std::fs::write(
+        root.join("src/Acme/Alias/Util/Auth.cs"),
+        "namespace Acme.Alias.Util; static class Auth { public static bool Check() => true; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/main/kotlin/com/acme/project/alias/Helper.kt"),
+        "package com.acme.project.alias\nclass Helper { companion object { fun run() = true } }\n",
     )
     .unwrap();
     Command::new(assert_cmd::cargo::cargo_bin!("ig"))
@@ -758,6 +789,21 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     assert!(
         has_graph_dependency(&static_csharp, "src/Acme/Util/Auth.cs"),
         "{static_csharp:#}"
+    );
+
+    let alias_csharp = run_context("change verifyCsharpAliasRelease");
+    assert!(
+        has_graph_dependency(&alias_csharp, "src/Acme/Alias/Util/Auth.cs"),
+        "{alias_csharp:#}"
+    );
+
+    let alias_kotlin = run_context("change assembleKotlinAliasRelease");
+    assert!(
+        has_graph_dependency(
+            &alias_kotlin,
+            "src/main/kotlin/com/acme/project/alias/Helper.kt"
+        ),
+        "{alias_kotlin:#}"
     );
 }
 
