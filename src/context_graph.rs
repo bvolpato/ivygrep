@@ -820,7 +820,11 @@ fn likely_test_edges(
 
     if is_test {
         let parent = strip_test_component(parent);
-        for base in [parent, PathBuf::from("src"), PathBuf::from("lib")] {
+        for base in [
+            parent.clone(),
+            PathBuf::from("src").join(&parent),
+            PathBuf::from("lib").join(&parent),
+        ] {
             candidates.insert(base.join(format!("{production_stem}.{extension}")));
         }
     } else {
@@ -861,7 +865,11 @@ fn likely_test_edges(
 fn strip_test_component(path: &Path) -> PathBuf {
     path.components()
         .filter_map(|component| match component {
-            Component::Normal(value) if value != "test" && value != "tests" => Some(value),
+            Component::Normal(value)
+                if value != "test" && value != "tests" && value != "__tests__" =>
+            {
+                Some(value)
+            }
             _ => None,
         })
         .collect()
@@ -869,7 +877,7 @@ fn strip_test_component(path: &Path) -> PathBuf {
 
 fn path_looks_like_test(path: &Path) -> bool {
     path.components().any(|component| {
-        matches!(component, Component::Normal(value) if value == "test" || value == "tests")
+        matches!(component, Component::Normal(value) if value == "test" || value == "tests" || value == "__tests__")
     }) || path
         .file_stem()
         .and_then(|value| value.to_str())
@@ -1365,6 +1373,7 @@ mod tests {
 
         fs::create_dir_all(root.path().join("src/foo")).unwrap();
         fs::create_dir_all(root.path().join("tests/foo")).unwrap();
+        fs::write(root.path().join("src/foo/user.py"), "def user(): pass\n").unwrap();
         fs::write(
             root.path().join("tests/foo/test_user.py"),
             "def test_user(): pass\n",
@@ -1380,6 +1389,34 @@ mod tests {
             edge.kind == FileEdgeKind::Test
                 && edge.source_path == Path::new("src/foo/user.py")
                 && edge.target_path == Path::new("tests/foo/test_user.py")
+        }));
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("tests/foo/test_user.py"),
+            "def test_user(): pass\n",
+        );
+        assert!(
+            edges
+                .iter()
+                .any(|edge| edge.source_path == Path::new("src/foo/user.py"))
+        );
+
+        fs::create_dir_all(root.path().join("src/__tests__")).unwrap();
+        fs::write(
+            root.path().join("src/widget.ts"),
+            "export const widget = 1;\n",
+        )
+        .unwrap();
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("src/__tests__/widget.ts"),
+            "test('widget', () => {});\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.source_path == Path::new("src/widget.ts")
+                && edge.target_path == Path::new("src/__tests__/widget.ts")
         }));
     }
 
