@@ -693,6 +693,70 @@ fn cli_context_e2e_preserves_adjacent_jest_tests_after_source_edit() {
 
 #[test]
 #[serial]
+fn cli_context_e2e_resolves_late_markdown_links() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("workspace");
+    let home = tmp.path().join("ivygrep_home");
+    init_git_repo(&root);
+    std::fs::create_dir_all(root.join("docs")).unwrap();
+    std::fs::write(
+        root.join("README.md"),
+        "# Release process\n\nUse document_release_process with the [release guide](docs/release-guide.md).\n",
+    )
+    .unwrap();
+
+    let run_context = || {
+        let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+            .current_dir(&root)
+            .env("IVYGREP_HOME", &home)
+            .env("IVYGREP_NO_AUTOSPAWN", "1")
+            .args([
+                "--json",
+                "--hash",
+                "context",
+                "--budget",
+                "3000",
+                "change document_release_process",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+    };
+    let includes_guide = |value: &serde_json::Value| {
+        value["items"].as_array().unwrap().iter().any(|item| {
+            item["file_path"] == "docs/release-guide.md"
+                && item["roles"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("documentation"))
+        })
+    };
+
+    let before = run_context();
+    assert!(!includes_guide(&before), "{before:#}");
+
+    std::fs::write(
+        root.join("docs/release-guide.md"),
+        "# Guide\n\ndocument_release_process validates artifacts and publishes release notes.\n",
+    )
+    .unwrap();
+    Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--add", "--hash", "--no-watch", "."])
+        .assert()
+        .success();
+
+    let after = run_context();
+    assert!(includes_guide(&after), "{after:#}");
+}
+
+#[test]
+#[serial]
 fn cli_context_captures_type_constructor_relationships() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("workspace");

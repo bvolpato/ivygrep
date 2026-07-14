@@ -187,8 +187,21 @@ pub(crate) fn extract_file_graph(
         }
     }
     if language == "markdown" {
-        for target in markdown_targets(root, snapshot, rel_path, content) {
-            insert_edge(&mut edges, rel_path, &target, FileEdgeKind::Documentation);
+        for spec in markdown_specs(content) {
+            if let Some(target) =
+                resolve_local_dependency(root, snapshot, rel_path, "markdown", &spec)
+            {
+                insert_edge(&mut edges, rel_path, &target, FileEdgeKind::Documentation);
+            } else {
+                for lookup_key in dependency_lookup_keys(&spec) {
+                    unresolved_dependencies.insert(UnresolvedDependency {
+                        source_path: rel_path.to_path_buf(),
+                        language: language.to_string(),
+                        spec: spec.clone(),
+                        lookup_key,
+                    });
+                }
+            }
         }
     }
 
@@ -982,13 +995,8 @@ fn path_looks_like_test(path: &Path) -> bool {
         })
 }
 
-fn markdown_targets(
-    root: &Path,
-    snapshot: Option<&MerkleSnapshot>,
-    rel_path: &Path,
-    content: &str,
-) -> Vec<PathBuf> {
-    let mut targets = BTreeSet::new();
+fn markdown_specs(content: &str) -> Vec<String> {
+    let mut specs = BTreeSet::new();
     for line in content.lines().take(20_000) {
         let mut remaining = line;
         while let Some(open) = remaining.find("](") {
@@ -996,17 +1004,24 @@ fn markdown_targets(
             let Some(close) = remaining.find(')') else {
                 break;
             };
-            let target = remaining[..close].split_whitespace().next().unwrap_or("");
-            if !target.starts_with('#')
-                && let Some(path) =
-                    resolve_local_dependency(root, snapshot, rel_path, "markdown", target)
+            let target = remaining[..close]
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_matches(['<', '>']);
+            if !target.is_empty()
+                && !target.starts_with('#')
+                && !target.starts_with('/')
+                && !target.contains("://")
+                && !target.starts_with("mailto:")
+                && !target.starts_with("data:")
             {
-                targets.insert(path);
+                specs.insert(target.to_string());
             }
             remaining = &remaining[close + 1..];
         }
     }
-    targets.into_iter().take(16).collect()
+    specs.into_iter().take(128).collect()
 }
 
 pub(crate) fn expand_context_graph(
@@ -1356,6 +1371,29 @@ mod tests {
         assert!(docs.iter().any(|edge| {
             edge.kind == FileEdgeKind::Documentation
                 && edge.target_path == Path::new("docs/guide.md")
+        }));
+    }
+
+    #[test]
+    fn missing_markdown_targets_are_persisted_for_later_resolution() {
+        let root = tempfile::tempdir().unwrap();
+        let content = "Read the [release guide](docs/release-guide.md).\n";
+
+        let missing = extract_file_graph(root.path(), None, Path::new("README.md"), content);
+        assert!(missing.edges.is_empty());
+        assert!(missing.unresolved_dependencies.iter().any(|dependency| {
+            dependency.language == "markdown"
+                && dependency.spec == "docs/release-guide.md"
+                && dependency.lookup_key == "guide"
+        }));
+
+        fs::create_dir_all(root.path().join("docs")).unwrap();
+        fs::write(root.path().join("docs/release-guide.md"), "# Release\n").unwrap();
+        let resolved = extract_file_graph(root.path(), None, Path::new("README.md"), content);
+        assert!(resolved.unresolved_dependencies.is_empty());
+        assert!(resolved.edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Documentation
+                && edge.target_path == Path::new("docs/release-guide.md")
         }));
     }
 
