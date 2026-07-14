@@ -520,17 +520,35 @@ fn cli_context_graph_tracks_dependencies_across_incremental_reindex() {
 
 #[test]
 #[serial]
-fn cli_context_e2e_resolves_python_and_bazel_dependencies() {
+fn cli_context_e2e_resolves_multilanguage_dependencies() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("workspace");
     let home = tmp.path().join("ivygrep_home");
     init_git_repo(&root);
     std::fs::create_dir_all(root.join("app")).unwrap();
+    std::fs::create_dir_all(root.join("cmd/server")).unwrap();
+    std::fs::create_dir_all(root.join("frontend")).unwrap();
+    std::fs::create_dir_all(root.join("internal/auth")).unwrap();
     std::fs::create_dir_all(root.join("tools")).unwrap();
     std::fs::write(root.join("app/__init__.py"), "").unwrap();
     std::fs::write(
         root.join("service.py"),
         "from app import helper\n\ndef run_release_helper():\n    return helper.work()\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("cmd/server/main.go"),
+        "package main\n\nimport \"example.com/context/internal/auth\"\n\nfunc start_auth_server() { auth.Connect() }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("frontend/main.ts"),
+        "import { runWidgetHelper } from \"./helper.js\";\n\nexport function start_nodenext_widget() { return runWidgetHelper(); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("frontend/helper.ts"),
+        "export function runWidgetHelper() { return \"ready\"; }\n",
     )
     .unwrap();
     std::fs::write(
@@ -575,6 +593,11 @@ fn cli_context_e2e_resolves_python_and_bazel_dependencies() {
         "def work():\n    return \"done\"\n",
     )
     .unwrap();
+    std::fs::write(
+        root.join("internal/auth/client.go"),
+        "package auth\n\nfunc Connect() {}\n",
+    )
+    .unwrap();
     Command::new(assert_cmd::cargo::cargo_bin!("ig"))
         .current_dir(&root)
         .env("IVYGREP_HOME", &home)
@@ -586,8 +609,86 @@ fn cli_context_e2e_resolves_python_and_bazel_dependencies() {
     let python = run_context("change run_release_helper");
     assert!(has_dependency(&python, "app/helper.py"), "{python:#}");
 
+    let typescript = run_context("change start_nodenext_widget");
+    assert!(
+        has_dependency(&typescript, "frontend/helper.ts"),
+        "{typescript:#}"
+    );
+
+    let go = run_context("change start_auth_server");
+    assert!(has_dependency(&go, "internal/auth/client.go"), "{go:#}");
+
     let bazel = run_context("change configure_release_widget");
     assert!(has_dependency(&bazel, "tools/defs.bzl"), "{bazel:#}");
+}
+
+#[test]
+#[serial]
+fn cli_context_e2e_preserves_adjacent_jest_tests_after_source_edit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("workspace");
+    let home = tmp.path().join("ivygrep_home");
+    init_git_repo(&root);
+    std::fs::create_dir_all(root.join("src/__tests__")).unwrap();
+    std::fs::write(
+        root.join("src/widget.ts"),
+        "export function render_release_widget() { return 1; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/__tests__/widget.test.ts"),
+        "test(\"release widget\", () => render_release_widget());\n",
+    )
+    .unwrap();
+
+    let run_context = || {
+        let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+            .current_dir(&root)
+            .env("IVYGREP_HOME", &home)
+            .env("IVYGREP_NO_AUTOSPAWN", "1")
+            .args([
+                "--json",
+                "--hash",
+                "context",
+                "--budget",
+                "3000",
+                "change render_release_widget",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+    };
+    let includes_test = |value: &serde_json::Value| {
+        value["items"].as_array().unwrap().iter().any(|item| {
+            item["file_path"] == "src/__tests__/widget.test.ts"
+                && item["roles"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("test"))
+        })
+    };
+
+    let before = run_context();
+    assert!(includes_test(&before), "{before:#}");
+
+    std::fs::write(
+        root.join("src/widget.ts"),
+        "export function render_release_widget() { return 2; }\n",
+    )
+    .unwrap();
+    Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--add", "--hash", "--no-watch", "."])
+        .assert()
+        .success();
+
+    let after = run_context();
+    assert!(includes_test(&after), "{after:#}");
 }
 
 #[test]

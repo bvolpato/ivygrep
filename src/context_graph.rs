@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
@@ -697,10 +698,21 @@ fn resolve_local_dependency(
     for target in targets {
         for base in &bases {
             let base_target = base.join(&target);
-            for suffix in &suffixes {
-                let candidate = if suffix.as_os_str().is_empty() {
-                    base_target.clone()
-                } else if suffix.to_string_lossy().starts_with('.') {
+            if tried.insert(base_target.clone())
+                && let Some(relative) = existing_workspace_file(root, snapshot, &base_target)
+            {
+                return Some(relative);
+            }
+            for extension in node_source_extensions(language, &base_target) {
+                let candidate = base_target.with_extension(extension);
+                if tried.insert(candidate.clone())
+                    && let Some(relative) = existing_workspace_file(root, snapshot, &candidate)
+                {
+                    return Some(relative);
+                }
+            }
+            for suffix in suffixes.iter().skip(1) {
+                let candidate = if suffix.to_string_lossy().starts_with('.') {
                     PathBuf::from(format!("{}{}", base_target.display(), suffix.display()))
                 } else {
                     base_target.join(suffix)
@@ -722,9 +734,67 @@ fn resolve_local_dependency(
                     return Some(relative);
                 }
             }
+            if language == "go"
+                && let Some(relative) = first_go_package_file(root, snapshot, &base_target)
+            {
+                return Some(relative);
+            }
         }
     }
     None
+}
+
+fn node_source_extensions(language: &str, path: &Path) -> &'static [&'static str] {
+    if !matches!(language, "javascript" | "typescript") {
+        return &[];
+    }
+    match path.extension().and_then(|value| value.to_str()) {
+        Some("js") => &["ts", "tsx"],
+        Some("jsx") => &["tsx"],
+        Some("mjs") => &["mts"],
+        Some("cjs") => &["cts"],
+        _ => &[],
+    }
+}
+
+fn first_go_package_file(
+    root: &Path,
+    snapshot: Option<&MerkleSnapshot>,
+    directory: &Path,
+) -> Option<PathBuf> {
+    let directory = normalize_relative_path(directory)?;
+    if let Some(snapshot) = snapshot {
+        let prefix = format!("{}/", index_path_string(&directory));
+        return snapshot
+            .files
+            .range(prefix.clone()..)
+            .take_while(|(path, _)| path.starts_with(&prefix))
+            .map(|(path, _)| Path::new(path))
+            .filter(|path| path.parent() == Some(directory.as_path()))
+            .find(|path| is_go_package_file(path))
+            .map(Path::to_path_buf);
+    }
+
+    let absolute_directory = root.join(&directory);
+    if !absolute_directory.is_dir() {
+        return None;
+    }
+    let mut candidates = fs::read_dir(absolute_directory)
+        .ok()?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| directory.join(entry.file_name()))
+        .filter(|path| root.join(path).is_file() && is_go_package_file(path))
+        .collect::<Vec<_>>();
+    candidates.sort();
+    candidates.into_iter().next()
+}
+
+fn is_go_package_file(path: &Path) -> bool {
+    path.extension().is_some_and(|extension| extension == "go")
+        && !path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem.ends_with("_test"))
 }
 
 fn module_index_names(language: &str) -> &'static [&'static str] {
@@ -847,6 +917,11 @@ fn likely_test_edges(
     } else {
         for suffix in ["_test", "_tests", ".test", ".spec"] {
             candidates.insert(parent.join(format!("{stem}{suffix}.{extension}")));
+        }
+        let adjacent_tests = parent.join("__tests__");
+        candidates.insert(adjacent_tests.join(format!("{stem}.{extension}")));
+        for suffix in [".test", ".spec"] {
+            candidates.insert(adjacent_tests.join(format!("{stem}{suffix}.{extension}")));
         }
         let relative_under_source = rel_path
             .strip_prefix("src")
@@ -1425,11 +1500,26 @@ mod tests {
             "export const widget = 1;\n",
         )
         .unwrap();
+        fs::write(
+            root.path().join("src/__tests__/widget.ts"),
+            "test('widget', () => {});\n",
+        )
+        .unwrap();
         let edges = extract_file_edges(
             root.path(),
             None,
             Path::new("src/__tests__/widget.ts"),
             "test('widget', () => {});\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.source_path == Path::new("src/widget.ts")
+                && edge.target_path == Path::new("src/__tests__/widget.ts")
+        }));
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("src/widget.ts"),
+            "export const widget = 1;\n",
         );
         assert!(edges.iter().any(|edge| {
             edge.source_path == Path::new("src/widget.ts")
@@ -1452,6 +1542,39 @@ mod tests {
         assert!(edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Dependency && edge.target_path == Path::new("lib/helper.rb")
         }));
+    }
+
+    #[test]
+    fn typescript_runtime_specifiers_prefer_exact_then_source_extensions() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::write(
+            root.path().join("src/helper.js"),
+            "export const value = 1;\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("src/helper.ts"),
+            "export const value = 2;\n",
+        )
+        .unwrap();
+
+        let dependency = |root: &Path| {
+            extract_file_edges(
+                root,
+                None,
+                Path::new("src/main.ts"),
+                "import { value } from './helper.js';\n",
+            )
+            .into_iter()
+            .find(|edge| edge.kind == FileEdgeKind::Dependency)
+            .unwrap()
+            .target_path
+        };
+        assert_eq!(dependency(root.path()), Path::new("src/helper.js"));
+
+        fs::remove_file(root.path().join("src/helper.js")).unwrap();
+        assert_eq!(dependency(root.path()), Path::new("src/helper.ts"));
     }
 
     #[test]
@@ -1550,10 +1673,24 @@ mod tests {
     }
 
     #[test]
-    fn go_module_imports_resolve_workspace_suffix() {
+    fn go_module_imports_resolve_arbitrary_package_files() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("internal/auth")).unwrap();
-        fs::write(root.path().join("internal/auth/auth.go"), "package auth\n").unwrap();
+        fs::write(
+            root.path().join("internal/auth/aaa_test.go"),
+            "package auth\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("internal/auth/client.go"),
+            "package auth\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("internal/auth/session.go"),
+            "package auth\n",
+        )
+        .unwrap();
 
         let edges = extract_file_edges(
             root.path(),
@@ -1563,7 +1700,7 @@ mod tests {
         );
         assert!(edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Dependency
-                && edge.target_path == Path::new("internal/auth/auth.go")
+                && edge.target_path == Path::new("internal/auth/client.go")
         }));
     }
 
