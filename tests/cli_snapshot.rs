@@ -450,7 +450,7 @@ fn cli_context_graph_tracks_dependencies_across_incremental_reindex() {
     .unwrap();
     std::fs::write(
         root.join("src/auth.rs"),
-        "use crate::old_clock::now;\npub fn rotate_refresh_token() { now(); }\n",
+        "use crate::old_clock::now; // current clock\npub fn rotate_refresh_token() { now(); }\n",
     )
     .unwrap();
     std::fs::write(root.join("src/old_clock.rs"), "pub fn now() -> u64 { 1 }\n").unwrap();
@@ -482,10 +482,10 @@ fn cli_context_graph_tracks_dependencies_across_incremental_reindex() {
             .unwrap()
             .iter()
             .filter(|item| {
-                item["roles"]
+                item["sources"]
                     .as_array()
                     .unwrap()
-                    .contains(&serde_json::json!("dependency"))
+                    .contains(&serde_json::json!("graph_dependency"))
             })
             .map(|item| item["file_path"].as_str().unwrap().to_string())
             .collect::<Vec<_>>()
@@ -499,7 +499,7 @@ fn cli_context_graph_tracks_dependencies_across_incremental_reindex() {
 
     std::fs::write(
         root.join("src/auth.rs"),
-        "use crate::new_clock::now;\npub fn rotate_refresh_token() { now(); }\n",
+        "use crate::new_clock::now; // replacement clock\npub fn rotate_refresh_token() { now(); }\n",
     )
     .unwrap();
     Command::new(assert_cmd::cargo::cargo_bin!("ig"))
@@ -529,6 +529,8 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::create_dir_all(root.join("cmd/server")).unwrap();
     std::fs::create_dir_all(root.join("frontend")).unwrap();
     std::fs::create_dir_all(root.join("internal/auth")).unwrap();
+    std::fs::create_dir_all(root.join("src/main/groovy/com/acme/project/module")).unwrap();
+    std::fs::create_dir_all(root.join("src/main/groovy/com/acme/project/util")).unwrap();
     std::fs::create_dir_all(root.join("src/main/java/com/acme/project/module")).unwrap();
     std::fs::create_dir_all(root.join("src/main/java/com/acme/project/util")).unwrap();
     std::fs::create_dir_all(root.join("tools")).unwrap();
@@ -566,6 +568,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::write(
         root.join("src/main/java/com/acme/project/module/Service.java"),
         "package com.acme.project.module;\nimport com.acme.project.util.Helper;\nimport static com.acme.project.util.Auth.check;\nclass Service {\n    void assembleMavenRelease() { Helper.run(); }\n    void verifyStaticRelease() { check(); }\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/main/groovy/com/acme/project/module/Service.groovy"),
+        "package com.acme.project.module\nimport com.acme.project.util.Helper\nclass Service { def assembleGroovyRelease() { Helper.run() } }\n",
     )
     .unwrap();
     std::fs::write(
@@ -628,6 +635,14 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         !has_graph_dependency(&before_import_attribute, "frontend/schema.json"),
         "{before_import_attribute:#}"
     );
+    let before_groovy = run_context("change assembleGroovyRelease");
+    assert!(
+        !has_graph_dependency(
+            &before_groovy,
+            "src/main/groovy/com/acme/project/util/Helper.groovy"
+        ),
+        "{before_groovy:#}"
+    );
 
     std::fs::write(
         root.join("app/helper.py"),
@@ -650,6 +665,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     )
     .unwrap();
     std::fs::write(root.join("frontend/schema.json"), "{\"release\": true}\n").unwrap();
+    std::fs::write(
+        root.join("src/main/groovy/com/acme/project/util/Helper.groovy"),
+        "package com.acme.project.util\nclass Helper { static def run() {} }\n",
+    )
+    .unwrap();
     std::fs::write(
         root.join("root_defs.bzl"),
         "def root_rule():\n    return \"root configured\"\n",
@@ -706,6 +726,15 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     assert!(
         has_graph_dependency(&import_attribute, "frontend/schema.json"),
         "{import_attribute:#}"
+    );
+
+    let groovy = run_context("change assembleGroovyRelease");
+    assert!(
+        has_graph_dependency(
+            &groovy,
+            "src/main/groovy/com/acme/project/util/Helper.groovy"
+        ),
+        "{groovy:#}"
     );
 }
 

@@ -338,7 +338,13 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                     .strip_prefix("use ")
                     .or_else(|| line.strip_prefix("mod "));
                 if let Some(value) = value {
-                    specs.extend(expand_grouped_spec(value.trim_end_matches(';')));
+                    let value = value
+                        .split("//")
+                        .next()
+                        .unwrap_or(value)
+                        .trim_end()
+                        .trim_end_matches(';');
+                    specs.extend(expand_grouped_spec(value));
                 }
             }
             "python" => {
@@ -398,11 +404,18 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                     .strip_prefix("import ")
                     .or_else(|| line.strip_prefix("using "))
                 {
-                    let value = value.trim_end_matches(';');
-                    let static_import = language == "java" && value.starts_with("static ");
+                    let value = value
+                        .split("//")
+                        .next()
+                        .unwrap_or(value)
+                        .trim_end()
+                        .trim_end_matches(';');
+                    let static_import =
+                        matches!(language, "java" | "groovy") && value.starts_with("static ");
                     let value = value.strip_prefix("static ").unwrap_or(value);
-                    let wildcard = value.ends_with(".*");
-                    let value = value.trim_end_matches(".*");
+                    let wildcard =
+                        value.ends_with(".*") || language == "scala" && value.ends_with("._");
+                    let value = value.trim_end_matches(".*").trim_end_matches("._");
                     let value = if static_import && !wildcard {
                         value.rsplit_once('.').map_or(value, |(owner, _)| owner)
                     } else {
@@ -604,7 +617,7 @@ fn resolve_local_dependency(
             .replace(':', "/");
     } else if matches!(
         language,
-        "python" | "java" | "kotlin" | "scala" | "csharp" | "haskell" | "elixir"
+        "python" | "java" | "kotlin" | "scala" | "groovy" | "csharp" | "haskell" | "elixir"
     ) {
         normalized = normalized.replace('.', "/");
     }
@@ -696,8 +709,11 @@ fn resolve_local_dependency(
                 .and_then(|value| value.to_str())
                 .is_some_and(|name| matches!(name, "java" | "kotlin" | "scala" | "groovy"))
             {
+                bases.push(parent.join(language));
                 for source_root in ["java", "kotlin", "scala", "groovy"] {
-                    bases.push(parent.join(source_root));
+                    if source_root != language {
+                        bases.push(parent.join(source_root));
+                    }
                 }
             }
         }
@@ -1435,6 +1451,23 @@ mod tests {
     }
 
     #[test]
+    fn rust_inline_comments_do_not_break_module_resolution() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::write(root.path().join("src/helper.rs"), "pub fn run() {}\n").unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("src/lib.rs"),
+            "mod helper; // auth helper\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency && edge.target_path == Path::new("src/helper.rs")
+        }));
+    }
+
+    #[test]
     fn rust_symbol_import_resolves_owning_module() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("src")).unwrap();
@@ -1769,11 +1802,73 @@ mod tests {
             root.path(),
             None,
             Path::new("src/main/java/com/acme/service/Service.java"),
-            "import static com.acme.util.Auth.check;\nclass Service { void run() { check(); } }\n",
+            "import static com.acme.util.Auth.check; // access check\nclass Service { void run() { check(); } }\n",
         );
         assert!(edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Dependency
                 && edge.target_path == Path::new("src/main/java/com/acme/util/Auth.java")
+        }));
+    }
+
+    #[test]
+    fn groovy_imports_resolve_package_classes_and_static_owners() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src/main/groovy/com/acme/util")).unwrap();
+        fs::create_dir_all(root.path().join("src/main/groovy/com/acme/service")).unwrap();
+        fs::create_dir_all(root.path().join("src/main/java/com/acme/util")).unwrap();
+        fs::write(
+            root.path()
+                .join("src/main/groovy/com/acme/util/Helper.groovy"),
+            "package com.acme.util\nclass Helper {}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("src/main/java/com/acme/util/Helper.java"),
+            "package com.acme.util; class Helper {}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path()
+                .join("src/main/groovy/com/acme/util/Auth.groovy"),
+            "package com.acme.util\nclass Auth { static void check() {} }\n",
+        )
+        .unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("src/main/groovy/com/acme/service/Service.groovy"),
+            "import com.acme.util.Helper\nimport static com.acme.util.Auth.check\nclass Service {}\n",
+        );
+        for target in ["Helper.groovy", "Auth.groovy"] {
+            let expected = Path::new("src/main/groovy/com/acme/util").join(target);
+            assert!(edges.iter().any(|edge| {
+                edge.kind == FileEdgeKind::Dependency && edge.target_path == expected
+            }));
+        }
+    }
+
+    #[test]
+    fn scala_wildcard_imports_resolve_owning_object() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src/main/scala/com/acme/util")).unwrap();
+        fs::create_dir_all(root.path().join("src/main/scala/com/acme/service")).unwrap();
+        fs::write(
+            root.path()
+                .join("src/main/scala/com/acme/util/Helpers.scala"),
+            "package com.acme.util\nobject Helpers\n",
+        )
+        .unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("src/main/scala/com/acme/service/Service.scala"),
+            "import com.acme.util.Helpers._ // utilities\nclass Service\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("src/main/scala/com/acme/util/Helpers.scala")
         }));
     }
 
