@@ -346,7 +346,7 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
     let mut go_import_block = false;
     for raw_line in content.lines().take(20_000) {
         let line = raw_line.trim();
-        if line.is_empty() || line.starts_with("//") && language != "go" {
+        if line.is_empty() || line.starts_with("//") {
             continue;
         }
         match language {
@@ -1085,10 +1085,10 @@ fn test_suffixes(extension: &str) -> &'static [&'static str] {
 }
 
 fn test_directories(extension: &str) -> &'static [&'static str] {
-    if extension == "rb" {
-        &["test", "tests", "spec", "specs"]
-    } else {
-        &["test", "tests"]
+    match extension {
+        "rb" => &["test", "tests", "spec", "specs"],
+        "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" => &["test", "tests", "__tests__"],
+        _ => &["test", "tests"],
     }
 }
 
@@ -2333,6 +2333,34 @@ mod tests {
         assert!(edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Dependency
                 && edge.target_path == Path::new("internal/auth/client.go")
+        }));
+    }
+
+    #[test]
+    fn go_import_blocks_ignore_commented_dependencies() {
+        let root = tempfile::tempdir().unwrap();
+        for package in ["active", "old"] {
+            fs::create_dir_all(root.path().join(format!("internal/{package}"))).unwrap();
+            fs::write(
+                root.path().join(format!("internal/{package}/client.go")),
+                format!("package {package}\n"),
+            )
+            .unwrap();
+        }
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("cmd/server/main.go"),
+            "package main\nimport (\n  \"example.com/app/internal/active\"\n  // \"example.com/app/internal/old\"\n)\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("internal/active/client.go")
+        }));
+        assert!(!edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("internal/old/client.go")
         }));
     }
 

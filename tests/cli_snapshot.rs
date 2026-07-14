@@ -930,16 +930,17 @@ fn cli_context_e2e_preserves_adjacent_tests_after_source_edits() {
     let root = tmp.path().join("workspace");
     let home = tmp.path().join("ivygrep_home");
     init_git_repo(&root);
-    std::fs::create_dir_all(root.join("src/__tests__")).unwrap();
+    std::fs::create_dir_all(root.join("src/components")).unwrap();
+    std::fs::create_dir_all(root.join("__tests__/components")).unwrap();
     std::fs::create_dir_all(root.join("lib")).unwrap();
     std::fs::create_dir_all(root.join("spec")).unwrap();
     std::fs::write(
-        root.join("src/widget.ts"),
+        root.join("src/components/widget.ts"),
         "export function render_release_widget() { return 1; }\n",
     )
     .unwrap();
     std::fs::write(
-        root.join("src/__tests__/widget.test.ts"),
+        root.join("__tests__/components/widget.test.ts"),
         "test(\"release widget\", () => render_release_widget());\n",
     )
     .unwrap();
@@ -988,7 +989,7 @@ fn cli_context_e2e_preserves_adjacent_tests_after_source_edits() {
 
     let before_jest = run_context("change render_release_widget");
     assert!(
-        includes_graph_test(&before_jest, "src/__tests__/widget.test.ts"),
+        includes_graph_test(&before_jest, "__tests__/components/widget.test.ts"),
         "{before_jest:#}"
     );
     let before_pytest = run_context("change refresh_colocated_auth");
@@ -1021,7 +1022,7 @@ fn cli_context_e2e_preserves_adjacent_tests_after_source_edits() {
     );
 
     std::fs::write(
-        root.join("src/widget.ts"),
+        root.join("src/components/widget.ts"),
         "export function render_release_widget() { return 2; }\n",
     )
     .unwrap();
@@ -1045,7 +1046,7 @@ fn cli_context_e2e_preserves_adjacent_tests_after_source_edits() {
 
     let after_jest = run_context("change render_release_widget");
     assert!(
-        includes_graph_test(&after_jest, "src/__tests__/widget.test.ts"),
+        includes_graph_test(&after_jest, "__tests__/components/widget.test.ts"),
         "{after_jest:#}"
     );
     let after_pytest = run_context("change refresh_colocated_auth");
