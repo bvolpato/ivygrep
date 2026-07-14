@@ -813,7 +813,6 @@ pub(crate) fn expand_context_graph(
     let ranks = personalized_page_rank(&edges, &seeds);
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
     let expected_language = options.type_filter.as_deref().and_then(resolve_type_alias);
-    let tombstoned = overlay_tombstones(workspace);
     let mut best = BTreeMap::<PathBuf, GraphExpansion>::new();
     for edge in edges {
         let source = index_path_string(&edge.source_path);
@@ -827,8 +826,7 @@ pub(crate) fn expand_context_graph(
         }
         for (neighbor, seed, outgoing) in relationships {
             let neighbor_string = index_path_string(&neighbor);
-            if tombstoned.contains(&neighbor_string)
-                || !workspace.root.join(&neighbor).is_file()
+            if !workspace.root.join(&neighbor).is_file()
                 || options
                     .scope_filter
                     .as_ref()
@@ -965,22 +963,6 @@ fn overlay_shadowed_paths(workspace: &Workspace) -> HashSet<String> {
         paths.extend(rows.filter_map(Result::ok));
     }
     paths
-}
-
-fn overlay_tombstones(workspace: &Workspace) -> HashSet<String> {
-    if !workspace.overlay_sqlite_path().is_file() {
-        return HashSet::new();
-    }
-    let Ok(conn) = open_sqlite_readonly(&workspace.overlay_sqlite_path()) else {
-        return HashSet::new();
-    };
-    let Ok(mut statement) = conn.prepare("SELECT file_path FROM tombstones") else {
-        return HashSet::new();
-    };
-    let Ok(rows) = statement.query_map([], |row| row.get::<_, String>(0)) else {
-        return HashSet::new();
-    };
-    rows.filter_map(Result::ok).collect()
 }
 
 fn personalized_page_rank(edges: &[RankedEdge], seeds: &BTreeSet<String>) -> HashMap<String, f64> {

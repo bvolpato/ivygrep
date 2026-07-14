@@ -2913,6 +2913,16 @@ fn worktree_context_graph_prefers_overlay_dependencies() {
         "pub fn now() -> u64 { 2 }\n",
     )
     .unwrap();
+    fs::write(
+        root.path().join("src/session.rs"),
+        "use crate::policy::validate_policy;\npub fn refresh_session_orchestration() { validate_policy(); }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("src/policy.rs"),
+        "pub fn validate_policy() -> &'static str { \"base-policy\" }\n",
+    )
+    .unwrap();
     git(root.path(), &["add", "."]);
     git(root.path(), &["commit", "-m", "base graph"]);
     setup_and_index(root.path(), home.path());
@@ -2932,6 +2942,11 @@ fn worktree_context_graph_prefers_overlay_dependencies() {
     fs::write(
         wt_path.join("src/auth.rs"),
         "use crate::new_clock::now;\npub fn rotate_refresh_token() { now(); }\n",
+    )
+    .unwrap();
+    fs::write(
+        wt_path.join("src/policy.rs"),
+        "pub fn validate_policy() -> &'static str { \"worktree-policy\" }\n",
     )
     .unwrap();
     setup_and_index(&wt_path, home.path());
@@ -2962,6 +2977,25 @@ fn worktree_context_graph_prefers_overlay_dependencies() {
         dependency_paths
             .iter()
             .all(|path| path != "src/old_clock.rs"),
+        "{bundle:#?}"
+    );
+
+    let bundle = build_context_bundle(
+        &workspace,
+        "refresh session orchestration",
+        Some(&model),
+        &SearchOptions::default(),
+        4_000,
+    )
+    .unwrap();
+    let policy = bundle.items.iter().find(|item| {
+        item.file_path == std::path::Path::new("src/policy.rs")
+            && item.roles.contains(&ContextRole::Dependency)
+    });
+    assert!(
+        policy.is_some_and(|item| {
+            item.preview.contains("worktree-policy") && !item.preview.contains("base-policy")
+        }),
         "{bundle:#?}"
     );
 
