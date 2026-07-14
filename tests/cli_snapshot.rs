@@ -358,10 +358,22 @@ fn cli_context_json_respects_budget_and_captures_relationships() {
     init_git_repo(&root);
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::create_dir_all(root.join("config")).unwrap();
+    std::fs::create_dir_all(root.join("docs")).unwrap();
     std::fs::write(
         root.join("src/auth.rs"),
         "pub fn validate_token(token: &str) -> bool { !token.is_empty() }\n\
          pub fn authenticate(token: &str) -> bool { validate_token(token) }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("config/auth.toml"),
+        "# Change validate_token behavior configuration\n[authentication]\nvalidation_function = \"validate_token\"\nempty_token_behavior = \"reject\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("docs/auth.md"),
+        "# Change validate_token behavior\n\nThe `validate_token` example rejects empty tokens.\n",
     )
     .unwrap();
     std::fs::write(
@@ -379,7 +391,7 @@ fn cli_context_json_respects_budget_and_captures_relationships() {
             "--hash",
             "context",
             "--budget",
-            "1200",
+            "4000",
             "change validate_token behavior",
         ])
         .assert()
@@ -389,7 +401,7 @@ fn cli_context_json_respects_budget_and_captures_relationships() {
         .clone();
     let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
     let used = value["used_tokens"].as_u64().unwrap();
-    assert!(used <= 1200, "bundle exceeded budget: {value:#}");
+    assert!(used <= 4000, "bundle exceeded budget: {value:#}");
     assert_eq!(
         value["anchor_symbols"],
         serde_json::json!(["validate_token"])
@@ -403,11 +415,174 @@ fn cli_context_json_respects_budget_and_captures_relationships() {
         .collect::<Vec<_>>();
     assert!(roles.contains(&"primary"), "{value:#}");
     assert!(roles.contains(&"caller"), "{value:#}");
+    assert!(roles.contains(&"reference"), "{value:#}");
     assert!(roles.contains(&"test"), "{value:#}");
+    assert!(roles.contains(&"config"), "{value:#}");
+    assert!(roles.contains(&"documentation"), "{value:#}");
+    assert!(
+        value["coverage"]["files"].as_u64().unwrap() >= 2,
+        "{value:#}"
+    );
+    assert!(
+        value["coverage"]["references"].as_u64().unwrap() >= 1,
+        "{value:#}"
+    );
     assert!(
         items
             .iter()
             .any(|item| item["file_path"] == "tests/auth_test.rs"),
+        "{value:#}"
+    );
+}
+
+#[test]
+#[serial]
+fn cli_context_captures_type_constructor_relationships() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("workspace");
+    let home = tmp.path().join("ivygrep_home");
+    init_git_repo(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/service.rs"),
+        "pub struct UserService(pub u64);\n\
+         pub fn load_user_service() -> UserService {\n\
+             UserService(7)\n\
+         }\n",
+    )
+    .unwrap();
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args([
+            "--json",
+            "--hash",
+            "context",
+            "--budget",
+            "2000",
+            "change UserService construction",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(value["anchor_symbols"], serde_json::json!(["UserService"]));
+    assert!(
+        value["coverage"]["callers"].as_u64().unwrap() >= 1,
+        "{value:#}"
+    );
+    assert!(
+        value["coverage"]["references"].as_u64().unwrap() >= 1,
+        "{value:#}"
+    );
+    assert!(
+        value["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["preview"].as_str().unwrap().contains("UserService(7)")),
+        "{value:#}"
+    );
+}
+
+#[test]
+#[serial]
+fn cli_context_qualified_method_anchor_finds_definition() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("workspace");
+    let home = tmp.path().join("ivygrep_home");
+    init_git_repo(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/client.rs"),
+        "pub struct Client;\n\
+         impl Client {\n\
+             pub fn send(&self) -> bool { true }\n\
+         }\n\
+         pub struct Server;\n\
+         impl Server {\n\
+             pub fn receive(&self) -> bool { true }\n\
+         }\n\
+         pub fn deliver(client: &Client, server: &Server) -> bool {\n\
+             client.send() && server.receive()\n\
+         }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/unrelated.rs"),
+        "pub fn send() -> bool { true }\n\
+         pub fn queue_message() -> bool { send() }\n",
+    )
+    .unwrap();
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args([
+            "--json",
+            "--hash",
+            "context",
+            "--budget",
+            "2000",
+            "fix client.send and server.receive behavior",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(
+        value["anchor_symbols"],
+        serde_json::json!(["client.send", "send", "server.receive", "receive"])
+    );
+    assert!(
+        value["coverage"]["definitions"].as_u64().unwrap() >= 1,
+        "{value:#}"
+    );
+    let reasons = value["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["reasons"].as_array().unwrap())
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(reasons.contains(&"defines send"), "{value:#}");
+    assert!(reasons.contains(&"defines receive"), "{value:#}");
+    assert!(reasons.contains(&"calls client.send"), "{value:#}");
+    assert!(reasons.contains(&"calls server.receive"), "{value:#}");
+    assert!(!reasons.contains(&"calls send"), "{value:#}");
+    assert!(!reasons.contains(&"references send"), "{value:#}");
+    let definition_previews = value["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| {
+            item["roles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|role| role == "definition")
+        })
+        .map(|item| item["preview"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        definition_previews
+            .iter()
+            .any(|preview| preview.contains("fn send")),
+        "{value:#}"
+    );
+    assert!(
+        definition_previews
+            .iter()
+            .any(|preview| preview.contains("fn receive")),
         "{value:#}"
     );
 }

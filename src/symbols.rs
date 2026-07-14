@@ -117,6 +117,15 @@ pub fn search_symbols_with_options(
     let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
     reconcile_worktree_overlay(workspace, &model)?;
 
+    search_symbols_in_current_index(workspace, name, mode, options)
+}
+
+pub(crate) fn search_symbols_in_current_index(
+    workspace: &Workspace,
+    name: &str,
+    mode: SymbolSearchMode,
+    options: &SearchOptions,
+) -> Result<Vec<SearchHit>> {
     let candidate_name = canonical_symbol(name);
     let normalized = normalize_symbol(candidate_name);
     if normalized.is_empty() {
@@ -365,16 +374,34 @@ fn search_call_sites(
     mode: SymbolSearchMode,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
-    let source = match mode {
-        SymbolSearchMode::References => "reference",
-        SymbolSearchMode::Callers => "caller",
+    let (callers, references) =
+        search_call_sites_with_references(workspace, name, normalized, options)?;
+    match mode {
+        SymbolSearchMode::Callers => Ok(callers),
+        SymbolSearchMode::References => Ok(references),
         SymbolSearchMode::Definitions => unreachable!(),
-    };
-    let score = if mode == SymbolSearchMode::Callers {
-        8.0
-    } else {
-        6.0
-    };
+    }
+}
+
+pub(crate) fn search_symbol_relationships_in_current_index(
+    workspace: &Workspace,
+    name: &str,
+    options: &SearchOptions,
+) -> Result<(Vec<SearchHit>, Vec<SearchHit>)> {
+    let candidate_name = canonical_symbol(name);
+    let normalized = normalize_symbol(candidate_name);
+    if normalized.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    search_call_sites_with_references(workspace, candidate_name, &normalized, options)
+}
+
+fn search_call_sites_with_references(
+    workspace: &Workspace,
+    name: &str,
+    normalized: &str,
+    options: &SearchOptions,
+) -> Result<(Vec<SearchHit>, Vec<SearchHit>)> {
     let mut candidate_options = options.clone();
     candidate_options.limit = options.limit.map(|limit| limit.saturating_mul(4));
     let query = format!("{}(", name.trim());
@@ -383,7 +410,8 @@ fn search_call_sites(
     } else {
         crate::search::exact_literal_chunks_unbounded(workspace, &query, &candidate_options)?
     };
-    let mut hits = Vec::new();
+    let mut callers = Vec::new();
+    let mut references = Vec::new();
     let mut seen_call_sites = HashSet::new();
     let mut chunks_by_file = BTreeMap::<PathBuf, Vec<IndexedChunk>>::new();
     for chunk in candidates {
@@ -411,40 +439,43 @@ fn search_call_sites(
             if call_lines.is_empty() {
                 continue;
             }
-            if mode == SymbolSearchMode::Callers {
-                hits.push(SearchHit {
-                    file_path: chunk.file_path,
+            if options.limit.is_none_or(|limit| callers.len() < limit) {
+                callers.push(SearchHit {
+                    file_path: chunk.file_path.clone(),
                     start_line: chunk.start_line,
                     end_line: chunk.end_line,
-                    preview: chunk.text,
-                    reason: format!("exact {source} match"),
-                    score,
-                    sources: vec![source.to_string()],
+                    preview: chunk.text.clone(),
+                    reason: "exact caller match".to_string(),
+                    score: 8.0,
+                    sources: vec!["caller".to_string()],
                     neural_requested: false,
                     neural_executed: false,
                 });
-            } else {
-                for (line, preview) in call_lines {
-                    hits.push(SearchHit {
+            }
+            for (line, preview) in call_lines {
+                if options.limit.is_none_or(|limit| references.len() < limit) {
+                    references.push(SearchHit {
                         file_path: chunk.file_path.clone(),
                         start_line: line,
                         end_line: line,
                         preview,
-                        reason: format!("exact {source} match"),
-                        score,
-                        sources: vec![source.to_string()],
+                        reason: "exact reference match".to_string(),
+                        score: 6.0,
+                        sources: vec!["reference".to_string()],
                         neural_requested: false,
                         neural_executed: false,
                     });
                 }
             }
-            if options.limit.is_some_and(|limit| hits.len() >= limit) {
-                hits.truncate(options.limit.unwrap_or(hits.len()));
-                return Ok(hits);
+            if options
+                .limit
+                .is_some_and(|limit| callers.len() >= limit && references.len() >= limit)
+            {
+                return Ok((callers, references));
             }
         }
     }
-    Ok(hits)
+    Ok((callers, references))
 }
 
 fn matching_call_lines(
@@ -485,21 +516,117 @@ fn looks_like_definition(line: &str, name_offset: usize) -> bool {
     }
     let has_definition_keyword = prefix
         .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-        .any(|part| matches!(part, "fn" | "def" | "func" | "function"));
+        .any(|part| {
+            matches!(
+                part,
+                "class"
+                    | "def"
+                    | "enum"
+                    | "fn"
+                    | "func"
+                    | "function"
+                    | "interface"
+                    | "record"
+                    | "struct"
+                    | "trait"
+            )
+        });
     if has_definition_keyword {
         return true;
     }
 
     let suffix = &line[name_offset..];
-    suffix
-        .find(')')
-        .map(|close| suffix[close + 1..].trim_start())
-        .is_some_and(|after| {
-            after.starts_with('{')
-                || after.starts_with("->")
-                || after.starts_with(':')
-                || after.starts_with("throws ")
+    let after_parameters = after_parameter_list(suffix);
+    if after_parameters.is_some_and(|after| {
+        after.starts_with('{')
+            || after.starts_with("->")
+            || after.starts_with(':')
+            || after.starts_with("throws ")
+    }) {
+        return true;
+    }
+
+    after_parameters.is_some_and(looks_like_prototype_suffix) && looks_like_prototype_prefix(prefix)
+}
+
+fn looks_like_prototype_suffix(suffix: &str) -> bool {
+    let Some(mut suffix) = suffix.trim_end().strip_suffix(';').map(str::trim) else {
+        return false;
+    };
+    while !suffix.is_empty() {
+        if let Some(default) = suffix.strip_prefix('=').map(str::trim) {
+            return matches!(default, "0" | "default" | "delete");
+        }
+        if let Some(rest) = suffix
+            .strip_prefix("&&")
+            .or_else(|| suffix.strip_prefix('&'))
+        {
+            suffix = rest.trim_start();
+            continue;
+        }
+        let qualifier_end = suffix
+            .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .unwrap_or(suffix.len());
+        let qualifier = &suffix[..qualifier_end];
+        if !matches!(
+            qualifier,
+            "const" | "final" | "noexcept" | "override" | "volatile"
+        ) {
+            return false;
+        }
+        suffix = suffix[qualifier_end..].trim_start();
+        if qualifier == "noexcept" && suffix.starts_with('(') {
+            let Some(after) = after_parameter_list(suffix) else {
+                return false;
+            };
+            suffix = after;
+        }
+    }
+    true
+}
+
+fn after_parameter_list(suffix: &str) -> Option<&str> {
+    let mut depth = 0usize;
+    for (offset, character) in suffix.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' if depth == 1 => return Some(suffix[offset + 1..].trim_start()),
+            ')' if depth > 1 => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+fn looks_like_prototype_prefix(prefix: &str) -> bool {
+    if prefix.is_empty() || prefix.ends_with('.') || prefix.ends_with("->") {
+        return false;
+    }
+    if prefix.ends_with("::") && !prefix.contains(char::is_whitespace) {
+        return false;
+    }
+
+    let first_word = prefix
+        .trim_start_matches(|character: char| {
+            !character.is_ascii_alphanumeric() && character != '_'
         })
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .next()
+        .unwrap_or_default();
+    !matches!(
+        first_word,
+        "await"
+            | "co_await"
+            | "co_return"
+            | "co_yield"
+            | "defer"
+            | "delete"
+            | "new"
+            | "return"
+            | "throw"
+            | "try"
+            | "yield"
+    )
 }
 
 fn type_matches(language: &str, type_filter: Option<&str>) -> bool {
@@ -1436,6 +1563,60 @@ mod tests {
         assert_eq!(callers[0].start_line, 2);
         assert!(callers[0].preview.contains("fn run()"));
         assert!(callers[0].preview.contains("parse();"));
+    }
+
+    #[test]
+    fn type_declarations_are_not_call_sites() {
+        for (source, symbol) in [
+            ("pub struct UserService(pub u64);", "userservice"),
+            ("data class UserService(val id: Long)", "userservice"),
+            ("record UserService(String id) {}", "userservice"),
+        ] {
+            assert!(
+                matching_call_lines(source, symbol, 1, 1).is_empty(),
+                "{source}"
+            );
+        }
+        assert_eq!(
+            matching_call_lines("let service = UserService(7);", "userservice", 1, 1),
+            [(1, "let service = UserService(7);".to_string())]
+        );
+    }
+
+    #[test]
+    fn function_prototypes_are_not_call_sites() {
+        for (source, symbol) in [
+            ("int parse();", "parse"),
+            ("void send();", "send"),
+            ("public abstract void send();", "send"),
+            ("int parser::parse();", "parse"),
+            ("int parse(void (*callback)());", "parse"),
+            ("int parse() const;", "parse"),
+            ("void send() noexcept;", "send"),
+            ("virtual bool send() = 0;", "send"),
+            ("Widget make() const noexcept final;", "make"),
+            ("Result parse() && override;", "parse"),
+            ("void send() noexcept(noexcept(flush()));", "send"),
+        ] {
+            assert!(
+                matching_call_lines(source, symbol, 1, 1).is_empty(),
+                "{source}"
+            );
+        }
+        for (source, symbol) in [
+            ("parse();", "parse"),
+            ("client.send();", "send"),
+            ("parser::parse();", "parse"),
+            ("return parse();", "parse"),
+            ("await parse();", "parse"),
+            ("ready && parse() && accepted;", "parse"),
+        ] {
+            assert_eq!(
+                matching_call_lines(source, symbol, 1, 1),
+                [(1, source.to_string())],
+                "{source}"
+            );
+        }
     }
 
     #[test]

@@ -4,6 +4,19 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.1.19] - 2026-07-13
+
+### Improved
+- **`ig context` expands and explains more task evidence.** Packs now add exact references, separate configuration and documentation roles, merge retrieval signals, reject acronym and filename false anchors, prefer production relationships over test-helper names, and report role coverage.
+- **Context budgets cover rendered Markdown.** `used_tokens` now estimates complete pack output, including headings, reasons, signals, and code fences, with final trimming when needed.
+
+### Documentation
+- **Context packs are a first-class product workflow.** README, agent guide, CLI help, metadata, comparison table, and dedicated website section explain one-command task handoffs and useful budget sizes.
+
+### Fixed
+- **Cross-platform release checks tolerate transient model-host failures.** Xet CAS signed-URL failures retry without treating generic authorization errors as transient, and daemon-equivalence output is decoded as UTF-8 on Windows.
+- **Neural acceptance uses Hugging Face's native Xet client.** CI and release checks cache pinned, checksum-verified model assets before testing online and offline loading.
+
 ## [1.1.18] - 2026-07-12
 
 ### Added

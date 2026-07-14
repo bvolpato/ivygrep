@@ -387,16 +387,39 @@ jobs:
             --skip-build \
             --binary "$BINARY"
 
+      - name: Install uv for neural model caching
+        if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.archive_name == 'macos-aarch64-metal' || matrix.target == 'x86_64-pc-windows-msvc'
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: false
+
+      - name: Cache pinned neural model through Xet
+        if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.archive_name == 'macos-aarch64-metal' || matrix.target == 'x86_64-pc-windows-msvc'
+        shell: bash
+        run: |
+          PROFILE=static
+          if [[ "${{ matrix.archive_name }}" == "macos-aarch64-metal" ]]; then
+            PROFILE=general
+          fi
+          CACHE="$RUNNER_TEMP/ivygrep-release-hf-cache"
+          uv run scripts/cache_neural_model.py --profile "$PROFILE" --cache "$CACHE"
+          echo "IVYGREP_RELEASE_HF_CACHE=$CACHE" >> "$GITHUB_ENV"
+
       - name: Validate macOS Metal backend
         if: matrix.archive_name == 'macos-aarch64-metal'
         shell: bash
         env:
           BINARY: ${{ steps.artifact.outputs.binary }}
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          ALL_PROXY: http://127.0.0.1:9
+          NO_PROXY: ''
         run: |
-          ./scripts/e2e_neural_backend.sh \
-            --binary "$BINARY" \
-            --model-profile general \
-            --expect-backend "Candle Metal"
+          HF_HOME="$IVYGREP_RELEASE_HF_CACHE" \
+            ./scripts/e2e_neural_backend.sh \
+              --binary "$BINARY" \
+              --model-profile general \
+              --expect-backend "Candle Metal"
 
       - name: Run exact Linux aarch64 archive under QEMU
         if: matrix.target == 'aarch64-unknown-linux-musl'
@@ -446,8 +469,12 @@ jobs:
         env:
           BINARY: ${{ steps.artifact.outputs.binary }}
         run: |
-          CACHE="$RUNNER_TEMP/ivygrep-release-hf-cache"
-          ./scripts/e2e_cached_model.sh --binary "$BINARY" --cache "$CACHE"
+          CACHE="$IVYGREP_RELEASE_HF_CACHE"
+          HTTP_PROXY=http://127.0.0.1:9 \
+          HTTPS_PROXY=http://127.0.0.1:9 \
+          ALL_PROXY=http://127.0.0.1:9 \
+          NO_PROXY='' \
+            ./scripts/e2e_cached_model.sh --binary "$BINARY" --cache "$CACHE"
           BINARY_REL="${BINARY#"$PWD/"}"
           docker run --rm \
             --network none \
@@ -463,11 +490,15 @@ jobs:
         env:
           BINARY: ${{ steps.artifact.outputs.binary }}
         run: |
-          CACHE="$RUNNER_TEMP/ivygrep-release-hf-cache"
-          ./scripts/e2e_cached_model.sh \
-            --binary "$BINARY" \
-            --cache "$CACHE" \
-            --expect-backend "StaticEmbedding token mean via Rust"
+          CACHE="$IVYGREP_RELEASE_HF_CACHE"
+          HTTP_PROXY=http://127.0.0.1:9 \
+          HTTPS_PROXY=http://127.0.0.1:9 \
+          ALL_PROXY=http://127.0.0.1:9 \
+          NO_PROXY='' \
+            ./scripts/e2e_cached_model.sh \
+              --binary "$BINARY" \
+              --cache "$CACHE" \
+              --expect-backend "StaticEmbedding token mean via Rust"
           HTTP_PROXY=http://127.0.0.1:9 \
           HTTPS_PROXY=http://127.0.0.1:9 \
           ALL_PROXY=http://127.0.0.1:9 \

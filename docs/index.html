@@ -4,12 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ivygrep - Semantic code search that never uploads your code</title>
-    <meta name="description" content="Local semantic code search with BM25, vector retrieval, zero telemetry, 45 language/file types, a local web UI, and a built-in MCP server.">
+    <meta name="description" content="Local semantic code search and task-aware context packs with BM25, vectors, relationship expansion, strict token budgets, zero telemetry, a web UI, and MCP.">
     <meta name="theme-color" content="#06070a">
 
     <!-- Open Graph -->
     <meta property="og:title" content="ivygrep - Semantic code search that never uploads your code">
-    <meta property="og:description" content="Ask questions in English. Get answers from local code search with no telemetry.">
+    <meta property="og:description" content="Search local code by intent, then build one relationship-aware context pack for your task.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://bvolpato.github.io/ivygrep">
     <meta property="og:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner.png">
@@ -17,7 +17,7 @@
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="ivygrep - Semantic code search that never uploads your code">
-    <meta name="twitter:description" content="Ask questions in English. Get answers from local code search with no telemetry.">
+    <meta name="twitter:description" content="Search local code by intent, then build one relationship-aware context pack for your task.">
     <meta name="twitter:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner.png">
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -48,6 +48,7 @@
             </a>
             <div class="nav-links">
                 <a href="#features">Features</a>
+                <a href="#context-packs">Context Packs</a>
                 <a href="#how-it-works">Architecture</a>
                 <a href="#performance">Performance</a>
                 <a href="#languages">Languages</a>
@@ -69,13 +70,13 @@
         <div class="container hero-content">
             <div class="hero-badge slide-up">
                 <span class="badge-dot"></span>
-                v1.1.18
+                v1.1.19
             </div>
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" onerror="this.src='assets/logo.png'"/>
             </div>
-            <h1 class="slide-up delay-1">Semantic code search that <br/><span class="highlight-gradient">never uploads your code.</span></h1>
-            <p class="subtitle slide-up delay-2">Ask questions in English. Get answers in code.<br>Local inference. Fast indexed search. Zero telemetry.</p>
+            <h1 class="slide-up delay-1">Search code. Build task context.<br/><span class="highlight-gradient">Never upload your code.</span></h1>
+            <p class="subtitle slide-up delay-2">Find code by intent. Expand definitions, callers, references, tests, config, and docs into one token-budgeted pack.</p>
 
             <div class="cta-row slide-up delay-3">
                 <a href="#install" class="btn btn-primary">
@@ -90,6 +91,7 @@
                     <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 1v6m0 6v6M1 12h6m6 0h6"/></svg>
                     MCP Setup
                 </a>
+                <a href="#context-packs" class="btn btn-ghost">Context Packs</a>
             </div>
         </div>
     </header>
@@ -146,6 +148,46 @@
         </div>
     </section>
 
+    <!-- Task context packs -->
+    <section id="context-packs" class="container relative z-10 section-spacing">
+        <div class="section-header">
+            <span class="section-tag">Task context</span>
+            <h2 class="section-title text-center">One task in. Implementation-ready evidence out.</h2>
+            <p class="text-center subtitle-small">One local command retrieves, connects, deduplicates, and budgets evidence for coding agents.</p>
+        </div>
+
+        <div class="glass-panel fade-in-scroll mt-4">
+            <div class="grid grid-2 align-center context-pack-grid">
+                <div>
+                    <h3>More useful than a list of search hits</h3>
+                    <p><code>ig context</code> starts from task intent, finds anchor symbols, expands definitions, callers, and exact references, then adds matching tests, configuration, and documentation.</p>
+                    <div class="context-role-list" aria-label="Context pack evidence roles">
+                        <span>Primary</span><span>Definitions</span><span>Callers</span><span>References</span>
+                        <span>Tests</span><span>Config</span><span>Docs</span>
+                    </div>
+                    <p>Markdown output includes source lines, retrieval signals, role coverage, and complete-pack token use. JSON output keeps the same evidence structured.</p>
+                </div>
+                <div class="install-code relative">
+                    <pre class="code-block"><span class="prompt">$</span> ig context "fix refresh-token races" --budget 8000
+
+# ivygrep context
+Budget: 3842 / 8000 estimated tokens
+Coverage: 7 files | primary | definitions | callers | references | tests
+
+1. src/auth/refresh.rs:42-88 [primary, definition]
+2. src/http/session.rs:117-145 [caller, reference]
+3. tests/refresh_token.rs:20-61 [test]</pre>
+                </div>
+            </div>
+        </div>
+
+        <div class="grid grid-3 mt-4">
+            <div class="glass-card fade-in-scroll"><h3>2K: orient</h3><p>Small pack for locating ownership and first implementation paths.</p></div>
+            <div class="glass-card fade-in-scroll"><h3>8K: implement</h3><p>Default pack for code, relationships, tests, config, and docs.</p></div>
+            <div class="glass-card fade-in-scroll"><h3>16K+: cross-cutting</h3><p>Broader pack for changes spanning subsystems or languages.</p></div>
+        </div>
+    </section>
+
     <!-- Features -->
     <section id="features" class="container relative z-10 section-spacing">
         <div class="section-header">
@@ -155,6 +197,11 @@
         </div>
 
         <div class="grid grid-3 mt-4">
+            <div class="glass-card fade-in-scroll">
+                <div class="card-icon-wrap"><span class="card-icon-emoji">📦</span></div>
+                <h3>Task-ready context packs</h3>
+                <p>Turn one task into bounded evidence across implementations, relationships, tests, config, and docs with <code>ig context</code>.</p>
+            </div>
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">⚡</span></div>
                 <h3>Fast indexed search</h3>
@@ -285,6 +332,13 @@
                     </tr>
                     <tr>
                         <td>MCP server for AI agents</td>
+                        <td>❌</td>
+                        <td>❌</td>
+                        <td>❌</td>
+                        <td><span class="highlight">✅</span></td>
+                    </tr>
+                    <tr>
+                        <td>Task-aware, token-budgeted evidence packs</td>
                         <td>❌</td>
                         <td>❌</td>
                         <td>❌</td>
@@ -459,7 +513,7 @@
             <div class="section-header">
                 <span class="section-tag">Model Context Protocol</span>
                 <h2 class="section-title text-center">MCP for coding agents</h2>
-                <p class="text-center subtitle-small">Automatic setup for common clients. Manual configuration remains available.</p>
+                <p class="text-center subtitle-small">Use MCP for iterative search. Use <code>ig context</code> for one bounded task handoff. Automatic and manual setup remain available.</p>
             </div>
 
             <div class="glass-panel fade-in-scroll mt-4 setup-panel">
@@ -680,7 +734,7 @@
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md" class="footer-link">Changelog</a>
                 </div>
                 <div class="footer-copy">
-                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v1.1.18</p>
+                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v1.1.19</p>
                 </div>
             </div>
         </div>

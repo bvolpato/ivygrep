@@ -22,10 +22,27 @@ class ReleaseWorkflowTest(unittest.TestCase):
 
     def test_release_waits_for_archive_acceptance(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        builds = workflow.split("  build:\n", maxsplit=1)[1].split(
+            "  artifact-acceptance:\n", maxsplit=1
+        )[0]
+        acceptance = workflow.split("  artifact-acceptance:\n", maxsplit=1)[1].split(
+            "  release:\n", maxsplit=1
+        )[0]
+
         self.assertIn("artifact-acceptance:", workflow)
         self.assertIn("needs: artifact-acceptance", workflow)
         self.assertIn("scripts/verify_release_artifact.py", workflow)
         self.assertIn("scripts/e2e_x86_baseline.sh", workflow)
+        self.assertNotIn("scripts/cache_neural_model.py", builds)
+        self.assertIn("scripts/cache_neural_model.py", acceptance)
+        self.assertLess(
+            acceptance.index("Install uv for neural model caching"),
+            acceptance.index("Cache pinned neural model through Xet"),
+        )
+        uv_setup = acceptance.split(
+            "- name: Install uv for neural model caching", maxsplit=1
+        )[1].split("- name: Cache pinned neural model through Xet", maxsplit=1)[0]
+        self.assertIn("enable-cache: false", uv_setup)
 
     def test_native_daemon_acceptance_uses_platform_temp_default(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
@@ -38,6 +55,28 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("scripts/check_daemon_equivalence.py", native_acceptance)
         self.assertNotIn("--bench-home", native_acceptance)
         self.assertNotIn("${RUNNER_TEMP:-$TEMP}", workflow)
+
+    def test_primed_model_acceptance_blocks_network_on_first_load(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        metal = workflow.split("- name: Validate macOS Metal backend", maxsplit=1)[
+            1
+        ].split("- name: Run exact Linux aarch64 archive under QEMU", maxsplit=1)[0]
+        linux = workflow.split(
+            "- name: Prime and import cached neural model without network", maxsplit=1
+        )[1].split(
+            "- name: Validate Windows neural backend and cached offline reuse",
+            maxsplit=1,
+        )[0]
+        windows = workflow.split(
+            "- name: Validate Windows neural backend and cached offline reuse",
+            maxsplit=1,
+        )[1].split("  release:", maxsplit=1)[0]
+
+        self.assertIn("HTTP_PROXY: http://127.0.0.1:9", metal)
+        self.assertIn('HF_HOME="$IVYGREP_RELEASE_HF_CACHE"', metal)
+        self.assertNotIn("HF_HOME: ${{ env.IVYGREP_RELEASE_HF_CACHE }}", metal)
+        self.assertIn("HTTP_PROXY=http://127.0.0.1:9", linux)
+        self.assertEqual(windows.count("HTTP_PROXY=http://127.0.0.1:9"), 2)
 
     def test_linux_arm_acceptance_has_git_without_network_access(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
@@ -120,6 +159,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("VCRUNTIME", workflow)
         self.assertIn("MSVCP", workflow)
         self.assertIn("scripts/e2e_cached_model.sh", windows_acceptance)
+        self.assertIn("IVYGREP_RELEASE_HF_CACHE", windows_acceptance)
         self.assertIn("StaticEmbedding token mean via Rust", windows_acceptance)
         self.assertIn("HTTP_PROXY=http://127.0.0.1:9", windows_acceptance)
 

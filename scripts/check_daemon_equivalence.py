@@ -29,7 +29,16 @@ class Case:
 
 
 def run(cmd: list[str], *, cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, cwd=cwd, env=env, text=True, capture_output=True, check=True)
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        env=env,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        capture_output=True,
+        check=True,
+    )
 
 
 def ensure_bench_home_under_tmp(path: Path) -> Path:

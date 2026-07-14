@@ -252,10 +252,19 @@ jobs:
             --binary "$IG_BIN" \
             --bench-home "$BENCH_HOME"
 
+      - name: Install uv for neural model caching
+        if: matrix.validate_backend != ''
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+
       - name: Validate local neural execution
         if: matrix.validate_backend != ''
         shell: bash
         run: |
+          HF_HOME="$RUNNER_TEMP/ivygrep-ci-hf-cache"
+          export HF_HOME
+          uv run scripts/cache_neural_model.py \
+            --profile "$MODEL_PROFILE" \
+            --cache "$HF_HOME"
           EXE_SUFFIX=""
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             EXE_SUFFIX=".exe"
@@ -267,11 +276,16 @@ jobs:
           if [[ -n "$ALLOWED_BACKEND" ]]; then
             args+=(--allow-backend "$ALLOWED_BACKEND")
           fi
-          ./scripts/e2e_neural_backend.sh "${args[@]}"
+          HTTP_PROXY=http://127.0.0.1:9 \
+          HTTPS_PROXY=http://127.0.0.1:9 \
+          ALL_PROXY=http://127.0.0.1:9 \
+          NO_PROXY='' \
+            ./scripts/e2e_neural_backend.sh "${args[@]}"
         env:
           ALLOWED_BACKEND: ${{ matrix.allow_backend }}
           EXPECTED_BACKEND: ${{ matrix.validate_backend }}
           IVYGREP_MODEL_PROFILE: ${{ matrix.model_profile }}
+          MODEL_PROFILE: ${{ matrix.model_profile }}
 
   ci-gate:
     name: CI gate

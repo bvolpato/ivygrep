@@ -103,7 +103,7 @@ while ! "$ig_bin" --enhance-internal "$project" >"$enhance_log" 2>&1; do
   cat "$enhance_log" >&2
   if [ "$attempt" -ge "$download_attempts" ] ||
     ! grep -Eiq \
-      'status code (429|500|502|503|504)([^0-9]|$)|connection (reset|refused|timed out)|operation timed out|temporary failure|dns error|failed to lookup address|network is unreachable' \
+      'status code (429|500|502|503|504)([^0-9]|$)|cas-bridge\.xethub\.hf\.co.*status code 403([^0-9]|$)|connection (reset|refused|timed out)|operation timed out|temporary failure|dns error|failed to lookup address|network is unreachable' \
       "$enhance_log"
   then
     fail "neural enhancement failed on attempt $attempt"

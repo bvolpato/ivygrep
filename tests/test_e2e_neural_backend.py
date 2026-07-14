@@ -113,6 +113,60 @@ class NeuralBackendE2ETest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(attempts, 1)
 
+    def test_retries_xet_cas_signed_url_forbidden(self) -> None:
+        result, attempts = self.run_helper(
+            """
+            case "$1" in
+              --add)
+                exit 0
+                ;;
+              --enhance-internal)
+                count=0
+                [ ! -f "$state" ] || count=$(cat "$state")
+                count=$((count + 1))
+                echo "$count" > "$state"
+                if [ "$count" -lt 2 ]; then
+                  echo "request error: https://cas-bridge.xethub.hf.co/xet/model: status code 403" >&2
+                  exit 1
+                fi
+                exit 0
+                ;;
+              --status)
+                echo "StaticEmbedding token mean via Rust"
+                exit 0
+                ;;
+            esac
+            exit 2
+            """,
+            attempts=2,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(attempts, 2)
+
+    def test_does_not_retry_generic_forbidden(self) -> None:
+        result, attempts = self.run_helper(
+            """
+            case "$1" in
+              --add)
+                exit 0
+                ;;
+              --enhance-internal)
+                count=0
+                [ ! -f "$state" ] || count=$(cat "$state")
+                echo $((count + 1)) > "$state"
+                echo "request error: https://example.com/private: status code 403" >&2
+                exit 1
+                ;;
+            esac
+            exit 2
+            """,
+            attempts=5,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(attempts, 1)
+
     def test_does_not_retry_permanent_model_failures(self) -> None:
         result, attempts = self.run_helper(
             """
