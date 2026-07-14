@@ -545,7 +545,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     .unwrap();
     std::fs::write(
         root.join("frontend/main.ts"),
-        "import { runWidgetHelper } from \"./helper.js\";\nimport schema from \"./schema.json\" assert { type: \"json\" };\n\nexport function start_nodenext_widget() { return runWidgetHelper(); }\nexport function start_schema_widget() { return schema.release; }\n",
+        "import { runWidgetHelper } from \"./helper.js\";\nimport schema from './schema.json' with { type: \"json\" };\n\nexport function start_nodenext_widget() { return runWidgetHelper(); }\nexport function start_schema_widget() { return schema.release; }\n",
     )
     .unwrap();
     std::fs::write(

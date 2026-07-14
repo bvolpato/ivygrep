@@ -537,16 +537,12 @@ fn expand_grouped_spec(value: &str) -> Vec<String> {
 }
 
 fn first_quoted_value(value: &str) -> Option<String> {
-    for quote in ['"', '\''] {
-        let Some(start) = value.find(quote) else {
-            continue;
-        };
-        let rest = &value[start + quote.len_utf8()..];
-        if let Some(end) = rest.find(quote) {
-            return Some(rest[..end].to_string());
-        }
-    }
-    None
+    let (start, quote) = value
+        .char_indices()
+        .find(|(_, character)| matches!(character, '"' | '\''))?;
+    let rest = &value[start + quote.len_utf8()..];
+    let end = rest.find(quote)?;
+    Some(rest[..end].to_string())
 }
 
 fn value_after_marker(value: &str, marker: &str) -> Option<String> {
@@ -1641,7 +1637,7 @@ mod tests {
             root.path(),
             None,
             Path::new("src/main.ts"),
-            "import schema from './schema.json' assert { type: 'json' };\n",
+            "import schema from './schema.json' with { type: \"json\" };\n",
         );
         assert!(edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Dependency
