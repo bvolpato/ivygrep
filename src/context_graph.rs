@@ -810,7 +810,8 @@ fn likely_test_edges(
     let parent = rel_path.parent().unwrap_or_else(|| Path::new(""));
     let is_test = path_looks_like_test(rel_path);
     let production_stem = stem
-        .strip_suffix("_test")
+        .strip_prefix("test_")
+        .or_else(|| stem.strip_suffix("_test"))
         .or_else(|| stem.strip_suffix("_tests"))
         .or_else(|| stem.strip_suffix(".test"))
         .or_else(|| stem.strip_suffix(".spec"))
@@ -1343,6 +1344,19 @@ mod tests {
             edge.kind == FileEdgeKind::Test
                 && edge.source_path == Path::new("src/auth.rs")
                 && edge.target_path == Path::new("tests/auth_test.rs")
+        }));
+
+        fs::write(root.path().join("src/session.py"), "def login(): pass\n").unwrap();
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("tests/test_session.py"),
+            "def test_login(): pass\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Test
+                && edge.source_path == Path::new("src/session.py")
+                && edge.target_path == Path::new("tests/test_session.py")
         }));
     }
 
