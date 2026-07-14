@@ -102,8 +102,10 @@ impl GraphExpansion {
             (FileEdgeKind::Dependency, false) => format!("{file} depends on {seed}"),
             (FileEdgeKind::Test, true) => format!("{file} tests {seed}"),
             (FileEdgeKind::Test, false) => format!("{seed} tests {file}"),
-            (FileEdgeKind::Config, _) => format!("configures {seed}"),
-            (FileEdgeKind::Documentation, _) => format!("documents {seed}"),
+            (FileEdgeKind::Config, true) => format!("{file} configures {seed}"),
+            (FileEdgeKind::Config, false) => format!("{seed} configures {file}"),
+            (FileEdgeKind::Documentation, true) => format!("{seed} documents {file}"),
+            (FileEdgeKind::Documentation, false) => format!("{file} documents {seed}"),
             (FileEdgeKind::CoChange, _) => format!(
                 "changed with {seed} in {} recent commit{}",
                 self.cochange_count,
@@ -1430,5 +1432,34 @@ mod tests {
         ];
         let ranks = personalized_page_rank(&edges, &seeds);
         assert!(ranks["src/dependency.rs"] > ranks["docs/note.md"]);
+    }
+
+    #[test]
+    fn graph_reasons_follow_edge_direction() {
+        let expansion = |kind, outgoing| GraphExpansion {
+            file_path: PathBuf::from("neighbor"),
+            seed_path: PathBuf::from("seed"),
+            kind,
+            outgoing,
+            score: 1.0,
+            cochange_count: 0,
+        };
+
+        assert_eq!(
+            expansion(FileEdgeKind::Config, true).reason(),
+            "neighbor configures seed"
+        );
+        assert_eq!(
+            expansion(FileEdgeKind::Config, false).reason(),
+            "seed configures neighbor"
+        );
+        assert_eq!(
+            expansion(FileEdgeKind::Documentation, true).reason(),
+            "seed documents neighbor"
+        );
+        assert_eq!(
+            expansion(FileEdgeKind::Documentation, false).reason(),
+            "neighbor documents seed"
+        );
     }
 }

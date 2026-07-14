@@ -300,8 +300,10 @@ fn graph_context_role(kind: FileEdgeKind, outgoing: bool) -> ContextRole {
         (FileEdgeKind::Dependency, false) => ContextRole::Dependent,
         (FileEdgeKind::Test, true) => ContextRole::Test,
         (FileEdgeKind::Test, false) => ContextRole::Dependency,
-        (FileEdgeKind::Config, _) => ContextRole::Config,
-        (FileEdgeKind::Documentation, _) => ContextRole::Documentation,
+        (FileEdgeKind::Config, true) => ContextRole::Config,
+        (FileEdgeKind::Config, false) => ContextRole::Related,
+        (FileEdgeKind::Documentation, false) => ContextRole::Documentation,
+        (FileEdgeKind::Documentation, true) => ContextRole::Related,
         (FileEdgeKind::CoChange, _) => ContextRole::Related,
     }
 }
@@ -1403,7 +1405,7 @@ mod tests {
     }
 
     #[test]
-    fn test_edges_label_only_test_files_as_tests() {
+    fn graph_roles_follow_edge_direction() {
         assert_eq!(
             graph_context_role(FileEdgeKind::Test, true),
             ContextRole::Test
@@ -1411,6 +1413,22 @@ mod tests {
         assert_eq!(
             graph_context_role(FileEdgeKind::Test, false),
             ContextRole::Dependency
+        );
+        assert_eq!(
+            graph_context_role(FileEdgeKind::Config, true),
+            ContextRole::Config
+        );
+        assert_eq!(
+            graph_context_role(FileEdgeKind::Config, false),
+            ContextRole::Related
+        );
+        assert_eq!(
+            graph_context_role(FileEdgeKind::Documentation, false),
+            ContextRole::Documentation
+        );
+        assert_eq!(
+            graph_context_role(FileEdgeKind::Documentation, true),
+            ContextRole::Related
         );
     }
 
