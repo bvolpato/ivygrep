@@ -437,6 +437,89 @@ fn cli_context_json_respects_budget_and_captures_relationships() {
 
 #[test]
 #[serial]
+fn cli_context_graph_tracks_dependencies_across_incremental_reindex() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("workspace");
+    let home = tmp.path().join("ivygrep_home");
+    init_git_repo(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"context-graph\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/auth.rs"),
+        "use crate::old_clock::now;\npub fn rotate_refresh_token() { now(); }\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("src/old_clock.rs"), "pub fn now() -> u64 { 1 }\n").unwrap();
+    std::fs::write(root.join("src/new_clock.rs"), "pub fn now() -> u64 { 2 }\n").unwrap();
+
+    let run_context = || {
+        let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+            .current_dir(&root)
+            .env("IVYGREP_HOME", &home)
+            .env("IVYGREP_NO_AUTOSPAWN", "1")
+            .args([
+                "--json",
+                "--hash",
+                "context",
+                "--budget",
+                "4000",
+                "rotate refresh token expiration",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+    };
+    let dependency_paths = |value: &serde_json::Value| {
+        value["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| {
+                item["roles"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("dependency"))
+            })
+            .map(|item| item["file_path"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+
+    let before = run_context();
+    assert!(
+        dependency_paths(&before).contains(&"src/old_clock.rs".to_string()),
+        "{before:#}"
+    );
+
+    std::fs::write(
+        root.join("src/auth.rs"),
+        "use crate::new_clock::now;\npub fn rotate_refresh_token() { now(); }\n",
+    )
+    .unwrap();
+    Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--add", "--hash", "--no-watch", "."])
+        .assert()
+        .success();
+    let after = run_context();
+    let paths = dependency_paths(&after);
+    assert!(paths.contains(&"src/new_clock.rs".to_string()), "{after:#}");
+    assert!(
+        !paths.contains(&"src/old_clock.rs".to_string()),
+        "{after:#}"
+    );
+}
+
+#[test]
+#[serial]
 fn cli_context_captures_type_constructor_relationships() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("workspace");

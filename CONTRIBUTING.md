@@ -1,106 +1,164 @@
 # Contributing to ivygrep
 
-Thanks for your interest in contributing to ivygrep! Here's how to get started.
+Small fixes, tests, docs, platform validation, and focused features are welcome.
 
-## Quick Start
+## Find work
+
+- Start with [`good first issue`](https://github.com/bvolpato/ivygrep/labels/good%20first%20issue) or [`help wanted`](https://github.com/bvolpato/ivygrep/labels/help%20wanted).
+- Use [Discussions](https://github.com/bvolpato/ivygrep/discussions) for questions and early ideas.
+- Use an [issue form](https://github.com/bvolpato/ivygrep/issues/new/choose) for reproducible bugs or concrete features.
+- Comment before starting an existing issue so work does not overlap.
+
+Open an issue or discussion before large architecture, dependency, storage-format,
+ranking, or CLI compatibility changes.
+
+## Development setup
+
+Required:
+
+- Git
+- stable Rust through [rustup](https://rustup.rs/)
+- Python 3 for repository harnesses
+- ShellCheck for full script validation
+- Node.js and pnpm 10 only when changing `web/`
+
+Repository toolchain configuration installs `rustfmt` and Clippy automatically.
 
 ```bash
-# Clone the repo
 git clone https://github.com/bvolpato/ivygrep.git
 cd ivygrep
 
-# Build (hash-only mode, no model download)
-cargo build --no-default-features
+# Fast, offline-capable hash build
+cargo build --locked --no-default-features
 
-# Build with neural search (requires ~134MB model download on first run)
-cargo build
-
-# Run tests
-cargo test
-
-# Run benchmarks
-cargo bench
+# Focused local validation
+./test.sh --quick
 ```
 
-## Development Setup
+Default build includes local neural search and may download pinned model assets
+on first use. Hash-only builds need no model download.
 
-- **Rust toolchain:** Install via [rustup](https://rustup.rs/). The project uses Rust 2024 edition.
-- **Tree-sitter grammars:** Bundled as Cargo dependencies — no external setup needed.
-- **Environment variables:**
-  - `IVYGREP_HOME` — Override the default index/config directory (useful for testing).
-  - `IVYGREP_NO_AUTOSPAWN=1` — Prevent daemon auto-spawning in CI/test environments.
+Useful environment variables:
 
-## Project Structure
+- `IVYGREP_HOME`: isolate indexes and configuration during testing.
+- `IVYGREP_NO_AUTOSPAWN=1`: prevent daemon auto-start.
+- `CARGO_BUILD_JOBS`: cap local build concurrency.
+- `RUST_TEST_THREADS`: cap test concurrency.
 
+## Project map
+
+Read [ARCHITECTURE.md](ARCHITECTURE.md) before changing storage, indexing,
+search, worktrees, daemon IPC, context packs, or MCP contracts.
+
+| Area | Primary files | Strong validation |
+|---|---|---|
+| Indexing and storage | `src/indexer.rs`, `src/workspace.rs`, `src/merkle.rs` | incremental CRUD, worktree, benchmark tests |
+| Search and relevance | `src/search.rs`, `src/reranker.rs`, `src/embedding.rs` | relevance fixture and public benchmark harnesses |
+| Context graph | `src/context.rs`, `src/context_graph.rs` | CLI, incremental, worktree, MCP tests |
+| CLI and daemon | `src/cli.rs`, `src/daemon.rs`, `src/protocol.rs` | CLI snapshots, IPC, recovery tests |
+| MCP and agents | `src/mcp.rs`, `src/agent.rs` | MCP unit/E2E and agent setup tests |
+| Web UI | `src/web.rs`, `web/` | Vitest, TypeScript, web server tests |
+| Documentation | `README.md`, `docs/`, agent and architecture guides | documentation contract tests and local browser check |
+
+## Change workflow
+
+1. Fork repository and branch from current `main`.
+2. Add smallest useful test before or with behavior change.
+3. Match nearby error handling, naming, and abstraction patterns.
+4. Run focused tests while iterating.
+5. Run full required validation before opening pull request.
+6. Update user-facing docs and changelog for observable behavior changes.
+7. Open focused pull request using repository template.
+
+Keep commits reviewable. Use conventional commit subjects such as
+`fix(search): preserve filtered candidate recall`.
+
+## Validation
+
+Before every pull request:
+
+```bash
+./test.sh --quick
 ```
-src/
-├── main.rs          # Binary entry point
-├── cli.rs           # CLI argument parsing & dispatch
-├── daemon.rs        # Background daemon (file watching, IPC)
-├── indexer.rs       # Core indexing pipeline
-├── search.rs        # Hybrid BM25 + vector search engine
-├── chunking.rs      # Tree-sitter AST + heuristic code chunking
-├── merkle.rs        # Merkle tree for incremental re-indexing
-├── mcp.rs           # Model Context Protocol server
-├── embedding.rs     # Hash & neural embedding models
-├── vector_store.rs  # USearch ANN vector index
-├── workspace.rs     # Workspace resolution (git, worktrees)
-├── walker.rs        # .gitignore-aware file walker
-├── doctor.rs        # Index health inspection & repair
-├── jobs.rs          # Job ledger (watcher, indexer, enhancer)
-├── ipc.rs           # Unix socket IPC protocol
-├── protocol.rs      # Daemon request/response types
-├── config.rs        # Configuration management
-├── text.rs          # Text utilities (camelCase split, etc.)
-├── path_glob.rs     # Glob pattern matching
-└── regex_search.rs  # Regex search fallback
 
-tests/
-├── cli_snapshot.rs      # CLI E2E with insta snapshots
-├── concurrency.rs       # Thread safety & race condition tests
-├── git_branch_switch.rs # Branch switch + worktree overlay tests
-├── incremental_crud.rs  # Incremental indexing CRUD
-├── golden_queries.rs    # Cross-language relevance tests
-├── merkle_prop.rs       # Property-based Merkle tests (proptest)
-├── mcp_e2e.rs           # MCP server integration
-├── stress_harness.rs    # Large-repo stress tests
-└── ...
+Before requesting merge for Rust, scripts, workflows, or cross-cutting changes:
+
+```bash
+./test.sh
+./bench.sh
 ```
 
-## How to Contribute
+Web changes:
 
-### Bug Reports
-Open an issue with reproduction steps, OS/arch, and `ig --version` output.
+```bash
+pnpm -C web install --frozen-lockfile
+pnpm -C web check
+pnpm -C web build
+git diff --exit-code -- web/dist
+```
 
-### Feature Requests
-Open an issue describing the use case, expected behavior, and how it fits the project's local-first, privacy-focused philosophy.
+Docs or website changes:
 
-### Code Contributions
+```bash
+python3 -m unittest discover -s tests -p 'test_*.py' -v
+python3 -m http.server 8765 --directory docs
+```
 
-1. **Fork & branch:** Create a feature branch from `main`.
-2. **Write tests:** Every bugfix needs a regression test. Features need integration tests.
-3. **Run the suite:**
-   ```bash
-   cargo test
-   cargo clippy -- -D warnings
-   ```
-4. **Keep commits focused:** One logical change per commit. Use conventional commit messages.
-5. **Open a PR:** Describe what changed and why. Reference any related issues.
+Open `http://127.0.0.1:8765/` and inspect desktop/mobile layout, console errors,
+and changed links. Stop server afterward.
 
-### Adding a Tree-sitter Language
+Release and platform acceptance procedures live in [AGENTS_TESTING.md](AGENTS_TESTING.md).
 
-1. Add the grammar crate to `Cargo.toml` (e.g., `tree-sitter-kotlin`).
-2. Add the language variant to `chunking.rs` (follow the pattern of existing languages).
-3. Write a test in `golden_queries.rs` or `cli_snapshot.rs` with a representative code sample.
-4. Update the language count in `README.md` and `docs/index.html`.
+## Tests
 
-## Code Style
+- Bug fixes need regression test that fails without fix.
+- Features need behavior-level test at public boundary.
+- Storage changes need fresh, incremental, deletion, migration, and worktree coverage.
+- MCP changes need schema, structured-content, error, and stdio-session coverage.
+- Platform fixes need guarded test that runs on affected target in CI.
+- Avoid tests that duplicate implementation or depend on timing, network, user home, or test order.
 
-- Follow `rustfmt` defaults. Run `cargo fmt` before committing.
-- Fix all `clippy` warnings. CI will reject PRs with warnings.
-- Prefer descriptive variable names over comments explaining *what* — save comments for *why*.
-- No `unwrap()` in library code — use `?` or explicit error handling. `unwrap()` is fine in tests.
+Temporary fixtures must use isolated directories and `IVYGREP_HOME`.
 
-## License
+## Performance and relevance changes
 
-By contributing, you agree that your contributions will be licensed under the MIT License.
+Claims need comparable before/after evidence:
+
+- same hardware, corpus, build profile, model, query set, warmup, and concurrency
+- multiple runs when host noise can affect conclusion
+- latency distribution, memory, and index-size impact when relevant
+- relevance metrics and per-task regressions for search changes
+- held-out/public datasets instead of repository-specific ranking rules
+- discarded alternatives recorded when they explain final design
+
+Keep only changes with useful measured tradeoffs. Do not encode benchmark names,
+expected paths, or corpus-specific aliases in production ranking code.
+
+## Code style
+
+- Run `cargo fmt`.
+- Fix every Clippy warning.
+- Prefer `Result` and `?` over `unwrap()` in library code. `unwrap()` is fine in tests.
+- Explain non-obvious reasons, not obvious operations.
+- Preserve offline hash search and local-only code handling.
+- Avoid new dependencies when standard library or existing crate is sufficient.
+
+## Adding a Tree-sitter language
+
+1. Add grammar crate to `Cargo.toml`.
+2. Register parser and language detection in `src/chunking.rs`.
+3. Add representative parser and retrieval tests.
+4. Add context-graph import handling when language has local imports.
+5. Update supported-language counts and lists in README and website.
+
+## Review and release
+
+Maintainers may request smaller scope, stronger tests, platform proof, or neutral
+benchmark evidence. Maintainers own version bumps, tags, release notes, and
+published artifacts.
+
+Security vulnerabilities follow [SECURITY.md](SECURITY.md). Community behavior
+follows [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Project decisions follow
+[GOVERNANCE.md](GOVERNANCE.md).
+
+By contributing, you agree contributions are licensed under [MIT License](LICENSE).

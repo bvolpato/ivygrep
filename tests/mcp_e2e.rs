@@ -232,13 +232,44 @@ fn e2e_mcp_full_session() {
     assert!(payload["result_count"].as_u64().unwrap() > 0);
     assert_eq!(payload["results"][0]["file_path"], "test.rs");
 
-    // 5. Edit the workspace and verify the same MCP session reconciles it.
-    std::fs::write(repo.join("test.rs"), "fn bar_after_agent_edit() {}").unwrap();
+    // 5. Build one bounded context pack through the same MCP tool.
     send_request(
         &mut stdin,
         json!({
             "jsonrpc": "2.0",
             "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "ig_search",
+                "arguments": {
+                    "query": "implement foo behavior",
+                    "path": repo.to_string_lossy().to_string(),
+                    "output": "context_pack",
+                    "budget_tokens": 1000
+                }
+            }
+        }),
+    );
+    let context_res = read_response(&mut reader);
+    assert_eq!(context_res["id"], 5);
+    let context_payload = search_payload(&context_res);
+    assert_eq!(context_payload["mode"], "context");
+    assert_eq!(context_payload["context_pack"]["budget_tokens"], 1000);
+    assert!(
+        context_payload["context_pack"]["used_tokens"]
+            .as_u64()
+            .unwrap()
+            <= 1000
+    );
+    assert_eq!(context_res["result"]["structuredContent"], context_payload);
+
+    // 6. Edit the workspace and verify the same MCP session reconciles it.
+    std::fs::write(repo.join("test.rs"), "fn bar_after_agent_edit() {}").unwrap();
+    send_request(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 6,
             "method": "tools/call",
             "params": {
                 "name": "ig_search",
@@ -251,7 +282,7 @@ fn e2e_mcp_full_session() {
         }),
     );
     let refreshed_res = read_response(&mut reader);
-    assert_eq!(refreshed_res["id"], 5);
+    assert_eq!(refreshed_res["id"], 6);
     let refreshed_payload = search_payload(&refreshed_res);
     assert!(
         refreshed_payload["result_count"].as_u64().unwrap() > 0,

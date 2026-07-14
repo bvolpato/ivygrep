@@ -1,0 +1,83 @@
+name: Bug report
+description: Report reproducible incorrect behavior or a regression
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve ivygrep. For security vulnerabilities, use the private reporting link in [SECURITY.md](../../SECURITY.md).
+
+  - type: input
+    id: version
+    attributes:
+      label: ivygrep version
+      description: Run `ig --version` and paste its output.
+      placeholder: ivygrep 1.1.19
+    validations:
+      required: true
+
+  - type: dropdown
+    id: installation
+    attributes:
+      label: Installation method
+      options:
+        - Homebrew
+        - Shell installer
+        - PowerShell installer
+        - GitHub release archive
+        - Built from source
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: operating-system
+    attributes:
+      label: Operating system
+      options:
+        - Linux x86_64
+        - Linux ARM64
+        - macOS Apple Silicon
+        - macOS Intel
+        - Windows x86_64
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe observed behavior and expected behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include exact commands, flags, and smallest safe fixture that reproduces the problem.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Paste relevant `ig --doctor --json`, `ig --status --json`, or log output after removing secrets and source content.
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues for duplicates.
+          required: true
+        - label: I removed secrets, private source code, and personal paths from this report.
+          required: true
+        - label: I can reproduce this with a supported release or current `main`.
+          required: true

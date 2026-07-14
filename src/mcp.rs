@@ -96,6 +96,8 @@ struct ToolCallParams {
 struct IvygrepSearchArgs {
     query: Option<String>,
     path: Option<String>,
+    output: Option<String>,
+    budget_tokens: Option<usize>,
     limit: Option<usize>,
     context: Option<usize>,
     #[serde(rename = "type")]
@@ -232,20 +234,33 @@ fn initialize_result(params: &Value) -> Value {
             "description": "Local hybrid semantic and lexical code search",
             "websiteUrl": env!("CARGO_PKG_HOMEPAGE")
         },
-        "instructions": "Use ig_search with an absolute path to the active workspace so searches stay scoped to the intended repository. Use natural-language queries for discovery and literal=true for exact identifiers. Set limit explicitly; start with limit=5-10 and context=2. Increase context when a promising hit needs more evidence; increase limit when you need more candidate files. Use ig_status to inspect indexing health. Workspaces are indexed on first use and watched for incremental updates."
+        "instructions": "Use ig_search with an absolute path to the active workspace so searches stay scoped to the intended repository. For implementation tasks, request output=context_pack with budget_tokens=8000 to receive one bounded pack containing primary code, dependencies, dependents, definitions, callers, references, tests, configuration, documentation, and recent co-change evidence. For iterative discovery, keep output=hits, use natural-language queries for concepts, and literal=true for exact identifiers. Start with limit=5-10 and context=2. Use ig_status when indexing health is unclear. Workspaces are indexed on first use and watched for incremental updates."
     })
 }
 
 fn search_tool_schema() -> Value {
     json!({
         "name": TOOL_IG_SEARCH,
-        "title": "Search local code",
-        "description": "Hybrid semantic+lexical code search. Auto-indexes on first query. Respects .gitignore and restricts results to the provided path scope. Use limit for result-file count and context for snippet radius.",
+        "title": "Search local code or build a task context pack",
+        "description": "Hybrid semantic+lexical code search and token-budgeted task context. Auto-indexes on first query, stays local, respects .gitignore, and restricts results to the provided path scope. Use output=context_pack for implementation tasks; keep output=hits for iterative discovery.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Natural-language or keyword query."},
                 "path": {"type": "string", "description": "Workspace path, subdirectory, or file path. Defaults to current directory."},
+                "output": {
+                    "type": "string",
+                    "enum": ["hits", "context_pack"],
+                    "default": "hits",
+                    "description": "Return ranked search hits or one task-ready, relationship-expanded context pack. context_pack keeps the same single MCP tool call."
+                },
+                "budget_tokens": {
+                    "type": "integer",
+                    "minimum": 256,
+                    "maximum": 131072,
+                    "default": 8000,
+                    "description": "Complete context-pack budget, including metadata and snippets. Valid only with output=context_pack."
+                },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
@@ -314,12 +329,13 @@ fn search_output_schema() -> Value {
             "scope_path": {"type": ["string", "null"]},
             "scope_is_file": {"type": "boolean"},
             "query": {"type": "string"},
-            "mode": {"type": "string", "enum": ["hybrid", "literal", "regex", "symbol", "references", "callers"]},
+            "mode": {"type": "string", "enum": ["hybrid", "literal", "regex", "symbol", "references", "callers", "context"]},
             "result_count": {"type": "integer", "minimum": 0},
             "include": {"type": "array", "items": {"type": "string"}},
             "exclude": {"type": "array", "items": {"type": "string"}},
             "results": {"type": "array", "items": {"type": "object"}},
-            "file_paths": {"type": "array", "items": {"type": "string"}}
+            "file_paths": {"type": "array", "items": {"type": "string"}},
+            "context_pack": context_pack_output_schema()
         },
         "required": [
             "workspace_root",
@@ -333,7 +349,79 @@ fn search_output_schema() -> Value {
         ],
         "oneOf": [
             {"required": ["results"]},
-            {"required": ["file_paths"]}
+            {"required": ["file_paths"]},
+            {"required": ["context_pack"]}
+        ],
+        "additionalProperties": false
+    })
+}
+
+fn context_pack_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "task": {"type": "string"},
+            "workspace": {"type": "string"},
+            "budget_tokens": {"type": "integer", "minimum": 256, "maximum": 131072},
+            "used_tokens": {"type": "integer", "minimum": 0},
+            "candidate_count": {"type": "integer", "minimum": 0},
+            "truncated": {"type": "boolean"},
+            "anchor_symbols": {"type": "array", "items": {"type": "string"}},
+            "coverage": {
+                "type": "object",
+                "properties": {
+                    "files": {"type": "integer", "minimum": 0},
+                    "primary": {"type": "integer", "minimum": 0},
+                    "definitions": {"type": "integer", "minimum": 0},
+                    "dependencies": {"type": "integer", "minimum": 0},
+                    "dependents": {"type": "integer", "minimum": 0},
+                    "callers": {"type": "integer", "minimum": 0},
+                    "references": {"type": "integer", "minimum": 0},
+                    "tests": {"type": "integer", "minimum": 0},
+                    "config": {"type": "integer", "minimum": 0},
+                    "documentation": {"type": "integer", "minimum": 0}
+                },
+                "required": [
+                    "files", "primary", "definitions", "dependencies", "dependents",
+                    "callers", "references", "tests", "config", "documentation"
+                ],
+                "additionalProperties": false
+            },
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "start_line": {"type": "integer", "minimum": 1},
+                        "end_line": {"type": "integer", "minimum": 1},
+                        "roles": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "enum": [
+                                    "primary", "definition", "dependency", "dependent",
+                                    "caller", "reference", "test", "config",
+                                    "documentation", "related"
+                                ]
+                            }
+                        },
+                        "reasons": {"type": "array", "items": {"type": "string"}},
+                        "sources": {"type": "array", "items": {"type": "string"}},
+                        "preview": {"type": "string"},
+                        "estimated_tokens": {"type": "integer", "minimum": 0}
+                    },
+                    "required": [
+                        "file_path", "start_line", "end_line", "roles", "reasons",
+                        "sources", "preview", "estimated_tokens"
+                    ],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": [
+            "task", "workspace", "budget_tokens", "used_tokens", "candidate_count",
+            "truncated", "anchor_symbols", "coverage", "items"
         ],
         "additionalProperties": false
     })
@@ -585,6 +673,11 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
     if query.trim().is_empty() {
         bail!("query must not be empty");
     }
+    let output = args.output.as_deref().unwrap_or("hits");
+    if !matches!(output, "hits" | "context_pack") {
+        bail!("output must be hits or context_pack");
+    }
+    let wants_context_pack = output == "context_pack";
     let requested_modes = [
         args.literal.unwrap_or(false),
         args.regex.unwrap_or(false),
@@ -606,6 +699,24 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
     if args.context.is_some_and(|context| context > 100) {
         bail!("context must be between 0 and 100");
     }
+    if args
+        .budget_tokens
+        .is_some_and(|budget| !(256..=131_072).contains(&budget))
+    {
+        bail!("budget_tokens must be between 256 and 131072");
+    }
+    if !wants_context_pack && args.budget_tokens.is_some() {
+        bail!("budget_tokens requires output=context_pack");
+    }
+    if wants_context_pack
+        && (requested_modes.into_iter().any(|enabled| enabled)
+            || args.first_line_only.unwrap_or(false)
+            || args.file_name_only.unwrap_or(false))
+    {
+        bail!(
+            "output=context_pack cannot be combined with literal, regex, symbol, refs, callers, first_line_only, or file_name_only"
+        );
+    }
 
     let input_path = match args.path {
         Some(path) => PathBuf::from(path),
@@ -623,6 +734,45 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
 
     let include_globs = parse_glob_csv(args.include.as_deref());
     let exclude_globs = parse_glob_csv(args.exclude.as_deref());
+
+    if wants_context_pack {
+        let model = mcp_search_model(&workspace);
+        let bundle = crate::context::build_context_bundle(
+            &workspace,
+            query,
+            Some(model.as_ref()),
+            &SearchOptions {
+                limit: None,
+                context: args.context.unwrap_or(2),
+                type_filter: args.type_filter.clone(),
+                include_globs: include_globs.clone(),
+                exclude_globs: exclude_globs.clone(),
+                scope_filter: scope_filter.clone(),
+                skip_gitignore: args.skip_gitignore.unwrap_or(false),
+                force_neural: false,
+                progress_tx: None,
+                cancel_token: None,
+            },
+            args.budget_tokens.unwrap_or(8_000),
+        )?;
+        if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
+            && workspace.needs_neural_enhancement()
+        {
+            let _ = workspace.trigger_background_enhancement();
+        }
+        let payload = json!({
+            "workspace_root": current_workspace.root,
+            "scope_path": scope_filter.as_ref().map(|scope| scope.rel_path.clone()),
+            "scope_is_file": scope_filter.as_ref().is_some_and(|scope| scope.is_file),
+            "query": query,
+            "mode": "context",
+            "result_count": bundle.items.len(),
+            "include": include_globs,
+            "exclude": exclude_globs,
+            "context_pack": bundle,
+        });
+        return tool_success_result(payload, false);
+    }
 
     let literal = args.literal.unwrap_or(false);
     let regex = args.regex.unwrap_or(false);
@@ -1022,6 +1172,8 @@ mod tests {
         let response = execute_ivygrep_search(IvygrepSearchArgs {
             query: Some("applyFilter".to_string()),
             path: Some(scoped.to_string_lossy().to_string()),
+            output: None,
+            budget_tokens: None,
             limit: None,
             context: Some(2),
             type_filter: None,
@@ -1054,6 +1206,119 @@ mod tests {
 
     #[test]
     #[serial]
+    fn mcp_search_returns_budgeted_context_graph_pack() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("tests")).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&root)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"context-fixture\"\nversion = \"0.1.0\"\ndescription = \"refresh token expiration fixture\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/auth.rs"),
+            "use crate::clock::now;\npub fn rotate_refresh_token() { now(); }\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/clock.rs"), "pub fn now() -> u64 { 42 }\n").unwrap();
+        std::fs::write(
+            root.join("src/session.rs"),
+            "use crate::auth::rotate_refresh_token;\npub fn refresh() { rotate_refresh_token(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("tests/auth_test.rs"),
+            "#[test]\nfn regression_case() { assert!(true); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("README.md"),
+            "Refresh token rotation is implemented in [auth](src/auth.rs).\n",
+        )
+        .unwrap();
+
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let response = execute_ivygrep_search(IvygrepSearchArgs {
+            query: Some("rotate refresh token expiration".to_string()),
+            path: Some(root.to_string_lossy().to_string()),
+            output: Some("context_pack".to_string()),
+            budget_tokens: Some(4_000),
+            limit: None,
+            context: Some(2),
+            type_filter: None,
+            regex: None,
+            literal: None,
+            symbol: None,
+            refs: None,
+            callers: None,
+            include: None,
+            exclude: None,
+            first_line_only: None,
+            file_name_only: None,
+            verbose: None,
+            skip_gitignore: None,
+        })
+        .unwrap();
+
+        let payload = tool_json_payload(&response);
+        assert_eq!(payload["mode"], "context");
+        assert_eq!(payload["context_pack"]["budget_tokens"], 4_000);
+        assert!(
+            payload["context_pack"]["used_tokens"].as_u64().unwrap() <= 4_000,
+            "{payload:#}"
+        );
+        let coverage = &payload["context_pack"]["coverage"];
+        assert!(
+            coverage["dependencies"].as_u64().unwrap() >= 1,
+            "{payload:#}"
+        );
+        assert!(coverage["dependents"].as_u64().unwrap() >= 1, "{payload:#}");
+        assert!(coverage["tests"].as_u64().unwrap() >= 1, "{payload:#}");
+        assert!(coverage["config"].as_u64().unwrap() >= 1, "{payload:#}");
+        assert!(
+            coverage["documentation"].as_u64().unwrap() >= 1,
+            "{payload:#}"
+        );
+        assert_eq!(response["structuredContent"], payload);
+
+        let filtered = dispatch(
+            "tools/call",
+            json!({
+                "name": "ig_search",
+                "arguments": {
+                    "query": "rotate refresh token expiration",
+                    "path": root,
+                    "output": "context_pack",
+                    "budget_tokens": 4000,
+                    "include": "src/**"
+                }
+            }),
+        )
+        .unwrap();
+        let filtered = tool_json_payload(&filtered);
+        assert!(
+            filtered["context_pack"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|item| item["file_path"].as_str().unwrap().starts_with("src/")),
+            "{filtered:#}"
+        );
+        assert_eq!(filtered["context_pack"]["coverage"]["tests"], 0);
+        assert_eq!(filtered["context_pack"]["coverage"]["config"], 0);
+        assert_eq!(filtered["context_pack"]["coverage"]["documentation"], 0);
+    }
+
+    #[test]
+    #[serial]
     fn mcp_search_omits_reason_by_default() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("repo");
@@ -1070,6 +1335,8 @@ mod tests {
         let response = execute_ivygrep_search(IvygrepSearchArgs {
             query: Some("applyFilter".to_string()),
             path: Some(root.to_string_lossy().to_string()),
+            output: None,
+            budget_tokens: None,
             limit: Some(5),
             context: Some(2),
             type_filter: None,
@@ -1124,6 +1391,8 @@ mod tests {
         let include_only = execute_ivygrep_search(IvygrepSearchArgs {
             query: Some("applyFilter".to_string()),
             path: Some(root.to_string_lossy().to_string()),
+            output: None,
+            budget_tokens: None,
             limit: Some(5),
             context: Some(2),
             type_filter: None,
@@ -1156,6 +1425,8 @@ mod tests {
         let include_and_exclude = execute_ivygrep_search(IvygrepSearchArgs {
             query: Some("applyFilter".to_string()),
             path: Some(root.to_string_lossy().to_string()),
+            output: None,
+            budget_tokens: None,
             limit: Some(5),
             context: Some(2),
             type_filter: None,
@@ -1223,6 +1494,14 @@ mod tests {
         assert!(schema["properties"]["symbol"].is_object());
         assert!(schema["properties"]["refs"].is_object());
         assert!(schema["properties"]["callers"].is_object());
+        assert_eq!(schema["properties"]["output"]["default"], "hits");
+        assert_eq!(
+            schema["properties"]["output"]["enum"],
+            json!(["hits", "context_pack"])
+        );
+        assert_eq!(schema["properties"]["budget_tokens"]["minimum"], 256);
+        assert_eq!(schema["properties"]["budget_tokens"]["maximum"], 131_072);
+        assert_eq!(schema["properties"]["budget_tokens"]["default"], 8_000);
         assert_eq!(schema["properties"]["limit"]["minimum"], 1);
         assert_eq!(schema["properties"]["limit"]["maximum"], 1000);
         assert_eq!(schema["properties"]["context"]["minimum"], 0);
@@ -1232,6 +1511,10 @@ mod tests {
         let required = schema["required"].as_array().unwrap();
         assert!(required.contains(&json!("query")));
         assert!(tools[0]["outputSchema"].is_object());
+        assert_eq!(
+            tools[0]["outputSchema"]["properties"]["context_pack"]["additionalProperties"],
+            false
+        );
         assert_eq!(tools[0]["annotations"]["readOnlyHint"], false);
         assert_eq!(tools[1]["name"], "ig_status");
         assert!(tools[1]["outputSchema"].is_object());
@@ -1276,6 +1559,39 @@ mod tests {
                 .unwrap()
                 .contains("mutually exclusive")
         );
+
+        for (arguments, expected) in [
+            (
+                json!({"query": "needle", "output": "unknown"}),
+                "output must be hits or context_pack",
+            ),
+            (
+                json!({"query": "needle", "budget_tokens": 8000}),
+                "budget_tokens requires output=context_pack",
+            ),
+            (
+                json!({"query": "needle", "output": "context_pack", "budget_tokens": 255}),
+                "budget_tokens must be between 256 and 131072",
+            ),
+            (
+                json!({"query": "needle", "output": "context_pack", "literal": true}),
+                "output=context_pack cannot be combined",
+            ),
+        ] {
+            let response = dispatch(
+                "tools/call",
+                json!({"name": "ig_search", "arguments": arguments}),
+            )
+            .unwrap();
+            assert_eq!(response["isError"], true);
+            assert!(
+                response["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains(expected),
+                "{response:#}"
+            );
+        }
 
         let unknown_argument = dispatch(
             "tools/call",
@@ -1348,6 +1664,8 @@ mod tests {
         let response = execute_ivygrep_search(IvygrepSearchArgs {
             query: Some(r"calculate_\w+".to_string()),
             path: Some(root.to_string_lossy().to_string()),
+            output: None,
+            budget_tokens: None,
             limit: Some(5),
             context: Some(2),
             type_filter: None,
@@ -1389,6 +1707,8 @@ mod tests {
         let response = execute_ivygrep_search(IvygrepSearchArgs {
             query: Some("calculate_tax".to_string()),
             path: Some(root.to_string_lossy().to_string()),
+            output: None,
+            budget_tokens: None,
             limit: Some(5),
             context: Some(2),
             type_filter: None,
@@ -1438,6 +1758,8 @@ mod tests {
             let response = execute_ivygrep_search(IvygrepSearchArgs {
                 query: Some("calculate_tax".to_string()),
                 path: Some(root.to_string_lossy().to_string()),
+                output: None,
+                budget_tokens: None,
                 limit: Some(5),
                 context: Some(2),
                 type_filter: None,
@@ -1466,6 +1788,8 @@ mod tests {
                 let response = execute_ivygrep_search(IvygrepSearchArgs {
                     query: Some(query.to_string()),
                     path: Some(root.to_string_lossy().to_string()),
+                    output: None,
+                    budget_tokens: None,
                     limit: Some(5),
                     context: Some(2),
                     type_filter: None,
@@ -1494,6 +1818,8 @@ mod tests {
         let error = execute_ivygrep_search(IvygrepSearchArgs {
             query: Some("calculate_tax".to_string()),
             path: None,
+            output: None,
+            budget_tokens: None,
             limit: Some(5),
             context: Some(2),
             type_filter: None,
@@ -1538,6 +1864,8 @@ mod tests {
         let _ = execute_ivygrep_search(IvygrepSearchArgs {
             query: Some("calculate tax".to_string()),
             path: Some(root.to_string_lossy().to_string()),
+            output: None,
+            budget_tokens: None,
             limit: Some(5),
             context: Some(2),
             type_filter: None,

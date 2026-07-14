@@ -372,6 +372,7 @@ struct IndexedFile {
     rel_path: PathBuf,
     chunks: Vec<PreparedIndexedChunk>,
     included_paths: Vec<PathBuf>,
+    file_edges: Vec<crate::context_graph::FileEdge>,
 }
 
 type IndexedFileBatch = Vec<IndexedFile>;
@@ -1418,6 +1419,7 @@ fn index_workspace_inner(
                                     rel_path: rel.to_path_buf(),
                                     chunks: Vec::new(),
                                     included_paths: Vec::new(),
+                                    file_edges: Vec::new(),
                                 })
                             }
                         };
@@ -1445,6 +1447,12 @@ fn index_workspace_inner(
                         };
 
                         let mut chunked = chunk_source_with_metadata(rel_path, &content);
+                        let file_edges = crate::context_graph::extract_file_edges(
+                            &root_clone,
+                            current_snapshot_clone.as_deref(),
+                            rel_path,
+                            &content,
+                        );
                         let (included_chunks, included_paths) = load_rust_doc_includes(
                             &root_clone,
                             rel_path,
@@ -1471,13 +1479,15 @@ fn index_workspace_inner(
                             let _ = fs::write(&progress_path_clone, format!("{n}/{total}"));
                         }
 
-                        if indexed.is_empty() && included_paths.is_empty() {
+                        if indexed.is_empty() && included_paths.is_empty() && file_edges.is_empty()
+                        {
                             return nothing(rel_path);
                         }
                         Some(IndexedFile {
                             rel_path: rel_path.clone(),
                             chunks: indexed,
                             included_paths,
+                            file_edges,
                         })
                     })
                     .collect()
@@ -1535,6 +1545,9 @@ fn index_workspace_inner(
                 persist_or_stop!(
                     persist_statements.insert_dependency(&rel_path_string, &included_path)
                 );
+            }
+            for edge in indexed_file.file_edges {
+                persist_or_stop!(persist_statements.insert_file_edge(&edge));
             }
 
             // Batch the timestamp syscall per file, not per chunk.
@@ -2669,6 +2682,10 @@ fn remove_file_chunks(
         "DELETE FROM included_file_dependencies WHERE owner_path = ?1",
         params![rel_str],
     )?;
+    sqlite.execute(
+        "DELETE FROM file_edges WHERE source_path = ?1",
+        params![rel_str],
+    )?;
     Ok(())
 }
 
@@ -2880,6 +2897,7 @@ struct PersistStatements<'conn> {
     conn: &'conn Connection,
     chunk_insert: Statement<'conn>,
     dependency_insert: Statement<'conn>,
+    file_edge_insert: Statement<'conn>,
     symbol_rows: Vec<(String, i64)>,
     symbol_insert_sql: String,
 }
@@ -2906,6 +2924,11 @@ impl<'conn> PersistStatements<'conn> {
                     owner_path, included_path
                 ) VALUES (?1, ?2)",
             )?,
+            file_edge_insert: conn.prepare(
+                "INSERT OR IGNORE INTO file_edges (
+                    source_path, target_path, kind
+                ) VALUES (?1, ?2, ?3)",
+            )?,
             symbol_rows: Vec::with_capacity(SYMBOL_INSERT_BATCH_ROWS),
             symbol_insert_sql: String::with_capacity(
                 "INSERT OR REPLACE INTO symbols (normalized_name, chunk_key) VALUES ".len()
@@ -2918,6 +2941,10 @@ impl<'conn> PersistStatements<'conn> {
         self.dependency_insert
             .execute(params![owner_path, included_path])?;
         Ok(())
+    }
+
+    fn insert_file_edge(&mut self, edge: &crate::context_graph::FileEdge) -> Result<()> {
+        crate::context_graph::persist_file_edge(&mut self.file_edge_insert, edge)
     }
 
     fn queue_symbols(&mut self, chunk: &IndexedChunk, chunk_key: i64) -> Result<()> {
@@ -3086,6 +3113,13 @@ fn create_tables_schema(conn: &Connection, create_indexes: bool) -> Result<()> {
             PRIMARY KEY (owner_path, included_path)
         ) WITHOUT ROWID;
 
+        CREATE TABLE IF NOT EXISTS file_edges (
+            source_path TEXT NOT NULL,
+            target_path TEXT NOT NULL,
+            kind INTEGER NOT NULL,
+            PRIMARY KEY (source_path, target_path, kind)
+        ) WITHOUT ROWID;
+
         "#,
     )?;
     if create_indexes {
@@ -3142,6 +3176,8 @@ fn create_secondary_indexes(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_chunks_language ON chunks(language);
         CREATE INDEX IF NOT EXISTS idx_included_file_dependencies_path
             ON included_file_dependencies(included_path);
+        CREATE INDEX IF NOT EXISTS idx_file_edges_target
+            ON file_edges(target_path, source_path);
         "#,
     )?;
     Ok(())

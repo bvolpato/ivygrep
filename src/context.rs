@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::Serialize;
 
+use crate::context_graph::{FileEdgeKind, expand_context_graph};
 use crate::embedding::{EmbeddingModel, HashEmbeddingModel};
 use crate::indexer::reconcile_worktree_overlay;
 use crate::protocol::SearchHit;
@@ -23,6 +24,8 @@ const RRF_K: f64 = 10.0;
 pub enum ContextRole {
     Primary,
     Definition,
+    Dependency,
+    Dependent,
     Caller,
     Reference,
     Test,
@@ -36,6 +39,8 @@ impl ContextRole {
         match self {
             Self::Primary => "primary",
             Self::Definition => "definition",
+            Self::Dependency => "dependency",
+            Self::Dependent => "dependent",
             Self::Caller => "caller",
             Self::Reference => "reference",
             Self::Test => "test",
@@ -51,6 +56,8 @@ pub struct ContextCoverage {
     pub files: usize,
     pub primary: usize,
     pub definitions: usize,
+    pub dependencies: usize,
+    pub dependents: usize,
     pub callers: usize,
     pub references: usize,
     pub tests: usize,
@@ -138,6 +145,7 @@ pub fn build_context_bundle(
     ];
 
     let mut primary_hits = Vec::new();
+    let mut graph_seed_paths = Vec::new();
     for (query, requested_role, weight, context_lines, retrieval_label) in query_specs {
         let mut options = base_options.clone();
         options.limit = Some(candidate_limit);
@@ -166,6 +174,9 @@ pub fn build_context_bundle(
                     })
             {
                 continue;
+            }
+            if requested_role == ContextRole::Primary {
+                graph_seed_paths.push(hit.file_path.clone());
             }
             add_candidate(
                 &mut candidates,
@@ -230,6 +241,53 @@ pub fn build_context_bundle(
             }
             Err(error) => tracing::debug!("context relationship expansion failed: {error:#}"),
         }
+    }
+
+    let mut seen_seed_paths = HashSet::new();
+    let seed_paths = graph_seed_paths
+        .into_iter()
+        .filter(|path| seen_seed_paths.insert(path.clone()))
+        .take(4)
+        .collect::<Vec<_>>();
+    match expand_context_graph(workspace, &seed_paths, base_options) {
+        Ok(expansions) => {
+            for (rank, expansion) in expansions.into_iter().enumerate() {
+                match search_context.representative_hit_for_file(&expansion.file_path, task) {
+                    Ok(Some(mut hit)) => {
+                        if matches!(
+                            expansion.kind,
+                            FileEdgeKind::Config | FileEdgeKind::Documentation
+                        ) && !graph_support_matches_task(&hit, task, expansion.kind)
+                        {
+                            continue;
+                        }
+                        let role = match expansion.kind {
+                            FileEdgeKind::Dependency if expansion.outgoing => {
+                                ContextRole::Dependency
+                            }
+                            FileEdgeKind::Dependency => ContextRole::Dependent,
+                            FileEdgeKind::Test => ContextRole::Test,
+                            FileEdgeKind::Config => ContextRole::Config,
+                            FileEdgeKind::Documentation => ContextRole::Documentation,
+                            FileEdgeKind::CoChange => ContextRole::Related,
+                        };
+                        hit.sources.push(expansion.kind.source_label().to_string());
+                        add_candidate(
+                            &mut candidates,
+                            hit,
+                            role,
+                            expansion.reason(),
+                            0.74 / (RRF_K + rank as f64 + 1.0),
+                        );
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::debug!("context graph hydration failed: {error:#}")
+                    }
+                }
+            }
+        }
+        Err(error) => tracing::debug!("context graph expansion failed: {error:#}"),
     }
 
     Ok(assemble_bundle(
@@ -335,6 +393,8 @@ fn assemble_bundle(
     for role in [
         ContextRole::Primary,
         ContextRole::Definition,
+        ContextRole::Dependency,
+        ContextRole::Dependent,
         ContextRole::Caller,
         ContextRole::Reference,
         ContextRole::Test,
@@ -463,6 +523,8 @@ fn estimated_header_tokens(
             files: MAX_ITEMS,
             primary: MAX_ITEMS,
             definitions: MAX_ITEMS,
+            dependencies: MAX_ITEMS,
+            dependents: MAX_ITEMS,
             callers: MAX_ITEMS,
             references: MAX_ITEMS,
             tests: MAX_ITEMS,
@@ -483,6 +545,8 @@ fn finalize_bundle_metrics(bundle: &mut ContextBundle) {
             match role {
                 ContextRole::Primary => coverage.primary += 1,
                 ContextRole::Definition => coverage.definitions += 1,
+                ContextRole::Dependency => coverage.dependencies += 1,
+                ContextRole::Dependent => coverage.dependents += 1,
                 ContextRole::Caller => coverage.callers += 1,
                 ContextRole::Reference => coverage.references += 1,
                 ContextRole::Test => coverage.tests += 1,
@@ -1079,6 +1143,27 @@ fn hit_matches_task(hit: &SearchHit, task: &str) -> bool {
         }
 }
 
+fn graph_support_matches_task(hit: &SearchHit, task: &str, kind: FileEdgeKind) -> bool {
+    if hit_matches_task(hit, task) {
+        return true;
+    }
+    if kind != FileEdgeKind::Config {
+        return false;
+    }
+    let terms = significant_task_terms(task);
+    let haystack = format!("{}\n{}", hit.file_path.display(), hit.preview).to_ascii_lowercase();
+    let haystack_terms = haystack
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .flat_map(crate::text::split_identifier_segments)
+        .collect::<HashSet<_>>();
+    terms
+        .iter()
+        .filter(|term| haystack_terms.contains(*term))
+        .take(2)
+        .count()
+        >= 2
+}
+
 fn substantially_overlaps(item: &ContextItem, hit: &SearchHit) -> bool {
     if item.file_path != hit.file_path {
         return false;
@@ -1208,10 +1293,12 @@ pub fn render_markdown(bundle: &ContextBundle) -> String {
         output.push_str(&format!("Anchors: {}\n", bundle.anchor_symbols.join(", ")));
     }
     output.push_str(&format!(
-        "Coverage: {} files | {} primary | {} definitions | {} callers | {} references | {} tests | {} config | {} docs\n",
+        "Coverage: {} files | {} primary | {} definitions | {} dependencies | {} dependents | {} callers | {} references | {} tests | {} config | {} docs\n",
         bundle.coverage.files,
         bundle.coverage.primary,
         bundle.coverage.definitions,
+        bundle.coverage.dependencies,
+        bundle.coverage.dependents,
         bundle.coverage.callers,
         bundle.coverage.references,
         bundle.coverage.tests,

@@ -4,6 +4,20 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.1.20] - 2026-07-14
+
+### Added
+- **Context Graph v2 connects task evidence across files.** Indexing stores compact typed dependency, test, configuration, and documentation edges. `ig context` expands both directions, ranks bounded graph evidence, adds recent Git co-changes, and reports dependency and dependent coverage.
+- **MCP agents can request complete context packs through `ig_search`.** `output=context_pack` and `budget_tokens` expose same scoped, filtered, token-bounded pack as CLI without adding another tool or round trip.
+
+### Community
+- **Contributor paths are complete.** Structured issue forms, a pull-request evidence template, stable toolchain defaults, community policies, support routing, governance, and a task-oriented contributor guide reduce setup and review ambiguity.
+- **Website and README expose contribution entry points.** Newcomers can find starter work, Discussions, issue forms, security reporting, and validation guidance without searching repository internals.
+
+### Testing
+- **Context graph behavior has unit, incremental-index, CLI, MCP schema, direct-tool, and stdio session coverage.** Tests verify relationship extraction, reverse edges, stale-edge replacement, strict output shape, and budget enforcement.
+- **Community-health contracts prevent onboarding drift.** Tests verify required files, issue-form routing, policy links, contributor commands, and release-version synchronization.
+
 ## [1.1.19] - 2026-07-13
 
 ### Improved

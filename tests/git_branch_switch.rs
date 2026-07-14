@@ -17,6 +17,7 @@ use serial_test::serial;
 use tempfile::tempdir;
 
 use ivygrep::EMBEDDING_DIMENSIONS;
+use ivygrep::context::{ContextRole, build_context_bundle};
 use ivygrep::embedding::HashEmbeddingModel;
 use ivygrep::indexer::{index_workspace, open_sqlite, reconcile_worktree_overlay};
 use ivygrep::search::{SearchOptions, hybrid_search};
@@ -2878,6 +2879,91 @@ fn worktree_search_reconciles_base_only_additions_before_loading_context() {
     fs2::FileExt::unlock(&lock_file).unwrap();
     assert!(reconcile.join().unwrap().unwrap());
     assert!(!wt_workspace.worktree_overlay_is_stale().unwrap());
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+#[test]
+#[serial]
+fn worktree_context_graph_prefers_overlay_dependencies() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    init_git_repo(root.path());
+    fs::create_dir_all(root.path().join("src")).unwrap();
+    fs::write(
+        root.path().join("Cargo.toml"),
+        "[package]\nname = \"worktree-graph\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("src/auth.rs"),
+        "use crate::old_clock::now;\npub fn rotate_refresh_token() { now(); }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("src/old_clock.rs"),
+        "pub fn now() -> u64 { 1 }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("src/new_clock.rs"),
+        "pub fn now() -> u64 { 2 }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base graph"]);
+    setup_and_index(root.path(), home.path());
+
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_context_graph");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "context-graph-worktree",
+            wt_path.to_str().unwrap(),
+        ],
+    );
+    fs::write(
+        wt_path.join("src/auth.rs"),
+        "use crate::new_clock::now;\npub fn rotate_refresh_token() { now(); }\n",
+    )
+    .unwrap();
+    setup_and_index(&wt_path, home.path());
+
+    let workspace = workspace_for(&wt_path);
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+    let bundle = build_context_bundle(
+        &workspace,
+        "rotate refresh token expiration",
+        Some(&model),
+        &SearchOptions::default(),
+        4_000,
+    )
+    .unwrap();
+    let dependency_paths = bundle
+        .items
+        .iter()
+        .filter(|item| item.roles.contains(&ContextRole::Dependency))
+        .map(|item| item.file_path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        dependency_paths
+            .iter()
+            .any(|path| path == "src/new_clock.rs"),
+        "{bundle:#?}"
+    );
+    assert!(
+        dependency_paths
+            .iter()
+            .all(|path| path != "src/old_clock.rs"),
+        "{bundle:#?}"
+    );
 
     git(
         root.path(),
