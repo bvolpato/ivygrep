@@ -504,7 +504,13 @@ fn cli_context_qualified_method_anchor_finds_definition() {
          impl Client {\n\
              pub fn send(&self) -> bool { true }\n\
          }\n\
-         pub fn deliver(client: &Client) -> bool { client.send() }\n",
+         pub struct Server;\n\
+         impl Server {\n\
+             pub fn receive(&self) -> bool { true }\n\
+         }\n\
+         pub fn deliver(client: &Client, server: &Server) -> bool {\n\
+             client.send() && server.receive()\n\
+         }\n",
     )
     .unwrap();
 
@@ -518,7 +524,7 @@ fn cli_context_qualified_method_anchor_finds_definition() {
             "context",
             "--budget",
             "2000",
-            "fix client.send behavior",
+            "fix client.send and server.receive behavior",
         ])
         .assert()
         .success()
@@ -529,21 +535,44 @@ fn cli_context_qualified_method_anchor_finds_definition() {
 
     assert_eq!(
         value["anchor_symbols"],
-        serde_json::json!(["client.send", "send"])
+        serde_json::json!(["client.send", "send", "server.receive", "receive"])
     );
     assert!(
         value["coverage"]["definitions"].as_u64().unwrap() >= 1,
         "{value:#}"
     );
-    assert!(
-        value["items"].as_array().unwrap().iter().any(|item| {
+    let reasons = value["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|item| item["reasons"].as_array().unwrap())
+        .filter_map(serde_json::Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(reasons.contains(&"defines send"), "{value:#}");
+    assert!(reasons.contains(&"defines receive"), "{value:#}");
+    let definition_previews = value["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| {
             item["roles"]
                 .as_array()
                 .unwrap()
                 .iter()
                 .any(|role| role == "definition")
-                && item["preview"].as_str().unwrap().contains("fn send")
-        }),
+        })
+        .map(|item| item["preview"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        definition_previews
+            .iter()
+            .any(|preview| preview.contains("fn send")),
+        "{value:#}"
+    );
+    assert!(
+        definition_previews
+            .iter()
+            .any(|preview| preview.contains("fn receive")),
         "{value:#}"
     );
 }

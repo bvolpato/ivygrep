@@ -567,14 +567,11 @@ fn anchor_symbols(task: &str, primary_hits: &[SearchHit]) -> Vec<String> {
     if !explicit_symbols.is_empty() {
         let mut anchors = Vec::new();
         let mut seen = HashSet::new();
-        for symbol in explicit_symbols {
+        for symbol in explicit_symbols.into_iter().take(MAX_ANCHOR_SYMBOLS) {
             let terminal = terminal_symbol_member(&symbol).map(ToOwned::to_owned);
             for candidate in std::iter::once(symbol).chain(terminal) {
                 if seen.insert(candidate.to_ascii_lowercase()) {
                     anchors.push(candidate);
-                    if anchors.len() == MAX_ANCHOR_SYMBOLS {
-                        return anchors;
-                    }
                 }
             }
         }
@@ -1381,8 +1378,8 @@ mod tests {
     #[test]
     fn qualified_explicit_anchors_include_terminal_members() {
         assert_eq!(
-            anchor_symbols("fix client.send retries", &[]),
-            ["client.send", "send"]
+            anchor_symbols("fix client.send and server.receive retries", &[]),
+            ["client.send", "send", "server.receive", "receive"]
         );
         assert_eq!(
             anchor_symbols("change UserService.handle through std::io", &[]),
