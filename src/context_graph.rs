@@ -18,6 +18,22 @@ const MAX_GRAPH_EDGES: usize = 192;
 const MAX_GRAPH_EXPANSIONS: usize = 12;
 const MIN_STATIC_EDGES_BEFORE_COCHANGE: usize = 2;
 const MAX_COCHANGE_COMMITS: usize = 64;
+const MANIFEST_NAMES: &[&str] = &[
+    "Cargo.toml",
+    "package.json",
+    "pyproject.toml",
+    "go.mod",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "Gemfile",
+    "composer.json",
+    "Package.swift",
+    "mix.exs",
+    "CMakeLists.txt",
+    "MODULE.bazel",
+    "WORKSPACE",
+];
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd)]
 #[repr(i64)]
@@ -211,6 +227,22 @@ pub(crate) fn path_lookup_keys(path: &Path) -> BTreeSet<String> {
         })
         .flat_map(dependency_lookup_keys)
         .collect()
+}
+
+pub(crate) fn is_manifest_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|name| MANIFEST_NAMES.contains(&name))
+}
+
+pub(crate) fn configuration_target(
+    root: &Path,
+    snapshot: Option<&MerkleSnapshot>,
+    rel_path: &Path,
+) -> Option<PathBuf> {
+    language_for_path(rel_path)
+        .filter(|language| is_source_language(language))
+        .and_then(|_| nearest_manifest(root, snapshot, rel_path))
 }
 
 fn supports_dependency_scan(language: &str) -> bool {
@@ -740,25 +772,9 @@ fn nearest_manifest(
     snapshot: Option<&MerkleSnapshot>,
     rel_path: &Path,
 ) -> Option<PathBuf> {
-    const MANIFESTS: &[&str] = &[
-        "Cargo.toml",
-        "package.json",
-        "pyproject.toml",
-        "go.mod",
-        "pom.xml",
-        "build.gradle",
-        "build.gradle.kts",
-        "Gemfile",
-        "composer.json",
-        "Package.swift",
-        "mix.exs",
-        "CMakeLists.txt",
-        "MODULE.bazel",
-        "WORKSPACE",
-    ];
     let parent = rel_path.parent().unwrap_or_else(|| Path::new(""));
     for directory in parent.ancestors() {
-        for manifest in MANIFESTS {
+        for manifest in MANIFEST_NAMES {
             let candidate = directory.join(manifest);
             if candidate != rel_path
                 && existing_workspace_file(root, snapshot, &candidate).is_some()

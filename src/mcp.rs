@@ -258,7 +258,6 @@ fn search_tool_schema() -> Value {
                     "type": "integer",
                     "minimum": 256,
                     "maximum": 131072,
-                    "default": 8000,
                     "description": "Complete context-pack budget, including metadata and snippets. Valid only with output=context_pack."
                 },
                 "limit": {
@@ -1591,7 +1590,11 @@ mod tests {
         );
         assert_eq!(schema["properties"]["budget_tokens"]["minimum"], 256);
         assert_eq!(schema["properties"]["budget_tokens"]["maximum"], 131_072);
-        assert_eq!(schema["properties"]["budget_tokens"]["default"], 8_000);
+        assert!(
+            schema["properties"]["budget_tokens"]
+                .get("default")
+                .is_none()
+        );
         assert_eq!(schema["properties"]["limit"]["minimum"], 1);
         assert_eq!(schema["properties"]["limit"]["maximum"], 1000);
         assert_eq!(schema["properties"]["context"]["minimum"], 0);

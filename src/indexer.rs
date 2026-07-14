@@ -1884,13 +1884,17 @@ fn add_file_edge_dependents(
         if sqlite_table_exists(&conn, "file_edges") {
             let Ok(mut statement) = conn.prepare_cached(
                 "SELECT source_path FROM file_edges
-                 WHERE target_path = ?1 AND kind = ?2",
+                 WHERE target_path = ?1 AND kind IN (?2, ?3)",
             ) else {
                 continue;
             };
             for path in &deleted {
                 let Ok(rows) = statement.query_map(
-                    params![path, crate::context_graph::FileEdgeKind::Dependency as i64],
+                    params![
+                        path,
+                        crate::context_graph::FileEdgeKind::Dependency as i64,
+                        crate::context_graph::FileEdgeKind::Config as i64,
+                    ],
                     |row| row.get::<_, String>(0),
                 ) else {
                     continue;
@@ -1943,6 +1947,27 @@ fn add_file_edge_dependents(
             };
             if new_targets.contains(&index_path_string(&target)) {
                 owners.insert(source);
+            }
+        }
+    }
+    let added_manifests = new_targets
+        .iter()
+        .filter(|path| crate::context_graph::is_manifest_path(Path::new(path)))
+        .map(PathBuf::from)
+        .collect::<HashSet<_>>();
+    if !added_manifests.is_empty() {
+        for source in current_snapshot.files.keys() {
+            if changed.contains(source) || deleted.contains(source) {
+                continue;
+            }
+            if crate::context_graph::configuration_target(
+                &workspace.root,
+                Some(current_snapshot),
+                Path::new(source),
+            )
+            .is_some_and(|manifest| added_manifests.contains(&manifest))
+            {
+                owners.insert(source.clone());
             }
         }
     }
@@ -4660,6 +4685,58 @@ mod tests {
             )
             .unwrap();
         assert_eq!(edge, 1);
+    }
+
+    #[test]
+    #[serial]
+    fn adding_manifest_reindexes_configured_sources() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::write(root.path().join("src/lib.rs"), "pub fn run() {}\n").unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let summary = index_workspace(&workspace, &model).unwrap();
+        assert_eq!(summary.indexed_files, 2);
+
+        let conn = open_sqlite_readonly(&workspace.sqlite_path()).unwrap();
+        let edge = conn
+            .query_row(
+                "SELECT COUNT(*) FROM file_edges
+                 WHERE source_path = 'src/lib.rs'
+                   AND target_path = 'Cargo.toml'
+                   AND kind = ?1",
+                [crate::context_graph::FileEdgeKind::Config as i64],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(edge, 1);
+        drop(conn);
+
+        fs::remove_file(root.path().join("Cargo.toml")).unwrap();
+        let summary = index_workspace(&workspace, &model).unwrap();
+        assert_eq!(summary.indexed_files, 1);
+        assert_eq!(summary.deleted_files, 1);
+
+        let conn = open_sqlite_readonly(&workspace.sqlite_path()).unwrap();
+        let edge = conn
+            .query_row(
+                "SELECT COUNT(*) FROM file_edges
+                 WHERE source_path = 'src/lib.rs' AND kind = ?1",
+                [crate::context_graph::FileEdgeKind::Config as i64],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(edge, 0);
     }
 
     #[test]
