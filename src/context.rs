@@ -663,7 +663,11 @@ fn likely_called_names(text: &str) -> Vec<String> {
             let is_definition = ["def", "fn", "func", "function", "fun"]
                 .iter()
                 .any(|keyword| prefix.ends_with(keyword));
-            if name.len() >= 3 && !is_definition && !is_generic_call(name) {
+            if name.len() >= 3
+                && !is_definition
+                && !is_generic_call(name)
+                && !has_assertion_receiver(prefix)
+            {
                 names.push(name.to_string());
             }
         }
@@ -685,9 +689,17 @@ fn is_generic_call(name: &str) -> bool {
             | "context"
             | "debugassert"
             | "debugasserteq"
+            | "deepequal"
+            | "deepstrictequal"
             | "describe"
+            | "doesnotmatch"
+            | "doesnotreject"
+            | "doesnotthrow"
             | "eprint"
             | "eprintln"
+            | "eq"
+            | "equal"
+            | "equals"
             | "expect"
             | "fail"
             | "fixture"
@@ -697,24 +709,42 @@ fn is_generic_call(name: &str) -> bool {
             | "it"
             | "match"
             | "mock"
+            | "notdeepequal"
+            | "notequal"
+            | "notstrictequal"
             | "ok"
             | "parametrize"
             | "patch"
             | "print"
             | "println"
             | "raises"
+            | "rejects"
             | "setuptest"
             | "some"
             | "specify"
             | "spyon"
+            | "strictequal"
             | "suite"
             | "teardowntest"
             | "test"
+            | "throws"
             | "vec"
             | "xdescribe"
             | "xit"
             | "xtest"
     )
+}
+
+fn has_assertion_receiver(prefix: &str) -> bool {
+    let Some(receiver) = prefix.strip_suffix('.').and_then(|prefix| {
+        prefix
+            .rsplit(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .find(|part| !part.is_empty())
+    }) else {
+        return false;
+    };
+    let receiver = receiver.to_ascii_lowercase().replace('_', "");
+    matches!(receiver.as_str(), "assert" | "expect" | "should") || receiver.ends_with("assert")
 }
 
 fn task_symbols(task: &str) -> Vec<String> {
@@ -1314,11 +1344,37 @@ mod tests {
     }
 
     #[test]
+    fn inferred_anchors_skip_assertion_methods() {
+        for preview in [
+            "assert.equal(validateToken(''), false);",
+            "should.equal(validateToken(''), false);",
+        ] {
+            let primary = vec![SearchHit {
+                file_path: PathBuf::from("src/auth.test.ts"),
+                start_line: 1,
+                end_line: 1,
+                preview: preview.to_string(),
+                reason: String::new(),
+                score: 1.0,
+                sources: Vec::new(),
+                neural_requested: false,
+                neural_executed: false,
+            }];
+            assert_eq!(
+                anchor_symbols("fix authentication failures", &primary),
+                ["validateToken"],
+                "{preview}"
+            );
+        }
+    }
+
+    #[test]
     fn generic_test_calls_cover_common_framework_shapes() {
         for call in [
             "assertEqual",
             "beforeEach",
             "describe",
+            "equal",
             "expect",
             "raises",
             "spyOn",

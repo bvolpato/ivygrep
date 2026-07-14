@@ -516,7 +516,21 @@ fn looks_like_definition(line: &str, name_offset: usize) -> bool {
     }
     let has_definition_keyword = prefix
         .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
-        .any(|part| matches!(part, "fn" | "def" | "func" | "function"));
+        .any(|part| {
+            matches!(
+                part,
+                "class"
+                    | "def"
+                    | "enum"
+                    | "fn"
+                    | "func"
+                    | "function"
+                    | "interface"
+                    | "record"
+                    | "struct"
+                    | "trait"
+            )
+        });
     if has_definition_keyword {
         return true;
     }
@@ -1467,6 +1481,24 @@ mod tests {
         assert_eq!(callers[0].start_line, 2);
         assert!(callers[0].preview.contains("fn run()"));
         assert!(callers[0].preview.contains("parse();"));
+    }
+
+    #[test]
+    fn type_declarations_are_not_call_sites() {
+        for (source, symbol) in [
+            ("pub struct UserService(pub u64);", "userservice"),
+            ("data class UserService(val id: Long)", "userservice"),
+            ("record UserService(String id) {}", "userservice"),
+        ] {
+            assert!(
+                matching_call_lines(source, symbol, 1, 1).is_empty(),
+                "{source}"
+            );
+        }
+        assert_eq!(
+            matching_call_lines("let service = UserService(7);", "userservice", 1, 1),
+            [(1, "let service = UserService(7);".to_string())]
+        );
     }
 
     #[test]
