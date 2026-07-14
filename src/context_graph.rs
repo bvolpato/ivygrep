@@ -365,7 +365,7 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
             }
             "javascript" | "typescript" => {
                 if (line.starts_with("import ") || line.starts_with("export "))
-                    && let Some(spec) = last_quoted_value(line)
+                    && let Some(spec) = javascript_module_specifier(line)
                 {
                     specs.insert(spec);
                 }
@@ -398,12 +398,17 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                     .strip_prefix("import ")
                     .or_else(|| line.strip_prefix("using "))
                 {
-                    specs.insert(
+                    let value = value.trim_end_matches(';');
+                    let static_import = language == "java" && value.starts_with("static ");
+                    let value = value.strip_prefix("static ").unwrap_or(value);
+                    let wildcard = value.ends_with(".*");
+                    let value = value.trim_end_matches(".*");
+                    let value = if static_import && !wildcard {
+                        value.rsplit_once('.').map_or(value, |(owner, _)| owner)
+                    } else {
                         value
-                            .trim_end_matches(';')
-                            .trim_end_matches(".*")
-                            .to_string(),
-                    );
+                    };
+                    specs.insert(value.to_string());
                 }
             }
             "ruby" => {
@@ -544,24 +549,15 @@ fn first_quoted_value(value: &str) -> Option<String> {
     None
 }
 
-fn last_quoted_value(value: &str) -> Option<String> {
-    let mut result = None;
-    for (offset, character) in value.char_indices() {
-        if character != '"' && character != '\'' {
-            continue;
-        }
-        let rest = &value[offset + 1..];
-        if let Some(end) = rest.find(character) {
-            result = Some(rest[..end].to_string());
-        }
-    }
-    result
-}
-
 fn value_after_marker(value: &str, marker: &str) -> Option<String> {
     value
         .find(marker)
         .and_then(|offset| first_quoted_value(&value[offset + marker.len()..]))
+}
+
+fn javascript_module_specifier(line: &str) -> Option<String> {
+    value_after_marker(line, " from ")
+        .or_else(|| line.strip_prefix("import ").and_then(first_quoted_value))
 }
 
 fn resolve_local_dependency(
@@ -1636,6 +1632,24 @@ mod tests {
     }
 
     #[test]
+    fn typescript_import_attributes_keep_module_specifier() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::write(root.path().join("src/schema.json"), "{}\n").unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("src/main.ts"),
+            "import schema from './schema.json' assert { type: 'json' };\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("src/schema.json")
+        }));
+    }
+
+    #[test]
     fn python_relative_imports_resolve_from_source_directory() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("app/auth")).unwrap();
@@ -1741,6 +1755,29 @@ mod tests {
         assert!(edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Dependency
                 && edge.target_path == Path::new("src/main/java/com/acme/project/util/Helper.java")
+        }));
+    }
+
+    #[test]
+    fn java_static_imports_resolve_owning_class() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src/main/java/com/acme/util")).unwrap();
+        fs::create_dir_all(root.path().join("src/main/java/com/acme/service")).unwrap();
+        fs::write(
+            root.path().join("src/main/java/com/acme/util/Auth.java"),
+            "package com.acme.util; public class Auth { public static void check() {} }\n",
+        )
+        .unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("src/main/java/com/acme/service/Service.java"),
+            "import static com.acme.util.Auth.check;\nclass Service { void run() { check(); } }\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("src/main/java/com/acme/util/Auth.java")
         }));
     }
 

@@ -545,7 +545,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     .unwrap();
     std::fs::write(
         root.join("frontend/main.ts"),
-        "import { runWidgetHelper } from \"./helper.js\";\n\nexport function start_nodenext_widget() { return runWidgetHelper(); }\n",
+        "import { runWidgetHelper } from \"./helper.js\";\nimport schema from \"./schema.json\" assert { type: \"json\" };\n\nexport function start_nodenext_widget() { return runWidgetHelper(); }\nexport function start_schema_widget() { return schema.release; }\n",
     )
     .unwrap();
     std::fs::write(
@@ -565,7 +565,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     .unwrap();
     std::fs::write(
         root.join("src/main/java/com/acme/project/module/Service.java"),
-        "package com.acme.project.module;\nimport com.acme.project.util.Helper;\nclass Service { void assembleMavenRelease() { Helper.run(); } }\n",
+        "package com.acme.project.module;\nimport com.acme.project.util.Helper;\nimport static com.acme.project.util.Auth.check;\nclass Service {\n    void assembleMavenRelease() { Helper.run(); }\n    void verifyStaticRelease() { check(); }\n}\n",
     )
     .unwrap();
     std::fs::write(
@@ -615,6 +615,19 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         !has_graph_dependency(&before_bazel_root, "root_defs.bzl"),
         "{before_bazel_root:#}"
     );
+    let before_static_java = run_context("change verifyStaticRelease");
+    assert!(
+        !has_graph_dependency(
+            &before_static_java,
+            "src/main/java/com/acme/project/util/Auth.java"
+        ),
+        "{before_static_java:#}"
+    );
+    let before_import_attribute = run_context("change start_schema_widget");
+    assert!(
+        !has_graph_dependency(&before_import_attribute, "frontend/schema.json"),
+        "{before_import_attribute:#}"
+    );
 
     std::fs::write(
         root.join("app/helper.py"),
@@ -631,6 +644,12 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         "package com.acme.project.util;\nclass Helper { static void run() {} }\n",
     )
     .unwrap();
+    std::fs::write(
+        root.join("src/main/java/com/acme/project/util/Auth.java"),
+        "package com.acme.project.util;\nclass Auth { static void check() {} }\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("frontend/schema.json"), "{\"release\": true}\n").unwrap();
     std::fs::write(
         root.join("root_defs.bzl"),
         "def root_rule():\n    return \"root configured\"\n",
@@ -672,6 +691,21 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     assert!(
         has_graph_dependency(&bazel_root, "root_defs.bzl"),
         "{bazel_root:#}"
+    );
+
+    let static_java = run_context("change verifyStaticRelease");
+    assert!(
+        has_graph_dependency(
+            &static_java,
+            "src/main/java/com/acme/project/util/Auth.java"
+        ),
+        "{static_java:#}"
+    );
+
+    let import_attribute = run_context("change start_schema_widget");
+    assert!(
+        has_graph_dependency(&import_attribute, "frontend/schema.json"),
+        "{import_attribute:#}"
     );
 }
 
