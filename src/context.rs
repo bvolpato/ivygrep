@@ -907,6 +907,17 @@ fn looks_like_file_name(token: &str) -> bool {
 }
 
 fn is_generic_symbol(symbol: &str) -> bool {
+    let mut characters = symbol.chars();
+    let is_type_name = characters
+        .next()
+        .is_some_and(|first| first.is_ascii_uppercase())
+        && characters
+            .clone()
+            .any(|character| character.is_ascii_lowercase())
+        && characters.all(|character| character.is_ascii_alphanumeric());
+    if is_type_name {
+        return false;
+    }
     matches!(
         symbol.to_ascii_lowercase().as_str(),
         "main"
@@ -1394,6 +1405,27 @@ mod tests {
             anchor_symbols("fix authentication failures", &primary),
             ["validate_token"]
         );
+    }
+
+    #[test]
+    fn inferred_anchors_preserve_pascal_case_type_names() {
+        let primary = vec![SearchHit {
+            file_path: PathBuf::from("src/token.rs"),
+            start_line: 1,
+            end_line: 1,
+            preview: "pub struct Token(pub String);".to_string(),
+            reason: String::new(),
+            score: 1.0,
+            sources: Vec::new(),
+            neural_requested: false,
+            neural_executed: false,
+        }];
+        assert_eq!(
+            anchor_symbols("fix authentication failures", &primary),
+            ["Token"]
+        );
+        assert!(is_generic_symbol("token"));
+        assert!(!is_generic_symbol("Token"));
     }
 
     #[test]
