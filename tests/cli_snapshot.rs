@@ -529,6 +529,8 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::create_dir_all(root.join("cmd/server")).unwrap();
     std::fs::create_dir_all(root.join("frontend")).unwrap();
     std::fs::create_dir_all(root.join("internal/auth")).unwrap();
+    std::fs::create_dir_all(root.join("src/Acme/Service")).unwrap();
+    std::fs::create_dir_all(root.join("src/Acme/Util")).unwrap();
     std::fs::create_dir_all(root.join("src/main/groovy/com/acme/project/module")).unwrap();
     std::fs::create_dir_all(root.join("src/main/groovy/com/acme/project/util")).unwrap();
     std::fs::create_dir_all(root.join("src/main/java/com/acme/project/module")).unwrap();
@@ -578,6 +580,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::write(
         root.join("BUILD.bazel"),
         "load(\"//:root_defs.bzl\", \"root_rule\")\n\ndef assemble_root_release():\n    return root_rule()\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/Acme/Service/Service.cs"),
+        "using static Acme.Util.Auth;\nclass Service { bool verifyCsharpRelease() => Check(); }\n",
     )
     .unwrap();
 
@@ -643,6 +650,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         ),
         "{before_groovy:#}"
     );
+    let before_static_csharp = run_context("change verifyCsharpRelease");
+    assert!(
+        !has_graph_dependency(&before_static_csharp, "src/Acme/Util/Auth.cs"),
+        "{before_static_csharp:#}"
+    );
 
     std::fs::write(
         root.join("app/helper.py"),
@@ -673,6 +685,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::write(
         root.join("root_defs.bzl"),
         "def root_rule():\n    return \"root configured\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/Acme/Util/Auth.cs"),
+        "namespace Acme.Util; static class Auth { public static bool Check() => true; }\n",
     )
     .unwrap();
     Command::new(assert_cmd::cargo::cargo_bin!("ig"))
@@ -735,6 +752,12 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
             "src/main/groovy/com/acme/project/util/Helper.groovy"
         ),
         "{groovy:#}"
+    );
+
+    let static_csharp = run_context("change verifyCsharpRelease");
+    assert!(
+        has_graph_dependency(&static_csharp, "src/Acme/Util/Auth.cs"),
+        "{static_csharp:#}"
     );
 }
 

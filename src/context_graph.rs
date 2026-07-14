@@ -410,17 +410,21 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                         .unwrap_or(value)
                         .trim_end()
                         .trim_end_matches(';');
-                    let static_import =
-                        matches!(language, "java" | "groovy") && value.starts_with("static ");
-                    let value = value.strip_prefix("static ").unwrap_or(value);
-                    let wildcard =
-                        value.ends_with(".*") || language == "scala" && value.ends_with("._");
-                    let value = value.trim_end_matches(".*").trim_end_matches("._");
-                    let value = if static_import && !wildcard {
-                        value.rsplit_once('.').map_or(value, |(owner, _)| owner)
+                    let static_import = value.starts_with("static ");
+                    let value = if matches!(language, "java" | "groovy" | "csharp") {
+                        value.strip_prefix("static ").unwrap_or(value)
                     } else {
                         value
                     };
+                    let wildcard =
+                        value.ends_with(".*") || language == "scala" && value.ends_with("._");
+                    let value = value.trim_end_matches(".*").trim_end_matches("._");
+                    let value =
+                        if static_import && matches!(language, "java" | "groovy") && !wildcard {
+                            value.rsplit_once('.').map_or(value, |(owner, _)| owner)
+                        } else {
+                            value
+                        };
                     specs.insert(value.to_string());
                 }
             }
@@ -1807,6 +1811,29 @@ mod tests {
         assert!(edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Dependency
                 && edge.target_path == Path::new("src/main/java/com/acme/util/Auth.java")
+        }));
+    }
+
+    #[test]
+    fn csharp_static_using_resolves_owning_class() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src/Acme/Util")).unwrap();
+        fs::create_dir_all(root.path().join("src/Acme/Service")).unwrap();
+        fs::write(
+            root.path().join("src/Acme/Util/Auth.cs"),
+            "namespace Acme.Util; public static class Auth { public static bool Check() => true; }\n",
+        )
+        .unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("src/Acme/Service/Service.cs"),
+            "using static Acme.Util.Auth; // access check\nclass Service { bool Run() => Check(); }\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("src/Acme/Util/Auth.cs")
         }));
     }
 
