@@ -525,6 +525,16 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     let root = tmp.path().join("workspace");
     let home = tmp.path().join("ivygrep_home");
     init_git_repo(&root);
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"mixed-workspace\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("package.json"),
+        "{\"name\":\"mixed-workspace\",\"scripts\":{\"start_schema_widget\":\"vite\"}}\n",
+    )
+    .unwrap();
     std::fs::create_dir_all(root.join("app")).unwrap();
     std::fs::create_dir_all(root.join("cmd/server")).unwrap();
     std::fs::create_dir_all(root.join("frontend")).unwrap();
@@ -533,6 +543,8 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::create_dir_all(root.join("src/Acme/Util")).unwrap();
     std::fs::create_dir_all(root.join("src/main/kotlin/com/acme/project/alias")).unwrap();
     std::fs::create_dir_all(root.join("src/main/kotlin/com/acme/project/module")).unwrap();
+    std::fs::create_dir_all(root.join("src/main/scala/com/acme/project/grouped")).unwrap();
+    std::fs::create_dir_all(root.join("src/main/scala/com/acme/project/module")).unwrap();
     std::fs::create_dir_all(root.join("src/main/groovy/com/acme/project/module")).unwrap();
     std::fs::create_dir_all(root.join("src/main/groovy/com/acme/project/util")).unwrap();
     std::fs::create_dir_all(root.join("src/main/java/com/acme/project/module")).unwrap();
@@ -594,6 +606,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         "package com.acme.project.module\nimport com.acme.project.alias.Helper as AliasHelper\nclass AliasService { fun assembleKotlinAliasRelease() = AliasHelper.run() }\n",
     )
     .unwrap();
+    std::fs::write(
+        root.join("src/main/scala/com/acme/project/module/GroupedService.scala"),
+        "package com.acme.project.module\nimport com.acme.project.grouped.{Auth, Clock}\nclass GroupedService { def assembleScalaGroupedRelease() = Auth.check() && Clock.ready() }\n",
+    )
+    .unwrap();
 
     let run_context = |query: &str| {
         let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
@@ -615,6 +632,15 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
                     .as_array()
                     .unwrap()
                     .contains(&serde_json::json!("graph_dependency"))
+        })
+    };
+    let has_graph_source = |value: &serde_json::Value, expected: &str, source: &str| {
+        value["items"].as_array().unwrap().iter().any(|item| {
+            item["file_path"] == expected
+                && item["sources"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!(source))
         })
     };
 
@@ -649,6 +675,14 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         !has_graph_dependency(&before_import_attribute, "frontend/schema.json"),
         "{before_import_attribute:#}"
     );
+    assert!(
+        has_graph_source(&before_import_attribute, "package.json", "graph_config"),
+        "{before_import_attribute:#}"
+    );
+    assert!(
+        !has_graph_source(&before_import_attribute, "Cargo.toml", "graph_config"),
+        "{before_import_attribute:#}"
+    );
     let before_groovy = run_context("change assembleGroovyRelease");
     assert!(
         !has_graph_dependency(
@@ -675,6 +709,14 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         ),
         "{before_alias_kotlin:#}"
     );
+    let before_grouped_scala = run_context("change assembleScalaGroupedRelease");
+    for target in ["Auth.scala", "Clock.scala"] {
+        let expected = format!("src/main/scala/com/acme/project/grouped/{target}");
+        assert!(
+            !has_graph_dependency(&before_grouped_scala, &expected),
+            "{before_grouped_scala:#}"
+        );
+    }
 
     std::fs::write(
         root.join("app/helper.py"),
@@ -723,6 +765,17 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         "package com.acme.project.alias\nclass Helper { companion object { fun run() = true } }\n",
     )
     .unwrap();
+    for (owner, member) in [("Auth", "check"), ("Clock", "ready")] {
+        std::fs::write(
+            root.join(format!(
+                "src/main/scala/com/acme/project/grouped/{owner}.scala"
+            )),
+            format!(
+                "package com.acme.project.grouped\nobject {owner} {{ def {member}() = true }}\n"
+            ),
+        )
+        .unwrap();
+    }
     Command::new(assert_cmd::cargo::cargo_bin!("ig"))
         .current_dir(&root)
         .env("IVYGREP_HOME", &home)
@@ -775,6 +828,10 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         has_graph_dependency(&import_attribute, "frontend/schema.json"),
         "{import_attribute:#}"
     );
+    assert!(
+        has_graph_source(&import_attribute, "package.json", "graph_config"),
+        "{import_attribute:#}"
+    );
 
     let groovy = run_context("change assembleGroovyRelease");
     assert!(
@@ -805,11 +862,20 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         ),
         "{alias_kotlin:#}"
     );
+
+    let grouped_scala = run_context("change assembleScalaGroupedRelease");
+    for target in ["Auth.scala", "Clock.scala"] {
+        let expected = format!("src/main/scala/com/acme/project/grouped/{target}");
+        assert!(
+            has_graph_dependency(&grouped_scala, &expected),
+            "{grouped_scala:#}"
+        );
+    }
 }
 
 #[test]
 #[serial]
-fn cli_context_e2e_preserves_adjacent_jest_tests_after_source_edit() {
+fn cli_context_e2e_preserves_adjacent_tests_after_source_edits() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("workspace");
     let home = tmp.path().join("ivygrep_home");
@@ -825,20 +891,23 @@ fn cli_context_e2e_preserves_adjacent_jest_tests_after_source_edit() {
         "test(\"release widget\", () => render_release_widget());\n",
     )
     .unwrap();
+    std::fs::write(
+        root.join("src/auth.py"),
+        "def refresh_colocated_auth():\n    return 1\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/test_auth.py"),
+        "def test_refresh_colocated_auth():\n    assert refresh_colocated_auth() == 1\n",
+    )
+    .unwrap();
 
-    let run_context = || {
+    let run_context = |query: &str| {
         let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
             .current_dir(&root)
             .env("IVYGREP_HOME", &home)
             .env("IVYGREP_NO_AUTOSPAWN", "1")
-            .args([
-                "--json",
-                "--hash",
-                "context",
-                "--budget",
-                "3000",
-                "change render_release_widget",
-            ])
+            .args(["--json", "--hash", "context", "--budget", "3000", query])
             .assert()
             .success()
             .get_output()
@@ -846,22 +915,39 @@ fn cli_context_e2e_preserves_adjacent_jest_tests_after_source_edit() {
             .clone();
         serde_json::from_slice::<serde_json::Value>(&output).unwrap()
     };
-    let includes_test = |value: &serde_json::Value| {
+    let includes_graph_test = |value: &serde_json::Value, expected: &str| {
         value["items"].as_array().unwrap().iter().any(|item| {
-            item["file_path"] == "src/__tests__/widget.test.ts"
+            item["file_path"] == expected
                 && item["roles"]
                     .as_array()
                     .unwrap()
                     .contains(&serde_json::json!("test"))
+                && item["sources"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("graph_test"))
         })
     };
 
-    let before = run_context();
-    assert!(includes_test(&before), "{before:#}");
+    let before_jest = run_context("change render_release_widget");
+    assert!(
+        includes_graph_test(&before_jest, "src/__tests__/widget.test.ts"),
+        "{before_jest:#}"
+    );
+    let before_pytest = run_context("change refresh_colocated_auth");
+    assert!(
+        includes_graph_test(&before_pytest, "src/test_auth.py"),
+        "{before_pytest:#}"
+    );
 
     std::fs::write(
         root.join("src/widget.ts"),
         "export function render_release_widget() { return 2; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/auth.py"),
+        "def refresh_colocated_auth():\n    return 2\n",
     )
     .unwrap();
     Command::new(assert_cmd::cargo::cargo_bin!("ig"))
@@ -872,8 +958,16 @@ fn cli_context_e2e_preserves_adjacent_jest_tests_after_source_edit() {
         .assert()
         .success();
 
-    let after = run_context();
-    assert!(includes_test(&after), "{after:#}");
+    let after_jest = run_context("change render_release_widget");
+    assert!(
+        includes_graph_test(&after_jest, "src/__tests__/widget.test.ts"),
+        "{after_jest:#}"
+    );
+    let after_pytest = run_context("change refresh_colocated_auth");
+    assert!(
+        includes_graph_test(&after_pytest, "src/test_auth.py"),
+        "{after_pytest:#}"
+    );
 }
 
 #[test]

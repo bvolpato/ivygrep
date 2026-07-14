@@ -175,7 +175,7 @@ pub(crate) fn extract_file_graph(
     }
 
     if is_source_language(language)
-        && let Some(manifest) = nearest_manifest(root, snapshot, rel_path)
+        && let Some(manifest) = nearest_manifest(root, snapshot, rel_path, language)
     {
         insert_edge(&mut edges, rel_path, &manifest, FileEdgeKind::Config);
     }
@@ -256,7 +256,7 @@ pub(crate) fn configuration_target(
 ) -> Option<PathBuf> {
     language_for_path(rel_path)
         .filter(|language| is_source_language(language))
-        .and_then(|_| nearest_manifest(root, snapshot, rel_path))
+        .and_then(|language| nearest_manifest(root, snapshot, rel_path, language))
 }
 
 fn supports_dependency_scan(language: &str) -> bool {
@@ -439,7 +439,11 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                         } else {
                             value
                         };
-                    specs.insert(value.to_string());
+                    if language == "scala" {
+                        specs.extend(expand_grouped_spec(value));
+                    } else {
+                        specs.insert(value.to_string());
+                    }
                 }
             }
             "ruby" => {
@@ -574,12 +578,19 @@ fn expand_grouped_spec(value: &str) -> Vec<String> {
     let Some(group) = rest.split('}').next() else {
         return vec![prefix.trim_end_matches("::").to_string()];
     };
-    let prefix = prefix.trim_end_matches("::");
+    let (prefix, separator) = if let Some(prefix) = prefix.strip_suffix("::") {
+        (prefix, "::")
+    } else if let Some(prefix) = prefix.strip_suffix('.') {
+        (prefix, ".")
+    } else {
+        (prefix, "::")
+    };
     group
         .split(',')
         .filter_map(|member| {
             let member = member.split_whitespace().next()?;
-            (!member.is_empty() && member != "self").then(|| format!("{prefix}::{member}"))
+            (!member.is_empty() && !matches!(member, "self" | "_" | "*"))
+                .then(|| format!("{prefix}{separator}{member}"))
         })
         .collect()
 }
@@ -943,10 +954,11 @@ fn nearest_manifest(
     root: &Path,
     snapshot: Option<&MerkleSnapshot>,
     rel_path: &Path,
+    language: &str,
 ) -> Option<PathBuf> {
     let parent = rel_path.parent().unwrap_or_else(|| Path::new(""));
     for directory in parent.ancestors() {
-        for manifest in MANIFEST_NAMES {
+        for manifest in manifest_names_for_language(language) {
             let candidate = directory.join(manifest);
             if candidate != rel_path
                 && existing_workspace_file(root, snapshot, &candidate).is_some()
@@ -956,6 +968,23 @@ fn nearest_manifest(
         }
     }
     None
+}
+
+fn manifest_names_for_language(language: &str) -> &'static [&'static str] {
+    match language {
+        "rust" => &["Cargo.toml"],
+        "javascript" | "typescript" => &["package.json"],
+        "python" => &["pyproject.toml"],
+        "go" => &["go.mod"],
+        "java" | "kotlin" | "scala" | "groovy" => &["pom.xml", "build.gradle", "build.gradle.kts"],
+        "ruby" => &["Gemfile"],
+        "php" => &["composer.json"],
+        "swift" => &["Package.swift"],
+        "elixir" => &["mix.exs"],
+        "c" | "cpp" | "objc" => &["CMakeLists.txt"],
+        "starlark" => &["MODULE.bazel", "WORKSPACE"],
+        _ => &[],
+    }
 }
 
 fn likely_test_edges(
@@ -991,6 +1020,7 @@ fn likely_test_edges(
             candidates.insert(base.join(format!("{production_stem}.{extension}")));
         }
     } else {
+        candidates.insert(parent.join(format!("test_{stem}.{extension}")));
         for suffix in ["_test", "_tests", ".test", ".spec"] {
             candidates.insert(parent.join(format!("{stem}{suffix}.{extension}")));
         }
@@ -1438,6 +1468,26 @@ mod tests {
     }
 
     #[test]
+    fn config_edges_follow_source_ecosystem() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("Cargo.toml"), "[package]\nname='demo'\n").unwrap();
+        fs::write(root.path().join("package.json"), "{\"name\":\"demo\"}\n").unwrap();
+
+        for (source, expected, unrelated) in [
+            ("src/lib.rs", "Cargo.toml", "package.json"),
+            ("frontend/main.ts", "package.json", "Cargo.toml"),
+        ] {
+            let edges = extract_file_edges(root.path(), None, Path::new(source), "");
+            assert!(edges.iter().any(|edge| {
+                edge.kind == FileEdgeKind::Config && edge.target_path == Path::new(expected)
+            }));
+            assert!(!edges.iter().any(|edge| {
+                edge.kind == FileEdgeKind::Config && edge.target_path == Path::new(unrelated)
+            }));
+        }
+    }
+
+    #[test]
     fn missing_markdown_targets_are_persisted_for_later_resolution() {
         let root = tempfile::tempdir().unwrap();
         let content = "Read the [release guide](docs/release-guide.md).\n";
@@ -1542,6 +1592,29 @@ mod tests {
         );
         assert!(edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Test && edge.target_path == Path::new("tests/auth_test.rs")
+        }));
+    }
+
+    #[test]
+    fn source_file_finds_colocated_pytest_module() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::write(
+            root.path().join("src/test_auth.py"),
+            "def test_auth(): pass\n",
+        )
+        .unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("src/auth.py"),
+            "def authenticate(): pass\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Test
+                && edge.source_path == Path::new("src/auth.py")
+                && edge.target_path == Path::new("src/test_auth.py")
         }));
     }
 
@@ -1986,6 +2059,33 @@ mod tests {
             edge.kind == FileEdgeKind::Dependency
                 && edge.target_path == Path::new("src/main/scala/com/acme/util/Helpers.scala")
         }));
+    }
+
+    #[test]
+    fn scala_grouped_imports_resolve_independently() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src/main/scala/com/acme/util")).unwrap();
+        for owner in ["Auth", "Clock"] {
+            fs::write(
+                root.path()
+                    .join(format!("src/main/scala/com/acme/util/{owner}.scala")),
+                format!("package com.acme.util\nobject {owner}\n"),
+            )
+            .unwrap();
+        }
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("src/main/scala/com/acme/service/Service.scala"),
+            "import com.acme.util.{Auth => AliasAuth, Clock}\nclass Service\n",
+        );
+        for owner in ["Auth", "Clock"] {
+            let expected = PathBuf::from(format!("src/main/scala/com/acme/util/{owner}.scala"));
+            assert!(edges.iter().any(|edge| {
+                edge.kind == FileEdgeKind::Dependency && edge.target_path == expected
+            }));
+        }
     }
 
     #[test]
