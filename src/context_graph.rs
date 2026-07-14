@@ -833,12 +833,15 @@ fn likely_test_edges(
             .unwrap_or(rel_path);
         candidates.insert(PathBuf::from("tests").join(relative_under_source));
         candidates.insert(PathBuf::from("test").join(relative_under_source));
+        let mirrored_parent = relative_under_source
+            .parent()
+            .unwrap_or_else(|| Path::new(""));
         for directory in ["tests", "test"] {
+            let mirrored_base = PathBuf::from(directory).join(mirrored_parent);
             for suffix in ["_test", "_tests", ".test", ".spec"] {
-                candidates
-                    .insert(PathBuf::from(directory).join(format!("{stem}{suffix}.{extension}")));
+                candidates.insert(mirrored_base.join(format!("{stem}{suffix}.{extension}")));
             }
-            candidates.insert(PathBuf::from(directory).join(format!("test_{stem}.{extension}")));
+            candidates.insert(mirrored_base.join(format!("test_{stem}.{extension}")));
         }
         if let Some(file_name) = rel_path.file_name() {
             candidates.insert(PathBuf::from("tests").join(file_name));
@@ -875,6 +878,7 @@ fn path_looks_like_test(path: &Path) -> bool {
                 || stem.ends_with("_tests")
                 || stem.ends_with(".test")
                 || stem.ends_with(".spec")
+                || stem.starts_with("test_")
         })
 }
 
@@ -1357,6 +1361,25 @@ mod tests {
             edge.kind == FileEdgeKind::Test
                 && edge.source_path == Path::new("src/session.py")
                 && edge.target_path == Path::new("tests/test_session.py")
+        }));
+
+        fs::create_dir_all(root.path().join("src/foo")).unwrap();
+        fs::create_dir_all(root.path().join("tests/foo")).unwrap();
+        fs::write(
+            root.path().join("tests/foo/test_user.py"),
+            "def test_user(): pass\n",
+        )
+        .unwrap();
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("src/foo/user.py"),
+            "def user(): pass\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Test
+                && edge.source_path == Path::new("src/foo/user.py")
+                && edge.target_path == Path::new("tests/foo/test_user.py")
         }));
     }
 
