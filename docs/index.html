@@ -43,7 +43,7 @@
     <nav class="navbar relative z-10 fade-in">
         <div class="container nav-content">
             <a href="#" class="logo">
-                <img src="assets/icon.svg" alt="ivygrep" onerror="this.style.display='none'; this.nextElementSibling.style.display='inline';"/>
+                <img src="assets/icon.svg" alt="ivygrep" width="38" height="34" onerror="this.style.display='none'; this.nextElementSibling.style.display='inline';"/>
                 <span style="display:none;" class="logo-text">ivy<span class="highlight">grep</span></span>
             </a>
             <div class="nav-links">
@@ -66,6 +66,7 @@
         </div>
     </nav>
 
+    <main>
     <!-- Hero -->
     <header class="hero relative z-10">
         <div class="container hero-content">
@@ -74,7 +75,7 @@
                 v1.1.20
             </div>
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
-                <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" onerror="this.src='assets/logo.png'"/>
+                <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" width="190" height="200" onerror="this.src='assets/logo.png'"/>
             </div>
             <h1 class="slide-up delay-1">Search code. Build task context.<br/><span class="highlight-gradient">Never upload your code.</span></h1>
             <p class="subtitle slide-up delay-2">Find code by intent. Traverse dependencies, dependents, symbols, tests, config, and docs. Return one bounded pack through CLI or MCP.</p>
@@ -368,7 +369,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
         <div class="flow-diagram glass-panel fade-in-scroll mt-4">
             <div class="flow-step">
                 <div class="flow-icon pulse-glow">1</div>
-                <h4>Lexical index</h4>
+                <h3>Lexical index</h3>
                 <p>File chunks go into SQLite and Tantivy first, so search works before vector jobs finish.</p>
             </div>
             <div class="flow-arrow">
@@ -376,7 +377,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
             </div>
             <div class="flow-step">
                 <div class="flow-icon pulse-glow">2</div>
-                <h4>Hybrid fusion</h4>
+                <h3>Hybrid fusion</h3>
                 <p>BM25, literal matches, symbols, paths, and vector hits combine through Reciprocal Rank Fusion.</p>
             </div>
             <div class="flow-arrow">
@@ -384,7 +385,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
             </div>
             <div class="flow-step">
                 <div class="flow-icon pulse-glow">3</div>
-                <h4>Local vectors</h4>
+                <h3>Local vectors</h3>
                 <p>The daemon adds hash vectors and locally cached 256-dimensional static-retrieval-v1 vectors in the background. macOS releases use Accelerate-backed CPU math; the shell installer can select Apple Silicon Metal or Linux CUDA archives when available.</p>
             </div>
         </div>
@@ -451,7 +452,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
 
         <div class="lang-grid glass-panel fade-in-scroll mt-4">
             <div class="lang-category">
-                <h4>🌲 Tree-sitter AST <span class="lang-badge">24 languages</span></h4>
+                <h3>🌲 Tree-sitter AST <span class="lang-badge">24 languages</span></h3>
                 <div class="lang-tags">
                     <span class="lang-tag lang-ast">Rust</span>
                     <span class="lang-tag lang-ast">Python</span>
@@ -480,7 +481,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
                 </div>
             </div>
             <div class="lang-category">
-                <h4>📐 Heuristic chunking <span class="lang-badge lang-badge-muted">21 more</span></h4>
+                <h3>📐 Heuristic chunking <span class="lang-badge lang-badge-muted">21 more</span></h3>
                 <div class="lang-tags">
                     <span class="lang-tag">Nim</span>
                     <span class="lang-tag">Groovy</span>
@@ -744,12 +745,14 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
         </div>
     </section>
 
+    </main>
+
     <!-- Footer -->
     <footer class="footer relative z-10">
         <div class="container">
             <div class="footer-content">
                 <div class="footer-brand">
-                    <img src="assets/icon.svg" alt="ivygrep" height="28" onerror="this.style.display='none'"/>
+                    <img src="assets/icon.svg" alt="ivygrep" width="31" height="28" onerror="this.style.display='none'"/>
                     <span class="footer-tagline">Semantic code search that never uploads your code.</span>
                 </div>
                 <div class="footer-links">
@@ -807,7 +810,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
             const textToType = 'ig "where is tax calculated?"';
             typingEl.innerHTML = prompt;
             const outputs = document.querySelectorAll('.output');
-            outputs.forEach(out => { out.style.opacity = '0'; out.style.transform = 'translateY(8px)'; });
+            outputs.forEach(out => { out.style.transform = 'translateY(8px)'; });
 
             setTimeout(() => {
                 let i = 0;
@@ -819,8 +822,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
                         setTimeout(() => {
                             outputs.forEach((out, idx) => {
                                 setTimeout(() => {
-                                    out.style.transition = 'opacity 0.3s ease, transform 0.3s ease';
-                                    out.style.opacity = '1';
+                                    out.style.transition = 'transform 0.3s ease';
                                     out.style.transform = 'translateY(0)';
                                 }, idx * 80);
                             });
