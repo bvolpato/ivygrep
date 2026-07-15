@@ -556,7 +556,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::write(root.join("app/__init__.py"), "").unwrap();
     std::fs::write(
         root.join("service.py"),
-        "from app import helper\n\ndef run_release_helper():\n    return helper.work()\n",
+        "from app import (\n    helper,\n)\n\ndef run_release_helper():\n    return helper.work()\n",
     )
     .unwrap();
     std::fs::write(
@@ -626,7 +626,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     .unwrap();
     std::fs::write(
         root.join("crates/core/tests/release_integration.rs"),
-        "use context_core::crate_auth::verify_crate_auth;\n#[test]\nfn verify_crate_package_release() { verify_crate_auth(); }\n",
+        "use context_core::{\n    crate_auth::verify_crate_auth,\n};\n#[test]\nfn verify_crate_package_release() { verify_crate_auth(); }\n",
     )
     .unwrap();
 

@@ -350,6 +350,8 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
     let mut specs = BTreeSet::new();
     let mut go_import_block = false;
     let mut javascript_static_declaration = false;
+    let mut python_import_module: Option<String> = None;
+    let mut rust_grouped_import: Option<(String, usize)> = None;
     for raw_line in content.lines().take(20_000) {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with("//") {
@@ -358,6 +360,23 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
         match language {
             "rust" => {
                 let line = strip_rust_visibility(line);
+                if let Some((grouped, depth)) = rust_grouped_import.as_mut() {
+                    let value = line
+                        .split("//")
+                        .next()
+                        .unwrap_or(line)
+                        .trim_end()
+                        .trim_end_matches(';');
+                    grouped.push(' ');
+                    grouped.push_str(value);
+                    *depth += value.matches('{').count();
+                    *depth = depth.saturating_sub(value.matches('}').count());
+                    if *depth == 0 {
+                        let (grouped, _) = rust_grouped_import.take().unwrap();
+                        specs.extend(expand_grouped_spec(&grouped));
+                    }
+                    continue;
+                }
                 let value = line
                     .strip_prefix("use ")
                     .or_else(|| line.strip_prefix("mod "));
@@ -369,23 +388,31 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                         .trim_end()
                         .trim_end_matches(';');
                     let value = import_target_without_alias(language, value);
-                    specs.extend(expand_grouped_spec(value));
+                    let depth = value
+                        .matches('{')
+                        .count()
+                        .saturating_sub(value.matches('}').count());
+                    if depth > 0 {
+                        rust_grouped_import = Some((value.to_string(), depth));
+                    } else {
+                        specs.extend(expand_grouped_spec(value));
+                    }
                 }
             }
             "python" => {
-                if let Some(value) = line.strip_prefix("from ") {
+                if let Some(module) = python_import_module.as_deref() {
+                    if !line.starts_with('#') {
+                        insert_python_import_specs(&mut specs, &module, line);
+                    }
+                    if line.contains(')') {
+                        python_import_module = None;
+                    }
+                } else if let Some(value) = line.strip_prefix("from ") {
                     if let Some((module, members)) = value.split_once(" import ") {
                         let module = module.trim();
-                        let members = python_import_members(members);
-                        if !module.is_empty() && module.chars().all(|character| character == '.') {
-                            for member in members {
-                                specs.insert(format!("{module}{member}"));
-                            }
-                        } else {
-                            specs.insert(module.to_string());
-                            for member in members {
-                                specs.insert(format!("{module}.{member}"));
-                            }
+                        insert_python_import_specs(&mut specs, module, members);
+                        if members.trim_start().starts_with('(') && !members.contains(')') {
+                            python_import_module = Some(module.to_string());
                         }
                     }
                 } else if let Some(value) = line.strip_prefix("import ") {
@@ -587,6 +614,20 @@ fn python_import_members(value: &str) -> impl Iterator<Item = &str> {
         .split(',')
         .filter_map(|member| member.split_whitespace().next())
         .filter(|member| !member.is_empty() && *member != "*")
+}
+
+fn insert_python_import_specs(specs: &mut BTreeSet<String>, module: &str, members: &str) {
+    let relative_members = !module.is_empty() && module.chars().all(|character| character == '.');
+    if !relative_members {
+        specs.insert(module.to_string());
+    }
+    for member in python_import_members(members) {
+        specs.insert(if relative_members {
+            format!("{module}{member}")
+        } else {
+            format!("{module}.{member}")
+        });
+    }
 }
 
 fn import_target_without_alias<'a>(language: &str, value: &'a str) -> &'a str {
@@ -1660,7 +1701,7 @@ mod tests {
             root.path(),
             None,
             Path::new("src/lib.rs"),
-            "use crate::auth::{token, session};\n",
+            "use crate::auth::{\n    token,\n    session,\n};\n",
         );
         let targets = edges
             .iter()
@@ -2061,7 +2102,7 @@ mod tests {
             root.path(),
             None,
             Path::new("service.py"),
-            "from app import helper\n",
+            "from app import (\n    helper,\n)\n",
         );
         assert!(edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Dependency && edge.target_path == Path::new("app/helper.py")
