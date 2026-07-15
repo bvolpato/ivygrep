@@ -257,7 +257,10 @@ pub(crate) fn resolve_dependency_spec(
 }
 
 pub(crate) fn dependency_lookup_keys(value: &str) -> BTreeSet<String> {
-    let value = value.strip_prefix("mod/").unwrap_or(value);
+    let value = value
+        .strip_prefix("mod/")
+        .or_else(|| value.strip_prefix("pathmod/"))
+        .unwrap_or(value);
     value
         .split(|character: char| !character.is_alphanumeric() && character != '_')
         .map(str::trim)
@@ -362,6 +365,7 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
     let mut javascript_static_declaration = false;
     let mut python_import_module: Option<String> = None;
     let mut rust_grouped_import: Option<(String, usize)> = None;
+    let mut rust_module_path: Option<String> = None;
     let mut scala_grouped_import: Option<(String, usize)> = None;
     let mut starlark_load = false;
     for raw_line in content.lines().take(20_000) {
@@ -371,6 +375,17 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
         }
         match language {
             "rust" => {
+                let mut line = line;
+                if line.starts_with("#[path") {
+                    rust_module_path = first_quoted_value(line);
+                    line = line
+                        .split_once(']')
+                        .map(|(_, remainder)| remainder.trim())
+                        .unwrap_or("");
+                    if line.is_empty() {
+                        continue;
+                    }
+                }
                 let line = strip_rust_visibility(line);
                 if let Some((grouped, depth)) = rust_grouped_import.as_mut() {
                     let value = line
@@ -392,9 +407,14 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                 if let Some(value) = line.strip_prefix("mod ") {
                     let value = value.split("//").next().unwrap_or(value).trim_end();
                     if let Some(module) = value.strip_suffix(';') {
-                        specs.insert(format!("mod/{}", module.trim()));
+                        let spec = rust_module_path
+                            .take()
+                            .map(|path| format!("pathmod/{path}"))
+                            .unwrap_or_else(|| format!("mod/{}", module.trim()));
+                        specs.insert(spec);
                     }
                 } else if let Some(value) = line.strip_prefix("use ") {
+                    rust_module_path = None;
                     let value = value
                         .split("//")
                         .next()
@@ -411,6 +431,8 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                     } else {
                         specs.extend(expand_grouped_spec(value));
                     }
+                } else if !line.starts_with("#[") {
+                    rust_module_path = None;
                 }
             }
             "python" => {
@@ -838,6 +860,7 @@ fn resolve_local_dependency(
         dart_package_source_root = Some(context.source_root);
     }
     let rust_module_declaration = language == "rust" && normalized.starts_with("mod/");
+    let rust_path_module = language == "rust" && normalized.starts_with("pathmod/");
     let python_relative = language == "python" && spec.starts_with('.');
     let starlark_relative = language == "starlark" && spec.starts_with(':');
     let starlark_workspace = language == "starlark" && spec.starts_with("//");
@@ -882,6 +905,7 @@ fn resolve_local_dependency(
         || starlark_relative;
     if language == "rust"
         && !rust_module_declaration
+        && !rust_path_module
         && !crate_relative
         && !source_relative
         && normalized.contains('/')
@@ -908,6 +932,7 @@ fn resolve_local_dependency(
     normalized = normalized
         .strip_prefix("crate/")
         .or_else(|| normalized.strip_prefix("mod/"))
+        .or_else(|| normalized.strip_prefix("pathmod/"))
         .or_else(|| normalized.strip_prefix("self/"))
         .or_else(|| normalized.strip_prefix("@/"))
         .or_else(|| normalized.strip_prefix("~/"))
@@ -965,6 +990,8 @@ fn resolve_local_dependency(
     let mut bases = Vec::new();
     if let Some(source_root) = dart_package_source_root {
         bases.push(source_root);
+    } else if rust_path_module {
+        bases.push(source_dir.to_path_buf());
     } else if rust_module_declaration {
         bases.push(rust_module_declaration_base(source_path));
     } else {
@@ -1634,7 +1661,7 @@ fn query_edges(conn: &Connection, seeds: &BTreeSet<String>) -> Result<Vec<Ranked
     Ok(edges)
 }
 
-fn overlay_shadowed_paths(workspace: &Workspace) -> HashSet<String> {
+pub(crate) fn overlay_shadowed_paths(workspace: &Workspace) -> HashSet<String> {
     if !workspace.overlay_sqlite_path().is_file() {
         return HashSet::new();
     }
@@ -2708,6 +2735,38 @@ mod tests {
         }));
         assert!(edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Dependency && edge.target_path == Path::new("src/scoped.rs")
+        }));
+    }
+
+    #[test]
+    fn rust_path_modules_resolve_relative_to_declaring_file() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src/generated")).unwrap();
+        fs::create_dir_all(root.path().join("generated")).unwrap();
+        fs::write(
+            root.path().join("src/generated/auth.rs"),
+            "pub fn authenticate() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("generated/auth.rs"),
+            "pub fn wrong_authenticate() {}\n",
+        )
+        .unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("src/lib.rs"),
+            "#[path = \"generated/auth.rs\"]\npub(crate) mod auth;\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("src/generated/auth.rs")
+        }));
+        assert!(!edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("generated/auth.rs")
         }));
     }
 

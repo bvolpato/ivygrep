@@ -1844,9 +1844,14 @@ fn add_file_edge_dependents(
         .flat_map(|(path, _)| crate::context_graph::path_lookup_keys(path))
         .collect::<BTreeSet<_>>();
 
+    let base_sqlite_path = workspace
+        .base_index_dir
+        .as_ref()
+        .map(|base_index_dir| base_index_dir.join("metadata.sqlite3"));
+    let overlay_shadowed = crate::context_graph::overlay_shadowed_paths(workspace);
     let mut sqlite_paths = vec![workspace.sqlite_path(), workspace.overlay_sqlite_path()];
-    if let Some(base_index_dir) = &workspace.base_index_dir {
-        sqlite_paths.push(base_index_dir.join("metadata.sqlite3"));
+    if let Some(base_sqlite_path) = &base_sqlite_path {
+        sqlite_paths.push(base_sqlite_path.clone());
     }
     sqlite_paths.sort();
     sqlite_paths.dedup();
@@ -1871,7 +1876,11 @@ fn add_file_edge_dependents(
             else {
                 continue;
             };
+            let base_index = base_sqlite_path.as_ref() == Some(&sqlite_path);
             for path in &added_or_modified {
+                if base_index && overlay_shadowed.contains(path) {
+                    continue;
+                }
                 if statement
                     .query_row([path], |row| row.get::<_, bool>(0))
                     .unwrap_or(false)
@@ -4646,6 +4655,58 @@ mod tests {
             )
             .unwrap();
         assert_eq!(unresolved, 0);
+    }
+
+    #[test]
+    #[serial]
+    fn adding_rust_path_module_reindexes_importer() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src/generated")).unwrap();
+        fs::write(
+            root.path().join("src/lib.rs"),
+            "#[path = \"generated/auth.rs\"]\nmod auth;\npub fn run() { auth::work(); }\n",
+        )
+        .unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let conn = open_sqlite_readonly(&workspace.sqlite_path()).unwrap();
+        let unresolved = conn
+            .query_row(
+                "SELECT COUNT(DISTINCT spec) FROM unresolved_file_dependencies
+                 WHERE source_path = 'src/lib.rs'
+                   AND spec = 'pathmod/generated/auth.rs'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(unresolved, 1);
+        drop(conn);
+
+        fs::write(
+            root.path().join("src/generated/auth.rs"),
+            "pub fn work() {}\n",
+        )
+        .unwrap();
+        let summary = index_workspace(&workspace, &model).unwrap();
+        assert_eq!(summary.indexed_files, 2);
+
+        let conn = open_sqlite_readonly(&workspace.sqlite_path()).unwrap();
+        let edge = conn
+            .query_row(
+                "SELECT COUNT(*) FROM file_edges
+                 WHERE source_path = 'src/lib.rs'
+                   AND target_path = 'src/generated/auth.rs'
+                   AND kind = ?1",
+                [crate::context_graph::FileEdgeKind::Dependency as i64],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        assert_eq!(edge, 1);
     }
 
     #[test]

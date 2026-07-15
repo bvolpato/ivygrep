@@ -542,6 +542,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::create_dir_all(root.join("lib/src")).unwrap();
     std::fs::create_dir_all(root.join("src/Acme/Service")).unwrap();
     std::fs::create_dir_all(root.join("src/Acme/Util")).unwrap();
+    std::fs::create_dir_all(root.join("src/generated")).unwrap();
     std::fs::create_dir_all(root.join("src/main/kotlin/com/acme/project/alias")).unwrap();
     std::fs::create_dir_all(root.join("src/main/kotlin/com/acme/project/member")).unwrap();
     std::fs::create_dir_all(root.join("src/main/kotlin/com/acme/project/module")).unwrap();
@@ -640,6 +641,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::write(
         root.join("src/release.rs"),
         "mod token;\npub fn verify_file_module_release() { token::verify(); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/path_owner.rs"),
+        "#[path = \"generated/release_path.rs\"]\nmod release_path;\npub fn verify_path_module_release() { release_path::verify(); }\n",
     )
     .unwrap();
 
@@ -771,6 +777,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         !has_graph_dependency(&before_file_module, "src/release/token.rs"),
         "{before_file_module:#}"
     );
+    let before_path_module = run_context("change verify_path_module_release");
+    assert!(
+        !has_graph_dependency(&before_path_module, "src/generated/release_path.rs"),
+        "{before_path_module:#}"
+    );
     let before_type_barrel = run_context("change start_type_barrel_widget");
     assert!(
         !has_graph_dependency(&before_type_barrel, "frontend/release-types.ts"),
@@ -900,6 +911,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         .unwrap();
     }
     std::fs::write(root.join("src/release/token.rs"), "pub fn verify() {}\n").unwrap();
+    std::fs::write(
+        root.join("src/generated/release_path.rs"),
+        "pub fn verify() {}\n",
+    )
+    .unwrap();
     Command::new(assert_cmd::cargo::cargo_bin!("ig"))
         .current_dir(&root)
         .env("IVYGREP_HOME", &home)
@@ -1034,6 +1050,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     assert!(
         has_graph_dependency(&file_module, "src/release/token.rs"),
         "{file_module:#}"
+    );
+    let path_module = run_context("change verify_path_module_release");
+    assert!(
+        has_graph_dependency(&path_module, "src/generated/release_path.rs"),
+        "{path_module:#}"
     );
     let nested_group = run_context("change verify_nested_group_release");
     for target in [

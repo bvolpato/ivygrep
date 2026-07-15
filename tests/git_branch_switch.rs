@@ -3007,6 +3007,106 @@ fn worktree_context_graph_prefers_overlay_dependencies() {
 
 #[test]
 #[serial]
+fn worktree_restored_dependency_wakes_overlay_importer() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    init_git_repo(root.path());
+    fs::create_dir_all(root.path().join("src")).unwrap();
+    fs::write(
+        root.path().join("src/lib.rs"),
+        "use crate::helper::work;\npub fn restore_overlay_dependency_wakeup() { work(); }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("src/helper.rs"),
+        "pub fn work() -> &'static str { \"base-target\" }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base dependency"]);
+    setup_and_index(root.path(), home.path());
+
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_restored_dependency");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "restored-dependency-worktree",
+            wt_path.to_str().unwrap(),
+        ],
+    );
+    fs::remove_file(wt_path.join("src/helper.rs")).unwrap();
+    fs::write(
+        wt_path.join("src/lib.rs"),
+        "use crate::helper::work;\n// overlay importer\npub fn restore_overlay_dependency_wakeup() { work(); }\n",
+    )
+    .unwrap();
+    setup_and_index(&wt_path, home.path());
+
+    let workspace = workspace_for(&wt_path);
+    let conn = open_sqlite(&workspace.overlay_sqlite_path()).unwrap();
+    let unresolved = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT spec) FROM unresolved_file_dependencies
+             WHERE source_path = 'src/lib.rs' AND spec = 'crate::helper::work'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(unresolved, 1);
+    drop(conn);
+
+    fs::write(
+        wt_path.join("src/helper.rs"),
+        "pub fn work() -> &'static str { \"restored-worktree-target\" }\n",
+    )
+    .unwrap();
+    let summary = setup_and_index(&wt_path, home.path());
+    assert_eq!(summary.indexed_files, 2);
+
+    let conn = open_sqlite(&workspace.overlay_sqlite_path()).unwrap();
+    let edge = conn
+        .query_row(
+            "SELECT COUNT(*) FROM file_edges
+             WHERE source_path = 'src/lib.rs'
+               AND target_path = 'src/helper.rs'
+               AND kind = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(edge, 1);
+    drop(conn);
+
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+    let bundle = build_context_bundle(
+        &workspace,
+        "restore overlay dependency wakeup",
+        Some(&model),
+        &SearchOptions::default(),
+        4_000,
+    )
+    .unwrap();
+    assert!(
+        bundle.items.iter().any(|item| {
+            item.file_path == std::path::Path::new("src/helper.rs")
+                && item.roles.contains(&ContextRole::Dependency)
+                && item.preview.contains("restored-worktree-target")
+        }),
+        "{bundle:#?}"
+    );
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+#[test]
+#[serial]
 fn worktree_overlay_auto_reindex_via_cli_e2e() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
