@@ -548,6 +548,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::create_dir_all(root.join("frontend")).unwrap();
     std::fs::create_dir_all(root.join("internal/auth")).unwrap();
     std::fs::create_dir_all(root.join("lib/my_app")).unwrap();
+    std::fs::create_dir_all(root.join("lib/local")).unwrap();
     std::fs::create_dir_all(root.join("lib/release")).unwrap();
     std::fs::create_dir_all(root.join("lib/src")).unwrap();
     std::fs::create_dir_all(root.join("scripts")).unwrap();
@@ -577,7 +578,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     .unwrap();
     std::fs::write(
         root.join("app/GroupedService.php"),
-        "<?php\nuse Acme\\Util\\{\n    Auth,\n    Clock,\n};\nfunction verifyPhpGroupedRelease() { return Auth::check() && Clock::ready(); }\n",
+        "<?php\nuse Acme\\Util\\{\n    Auth,\n    Clock,\n};\nuse Acme\\Util\\Logger, Acme\\Util\\Tracer;\nfunction verifyPhpGroupedRelease() { return Auth::check() && Clock::ready() && Logger::ready() && Tracer::ready(); }\n",
     )
     .unwrap();
     std::fs::write(
@@ -598,7 +599,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     .unwrap();
     std::fs::write(
         root.join("lib/main.dart"),
-        "import 'package:context_app/src/release.dart';\nbool verifyDartPackageRelease() => verifyRelease();\n",
+        "import 'package:context_app/src/release.dart';\nimport 'local/release_helper.dart';\nbool verifyDartPackageRelease() => verifyRelease();\nbool verifyDartRelativeRelease() => verifyRelativeRelease();\n",
     )
     .unwrap();
     std::fs::write(
@@ -736,7 +737,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         "{before_nested_java:#}"
     );
     let before_grouped_php = run_context("change verifyPhpGroupedRelease");
-    for target in ["Auth.php", "Clock.php"] {
+    for target in ["Auth.php", "Clock.php", "Logger.php", "Tracer.php"] {
         let expected = format!("app/Acme/Util/{target}");
         assert!(
             !has_graph_dependency(&before_grouped_php, &expected),
@@ -846,6 +847,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         !has_graph_dependency(&before_dart_package, "lib/src/release.dart"),
         "{before_dart_package:#}"
     );
+    let before_dart_relative = run_context("change verifyDartRelativeRelease");
+    assert!(
+        !has_graph_dependency(&before_dart_relative, "lib/local/release_helper.dart"),
+        "{before_dart_relative:#}"
+    );
     let before_lua = run_context("change verify_lua_release");
     assert!(
         !has_graph_dependency(&before_lua, "lib/release/module.lua"),
@@ -898,7 +904,12 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         "package com.acme.project.model;\nclass Outer { static class Inner {} }\n",
     )
     .unwrap();
-    for (class, method) in [("Auth", "check"), ("Clock", "ready")] {
+    for (class, method) in [
+        ("Auth", "check"),
+        ("Clock", "ready"),
+        ("Logger", "ready"),
+        ("Tracer", "ready"),
+    ] {
         std::fs::write(
             root.join(format!("app/Acme/Util/{class}.php")),
             format!(
@@ -931,6 +942,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::write(
         root.join("lib/src/release.dart"),
         "bool verifyRelease() => true;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("lib/local/release_helper.dart"),
+        "bool verifyRelativeRelease() => true;\n",
     )
     .unwrap();
     std::fs::write(
@@ -1045,6 +1061,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         has_graph_dependency(&dart_package, "lib/src/release.dart"),
         "{dart_package:#}"
     );
+    let dart_relative = run_context("change verifyDartRelativeRelease");
+    assert!(
+        has_graph_dependency(&dart_relative, "lib/local/release_helper.dart"),
+        "{dart_relative:#}"
+    );
     let lua = run_context("change verify_lua_release");
     assert!(
         has_graph_dependency(&lua, "lib/release/module.lua"),
@@ -1087,7 +1108,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     );
 
     let grouped_php = run_context("change verifyPhpGroupedRelease");
-    for target in ["Auth.php", "Clock.php"] {
+    for target in ["Auth.php", "Clock.php", "Logger.php", "Tracer.php"] {
         let expected = format!("app/Acme/Util/{target}");
         assert!(
             has_graph_dependency(&grouped_php, &expected),

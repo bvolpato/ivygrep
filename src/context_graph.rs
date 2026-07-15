@@ -386,7 +386,7 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
     let mut specs = BTreeSet::new();
     let mut go_import_block = false;
     let mut javascript_static_declaration = false;
-    let mut php_grouped_import: Option<(String, usize)> = None;
+    let mut php_import_declaration: Option<String> = None;
     let mut python_import_module: Option<String> = None;
     let mut rust_grouped_import: Option<(String, usize)> = None;
     let mut rust_module_path: Option<String> = None;
@@ -603,34 +603,22 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                 }
             }
             "php" => {
-                if let Some((grouped, depth)) = php_grouped_import.as_mut() {
-                    let value = line
-                        .split("//")
-                        .next()
-                        .unwrap_or(line)
-                        .trim_end()
-                        .trim_end_matches(';');
-                    grouped.push(' ');
-                    grouped.push_str(value);
-                    *depth += value.matches('{').count();
-                    *depth = depth.saturating_sub(value.matches('}').count());
-                    if *depth == 0 {
-                        let (grouped, _) = php_grouped_import.take().unwrap();
-                        specs.extend(php_import_specs(&grouped));
+                if let Some(declaration) = php_import_declaration.as_mut() {
+                    let (value, complete) = php_import_line(line);
+                    declaration.push(' ');
+                    declaration.push_str(value);
+                    if complete {
+                        let declaration = php_import_declaration.take().unwrap();
+                        specs.extend(php_import_specs(&declaration));
                     }
                     continue;
                 }
                 if let Some(value) = line.strip_prefix("use ") {
-                    let value = value.trim_end_matches(';');
-                    let value = import_target_without_alias(language, value);
-                    let grouped_depth = value
-                        .matches('{')
-                        .count()
-                        .saturating_sub(value.matches('}').count());
-                    if grouped_depth > 0 {
-                        php_grouped_import = Some((value.to_string(), grouped_depth));
-                    } else {
+                    let (value, complete) = php_import_line(value);
+                    if complete {
                         specs.extend(php_import_specs(value));
+                    } else {
+                        php_import_declaration = Some(value.to_string());
                     }
                 }
                 if (line.starts_with("require") || line.starts_with("include"))
@@ -766,7 +754,7 @@ fn import_target_without_alias<'a>(language: &str, value: &'a str) -> &'a str {
     {
         return target.trim();
     }
-    if matches!(language, "rust" | "kotlin" | "scala" | "groovy" | "php")
+    if matches!(language, "rust" | "kotlin" | "scala" | "groovy")
         && !value.contains('{')
         && let Some((target, _)) = value.split_once(" as ")
     {
@@ -780,10 +768,45 @@ fn php_import_specs(value: &str) -> Vec<String> {
         .strip_prefix("function ")
         .or_else(|| value.strip_prefix("const "))
         .unwrap_or(value);
-    expand_grouped_spec(value)
+    split_top_level_specs(value)
         .into_iter()
+        .flat_map(|spec| {
+            let spec = spec
+                .strip_prefix("function ")
+                .or_else(|| spec.strip_prefix("const "))
+                .unwrap_or(spec);
+            expand_grouped_spec(spec)
+        })
         .map(|spec| spec.replace('\\', "/"))
         .collect()
+}
+
+fn php_import_line(value: &str) -> (&str, bool) {
+    let value = value.split("//").next().unwrap_or(value).trim_end();
+    value
+        .split_once(';')
+        .map_or((value, false), |(declaration, _)| {
+            (declaration.trim_end(), true)
+        })
+}
+
+fn split_top_level_specs(value: &str) -> Vec<&str> {
+    let mut specs = Vec::new();
+    let mut start = 0;
+    let mut depth = 0_usize;
+    for (offset, character) in value.char_indices() {
+        match character {
+            '{' => depth += 1,
+            '}' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                specs.push(value[start..offset].trim());
+                start = offset + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    specs.push(value[start..].trim());
+    specs.into_iter().filter(|spec| !spec.is_empty()).collect()
 }
 
 fn expand_grouped_spec(value: &str) -> Vec<String> {
@@ -985,6 +1008,8 @@ fn resolve_local_dependency(
     let javascript_workspace_absolute = matches!(language, "javascript" | "typescript")
         && spec.starts_with('/')
         && !spec.starts_with("//");
+    let dart_relative =
+        language == "dart" && !spec.starts_with("package:") && !spec.starts_with('/');
     let python_relative = language == "python" && spec.starts_with('.');
     let starlark_relative = language == "starlark" && spec.starts_with(':');
     let starlark_workspace = language == "starlark" && spec.starts_with("//");
@@ -1036,7 +1061,8 @@ fn resolve_local_dependency(
         || normalized.starts_with("./")
         || normalized.starts_with("../")
         || python_relative
-        || starlark_relative;
+        || starlark_relative
+        || dart_relative;
     if language == "rust"
         && !rust_module_declaration
         && !rust_path_module
@@ -1146,7 +1172,7 @@ fn resolve_local_dependency(
         bases.push(source_root);
     } else if javascript_workspace_absolute {
         bases.push(PathBuf::new());
-    } else if rust_path_module {
+    } else if dart_relative || rust_path_module {
         bases.push(source_dir.to_path_buf());
     } else if rust_module_declaration {
         bases.push(rust_module_declaration_base(source_path));
@@ -2620,6 +2646,41 @@ mod tests {
     }
 
     #[test]
+    fn dart_bare_uris_resolve_from_declaring_directory() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("lib/src")).unwrap();
+        fs::write(
+            root.path().join("lib/src/helper.dart"),
+            "bool helper() => true;\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("lib/helper.dart"),
+            "bool wrongHelper() => false;\n",
+        )
+        .unwrap();
+
+        for declaration in [
+            "import 'helper.dart';",
+            "export 'helper.dart';",
+            "part 'helper.dart';",
+        ] {
+            let edges = extract_file_edges(
+                root.path(),
+                None,
+                Path::new("lib/src/main.dart"),
+                declaration,
+            );
+            let dependencies = edges
+                .iter()
+                .filter(|edge| edge.kind == FileEdgeKind::Dependency)
+                .map(|edge| edge.target_path.as_path())
+                .collect::<Vec<_>>();
+            assert_eq!(dependencies, [Path::new("lib/src/helper.dart")]);
+        }
+    }
+
+    #[test]
     fn lua_dotted_modules_resolve_as_paths() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("src/foo")).unwrap();
@@ -2971,6 +3032,30 @@ mod tests {
             (
                 "<?php\nuse function Acme\\Util\\foo as release_foo;\nuse const Acme\\Util\\FOO;\n",
                 &["foo", "FOO"][..],
+            ),
+            (
+                "<?php\nuse Acme\\Util\\Auth, Acme\\Util\\Clock as ReleaseClock;\n",
+                &["Auth", "Clock"][..],
+            ),
+            (
+                "<?php\nuse Acme\\Util\\Auth as ReleaseAuth, Acme\\Util\\Clock;\n",
+                &["Auth", "Clock"][..],
+            ),
+            (
+                "<?php\nuse Acme\\Util\\Auth as ReleaseAuth,\n    Acme\\Util\\Clock;\n",
+                &["Auth", "Clock"][..],
+            ),
+            (
+                "<?php\nuse Acme\\Util\\Auth; # trailing comment\n",
+                &["Auth"][..],
+            ),
+            (
+                "<?php\nuse Acme\\Util\\Auth,\n    Acme\\Util\\Clock; /* trailing comment */\n",
+                &["Auth", "Clock"][..],
+            ),
+            (
+                "<?php\nuse function Acme\\Util\\foo, Acme\\Util\\bar;\nuse const Acme\\Util\\FOO, Acme\\Util\\BAR;\n",
+                &["foo", "bar", "FOO", "BAR"][..],
             ),
             (
                 "<?php\nuse Acme\\Util\\{\n    Auth as ReleaseAuth,\n    function foo as release_foo,\n    const FOO,\n};\n",
