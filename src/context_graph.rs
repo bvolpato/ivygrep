@@ -100,6 +100,11 @@ pub(crate) struct FileGraphExtraction {
     pub unresolved_dependencies: Vec<UnresolvedDependency>,
 }
 
+struct RustCrateContext {
+    name: String,
+    source_root: PathBuf,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct GraphExpansion {
     pub file_path: PathBuf,
@@ -151,8 +156,8 @@ pub(crate) fn extract_file_graph(
     let mut edges = BTreeSet::new();
     let mut unresolved_dependencies = BTreeSet::new();
     let language = language_for_path(rel_path).unwrap_or("text");
-    let local_rust_crate_name = (language == "rust" && rust_file_may_import_library(rel_path))
-        .then(|| rust_crate_name(root, snapshot, rel_path))
+    let local_rust_crate = (language == "rust" && rust_file_may_import_library(rel_path))
+        .then(|| rust_crate_context(root, snapshot, rel_path))
         .flatten();
 
     if supports_dependency_scan(language) {
@@ -163,7 +168,7 @@ pub(crate) fn extract_file_graph(
                 rel_path,
                 language,
                 &spec,
-                local_rust_crate_name.as_deref(),
+                local_rust_crate.as_ref(),
             ) {
                 insert_edge(&mut edges, rel_path, &target_path, FileEdgeKind::Dependency);
             } else {
@@ -229,8 +234,8 @@ pub(crate) fn resolve_dependency_spec(
     language: &str,
     spec: &str,
 ) -> Option<PathBuf> {
-    let local_rust_crate_name = (language == "rust" && rust_file_may_import_library(source_path))
-        .then(|| rust_crate_name(root, snapshot, source_path))
+    let local_rust_crate = (language == "rust" && rust_file_may_import_library(source_path))
+        .then(|| rust_crate_context(root, snapshot, source_path))
         .flatten();
     resolve_local_dependency(
         root,
@@ -238,7 +243,7 @@ pub(crate) fn resolve_dependency_spec(
         source_path,
         language,
         spec,
-        local_rust_crate_name.as_deref(),
+        local_rust_crate.as_ref(),
     )
 }
 
@@ -639,7 +644,7 @@ fn resolve_local_dependency(
     source_path: &Path,
     language: &str,
     spec: &str,
-    local_rust_crate_name: Option<&str>,
+    local_rust_crate: Option<&RustCrateContext>,
 ) -> Option<PathBuf> {
     let spec = spec
         .trim()
@@ -686,12 +691,14 @@ fn resolve_local_dependency(
     ) {
         normalized = normalized.replace('.', "/");
     }
+    let mut package_relative = false;
     if language == "rust"
-        && let Some(crate_name) = local_rust_crate_name
-        && let Some(local_spec) = normalized.strip_prefix(crate_name)
+        && let Some(crate_context) = local_rust_crate
+        && let Some(local_spec) = normalized.strip_prefix(&crate_context.name)
         && let Some(local_spec) = local_spec.strip_prefix('/')
     {
         normalized = format!("crate/{local_spec}");
+        package_relative = true;
     }
     let crate_relative = normalized.starts_with("crate/");
     let source_relative = normalized.starts_with("self/")
@@ -782,6 +789,9 @@ fn resolve_local_dependency(
         || language == "rust" && !crate_relative
     {
         bases.push(source_dir.to_path_buf());
+    }
+    if package_relative && let Some(crate_context) = local_rust_crate {
+        bases.push(crate_context.source_root.clone());
     }
     bases.extend([
         PathBuf::new(),
@@ -1031,24 +1041,17 @@ fn manifest_names_for_language(language: &str) -> &'static [&'static str] {
     }
 }
 
-fn rust_crate_name(
+fn rust_crate_context(
     root: &Path,
     snapshot: Option<&MerkleSnapshot>,
     rel_path: &Path,
-) -> Option<String> {
+) -> Option<RustCrateContext> {
     let manifest = nearest_manifest(root, snapshot, rel_path, "rust")?;
     let package_root = manifest.parent().unwrap_or_else(|| Path::new(""));
-    if let Ok(relative) = rel_path.strip_prefix(package_root.join("src"))
-        && relative != Path::new("main.rs")
-        && !relative.starts_with("bin")
-    {
-        return None;
-    }
-    let content = fs::read_to_string(root.join(manifest)).ok()?;
+    let content = fs::read_to_string(root.join(&manifest)).ok()?;
     let document = content.parse::<toml_edit::DocumentMut>().ok()?;
-    let name = document
-        .get("lib")
-        .and_then(toml_edit::Item::as_table_like)
+    let library = document.get("lib").and_then(toml_edit::Item::as_table_like);
+    let name = library
         .and_then(|table| table.get("name"))
         .and_then(toml_edit::Item::as_str)
         .or_else(|| {
@@ -1057,8 +1060,15 @@ fn rust_crate_name(
                 .and_then(toml_edit::Item::as_table_like)
                 .and_then(|table| table.get("name"))
                 .and_then(toml_edit::Item::as_str)
-        })?;
-    Some(name.replace('-', "_"))
+        })?
+        .replace('-', "_");
+    let source_root = library
+        .and_then(|table| table.get("path"))
+        .and_then(toml_edit::Item::as_str)
+        .map(|path| package_root.join(path))
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| package_root.join("src"));
+    Some(RustCrateContext { name, source_root })
 }
 
 fn rust_file_may_import_library(path: &Path) -> bool {
@@ -1122,6 +1132,7 @@ fn likely_test_edges(
             parent.clone(),
             PathBuf::from("src").join(&parent),
             PathBuf::from("lib").join(&parent),
+            PathBuf::from("app").join(&parent),
         ] {
             candidates.insert(base.join(format!("{production_stem}.{extension}")));
         }
@@ -1138,6 +1149,7 @@ fn likely_test_edges(
         let relative_under_source = rel_path
             .strip_prefix("src")
             .or_else(|_| rel_path.strip_prefix("lib"))
+            .or_else(|_| rel_path.strip_prefix("app"))
             .unwrap_or(rel_path);
         for directory in test_directories(extension) {
             candidates.insert(PathBuf::from(directory).join(relative_under_source));
@@ -1689,23 +1701,34 @@ mod tests {
     #[test]
     fn rust_package_import_resolves_local_library_module() {
         let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("crates/core/src")).unwrap();
+        fs::create_dir_all(root.path().join("crates/core/tests")).unwrap();
         fs::create_dir_all(root.path().join("src")).unwrap();
-        fs::create_dir_all(root.path().join("tests")).unwrap();
         fs::write(
-            root.path().join("Cargo.toml"),
-            "[package]\nname = 'my-package'\nversion = '0.1.0'\n",
+            root.path().join("crates/core/Cargo.toml"),
+            "[package]\nname = 'core-package'\nversion = '0.1.0'\n",
         )
         .unwrap();
-        fs::write(root.path().join("src/auth.rs"), "pub struct Session;\n").unwrap();
+        fs::write(
+            root.path().join("crates/core/src/auth.rs"),
+            "pub struct Session;\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("src/auth.rs"),
+            "pub struct WrongSession;\n",
+        )
+        .unwrap();
 
         let edges = extract_file_edges(
             root.path(),
             None,
-            Path::new("tests/integration.rs"),
-            "use my_package::auth::Session;\n",
+            Path::new("crates/core/tests/integration.rs"),
+            "use core_package::auth::Session;\n",
         );
         assert!(edges.iter().any(|edge| {
-            edge.kind == FileEdgeKind::Dependency && edge.target_path == Path::new("src/auth.rs")
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("crates/core/src/auth.rs")
         }));
     }
 
@@ -1772,21 +1795,21 @@ mod tests {
     #[test]
     fn ruby_spec_files_link_to_production_in_both_directions() {
         let root = tempfile::tempdir().unwrap();
-        fs::create_dir_all(root.path().join("src")).unwrap();
-        fs::create_dir_all(root.path().join("spec")).unwrap();
-        fs::write(root.path().join("src/user.rb"), "class User; end\n").unwrap();
+        fs::create_dir_all(root.path().join("app/models")).unwrap();
+        fs::create_dir_all(root.path().join("spec/models")).unwrap();
+        fs::write(root.path().join("app/models/user.rb"), "class User; end\n").unwrap();
         fs::write(
-            root.path().join("spec/user_spec.rb"),
+            root.path().join("spec/models/user_spec.rb"),
             "RSpec.describe User do; end\n",
         )
         .unwrap();
 
-        for path in ["src/user.rb", "spec/user_spec.rb"] {
+        for path in ["app/models/user.rb", "spec/models/user_spec.rb"] {
             let edges = extract_file_edges(root.path(), None, Path::new(path), "");
             assert!(edges.iter().any(|edge| {
                 edge.kind == FileEdgeKind::Test
-                    && edge.source_path == Path::new("src/user.rb")
-                    && edge.target_path == Path::new("spec/user_spec.rb")
+                    && edge.source_path == Path::new("app/models/user.rb")
+                    && edge.target_path == Path::new("spec/models/user_spec.rb")
             }));
         }
     }
