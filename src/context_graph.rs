@@ -1191,8 +1191,15 @@ fn rust_file_may_import_library(path: &Path) -> bool {
 
 fn rust_module_declaration_base(source_path: &Path) -> PathBuf {
     let parent = source_path.parent().unwrap_or_else(|| Path::new(""));
+    let crate_root_directory = parent.file_name().is_some_and(|name| {
+        matches!(
+            name.to_str(),
+            Some("tests" | "examples" | "benches" | "bin")
+        )
+    });
     match source_path.file_stem().and_then(|value| value.to_str()) {
         Some("lib" | "main" | "mod" | "build") | None => parent.to_path_buf(),
+        Some(_) if parent.as_os_str().is_empty() || crate_root_directory => parent.to_path_buf(),
         Some(stem) => parent.join(stem),
     }
 }
@@ -2515,6 +2522,33 @@ mod tests {
         }));
         assert!(!edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Dependency && edge.target_path == Path::new("src/token.rs")
+        }));
+    }
+
+    #[test]
+    fn rust_crate_root_modules_resolve_siblings() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("tests/integration")).unwrap();
+        fs::write(root.path().join("tests/helper.rs"), "pub fn run() {}\n").unwrap();
+        fs::write(
+            root.path().join("tests/integration/helper.rs"),
+            "pub fn wrong() {}\n",
+        )
+        .unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("tests/integration.rs"),
+            "mod helper;\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("tests/helper.rs")
+        }));
+        assert!(!edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("tests/integration/helper.rs")
         }));
     }
 
