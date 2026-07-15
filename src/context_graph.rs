@@ -30,6 +30,7 @@ const MANIFEST_NAMES: &[&str] = &[
     "Gemfile",
     "composer.json",
     "Package.swift",
+    "pubspec.yaml",
     "mix.exs",
     "CMakeLists.txt",
     "MODULE.bazel",
@@ -101,6 +102,11 @@ pub(crate) struct FileGraphExtraction {
 }
 
 struct RustCrateContext {
+    name: String,
+    source_root: PathBuf,
+}
+
+struct DartPackageContext {
     name: String,
     source_root: PathBuf,
 }
@@ -691,12 +697,34 @@ fn import_target_without_alias<'a>(language: &str, value: &'a str) -> &'a str {
 
 fn expand_grouped_spec(value: &str) -> Vec<String> {
     let value = value.trim();
-    let Some((prefix, rest)) = value.split_once('{') else {
-        return vec![value.to_string()];
+    let Some(open) = value.find('{') else {
+        let target = value.split_whitespace().next().unwrap_or("");
+        let terminal = target.rsplit([':', '.']).next().unwrap_or(target);
+        return (!target.is_empty() && !matches!(terminal, "self" | "_" | "*"))
+            .then(|| target.to_string())
+            .into_iter()
+            .collect();
     };
-    let Some(group) = rest.split('}').next() else {
-        return vec![prefix.trim_end_matches("::").to_string()];
+    let mut depth = 0_usize;
+    let close = value[open..]
+        .char_indices()
+        .find_map(|(offset, character)| {
+            match character {
+                '{' => depth += 1,
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(open + offset);
+                    }
+                }
+                _ => {}
+            }
+            None
+        });
+    let Some(close) = close else {
+        return vec![value[..open].trim_end_matches("::").to_string()];
     };
+    let prefix = &value[..open];
     let (prefix, separator) = if let Some(prefix) = prefix.strip_suffix("::") {
         (prefix, "::")
     } else if let Some(prefix) = prefix.strip_suffix('.') {
@@ -704,12 +732,27 @@ fn expand_grouped_spec(value: &str) -> Vec<String> {
     } else {
         (prefix, "::")
     };
-    group
-        .split(',')
-        .filter_map(|member| {
-            let member = member.split_whitespace().next()?;
-            (!member.is_empty() && !matches!(member, "self" | "_" | "*"))
-                .then(|| format!("{prefix}{separator}{member}"))
+    let group = &value[open + 1..close];
+    let mut members = Vec::new();
+    let mut member_start = 0;
+    let mut member_depth = 0_usize;
+    for (offset, character) in group.char_indices() {
+        match character {
+            '{' => member_depth += 1,
+            '}' => member_depth = member_depth.saturating_sub(1),
+            ',' if member_depth == 0 => {
+                members.push(&group[member_start..offset]);
+                member_start = offset + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    members.push(&group[member_start..]);
+    members
+        .into_iter()
+        .flat_map(|member| {
+            let nested = format!("{prefix}{separator}{}", member.trim());
+            expand_grouped_spec(&nested)
         })
         .collect()
 }
@@ -754,13 +797,25 @@ fn resolve_local_dependency(
         || spec.starts_with("data:")
         || spec.starts_with("node:")
         || spec.starts_with("dart:")
-        || spec.starts_with("package:")
     {
         return None;
     }
 
     let source_dir = source_path.parent().unwrap_or_else(|| Path::new(""));
     let mut normalized = spec.replace("::", "/").replace('\\', "/");
+    let mut dart_package_source_root = None;
+    if let Some(package_spec) = spec.strip_prefix("package:") {
+        if language != "dart" {
+            return None;
+        }
+        let (package, module) = package_spec.split_once('/')?;
+        let context = dart_package_context(root, snapshot, source_path)?;
+        if package != context.name {
+            return None;
+        }
+        normalized = module.to_string();
+        dart_package_source_root = Some(context.source_root);
+    }
     let rust_module_declaration = language == "rust" && normalized.starts_with("mod/");
     let python_relative = language == "python" && spec.starts_with('.');
     let starlark_relative = language == "starlark" && spec.starts_with(':');
@@ -887,7 +942,9 @@ fn resolve_local_dependency(
     }
 
     let mut bases = Vec::new();
-    if rust_module_declaration {
+    if let Some(source_root) = dart_package_source_root {
+        bases.push(source_root);
+    } else if rust_module_declaration {
         bases.push(rust_module_declaration_base(source_path));
     } else {
         if source_relative
@@ -1144,6 +1201,7 @@ fn manifest_names_for_language(language: &str) -> &'static [&'static str] {
         "elixir" => &["mix.exs"],
         "c" | "cpp" | "objc" => &["CMakeLists.txt"],
         "starlark" => &["MODULE.bazel", "WORKSPACE"],
+        "dart" => &["pubspec.yaml"],
         _ => &[],
     }
 }
@@ -1176,6 +1234,28 @@ fn rust_crate_context(
         .and_then(|path| path.parent().map(Path::to_path_buf))
         .unwrap_or_else(|| package_root.join("src"));
     Some(RustCrateContext { name, source_root })
+}
+
+fn dart_package_context(
+    root: &Path,
+    snapshot: Option<&MerkleSnapshot>,
+    rel_path: &Path,
+) -> Option<DartPackageContext> {
+    let manifest = nearest_manifest(root, snapshot, rel_path, "dart")?;
+    let package_root = manifest.parent().unwrap_or_else(|| Path::new(""));
+    let content = fs::read_to_string(root.join(&manifest)).ok()?;
+    let name = content.lines().find_map(|line| {
+        line.strip_prefix("name:")
+            .map(str::trim)
+            .map(|name| name.split('#').next().unwrap_or(name).trim())
+            .map(|name| name.trim_matches(['\'', '"']))
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+    })?;
+    Some(DartPackageContext {
+        name,
+        source_root: package_root.join("lib"),
+    })
 }
 
 fn rust_file_may_import_library(path: &Path) -> bool {
@@ -1786,11 +1866,12 @@ mod tests {
             "pub struct Session;\n",
         )
         .unwrap();
+        fs::write(root.path().join("src/clock.rs"), "pub struct Clock;\n").unwrap();
         let edges = extract_file_edges(
             root.path(),
             None,
             Path::new("src/lib.rs"),
-            "use crate::auth::{\n    token,\n    session,\n};\n",
+            "use crate::{\n    auth::{token, session},\n    clock,\n};\n",
         );
         let targets = edges
             .iter()
@@ -1799,6 +1880,7 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert!(targets.contains(Path::new("src/auth/token.rs")));
         assert!(targets.contains(Path::new("src/auth/session.rs")));
+        assert!(targets.contains(Path::new("src/clock.rs")));
     }
 
     #[test]
@@ -2186,6 +2268,43 @@ mod tests {
         assert!(edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Dependency
                 && edge.target_path == Path::new("src/release-types.ts")
+        }));
+    }
+
+    #[test]
+    fn dart_package_imports_resolve_within_nearest_package() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("packages/app/lib/src")).unwrap();
+        fs::create_dir_all(root.path().join("lib/src")).unwrap();
+        fs::write(
+            root.path().join("packages/app/pubspec.yaml"),
+            "name: my_app\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("packages/app/lib/src/auth.dart"),
+            "bool authenticate() => true;\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("lib/src/auth.dart"),
+            "bool wrongAuthenticate() => false;\n",
+        )
+        .unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("packages/app/lib/main.dart"),
+            "import 'package:my_app/src/auth.dart';\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("packages/app/lib/src/auth.dart")
+        }));
+        assert!(!edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("lib/src/auth.dart")
         }));
     }
 

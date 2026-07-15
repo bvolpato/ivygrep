@@ -539,6 +539,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::create_dir_all(root.join("cmd/server")).unwrap();
     std::fs::create_dir_all(root.join("frontend")).unwrap();
     std::fs::create_dir_all(root.join("internal/auth")).unwrap();
+    std::fs::create_dir_all(root.join("lib/src")).unwrap();
     std::fs::create_dir_all(root.join("src/Acme/Service")).unwrap();
     std::fs::create_dir_all(root.join("src/Acme/Util")).unwrap();
     std::fs::create_dir_all(root.join("src/main/kotlin/com/acme/project/alias")).unwrap();
@@ -555,6 +556,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::create_dir_all(root.join("src/release")).unwrap();
     std::fs::create_dir_all(root.join("tools")).unwrap();
     std::fs::write(root.join("app/__init__.py"), "").unwrap();
+    std::fs::write(root.join("pubspec.yaml"), "name: context_app\n").unwrap();
     std::fs::write(
         root.join("service.py"),
         "from app import (\n    helper,\n)\n\ndef run_release_helper():\n    return helper.work()\n",
@@ -573,6 +575,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::write(
         root.join("frontend/helper.ts"),
         "export function runWidgetHelper() { return \"ready\"; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("lib/main.dart"),
+        "import 'package:context_app/src/release.dart';\nbool verifyDartPackageRelease() => verifyRelease();\n",
     )
     .unwrap();
     std::fs::write(
@@ -627,7 +634,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     .unwrap();
     std::fs::write(
         root.join("crates/core/tests/release_integration.rs"),
-        "use context_core::{\n    crate_auth::verify_crate_auth,\n};\n#[test]\nfn verify_crate_package_release() { verify_crate_auth(); }\n",
+        "use context_core::{\n    crate_auth::verify_crate_auth,\n    release::{token, session},\n};\n#[test]\nfn verify_crate_package_release() { verify_crate_auth(); }\n#[test]\nfn verify_nested_group_release() { token::verify(); session::verify(); }\n",
     )
     .unwrap();
     std::fs::write(
@@ -769,6 +776,21 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         !has_graph_dependency(&before_type_barrel, "frontend/release-types.ts"),
         "{before_type_barrel:#}"
     );
+    let before_dart_package = run_context("change verifyDartPackageRelease");
+    assert!(
+        !has_graph_dependency(&before_dart_package, "lib/src/release.dart"),
+        "{before_dart_package:#}"
+    );
+    let before_nested_group = run_context("change verify_nested_group_release");
+    for target in [
+        "crates/core/src/release/token.rs",
+        "crates/core/src/release/session.rs",
+    ] {
+        assert!(
+            !has_graph_dependency(&before_nested_group, target),
+            "{before_nested_group:#}"
+        );
+    }
 
     std::fs::write(
         root.join("app/helper.py"),
@@ -799,6 +821,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::write(
         root.join("frontend/release-types.ts"),
         "export type Release = string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("lib/src/release.dart"),
+        "bool verifyRelease() => true;\n",
     )
     .unwrap();
     std::fs::write(
@@ -848,6 +875,14 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         "pub fn verify_crate_auth() {}\n",
     )
     .unwrap();
+    std::fs::create_dir_all(root.join("crates/core/src/release")).unwrap();
+    for module in ["token", "session"] {
+        std::fs::write(
+            root.join(format!("crates/core/src/release/{module}.rs")),
+            "pub fn verify() {}\n",
+        )
+        .unwrap();
+    }
     std::fs::write(root.join("src/release/token.rs"), "pub fn verify() {}\n").unwrap();
     Command::new(assert_cmd::cargo::cargo_bin!("ig"))
         .current_dir(&root)
@@ -874,6 +909,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     assert!(
         has_graph_dependency(&type_barrel, "frontend/release-types.ts"),
         "{type_barrel:#}"
+    );
+    let dart_package = run_context("change verifyDartPackageRelease");
+    assert!(
+        has_graph_dependency(&dart_package, "lib/src/release.dart"),
+        "{dart_package:#}"
     );
 
     let go = run_context("change start_auth_server");
@@ -974,6 +1014,16 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         has_graph_dependency(&file_module, "src/release/token.rs"),
         "{file_module:#}"
     );
+    let nested_group = run_context("change verify_nested_group_release");
+    for target in [
+        "crates/core/src/release/token.rs",
+        "crates/core/src/release/session.rs",
+    ] {
+        assert!(
+            has_graph_dependency(&nested_group, target),
+            "{nested_group:#}"
+        );
+    }
 }
 
 #[test]
