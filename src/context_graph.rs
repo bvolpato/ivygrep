@@ -111,6 +111,11 @@ struct DartPackageContext {
     source_root: PathBuf,
 }
 
+struct GoModuleContext {
+    name: String,
+    source_root: PathBuf,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct GraphExpansion {
     pub file_path: PathBuf,
@@ -165,10 +170,15 @@ pub(crate) fn extract_file_graph(
     let local_rust_crate = (language == "rust" && rust_file_may_import_library(rel_path))
         .then(|| rust_crate_context(root, snapshot, rel_path))
         .flatten();
+    let local_go_module = (language == "go")
+        .then(|| go_module_context(root, snapshot, rel_path))
+        .flatten();
 
     if supports_dependency_scan(language) {
         for spec in dependency_specs(language, content) {
-            if is_javascript_package_specifier(language, &spec) {
+            if is_javascript_package_specifier(language, &spec)
+                || is_external_go_specifier(language, &spec, local_go_module.as_ref())
+            {
                 continue;
             }
             if let Some(target_path) = resolve_local_dependency(
@@ -178,6 +188,7 @@ pub(crate) fn extract_file_graph(
                 language,
                 &spec,
                 local_rust_crate.as_ref(),
+                local_go_module.as_ref(),
             ) {
                 insert_edge(&mut edges, rel_path, &target_path, FileEdgeKind::Dependency);
             } else {
@@ -211,7 +222,7 @@ pub(crate) fn extract_file_graph(
     if language == "markdown" {
         for spec in markdown_specs(content) {
             if let Some(target) =
-                resolve_local_dependency(root, snapshot, rel_path, "markdown", &spec, None)
+                resolve_local_dependency(root, snapshot, rel_path, "markdown", &spec, None, None)
             {
                 insert_edge(&mut edges, rel_path, &target, FileEdgeKind::Documentation);
             } else {
@@ -246,6 +257,9 @@ pub(crate) fn resolve_dependency_spec(
     let local_rust_crate = (language == "rust" && rust_file_may_import_library(source_path))
         .then(|| rust_crate_context(root, snapshot, source_path))
         .flatten();
+    let local_go_module = (language == "go")
+        .then(|| go_module_context(root, snapshot, source_path))
+        .flatten();
     resolve_local_dependency(
         root,
         snapshot,
@@ -253,6 +267,7 @@ pub(crate) fn resolve_dependency_spec(
         language,
         spec,
         local_rust_crate.as_ref(),
+        local_go_module.as_ref(),
     )
 }
 
@@ -635,9 +650,10 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                 }
             }
             "lua" => {
-                if let Some(value) = value_after_marker(line, "require(")
-                    .or_else(|| line.strip_prefix("require ").and_then(first_quoted_value))
-                {
+                if line.starts_with("--") {
+                    continue;
+                }
+                if let Some(value) = quoted_value_after_keyword(line, "require") {
                     specs.insert(value);
                 }
             }
@@ -819,6 +835,23 @@ fn value_after_marker(value: &str, marker: &str) -> Option<String> {
         .and_then(|offset| first_quoted_value(&value[offset + marker.len()..]))
 }
 
+fn quoted_value_after_keyword(value: &str, keyword: &str) -> Option<String> {
+    value.match_indices(keyword).find_map(|(offset, _)| {
+        let boundary = value[..offset]
+            .chars()
+            .next_back()
+            .is_none_or(|character| !character.is_alphanumeric() && character != '_');
+        if !boundary {
+            return None;
+        }
+        let remainder = value[offset + keyword.len()..].trim_start();
+        let remainder = remainder.strip_prefix('(').unwrap_or(remainder);
+        matches!(remainder.chars().next(), Some('"' | '\''))
+            .then(|| first_quoted_value(remainder))
+            .flatten()
+    })
+}
+
 fn javascript_module_specifier(line: &str) -> Option<String> {
     value_after_marker(line, " from ")
         .or_else(|| line.strip_prefix("import ").and_then(first_quoted_value))
@@ -832,6 +865,21 @@ fn is_javascript_package_specifier(language: &str, spec: &str) -> bool {
         && !spec.starts_with("~/")
 }
 
+fn is_external_go_specifier(
+    language: &str,
+    spec: &str,
+    local_go_module: Option<&GoModuleContext>,
+) -> bool {
+    language == "go"
+        && local_go_module.is_some_and(|module| {
+            spec != module.name
+                && spec
+                    .strip_prefix(&module.name)
+                    .and_then(|rest| rest.strip_prefix('/'))
+                    .is_none()
+        })
+}
+
 fn resolve_local_dependency(
     root: &Path,
     snapshot: Option<&MerkleSnapshot>,
@@ -839,6 +887,7 @@ fn resolve_local_dependency(
     language: &str,
     spec: &str,
     local_rust_crate: Option<&RustCrateContext>,
+    local_go_module: Option<&GoModuleContext>,
 ) -> Option<PathBuf> {
     let spec = spec
         .trim()
@@ -860,6 +909,7 @@ fn resolve_local_dependency(
     let source_dir = source_path.parent().unwrap_or_else(|| Path::new(""));
     let mut normalized = spec.replace("::", "/").replace('\\', "/");
     let mut dart_package_source_root = None;
+    let mut go_module_source_root = None;
     if let Some(package_spec) = spec.strip_prefix("package:") {
         if language != "dart" {
             return None;
@@ -871,6 +921,18 @@ fn resolve_local_dependency(
         }
         normalized = module.to_string();
         dart_package_source_root = Some(context.source_root);
+    }
+    if language == "go"
+        && let Some(module) = local_go_module
+    {
+        normalized = if spec == module.name {
+            String::new()
+        } else {
+            spec.strip_prefix(&module.name)?
+                .strip_prefix('/')?
+                .to_string()
+        };
+        go_module_source_root = Some(module.source_root.clone());
     }
     let rust_module_declaration = language == "rust" && normalized.starts_with("mod/");
     let rust_path_module = language == "rust" && normalized.starts_with("pathmod/");
@@ -998,7 +1060,7 @@ fn resolve_local_dependency(
             parent = next;
         }
     }
-    if language == "go" {
+    if language == "go" && go_module_source_root.is_none() {
         let components = Path::new(&normalized).components().collect::<Vec<_>>();
         for offset in 1..components.len() {
             let suffix = components[offset..].iter().collect::<PathBuf>();
@@ -1010,6 +1072,8 @@ fn resolve_local_dependency(
 
     let mut bases = Vec::new();
     if let Some(source_root) = dart_package_source_root {
+        bases.push(source_root);
+    } else if let Some(source_root) = go_module_source_root {
         bases.push(source_root);
     } else if rust_path_module {
         bases.push(source_dir.to_path_buf());
@@ -1135,8 +1199,21 @@ fn first_go_package_file(
     snapshot: Option<&MerkleSnapshot>,
     directory: &Path,
 ) -> Option<PathBuf> {
-    let directory = normalize_relative_path(directory)?;
+    let directory = if directory.as_os_str().is_empty() {
+        PathBuf::new()
+    } else {
+        normalize_relative_path(directory)?
+    };
     if let Some(snapshot) = snapshot {
+        if directory.as_os_str().is_empty() {
+            return snapshot
+                .files
+                .keys()
+                .map(Path::new)
+                .filter(|path| path.parent() == Some(directory.as_path()))
+                .find(|path| is_go_package_file(path))
+                .map(Path::to_path_buf);
+        }
         let prefix = format!("{}/", index_path_string(&directory));
         return snapshot
             .files
@@ -1325,6 +1402,27 @@ fn dart_package_context(
         name,
         source_root: package_root.join("lib"),
     })
+}
+
+fn go_module_context(
+    root: &Path,
+    snapshot: Option<&MerkleSnapshot>,
+    rel_path: &Path,
+) -> Option<GoModuleContext> {
+    let manifest = nearest_manifest(root, snapshot, rel_path, "go")?;
+    let source_root = manifest
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .to_path_buf();
+    let content = fs::read_to_string(root.join(&manifest)).ok()?;
+    let name = content.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("module ")
+            .and_then(|value| value.split_whitespace().next())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })?;
+    Some(GoModuleContext { name, source_root })
 }
 
 fn rust_file_may_import_library(path: &Path) -> bool {
@@ -2425,7 +2523,9 @@ mod tests {
     fn lua_dotted_modules_resolve_as_paths() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("src/foo")).unwrap();
+        fs::create_dir_all(root.path().join("src/wrong")).unwrap();
         fs::write(root.path().join("src/foo/bar.lua"), "return {}\n").unwrap();
+        fs::write(root.path().join("src/wrong/module.lua"), "return {}\n").unwrap();
         fs::write(
             root.path().join("src/foo.bar.lua"),
             "return { wrong = true }\n",
@@ -2436,7 +2536,7 @@ mod tests {
             root.path(),
             None,
             Path::new("src/main.lua"),
-            "local module = require(\"foo.bar\")\n",
+            "-- local wrong = require \"wrong.module\"\nlocal module = require \"foo.bar\"\nlocal ignored = prerequire \"wrong.module\"\n",
         );
         assert!(edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Dependency
@@ -2445,6 +2545,10 @@ mod tests {
         assert!(!edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Dependency
                 && edge.target_path == Path::new("src/foo.bar.lua")
+        }));
+        assert!(!edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("src/wrong/module.lua")
         }));
     }
 
@@ -2933,6 +3037,41 @@ mod tests {
             edge.kind == FileEdgeKind::Dependency
                 && edge.target_path == Path::new("internal/auth/client.go")
         }));
+    }
+
+    #[test]
+    fn go_module_imports_do_not_bind_external_suffixes() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("internal/auth")).unwrap();
+        fs::create_dir_all(root.path().join("errors")).unwrap();
+        fs::write(root.path().join("go.mod"), "module example.com/app\n").unwrap();
+        fs::write(
+            root.path().join("internal/auth/client.go"),
+            "package auth\n",
+        )
+        .unwrap();
+        fs::write(root.path().join("errors/errors.go"), "package errors\n").unwrap();
+
+        let graph = extract_file_graph(
+            root.path(),
+            None,
+            Path::new("cmd/server/main.go"),
+            "package main\nimport (\n  \"example.com/app/internal/auth\"\n  \"github.com/pkg/errors\"\n)\n",
+        );
+        assert!(graph.edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("internal/auth/client.go")
+        }));
+        assert!(!graph.edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("errors/errors.go")
+        }));
+        assert!(
+            graph
+                .unresolved_dependencies
+                .iter()
+                .all(|dependency| dependency.spec != "github.com/pkg/errors")
+        );
     }
 
     #[test]

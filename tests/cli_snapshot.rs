@@ -535,6 +535,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         "{\"name\":\"mixed-workspace\",\"scripts\":{\"start_schema_widget\":\"vite\"}}\n",
     )
     .unwrap();
+    std::fs::write(root.join("go.mod"), "module example.com/context\n").unwrap();
     std::fs::write(
         root.join("mix.exs"),
         "defmodule Context.MixProject do\nend\n",
@@ -542,6 +543,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     .unwrap();
     std::fs::create_dir_all(root.join("app")).unwrap();
     std::fs::create_dir_all(root.join("cmd/server")).unwrap();
+    std::fs::create_dir_all(root.join("errors")).unwrap();
     std::fs::create_dir_all(root.join("frontend")).unwrap();
     std::fs::create_dir_all(root.join("internal/auth")).unwrap();
     std::fs::create_dir_all(root.join("lib/my_app")).unwrap();
@@ -573,9 +575,10 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     .unwrap();
     std::fs::write(
         root.join("cmd/server/main.go"),
-        "package main\n\nimport \"example.com/context/internal/auth\"\n\nfunc start_auth_server() { auth.Connect() }\n",
+        "package main\n\nimport (\n  \"example.com/context/internal/auth\"\n  \"github.com/pkg/errors\"\n)\n\nfunc start_auth_server() { auth.Connect(); errors.New(\"start\") }\n",
     )
     .unwrap();
+    std::fs::write(root.join("errors/errors.go"), "package errors\n").unwrap();
     std::fs::write(
         root.join("frontend/main.ts"),
         "import { runWidgetHelper } from \"./helper.js\";\nimport {\n  runMultilineHelper,\n} from './multiline.js';\nexport type * from './release-types.js';\nimport schema from './schema.json' with { type: \"json\" };\nimport { packageShadow } from 'package_shadow';\n\nexport function start_nodenext_widget() { return runWidgetHelper(); }\nexport function start_multiline_widget() { return runMultilineHelper(); }\nexport function start_type_barrel_widget() { return true; }\nexport function start_schema_widget() { return schema.release; }\nexport function avoid_package_shadow() { return packageShadow(); }\n",
@@ -593,7 +596,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     .unwrap();
     std::fs::write(
         root.join("scripts/main.lua"),
-        "local release = require(\"release.module\")\nfunction verify_lua_release() return release.verify() end\n",
+        "local release = require \"release.module\"\nfunction verify_lua_release() return release.verify() end\n",
     )
     .unwrap();
     std::fs::write(
@@ -703,6 +706,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     assert!(
         !has_graph_dependency(&before, "app/helper.py"),
         "{before:#}"
+    );
+    let before_go = run_context("change start_auth_server");
+    assert!(
+        !has_graph_dependency(&before_go, "errors/errors.go"),
+        "{before_go:#}"
     );
     let before_maven = run_context("change assembleMavenRelease");
     assert!(
@@ -1006,6 +1014,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         has_graph_dependency(&go, "internal/auth/client.go"),
         "{go:#}"
     );
+    assert!(!has_graph_dependency(&go, "errors/errors.go"), "{go:#}");
 
     let bazel = run_context("change configure_release_widget");
     assert!(has_graph_dependency(&bazel, "tools/defs.bzl"), "{bazel:#}");
