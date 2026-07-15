@@ -352,6 +352,8 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
     let mut javascript_static_declaration = false;
     let mut python_import_module: Option<String> = None;
     let mut rust_grouped_import: Option<(String, usize)> = None;
+    let mut scala_grouped_import: Option<(String, usize)> = None;
+    let mut starlark_load = false;
     for raw_line in content.lines().take(20_000) {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with("//") {
@@ -402,7 +404,7 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
             "python" => {
                 if let Some(module) = python_import_module.as_deref() {
                     if !line.starts_with('#') {
-                        insert_python_import_specs(&mut specs, &module, line);
+                        insert_python_import_specs(&mut specs, module, line);
                     }
                     if line.contains(')') {
                         python_import_module = None;
@@ -462,6 +464,25 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                 }
             }
             "java" | "kotlin" | "scala" | "groovy" | "csharp" => {
+                if language == "scala"
+                    && let Some((grouped, depth)) = scala_grouped_import.as_mut()
+                {
+                    let value = line
+                        .split("//")
+                        .next()
+                        .unwrap_or(line)
+                        .trim_end()
+                        .trim_end_matches(';');
+                    grouped.push(' ');
+                    grouped.push_str(value);
+                    *depth += value.matches('{').count();
+                    *depth = depth.saturating_sub(value.matches('}').count());
+                    if *depth == 0 {
+                        let (grouped, _) = scala_grouped_import.take().unwrap();
+                        specs.extend(expand_grouped_spec(&grouped));
+                    }
+                    continue;
+                }
                 if let Some(value) = line
                     .strip_prefix("import ")
                     .or_else(|| line.strip_prefix("using "))
@@ -491,6 +512,14 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                     } else {
                         value
                     };
+                    let grouped_depth = value
+                        .matches('{')
+                        .count()
+                        .saturating_sub(value.matches('}').count());
+                    if language == "scala" && grouped_depth > 0 {
+                        scala_grouped_import = Some((value.to_string(), grouped_depth));
+                        continue;
+                    }
                     let wildcard =
                         value.ends_with(".*") || language == "scala" && value.ends_with("._");
                     let value = value.trim_end_matches(".*").trim_end_matches("._");
@@ -578,8 +607,16 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                 }
             }
             "starlark" => {
-                if let Some(value) = value_after_marker(line, "load(") {
-                    specs.insert(value);
+                if line.starts_with("load(") {
+                    starlark_load = true;
+                }
+                if starlark_load {
+                    if let Some(value) = first_quoted_value(line) {
+                        specs.insert(value);
+                        starlark_load = false;
+                    } else if line.contains(')') {
+                        starlark_load = false;
+                    }
                 }
             }
             "protobuf" => {
@@ -2121,7 +2158,7 @@ mod tests {
         .unwrap();
 
         for spec in [":defs.bzl", "//tools:defs.bzl"] {
-            let content = format!("load(\"{spec}\", \"rule_impl\")\n");
+            let content = format!("load(\n    \"{spec}\",\n    \"rule_impl\",\n)\n");
             let edges = extract_file_edges(root.path(), None, Path::new("tools/BUILD"), &content);
             assert!(edges.iter().any(|edge| {
                 edge.kind == FileEdgeKind::Dependency
@@ -2133,7 +2170,7 @@ mod tests {
             root.path(),
             None,
             Path::new("BUILD.bazel"),
-            "load(\"//:defs.bzl\", \"root_rule\")\n",
+            "load(\n    \"//:defs.bzl\",\n    \"root_rule\",\n)\n",
         );
         assert!(edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Dependency && edge.target_path == Path::new("defs.bzl")
@@ -2369,7 +2406,7 @@ mod tests {
             root.path(),
             None,
             Path::new("src/main/scala/com/acme/service/Service.scala"),
-            "import com.acme.util.{Auth => AliasAuth, Clock}\nclass Service\n",
+            "import com.acme.util.{\n  Auth => AliasAuth,\n  Clock,\n}\nclass Service\n",
         );
         for owner in ["Auth", "Clock"] {
             let expected = PathBuf::from(format!("src/main/scala/com/acme/util/{owner}.scala"));

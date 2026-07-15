@@ -596,7 +596,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     .unwrap();
     std::fs::write(
         root.join("BUILD.bazel"),
-        "load(\"//:root_defs.bzl\", \"root_rule\")\n\ndef assemble_root_release():\n    return root_rule()\n",
+        "load(\n    \"//:root_defs.bzl\",\n    \"root_rule\",\n)\n\ndef assemble_root_release():\n    return root_rule()\n",
     )
     .unwrap();
     std::fs::write(
@@ -616,7 +616,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     .unwrap();
     std::fs::write(
         root.join("src/main/scala/com/acme/project/module/GroupedService.scala"),
-        "package com.acme.project.module\nimport com.acme.project.grouped.{Auth, Clock}\nclass GroupedService { def assembleScalaGroupedRelease() = Auth.check() && Clock.ready() }\n",
+        "package com.acme.project.module\nimport com.acme.project.grouped.{\n  Auth,\n  Clock,\n}\nclass GroupedService { def assembleScalaGroupedRelease() = Auth.check() && Clock.ready() }\n",
     )
     .unwrap();
     std::fs::write(
