@@ -566,7 +566,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     .unwrap();
     std::fs::write(
         root.join("frontend/main.ts"),
-        "import { runWidgetHelper } from \"./helper.js\";\nimport schema from './schema.json' with { type: \"json\" };\n\nexport function start_nodenext_widget() { return runWidgetHelper(); }\nexport function start_schema_widget() { return schema.release; }\n",
+        "import { runWidgetHelper } from \"./helper.js\";\nimport {\n  runMultilineHelper,\n} from './multiline.js';\nimport schema from './schema.json' with { type: \"json\" };\n\nexport function start_nodenext_widget() { return runWidgetHelper(); }\nexport function start_multiline_widget() { return runMultilineHelper(); }\nexport function start_schema_widget() { return schema.release; }\n",
     )
     .unwrap();
     std::fs::write(
@@ -748,6 +748,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         !has_graph_dependency(&before_crate_package, "crates/core/src/crate_auth.rs"),
         "{before_crate_package:#}"
     );
+    let before_multiline_typescript = run_context("change start_multiline_widget");
+    assert!(
+        !has_graph_dependency(&before_multiline_typescript, "frontend/multiline.ts"),
+        "{before_multiline_typescript:#}"
+    );
 
     std::fs::write(
         root.join("app/helper.py"),
@@ -770,6 +775,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     )
     .unwrap();
     std::fs::write(root.join("frontend/schema.json"), "{\"release\": true}\n").unwrap();
+    std::fs::write(
+        root.join("frontend/multiline.ts"),
+        "export function runMultilineHelper() { return \"ready\"; }\n",
+    )
+    .unwrap();
     std::fs::write(
         root.join("src/main/groovy/com/acme/project/util/Helper.groovy"),
         "package com.acme.project.util\nclass Helper { static def run() {} }\n",
@@ -832,6 +842,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     assert!(
         has_graph_dependency(&typescript, "frontend/helper.ts"),
         "{typescript:#}"
+    );
+    let multiline_typescript = run_context("change start_multiline_widget");
+    assert!(
+        has_graph_dependency(&multiline_typescript, "frontend/multiline.ts"),
+        "{multiline_typescript:#}"
     );
 
     let go = run_context("change start_auth_server");

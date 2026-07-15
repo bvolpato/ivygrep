@@ -349,6 +349,7 @@ fn insert_edge(
 fn dependency_specs(language: &str, content: &str) -> Vec<String> {
     let mut specs = BTreeSet::new();
     let mut go_import_block = false;
+    let mut javascript_static_declaration = false;
     for raw_line in content.lines().take(20_000) {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with("//") {
@@ -394,10 +395,20 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                 }
             }
             "javascript" | "typescript" => {
-                if (line.starts_with("import ") || line.starts_with("export "))
-                    && let Some(spec) = javascript_module_specifier(line)
+                if line.starts_with("import ")
+                    || line.starts_with("export {")
+                    || line.starts_with("export *")
+                    || line.starts_with("export type {")
                 {
-                    specs.insert(spec);
+                    javascript_static_declaration = true;
+                }
+                if javascript_static_declaration {
+                    if let Some(spec) = javascript_module_specifier(line) {
+                        specs.insert(spec);
+                        javascript_static_declaration = false;
+                    } else if line.ends_with(';') {
+                        javascript_static_declaration = false;
+                    }
                 }
                 for marker in ["require(", "import("] {
                     if let Some(value) = value_after_marker(line, marker) {
@@ -1979,6 +1990,27 @@ mod tests {
         assert!(edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Dependency
                 && edge.target_path == Path::new("src/schema.json")
+        }));
+    }
+
+    #[test]
+    fn typescript_multiline_static_imports_resolve() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::write(
+            root.path().join("src/helper.ts"),
+            "export const value = 1;\n",
+        )
+        .unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("src/main.ts"),
+            "import {\n  value,\n} from './helper.js';\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency && edge.target_path == Path::new("src/helper.ts")
         }));
     }
 
