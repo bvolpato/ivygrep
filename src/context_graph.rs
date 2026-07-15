@@ -431,6 +431,7 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                     || line.starts_with("export {")
                     || line.starts_with("export *")
                     || line.starts_with("export type {")
+                    || line.starts_with("export type *")
                 {
                     javascript_static_declaration = true;
                 }
@@ -610,6 +611,9 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                 }
             }
             "starlark" => {
+                if line.starts_with('#') {
+                    continue;
+                }
                 if line.starts_with("load(") {
                     starlark_load = true;
                 }
@@ -2164,6 +2168,28 @@ mod tests {
     }
 
     #[test]
+    fn typescript_type_star_reexports_resolve() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::write(
+            root.path().join("src/release-types.ts"),
+            "export type Release = string;\n",
+        )
+        .unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("src/index.ts"),
+            "export type * from './release-types.js';\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("src/release-types.ts")
+        }));
+    }
+
+    #[test]
     fn python_relative_imports_resolve_from_source_directory() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("app/auth")).unwrap();
@@ -2229,7 +2255,9 @@ mod tests {
         .unwrap();
 
         for spec in [":defs.bzl", "//tools:defs.bzl"] {
-            let content = format!("load(\n    \"{spec}\",\n    \"rule_impl\",\n)\n");
+            let content = format!(
+                "load(\n    # \":old_defs.bzl\",\n    \"{spec}\",\n    \"rule_impl\",\n)\n"
+            );
             let edges = extract_file_edges(root.path(), None, Path::new("tools/BUILD"), &content);
             assert!(edges.iter().any(|edge| {
                 edge.kind == FileEdgeKind::Dependency

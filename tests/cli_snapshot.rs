@@ -567,7 +567,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     .unwrap();
     std::fs::write(
         root.join("frontend/main.ts"),
-        "import { runWidgetHelper } from \"./helper.js\";\nimport {\n  runMultilineHelper,\n} from './multiline.js';\nimport schema from './schema.json' with { type: \"json\" };\n\nexport function start_nodenext_widget() { return runWidgetHelper(); }\nexport function start_multiline_widget() { return runMultilineHelper(); }\nexport function start_schema_widget() { return schema.release; }\n",
+        "import { runWidgetHelper } from \"./helper.js\";\nimport {\n  runMultilineHelper,\n} from './multiline.js';\nexport type * from './release-types.js';\nimport schema from './schema.json' with { type: \"json\" };\n\nexport function start_nodenext_widget() { return runWidgetHelper(); }\nexport function start_multiline_widget() { return runMultilineHelper(); }\nexport function start_type_barrel_widget() { return true; }\nexport function start_schema_widget() { return schema.release; }\n",
     )
     .unwrap();
     std::fs::write(
@@ -597,7 +597,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     .unwrap();
     std::fs::write(
         root.join("BUILD.bazel"),
-        "load(\n    \"//:root_defs.bzl\",\n    \"root_rule\",\n)\n\ndef assemble_root_release():\n    return root_rule()\n",
+        "load(\n    # \"//:old_root_defs.bzl\",\n    \"//:root_defs.bzl\",\n    \"root_rule\",\n)\n\ndef assemble_root_release():\n    return root_rule()\n",
     )
     .unwrap();
     std::fs::write(
@@ -764,6 +764,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         !has_graph_dependency(&before_file_module, "src/release/token.rs"),
         "{before_file_module:#}"
     );
+    let before_type_barrel = run_context("change start_type_barrel_widget");
+    assert!(
+        !has_graph_dependency(&before_type_barrel, "frontend/release-types.ts"),
+        "{before_type_barrel:#}"
+    );
 
     std::fs::write(
         root.join("app/helper.py"),
@@ -789,6 +794,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::write(
         root.join("frontend/multiline.ts"),
         "export function runMultilineHelper() { return \"ready\"; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("frontend/release-types.ts"),
+        "export type Release = string;\n",
     )
     .unwrap();
     std::fs::write(
@@ -859,6 +869,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     assert!(
         has_graph_dependency(&multiline_typescript, "frontend/multiline.ts"),
         "{multiline_typescript:#}"
+    );
+    let type_barrel = run_context("change start_type_barrel_widget");
+    assert!(
+        has_graph_dependency(&type_barrel, "frontend/release-types.ts"),
+        "{type_barrel:#}"
     );
 
     let go = run_context("change start_auth_server");
