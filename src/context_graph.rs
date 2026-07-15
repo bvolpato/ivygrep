@@ -1129,7 +1129,7 @@ fn resolve_local_dependency(
             owner = parent;
         }
     }
-    if language == "kotlin" {
+    if matches!(language, "kotlin" | "scala") {
         let path = Path::new(&normalized);
         let member_starts_lowercase = path
             .file_name()
@@ -3224,6 +3224,34 @@ mod tests {
             edge.kind == FileEdgeKind::Dependency
                 && edge.target_path == Path::new("src/main/scala/com/acme/util/Helpers.scala")
         }));
+    }
+
+    #[test]
+    fn scala_named_member_imports_resolve_owning_object() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src/main/scala/com/acme/util")).unwrap();
+        fs::write(
+            root.path()
+                .join("src/main/scala/com/acme/util/Helpers.scala"),
+            "package com.acme.util\nobject Helpers { def helper = true }\n",
+        )
+        .unwrap();
+
+        for declaration in [
+            "import com.acme.util.Helpers.helper",
+            "import com.acme.util.Helpers.{helper => localHelper}",
+        ] {
+            let edges = extract_file_edges(
+                root.path(),
+                None,
+                Path::new("src/main/scala/com/acme/service/Service.scala"),
+                declaration,
+            );
+            assert!(edges.iter().any(|edge| {
+                edge.kind == FileEdgeKind::Dependency
+                    && edge.target_path == Path::new("src/main/scala/com/acme/util/Helpers.scala")
+            }));
+        }
     }
 
     #[test]

@@ -560,6 +560,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::create_dir_all(root.join("src/main/kotlin/com/acme/project/member")).unwrap();
     std::fs::create_dir_all(root.join("src/main/kotlin/com/acme/project/module")).unwrap();
     std::fs::create_dir_all(root.join("src/main/scala/com/acme/project/grouped")).unwrap();
+    std::fs::create_dir_all(root.join("src/main/scala/com/acme/project/member")).unwrap();
     std::fs::create_dir_all(root.join("src/main/scala/com/acme/project/module")).unwrap();
     std::fs::create_dir_all(root.join("src/main/groovy/com/acme/project/module")).unwrap();
     std::fs::create_dir_all(root.join("src/main/groovy/com/acme/project/util")).unwrap();
@@ -656,6 +657,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::write(
         root.join("src/main/scala/com/acme/project/module/GroupedService.scala"),
         "package com.acme.project.module\nimport com.acme.project.grouped.{\n  Auth,\n  Clock,\n}\nclass GroupedService { def assembleScalaGroupedRelease() = Auth.check() && Clock.ready() }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/main/scala/com/acme/project/module/MemberService.scala"),
+        "package com.acme.project.module\nimport com.acme.project.member.Helpers.helper\nclass MemberService { def assembleScalaMemberRelease() = helper }\n",
     )
     .unwrap();
     std::fs::write(
@@ -813,6 +819,14 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
             "{before_grouped_scala:#}"
         );
     }
+    let before_member_scala = run_context("change assembleScalaMemberRelease");
+    assert!(
+        !has_graph_dependency(
+            &before_member_scala,
+            "src/main/scala/com/acme/project/member/Helpers.scala"
+        ),
+        "{before_member_scala:#}"
+    );
     let before_crate_package = run_context("change verify_crate_package_release");
     assert!(
         !has_graph_dependency(&before_crate_package, "crates/core/src/crate_auth.rs"),
@@ -1016,6 +1030,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         .unwrap();
     }
     std::fs::write(
+        root.join("src/main/scala/com/acme/project/member/Helpers.scala"),
+        "package com.acme.project.member\nobject Helpers { def helper = true }\n",
+    )
+    .unwrap();
+    std::fs::write(
         root.join("crates/core/src/crate_auth.rs"),
         "pub fn verify_crate_auth() {}\n",
     )
@@ -1207,6 +1226,14 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
             "{grouped_scala:#}"
         );
     }
+    let member_scala = run_context("change assembleScalaMemberRelease");
+    assert!(
+        has_graph_dependency(
+            &member_scala,
+            "src/main/scala/com/acme/project/member/Helpers.scala"
+        ),
+        "{member_scala:#}"
+    );
 
     let crate_package = run_context("change verify_crate_package_release");
     assert!(
