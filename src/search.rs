@@ -569,6 +569,46 @@ impl SearchContext {
         Ok(result)
     }
 
+    pub(crate) fn representative_hit_for_file(
+        &self,
+        file_path: &Path,
+        task: &str,
+        skip_gitignore: bool,
+    ) -> Result<Option<SearchHit>> {
+        let mut chunks = query_chunks_for_file(&self.sqlite, file_path, skip_gitignore)?;
+        if chunks.is_empty()
+            && let Some(base_sqlite) = &self.base_sqlite
+            && !self.is_shadowed_base_file(1, file_path)
+        {
+            chunks = query_chunks_for_file(base_sqlite, file_path, skip_gitignore)?;
+        }
+        if chunks.is_empty() {
+            return Ok(None);
+        }
+        let task_terms = task
+            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .map(str::to_ascii_lowercase)
+            .filter(|term| term.len() >= 3)
+            .collect::<HashSet<_>>();
+        chunks.sort_by(|left, right| {
+            representative_chunk_score(right, &task_terms)
+                .cmp(&representative_chunk_score(left, &task_terms))
+                .then_with(|| left.start_line.cmp(&right.start_line))
+        });
+        let chunk = chunks.remove(0);
+        Ok(Some(SearchHit {
+            file_path: chunk.file_path,
+            start_line: chunk.start_line,
+            end_line: chunk.end_line,
+            preview: chunk.text,
+            reason: "context graph relationship".to_string(),
+            score: 0.0,
+            sources: Vec::new(),
+            neural_requested: false,
+            neural_executed: false,
+        }))
+    }
+
     /// Batch-fetch stored text for candidates whose metadata is already loaded.
     fn fetch_chunk_texts_by_vector_keys_batch(&self, keys: &[u64]) -> Result<HashMap<u64, String>> {
         let mut result = fetch_chunk_texts_by_vector_keys_batch(&self.sqlite, keys)?;
@@ -655,6 +695,51 @@ impl SearchContext {
         cache.insert(path.to_path_buf(), cached.clone());
         Some(cached)
     }
+}
+
+fn query_chunks_for_file(
+    conn: &Connection,
+    file_path: &Path,
+    skip_gitignore: bool,
+) -> Result<Vec<IndexedChunk>> {
+    let path = crate::workspace::index_path_string(file_path);
+    let mut statement = conn.prepare_cached(
+        "SELECT file_path, start_line, end_line, language, kind, text, vector_key, is_ignored
+         FROM chunks
+         WHERE file_path = ?1 AND (?2 OR is_ignored = 0)
+         ORDER BY start_line LIMIT 96",
+    )?;
+    let rows = statement.query_map(rusqlite::params![path, skip_gitignore], |row| {
+        let raw: Vec<u8> = row.get(5)?;
+        Ok(IndexedChunk {
+            chunk_id: String::new(),
+            file_path: PathBuf::from(row.get::<_, String>(0)?),
+            start_line: row.get::<_, i64>(1)? as usize,
+            end_line: row.get::<_, i64>(2)? as usize,
+            language: row.get(3)?,
+            kind: row.get(4)?,
+            text: crate::indexer::decompress_text(raw),
+            content_hash: String::new(),
+            vector_key: row.get::<_, i64>(6)? as u64,
+            is_ignored: row.get(7)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
+fn representative_chunk_score(chunk: &IndexedChunk, task_terms: &HashSet<String>) -> usize {
+    let text = chunk.text.to_ascii_lowercase();
+    let path = chunk.file_path.to_string_lossy().to_ascii_lowercase();
+    let term_score = task_terms
+        .iter()
+        .map(|term| usize::from(text.contains(term)) * 8 + usize::from(path.contains(term)) * 5)
+        .sum::<usize>();
+    let kind_score = usize::from(matches!(
+        chunk.kind.as_str(),
+        "Function" | "Class" | "Module" | "Struct" | "Trait" | "Interface" | "Enum"
+    )) * 3;
+    term_score + kind_score + usize::from(chunk.start_line <= 20)
 }
 
 /// Fast index-backed literal text search.

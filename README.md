@@ -11,7 +11,7 @@
   <a href="https://github.com/bvolpato/ivygrep/actions"><img src="https://github.com/bvolpato/ivygrep/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://github.com/bvolpato/ivygrep/actions/workflows/security.yml"><img src="https://github.com/bvolpato/ivygrep/actions/workflows/security.yml/badge.svg" alt="Security" /></a>
   <a href="https://github.com/bvolpato/ivygrep/actions/workflows/relevance.yml"><img src="https://github.com/bvolpato/ivygrep/actions/workflows/relevance.yml/badge.svg" alt="Relevance" /></a>
-  <a href="https://github.com/bvolpato/ivygrep/releases/tag/v1.1.19"><img src="https://img.shields.io/badge/release-v1.1.19-34d058" alt="Latest Release" /></a>
+  <a href="https://github.com/bvolpato/ivygrep/releases/tag/v1.1.20"><img src="https://img.shields.io/badge/release-v1.1.20-34d058" alt="Latest Release" /></a>
   <a href="https://github.com/bvolpato/ivygrep/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT" /></a>
   <a href="https://github.com/bvolpato/ivygrep/releases"><img src="https://img.shields.io/github/downloads/bvolpato/ivygrep/total?color=%23ff6f00" alt="Downloads" /></a>
 </p>
@@ -25,7 +25,8 @@
   <a href="https://bvolpato.github.io/ivygrep/benchmarks/">Benchmarks</a> ·
   <a href="AGENT_INTEGRATION.md">AI Agents</a> ·
   <a href="ARCHITECTURE.md">Architecture</a> ·
-  <a href="CONTRIBUTING.md">Contributing</a>
+  <a href="CONTRIBUTING.md">Contributing</a> ·
+  <a href="https://github.com/bvolpato/ivygrep/discussions">Discussions</a>
 </p>
 
 ---
@@ -36,10 +37,16 @@
 ig context "fix refresh-token races" --budget 8000
 ```
 
-`ig context` retrieves implementation chunks, definitions, callers, exact
-references, tests, configuration, and documentation. It merges overlapping
-evidence, labels why each snippet matters, and keeps the complete Markdown pack
-inside the requested token budget. Add `--json` for structured output.
+`ig context` retrieves implementation chunks, dependencies, reverse dependents,
+definitions, callers, exact references, tests, configuration, documentation,
+and recent co-change evidence. It merges overlapping evidence, labels why each
+snippet matters, and keeps complete Markdown pack within requested token budget.
+Add `--json` for structured output. MCP agents request same pack through
+existing `ig_search` tool:
+
+```json
+{"query":"fix refresh-token races","path":"/repo","output":"context_pack","budget_tokens":8000}
+```
 
 ## Quick start
 
@@ -129,9 +136,10 @@ ig --json context "fix refresh-token races" --budget 16000
 ```
 
 Packs include role coverage, retrieval signals, source locations, candidate and
-selected counts, anchor symbols, and exact-reference expansion. Default budget:
-8,000 tokens. Filters such as `--type`, `--include`, and `--exclude` apply to the
-whole pack. Existing local indexes stay local. No extra MCP call is added.
+selected counts, anchor symbols, typed file relationships, and exact-reference
+expansion. Default budget: 8,000 tokens. `--type`, `--include`, and `--exclude`
+apply to whole pack. Existing local indexes stay local. MCP uses same
+`ig_search` call with `output=context_pack` and `budget_tokens`.
 
 **Web UI:**
 ```bash
@@ -184,9 +192,9 @@ model artifacts once; `--hash` and hash-only builds do not.
 Use `ig --mcp` when an agent needs code search without loading whole files into
 context.
 
-Use MCP search for iterative discovery. Use `ig context "task" --budget 8000`
-when a shell-capable agent needs one bounded implementation pack with callers,
-references, tests, config, and docs.
+Use normal MCP search for iterative discovery. For implementation, set
+`output=context_pack` and `budget_tokens=8000` on `ig_search`. Shell-capable
+agents can run `ig context "task" --budget 8000` for same bounded evidence.
 
 ```bash
 ig --mcp    # starts MCP server on stdio
@@ -301,6 +309,7 @@ Use natural-language queries for concepts and literal=true for exact identifiers
 Use limit to choose retrieval breadth and context to choose source lines per hit.
 Start with limit=5-10 and context=2. Increase context when a promising hit needs
 more evidence; increase limit when you need more candidate files.
+For implementation tasks, set output=context_pack and budget_tokens=8000.
 Use ig_status when indexing health is unclear.
 ```
 
@@ -405,6 +414,9 @@ symbol/call graph storage,
 ivygrep runs search and embedding inference locally. It never sends code,
 queries, or index data to an external service.
 
+Report vulnerabilities privately through [security policy](SECURITY.md), not a
+public issue.
+
 - Compressed source chunks live under `~/.local/share/ivygrep` or the configured
   `$XDG_DATA_HOME`/`$IVYGREP_HOME`. Unix uses an owner-only `0600` socket plus
   peer-uid verification. Windows uses loopback TCP with a per-daemon token
@@ -498,7 +510,7 @@ Neither is a relevance threshold.
 - Agents should start with `-n 5` to `-n 10` and `-C 2`. Increase context for
   more lines from the same file; increase limit for more candidate files.
 - Scores order one query's results. They are not global confidence values.
-- MCP search has no total token budget. CLI `ig context` does.
+- MCP `output=context_pack` and CLI `ig context` enforce complete-pack token budgets.
 
 ---
 
@@ -558,7 +570,15 @@ neural backend check embeds fixture text locally and verifies backend reporting.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
+First contribution:
+
+- Pick a [`good first issue`](https://github.com/bvolpato/ivygrep/labels/good%20first%20issue) or [`help wanted`](https://github.com/bvolpato/ivygrep/labels/help%20wanted).
+- Read [contributor setup and validation](CONTRIBUTING.md).
+- Ask questions in [Discussions](https://github.com/bvolpato/ivygrep/discussions).
+- Use structured [bug and feature forms](https://github.com/bvolpato/ivygrep/issues/new/choose).
+
+Community standards: [Code of Conduct](CODE_OF_CONDUCT.md) ·
+[Governance](GOVERNANCE.md) · [Support](SUPPORT.md) · [Security](SECURITY.md)
 
 ---
 

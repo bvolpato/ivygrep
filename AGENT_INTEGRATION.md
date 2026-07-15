@@ -21,18 +21,25 @@ shell. If the MCP server fails with an executable-not-found error, replace
 
 ## Task Context Packs
 
-Use MCP search for iterative discovery. Use CLI context packs when a
-shell-capable agent needs one bounded handoff for planning or implementation:
+Use normal MCP search for iterative discovery. For planning or implementation,
+request one bounded pack from same `ig_search` tool:
+
+```json
+{"query":"fix refresh-token races","path":"/repo","output":"context_pack","budget_tokens":8000}
+```
+
+Shell-capable agents can request same pack from CLI:
 
 ```bash
 ig context "fix refresh-token races" --budget 8000
 ig --json context "fix refresh-token races" --budget 8000
 ```
 
-One pack combines primary hits, definitions, callers, exact references, tests,
-configuration, and documentation. Markdown output reports role coverage,
-retrieval signals, source lines, anchors, selected candidates, and complete-pack
-token use. `--type`, `--include`, and `--exclude` narrow every retrieval pass.
+One pack combines primary hits, dependencies, reverse dependents, definitions,
+callers, exact references, tests, configuration, documentation, and recent
+co-change evidence. Output reports role coverage, retrieval signals, source
+lines, anchors, selected candidates, and complete-pack token use. `type`,
+`include`, and `exclude` narrow every retrieval pass.
 
 | Budget | Use |
 |---:|---|
@@ -173,6 +180,8 @@ Important arguments:
 |---|---|
 | `query` | Required natural-language query, keywords, identifier, or regex |
 | `path` | Absolute repository, worktree, subdirectory, or file path |
+| `output` | `hits` for ranked discovery; `context_pack` for bounded task evidence |
+| `budget_tokens` | Complete-pack budget, 256 to 131,072; valid with `output=context_pack` |
 | `literal` | Exact identifier or text search backed by the index |
 | `regex` | Regex search; prefer `literal` when regex syntax is unnecessary |
 | `type` | Language name, extension, or alias such as `rust`, `rs`, or `python` |
@@ -227,10 +236,9 @@ Recommended agent flow:
    or supporting files. Narrow `path`, `type`, `include`, or `exclude` when the
    results are topically correct but too broad.
 
-MCP `ig_search` has no total `max_tokens` parameter. Use CLI
-`ig context "task" --budget TOKENS` for one task-aware pack whose rendered
-Markdown fits the requested estimate.
-Otherwise control MCP result count and per-hit context separately.
+For implementation, set `output=context_pack` and `budget_tokens=8000`.
+For iterative hits, control result count and per-hit source with `limit` and
+`context`. CLI `ig context "task" --budget TOKENS` returns same pack shape.
 
 Fewer snippet tokens do not mean fewer result files, better relevance, or worse
 relevance. They mean less source text was returned for the selected files.
@@ -268,6 +276,7 @@ Use natural-language queries for concepts and literal=true for exact identifiers
 Use limit to choose retrieval breadth and context to choose source lines per hit.
 Start with limit=5-10 and context=2. Increase context when a promising hit needs
 more evidence; increase limit when you need more candidate files.
+For implementation tasks, set output=context_pack and budget_tokens=8000.
 Use ig_status when indexing health is unclear.
 ```
 

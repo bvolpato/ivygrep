@@ -17,6 +17,7 @@ use serial_test::serial;
 use tempfile::tempdir;
 
 use ivygrep::EMBEDDING_DIMENSIONS;
+use ivygrep::context::{ContextRole, build_context_bundle};
 use ivygrep::embedding::HashEmbeddingModel;
 use ivygrep::indexer::{index_workspace, open_sqlite, reconcile_worktree_overlay};
 use ivygrep::search::{SearchOptions, hybrid_search};
@@ -2878,6 +2879,242 @@ fn worktree_search_reconciles_base_only_additions_before_loading_context() {
     fs2::FileExt::unlock(&lock_file).unwrap();
     assert!(reconcile.join().unwrap().unwrap());
     assert!(!wt_workspace.worktree_overlay_is_stale().unwrap());
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+#[test]
+#[serial]
+fn worktree_context_graph_prefers_overlay_dependencies() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    init_git_repo(root.path());
+    fs::create_dir_all(root.path().join("src")).unwrap();
+    fs::write(
+        root.path().join("Cargo.toml"),
+        "[package]\nname = \"worktree-graph\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("src/auth.rs"),
+        "use crate::old_clock::now;\npub fn rotate_refresh_token() { now(); }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("src/old_clock.rs"),
+        "pub fn now() -> u64 { 1 }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("src/new_clock.rs"),
+        "pub fn now() -> u64 { 2 }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("src/session.rs"),
+        "use crate::policy::validate_policy;\npub fn refresh_session_orchestration() { validate_policy(); }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("src/policy.rs"),
+        "pub fn validate_policy() -> &'static str { \"base-policy\" }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base graph"]);
+    setup_and_index(root.path(), home.path());
+
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_context_graph");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "context-graph-worktree",
+            wt_path.to_str().unwrap(),
+        ],
+    );
+    fs::write(
+        wt_path.join("src/auth.rs"),
+        "use crate::new_clock::now;\npub fn rotate_refresh_token() { now(); }\n",
+    )
+    .unwrap();
+    fs::write(
+        wt_path.join("src/policy.rs"),
+        "pub fn validate_policy() -> &'static str { \"worktree-policy\" }\n",
+    )
+    .unwrap();
+    setup_and_index(&wt_path, home.path());
+
+    let workspace = workspace_for(&wt_path);
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+    let bundle = build_context_bundle(
+        &workspace,
+        "rotate refresh token expiration",
+        Some(&model),
+        &SearchOptions::default(),
+        4_000,
+    )
+    .unwrap();
+    let dependency_paths = bundle
+        .items
+        .iter()
+        .filter(|item| item.roles.contains(&ContextRole::Dependency))
+        .map(|item| item.file_path.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        dependency_paths
+            .iter()
+            .any(|path| path == "src/new_clock.rs"),
+        "{bundle:#?}"
+    );
+    assert!(
+        dependency_paths
+            .iter()
+            .all(|path| path != "src/old_clock.rs"),
+        "{bundle:#?}"
+    );
+
+    let bundle = build_context_bundle(
+        &workspace,
+        "refresh session orchestration",
+        Some(&model),
+        &SearchOptions::default(),
+        4_000,
+    )
+    .unwrap();
+    let policy = bundle.items.iter().find(|item| {
+        item.file_path == std::path::Path::new("src/policy.rs")
+            && item.roles.contains(&ContextRole::Dependency)
+    });
+    assert!(
+        policy.is_some_and(|item| {
+            item.preview.contains("worktree-policy") && !item.preview.contains("base-policy")
+        }),
+        "{bundle:#?}"
+    );
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+#[test]
+#[serial]
+fn worktree_restored_dependency_wakes_overlay_importer() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    init_git_repo(root.path());
+    fs::create_dir_all(root.path().join("src")).unwrap();
+    fs::write(
+        root.path().join("src/lib.rs"),
+        "use crate::helper::work;\npub fn restore_overlay_dependency_wakeup() { work(); }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("src/helper.rs"),
+        "pub fn work() -> &'static str { \"base-target\" }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base dependency"]);
+    setup_and_index(root.path(), home.path());
+
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_restored_dependency");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "restored-dependency-worktree",
+            wt_path.to_str().unwrap(),
+        ],
+    );
+    fs::remove_file(wt_path.join("src/helper.rs")).unwrap();
+    fs::write(
+        wt_path.join("src/lib.rs"),
+        "use crate::helper::work;\n// overlay importer\npub fn restore_overlay_dependency_wakeup() { work(); }\n",
+    )
+    .unwrap();
+    setup_and_index(&wt_path, home.path());
+
+    let workspace = workspace_for(&wt_path);
+    let conn = open_sqlite(&workspace.overlay_sqlite_path()).unwrap();
+    let unresolved = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT spec) FROM unresolved_file_dependencies
+             WHERE source_path = 'src/lib.rs' AND spec = 'crate::helper::work'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(unresolved, 1);
+    drop(conn);
+
+    fs::write(
+        wt_path.join("src/helper.rs"),
+        "pub fn work() -> &'static str { \"base-target\" }\n",
+    )
+    .unwrap();
+    let summary = setup_and_index(&wt_path, home.path());
+    assert_eq!(summary.indexed_files, 1);
+
+    let conn = open_sqlite(&workspace.overlay_sqlite_path()).unwrap();
+    let edge = conn
+        .query_row(
+            "SELECT COUNT(*) FROM file_edges
+             WHERE source_path = 'src/lib.rs'
+               AND target_path = 'src/helper.rs'
+               AND kind = 1",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(edge, 1);
+    let unresolved = conn
+        .query_row(
+            "SELECT COUNT(*) FROM unresolved_file_dependencies
+             WHERE source_path = 'src/lib.rs' AND spec = 'crate::helper::work'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(unresolved, 0);
+    let overlay_target_chunks = conn
+        .query_row(
+            "SELECT COUNT(*) FROM chunks WHERE file_path = 'src/helper.rs'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(overlay_target_chunks, 0);
+    drop(conn);
+
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+    let bundle = build_context_bundle(
+        &workspace,
+        "restore overlay dependency wakeup",
+        Some(&model),
+        &SearchOptions::default(),
+        4_000,
+    )
+    .unwrap();
+    assert!(
+        bundle.items.iter().any(|item| {
+            item.file_path == std::path::Path::new("src/helper.rs")
+                && item.roles.contains(&ContextRole::Dependency)
+                && item.preview.contains("base-target")
+        }),
+        "{bundle:#?}"
+    );
 
     git(
         root.path(),

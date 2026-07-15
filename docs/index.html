@@ -53,6 +53,7 @@
                 <a href="#performance">Performance</a>
                 <a href="#languages">Languages</a>
                 <a href="#mcp">AI Agents</a>
+                <a href="#community">Contribute</a>
                 <a href="#install">Install</a>
                 <a href="https://github.com/bvolpato/ivygrep" class="btn btn-outline" target="_blank" rel="noopener">
                     <svg height="18" viewBox="0 0 16 16" width="18" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
@@ -70,13 +71,13 @@
         <div class="container hero-content">
             <div class="hero-badge slide-up">
                 <span class="badge-dot"></span>
-                v1.1.19
+                v1.1.20
             </div>
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" onerror="this.src='assets/logo.png'"/>
             </div>
             <h1 class="slide-up delay-1">Search code. Build task context.<br/><span class="highlight-gradient">Never upload your code.</span></h1>
-            <p class="subtitle slide-up delay-2">Find code by intent. Expand definitions, callers, references, tests, config, and docs into one token-budgeted pack.</p>
+            <p class="subtitle slide-up delay-2">Find code by intent. Traverse dependencies, dependents, symbols, tests, config, and docs. Return one bounded pack through CLI or MCP.</p>
 
             <div class="cta-row slide-up delay-3">
                 <a href="#install" class="btn btn-primary">
@@ -160,9 +161,9 @@
             <div class="grid grid-2 align-center context-pack-grid">
                 <div>
                     <h3>More useful than a list of search hits</h3>
-                    <p><code>ig context</code> starts from task intent, finds anchor symbols, expands definitions, callers, and exact references, then adds matching tests, configuration, and documentation.</p>
+                    <p><code>ig context</code> starts from task intent, then traverses typed dependencies, reverse dependents, definitions, callers, references, tests, configuration, docs, and recent co-changes.</p>
                     <div class="context-role-list" aria-label="Context pack evidence roles">
-                        <span>Primary</span><span>Definitions</span><span>Callers</span><span>References</span>
+                        <span>Primary</span><span>Dependencies</span><span>Dependents</span><span>Definitions</span><span>Callers</span><span>References</span>
                         <span>Tests</span><span>Config</span><span>Docs</span>
                     </div>
                     <p>Markdown output includes source lines, retrieval signals, role coverage, and complete-pack token use. JSON output keeps the same evidence structured.</p>
@@ -172,10 +173,10 @@
 
 # ivygrep context
 Budget: 3842 / 8000 estimated tokens
-Coverage: 7 files | primary | definitions | callers | references | tests
+Coverage: 7 files | primary | dependencies | dependents | definitions | tests
 
 1. src/auth/refresh.rs:42-88 [primary, definition]
-2. src/http/session.rs:117-145 [caller, reference]
+2. src/http/session.rs:117-145 [dependent, caller]
 3. tests/refresh_token.rs:20-61 [test]</pre>
                 </div>
             </div>
@@ -200,7 +201,7 @@ Coverage: 7 files | primary | definitions | callers | references | tests
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">📦</span></div>
                 <h3>Task-ready context packs</h3>
-                <p>Turn one task into bounded evidence across implementations, relationships, tests, config, and docs with <code>ig context</code>.</p>
+                <p>Turn one task into bounded graph evidence through CLI <code>ig context</code> or MCP <code>output=context_pack</code>.</p>
             </div>
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">⚡</span></div>
@@ -513,7 +514,7 @@ Coverage: 7 files | primary | definitions | callers | references | tests
             <div class="section-header">
                 <span class="section-tag">Model Context Protocol</span>
                 <h2 class="section-title text-center">MCP for coding agents</h2>
-                <p class="text-center subtitle-small">Use MCP for iterative search. Use <code>ig context</code> for one bounded task handoff. Automatic and manual setup remain available.</p>
+                <p class="text-center subtitle-small">Use normal MCP search for discovery. Set <code>output=context_pack</code> for one bounded task handoff. CLI <code>ig context</code> returns same evidence.</p>
             </div>
 
             <div class="glass-panel fade-in-scroll mt-4 setup-panel">
@@ -604,7 +605,7 @@ Coverage: 7 files | primary | definitions | callers | references | tests
 
             <div class="glass-panel fade-in-scroll mt-4 agent-guidance">
                 <h3>Agent-safe defaults</h3>
-                <p>Pass the absolute current repository or worktree path to <code>ig_search</code>. Use natural-language queries for concepts, <code>literal=true</code> for exact identifiers, and <code>ig_status</code> when indexing health is unclear.</p>
+                <p>Pass absolute repository or worktree path to <code>ig_search</code>. Use natural-language queries for concepts, <code>literal=true</code> for identifiers, or <code>output=context_pack</code> with <code>budget_tokens=8000</code> for implementation.</p>
                 <p>The first search creates an index and starts incremental watching. Worktrees reuse one shared base index and store only divergent chunks and tombstones.</p>
                 <a href="https://github.com/bvolpato/ivygrep/blob/main/AGENT_INTEGRATION.md" class="btn btn-ghost">Full integration guide</a>
             </div>
@@ -636,6 +637,32 @@ Coverage: 7 files | primary | definitions | callers | references | tests
                         <div class="mcp-flow-detail">Without loading entire files</div>
                     </div>
                 </div>
+            </div>
+        </div>
+    </section>
+
+    <section id="community" class="container relative z-10 section-spacing">
+        <div class="section-header">
+            <span class="section-tag">Open source</span>
+            <h2 class="section-title text-center">Make ivygrep better</h2>
+            <p class="text-center subtitle-small">Clear starter work, reproducible checks, public decisions.</p>
+        </div>
+
+        <div class="grid grid-3 mt-4">
+            <div class="glass-panel fade-in-scroll install-card">
+                <h3>Start small</h3>
+                <p>Pick a scoped issue with setup and validation guidance.</p>
+                <a href="https://github.com/bvolpato/ivygrep/labels/good%20first%20issue" class="btn btn-ghost">Good first issues</a>
+            </div>
+            <div class="glass-panel fade-in-scroll install-card">
+                <h3>Shape ideas</h3>
+                <p>Ask questions and discuss designs before large changes.</p>
+                <a href="https://github.com/bvolpato/ivygrep/discussions" class="btn btn-ghost">Discussions</a>
+            </div>
+            <div class="glass-panel fade-in-scroll install-card">
+                <h3>Send a PR</h3>
+                <p>Use focused checks and evidence-based review guidance.</p>
+                <a href="https://github.com/bvolpato/ivygrep/blob/main/CONTRIBUTING.md" class="btn btn-ghost">Contributor guide</a>
             </div>
         </div>
     </section>
@@ -731,10 +758,12 @@ Coverage: 7 files | primary | definitions | callers | references | tests
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/AGENT_INTEGRATION.md" class="footer-link">AI Agents</a>
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/ARCHITECTURE.md" class="footer-link">Architecture</a>
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/CONTRIBUTING.md" class="footer-link">Contributing</a>
+                    <a href="https://github.com/bvolpato/ivygrep/discussions" class="footer-link">Discussions</a>
+                    <a href="https://github.com/bvolpato/ivygrep/blob/main/SECURITY.md" class="footer-link">Security</a>
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md" class="footer-link">Changelog</a>
                 </div>
                 <div class="footer-copy">
-                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v1.1.19</p>
+                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v1.1.20</p>
                 </div>
             </div>
         </div>

@@ -16,6 +16,7 @@ match the source tree.
 | File walk and diffs | `src/walker.rs`, `src/merkle.rs` | Respect ignore rules, fingerprint files, compute incremental changes |
 | Indexing | `src/indexer.rs`, `src/chunking.rs` | Chunk source, write SQLite/Tantivy/vector stores, stage fresh indexes |
 | Search | `src/search.rs`, `src/symbols.rs`, `src/reranker.rs` | Build candidates, fuse ranks, filter low-quality hits |
+| Context graph | `src/context.rs`, `src/context_graph.rs` | Build budgeted task packs from retrieval, typed file edges, symbols, and Git history |
 | Embeddings | `src/embedding.rs`, `src/vector.rs` | Hash embeddings, learned profiles, USearch storage |
 | Daemon | `src/daemon.rs`, `src/ipc.rs`, `src/protocol.rs` | Watchers, warm search contexts, query cache, IPC protocol |
 | Web UI | `src/web.rs`, `web/` | Daemon-backed local HTTP UI, embedded frontend assets |
@@ -116,7 +117,7 @@ overlay_vectors.usearch
 .watcher.pid
 ```
 
-Current on-disk search format is `INDEX_FORMAT_VERSION = 17`. Health checks
+Current on-disk search format is `INDEX_FORMAT_VERSION = 18`. Health checks
 rebuild indexes with missing stores, corrupt SQLite/Tantivy/vector files,
 incompatible format versions, or stale worktree overlays.
 
@@ -127,8 +128,8 @@ and doc-include dependency edges.
 
 ## SQLite
 
-SQLite stores chunk metadata, compressed source text, stats, symbols, and
-Rust doc include dependencies.
+SQLite stores chunk metadata, compressed source text, stats, symbols, Rust doc
+include dependencies, and compact typed file edges.
 
 Main tables:
 
@@ -138,6 +139,7 @@ Main tables:
 | `_stats` | Cached `chunk_count`, `file_count`, `vector_key_count` |
 | `symbols` | `WITHOUT ROWID`, primary key `(normalized_name, chunk_key)` |
 | `included_file_dependencies` | `(owner_path, included_path)` edges for Rust doc includes |
+| `file_edges` | `WITHOUT ROWID` dependency, test, config, and documentation edges keyed by source and target path |
 | `tombstones` | Overlay-only table for base files hidden by a worktree |
 
 The `chunks.text` column stores raw UTF-8 bytes for small chunks. Chunks at least
@@ -161,6 +163,19 @@ PRAGMA temp_store = MEMORY;
 Secondary indexes are deferred during fresh staging, then created after bulk
 insert. Search connections are read-only and tuned for mmap/page-cache-heavy
 lookups.
+
+## Context Graph
+
+Indexing extracts local imports plus test, manifest, and Markdown-link
+relationships from full files. `file_edges` stores paths and edge type only.
+No symbol-level call graph is duplicated.
+
+`ig context` and MCP `output=context_pack` start from task-matching primary
+hits, expand typed edges in both directions, rank bounded neighbors, then
+hydrate one task-relevant chunk per file. Recent Git co-changes are queried only
+when static edges provide insufficient coverage. Weak config and documentation
+neighbors require task overlap. Final assembly balances roles, deduplicates
+overlapping snippets, and enforces complete-pack token budget.
 
 ## Tantivy
 
@@ -625,8 +640,9 @@ generated `web_assets.rs`.
 
 ## MCP Server
 
-`ig --mcp` serves stdio MCP tools. `ig_search` accepts a workspace path, query,
-limit, context, and optional literal mode. It scopes search to the supplied
+`ig --mcp` serves stdio MCP tools. `ig_search` returns ranked hits by default.
+`output=context_pack` returns same relationship-expanded bundle as CLI
+`ig context`, bounded by `budget_tokens`. Search stays scoped to supplied
 workspace, auto-indexes on first use, and starts watching when configured.
 `ig_status` reports workspace/index health for agents before broader scans.
 

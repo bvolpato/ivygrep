@@ -50,7 +50,8 @@ pub struct Workspace {
 ///  15 — Kotlin, Elixir, and Zig declarations use Tree-sitter structural chunks
 ///  16 — Declaration signatures skip leading documentation and attributes
 ///  17 — Main text Tantivy postings store frequencies without positions
-pub const INDEX_FORMAT_VERSION: u32 = 17;
+///  18 — Compact typed file relationships support task-local context graphs
+pub const INDEX_FORMAT_VERSION: u32 = 18;
 const COMPACTION_FREE_BYTES_THRESHOLD: u64 = 16 * 1024 * 1024;
 const COMPACTION_FREE_PERCENT_THRESHOLD: f64 = 20.0;
 
@@ -1682,6 +1683,10 @@ fn sqlite_tier_bytes(path: &Path) -> (u64, u64) {
         &[
             "symbols",
             "idx_symbols_name",
+            "file_edges",
+            "idx_file_edges_target",
+            "unresolved_file_dependencies",
+            "idx_unresolved_file_dependencies_lookup",
             "symbol_edges",
             "sqlite_autoindex_symbol_edges_1",
             "idx_symbol_edges_source_chunk",

@@ -118,6 +118,13 @@ fn e2e_mcp_full_session() {
     let repo = tmp.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
     std::fs::write(repo.join("test.rs"), "fn foo() {}").unwrap();
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::write(
+        repo.join("src/lib.rs"),
+        "mod helper;\npub fn execute_helper() -> u64 { helper::value() }\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("src/helper.rs"), "pub fn value() -> u64 { 42 }\n").unwrap();
     std::fs::create_dir_all(repo.join(".git")).unwrap();
 
     let bin_path = assert_cmd::cargo::cargo_bin("ig");
@@ -232,13 +239,57 @@ fn e2e_mcp_full_session() {
     assert!(payload["result_count"].as_u64().unwrap() > 0);
     assert_eq!(payload["results"][0]["file_path"], "test.rs");
 
-    // 5. Edit the workspace and verify the same MCP session reconciles it.
-    std::fs::write(repo.join("test.rs"), "fn bar_after_agent_edit() {}").unwrap();
+    // 5. Build one bounded context pack through the same MCP tool.
     send_request(
         &mut stdin,
         json!({
             "jsonrpc": "2.0",
             "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "ig_search",
+                "arguments": {
+                    "query": "change execute_helper behavior",
+                    "path": repo.to_string_lossy().to_string(),
+                    "output": "context_pack",
+                    "budget_tokens": 1000
+                }
+            }
+        }),
+    );
+    let context_res = read_response(&mut reader);
+    assert_eq!(context_res["id"], 5);
+    let context_payload = search_payload(&context_res);
+    assert_eq!(context_payload["mode"], "context");
+    assert_eq!(context_payload["context_pack"]["budget_tokens"], 1000);
+    assert!(
+        context_payload["context_pack"]["used_tokens"]
+            .as_u64()
+            .unwrap()
+            <= 1000
+    );
+    let context_items = context_payload["context_pack"]["items"]
+        .as_array()
+        .expect("context pack items should be an array");
+    assert!(
+        context_items.iter().any(|item| {
+            item["file_path"] == "src/helper.rs"
+                && item["roles"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!("dependency"))
+        }),
+        "MCP context pack should expand Rust dependencies: {context_payload:#}"
+    );
+    assert_eq!(context_res["result"]["structuredContent"], context_payload);
+
+    // 6. Edit the workspace and verify the same MCP session reconciles it.
+    std::fs::write(repo.join("test.rs"), "fn bar_after_agent_edit() {}").unwrap();
+    send_request(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 6,
             "method": "tools/call",
             "params": {
                 "name": "ig_search",
@@ -251,7 +302,7 @@ fn e2e_mcp_full_session() {
         }),
     );
     let refreshed_res = read_response(&mut reader);
-    assert_eq!(refreshed_res["id"], 5);
+    assert_eq!(refreshed_res["id"], 6);
     let refreshed_payload = search_payload(&refreshed_res);
     assert!(
         refreshed_payload["result_count"].as_u64().unwrap() > 0,
