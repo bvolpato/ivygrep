@@ -168,6 +168,9 @@ pub(crate) fn extract_file_graph(
 
     if supports_dependency_scan(language) {
         for spec in dependency_specs(language, content) {
+            if is_javascript_package_specifier(language, &spec) {
+                continue;
+            }
             if let Some(target_path) = resolve_local_dependency(
                 root,
                 snapshot,
@@ -777,6 +780,14 @@ fn javascript_module_specifier(line: &str) -> Option<String> {
         .or_else(|| line.strip_prefix("import ").and_then(first_quoted_value))
 }
 
+fn is_javascript_package_specifier(language: &str, spec: &str) -> bool {
+    matches!(language, "javascript" | "typescript")
+        && !spec.starts_with('.')
+        && !spec.starts_with('/')
+        && !spec.starts_with("@/")
+        && !spec.starts_with("~/")
+}
+
 fn resolve_local_dependency(
     root: &Path,
     snapshot: Option<&MerkleSnapshot>,
@@ -797,6 +808,7 @@ fn resolve_local_dependency(
         || spec.starts_with("data:")
         || spec.starts_with("node:")
         || spec.starts_with("dart:")
+        || is_javascript_package_specifier(language, spec)
     {
         return None;
     }
@@ -2208,6 +2220,33 @@ mod tests {
 
         fs::remove_file(root.path().join("src/helper.js")).unwrap();
         assert_eq!(dependency(root.path()), Path::new("src/helper.ts"));
+    }
+
+    #[test]
+    fn javascript_package_imports_do_not_bind_to_local_files() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::write(
+            root.path().join("src/react.ts"),
+            "export const React = {};\n",
+        )
+        .unwrap();
+
+        let graph = extract_file_graph(
+            root.path(),
+            None,
+            Path::new("src/main.ts"),
+            "import React from 'react';\n",
+        );
+        assert!(!graph.edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency && edge.target_path == Path::new("src/react.ts")
+        }));
+        assert!(
+            graph
+                .unresolved_dependencies
+                .iter()
+                .all(|dependency| dependency.spec != "react")
+        );
     }
 
     #[test]

@@ -569,7 +569,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     .unwrap();
     std::fs::write(
         root.join("frontend/main.ts"),
-        "import { runWidgetHelper } from \"./helper.js\";\nimport {\n  runMultilineHelper,\n} from './multiline.js';\nexport type * from './release-types.js';\nimport schema from './schema.json' with { type: \"json\" };\n\nexport function start_nodenext_widget() { return runWidgetHelper(); }\nexport function start_multiline_widget() { return runMultilineHelper(); }\nexport function start_type_barrel_widget() { return true; }\nexport function start_schema_widget() { return schema.release; }\n",
+        "import { runWidgetHelper } from \"./helper.js\";\nimport {\n  runMultilineHelper,\n} from './multiline.js';\nexport type * from './release-types.js';\nimport schema from './schema.json' with { type: \"json\" };\nimport { packageShadow } from 'package_shadow';\n\nexport function start_nodenext_widget() { return runWidgetHelper(); }\nexport function start_multiline_widget() { return runMultilineHelper(); }\nexport function start_type_barrel_widget() { return true; }\nexport function start_schema_widget() { return schema.release; }\nexport function avoid_package_shadow() { return packageShadow(); }\n",
     )
     .unwrap();
     std::fs::write(
@@ -781,6 +781,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         !has_graph_dependency(&before_dart_package, "lib/src/release.dart"),
         "{before_dart_package:#}"
     );
+    let before_package_shadow = run_context("change avoid_package_shadow");
+    assert!(
+        !has_graph_dependency(&before_package_shadow, "frontend/package_shadow.ts"),
+        "{before_package_shadow:#}"
+    );
     let before_nested_group = run_context("change verify_nested_group_release");
     for target in [
         "crates/core/src/release/token.rs",
@@ -821,6 +826,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::write(
         root.join("frontend/release-types.ts"),
         "export type Release = string;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("frontend/package_shadow.ts"),
+        "export function packageShadow() { return false; }\n",
     )
     .unwrap();
     std::fs::write(
@@ -914,6 +924,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     assert!(
         has_graph_dependency(&dart_package, "lib/src/release.dart"),
         "{dart_package:#}"
+    );
+    let package_shadow = run_context("change avoid_package_shadow");
+    assert!(
+        !has_graph_dependency(&package_shadow, "frontend/package_shadow.ts"),
+        "{package_shadow:#}"
     );
 
     let go = run_context("change start_auth_server");
