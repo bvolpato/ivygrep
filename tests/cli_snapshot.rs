@@ -546,6 +546,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::create_dir_all(root.join("cmd/server")).unwrap();
     std::fs::create_dir_all(root.join("errors")).unwrap();
     std::fs::create_dir_all(root.join("frontend")).unwrap();
+    std::fs::create_dir_all(root.join("frontend/components/Button")).unwrap();
     std::fs::create_dir_all(root.join("internal/auth")).unwrap();
     std::fs::create_dir_all(root.join("lib/my_app")).unwrap();
     std::fs::create_dir_all(root.join("lib/local")).unwrap();
@@ -589,7 +590,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::write(root.join("errors/errors.go"), "package errors\n").unwrap();
     std::fs::write(
         root.join("frontend/main.ts"),
-        "import { runWidgetHelper } from \"./helper.js\";\nimport { runRootAbsoluteHelper } from '/frontend/root-absolute.js';\nimport {\n  runMultilineHelper,\n} from './multiline.js';\nexport type * from './release-types.js';\nimport schema from './schema.json' with { type: \"json\" };\nimport { packageShadow } from 'package_shadow';\n\nexport function start_nodenext_widget() { return runWidgetHelper(); }\nexport function start_root_absolute_widget() { return runRootAbsoluteHelper(); }\nexport function start_multiline_widget() { return runMultilineHelper(); }\nexport function start_type_barrel_widget() { return true; }\nexport function start_schema_widget() { return schema.release; }\nexport function avoid_package_shadow() { return packageShadow(); }\n",
+        "import { runWidgetHelper } from \"./helper.js\";\nimport { runRootAbsoluteHelper } from '/frontend/root-absolute.js';\nimport { Button } from './components/Button';\nimport {\n  runMultilineHelper,\n} from './multiline.js';\nexport type * from './release-types.js';\nimport schema from './schema.json' with { type: \"json\" };\nimport { packageShadow } from 'package_shadow';\n\nexport function start_nodenext_widget() { return runWidgetHelper(); }\nexport function start_root_absolute_widget() { return runRootAbsoluteHelper(); }\nexport function start_directory_widget() { return Button; }\nexport function start_multiline_widget() { return runMultilineHelper(); }\nexport function start_type_barrel_widget() { return true; }\nexport function start_schema_widget() { return schema.release; }\nexport function avoid_package_shadow() { return packageShadow(); }\n",
     )
     .unwrap();
     std::fs::write(
@@ -827,6 +828,14 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         !has_graph_dependency(&before_root_absolute, "frontend/root-absolute.ts"),
         "{before_root_absolute:#}"
     );
+    let before_directory_index = run_context("change start_directory_widget");
+    assert!(
+        !has_graph_dependency(
+            &before_directory_index,
+            "frontend/components/Button/index.jsx"
+        ),
+        "{before_directory_index:#}"
+    );
     let before_file_module = run_context("change verify_file_module_release");
     assert!(
         !has_graph_dependency(&before_file_module, "src/release/token.rs"),
@@ -927,6 +936,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::write(
         root.join("frontend/root-absolute.ts"),
         "export function runRootAbsoluteHelper() { return \"ready\"; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("frontend/components/Button/index.jsx"),
+        "export const Button = 'ready';\n",
     )
     .unwrap();
     std::fs::write(
@@ -1050,6 +1064,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     assert!(
         has_graph_dependency(&root_absolute, "frontend/root-absolute.ts"),
         "{root_absolute:#}"
+    );
+    let directory_index = run_context("change start_directory_widget");
+    assert!(
+        has_graph_dependency(&directory_index, "frontend/components/Button/index.jsx"),
+        "{directory_index:#}"
     );
     let type_barrel = run_context("change start_type_barrel_widget");
     assert!(

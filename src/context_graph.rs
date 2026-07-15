@@ -1008,6 +1008,8 @@ fn resolve_local_dependency(
     let javascript_workspace_absolute = matches!(language, "javascript" | "typescript")
         && spec.starts_with('/')
         && !spec.starts_with("//");
+    let javascript_relative = matches!(language, "javascript" | "typescript")
+        && (spec.starts_with("./") || spec.starts_with("../"));
     let dart_relative =
         language == "dart" && !spec.starts_with("package:") && !spec.starts_with('/');
     let python_relative = language == "python" && spec.starts_with('.');
@@ -1172,7 +1174,7 @@ fn resolve_local_dependency(
         bases.push(source_root);
     } else if javascript_workspace_absolute {
         bases.push(PathBuf::new());
-    } else if dart_relative || rust_path_module {
+    } else if dart_relative || javascript_relative || rust_path_module {
         bases.push(source_dir.to_path_buf());
     } else if rust_module_declaration {
         bases.push(rust_module_declaration_base(source_path));
@@ -1348,7 +1350,16 @@ fn module_index_names(language: &str) -> &'static [&'static str] {
     match language {
         "rust" => &["mod.rs", "lib.rs"],
         "python" => &["__init__.py"],
-        "javascript" | "typescript" => &["index.ts", "index.tsx", "index.js"],
+        "javascript" | "typescript" => &[
+            "index.ts",
+            "index.tsx",
+            "index.mts",
+            "index.cts",
+            "index.js",
+            "index.jsx",
+            "index.mjs",
+            "index.cjs",
+        ],
         _ => &[],
     }
 }
@@ -2518,6 +2529,82 @@ mod tests {
             .map(|edge| edge.target_path.as_path())
             .collect::<Vec<_>>();
         assert_eq!(dependencies, [Path::new("src/helper.ts")]);
+    }
+
+    #[test]
+    fn javascript_directory_imports_resolve_supported_index_extensions() {
+        for extension in ["jsx", "mjs", "cjs", "mts", "cts"] {
+            let root = tempfile::tempdir().unwrap();
+            fs::create_dir_all(root.path().join("src/components/Button")).unwrap();
+            let target = format!("src/components/Button/index.{extension}");
+            fs::write(root.path().join(&target), "export const Button = {};\n").unwrap();
+
+            let edges = extract_file_edges(
+                root.path(),
+                None,
+                Path::new("src/App.jsx"),
+                "import { Button } from './components/Button';\n",
+            );
+            let dependencies = edges
+                .iter()
+                .filter(|edge| edge.kind == FileEdgeKind::Dependency)
+                .map(|edge| edge.target_path.as_path())
+                .collect::<Vec<_>>();
+            assert_eq!(dependencies, [Path::new(&target)], "{extension}");
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src/components/Button")).unwrap();
+        for extension in ["ts", "jsx"] {
+            fs::write(
+                root.path()
+                    .join(format!("src/components/Button/index.{extension}")),
+                "export const Button = {};\n",
+            )
+            .unwrap();
+        }
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("src/App.jsx"),
+            "import { Button } from './components/Button';\n",
+        );
+        let dependencies = edges
+            .iter()
+            .filter(|edge| edge.kind == FileEdgeKind::Dependency)
+            .map(|edge| edge.target_path.as_path())
+            .collect::<Vec<_>>();
+        assert_eq!(dependencies, [Path::new("src/components/Button/index.ts")]);
+    }
+
+    #[test]
+    fn javascript_relative_imports_do_not_fall_back_to_workspace_root() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("components/Button")).unwrap();
+        fs::write(
+            root.path().join("components/Button/index.jsx"),
+            "export const WrongButton = {};\n",
+        )
+        .unwrap();
+
+        let graph = extract_file_graph(
+            root.path(),
+            None,
+            Path::new("frontend/App.jsx"),
+            "import { Button } from './components/Button';\n",
+        );
+        assert!(
+            graph
+                .edges
+                .iter()
+                .all(|edge| edge.kind != FileEdgeKind::Dependency)
+        );
+        assert!(
+            graph
+                .unresolved_dependencies
+                .iter()
+                .any(|dependency| dependency.spec == "./components/Button")
+        );
     }
 
     #[test]
