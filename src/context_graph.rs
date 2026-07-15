@@ -261,12 +261,20 @@ pub(crate) fn dependency_lookup_keys(value: &str) -> BTreeSet<String> {
         .strip_prefix("mod/")
         .or_else(|| value.strip_prefix("pathmod/"))
         .unwrap_or(value);
-    value
+    let mut keys = BTreeSet::new();
+    for component in value
         .split(|character: char| !character.is_alphanumeric() && character != '_')
         .map(str::trim)
         .filter(|component| !component.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect()
+    {
+        keys.insert(component.to_ascii_lowercase());
+        let segments = crate::text::split_identifier_segments(component);
+        if segments.len() > 1 {
+            keys.insert(segments.join("_"));
+            keys.insert(segments.concat());
+        }
+    }
+    keys
 }
 
 pub(crate) fn path_lookup_keys(path: &Path) -> BTreeSet<String> {
@@ -605,7 +613,12 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                     .or_else(|| line.strip_prefix("import "))
                     .or_else(|| line.strip_prefix("use "))
                 {
-                    specs.insert(value.split(',').next().unwrap_or("").trim().to_string());
+                    let value = if value.contains('{') {
+                        value.trim()
+                    } else {
+                        value.split(',').next().unwrap_or("").trim()
+                    };
+                    specs.extend(expand_grouped_spec(value));
                 }
             }
             "erlang" => {
@@ -881,10 +894,18 @@ fn resolve_local_dependency(
             .trim_start_matches('/')
             .trim_start_matches(':')
             .replace(':', "/");
-    } else if matches!(
-        language,
-        "python" | "java" | "kotlin" | "scala" | "groovy" | "csharp" | "haskell" | "elixir"
-    ) {
+    } else if language == "elixir" {
+        normalized = normalized
+            .split('.')
+            .map(|segment| crate::text::split_identifier_segments(segment).join("_"))
+            .collect::<Vec<_>>()
+            .join("/");
+    } else if (language == "lua" && !spec.starts_with('.'))
+        || matches!(
+            language,
+            "python" | "java" | "kotlin" | "scala" | "groovy" | "csharp" | "haskell"
+        )
+    {
         normalized = normalized.replace('.', "/");
     }
     let mut package_relative = false;
@@ -1882,6 +1903,15 @@ mod tests {
     }
 
     #[test]
+    fn dependency_lookup_keys_bridge_camel_and_snake_case() {
+        let camel = dependency_lookup_keys("MyApp.ReleaseAuth");
+        let snake = path_lookup_keys(Path::new("lib/my_app/release_auth.ex"));
+        assert!(camel.contains("my_app"));
+        assert!(camel.contains("release_auth"));
+        assert!(!camel.is_disjoint(&snake));
+    }
+
+    #[test]
     fn missing_markdown_targets_are_persisted_for_later_resolution() {
         let root = tempfile::tempdir().unwrap();
         let content = "Read the [release guide](docs/release-guide.md).\n";
@@ -2388,6 +2418,65 @@ mod tests {
         assert!(!edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Dependency
                 && edge.target_path == Path::new("lib/src/auth.dart")
+        }));
+    }
+
+    #[test]
+    fn lua_dotted_modules_resolve_as_paths() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src/foo")).unwrap();
+        fs::write(root.path().join("src/foo/bar.lua"), "return {}\n").unwrap();
+        fs::write(
+            root.path().join("src/foo.bar.lua"),
+            "return { wrong = true }\n",
+        )
+        .unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("src/main.lua"),
+            "local module = require(\"foo.bar\")\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("src/foo/bar.lua")
+        }));
+        assert!(!edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("src/foo.bar.lua")
+        }));
+    }
+
+    #[test]
+    fn elixir_module_aliases_resolve_snake_case_paths() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("lib/my_app")).unwrap();
+        fs::create_dir_all(root.path().join("lib/MyApp")).unwrap();
+        fs::write(
+            root.path().join("lib/my_app/auth.ex"),
+            "defmodule MyApp.Auth do\nend\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("lib/MyApp/Auth.ex"),
+            "defmodule WrongAuth do\nend\n",
+        )
+        .unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("lib/my_app/service.ex"),
+            "alias MyApp.Auth\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("lib/my_app/auth.ex")
+        }));
+        assert!(!edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("lib/MyApp/Auth.ex")
         }));
     }
 

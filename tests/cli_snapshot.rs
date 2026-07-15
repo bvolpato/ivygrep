@@ -535,11 +535,19 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         "{\"name\":\"mixed-workspace\",\"scripts\":{\"start_schema_widget\":\"vite\"}}\n",
     )
     .unwrap();
+    std::fs::write(
+        root.join("mix.exs"),
+        "defmodule Context.MixProject do\nend\n",
+    )
+    .unwrap();
     std::fs::create_dir_all(root.join("app")).unwrap();
     std::fs::create_dir_all(root.join("cmd/server")).unwrap();
     std::fs::create_dir_all(root.join("frontend")).unwrap();
     std::fs::create_dir_all(root.join("internal/auth")).unwrap();
+    std::fs::create_dir_all(root.join("lib/my_app")).unwrap();
+    std::fs::create_dir_all(root.join("lib/release")).unwrap();
     std::fs::create_dir_all(root.join("lib/src")).unwrap();
+    std::fs::create_dir_all(root.join("scripts")).unwrap();
     std::fs::create_dir_all(root.join("src/Acme/Service")).unwrap();
     std::fs::create_dir_all(root.join("src/Acme/Util")).unwrap();
     std::fs::create_dir_all(root.join("src/generated")).unwrap();
@@ -581,6 +589,16 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::write(
         root.join("lib/main.dart"),
         "import 'package:context_app/src/release.dart';\nbool verifyDartPackageRelease() => verifyRelease();\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("scripts/main.lua"),
+        "local release = require(\"release.module\")\nfunction verify_lua_release() return release.verify() end\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("lib/my_app/service.ex"),
+        "defmodule MyApp.Service do\n  alias MyApp.ReleaseAuth\n  def verify_elixir_release, do: ReleaseAuth.verify()\nend\n",
     )
     .unwrap();
     std::fs::write(
@@ -792,6 +810,16 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         !has_graph_dependency(&before_dart_package, "lib/src/release.dart"),
         "{before_dart_package:#}"
     );
+    let before_lua = run_context("change verify_lua_release");
+    assert!(
+        !has_graph_dependency(&before_lua, "lib/release/module.lua"),
+        "{before_lua:#}"
+    );
+    let before_elixir = run_context("change verify_elixir_release");
+    assert!(
+        !has_graph_dependency(&before_elixir, "lib/my_app/release_auth.ex"),
+        "{before_elixir:#}"
+    );
     let before_package_shadow = run_context("change avoid_package_shadow");
     assert!(
         !has_graph_dependency(&before_package_shadow, "frontend/package_shadow.ts"),
@@ -848,6 +876,16 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::write(
         root.join("lib/src/release.dart"),
         "bool verifyRelease() => true;\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("lib/release/module.lua"),
+        "local module = {}\nfunction module.verify() return true end\nreturn module\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("lib/my_app/release_auth.ex"),
+        "defmodule MyApp.ReleaseAuth do\n  def verify, do: true\nend\n",
     )
     .unwrap();
     std::fs::write(
@@ -946,6 +984,16 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     assert!(
         has_graph_dependency(&dart_package, "lib/src/release.dart"),
         "{dart_package:#}"
+    );
+    let lua = run_context("change verify_lua_release");
+    assert!(
+        has_graph_dependency(&lua, "lib/release/module.lua"),
+        "{lua:#}"
+    );
+    let elixir = run_context("change verify_elixir_release");
+    assert!(
+        has_graph_dependency(&elixir, "lib/my_app/release_auth.ex"),
+        "{elixir:#}"
     );
     let package_shadow = run_context("change avoid_package_shadow");
     assert!(
