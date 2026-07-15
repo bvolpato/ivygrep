@@ -1215,7 +1215,12 @@ fn index_workspace_inner(
         &clear_overlay_paths,
         current_snapshot.as_deref(),
     )?;
-    add_file_edge_dependents(workspace, &mut diff, current_snapshot.as_deref())?;
+    add_file_edge_dependents(
+        workspace,
+        &mut diff,
+        &clear_overlay_paths,
+        current_snapshot.as_deref(),
+    )?;
 
     let discovery_ms = index_started.elapsed().as_secs_f64() * 1_000.0;
     let persist_started = std::time::Instant::now();
@@ -1813,20 +1818,29 @@ fn add_included_file_dependents(
 fn add_file_edge_dependents(
     workspace: &Workspace,
     diff: &mut MerkleDiff,
+    clear_overlay_paths: &[PathBuf],
     current_snapshot: Option<&MerkleSnapshot>,
 ) -> Result<()> {
     let Some(current_snapshot) = current_snapshot else {
         return Ok(());
     };
-    if diff.added_or_modified.is_empty() && diff.deleted.is_empty() {
+    if diff.added_or_modified.is_empty()
+        && diff.deleted.is_empty()
+        && clear_overlay_paths.is_empty()
+    {
         return Ok(());
     }
 
+    let restored_from_base = clear_overlay_paths
+        .iter()
+        .map(|path| index_path_string(path))
+        .collect::<HashSet<_>>();
     let changed = diff
         .added_or_modified
         .iter()
         .map(|(path, _)| index_path_string(path))
         .chain(diff.deleted.iter().map(|path| index_path_string(path)))
+        .chain(restored_from_base.iter().cloned())
         .collect::<HashSet<_>>();
     let deleted = diff
         .deleted
@@ -1841,7 +1855,9 @@ fn add_file_edge_dependents(
     let candidate_lookup_keys = diff
         .added_or_modified
         .iter()
-        .flat_map(|(path, _)| crate::context_graph::path_lookup_keys(path))
+        .map(|(path, _)| path)
+        .chain(clear_overlay_paths)
+        .flat_map(|path| crate::context_graph::path_lookup_keys(path))
         .collect::<BTreeSet<_>>();
 
     let base_sqlite_path = workspace
@@ -1938,6 +1954,7 @@ fn add_file_edge_dependents(
 
     let new_targets = added_or_modified
         .difference(&persisted_paths)
+        .chain(restored_from_base.iter())
         .cloned()
         .collect::<HashSet<_>>();
     if !new_targets.is_empty() {

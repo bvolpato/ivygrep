@@ -3061,11 +3061,11 @@ fn worktree_restored_dependency_wakes_overlay_importer() {
 
     fs::write(
         wt_path.join("src/helper.rs"),
-        "pub fn work() -> &'static str { \"restored-worktree-target\" }\n",
+        "pub fn work() -> &'static str { \"base-target\" }\n",
     )
     .unwrap();
     let summary = setup_and_index(&wt_path, home.path());
-    assert_eq!(summary.indexed_files, 2);
+    assert_eq!(summary.indexed_files, 1);
 
     let conn = open_sqlite(&workspace.overlay_sqlite_path()).unwrap();
     let edge = conn
@@ -3079,6 +3079,23 @@ fn worktree_restored_dependency_wakes_overlay_importer() {
         )
         .unwrap();
     assert_eq!(edge, 1);
+    let unresolved = conn
+        .query_row(
+            "SELECT COUNT(*) FROM unresolved_file_dependencies
+             WHERE source_path = 'src/lib.rs' AND spec = 'crate::helper::work'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(unresolved, 0);
+    let overlay_target_chunks = conn
+        .query_row(
+            "SELECT COUNT(*) FROM chunks WHERE file_path = 'src/helper.rs'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert_eq!(overlay_target_chunks, 0);
     drop(conn);
 
     let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
@@ -3094,7 +3111,7 @@ fn worktree_restored_dependency_wakes_overlay_importer() {
         bundle.items.iter().any(|item| {
             item.file_path == std::path::Path::new("src/helper.rs")
                 && item.roles.contains(&ContextRole::Dependency)
-                && item.preview.contains("restored-worktree-target")
+                && item.preview.contains("base-target")
         }),
         "{bundle:#?}"
     );
