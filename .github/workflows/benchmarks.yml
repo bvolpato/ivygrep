@@ -54,8 +54,32 @@ jobs:
           git cat-file -e "${BENCHMARK_BASE_REF}^{commit}" 2>/dev/null ||
             git fetch --no-tags --depth=1 origin "${BENCHMARK_BASE_REF}"
 
-      - name: Guard critical benchmark regressions
+      - name: Classify benchmark-relevant changes
+        id: benchmark-changes
         if: steps.benchmark-base.outputs.ref != ''
+        env:
+          BENCHMARK_BASE_REF: ${{ steps.benchmark-base.outputs.ref }}
+        run: |
+          if git diff --quiet "$BENCHMARK_BASE_REF" HEAD -- \
+            .cargo/ \
+            assets/query_aliases.toml \
+            benchmarks/public/reranker_model.json \
+            Cargo.lock \
+            Cargo.toml \
+            benches/ \
+            build.rs \
+            rust-toolchain.toml \
+            scripts/benchmark_guard.py \
+            scripts/criterion_to_benchmark_data.py \
+            src/ \
+            vendor/; then
+            echo "required=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "required=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Guard critical benchmark regressions
+        if: steps.benchmark-changes.outputs.required == 'true'
         env:
           BENCHMARK_BASE_REF: ${{ steps.benchmark-base.outputs.ref }}
           PAIRED_BENCHMARK_DIR: ${{ runner.temp }}/paired-benchmarks
@@ -93,7 +117,7 @@ jobs:
             --output "$PAIRED_BENCHMARK_DIR/vector-filtered-exact.json"
 
       - name: Report paired benchmark deltas
-        if: always() && steps.benchmark-base.outputs.ref != ''
+        if: always() && steps.benchmark-changes.outputs.required == 'true'
         env:
           PAIRED_BENCHMARK_DIR: ${{ runner.temp }}/paired-benchmarks
         run: |
@@ -110,33 +134,44 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload paired benchmark results
-        if: always() && steps.benchmark-base.outputs.ref != ''
+        if: always() && steps.benchmark-changes.outputs.required == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: paired-benchmark-guards
           path: ${{ runner.temp }}/paired-benchmarks/*.json
 
+      - name: Report skipped benchmarks
+        if: steps.benchmark-base.outputs.ref != '' && steps.benchmark-changes.outputs.required != 'true'
+        env:
+          BENCHMARK_BASE_REF: ${{ steps.benchmark-base.outputs.ref }}
+        run: |
+          {
+            echo "### Paired benchmark guards"
+            echo
+            echo "Skipped because no benchmark-relevant inputs changed from \`$BENCHMARK_BASE_REF\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Install cargo-criterion
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.benchmark-changes.outputs.required == 'true'
         run: cargo install cargo-criterion
 
       - name: Run benchmarks
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.benchmark-changes.outputs.required == 'true'
         run: cargo criterion --locked --message-format=json > criterion-output.json
 
       - name: Convert Criterion JSON to Custom Benchmark Format
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.benchmark-changes.outputs.required == 'true'
         run: |
           python3 scripts/criterion_to_benchmark_data.py \
             criterion-output.json benchmark-data.json \
             --min-benchmarks 10
 
       - name: Restore Cargo.lock
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.benchmark-changes.outputs.required == 'true'
         run: git restore Cargo.lock || true
 
       - name: Publish informational shared-runner history
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.benchmark-changes.outputs.required == 'true'
         uses: benchmark-action/github-action-benchmark@52576c92bccf6ac60c8223ec7eb2565637cae9ba # v1.22.1
         with:
           name: Rust shared-runner history (informational)
