@@ -386,6 +386,7 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
     let mut specs = BTreeSet::new();
     let mut go_import_block = false;
     let mut javascript_static_declaration = false;
+    let mut php_grouped_import: Option<(String, usize)> = None;
     let mut python_import_module: Option<String> = None;
     let mut rust_grouped_import: Option<(String, usize)> = None;
     let mut rust_module_path: Option<String> = None;
@@ -602,10 +603,35 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                 }
             }
             "php" => {
+                if let Some((grouped, depth)) = php_grouped_import.as_mut() {
+                    let value = line
+                        .split("//")
+                        .next()
+                        .unwrap_or(line)
+                        .trim_end()
+                        .trim_end_matches(';');
+                    grouped.push(' ');
+                    grouped.push_str(value);
+                    *depth += value.matches('{').count();
+                    *depth = depth.saturating_sub(value.matches('}').count());
+                    if *depth == 0 {
+                        let (grouped, _) = php_grouped_import.take().unwrap();
+                        specs.extend(php_import_specs(&grouped));
+                    }
+                    continue;
+                }
                 if let Some(value) = line.strip_prefix("use ") {
                     let value = value.trim_end_matches(';');
                     let value = import_target_without_alias(language, value);
-                    specs.insert(value.replace('\\', "/"));
+                    let grouped_depth = value
+                        .matches('{')
+                        .count()
+                        .saturating_sub(value.matches('}').count());
+                    if grouped_depth > 0 {
+                        php_grouped_import = Some((value.to_string(), grouped_depth));
+                    } else {
+                        specs.extend(php_import_specs(value));
+                    }
                 }
                 if (line.starts_with("require") || line.starts_with("include"))
                     && let Some(spec) = first_quoted_value(line)
@@ -749,6 +775,17 @@ fn import_target_without_alias<'a>(language: &str, value: &'a str) -> &'a str {
     value
 }
 
+fn php_import_specs(value: &str) -> Vec<String> {
+    let value = value
+        .strip_prefix("function ")
+        .or_else(|| value.strip_prefix("const "))
+        .unwrap_or(value);
+    expand_grouped_spec(value)
+        .into_iter()
+        .map(|spec| spec.replace('\\', "/"))
+        .collect()
+}
+
 fn expand_grouped_spec(value: &str) -> Vec<String> {
     let value = value.trim();
     let Some(open) = value.find('{') else {
@@ -792,6 +829,10 @@ fn expand_grouped_spec(value: &str) -> Vec<String> {
         (prefix, "::")
     } else if let Some(prefix) = prefix.strip_suffix('.') {
         (prefix, ".")
+    } else if let Some(prefix) = prefix.strip_suffix('\\') {
+        (prefix, "\\")
+    } else if let Some(prefix) = prefix.strip_suffix('/') {
+        (prefix, "/")
     } else {
         (prefix, "::")
     };
@@ -814,7 +855,12 @@ fn expand_grouped_spec(value: &str) -> Vec<String> {
     members
         .into_iter()
         .flat_map(|member| {
-            let nested = format!("{prefix}{separator}{}", member.trim());
+            let member = member.trim();
+            let member = member
+                .strip_prefix("function ")
+                .or_else(|| member.strip_prefix("const "))
+                .unwrap_or(member);
+            let nested = format!("{prefix}{separator}{member}");
             expand_grouped_spec(&nested)
         })
         .collect()
@@ -1032,6 +1078,24 @@ fn resolve_local_dependency(
     normalized = normalized.trim_start_matches("./").to_string();
 
     let mut targets = vec![PathBuf::from(&normalized)];
+    if matches!(language, "java" | "kotlin" | "scala" | "groovy") {
+        let mut owner = Path::new(&normalized);
+        while let (Some(member), Some(parent)) = (
+            owner.file_name().and_then(|value| value.to_str()),
+            owner.parent(),
+        ) {
+            let owner_is_class = parent
+                .file_name()
+                .and_then(|value| value.to_str())
+                .and_then(|value| value.chars().next())
+                .is_some_and(char::is_uppercase);
+            if !member.chars().next().is_some_and(char::is_uppercase) || !owner_is_class {
+                break;
+            }
+            targets.push(parent.to_path_buf());
+            owner = parent;
+        }
+    }
     if language == "kotlin" {
         let path = Path::new(&normalized);
         let member_starts_lowercase = path
@@ -2719,6 +2783,43 @@ mod tests {
     }
 
     #[test]
+    fn jvm_nested_class_imports_resolve_owning_files() {
+        let root = tempfile::tempdir().unwrap();
+        for (language, extension) in [
+            ("java", "java"),
+            ("kotlin", "kt"),
+            ("scala", "scala"),
+            ("groovy", "groovy"),
+        ] {
+            let package = root
+                .path()
+                .join(format!("src/main/{language}/com/acme/model"));
+            fs::create_dir_all(&package).unwrap();
+            fs::write(
+                package.join(format!("Outer.{extension}")),
+                "package com.acme.model; class Outer { static class Inner {} }\n",
+            )
+            .unwrap();
+
+            let source = PathBuf::from(format!(
+                "src/main/{language}/com/acme/service/Service.{extension}"
+            ));
+            let edges = extract_file_edges(
+                root.path(),
+                None,
+                &source,
+                "import com.acme.model.Outer.Inner;\nclass Service {}\n",
+            );
+            let target = PathBuf::from(format!(
+                "src/main/{language}/com/acme/model/Outer.{extension}"
+            ));
+            assert!(edges.iter().any(|edge| {
+                edge.kind == FileEdgeKind::Dependency && edge.target_path == target
+            }));
+        }
+    }
+
+    #[test]
     fn csharp_static_using_resolves_owning_class() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("src/Acme/Util")).unwrap();
@@ -2796,6 +2897,62 @@ mod tests {
             assert!(edges.iter().any(|edge| {
                 edge.kind == FileEdgeKind::Dependency && edge.target_path == Path::new(target)
             }));
+        }
+    }
+
+    #[test]
+    fn php_grouped_imports_resolve_each_owning_file() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("app/Acme/Util")).unwrap();
+        for owner in ["Auth", "Clock", "foo", "bar", "FOO", "BAR"] {
+            fs::write(
+                root.path().join(format!("app/Acme/Util/{owner}.php")),
+                "<?php namespace Acme\\Util;\n",
+            )
+            .unwrap();
+        }
+        for distractor in ["function", "const"] {
+            fs::write(
+                root.path().join(format!("app/Acme/Util/{distractor}.php")),
+                "<?php // parser distractor\n",
+            )
+            .unwrap();
+        }
+
+        for (content, owners) in [
+            (
+                "<?php\nuse Acme\\Util\\{Auth, Clock};\n",
+                &["Auth", "Clock"][..],
+            ),
+            (
+                "<?php\nuse function Acme\\Util\\{foo, bar as release_bar};\n",
+                &["foo", "bar"][..],
+            ),
+            (
+                "<?php\nuse const Acme\\Util\\{FOO, BAR};\n",
+                &["FOO", "BAR"][..],
+            ),
+            (
+                "<?php\nuse function Acme\\Util\\foo as release_foo;\nuse const Acme\\Util\\FOO;\n",
+                &["foo", "FOO"][..],
+            ),
+            (
+                "<?php\nuse Acme\\Util\\{\n    Auth as ReleaseAuth,\n    function foo as release_foo,\n    const FOO,\n};\n",
+                &["Auth", "foo", "FOO"][..],
+            ),
+        ] {
+            let edges =
+                extract_file_edges(root.path(), None, Path::new("app/Service.php"), content);
+            for owner in owners {
+                let target = PathBuf::from(format!("app/Acme/Util/{owner}.php"));
+                assert!(edges.iter().any(|edge| {
+                    edge.kind == FileEdgeKind::Dependency && edge.target_path == target
+                }));
+            }
+            for distractor in ["function", "const"] {
+                let target = PathBuf::from(format!("app/Acme/Util/{distractor}.php"));
+                assert!(!edges.iter().any(|edge| edge.target_path == target));
+            }
         }
     }
 

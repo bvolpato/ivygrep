@@ -542,6 +542,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     )
     .unwrap();
     std::fs::create_dir_all(root.join("app")).unwrap();
+    std::fs::create_dir_all(root.join("app/Acme/Util")).unwrap();
     std::fs::create_dir_all(root.join("cmd/server")).unwrap();
     std::fs::create_dir_all(root.join("errors")).unwrap();
     std::fs::create_dir_all(root.join("frontend")).unwrap();
@@ -561,6 +562,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::create_dir_all(root.join("src/main/groovy/com/acme/project/module")).unwrap();
     std::fs::create_dir_all(root.join("src/main/groovy/com/acme/project/util")).unwrap();
     std::fs::create_dir_all(root.join("src/main/java/com/acme/project/module")).unwrap();
+    std::fs::create_dir_all(root.join("src/main/java/com/acme/project/model")).unwrap();
     std::fs::create_dir_all(root.join("src/main/java/com/acme/project/util")).unwrap();
     std::fs::create_dir_all(root.join("crates/core/src")).unwrap();
     std::fs::create_dir_all(root.join("crates/core/tests")).unwrap();
@@ -571,6 +573,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::write(
         root.join("service.py"),
         "from app import (\n    helper,\n)\n\ndef run_release_helper():\n    return helper.work()\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("app/GroupedService.php"),
+        "<?php\nuse Acme\\Util\\{\n    Auth,\n    Clock,\n};\nfunction verifyPhpGroupedRelease() { return Auth::check() && Clock::ready(); }\n",
     )
     .unwrap();
     std::fs::write(
@@ -616,7 +623,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     .unwrap();
     std::fs::write(
         root.join("src/main/java/com/acme/project/module/Service.java"),
-        "package com.acme.project.module;\nimport com.acme.project.util.Helper;\nimport static com.acme.project.util.Auth.check;\nclass Service {\n    void assembleMavenRelease() { Helper.run(); }\n    void verifyStaticRelease() { check(); }\n}\n",
+        "package com.acme.project.module;\nimport com.acme.project.util.Helper;\nimport com.acme.project.model.Outer.Inner;\nimport static com.acme.project.util.Auth.check;\nclass Service {\n    void assembleMavenRelease() { Helper.run(); }\n    void verifyNestedRelease(Inner value) {}\n    void verifyStaticRelease() { check(); }\n}\n",
     )
     .unwrap();
     std::fs::write(
@@ -720,6 +727,22 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         ),
         "{before_maven:#}"
     );
+    let before_nested_java = run_context("change verifyNestedRelease");
+    assert!(
+        !has_graph_dependency(
+            &before_nested_java,
+            "src/main/java/com/acme/project/model/Outer.java"
+        ),
+        "{before_nested_java:#}"
+    );
+    let before_grouped_php = run_context("change verifyPhpGroupedRelease");
+    for target in ["Auth.php", "Clock.php"] {
+        let expected = format!("app/Acme/Util/{target}");
+        assert!(
+            !has_graph_dependency(&before_grouped_php, &expected),
+            "{before_grouped_php:#}"
+        );
+    }
     let before_bazel_root = run_context("change assemble_root_release");
     assert!(
         !has_graph_dependency(&before_bazel_root, "root_defs.bzl"),
@@ -865,6 +888,20 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         "package com.acme.project.util;\nclass Auth { static void check() {} }\n",
     )
     .unwrap();
+    std::fs::write(
+        root.join("src/main/java/com/acme/project/model/Outer.java"),
+        "package com.acme.project.model;\nclass Outer { static class Inner {} }\n",
+    )
+    .unwrap();
+    for (class, method) in [("Auth", "check"), ("Clock", "ready")] {
+        std::fs::write(
+            root.join(format!("app/Acme/Util/{class}.php")),
+            format!(
+                "<?php namespace Acme\\Util; class {class} {{ public static function {method}() {{ return true; }} }}\n"
+            ),
+        )
+        .unwrap();
+    }
     std::fs::write(root.join("frontend/schema.json"), "{\"release\": true}\n").unwrap();
     std::fs::write(
         root.join("frontend/multiline.ts"),
@@ -1024,6 +1061,24 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         has_graph_dependency(&maven, "src/main/java/com/acme/project/util/Helper.java"),
         "{maven:#}"
     );
+
+    let nested_java = run_context("change verifyNestedRelease");
+    assert!(
+        has_graph_dependency(
+            &nested_java,
+            "src/main/java/com/acme/project/model/Outer.java"
+        ),
+        "{nested_java:#}"
+    );
+
+    let grouped_php = run_context("change verifyPhpGroupedRelease");
+    for target in ["Auth.php", "Clock.php"] {
+        let expected = format!("app/Acme/Util/{target}");
+        assert!(
+            has_graph_dependency(&grouped_php, &expected),
+            "{grouped_php:#}"
+        );
+    }
 
     let bazel_root = run_context("change assemble_root_release");
     assert!(
