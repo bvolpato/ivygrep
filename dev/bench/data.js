@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784003263853,
+  "lastUpdate": 1784094951144,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -38612,6 +38612,185 @@ window.BENCHMARK_DATA = {
           {
             "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
             "value": 2180.55,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4b80f62549b7635723e84952ed0d75d6147e7ad0",
+          "message": "Context Graph v2 and contributor workflows (#177)\n\n* feat: ship context graph v2 and contributor workflows\n\n* fix: preserve gitignore in context graph hydration\n\n* fix: hydrate modified worktree graph neighbors\n\n* fix: keep incremental context graph complete\n\n* fix: preserve context graph role direction\n\n* fix: resolve Python relative import members\n\n* fix: complete context graph lifecycle\n\n* fix: index visible Rust modules\n\n* fix: map pytest filenames to sources\n\n* fix: map mirrored test directories\n\n* fix: map nested test layouts\n\n* fix: resolve Python and Bazel graph imports\n\n* fix: cover common graph dependency layouts\n\n* fix: refresh unresolved documentation links\n\n* test: require graph-backed documentation context\n\n* fix: resolve JVM and root Bazel dependencies\n\n* fix: parse attributed and static imports\n\n* fix: select earliest import quote\n\n* fix: harden JVM and Rust graph imports\n\n* fix: verify C# static graph imports\n\n* fix: resolve aliased graph imports\n\n* fix: preserve graph relationships across ecosystems\n\n* fix: resolve Kotlin member import owners\n\n* fix: complete graph import and test conventions\n\n* perf: avoid crate lookup on library sources\n\n* fix: preserve mirrored tests and ignore Go comments\n\n* fix: resolve nested crate and app test roots\n\n* fix: resolve multiline JavaScript imports\n\n* fix: parse multiline Python and Rust imports\n\n* fix: parse multiline Scala and Bazel imports\n\n* fix: resolve nested Rust modules and test mirrors\n\n* fix: preserve Rust crate-root module paths\n\n* fix: parse Starlark comments and type reexports\n\n* fix: resolve Dart packages and nested imports\n\n* fix: ignore JavaScript package imports\n\n* fix: preserve grouped self imports\n\n* fix: restore worktree and path module edges\n\n* fix: resolve Lua and Elixir module paths\n\n* fix: parse Lua expressions and Go module imports\n\n* fix: resolve grouped PHP and nested JVM imports\n\n* fix: resolve root-absolute JavaScript imports\n\n* fix: resolve Dart and comma-separated PHP imports\n\n* fix: wake worktree importers on base restore\n\n* fix: resolve JavaScript directory index imports\n\n* fix: resolve Scala object member imports\n\n* fix: refresh context graph dependencies precisely",
+          "timestamp": "2026-07-15T01:13:37-04:00",
+          "tree_id": "fb03662fa2bc051e64f656cfaff6d7b2d18dba71",
+          "url": "https://github.com/bvolpato/ivygrep/commit/4b80f62549b7635723e84952ed0d75d6147e7ad0"
+        },
+        "date": 1784094950493,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 60767.77,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 3454.92,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/worktree_overlay_one_file_delta",
+            "value": 56384.45,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer_bulk/fresh_index_30k_chunks",
+            "value": 192150.61,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_small_file",
+            "value": 9.93,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 1472.86,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 1178,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 9526.9,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 9292.26,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 1.6,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 100.29,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 4216.36,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 1725.53,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 980.27,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_simple_symbol_1000_files",
+            "value": 2458.25,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_complex_phrase_1000_files",
+            "value": 2606.4,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/bounded_rerank_100_candidates_1000_files",
+            "value": 2806.61,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/literal_simple_symbol_1000_files",
+            "value": 862.49,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/regex_symbol_1000_files",
+            "value": 8085.48,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 376785.46,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 146.03,
+            "unit": "µs"
+          },
+          {
+            "name": "hash_vector_build/ingest_5k_hash_vectors",
+            "value": 78428.51,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_one_file_change_10k_chunks",
+            "value": 73794.37,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_100_file_burst_10k_chunks",
+            "value": 215902.68,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/quick_health_cached_10k_chunks",
+            "value": 299.22,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k",
+            "value": 633.17,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k_hot",
+            "value": 17.3,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_top_50_in_50k_hot",
+            "value": 3570.48,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/500",
+            "value": 78.51,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/5000",
+            "value": 389.6,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
+            "value": 1799.21,
             "unit": "µs"
           }
         ]
