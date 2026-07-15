@@ -982,6 +982,9 @@ fn resolve_local_dependency(
     }
     let rust_module_declaration = language == "rust" && normalized.starts_with("mod/");
     let rust_path_module = language == "rust" && normalized.starts_with("pathmod/");
+    let javascript_workspace_absolute = matches!(language, "javascript" | "typescript")
+        && spec.starts_with('/')
+        && !spec.starts_with("//");
     let python_relative = language == "python" && spec.starts_with('.');
     let starlark_relative = language == "starlark" && spec.starts_with(':');
     let starlark_workspace = language == "starlark" && spec.starts_with("//");
@@ -1002,6 +1005,8 @@ fn resolve_local_dependency(
             .trim_start_matches('/')
             .trim_start_matches(':')
             .replace(':', "/");
+    } else if javascript_workspace_absolute {
+        normalized = spec.trim_start_matches('/').to_string();
     } else if language == "elixir" {
         normalized = normalized
             .split('.')
@@ -1139,6 +1144,8 @@ fn resolve_local_dependency(
         bases.push(source_root);
     } else if let Some(source_root) = go_module_source_root {
         bases.push(source_root);
+    } else if javascript_workspace_absolute {
+        bases.push(PathBuf::new());
     } else if rust_path_module {
         bases.push(source_dir.to_path_buf());
     } else if rust_module_declaration {
@@ -2456,6 +2463,35 @@ mod tests {
 
         fs::remove_file(root.path().join("src/helper.js")).unwrap();
         assert_eq!(dependency(root.path()), Path::new("src/helper.ts"));
+    }
+
+    #[test]
+    fn javascript_root_absolute_imports_resolve_from_workspace_root() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src/src")).unwrap();
+        fs::write(
+            root.path().join("src/helper.ts"),
+            "export const value = 1;\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("src/src/helper.ts"),
+            "export const value = 2;\n",
+        )
+        .unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("frontend/main.ts"),
+            "import { value } from '/src/helper.js';\n",
+        );
+        let dependencies = edges
+            .iter()
+            .filter(|edge| edge.kind == FileEdgeKind::Dependency)
+            .map(|edge| edge.target_path.as_path())
+            .collect::<Vec<_>>();
+        assert_eq!(dependencies, [Path::new("src/helper.ts")]);
     }
 
     #[test]

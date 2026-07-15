@@ -588,7 +588,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::write(root.join("errors/errors.go"), "package errors\n").unwrap();
     std::fs::write(
         root.join("frontend/main.ts"),
-        "import { runWidgetHelper } from \"./helper.js\";\nimport {\n  runMultilineHelper,\n} from './multiline.js';\nexport type * from './release-types.js';\nimport schema from './schema.json' with { type: \"json\" };\nimport { packageShadow } from 'package_shadow';\n\nexport function start_nodenext_widget() { return runWidgetHelper(); }\nexport function start_multiline_widget() { return runMultilineHelper(); }\nexport function start_type_barrel_widget() { return true; }\nexport function start_schema_widget() { return schema.release; }\nexport function avoid_package_shadow() { return packageShadow(); }\n",
+        "import { runWidgetHelper } from \"./helper.js\";\nimport { runRootAbsoluteHelper } from '/frontend/root-absolute.js';\nimport {\n  runMultilineHelper,\n} from './multiline.js';\nexport type * from './release-types.js';\nimport schema from './schema.json' with { type: \"json\" };\nimport { packageShadow } from 'package_shadow';\n\nexport function start_nodenext_widget() { return runWidgetHelper(); }\nexport function start_root_absolute_widget() { return runRootAbsoluteHelper(); }\nexport function start_multiline_widget() { return runMultilineHelper(); }\nexport function start_type_barrel_widget() { return true; }\nexport function start_schema_widget() { return schema.release; }\nexport function avoid_package_shadow() { return packageShadow(); }\n",
     )
     .unwrap();
     std::fs::write(
@@ -821,6 +821,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         !has_graph_dependency(&before_multiline_typescript, "frontend/multiline.ts"),
         "{before_multiline_typescript:#}"
     );
+    let before_root_absolute = run_context("change start_root_absolute_widget");
+    assert!(
+        !has_graph_dependency(&before_root_absolute, "frontend/root-absolute.ts"),
+        "{before_root_absolute:#}"
+    );
     let before_file_module = run_context("change verify_file_module_release");
     assert!(
         !has_graph_dependency(&before_file_module, "src/release/token.rs"),
@@ -906,6 +911,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::write(
         root.join("frontend/multiline.ts"),
         "export function runMultilineHelper() { return \"ready\"; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("frontend/root-absolute.ts"),
+        "export function runRootAbsoluteHelper() { return \"ready\"; }\n",
     )
     .unwrap();
     std::fs::write(
@@ -1019,6 +1029,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     assert!(
         has_graph_dependency(&multiline_typescript, "frontend/multiline.ts"),
         "{multiline_typescript:#}"
+    );
+    let root_absolute = run_context("change start_root_absolute_widget");
+    assert!(
+        has_graph_dependency(&root_absolute, "frontend/root-absolute.ts"),
+        "{root_absolute:#}"
     );
     let type_barrel = run_context("change start_type_barrel_widget");
     assert!(
