@@ -703,7 +703,16 @@ fn expand_grouped_spec(value: &str) -> Vec<String> {
     let Some(open) = value.find('{') else {
         let target = value.split_whitespace().next().unwrap_or("");
         let terminal = target.rsplit([':', '.']).next().unwrap_or(target);
-        return (!target.is_empty() && !matches!(terminal, "self" | "_" | "*"))
+        if terminal == "self" {
+            return target
+                .strip_suffix("::self")
+                .or_else(|| target.strip_suffix(".self"))
+                .filter(|parent| !parent.is_empty())
+                .map(str::to_string)
+                .into_iter()
+                .collect();
+        }
+        return (!target.is_empty() && !matches!(terminal, "_" | "*"))
             .then(|| target.to_string())
             .into_iter()
             .collect();
@@ -1878,12 +1887,18 @@ mod tests {
             "pub struct Session;\n",
         )
         .unwrap();
+        fs::write(root.path().join("src/auth.rs"), "pub mod token;\n").unwrap();
+        fs::write(
+            root.path().join("src/auth/self.rs"),
+            "pub struct WrongSelf;\n",
+        )
+        .unwrap();
         fs::write(root.path().join("src/clock.rs"), "pub struct Clock;\n").unwrap();
         let edges = extract_file_edges(
             root.path(),
             None,
             Path::new("src/lib.rs"),
-            "use crate::{\n    auth::{token, session},\n    clock,\n};\n",
+            "use crate::{\n    auth::{self as auth_mod, token, session},\n    clock,\n};\n",
         );
         let targets = edges
             .iter()
@@ -1892,6 +1907,8 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert!(targets.contains(Path::new("src/auth/token.rs")));
         assert!(targets.contains(Path::new("src/auth/session.rs")));
+        assert!(targets.contains(Path::new("src/auth.rs")));
+        assert!(!targets.contains(Path::new("src/auth/self.rs")));
         assert!(targets.contains(Path::new("src/clock.rs")));
     }
 

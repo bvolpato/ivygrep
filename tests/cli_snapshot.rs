@@ -634,7 +634,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     .unwrap();
     std::fs::write(
         root.join("crates/core/tests/release_integration.rs"),
-        "use context_core::{\n    crate_auth::verify_crate_auth,\n    release::{token, session},\n};\n#[test]\nfn verify_crate_package_release() { verify_crate_auth(); }\n#[test]\nfn verify_nested_group_release() { token::verify(); session::verify(); }\n",
+        "use context_core::{\n    crate_auth::verify_crate_auth,\n    release::{self as release_mod, token, session},\n};\n#[test]\nfn verify_crate_package_release() { verify_crate_auth(); }\n#[test]\nfn verify_nested_group_release() { release_mod::verify(); token::verify(); session::verify(); }\n",
     )
     .unwrap();
     std::fs::write(
@@ -788,6 +788,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     );
     let before_nested_group = run_context("change verify_nested_group_release");
     for target in [
+        "crates/core/src/release.rs",
         "crates/core/src/release/token.rs",
         "crates/core/src/release/session.rs",
     ] {
@@ -886,6 +887,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     )
     .unwrap();
     std::fs::create_dir_all(root.join("crates/core/src/release")).unwrap();
+    std::fs::write(
+        root.join("crates/core/src/release.rs"),
+        "pub mod token;\npub mod session;\npub fn verify() {}\n",
+    )
+    .unwrap();
     for module in ["token", "session"] {
         std::fs::write(
             root.join(format!("crates/core/src/release/{module}.rs")),
@@ -1031,6 +1037,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     );
     let nested_group = run_context("change verify_nested_group_release");
     for target in [
+        "crates/core/src/release.rs",
         "crates/core/src/release/token.rs",
         "crates/core/src/release/session.rs",
     ] {
