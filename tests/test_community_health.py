@@ -76,7 +76,7 @@ class CommunityHealthTest(unittest.TestCase):
         self.assertIn(private_report, support)
         self.assertIn("Do not open public issue", security)
 
-    def test_release_version_is_synchronized(self) -> None:
+    def test_release_metadata_is_synchronized(self) -> None:
         cargo = tomllib.loads(self.read("Cargo.toml"))
         version = cargo["package"]["version"]
         lock = self.read("Cargo.lock")
@@ -85,7 +85,8 @@ class CommunityHealthTest(unittest.TestCase):
         changelog = self.read("CHANGELOG.md")
 
         self.assertRegex(lock, rf'name = "ivygrep"\nversion = "{re.escape(version)}"')
-        self.assertIn(f"release-v{version}", readme)
+        self.assertIn("https://github.com/bvolpato/ivygrep/releases/latest", readme)
+        self.assertIn("https://img.shields.io/github/v/release/bvolpato/ivygrep", readme)
         self.assertRegex(website, rf">\s*v{re.escape(version)}\s*<")
         self.assertRegex(changelog, rf"(?m)^## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}$")
 

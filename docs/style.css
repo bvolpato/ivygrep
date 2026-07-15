@@ -265,7 +265,7 @@ h1 {
 }
 
 .prompt { color: #f59e0b; margin-right: 0.4rem; }
-.comment { color: #64748b; }
+.comment { color: #94a3b8; }
 .code-font { font-family: var(--font-code) !important; }
 
 .copy-btn {
@@ -385,7 +385,7 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
 }
 
 .flow-step { flex: 1; text-align: center; }
-.flow-step h4 { margin-bottom: 0.4rem; font-weight: 700; }
+.flow-step h3 { margin-bottom: 0.4rem; font-weight: 700; }
 .flow-step p { font-size: 0.85rem; color: var(--text-muted); max-width: 200px; margin: 0 auto; }
 
 .flow-arrow {
@@ -519,7 +519,7 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
 .lang-grid { padding: 2rem; }
 .lang-category { margin-bottom: 1.5rem; }
 .lang-category:last-child { margin-bottom: 0; }
-.lang-category h4 { margin-bottom: 0.75rem; font-size: 1rem; display: flex; align-items: center; gap: 0.5rem; }
+.lang-category h3 { margin-bottom: 0.75rem; font-size: 1rem; display: flex; align-items: center; gap: 0.5rem; }
 
 .lang-badge {
     font-size: 0.7rem; font-weight: 600;
@@ -653,8 +653,8 @@ tbody tr:hover { background: rgba(255, 255, 255, 0.02); }
 .footer-link { color: var(--text-muted); text-decoration: none; font-size: 0.85rem; transition: color 0.2s; }
 .footer-link:hover { color: var(--accent-green); }
 
-.footer-copy { font-size: 0.8rem; color: rgba(255, 255, 255, 0.3); }
-.footer-copy a { color: rgba(255, 255, 255, 0.4); }
+.footer-copy { font-size: 0.8rem; color: rgba(255, 255, 255, 0.55); }
+.footer-copy a { color: rgba(255, 255, 255, 0.65); }
 
 /* ─── Animations ─── */
 .slide-up { opacity: 1; transform: translateY(18px); animation: slideUp 0.8s cubic-bezier(0.22, 1, 0.36, 1) forwards; }
