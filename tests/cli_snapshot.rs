@@ -1440,8 +1440,13 @@ fn cli_context_e2e_resolves_late_markdown_links() {
     init_git_repo(&root);
     std::fs::create_dir_all(root.join("docs")).unwrap();
     std::fs::write(
-        root.join("README.md"),
-        "# Release process\n\nUse document_release_process with the [release guide](docs/release-guide.md).\n",
+        root.join("docs/README.md"),
+        "# Release process\n\nUse document_release_process with the [release guide](release-guide.md).\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("release-guide.md"),
+        "# Root distractor\n\nThis file must not satisfy the nested relative link.\n",
     )
     .unwrap();
 
@@ -1465,9 +1470,9 @@ fn cli_context_e2e_resolves_late_markdown_links() {
             .clone();
         serde_json::from_slice::<serde_json::Value>(&output).unwrap()
     };
-    let includes_graph_guide = |value: &serde_json::Value| {
+    let includes_graph_guide = |value: &serde_json::Value, expected: &str| {
         value["items"].as_array().unwrap().iter().any(|item| {
-            item["file_path"] == "docs/release-guide.md"
+            item["file_path"] == expected
                 && item["sources"]
                     .as_array()
                     .unwrap()
@@ -1476,7 +1481,14 @@ fn cli_context_e2e_resolves_late_markdown_links() {
     };
 
     let before = run_context();
-    assert!(!includes_graph_guide(&before), "{before:#}");
+    assert!(
+        !includes_graph_guide(&before, "docs/release-guide.md"),
+        "{before:#}"
+    );
+    assert!(
+        !includes_graph_guide(&before, "release-guide.md"),
+        "{before:#}"
+    );
 
     std::fs::write(
         root.join("docs/release-guide.md"),
@@ -1492,7 +1504,89 @@ fn cli_context_e2e_resolves_late_markdown_links() {
         .success();
 
     let after = run_context();
-    assert!(includes_graph_guide(&after), "{after:#}");
+    assert!(
+        includes_graph_guide(&after, "docs/release-guide.md"),
+        "{after:#}"
+    );
+    assert!(
+        !includes_graph_guide(&after, "release-guide.md"),
+        "{after:#}"
+    );
+}
+
+#[test]
+#[serial]
+fn cli_context_e2e_refreshes_imports_after_manifest_identity_changes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("workspace");
+    let home = tmp.path().join("ivygrep_home");
+    init_git_repo(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = 'old-package'\nversion = '0.1.0'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/auth.rs"),
+        "pub fn validate_manifest_refresh() -> bool { true }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("tests/integration.rs"),
+        "use new_package::auth::validate_manifest_refresh;\n#[test]\nfn verify_manifest_refresh() { assert!(validate_manifest_refresh()); }\n",
+    )
+    .unwrap();
+
+    let run_context = || {
+        let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+            .current_dir(&root)
+            .env("IVYGREP_HOME", &home)
+            .env("IVYGREP_NO_AUTOSPAWN", "1")
+            .args([
+                "--json",
+                "--hash",
+                "context",
+                "--budget",
+                "3000",
+                "change verify_manifest_refresh",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice::<serde_json::Value>(&output).unwrap()
+    };
+    let includes_graph_auth = |value: &serde_json::Value| {
+        value["items"].as_array().unwrap().iter().any(|item| {
+            item["file_path"] == "src/auth.rs"
+                && item["sources"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&serde_json::json!("graph_dependency"))
+        })
+    };
+
+    let before = run_context();
+    assert!(!includes_graph_auth(&before), "{before:#}");
+
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = 'new-package'\nversion = '0.1.0'\n",
+    )
+    .unwrap();
+    Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--add", "--hash", "--no-watch", "."])
+        .assert()
+        .success();
+
+    let after = run_context();
+    assert!(includes_graph_auth(&after), "{after:#}");
 }
 
 #[test]

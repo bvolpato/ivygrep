@@ -308,6 +308,26 @@ pub(crate) fn is_manifest_path(path: &Path) -> bool {
         .is_some_and(|name| MANIFEST_NAMES.contains(&name))
 }
 
+pub(crate) fn manifest_resolution_signature(path: &Path, content: &str) -> Option<String> {
+    match path.file_name().and_then(|value| value.to_str())? {
+        "Cargo.toml" => {
+            let identity = rust_manifest_resolution(content)
+                .map(|(name, source_root)| format!("{name}\0{}", index_path_string(&source_root)))
+                .unwrap_or_default();
+            Some(format!("rust\0{identity}"))
+        }
+        "go.mod" => Some(format!(
+            "go\0{}",
+            go_manifest_module_name(content).unwrap_or_default()
+        )),
+        "pubspec.yaml" => Some(format!(
+            "dart\0{}",
+            dart_manifest_package_name(content).unwrap_or_default()
+        )),
+        _ => None,
+    }
+}
+
 pub(crate) fn configuration_target(
     root: &Path,
     snapshot: Option<&MerkleSnapshot>,
@@ -1012,6 +1032,7 @@ fn resolve_local_dependency(
         && (spec.starts_with("./") || spec.starts_with("../"));
     let dart_relative =
         language == "dart" && !spec.starts_with("package:") && !spec.starts_with('/');
+    let markdown_relative = language == "markdown";
     let python_relative = language == "python" && spec.starts_with('.');
     let starlark_relative = language == "starlark" && spec.starts_with(':');
     let starlark_workspace = language == "starlark" && spec.starts_with("//");
@@ -1174,7 +1195,7 @@ fn resolve_local_dependency(
         bases.push(source_root);
     } else if javascript_workspace_absolute {
         bases.push(PathBuf::new());
-    } else if dart_relative || javascript_relative || rust_path_module {
+    } else if dart_relative || javascript_relative || markdown_relative || rust_path_module {
         bases.push(source_dir.to_path_buf());
     } else if rust_module_declaration {
         bases.push(rust_module_declaration_base(source_path));
@@ -1468,6 +1489,14 @@ fn rust_crate_context(
     let manifest = nearest_manifest(root, snapshot, rel_path, "rust")?;
     let package_root = manifest.parent().unwrap_or_else(|| Path::new(""));
     let content = fs::read_to_string(root.join(&manifest)).ok()?;
+    let (name, source_root) = rust_manifest_resolution(&content)?;
+    Some(RustCrateContext {
+        name,
+        source_root: package_root.join(source_root),
+    })
+}
+
+fn rust_manifest_resolution(content: &str) -> Option<(String, PathBuf)> {
     let document = content.parse::<toml_edit::DocumentMut>().ok()?;
     let library = document.get("lib").and_then(toml_edit::Item::as_table_like);
     let name = library
@@ -1484,10 +1513,9 @@ fn rust_crate_context(
     let source_root = library
         .and_then(|table| table.get("path"))
         .and_then(toml_edit::Item::as_str)
-        .map(|path| package_root.join(path))
-        .and_then(|path| path.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| package_root.join("src"));
-    Some(RustCrateContext { name, source_root })
+        .and_then(|path| Path::new(path).parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("src"));
+    Some((name, source_root))
 }
 
 fn dart_package_context(
@@ -1498,17 +1526,24 @@ fn dart_package_context(
     let manifest = nearest_manifest(root, snapshot, rel_path, "dart")?;
     let package_root = manifest.parent().unwrap_or_else(|| Path::new(""));
     let content = fs::read_to_string(root.join(&manifest)).ok()?;
-    let name = content.lines().find_map(|line| {
+    let name = dart_manifest_package_name(&content)?;
+    Some(DartPackageContext {
+        name,
+        source_root: package_root.join("lib"),
+    })
+}
+
+fn dart_manifest_package_name(content: &str) -> Option<String> {
+    content.lines().find_map(|line| {
+        if line.starts_with(char::is_whitespace) {
+            return None;
+        }
         line.strip_prefix("name:")
             .map(str::trim)
             .map(|name| name.split('#').next().unwrap_or(name).trim())
             .map(|name| name.trim_matches(['\'', '"']))
             .filter(|name| !name.is_empty())
             .map(str::to_string)
-    })?;
-    Some(DartPackageContext {
-        name,
-        source_root: package_root.join("lib"),
     })
 }
 
@@ -1523,14 +1558,18 @@ fn go_module_context(
         .unwrap_or_else(|| Path::new(""))
         .to_path_buf();
     let content = fs::read_to_string(root.join(&manifest)).ok()?;
-    let name = content.lines().find_map(|line| {
+    let name = go_manifest_module_name(&content)?;
+    Some(GoModuleContext { name, source_root })
+}
+
+fn go_manifest_module_name(content: &str) -> Option<String> {
+    content.lines().find_map(|line| {
         line.trim()
             .strip_prefix("module ")
             .and_then(|value| value.split_whitespace().next())
             .filter(|value| !value.is_empty())
             .map(str::to_string)
-    })?;
-    Some(GoModuleContext { name, source_root })
+    })
 }
 
 fn rust_file_may_import_library(path: &Path) -> bool {
@@ -2138,6 +2177,63 @@ mod tests {
             edge.kind == FileEdgeKind::Documentation
                 && edge.target_path == Path::new("docs/release-guide.md")
         }));
+    }
+
+    #[test]
+    fn markdown_links_resolve_strictly_from_the_document_directory() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("docs")).unwrap();
+        fs::write(root.path().join("guide.md"), "# Wrong root guide\n").unwrap();
+        fs::write(root.path().join("docs/guide.md"), "# Nested guide\n").unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("docs/README.md"),
+            "Read the [guide](guide.md).",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Documentation
+                && edge.target_path == Path::new("docs/guide.md")
+        }));
+        assert!(
+            !edges
+                .iter()
+                .any(|edge| edge.target_path == Path::new("guide.md"))
+        );
+    }
+
+    #[test]
+    fn manifest_resolution_signatures_ignore_unrelated_metadata() {
+        let cargo_path = Path::new("Cargo.toml");
+        let initial = manifest_resolution_signature(
+            cargo_path,
+            "[package]\nname = 'demo-app'\nversion = '0.1.0'\n",
+        );
+        let version_only = manifest_resolution_signature(
+            cargo_path,
+            "[package]\nname = 'demo-app'\nversion = '0.2.0'\n",
+        );
+        let renamed = manifest_resolution_signature(
+            cargo_path,
+            "[package]\nname = 'renamed-app'\nversion = '0.2.0'\n",
+        );
+        let custom_library = manifest_resolution_signature(
+            cargo_path,
+            "[package]\nname = 'demo-app'\n[lib]\npath = 'library/root.rs'\n",
+        );
+
+        assert_eq!(initial, version_only);
+        assert_ne!(initial, renamed);
+        assert_ne!(initial, custom_library);
+        assert_ne!(
+            manifest_resolution_signature(Path::new("go.mod"), "module old.example/app\n"),
+            manifest_resolution_signature(Path::new("go.mod"), "module new.example/app\n")
+        );
+        assert_ne!(
+            manifest_resolution_signature(Path::new("pubspec.yaml"), "name: old_app\n"),
+            manifest_resolution_signature(Path::new("pubspec.yaml"), "name: new_app\n")
+        );
     }
 
     #[test]
