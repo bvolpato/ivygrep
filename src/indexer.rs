@@ -4613,7 +4613,7 @@ mod tests {
         let unresolved = conn
             .query_row(
                 "SELECT COUNT(*) FROM unresolved_file_dependencies
-                 WHERE source_path = 'src/lib.rs' AND spec = 'helper'",
+                 WHERE source_path = 'src/lib.rs' AND spec = 'mod/helper'",
                 [],
                 |row| row.get::<_, i64>(0),
             )
@@ -4640,7 +4640,7 @@ mod tests {
         let unresolved = conn
             .query_row(
                 "SELECT COUNT(*) FROM unresolved_file_dependencies
-                 WHERE source_path = 'src/lib.rs' AND spec = 'helper'",
+                 WHERE source_path = 'src/lib.rs' AND spec = 'mod/helper'",
                 [],
                 |row| row.get::<_, i64>(0),
             )

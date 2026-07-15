@@ -552,6 +552,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::create_dir_all(root.join("src/main/java/com/acme/project/util")).unwrap();
     std::fs::create_dir_all(root.join("crates/core/src")).unwrap();
     std::fs::create_dir_all(root.join("crates/core/tests")).unwrap();
+    std::fs::create_dir_all(root.join("src/release")).unwrap();
     std::fs::create_dir_all(root.join("tools")).unwrap();
     std::fs::write(root.join("app/__init__.py"), "").unwrap();
     std::fs::write(
@@ -627,6 +628,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
     std::fs::write(
         root.join("crates/core/tests/release_integration.rs"),
         "use context_core::{\n    crate_auth::verify_crate_auth,\n};\n#[test]\nfn verify_crate_package_release() { verify_crate_auth(); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/release.rs"),
+        "mod token;\npub fn verify_file_module_release() { token::verify(); }\n",
     )
     .unwrap();
 
@@ -753,6 +759,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         !has_graph_dependency(&before_multiline_typescript, "frontend/multiline.ts"),
         "{before_multiline_typescript:#}"
     );
+    let before_file_module = run_context("change verify_file_module_release");
+    assert!(
+        !has_graph_dependency(&before_file_module, "src/release/token.rs"),
+        "{before_file_module:#}"
+    );
 
     std::fs::write(
         root.join("app/helper.py"),
@@ -827,6 +838,7 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         "pub fn verify_crate_auth() {}\n",
     )
     .unwrap();
+    std::fs::write(root.join("src/release/token.rs"), "pub fn verify() {}\n").unwrap();
     Command::new(assert_cmd::cargo::cargo_bin!("ig"))
         .current_dir(&root)
         .env("IVYGREP_HOME", &home)
@@ -942,6 +954,11 @@ fn cli_context_e2e_resolves_multilanguage_dependencies() {
         has_graph_dependency(&crate_package, "crates/core/src/crate_auth.rs"),
         "{crate_package:#}"
     );
+    let file_module = run_context("change verify_file_module_release");
+    assert!(
+        has_graph_dependency(&file_module, "src/release/token.rs"),
+        "{file_module:#}"
+    );
 }
 
 #[test]
@@ -953,6 +970,8 @@ fn cli_context_e2e_preserves_adjacent_tests_after_source_edits() {
     init_git_repo(&root);
     std::fs::create_dir_all(root.join("src/components")).unwrap();
     std::fs::create_dir_all(root.join("__tests__/components")).unwrap();
+    std::fs::create_dir_all(root.join("src/mirrored")).unwrap();
+    std::fs::create_dir_all(root.join("src/__tests__/mirrored")).unwrap();
     std::fs::create_dir_all(root.join("app/models")).unwrap();
     std::fs::create_dir_all(root.join("spec/models")).unwrap();
     std::fs::write(
@@ -963,6 +982,16 @@ fn cli_context_e2e_preserves_adjacent_tests_after_source_edits() {
     std::fs::write(
         root.join("__tests__/components/widget.test.ts"),
         "test(\"release widget\", () => render_release_widget());\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/mirrored/panel.ts"),
+        "export function render_mirrored_panel() { return 1; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/__tests__/mirrored/panel.test.ts"),
+        "test(\"mirrored panel\", () => render_mirrored_panel());\n",
     )
     .unwrap();
     std::fs::write(
@@ -1018,6 +1047,14 @@ fn cli_context_e2e_preserves_adjacent_tests_after_source_edits() {
         includes_graph_test(&before_pytest, "src/test_auth.py"),
         "{before_pytest:#}"
     );
+    let before_mirrored_jest = run_context("change render_mirrored_panel");
+    assert!(
+        includes_graph_test(
+            &before_mirrored_jest,
+            "src/__tests__/mirrored/panel.test.ts"
+        ),
+        "{before_mirrored_jest:#}"
+    );
     let before_rspec = run_context("change refresh_rspec_user");
     assert!(
         !includes_graph_test(&before_rspec, "spec/models/user_spec.rb"),
@@ -1053,6 +1090,11 @@ fn cli_context_e2e_preserves_adjacent_tests_after_source_edits() {
     )
     .unwrap();
     std::fs::write(
+        root.join("src/mirrored/panel.ts"),
+        "export function render_mirrored_panel() { return 2; }\n",
+    )
+    .unwrap();
+    std::fs::write(
         root.join("app/models/user.rb"),
         "class User\n  def refresh_rspec_user = 2\nend\n",
     )
@@ -1074,6 +1116,11 @@ fn cli_context_e2e_preserves_adjacent_tests_after_source_edits() {
     assert!(
         includes_graph_test(&after_pytest, "src/test_auth.py"),
         "{after_pytest:#}"
+    );
+    let after_mirrored_jest = run_context("change render_mirrored_panel");
+    assert!(
+        includes_graph_test(&after_mirrored_jest, "src/__tests__/mirrored/panel.test.ts"),
+        "{after_mirrored_jest:#}"
     );
     let after_rspec = run_context("change refresh_rspec_user");
     assert!(

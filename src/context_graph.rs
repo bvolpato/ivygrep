@@ -248,6 +248,7 @@ pub(crate) fn resolve_dependency_spec(
 }
 
 pub(crate) fn dependency_lookup_keys(value: &str) -> BTreeSet<String> {
+    let value = value.strip_prefix("mod/").unwrap_or(value);
     value
         .split(|character: char| !character.is_alphanumeric() && character != '_')
         .map(str::trim)
@@ -379,10 +380,12 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                     }
                     continue;
                 }
-                let value = line
-                    .strip_prefix("use ")
-                    .or_else(|| line.strip_prefix("mod "));
-                if let Some(value) = value {
+                if let Some(value) = line.strip_prefix("mod ") {
+                    let value = value.split("//").next().unwrap_or(value).trim_end();
+                    if let Some(module) = value.strip_suffix(';') {
+                        specs.insert(format!("mod/{}", module.trim()));
+                    }
+                } else if let Some(value) = line.strip_prefix("use ") {
                     let value = value
                         .split("//")
                         .next()
@@ -754,6 +757,7 @@ fn resolve_local_dependency(
 
     let source_dir = source_path.parent().unwrap_or_else(|| Path::new(""));
     let mut normalized = spec.replace("::", "/").replace('\\', "/");
+    let rust_module_declaration = language == "rust" && normalized.starts_with("mod/");
     let python_relative = language == "python" && spec.starts_with('.');
     let starlark_relative = language == "starlark" && spec.starts_with(':');
     let starlark_workspace = language == "starlark" && spec.starts_with("//");
@@ -796,7 +800,12 @@ fn resolve_local_dependency(
         || normalized.starts_with("../")
         || python_relative
         || starlark_relative;
-    if language == "rust" && !crate_relative && !source_relative && normalized.contains('/') {
+    if language == "rust"
+        && !rust_module_declaration
+        && !crate_relative
+        && !source_relative
+        && normalized.contains('/')
+    {
         let mut module_candidates = Vec::new();
         let mut prefix = Some(Path::new(&normalized));
         while let Some(path) = prefix {
@@ -818,6 +827,7 @@ fn resolve_local_dependency(
     }
     normalized = normalized
         .strip_prefix("crate/")
+        .or_else(|| normalized.strip_prefix("mod/"))
         .or_else(|| normalized.strip_prefix("self/"))
         .or_else(|| normalized.strip_prefix("@/"))
         .or_else(|| normalized.strip_prefix("~/"))
@@ -873,42 +883,46 @@ fn resolve_local_dependency(
     }
 
     let mut bases = Vec::new();
-    if source_relative
-        || matches!(language, "c" | "cpp" | "objc" | "ruby" | "shell")
-        || language == "rust" && !crate_relative
-    {
-        bases.push(source_dir.to_path_buf());
-    }
-    if package_relative && let Some(crate_context) = local_rust_crate {
-        bases.push(crate_context.source_root.clone());
-    }
-    bases.extend([
-        PathBuf::new(),
-        PathBuf::from("src"),
-        PathBuf::from("lib"),
-        PathBuf::from("app"),
-    ]);
-    if matches!(language, "java" | "kotlin" | "scala" | "groovy") {
-        for ancestor in source_dir.ancestors() {
-            let Some(parent) = ancestor.parent() else {
-                continue;
-            };
-            if ancestor
-                .file_name()
-                .and_then(|value| value.to_str())
-                .is_some_and(|name| matches!(name, "java" | "kotlin" | "scala" | "groovy"))
-            {
-                bases.push(parent.join(language));
-                for source_root in ["java", "kotlin", "scala", "groovy"] {
-                    if source_root != language {
-                        bases.push(parent.join(source_root));
+    if rust_module_declaration {
+        bases.push(rust_module_declaration_base(source_path));
+    } else {
+        if source_relative
+            || matches!(language, "c" | "cpp" | "objc" | "ruby" | "shell")
+            || language == "rust" && !crate_relative
+        {
+            bases.push(source_dir.to_path_buf());
+        }
+        if package_relative && let Some(crate_context) = local_rust_crate {
+            bases.push(crate_context.source_root.clone());
+        }
+        bases.extend([
+            PathBuf::new(),
+            PathBuf::from("src"),
+            PathBuf::from("lib"),
+            PathBuf::from("app"),
+        ]);
+        if matches!(language, "java" | "kotlin" | "scala" | "groovy") {
+            for ancestor in source_dir.ancestors() {
+                let Some(parent) = ancestor.parent() else {
+                    continue;
+                };
+                if ancestor
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|name| matches!(name, "java" | "kotlin" | "scala" | "groovy"))
+                {
+                    bases.push(parent.join(language));
+                    for source_root in ["java", "kotlin", "scala", "groovy"] {
+                        if source_root != language {
+                            bases.push(parent.join(source_root));
+                        }
                     }
                 }
             }
         }
-    }
-    for ancestor in source_dir.ancestors().take(4) {
-        bases.push(ancestor.to_path_buf());
+        for ancestor in source_dir.ancestors().take(4) {
+            bases.push(ancestor.to_path_buf());
+        }
     }
 
     let source_extension = source_path.extension().and_then(|value| value.to_str());
@@ -1175,6 +1189,14 @@ fn rust_file_may_import_library(path: &Path) -> bool {
     true
 }
 
+fn rust_module_declaration_base(source_path: &Path) -> PathBuf {
+    let parent = source_path.parent().unwrap_or_else(|| Path::new(""));
+    match source_path.file_stem().and_then(|value| value.to_str()) {
+        Some("lib" | "main" | "mod" | "build") | None => parent.to_path_buf(),
+        Some(stem) => parent.join(stem),
+    }
+}
+
 fn test_suffixes(extension: &str) -> &'static [&'static str] {
     if extension == "rb" {
         &["_test", "_tests", "_spec", ".test", ".spec"]
@@ -1240,18 +1262,37 @@ fn likely_test_edges(
             .or_else(|_| rel_path.strip_prefix("lib"))
             .or_else(|_| rel_path.strip_prefix("app"))
             .unwrap_or(rel_path);
+        let source_root = ["src", "lib", "app"]
+            .into_iter()
+            .find(|source_root| rel_path.starts_with(source_root));
         for directory in test_directories(extension) {
             candidates.insert(PathBuf::from(directory).join(relative_under_source));
+            if let Some(source_root) = source_root {
+                candidates.insert(
+                    PathBuf::from(source_root)
+                        .join(directory)
+                        .join(relative_under_source),
+                );
+            }
         }
         let mirrored_parent = relative_under_source
             .parent()
             .unwrap_or_else(|| Path::new(""));
         for directory in test_directories(extension) {
-            let mirrored_base = PathBuf::from(directory).join(mirrored_parent);
-            for suffix in test_suffixes(extension) {
-                candidates.insert(mirrored_base.join(format!("{stem}{suffix}.{extension}")));
+            let mut mirrored_bases = vec![PathBuf::from(directory).join(mirrored_parent)];
+            if let Some(source_root) = source_root {
+                mirrored_bases.push(
+                    PathBuf::from(source_root)
+                        .join(directory)
+                        .join(mirrored_parent),
+                );
             }
-            candidates.insert(mirrored_base.join(format!("test_{stem}.{extension}")));
+            for mirrored_base in mirrored_bases {
+                for suffix in test_suffixes(extension) {
+                    candidates.insert(mirrored_base.join(format!("{stem}{suffix}.{extension}")));
+                }
+                candidates.insert(mirrored_base.join(format!("test_{stem}.{extension}")));
+            }
         }
         if let Some(file_name) = rel_path.file_name() {
             for directory in test_directories(extension) {
@@ -1859,6 +1900,29 @@ mod tests {
     }
 
     #[test]
+    fn source_file_finds_nested_source_root_test_mirror() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src/foo")).unwrap();
+        fs::create_dir_all(root.path().join("src/__tests__/foo")).unwrap();
+        fs::write(
+            root.path().join("src/__tests__/foo/user.test.ts"),
+            "test('user', () => user());\n",
+        )
+        .unwrap();
+
+        let edges = extract_file_edges(
+            root.path(),
+            None,
+            Path::new("src/foo/user.ts"),
+            "export function user() {}\n",
+        );
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Test
+                && edge.target_path == Path::new("src/__tests__/foo/user.test.ts")
+        }));
+    }
+
+    #[test]
     fn source_file_finds_colocated_pytest_module() {
         let root = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("src")).unwrap();
@@ -2434,6 +2498,23 @@ mod tests {
         }));
         assert!(edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Dependency && edge.target_path == Path::new("src/scoped.rs")
+        }));
+    }
+
+    #[test]
+    fn rust_file_modules_resolve_children_without_root_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src/auth")).unwrap();
+        fs::write(root.path().join("src/auth/token.rs"), "pub fn issue() {}\n").unwrap();
+        fs::write(root.path().join("src/token.rs"), "pub fn wrong() {}\n").unwrap();
+
+        let edges = extract_file_edges(root.path(), None, Path::new("src/auth.rs"), "mod token;\n");
+        assert!(edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency
+                && edge.target_path == Path::new("src/auth/token.rs")
+        }));
+        assert!(!edges.iter().any(|edge| {
+            edge.kind == FileEdgeKind::Dependency && edge.target_path == Path::new("src/token.rs")
         }));
     }
 
