@@ -4,17 +4,25 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
-## [1.1.20] - 2026-07-14
+## [1.2.0] - 2026-07-15
 
 ### Added
+- **Context packs understand active work.** `ig context --since main` combines merge-base commits, staged edits, unstaged edits, untracked files, and exact file-line references from issues or stack traces.
+- **CLI, MCP, and Web share one structured pack.** MCP accepts `since`; Web adds Context pack mode, Git base, multiline task input, relationship roles, and explanations.
+- **JVM and .NET test ownership is directional and incremental.** Java, Kotlin, Scala, Groovy, and C# source-test conventions work forward, reverse, and when either side appears later.
 - **Context Graph v2 connects task evidence across files.** Indexing stores compact typed dependency, test, configuration, and documentation edges. `ig context` expands both directions, ranks bounded graph evidence, adds recent Git co-changes, and reports dependency and dependent coverage.
 - **MCP agents can request complete context packs through `ig_search`.** `output=context_pack` and `budget_tokens` expose same scoped, filtered, token-bounded pack as CLI without adding another tool or round trip.
 
 ### Community
-- **Contributor paths are complete.** Structured issue forms, a pull-request evidence template, stable toolchain defaults, community policies, support routing, governance, and a task-oriented contributor guide reduce setup and review ambiguity.
+- **Contributor paths are complete.** Structured issue forms, a pull-request evidence template, stable toolchain defaults, community policies, support routing, and a task-oriented contributor guide reduce setup and review ambiguity.
 - **Website and README expose contribution entry points.** Newcomers can find starter work, Discussions, issue forms, security reporting, and validation guidance without searching repository internals.
 
+### Documentation
+- **Launch surface leads with outcome.** README now shows task to context pack to agent to passing test in roughly 200 lines. Website and dedicated 1280x640 social card use same message.
+- **Project documentation is smaller.** Contributor, integration, architecture, governance, support, and benchmark essentials now live in focused README, CONTRIBUTING, website, HTML reports, and machine-readable evidence instead of overlapping Markdown files.
+
 ### Testing
+- **Diff packs have cross-surface E2E coverage.** Tests cover stale indexes, dirty files, stdin traces, token budgets, gitignore, Web payloads, MCP schema, and late JVM/.NET additions.
 - **Context graph behavior has unit, incremental-index, CLI, MCP schema, direct-tool, and stdio session coverage.** Tests verify relationship extraction, reverse edges, stale-edge replacement, strict output shape, and budget enforcement.
 - **Community-health contracts prevent onboarding drift.** Tests verify required files, issue-form routing, policy links, contributor commands, and release-version synchronization.
 

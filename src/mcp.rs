@@ -98,6 +98,7 @@ struct IvygrepSearchArgs {
     path: Option<String>,
     output: Option<String>,
     budget_tokens: Option<usize>,
+    since: Option<String>,
     limit: Option<usize>,
     context: Option<usize>,
     #[serde(rename = "type")]
@@ -260,6 +261,10 @@ fn search_tool_schema() -> Value {
                     "maximum": 131072,
                     "description": "Complete context-pack budget, including metadata and snippets. Valid only with output=context_pack."
                 },
+                "since": {
+                    "type": "string",
+                    "description": "Git ref for a diff-aware context pack. Includes merge-base changes plus staged, unstaged, and untracked files. Valid only with output=context_pack."
+                },
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
@@ -361,6 +366,50 @@ fn context_pack_output_schema() -> Value {
         "properties": {
             "task": {"type": "string"},
             "workspace": {"type": "string"},
+            "change_scope": {
+                "type": "object",
+                "properties": {
+                    "since": {"type": "string"},
+                    "base_commit": {"type": "string"},
+                    "dirty_worktree": {"type": "boolean"},
+                    "total_changes": {"type": "integer", "minimum": 0},
+                    "changes_truncated": {"type": "boolean"},
+                    "changes": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "file_path": {"type": "string"},
+                                "old_path": {"type": "string"},
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["added", "modified", "deleted", "renamed", "copied", "type_changed", "unmerged", "unknown"]
+                                },
+                                "sources": {
+                                    "type": "array",
+                                    "items": {"type": "string", "enum": ["since", "staged", "worktree", "untracked"]}
+                                }
+                            },
+                            "required": ["file_path", "status", "sources"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["dirty_worktree", "total_changes", "changes_truncated", "changes"],
+                "additionalProperties": false
+            },
+            "referenced_paths": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "line": {"type": "integer", "minimum": 1}
+                    },
+                    "required": ["file_path"],
+                    "additionalProperties": false
+                }
+            },
             "budget_tokens": {"type": "integer", "minimum": 256, "maximum": 131072},
             "used_tokens": {"type": "integer", "minimum": 0},
             "candidate_count": {"type": "integer", "minimum": 0},
@@ -419,7 +468,7 @@ fn context_pack_output_schema() -> Value {
             }
         },
         "required": [
-            "task", "workspace", "budget_tokens", "used_tokens", "candidate_count",
+            "task", "workspace", "referenced_paths", "budget_tokens", "used_tokens", "candidate_count",
             "truncated", "anchor_symbols", "coverage", "items"
         ],
         "additionalProperties": false
@@ -707,6 +756,9 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
     if !wants_context_pack && args.budget_tokens.is_some() {
         bail!("budget_tokens requires output=context_pack");
     }
+    if !wants_context_pack && args.since.is_some() {
+        bail!("since requires output=context_pack");
+    }
     if wants_context_pack
         && (requested_modes.into_iter().any(|enabled| enabled)
             || args.first_line_only.unwrap_or(false)
@@ -736,7 +788,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
 
     if wants_context_pack {
         let model = mcp_search_model(&workspace);
-        let bundle = crate::context::build_context_bundle(
+        let bundle = crate::context::build_context_bundle_with_options(
             &workspace,
             query,
             Some(model.as_ref()),
@@ -753,6 +805,9 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
                 cancel_token: None,
             },
             args.budget_tokens.unwrap_or(8_000),
+            &crate::context::ContextBuildOptions {
+                since: args.since.as_deref(),
+            },
         )?;
         if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
             && workspace.needs_neural_enhancement()
@@ -1173,6 +1228,7 @@ mod tests {
             path: Some(scoped.to_string_lossy().to_string()),
             output: None,
             budget_tokens: None,
+            since: None,
             limit: None,
             context: Some(2),
             type_filter: None,
@@ -1242,6 +1298,28 @@ mod tests {
             "Refresh token rotation is implemented in [auth](src/auth.rs).\n",
         )
         .unwrap();
+        for args in [
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+            vec!["add", "."],
+            vec!["commit", "-qm", "base"],
+            vec!["branch", "-M", "main"],
+            vec!["switch", "-qc", "feature"],
+        ] {
+            assert!(
+                std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(&root)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        std::fs::write(
+            root.join("src/auth.rs"),
+            "use crate::clock::now;\npub fn rotate_refresh_token() { now(); /* branch fix */ }\n",
+        )
+        .unwrap();
 
         let home = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
@@ -1250,6 +1328,7 @@ mod tests {
             path: Some(root.to_string_lossy().to_string()),
             output: Some("context_pack".to_string()),
             budget_tokens: Some(4_000),
+            since: Some("main".to_string()),
             limit: None,
             context: Some(2),
             type_filter: None,
@@ -1270,6 +1349,11 @@ mod tests {
         let payload = tool_json_payload(&response);
         assert_eq!(payload["mode"], "context");
         assert_eq!(payload["context_pack"]["budget_tokens"], 4_000);
+        assert_eq!(payload["context_pack"]["change_scope"]["since"], "main");
+        assert_eq!(
+            payload["context_pack"]["change_scope"]["dirty_worktree"],
+            true
+        );
         assert!(
             payload["context_pack"]["used_tokens"].as_u64().unwrap() <= 4_000,
             "{payload:#}"
@@ -1348,6 +1432,7 @@ mod tests {
             path: Some(root.to_string_lossy().to_string()),
             output: None,
             budget_tokens: None,
+            since: None,
             limit: Some(10),
             context: Some(2),
             type_filter: None,
@@ -1380,6 +1465,7 @@ mod tests {
                 path: Some(root.to_string_lossy().to_string()),
                 output: Some("context_pack".to_string()),
                 budget_tokens: Some(4_000),
+                since: None,
                 limit: None,
                 context: Some(2),
                 type_filter: None,
@@ -1426,6 +1512,7 @@ mod tests {
             path: Some(root.to_string_lossy().to_string()),
             output: None,
             budget_tokens: None,
+            since: None,
             limit: Some(5),
             context: Some(2),
             type_filter: None,
@@ -1482,6 +1569,7 @@ mod tests {
             path: Some(root.to_string_lossy().to_string()),
             output: None,
             budget_tokens: None,
+            since: None,
             limit: Some(5),
             context: Some(2),
             type_filter: None,
@@ -1516,6 +1604,7 @@ mod tests {
             path: Some(root.to_string_lossy().to_string()),
             output: None,
             budget_tokens: None,
+            since: None,
             limit: Some(5),
             context: Some(2),
             type_filter: None,
@@ -1759,6 +1848,7 @@ mod tests {
             path: Some(root.to_string_lossy().to_string()),
             output: None,
             budget_tokens: None,
+            since: None,
             limit: Some(5),
             context: Some(2),
             type_filter: None,
@@ -1802,6 +1892,7 @@ mod tests {
             path: Some(root.to_string_lossy().to_string()),
             output: None,
             budget_tokens: None,
+            since: None,
             limit: Some(5),
             context: Some(2),
             type_filter: None,
@@ -1853,6 +1944,7 @@ mod tests {
                 path: Some(root.to_string_lossy().to_string()),
                 output: None,
                 budget_tokens: None,
+                since: None,
                 limit: Some(5),
                 context: Some(2),
                 type_filter: None,
@@ -1883,6 +1975,7 @@ mod tests {
                     path: Some(root.to_string_lossy().to_string()),
                     output: None,
                     budget_tokens: None,
+                    since: None,
                     limit: Some(5),
                     context: Some(2),
                     type_filter: None,
@@ -1913,6 +2006,7 @@ mod tests {
             path: None,
             output: None,
             budget_tokens: None,
+            since: None,
             limit: Some(5),
             context: Some(2),
             type_filter: None,
@@ -1959,6 +2053,7 @@ mod tests {
             path: Some(root.to_string_lossy().to_string()),
             output: None,
             budget_tokens: None,
+            since: None,
             limit: Some(5),
             context: Some(2),
             type_filter: None,

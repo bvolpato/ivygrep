@@ -55,7 +55,8 @@ Options:
 
 Examples:
   ig "where is authentication checked?"
-  ig context "fix refresh-token races" --budget 8000
+  ig context "fix refresh-token races" --since main --budget 8000
+  printf 'panic at src/auth.rs:42' | ig context -
   ig agent install claude
   ig hardware
   ig --literal validate_token src/

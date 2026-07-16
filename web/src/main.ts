@@ -46,7 +46,45 @@ type SearchPayload = {
   error?: string;
   errors?: string[];
   hits?: SearchHit[];
+  context_pack?: ContextBundle;
   elapsed_ms?: number;
+};
+
+type ContextChange = {
+  file_path: string;
+  old_path?: string;
+  status: string;
+  sources: string[];
+};
+
+type ContextBundle = {
+  task: string;
+  workspace: string;
+  change_scope?: {
+    since?: string;
+    base_commit?: string;
+    dirty_worktree: boolean;
+    total_changes: number;
+    changes_truncated: boolean;
+    changes: ContextChange[];
+  };
+  referenced_paths: Array<{ file_path: string; line?: number }>;
+  budget_tokens: number;
+  used_tokens: number;
+  candidate_count: number;
+  truncated: boolean;
+  anchor_symbols: string[];
+  coverage: Record<string, number>;
+  items: Array<{
+    file_path: string;
+    start_line: number;
+    end_line: number;
+    roles: string[];
+    reasons: string[];
+    sources: string[];
+    preview: string;
+    estimated_tokens: number;
+  }>;
 };
 
 type SearchDonePayload = {
@@ -86,6 +124,7 @@ type AppState = {
   events: EventSource | null;
   searching: boolean;
   hits: SearchHit[];
+  contextPack: ContextBundle | null;
   autoOpenKey: string;
   manualOpen: boolean;
   requestedWorkspace: string;
@@ -123,6 +162,7 @@ const state: AppState = {
   events: null,
   searching: false,
   hits: [],
+  contextPack: null,
   autoOpenKey: "",
   manualOpen: false,
   requestedWorkspace: queryParams.get("workspace") || boot.workspace || "",
@@ -167,9 +207,10 @@ function renderShell(): void {
         </div>
         <div class="searchbar" role="search">
           <label class="sr-only" for="query">Search query</label>
-          <input id="query" type="search" placeholder="Search code, symbols, paths" />
+          <textarea id="query" rows="2" placeholder="Search code, paste issue, or paste stack trace"></textarea>
           <select id="mode" aria-label="Search mode">
             <option value="hybrid">Hybrid</option>
+            <option value="context">Context pack</option>
             <option value="literal">Literal</option>
             <option value="regex">Regex</option>
           </select>
@@ -190,6 +231,8 @@ function renderShell(): void {
             <input id="limit" type="number" min="1" max="${MAX_LIMIT}" value="${DEFAULT_LIMIT}" aria-label="Result limit" />
             <input id="include" placeholder="include globs" aria-label="Include path globs" />
             <input id="exclude" placeholder="exclude globs" aria-label="Exclude path globs" />
+            <label id="since-field" class="filter-field"><span>Git base</span><input id="since" placeholder="main" aria-label="Context Git base" /></label>
+            <label id="budget-field" class="filter-field"><span>Token budget</span><input id="budget" type="number" min="256" max="131072" value="8000" aria-label="Context token budget" /></label>
           </div>
           <div class="scopebar">
             <span id="scope-label">Scope: all folders</span>
@@ -468,7 +511,7 @@ function updateScopeLabel(): void {
 }
 
 function runSearch(options: { preserveSelection?: boolean } = {}): void {
-  const q = byId<HTMLInputElement>("query").value.trim();
+  const q = byId<HTMLTextAreaElement>("query").value.trim();
   if (!options.preserveSelection) fileRequests.cancel();
   if (state.events) {
     state.events.close();
@@ -476,6 +519,7 @@ function runSearch(options: { preserveSelection?: boolean } = {}): void {
   }
   if (!q) {
     state.hits = [];
+    state.contextPack = null;
     state.currentHitKey = "";
     state.pinnedHitKeys.clear();
     state.searchErrors = [];
@@ -483,6 +527,16 @@ function runSearch(options: { preserveSelection?: boolean } = {}): void {
     updateCopyAvailability();
     byId("summary").textContent = "Enter a query.";
     byId("results").innerHTML = '<div class="empty">Enter a query to search tracked workspaces.</div>';
+    return;
+  }
+  if (byId<HTMLSelectElement>("mode").value === "context" && state.workspace === ALL_WORKSPACES) {
+    state.hits = [];
+    state.contextPack = null;
+    state.pinnedHitKeys.clear();
+    setSearching(false);
+    updateCopyAvailability();
+    byId("summary").textContent = "Select one workspace for a context pack.";
+    byId("results").innerHTML = '<div class="empty">Context graphs and Git diffs belong to one workspace. Select it on the left.</div>';
     return;
   }
   syncUrlState();
@@ -494,6 +548,7 @@ function runSearch(options: { preserveSelection?: boolean } = {}): void {
     state.autoOpenKey = "";
     state.manualOpen = false;
     state.hits = [];
+    state.contextPack = null;
     state.currentHitKey = "";
     state.pinnedHitKeys.clear();
     byId("results").innerHTML = "";
@@ -509,6 +564,10 @@ function runSearch(options: { preserveSelection?: boolean } = {}): void {
     include: byId<HTMLInputElement>("include").value || "",
     exclude: byId<HTMLInputElement>("exclude").value || ""
   });
+  if (byId<HTMLSelectElement>("mode").value === "context") {
+    params.set("since", byId<HTMLInputElement>("since").value || "");
+    params.set("budget_tokens", byId<HTMLInputElement>("budget").value || "8000");
+  }
   if (state.workspace !== ALL_WORKSPACES && state.scope) params.set("scope", state.scope);
   const events = new EventSource(`/api/search/stream?${params.toString()}`, { withCredentials: true });
   state.events = events;
@@ -546,13 +605,14 @@ function runSearch(options: { preserveSelection?: boolean } = {}): void {
 }
 
 function refreshSearchIfQuery(): void {
-  if (byId<HTMLInputElement>("query").value.trim()) runSearch();
+  if (byId<HTMLTextAreaElement>("query").value.trim()) runSearch();
 }
 
 function renderResults(payload: SearchPayload): void {
   if (payload.error) {
     state.searchErrors = [payload.error];
     state.hits = [];
+    state.contextPack = null;
     state.currentHitKey = "";
     setSearching(false);
     byId("summary").textContent = payload.error;
@@ -560,7 +620,12 @@ function renderResults(payload: SearchPayload): void {
     return;
   }
   state.searchErrors = payload.errors || [];
+  if (payload.context_pack) {
+    renderContextPack(payload.context_pack, Number(payload.elapsed_ms || 0));
+    return;
+  }
   const hits = payload.hits || [];
+  state.contextPack = null;
   state.hits = hits;
   pruneResultKeySets();
   updateCopyAvailability();
@@ -610,6 +675,81 @@ function renderResults(payload: SearchPayload): void {
   if (!state.manualOpen && state.autoOpenKey !== firstKey) {
     state.autoOpenKey = firstKey;
     void openHit(first).catch((err: Error) => setStatus(err.message));
+  }
+}
+
+function renderContextPack(bundle: ContextBundle, elapsedMs: number): void {
+  const hits = bundle.items.map((item) => ({
+    file_path: item.file_path,
+    start_line: item.start_line,
+    end_line: item.end_line,
+    score: 0,
+    preview: item.preview,
+    sources: item.sources
+  }));
+  state.hits = hits;
+  state.contextPack = bundle;
+  pruneResultKeySets();
+  updateCopyAvailability();
+  const coverage = bundle.coverage;
+  const changeText = bundle.change_scope
+    ? `, ${bundle.change_scope.total_changes} changed${bundle.change_scope.dirty_worktree ? " including worktree" : ""}`
+    : "";
+  byId("summary").textContent = `${coverage.files} files, ${bundle.used_tokens}/${bundle.budget_tokens} tokens${changeText}, ${elapsedMs.toFixed(1)} ms`;
+  const root = byId("results");
+  root.innerHTML = "";
+  const overview = document.createElement("section");
+  overview.className = "context-overview";
+  const coverageText = [
+    ["primary", coverage.primary],
+    ["dependencies", coverage.dependencies],
+    ["dependents", coverage.dependents],
+    ["callers", coverage.callers],
+    ["tests", coverage.tests],
+    ["config", coverage.config],
+    ["docs", coverage.documentation]
+  ].filter(([, count]) => Number(count) > 0).map(([label, count]) => `${count} ${label}`).join(" | ");
+  const changes = bundle.change_scope?.changes.slice(0, 12).map((change) =>
+    `<li><strong>${escapeHtml(change.status)}</strong> ${escapeHtml(change.file_path)} <span>${escapeHtml(change.sources.join(", "))}</span></li>`
+  ).join("") || "";
+  overview.innerHTML = `
+    <div class="context-title">Structured context pack</div>
+    <div>${escapeHtml(coverageText || "No relationship coverage")}${bundle.truncated ? " | truncated to budget" : ""}</div>
+    ${bundle.anchor_symbols.length ? `<div>Anchors: ${escapeHtml(bundle.anchor_symbols.join(", "))}</div>` : ""}
+    ${changes ? `<ul class="context-changes">${changes}</ul>` : ""}`;
+  root.appendChild(overview);
+
+  for (let index = 0; index < bundle.items.length; index += 1) {
+    const item = bundle.items[index];
+    const hit = hits[index];
+    const key = hitKey(hit);
+    const article = document.createElement("article");
+    article.className = "hit context-item";
+    article.dataset.hitKey = key;
+    article.innerHTML = `
+      <div class="hit-head">
+        <button class="hit-main" type="button">
+          <div class="file">${languageIconForPath(item.file_path)}<span class="file-path">${pathWithBreaks(item.file_path)}<span class="context-location">:${item.start_line}-${item.end_line}</span></span></div>
+          <div class="context-roles">${item.roles.map((role) => `<span>${escapeHtml(role)}</span>`).join("")}</div>
+        </button>
+        <div class="hit-actions">
+          <button class="small-action pin-hit${state.pinnedHitKeys.has(key) ? " active" : ""}" type="button" aria-pressed="${state.pinnedHitKeys.has(key)}">${state.pinnedHitKeys.has(key) ? "Pinned" : "Pin"}</button>
+          <button class="small-action open-hit" type="button">Open</button>
+        </div>
+      </div>
+      ${item.reasons.length ? `<div class="context-why"><strong>Why:</strong> ${escapeHtml(item.reasons.join("; "))}</div>` : ""}
+      <pre class="snippet hljs">${renderSnippet(hit)}</pre>`;
+    article.querySelector(".hit-main")?.addEventListener("click", () => selectHit(hit));
+    article.querySelector(".pin-hit")?.addEventListener("click", () => togglePinnedHit(key));
+    article.querySelector(".open-hit")?.addEventListener("click", () => {
+      void openHitInEditor(hit).catch((err: Error) => setStatus(err.message));
+    });
+    root.appendChild(article);
+  }
+  if (!hits.length) {
+    root.insertAdjacentHTML("beforeend", '<div class="empty">No context evidence found.</div>');
+  } else if (!state.manualOpen) {
+    void openHit(hits[0]).catch((err: Error) => setStatus(err.message));
   }
 }
 
@@ -696,6 +836,9 @@ function copyHits(scope: CopyScope): SearchHit[] {
 function clipboardText(format: CopyFormat, hits: SearchHit[]): string {
   if (!hits.length) return "";
   if (format === "files") return uniqueFilePaths(hits).join("\n");
+  if (format === "json" && state.contextPack && currentCopyScope() === "visible") {
+    return JSON.stringify(state.contextPack, null, 2);
+  }
   if (format === "json") return JSON.stringify(searchExport(hits), null, 2);
   return hits.map(rawHitText).join("\n\n");
 }
@@ -844,7 +987,7 @@ function markQueryTerms(html: string): string {
 }
 
 function queryTerms(): string[] {
-  const query = byId<HTMLInputElement>("query").value.trim();
+  const query = byId<HTMLTextAreaElement>("query").value.trim();
   if (!query) return [];
   const terms = query.match(/[A-Za-z0-9_.$:/-]{2,}/g) || (query.length <= 32 ? [query] : []);
   return Array.from(new Set(terms.map((term) => term.toLowerCase()))).slice(0, 8);
@@ -1126,12 +1269,24 @@ function debounce(fn: () => void, delayMs: number): () => void {
 }
 
 function applyInitialParams(): void {
-  byId<HTMLInputElement>("query").value = queryParams.get("q") || boot.query || "";
+  byId<HTMLTextAreaElement>("query").value = queryParams.get("q") || boot.query || "";
   byId<HTMLSelectElement>("mode").value = queryParams.get("mode") || "hybrid";
   byId<HTMLInputElement>("limit").value = queryParams.get("limit") || String(DEFAULT_LIMIT);
   byId<HTMLInputElement>("type").value = queryParams.get("type") || "";
   byId<HTMLInputElement>("include").value = queryParams.get("include") || "";
   byId<HTMLInputElement>("exclude").value = queryParams.get("exclude") || "";
+  byId<HTMLInputElement>("since").value = queryParams.get("since") || "";
+  byId<HTMLInputElement>("budget").value = queryParams.get("budget") || "8000";
+  updateContextControls();
+}
+
+function updateContextControls(): void {
+  const contextMode = byId<HTMLSelectElement>("mode").value === "context";
+  byId("since-field").hidden = !contextMode;
+  byId("budget-field").hidden = !contextMode;
+  byId<HTMLTextAreaElement>("query").placeholder = contextMode
+    ? "Describe task, paste issue, or paste stack trace"
+    : "Search code, symbols, paths";
 }
 
 function currentLimit(): number {
@@ -1142,12 +1297,14 @@ function currentLimit(): number {
 
 function syncUrlState(): void {
   const params = new URLSearchParams();
-  const query = byId<HTMLInputElement>("query").value.trim();
+  const query = byId<HTMLTextAreaElement>("query").value.trim();
   const mode = byId<HTMLSelectElement>("mode").value;
   const limit = currentLimit();
   const type = byId<HTMLInputElement>("type").value.trim();
   const include = byId<HTMLInputElement>("include").value.trim();
   const exclude = byId<HTMLInputElement>("exclude").value.trim();
+  const since = byId<HTMLInputElement>("since").value.trim();
+  const budget = byId<HTMLInputElement>("budget").value.trim();
   if (query) params.set("q", query);
   if (state.workspace !== ALL_WORKSPACES) params.set("workspace", scopedWorkspacePath());
   if (mode !== "hybrid") params.set("mode", mode);
@@ -1155,6 +1312,8 @@ function syncUrlState(): void {
   if (type) params.set("type", type);
   if (include) params.set("include", include);
   if (exclude) params.set("exclude", exclude);
+  if (mode === "context" && since) params.set("since", since);
+  if (mode === "context" && budget !== "8000") params.set("budget", budget);
   const search = params.toString();
   history.replaceState(null, "", `${location.pathname}${search ? `?${search}` : ""}`);
 }
@@ -1169,14 +1328,14 @@ function handleGlobalKeyDown(event: KeyboardEvent): void {
   const editing = target instanceof Element && Boolean(target.closest("input, textarea, select, button, a, [contenteditable='true']"));
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
     event.preventDefault();
-    const query = byId<HTMLInputElement>("query");
+    const query = byId<HTMLTextAreaElement>("query");
     query.focus();
     query.select();
     return;
   }
   if (!editing && event.key === "/") {
     event.preventDefault();
-    byId<HTMLInputElement>("query").focus();
+    byId<HTMLTextAreaElement>("query").focus();
     return;
   }
   if (editing || event.altKey || event.metaKey || event.ctrlKey) return;
@@ -1192,6 +1351,10 @@ function handleGlobalKeyDown(event: KeyboardEvent): void {
 
 function escapeHtml(value: unknown): string {
   return String(value).replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch] || ch);
+}
+
+function pathWithBreaks(value: string): string {
+  return escapeHtml(value).replaceAll("/", "/<wbr>").replaceAll("\\", "\\<wbr>");
 }
 
 function attachEvents(): void {
@@ -1221,21 +1384,26 @@ function attachEvents(): void {
     state.viewerMode = "source";
     renderViewerFile();
   });
-  byId<HTMLInputElement>("query").addEventListener("keydown", (event) => {
-    if (event.key === "Enter") runSearch();
+  byId<HTMLTextAreaElement>("query").addEventListener("keydown", (event) => {
+    const contextMode = byId<HTMLSelectElement>("mode").value === "context";
+    if (event.key === "Enter" && (!contextMode || event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      runSearch();
+    }
   });
   byId<HTMLInputElement>("workspace-filter").addEventListener("input", (event) => {
     state.workspaceFilter = (event.target as HTMLInputElement).value;
     renderWorkspaces();
   });
   const debouncedRefresh = debounce(refreshSearchIfQuery, 220);
-  for (const id of ["type", "limit", "include", "exclude"]) {
+  for (const id of ["type", "limit", "include", "exclude", "since", "budget"]) {
     byId<HTMLInputElement>(id).addEventListener("input", () => {
       syncUrlState();
       debouncedRefresh();
     });
   }
   byId<HTMLSelectElement>("mode").addEventListener("change", () => {
+    updateContextControls();
     syncUrlState();
     refreshSearchIfQuery();
   });
@@ -1248,6 +1416,6 @@ attachEvents();
 applyInitialParams();
 void loadStatus()
   .then(() => {
-    if (byId<HTMLInputElement>("query").value.trim()) runSearch();
+    if (byId<HTMLTextAreaElement>("query").value.trim()) runSearch();
   })
   .catch((err: Error) => setStatus(err.message));

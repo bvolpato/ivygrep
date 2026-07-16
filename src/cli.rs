@@ -1,12 +1,10 @@
 use std::env;
-use std::io::Write;
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 use colored::Colorize;
-use std::io::IsTerminal;
-
 use tracing_subscriber::EnvFilter;
 
 use crate::config;
@@ -33,7 +31,7 @@ use crate::workspace::{
     version,
     about = "Semantic grep that stays local",
     long_about = None,
-    after_help = "Examples:\n  ig \"where is authentication checked?\"\n  ig context \"fix refresh-token races\" --budget 8000\n  ig agent install claude\n  ig hardware\n  ig --literal validate_token src/\n  ig --symbol UserService\n  ig --add . --wait-for-enhancement\n  ig --status\n  ig --web"
+    after_help = "Examples:\n  ig \"where is authentication checked?\"\n  ig context \"fix refresh-token races\" --since main --budget 8000\n  printf 'panic at src/auth.rs:42' | ig context -\n  ig agent install claude\n  ig hardware\n  ig --literal validate_token src/\n  ig --symbol UserService\n  ig --add . --wait-for-enhancement\n  ig --status\n  ig --web"
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -218,7 +216,7 @@ pub enum CliCommand {
 
 #[derive(Args, Debug, Clone)]
 pub struct ContextArgs {
-    /// Development task or question to gather context for.
+    /// Development task, issue, or stack trace. Use - to read stdin.
     #[arg(value_name = "TASK")]
     pub task: String,
 
@@ -229,6 +227,10 @@ pub struct ContextArgs {
     /// Maximum model-independent estimated tokens in the rendered Markdown pack.
     #[arg(long, value_name = "TOKENS", default_value_t = 8000)]
     pub budget: usize,
+
+    /// Include committed changes since merge base plus staged, unstaged, and untracked files.
+    #[arg(long, value_name = "GIT_REF")]
+    pub since: Option<String>,
 
     /// Use BM25/path/signature retrieval without vector search.
     #[arg(long, conflicts_with = "hash")]
@@ -310,7 +312,14 @@ pub async fn run() -> Result<()> {
     let mut agent_command = None;
     let mut hardware = false;
     let context_args = match cli.command.take() {
-        Some(CliCommand::Context(args)) => {
+        Some(CliCommand::Context(mut args)) => {
+            if args.task == "-" {
+                args.task.clear();
+                std::io::stdin().read_to_string(&mut args.task)?;
+                if args.task.trim().is_empty() {
+                    bail!("context task from stdin must not be empty");
+                }
+            }
             apply_context_args(&mut cli, &args);
             Some(args)
         }
@@ -1538,12 +1547,15 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             cli.lexical_only,
             cli.force_neural,
         )?;
-        let bundle = crate::context::build_context_bundle(
+        let bundle = crate::context::build_context_bundle_with_options(
             &workspace,
             query,
             model.as_deref(),
             &options,
             context_args.budget,
+            &crate::context::ContextBuildOptions {
+                since: context_args.since.as_deref(),
+            },
         )?;
         if cli.json {
             println!("{}", serde_json::to_string_pretty(&bundle)?);

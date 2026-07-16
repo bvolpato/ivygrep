@@ -293,7 +293,7 @@ def html(report: dict) -> str:
   <main class="report-shell relative z-10">
     <nav class="report-nav">
       <a class="report-brand" href="../"><img src="../assets/icon.svg" alt="ivygrep"><span>ivygrep benchmarks</span></a>
-      <div class="report-links"><a href="index.html">Reports</a><a href="embedding-model-bakeoff.json">Raw JSON</a><a href="https://github.com/bvolpato/ivygrep/blob/main/docs/benchmarks/embedding-model-bakeoff.md">Source</a></div>
+      <div class="report-links"><a href="index.html">Reports</a><a href="embedding-model-bakeoff.json">Raw JSON</a></div>
     </nav>
     <section class="report-hero">
       <div class="report-eyebrow">Portable Model Evidence</div>
@@ -328,7 +328,6 @@ def main() -> int:
     parser.add_argument("--matrix", action="append", default=[])
     parser.add_argument("--partial", action="append", default=[])
     parser.add_argument("--json", type=Path, required=True)
-    parser.add_argument("--markdown", type=Path, required=True)
     parser.add_argument("--html", type=Path, required=True)
     args = parser.parse_args()
 
@@ -343,7 +342,6 @@ def main() -> int:
         json.dumps(report, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    args.markdown.write_text(markdown(report), encoding="utf-8")
     args.html.write_text(html(report), encoding="utf-8")
     return 0
 

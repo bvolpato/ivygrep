@@ -461,6 +461,23 @@ fn create_search_model() -> Arc<dyn EmbeddingModel> {
 }
 
 impl DaemonState {
+    pub(crate) async fn acquire_cpu_permit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        self.cpu_permits.clone().acquire_owned().await.ok()
+    }
+
+    pub(crate) fn prepare_context_model(
+        &self,
+        workspace: &Workspace,
+        skip_gitignore: bool,
+    ) -> Result<Arc<dyn EmbeddingModel>> {
+        self.prepare_workspace_for_hybrid_query(workspace, skip_gitignore)?;
+        if self.cached_neural_identity(workspace).is_none() {
+            return Ok(cached_hash_model());
+        }
+        self.maybe_start_model_load();
+        self.get_model_for_search(false)
+    }
+
     fn resolve_workspace(&self, path: &Path) -> Result<Workspace> {
         if path.is_absolute()
             && let Some(workspace) = self.resolved_workspaces.lock().get(path).cloned()
@@ -2746,6 +2763,28 @@ mod tests {
         let state = test_state();
         assert!(state.lazy_model.set(cached_hash_model()).is_ok());
         assert!(state.get_model_for_search(true).is_err());
+    }
+
+    #[test]
+    #[serial]
+    fn context_model_keeps_hash_only_workspaces_on_hash_vectors() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn context() {}\n").unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let hash_model = create_hash_model();
+        index_workspace(&workspace, hash_model.as_ref()).unwrap();
+
+        let state = test_state();
+        assert!(
+            state
+                .lazy_model
+                .set(Arc::new(TestNeuralModel) as Arc<dyn EmbeddingModel>)
+                .is_ok()
+        );
+        let model = state.prepare_context_model(&workspace, false).unwrap();
+        assert!(model.model_identity().is_none());
     }
 
     #[test]

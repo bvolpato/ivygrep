@@ -4785,6 +4785,70 @@ mod tests {
 
     #[test]
     #[serial]
+    fn adding_jvm_and_dotnet_tests_reindexes_source_owners() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let java_source = Path::new("src/main/java/com/acme/Auth.java");
+        let java_test = Path::new("src/test/java/com/acme/AuthTest.java");
+        let dotnet_source = Path::new("src/Auth/Services/Token.cs");
+        let dotnet_test = Path::new("tests/Auth.Tests/Services/TokenTests.cs");
+        fs::create_dir_all(root.path().join(java_source.parent().unwrap())).unwrap();
+        fs::create_dir_all(root.path().join(dotnet_source.parent().unwrap())).unwrap();
+        fs::write(root.path().join(java_source), "class Auth {}\n").unwrap();
+        fs::write(root.path().join(dotnet_source), "class Token {}\n").unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let conn = open_sqlite_readonly(&workspace.sqlite_path()).unwrap();
+        for source in [java_source, dotnet_source] {
+            let unresolved = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM unresolved_file_dependencies
+                     WHERE source_path = ?1 AND language = 'context_test'
+                       AND spec = 'conventional_test'",
+                    params![source.to_string_lossy()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap();
+            assert_eq!(
+                unresolved,
+                1,
+                "missing compact mapping for {}",
+                source.display()
+            );
+        }
+        drop(conn);
+
+        fs::create_dir_all(root.path().join(java_test.parent().unwrap())).unwrap();
+        fs::create_dir_all(root.path().join(dotnet_test.parent().unwrap())).unwrap();
+        fs::write(root.path().join(java_test), "class AuthTest {}\n").unwrap();
+        fs::write(root.path().join(dotnet_test), "class TokenTests {}\n").unwrap();
+        let summary = index_workspace(&workspace, &model).unwrap();
+        assert_eq!(summary.indexed_files, 4);
+
+        let conn = open_sqlite_readonly(&workspace.sqlite_path()).unwrap();
+        for (source, test) in [(java_source, java_test), (dotnet_source, dotnet_test)] {
+            let edge = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM file_edges
+                     WHERE source_path = ?1 AND target_path = ?2 AND kind = ?3",
+                    params![
+                        source.to_string_lossy(),
+                        test.to_string_lossy(),
+                        crate::context_graph::FileEdgeKind::Test as i64,
+                    ],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap();
+            assert_eq!(edge, 1, "missing test edge for {}", source.display());
+        }
+    }
+
+    #[test]
+    #[serial]
     fn adding_rust_path_module_reindexes_importer() {
         let root = tempdir().unwrap();
         let home = tempdir().unwrap();

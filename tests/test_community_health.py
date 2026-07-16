@@ -1,4 +1,5 @@
 import re
+import struct
 import tomllib
 import unittest
 from pathlib import Path
@@ -15,11 +16,9 @@ class CommunityHealthTest(unittest.TestCase):
         required = [
             "CODE_OF_CONDUCT.md",
             "CONTRIBUTING.md",
-            "GOVERNANCE.md",
             "LICENSE",
             "README.md",
             "SECURITY.md",
-            "SUPPORT.md",
             ".github/pull_request_template.md",
         ]
         for path in required:
@@ -58,23 +57,44 @@ class CommunityHealthTest(unittest.TestCase):
         for command in ("./test.sh --quick", "./test.sh", "./bench.sh", "pnpm -C web check"):
             self.assertIn(command, guide)
         for path in (
-            "AGENTS_TESTING.md",
-            "ARCHITECTURE.md",
             "CODE_OF_CONDUCT.md",
-            "GOVERNANCE.md",
             "LICENSE",
             "SECURITY.md",
         ):
             self.assertIn(f"]({path})", guide)
             self.assertTrue((ROOT / path).exists())
 
-    def test_security_and_support_use_private_reporting(self) -> None:
+    def test_security_and_contributor_guide_use_private_reporting(self) -> None:
         security = self.read("SECURITY.md")
-        support = self.read("SUPPORT.md")
+        contributing = self.read("CONTRIBUTING.md")
         private_report = "https://github.com/bvolpato/ivygrep/security/advisories/new"
         self.assertIn(private_report, security)
-        self.assertIn(private_report, support)
+        self.assertIn(private_report, contributing)
         self.assertIn("Do not open public issue", security)
+
+    def test_launch_surface_stays_focused(self) -> None:
+        readme_lines = self.read("README.md").splitlines()
+        self.assertGreaterEqual(len(readme_lines), 180)
+        self.assertLessEqual(len(readme_lines), 230)
+        self.assertEqual(
+            {
+                "CHANGELOG.md",
+                "CODE_OF_CONDUCT.md",
+                "CONTRIBUTING.md",
+                "README.md",
+                "SECURITY.md",
+            },
+            {path.name for path in ROOT.glob("*.md")},
+        )
+        self.assertFalse(list(ROOT.rglob("AGENTS_*.md")))
+        self.assertIn("AGENTS_*", self.read(".gitignore"))
+
+    def test_social_card_has_share_dimensions(self) -> None:
+        png = (ROOT / "assets" / "social-card.png").read_bytes()
+        self.assertEqual(png[:8], b"\x89PNG\r\n\x1a\n")
+        self.assertEqual(struct.unpack(">II", png[16:24]), (1280, 640))
+        svg = self.read("assets/social-card.svg")
+        self.assertIn('width="1280" height="640"', svg)
 
     def test_release_metadata_is_synchronized(self) -> None:
         cargo = tomllib.loads(self.read("Cargo.toml"))

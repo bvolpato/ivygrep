@@ -47,8 +47,7 @@ Useful environment variables:
 
 ## Project map
 
-Read [ARCHITECTURE.md](ARCHITECTURE.md) before changing storage, indexing,
-search, worktrees, daemon IPC, context packs, or MCP contracts.
+Start with primary files and strongest behavior-level checks for changed area.
 
 | Area | Primary files | Strong validation |
 |---|---|---|
@@ -58,7 +57,7 @@ search, worktrees, daemon IPC, context packs, or MCP contracts.
 | CLI and daemon | `src/cli.rs`, `src/daemon.rs`, `src/protocol.rs` | CLI snapshots, IPC, recovery tests |
 | MCP and agents | `src/mcp.rs`, `src/agent.rs` | MCP unit/E2E and agent setup tests |
 | Web UI | `src/web.rs`, `web/` | Vitest, TypeScript, web server tests |
-| Documentation | `README.md`, `docs/`, agent and architecture guides | documentation contract tests and local browser check |
+| Documentation | `README.md`, `CONTRIBUTING.md`, `docs/` | documentation contract tests and local browser check |
 
 ## Change workflow
 
@@ -107,7 +106,9 @@ python3 -m http.server 8765 --directory docs
 Open `http://127.0.0.1:8765/` and inspect desktop/mobile layout, console errors,
 and changed links. Stop server afterward.
 
-Release and platform acceptance procedures live in [AGENTS_TESTING.md](AGENTS_TESTING.md).
+Release workflow validates archive bytes on each supported platform. Before a
+tag, run full checks above and inspect `.github/workflows/release.yml` for
+current target matrix and artifact acceptance gates.
 
 ## Tests
 
@@ -157,8 +158,10 @@ Maintainers may request smaller scope, stronger tests, platform proof, or neutra
 benchmark evidence. Maintainers own version bumps, tags, release notes, and
 published artifacts.
 
-Security vulnerabilities follow [SECURITY.md](SECURITY.md). Community behavior
-follows [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). Project decisions follow
-[GOVERNANCE.md](GOVERNANCE.md).
+Security vulnerabilities follow [SECURITY.md](SECURITY.md). Report them through
+[private security advisory](https://github.com/bvolpato/ivygrep/security/advisories/new),
+not public issue. Community behavior follows [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+Maintainers make final project decisions through public issues, Discussions,
+and pull requests.
 
 By contributing, you agree contributions are licensed under [MIT License](LICENSE).

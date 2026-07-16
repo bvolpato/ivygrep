@@ -620,6 +620,23 @@ fn search_value(hits: &[SearchHit], started: Instant) -> Value {
 
 async fn run_search(state: DaemonState, params: &HashMap<String, Vec<String>>) -> Value {
     let started = Instant::now();
+    if param(params, "mode") == Some("context") {
+        let params = params.clone();
+        let permit = state.acquire_cpu_permit().await;
+        return match tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            build_context_pack(&state, &params)
+        })
+        .await
+        {
+            Ok(Ok(bundle)) => json!({
+                "context_pack": bundle,
+                "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
+            }),
+            Ok(Err(error)) => json!({"error": error.to_string()}),
+            Err(error) => json!({"error": format!("context task failed: {error}")}),
+        };
+    }
     let request = match build_search_request(params) {
         Ok(request) => request,
         Err(err) => return json!({"error": err.to_string(), "hits": [], "groups": []}),
@@ -628,6 +645,73 @@ async fn run_search(state: DaemonState, params: &HashMap<String, Vec<String>>) -
         Ok(hits) => search_value(&hits, started),
         Err(message) => json!({"error": message, "hits": [], "groups": []}),
     }
+}
+
+fn build_context_pack(
+    state: &DaemonState,
+    params: &HashMap<String, Vec<String>>,
+) -> Result<crate::context::ContextBundle> {
+    let selected = param(params, "workspace")
+        .map(str::trim)
+        .filter(|workspace| !workspace.is_empty() && *workspace != "__all__")
+        .context("select one workspace for context mode")?;
+    let selected = Workspace::resolve(Path::new(selected))?;
+    let selected_root = selected.root.canonicalize()?;
+    if !tracked_roots()?
+        .iter()
+        .any(|root| root.canonicalize().is_ok_and(|root| root == selected_root))
+    {
+        bail!("workspace is not tracked");
+    }
+    let scoped_path = param(params, "scope")
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+        .map_or_else(|| selected_root.clone(), |scope| selected_root.join(scope));
+    let (workspace, scope_filter) = crate::workspace::resolve_workspace_and_scope(&scoped_path)?;
+    if workspace.root.canonicalize()? != selected_root {
+        bail!("scope is outside selected workspace");
+    }
+    let query = param(params, "q").unwrap_or_default().trim();
+    if query.is_empty() {
+        bail!("missing q");
+    }
+    let budget = match param(params, "budget_tokens") {
+        Some(value) => value
+            .parse::<usize>()
+            .context("budget_tokens must be an integer")?,
+        None => 8_000,
+    };
+    if !(256..=131_072).contains(&budget) {
+        bail!("budget_tokens must be between 256 and 131072");
+    }
+    let skip_gitignore = parse_bool_param(params, "skip_gitignore");
+    let model = state.prepare_context_model(&workspace, skip_gitignore)?;
+    crate::context::build_context_bundle_with_options(
+        &workspace,
+        query,
+        Some(model.as_ref()),
+        &crate::search::SearchOptions {
+            limit: None,
+            context: 12,
+            type_filter: param(params, "type")
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+            include_globs: csv_param(params, "include"),
+            exclude_globs: csv_param(params, "exclude"),
+            scope_filter,
+            skip_gitignore,
+            force_neural: false,
+            progress_tx: None,
+            cancel_token: None,
+        },
+        budget,
+        &crate::context::ContextBuildOptions {
+            since: param(params, "since")
+                .map(str::trim)
+                .filter(|since| !since.is_empty()),
+        },
+    )
 }
 
 async fn write_search_stream(
@@ -645,6 +729,15 @@ async fn write_search_stream(
         .await?;
 
     if searches_all_workspaces(params) {
+        if param(params, "mode") == Some("context") {
+            write_sse(
+                stream,
+                "results",
+                &json!({"error": "select one workspace for context mode"}),
+            )
+            .await?;
+            return write_sse(stream, "done", &json!({"ok": false})).await;
+        }
         return write_all_workspace_search_stream(stream, state, params).await;
     }
 

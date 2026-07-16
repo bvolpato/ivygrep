@@ -3,22 +3,26 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ivygrep - Semantic code search that never uploads your code</title>
-    <meta name="description" content="Local semantic code search and task-aware context packs with BM25, vectors, relationship expansion, strict token budgets, zero telemetry, a web UI, and MCP.">
+    <title>ivygrep - Turn code tasks into passing changes</title>
+    <meta name="description" content="Turn code tasks, diffs, and stack traces into focused local context packs for coding agents. CLI, MCP, and Web. No code upload.">
     <meta name="theme-color" content="#06070a">
 
     <!-- Open Graph -->
-    <meta property="og:title" content="ivygrep - Semantic code search that never uploads your code">
-    <meta property="og:description" content="Search local code by intent, then build one relationship-aware context pack for your task.">
+    <meta property="og:title" content="ivygrep - Turn code tasks into passing changes">
+    <meta property="og:description" content="One local command turns tasks, diffs, and traces into focused context packs for coding agents.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://bvolpato.github.io/ivygrep">
-    <meta property="og:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner.png">
+    <meta property="og:image" content="https://bvolpato.github.io/ivygrep/assets/social-card.png">
+    <meta property="og:image:width" content="1280">
+    <meta property="og:image:height" content="640">
+    <meta property="og:image:alt" content="ivygrep task to context pack to agent to passing tests workflow">
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="ivygrep - Semantic code search that never uploads your code">
-    <meta name="twitter:description" content="Search local code by intent, then build one relationship-aware context pack for your task.">
-    <meta name="twitter:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner.png">
+    <meta name="twitter:title" content="ivygrep - Turn code tasks into passing changes">
+    <meta name="twitter:description" content="One local command turns tasks, diffs, and traces into focused context packs for coding agents.">
+    <meta name="twitter:image" content="https://bvolpato.github.io/ivygrep/assets/social-card.png">
+    <meta name="twitter:image:alt" content="ivygrep task to context pack to agent to passing tests workflow">
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -72,18 +76,18 @@
         <div class="container hero-content">
             <div class="hero-badge slide-up">
                 <span class="badge-dot"></span>
-                v1.1.20
+                v1.2.0
             </div>
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" width="190" height="200" onerror="this.src='assets/logo.png'"/>
             </div>
-            <h1 class="slide-up delay-1">Search code. Build task context.<br/><span class="highlight-gradient">Never upload your code.</span></h1>
-            <p class="subtitle slide-up delay-2">Find code by intent. Traverse dependencies, dependents, symbols, tests, config, and docs. Return one bounded pack through CLI or MCP.</p>
+            <h1 class="slide-up delay-1">Turn a code task into<br/><span class="highlight-gradient">a passing change.</span></h1>
+            <p class="subtitle slide-up delay-2">One local command connects task intent, branch diff, dirty files, callers, dependents, tests, config, and docs. Give coding agents focused evidence, not a repository dump.</p>
 
             <div class="cta-row slide-up delay-3">
                 <a href="#install" class="btn btn-primary">
                     <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
-                    Install
+                    Start in 30 seconds
                 </a>
                 <a href="https://github.com/bvolpato/ivygrep" class="btn btn-ghost" target="_blank" rel="noopener">
                     <svg height="18" viewBox="0 0 16 16" width="18" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
@@ -91,7 +95,7 @@
                 </a>
                 <a href="#mcp" class="btn btn-ghost">
                     <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 1v6m0 6v6M1 12h6m6 0h6"/></svg>
-                    MCP Setup
+                    Connect agent
                 </a>
                 <a href="#context-packs" class="btn btn-ghost">Context Packs</a>
             </div>
@@ -109,15 +113,14 @@
                     <span class="mockup-title">Terminal - ig</span>
                 </div>
                 <div class="mockup-body code-font">
-                    <div class="line"><span class="comment"># Ask in English, find code by intent</span></div>
-                    <div class="line typing"><span class="prompt">$</span> ig "where is tax calculated?"</div>
-                    <div class="line output success">✓ Found 3 semantic matches in 45ms</div>
-                    <div class="line output"><span class="path">src/finance/billing.rs:182</span></div>
-                    <div class="line output match">    pub fn <span class="highlight-match">calculate_sales_tax</span>(amount: f64, rate: f64) -> f64 {</div>
-                    <div class="line output"><span class="path">src/checkout/tax.rs:44</span></div>
-                    <div class="line output match">    fn <span class="highlight-match">apply_vat_rate</span>(subtotal: Decimal, region: &Region) -> Decimal {</div>
-                    <div class="line output"><span class="path">src/invoice/total.rs:301</span></div>
-                    <div class="line output match">    let <span class="highlight-match">tax_total</span> = subtotal * self.region.tax_rate;</div>
+                    <div class="line"><span class="comment"># Task → context pack → agent → passing test</span></div>
+                    <div class="line typing"><span class="prompt">$</span> ig context "fix refresh-token races" --since main --budget 8000</div>
+                    <div class="line output success">✓ 14 focused snippets · 7,642 tokens · 3 changed files</div>
+                    <div class="line output"><span class="path">relationships</span> definitions · callers · dependents · tests · config · docs</div>
+                    <div class="line"><span class="prompt">$</span> ig agent install codex</div>
+                    <div class="line output success">✓ MCP handshake · real search · configuration preserved</div>
+                    <div class="line"><span class="prompt">$</span> codex "Use ig context. Fix refresh-token race and test it."</div>
+                    <div class="line output success">test auth::refresh_token_is_single_use ... ok</div>
                 </div>
             </div>
         </div>
@@ -162,18 +165,20 @@
             <div class="grid grid-2 align-center context-pack-grid">
                 <div>
                     <h3>More useful than a list of search hits</h3>
-                    <p><code>ig context</code> starts from task intent, then traverses typed dependencies, reverse dependents, definitions, callers, references, tests, configuration, docs, and recent co-changes.</p>
+                    <p><code>ig context --since main</code> combines task intent, branch diff, dirty worktree, and exact paths from pasted issues or stack traces. It then traverses dependencies, dependents, definitions, callers, references, tests, configuration, docs, and co-changes.</p>
                     <div class="context-role-list" aria-label="Context pack evidence roles">
                         <span>Primary</span><span>Dependencies</span><span>Dependents</span><span>Definitions</span><span>Callers</span><span>References</span>
                         <span>Tests</span><span>Config</span><span>Docs</span>
                     </div>
-                    <p>Markdown output includes source lines, retrieval signals, role coverage, and complete-pack token use. JSON output keeps the same evidence structured.</p>
+                    <p>Each item explains its relationship. CLI, MCP, and Web return same structured pack.</p>
                 </div>
                 <div class="install-code relative">
                     <pre class="code-block"><span class="prompt">$</span> ig context "fix refresh-token races" --budget 8000
+<span class="prompt">$</span> ig context "fix refresh-token races" --since main
 
 # ivygrep context
 Budget: 3842 / 8000 estimated tokens
+Changes: 4 files from main...HEAD plus dirty worktree
 Coverage: 7 files | primary | dependencies | dependents | definitions | tests
 
 1. src/auth/refresh.rs:42-88 [primary, definition]
@@ -202,7 +207,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">📦</span></div>
                 <h3>Task-ready context packs</h3>
-                <p>Turn one task into bounded graph evidence through CLI <code>ig context</code> or MCP <code>output=context_pack</code>.</p>
+                <p>Turn task, issue, trace, diff, and dirty worktree into bounded graph evidence through CLI, MCP, or Web.</p>
             </div>
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">⚡</span></div>
@@ -515,7 +520,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
             <div class="section-header">
                 <span class="section-tag">Model Context Protocol</span>
                 <h2 class="section-title text-center">MCP for coding agents</h2>
-                <p class="text-center subtitle-small">Use normal MCP search for discovery. Set <code>output=context_pack</code> for one bounded task handoff. CLI <code>ig context</code> returns same evidence.</p>
+                <p class="text-center subtitle-small">Use normal MCP search for discovery. Set <code>output=context_pack</code>, optional <code>since=main</code>, and a token budget for same pack as CLI and Web.</p>
             </div>
 
             <div class="glass-panel fade-in-scroll mt-4 setup-panel">
@@ -606,9 +611,9 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
 
             <div class="glass-panel fade-in-scroll mt-4 agent-guidance">
                 <h3>Agent-safe defaults</h3>
-                <p>Pass absolute repository or worktree path to <code>ig_search</code>. Use natural-language queries for concepts, <code>literal=true</code> for identifiers, or <code>output=context_pack</code> with <code>budget_tokens=8000</code> for implementation.</p>
+                <p>Pass absolute repository or worktree path to <code>ig_search</code>. Use natural-language queries for concepts, <code>literal=true</code> for identifiers, or <code>output=context_pack</code> with <code>since=main</code> and <code>budget_tokens=8000</code> for implementation.</p>
                 <p>The first search creates an index and starts incremental watching. Worktrees reuse one shared base index and store only divergent chunks and tombstones.</p>
-                <a href="https://github.com/bvolpato/ivygrep/blob/main/AGENT_INTEGRATION.md" class="btn btn-ghost">Full integration guide</a>
+                <a href="#mcp" class="btn btn-ghost">Manual MCP setup</a>
             </div>
 
             <div class="mcp-workflow glass-panel fade-in-scroll mt-4">
@@ -753,20 +758,20 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
             <div class="footer-content">
                 <div class="footer-brand">
                     <img src="assets/icon.svg" alt="ivygrep" width="31" height="28" onerror="this.style.display='none'"/>
-                    <span class="footer-tagline">Semantic code search that never uploads your code.</span>
+                    <span class="footer-tagline">Turn code tasks into focused local context packs.</span>
                 </div>
                 <div class="footer-links">
                     <a href="https://github.com/bvolpato/ivygrep" class="footer-link">GitHub</a>
                     <a href="https://github.com/bvolpato/ivygrep/releases" class="footer-link">Releases</a>
-                    <a href="https://github.com/bvolpato/ivygrep/blob/main/AGENT_INTEGRATION.md" class="footer-link">AI Agents</a>
-                    <a href="https://github.com/bvolpato/ivygrep/blob/main/ARCHITECTURE.md" class="footer-link">Architecture</a>
+                    <a href="#mcp" class="footer-link">AI Agents</a>
+                    <a href="#how-it-works" class="footer-link">Architecture</a>
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/CONTRIBUTING.md" class="footer-link">Contributing</a>
                     <a href="https://github.com/bvolpato/ivygrep/discussions" class="footer-link">Discussions</a>
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/SECURITY.md" class="footer-link">Security</a>
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md" class="footer-link">Changelog</a>
                 </div>
                 <div class="footer-copy">
-                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v1.1.20</p>
+                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v1.2.0</p>
                 </div>
             </div>
         </div>
@@ -807,7 +812,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
         const typingEl = document.querySelector('.typing');
         if (typingEl) {
             const prompt = '<span class="prompt">$</span> ';
-            const textToType = 'ig "where is tax calculated?"';
+            const textToType = 'ig context "fix refresh-token races" --since main --budget 8000';
             typingEl.innerHTML = prompt;
             const outputs = document.querySelectorAll('.output');
             outputs.forEach(out => { out.style.transform = 'translateY(8px)'; });

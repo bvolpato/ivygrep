@@ -61,7 +61,6 @@ jobs:
           python3 scripts/render_evidence_dashboard.py
           git diff --exit-code -- \
             docs/benchmarks/evidence-dashboard.json \
-            docs/benchmarks/evidence-dashboard.md \
             docs/benchmarks/evidence-dashboard.html
 
       - name: Clippy lints

@@ -495,7 +495,6 @@ def main() -> int:
     parser.add_argument("--quality-baseline", type=Path, required=True)
     parser.add_argument("--quality-current", type=Path, required=True)
     parser.add_argument("--json", type=Path, required=True)
-    parser.add_argument("--markdown", type=Path, required=True)
     parser.add_argument("--html", type=Path, required=True)
     args = parser.parse_args()
     report = build_report(
@@ -512,7 +511,6 @@ def main() -> int:
         json.dumps(report, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    args.markdown.write_text(render_markdown(report), encoding="utf-8")
     args.html.write_text(render_html(report), encoding="utf-8")
     if not report["gate"]["passed"]:
         raise SystemExit("million-chunk acceptance gate failed")

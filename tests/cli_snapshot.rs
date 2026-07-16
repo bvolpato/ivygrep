@@ -63,6 +63,19 @@ fn init_git_repo(root: &Path) {
     assert!(status.success());
 }
 
+fn git_checked(root: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 #[serial]
 fn cli_help_snapshot() {
@@ -1770,9 +1783,449 @@ fn cli_context_help_lists_only_relevant_options() {
         .assert()
         .success()
         .stdout(predicates::str::contains("--budget"))
+        .stdout(predicates::str::contains("--since"))
         .stdout(predicates::str::contains("--lexical-only"))
         .stdout(predicates::str::contains("--literal").not())
         .stdout(predicates::str::contains("--limit").not());
+}
+
+#[test]
+#[serial]
+fn cli_context_combines_since_dirty_and_stack_trace_inputs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir_all(root.join("tests")).unwrap();
+    std::fs::write(
+        root.join("src/auth.rs"),
+        "pub fn refresh_token() -> bool { false }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/server.rs"),
+        "use crate::auth::refresh_token;\npub fn login() { refresh_token(); }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/session.cs"),
+        "class Session { static void Refresh() {} }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("tests/auth_test.rs"),
+        "#[test]\nfn refresh_token_is_safe() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname='fixture'\nversion='0.1.0'\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("README.md"), "Refresh token behavior.\n").unwrap();
+    git_checked(&root, &["init", "-q", "-b", "main"]);
+    git_checked(&root, &["config", "user.email", "test@example.com"]);
+    git_checked(&root, &["config", "user.name", "Test"]);
+    git_checked(&root, &["add", "."]);
+    git_checked(&root, &["commit", "-qm", "base"]);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .args(["--add", "--force", "--no-watch", "--hash"])
+        .arg(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .assert()
+        .success();
+
+    git_checked(&root, &["switch", "-qc", "feature"]);
+    std::fs::write(
+        root.join("src/auth.rs"),
+        "pub fn refresh_token() -> bool { refresh_token_race_fix() }\nfn refresh_token_race_fix() -> bool { true }\n",
+    )
+    .unwrap();
+    git_checked(&root, &["add", "src/auth.rs"]);
+    git_checked(&root, &["commit", "-qm", "fix refresh race"]);
+    std::fs::write(
+        root.join("tests/auth_test.rs"),
+        "#[test]\nfn dirty_regression_guard() { assert!(true); }\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("config")).unwrap();
+    std::fs::write(root.join("config/auth.toml"), "refresh = true\n").unwrap();
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .args([
+            "--json",
+            "--hash",
+            "context",
+            "--since",
+            "main",
+            "fix refresh token race",
+        ])
+        .arg(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let bundle: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(bundle["change_scope"]["since"], "main");
+    assert_eq!(bundle["change_scope"]["dirty_worktree"], true);
+    assert!(bundle["change_scope"]["total_changes"].as_u64().unwrap() >= 3);
+    assert!(
+        bundle["change_scope"]["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|change| {
+                change["file_path"] == "src/auth.rs"
+                    && change["sources"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|source| source == "since")
+            })
+    );
+    assert!(bundle["items"].as_array().unwrap().iter().any(|item| {
+        item["file_path"] == "src/auth.rs"
+            && item["preview"]
+                .as_str()
+                .unwrap()
+                .contains("refresh_token_race_fix")
+    }));
+    assert!(bundle["items"].as_array().unwrap().iter().any(|item| {
+        item["file_path"] == "tests/auth_test.rs"
+            && item["preview"]
+                .as_str()
+                .unwrap()
+                .contains("dirty_regression_guard")
+            && item["roles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|role| role == "test")
+    }));
+
+    let trace_output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .args(["--json", "--hash", "context", "-"])
+        .arg(&root)
+        .write_stdin("at App.Session.Refresh() in C:\\agent\\work\\repo\\src\\session.cs:line 1\n")
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let trace_bundle: serde_json::Value = serde_json::from_slice(&trace_output).unwrap();
+    assert_eq!(
+        trace_bundle["referenced_paths"][0]["file_path"],
+        "src/session.cs"
+    );
+    assert_eq!(trace_bundle["referenced_paths"][0]["line"], 1);
+    assert!(
+        trace_bundle["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| {
+                item["file_path"] == "src/session.cs"
+                    && item["sources"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|source| source == "task_input")
+            }),
+        "trace bundle: {trace_bundle:#}"
+    );
+}
+
+#[test]
+#[serial]
+fn cli_context_bounds_changes_to_requested_scope_and_budget() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(root.join("pkg")).unwrap();
+    std::fs::create_dir_all(root.join("other")).unwrap();
+    for index in 0..6 {
+        std::fs::write(
+            root.join(format!("pkg/module_{index}.rs")),
+            format!("pub fn module_{index}() {{}}\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(format!("other/noise_{index}.rs")),
+            format!("pub fn noise_{index}() {{}}\n"),
+        )
+        .unwrap();
+    }
+    git_checked(&root, &["init", "-q", "-b", "main"]);
+    git_checked(&root, &["config", "user.email", "test@example.com"]);
+    git_checked(&root, &["config", "user.name", "Test"]);
+    git_checked(&root, &["add", "."]);
+    git_checked(&root, &["commit", "-qm", "base"]);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .args(["--add", "--force", "--no-watch", "--hash"])
+        .arg(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .assert()
+        .success();
+
+    git_checked(&root, &["switch", "-qc", "feature"]);
+    for index in 0..6 {
+        std::fs::write(
+            root.join(format!("pkg/module_{index}.rs")),
+            format!("pub fn module_{index}() {{ changed(); }}\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join(format!("other/noise_{index}.rs")),
+            format!("pub fn noise_{index}() {{ changed(); }}\n"),
+        )
+        .unwrap();
+    }
+    git_checked(&root, &["add", "."]);
+    git_checked(&root, &["commit", "-qm", "change modules"]);
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .args([
+            "--json",
+            "--hash",
+            "context",
+            "--since",
+            "main",
+            "--budget",
+            "256",
+            "review changed modules",
+        ])
+        .arg(root.join("pkg"))
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let bundle: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let scope = &bundle["change_scope"];
+    assert_eq!(scope["total_changes"], 6);
+    assert_eq!(scope["changes"].as_array().unwrap().len(), 1);
+    assert_eq!(scope["changes_truncated"], true);
+    assert!(
+        scope["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|change| { change["file_path"].as_str().unwrap().starts_with("pkg/") })
+    );
+}
+
+#[test]
+#[serial]
+fn cli_context_since_hydrates_deleted_files_and_callers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("src/auth.rs"),
+        "pub fn refresh_token() -> bool { true }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/server.rs"),
+        "use crate::auth::refresh_token;\npub fn login() { refresh_token(); }\n",
+    )
+    .unwrap();
+    git_checked(&root, &["init", "-q", "-b", "main"]);
+    git_checked(&root, &["config", "user.email", "test@example.com"]);
+    git_checked(&root, &["config", "user.name", "Test"]);
+    git_checked(&root, &["add", "."]);
+    git_checked(&root, &["commit", "-qm", "base"]);
+
+    Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .args(["--add", "--force", "--no-watch", "--hash"])
+        .arg(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .assert()
+        .success();
+
+    git_checked(&root, &["switch", "-qc", "feature"]);
+    std::fs::remove_file(root.join("src/auth.rs")).unwrap();
+    git_checked(&root, &["add", "-u"]);
+    git_checked(&root, &["commit", "-qm", "remove auth"]);
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .args([
+            "--json",
+            "--hash",
+            "context",
+            "--since",
+            "main",
+            "review this deletion",
+        ])
+        .arg(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let bundle: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    assert!(
+        bundle["change_scope"]["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|change| change["file_path"] == "src/auth.rs" && change["status"] == "deleted")
+    );
+    assert!(
+        bundle["items"].as_array().unwrap().iter().any(|item| {
+            item["file_path"] == "src/auth.rs"
+                && item["preview"].as_str().unwrap().contains("refresh_token")
+                && item["sources"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|source| source == "git_deleted")
+        }),
+        "deleted seed missing: {bundle:#}"
+    );
+    assert!(
+        bundle["items"].as_array().unwrap().iter().any(|item| {
+            item["file_path"] == "src/server.rs"
+                && item["roles"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|role| role == "caller" || role == "reference")
+        }),
+        "deleted callers missing: {bundle:#}"
+    );
+}
+
+#[test]
+#[serial]
+fn cli_context_maps_new_jvm_and_dotnet_tests() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    let java_source = root.join("src/main/java/com/acme/Auth.java");
+    let dotnet_source = root.join("src/Auth/Services/Token.cs");
+    std::fs::create_dir_all(java_source.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(dotnet_source.parent().unwrap()).unwrap();
+    std::fs::write(&java_source, "class Auth {}\n").unwrap();
+    std::fs::write(&dotnet_source, "class Token {}\n").unwrap();
+    git_checked(&root, &["init", "-q", "-b", "main"]);
+    git_checked(&root, &["config", "user.email", "test@example.com"]);
+    git_checked(&root, &["config", "user.name", "Test"]);
+    git_checked(&root, &["add", "."]);
+    git_checked(&root, &["commit", "-qm", "sources"]);
+    Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .args(["--add", "--force", "--no-watch", "--hash"])
+        .arg(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .assert()
+        .success();
+
+    let java_test = root.join("src/test/java/com/acme/AuthTest.java");
+    let dotnet_test = root.join("tests/Auth.Tests/Services/TokenTests.cs");
+    std::fs::create_dir_all(java_test.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(dotnet_test.parent().unwrap()).unwrap();
+    std::fs::write(&java_test, "class AuthTest {}\n").unwrap();
+    std::fs::write(&dotnet_test, "class TokenTests {}\n").unwrap();
+
+    for (query, expected_source, expected_test) in [
+        (
+            "change Auth",
+            "src/main/java/com/acme/Auth.java",
+            "src/test/java/com/acme/AuthTest.java",
+        ),
+        (
+            "change Token",
+            "src/Auth/Services/Token.cs",
+            "tests/Auth.Tests/Services/TokenTests.cs",
+        ),
+    ] {
+        let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+            .args(["--json", "--hash", "context", query])
+            .arg(&root)
+            .env("IVYGREP_HOME", &home)
+            .env("IVYGREP_NO_AUTOSPAWN", "1")
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let bundle: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        let items = bundle["items"].as_array().unwrap();
+        assert!(
+            items
+                .iter()
+                .any(|item| item["file_path"] == expected_source)
+        );
+        assert!(items.iter().any(|item| {
+            item["file_path"] == expected_test
+                && item["roles"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|role| role == "test")
+        }));
+        assert!(items.iter().any(|item| {
+            item["reasons"].as_array().unwrap().iter().any(|reason| {
+                reason.as_str().is_some_and(|reason| {
+                    reason.contains(expected_source) && reason.contains(expected_test)
+                })
+            })
+        }));
+    }
+
+    Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .args(["--add", "--hash", "--no-watch", "."])
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .assert()
+        .success();
+
+    for (query, expected_source) in [
+        ("change AuthTest", "src/main/java/com/acme/Auth.java"),
+        ("change TokenTests", "src/Auth/Services/Token.cs"),
+    ] {
+        let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+            .args(["--json", "--hash", "context", query])
+            .arg(&root)
+            .env("IVYGREP_HOME", &home)
+            .env("IVYGREP_NO_AUTOSPAWN", "1")
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let bundle: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert!(bundle["items"].as_array().unwrap().iter().any(|item| {
+            item["file_path"] == expected_source
+                && item["roles"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|role| role == "dependency")
+                && item["sources"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|source| source == "graph_test")
+        }));
+    }
 }
 
 #[test]

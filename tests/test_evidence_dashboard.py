@@ -185,9 +185,6 @@ class EvidenceDashboardTest(unittest.TestCase):
         html = (
             ROOT / "docs" / "benchmarks" / "evidence-dashboard.html"
         ).read_text(encoding="utf-8")
-        markdown = (
-            ROOT / "docs" / "benchmarks" / "evidence-dashboard.md"
-        ).read_text(encoding="utf-8")
         self.assertEqual(
             {
                 "evidence",
@@ -214,7 +211,6 @@ class EvidenceDashboardTest(unittest.TestCase):
         )
         self.assertEqual(current["summary"]["mode"], "blended")
         self.assertEqual(release["summary"]["release_archives"], 7)
-        self.assertIn("Public blended retrieval", markdown)
 
 
 if __name__ == "__main__":
