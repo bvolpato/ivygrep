@@ -3452,6 +3452,16 @@ fn is_definition_kind(kind: &str) -> bool {
 
 /// Pre-collect chunks from SQLite that match glob/scope/type filters.
 /// Used to avoid full-corpus vector scan when targeted filters are set.
+#[derive(Clone, Copy)]
+struct FilteredChunkQuery<'a> {
+    path_matcher: &'a PathGlobMatcher,
+    scope_filter: Option<&'a WorkspaceScope>,
+    type_filter: Option<&'a str>,
+    include_globs: &'a [String],
+    skip_gitignore: bool,
+    max_results: usize,
+}
+
 fn collect_filtered_chunks(
     ctx: &SearchContext,
     path_matcher: &PathGlobMatcher,
@@ -3459,25 +3469,29 @@ fn collect_filtered_chunks(
     type_filter: Option<&str>,
     include_globs: &[String],
     skip_gitignore: bool,
+    max_results: usize,
 ) -> Vec<RawIndexedChunk> {
-    let mut chunks = query_filtered_chunks(
-        &ctx.sqlite,
+    let query = FilteredChunkQuery {
         path_matcher,
         scope_filter,
         type_filter,
         include_globs,
         skip_gitignore,
-    );
-    if let Some(base_sqlite) = &ctx.base_sqlite {
-        let mut base_chunks = query_filtered_chunks(
+        max_results,
+    };
+    let mut chunks = query_filtered_chunks(&ctx.sqlite, query, |_| true);
+    if chunks.len() < max_results
+        && let Some(base_sqlite) = &ctx.base_sqlite
+    {
+        let remaining = max_results - chunks.len();
+        let base_chunks = query_filtered_chunks(
             base_sqlite,
-            path_matcher,
-            scope_filter,
-            type_filter,
-            include_globs,
-            skip_gitignore,
+            FilteredChunkQuery {
+                max_results: remaining,
+                ..query
+            },
+            |chunk| !ctx.is_shadowed_base_file(1, &chunk.file_path),
         );
-        base_chunks.retain(|c| !ctx.is_shadowed_base_file(1, &c.file_path));
         chunks.extend(base_chunks);
     }
     chunks
@@ -3485,11 +3499,8 @@ fn collect_filtered_chunks(
 
 fn query_filtered_chunks(
     conn: &Connection,
-    path_matcher: &PathGlobMatcher,
-    scope_filter: Option<&WorkspaceScope>,
-    type_filter: Option<&str>,
-    include_globs: &[String],
-    skip_gitignore: bool,
+    query: FilteredChunkQuery<'_>,
+    include_chunk: impl Fn(&RawIndexedChunk) -> bool,
 ) -> Vec<RawIndexedChunk> {
     // Build a SQL query that pushes as much filtering as possible into SQLite.
     let mut sql = String::from(
@@ -3499,16 +3510,16 @@ fn query_filtered_chunks(
     );
     let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
-    if !skip_gitignore {
+    if !query.skip_gitignore {
         sql.push_str(" AND is_ignored = 0");
     }
 
-    if let Some(tf) = type_filter {
+    if let Some(tf) = query.type_filter {
         sql.push_str(" AND language = ?");
         params_vec.push(Box::new(tf.to_string()));
     }
 
-    if let Some(scope) = scope_filter {
+    if let Some(scope) = query.scope_filter {
         let prefix = index_path_string(&scope.rel_path);
         if scope.is_file {
             sql.push_str(" AND file_path = ?");
@@ -3524,7 +3535,7 @@ fn query_filtered_chunks(
     // e.g., "*.yaml" -> language IN ('yaml') (Hits the SQLite index instantly!)
     // Instead of doing `file_path LIKE '%.yaml'` which triggers a full table scan.
     let mut sql_ext_filters: Vec<String> = Vec::new();
-    for glob in include_globs {
+    for glob in query.include_globs {
         let trimmed = glob.trim();
         if trimmed.starts_with("*.") && !trimmed.contains('/') && !trimmed.contains('?') {
             // Simple extension glob: *.yaml, *.rs, *.py, etc.
@@ -3577,8 +3588,10 @@ fn query_filtered_chunks(
 
     // Apply full glob filtering in Rust for complex patterns
     rows.flatten()
-        .filter(|chunk| scope_path_matches(&chunk.file_path, scope_filter))
-        .filter(|chunk| path_matcher.matches(&chunk.file_path))
+        .filter(|chunk| scope_path_matches(&chunk.file_path, query.scope_filter))
+        .filter(|chunk| query.path_matcher.matches(&chunk.file_path))
+        .filter(include_chunk)
+        .take(query.max_results)
         .collect()
 }
 
@@ -3606,6 +3619,7 @@ fn collect_semantic_candidates(
             options.type_filter.as_deref(),
             &options.include_globs,
             options.skip_gitignore,
+            MAX_EXACT_FILTERED_CANDIDATES + 1,
         );
         if filtered.len() <= MAX_EXACT_FILTERED_CANDIDATES {
             return score_filtered_semantic_candidates(

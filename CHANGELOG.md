@@ -4,7 +4,7 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
-## [1.2.0] - 2026-07-15
+## [1.2.0] - 2026-07-16
 
 ### Added
 - **Context packs understand active work.** `ig context --since main` combines merge-base commits, staged edits, unstaged edits, untracked files, and exact file-line references from issues or stack traces.
@@ -12,6 +12,12 @@ All notable changes to ivygrep are documented in this file.
 - **JVM and .NET test ownership is directional and incremental.** Java, Kotlin, Scala, Groovy, and C# source-test conventions work forward, reverse, and when either side appears later.
 - **Context Graph v2 connects task evidence across files.** Indexing stores compact typed dependency, test, configuration, and documentation edges. `ig context` expands both directions, ranks bounded graph evidence, adds recent Git co-changes, and reports dependency and dependent coverage.
 - **MCP agents can request complete context packs through `ig_search`.** `output=context_pack` and `budget_tokens` expose same scoped, filtered, token-bounded pack as CLI without adding another tool or round trip.
+
+### Performance
+- **Broad filtered semantic searches stop after proving exact scoring would exceed its 50,000-chunk bound.** A deterministic 60,001-chunk profile improved from `77.918 ms` to `69.777 ms` (`10.4%`) with byte-identical output, `12.1%` fewer instructions, and neutral narrow-filter latency.
+- **Completed vector enhancement avoids reading and decompressing every stored chunk.** Exact key validation plus no-op neural persistence reduced a 60,000-chunk no-op pass from `104.951 ms` to `48.747 ms` (`53.6%`) without slowing initial or partial enhancement.
+- **Skip-gitignore Merkle scans share their read-only path set across workers.** A 50,000-file scan improved from `112.38 ms` to `81.29 ms` (`27.7%`) with identical file and root hashes.
+- **Index heartbeat workers stop and join when each index operation finishes.** Two hundred rapid no-op indexes improved from `823.07 ms` to `776.60 ms` (`5.6%`) while final process threads fell from `218` to `17`.
 
 ### Community
 - **Contributor paths are complete.** Structured issue forms, a pull-request evidence template, stable toolchain defaults, community policies, support routing, and a task-oriented contributor guide reduce setup and review ambiguity.
@@ -25,6 +31,7 @@ All notable changes to ivygrep are documented in this file.
 - **Diff packs have cross-surface E2E coverage.** Tests cover stale indexes, dirty files, stdin traces, token budgets, gitignore, Web payloads, MCP schema, and late JVM/.NET additions.
 - **Context graph behavior has unit, incremental-index, CLI, MCP schema, direct-tool, and stdio session coverage.** Tests verify relationship extraction, reverse edges, stale-edge replacement, strict output shape, and budget enforcement.
 - **Community-health contracts prevent onboarding drift.** Tests verify required files, issue-form routing, policy links, contributor commands, and release-version synchronization.
+- **Performance candidates remain evidence-gated.** Wider reranker routing, retrained reranker weights, partial-selection fusion, larger Tantivy and indexing buffers, single-transaction persistence, universal enhancer scans, and read-only enhancement connections were discarded after relevance loss, slower cold paths, higher memory, or neutral results.
 
 ## [1.1.19] - 2026-07-13
 
