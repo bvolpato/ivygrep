@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
@@ -120,7 +121,7 @@ impl MerkleSnapshot {
 
     fn build_inner(root: &Path, content_based: bool, skip_gitignore: bool) -> Result<Self> {
         // If skip_gitignore is true, do a fast standard walk first to record which files WOULD have been included properly.
-        let unignored_paths: std::collections::HashSet<String> = if skip_gitignore {
+        let unignored_paths = Arc::new(if skip_gitignore {
             let standard_walker = crate::walker::source_walker(root, false);
             let paths = std::sync::Mutex::new(std::collections::HashSet::new());
             let root_owned = root.to_path_buf();
@@ -140,7 +141,7 @@ impl MerkleSnapshot {
             paths.into_inner().unwrap()
         } else {
             std::collections::HashSet::new()
-        };
+        });
 
         let walker = crate::walker::source_walker(root, skip_gitignore);
 
@@ -171,7 +172,7 @@ impl MerkleSnapshot {
             let root_ref = &root_owned;
             let scanned_ref = &scanned;
             let pairs_ref = &all_pairs;
-            let unignored_paths_clone = unignored_paths.clone();
+            let unignored_paths_clone = Arc::clone(&unignored_paths);
             let mut guard = FlushGuard {
                 buf: Vec::with_capacity(512),
                 target: pairs_ref,

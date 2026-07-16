@@ -739,28 +739,28 @@ fn index_workspace_with_options(
     };
 
     let _ = jobs::start_job(workspace, JobKind::Indexing, "starting", 1);
-    let stop_heartbeat = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let heartbeat_stop = stop_heartbeat.clone();
+    let (heartbeat_stop_tx, heartbeat_stop_rx) = std::sync::mpsc::channel::<()>();
     let heartbeat_workspace = workspace.clone();
-    std::thread::spawn(move || {
-        while !heartbeat_stop.load(std::sync::atomic::Ordering::Relaxed) {
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            if heartbeat_stop.load(std::sync::atomic::Ordering::Relaxed) {
-                break;
+    let heartbeat_handle = std::thread::spawn(move || {
+        loop {
+            match heartbeat_stop_rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    let progress =
+                        std::fs::read_to_string(heartbeat_workspace.indexing_progress_path())
+                            .ok()
+                            .map(|value| value.trim().to_string())
+                            .filter(|value| !value.is_empty());
+                    let mut update = JobUpdate {
+                        phase: Some(progress.clone().unwrap_or_else(|| "running".to_string())),
+                        ..Default::default()
+                    };
+                    if let Some(progress) = progress {
+                        update.details.insert("progress".to_string(), progress);
+                    }
+                    let _ = jobs::heartbeat_job(&heartbeat_workspace, JobKind::Indexing, update);
+                }
             }
-
-            let progress = std::fs::read_to_string(heartbeat_workspace.indexing_progress_path())
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty());
-            let mut update = JobUpdate {
-                phase: Some(progress.clone().unwrap_or_else(|| "running".to_string())),
-                ..Default::default()
-            };
-            if let Some(progress) = progress {
-                update.details.insert("progress".to_string(), progress);
-            }
-            let _ = jobs::heartbeat_job(&heartbeat_workspace, JobKind::Indexing, update);
         }
     });
 
@@ -795,7 +795,8 @@ fn index_workspace_with_options(
     }
 
     let _ = fs2::FileExt::unlock(&lock_file);
-    stop_heartbeat.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = heartbeat_stop_tx.send(());
+    let _ = heartbeat_handle.join();
     match &result {
         Ok(_) => {
             let _ = jobs::finish_job(workspace, JobKind::Indexing, "completed", None);
@@ -2567,6 +2568,25 @@ fn low_available_memory_reason(minimum_bytes: u64) -> Option<String> {
         .map(|available| format!("Low Available Memory ({} MiB)", available / MIB))
 }
 
+fn vector_store_covers_all_keys(
+    sqlite: &Connection,
+    vector_index: &VectorStore,
+    total_chunks: usize,
+) -> Result<bool> {
+    if vector_index.size() != total_chunks {
+        return Ok(false);
+    }
+
+    let mut stmt = sqlite.prepare("SELECT DISTINCT vector_key FROM chunks")?;
+    let rows = stmt.query_map([], |row| Ok(row.get::<_, i64>(0)? as u64))?;
+    for row in rows {
+        if !vector_index.contains(row?) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// Compute lightweight hash embeddings for all chunks and save as the first
 /// background vector tier.
 pub fn enhance_workspace_hash(
@@ -2647,7 +2667,12 @@ pub fn enhance_workspace_hash(
         Ok(())
     };
 
-    let mut stmt = sqlite.prepare("SELECT vector_key, text FROM chunks")?;
+    let scan_sql = if vector_store_covers_all_keys(&sqlite, &vector_index, total_chunks)? {
+        "SELECT vector_key, text FROM chunks WHERE 0"
+    } else {
+        "SELECT vector_key, text FROM chunks"
+    };
+    let mut stmt = sqlite.prepare(scan_sql)?;
     let rows = stmt.query_map([], |row| {
         let key = row.get::<_, i64>(0)? as u64;
         let raw: Vec<u8> = row.get(1)?;
@@ -2759,8 +2784,10 @@ pub fn enhance_workspace_neural(
         })
         .unwrap_or(0) as usize;
 
+    let vector_path = workspace.vector_neural_path();
+    let vector_store_existed = vector_path.exists();
     let mut vector_index = VectorStore::open(
-        &workspace.vector_neural_path(),
+        &vector_path,
         neural_model.dimensions(),
         NEURAL_VECTOR_QUANTIZATION,
     )?;
@@ -2768,6 +2795,7 @@ pub fn enhance_workspace_neural(
         &workspace.neural_tombstones_path(),
         &workspace.neural_tombstones_processing_path(),
     )?;
+    let removed_tombstones = claimed_tombstones.is_some();
     if let Some((_, keys)) = &claimed_tombstones {
         for key in keys {
             vector_index.remove(*key);
@@ -2797,7 +2825,12 @@ pub fn enhance_workspace_neural(
     let mut batch: Vec<(u64, String)> = Vec::with_capacity(initial_batch_size);
     let mut batch_keys = HashSet::with_capacity(initial_batch_size);
 
-    let mut stmt = sqlite.prepare("SELECT vector_key, text FROM chunks")?;
+    let scan_sql = if vector_store_covers_all_keys(&sqlite, &vector_index, total_chunks)? {
+        "SELECT vector_key, text FROM chunks WHERE 0"
+    } else {
+        "SELECT vector_key, text FROM chunks"
+    };
+    let mut stmt = sqlite.prepare(scan_sql)?;
     let rows = stmt.query_map([], |row| {
         let key = row.get::<_, i64>(0)? as u64;
         let raw: Vec<u8> = row.get(1)?;
@@ -2891,7 +2924,9 @@ pub fn enhance_workspace_neural(
     progress_count += tail_len;
 
     let _ = std::fs::write(&progress_path, progress_count.to_string());
-    vector_index.save()?;
+    if newly_processed > 0 || removed_tombstones || !vector_store_existed {
+        vector_index.save()?;
+    }
     if let Some((path, _)) = claimed_tombstones {
         fs::remove_file(path)?;
     }
@@ -5424,8 +5459,21 @@ mod tests {
 
         let n1 = enhance_workspace_neural(&workspace, &first_model).unwrap();
         assert!(n1 > 0, "first enhance should process chunks");
+        let vector_modified = fs::metadata(workspace.vector_neural_path())
+            .unwrap()
+            .modified()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
         let n2 = enhance_workspace_neural(&workspace, &second_model).unwrap();
         assert_eq!(n2, 0, "second enhance should skip already-processed chunks");
+        assert_eq!(
+            fs::metadata(workspace.vector_neural_path())
+                .unwrap()
+                .modified()
+                .unwrap(),
+            vector_modified,
+            "no-op enhancement must not rewrite the vector store"
+        );
         assert_eq!(
             fs::read_to_string(workspace.neural_backend_path()).unwrap(),
             "first backend",
