@@ -307,7 +307,7 @@ class PublicBenchmarkTest(unittest.TestCase):
 
         html = renderer.html(matrix)
         self.assertIn("public-sota-challenge-results.json", html)
-        self.assertIn("public-sota-challenge.md", html)
+        self.assertNotIn("public-sota-challenge.md", html)
         self.assertIn("sota-challenge", html)
         self.assertIn("query char limit", html)
 

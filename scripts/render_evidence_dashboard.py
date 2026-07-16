@@ -557,7 +557,7 @@ Raw machine-readable dashboard:
 """
 
 
-def render_html(dashboard: dict, markdown: str) -> str:
+def render_html(dashboard: dict) -> str:
     evidence_rows = "".join(
         "<tr>"
         f"<td>{escape(item['label'])}</td>"
@@ -642,7 +642,6 @@ def render_html(dashboard: dict, markdown: str) -> str:
     <section class="report-card"><h2>Versioned histories</h2><p>Every point carries unit, context, variance status, and immutable source metadata in the raw JSON.</p><div class="table-wrap"><table><thead><tr><th>Metric family</th><th>Points</th><th>Unavailable</th></tr></thead><tbody>{history_rows}</tbody></table></div></section>
     <section class="report-card"><h2>History points</h2><div class="table-wrap"><table><thead><tr><th>Family</th><th>Comparable series</th><th>Revision/tag</th><th>Value</th><th>Variance</th><th>Artifact</th></tr></thead><tbody>{rendered_points}</tbody></table></div></section>
   </main>
-  <!-- Markdown source length: {len(markdown)} -->
 </body>
 </html>
 """
@@ -662,26 +661,19 @@ def main() -> int:
         default=root / "docs" / "benchmarks" / "evidence-dashboard.json",
     )
     parser.add_argument(
-        "--markdown",
-        type=Path,
-        default=root / "docs" / "benchmarks" / "evidence-dashboard.md",
-    )
-    parser.add_argument(
         "--html",
         type=Path,
         default=root / "docs" / "benchmarks" / "evidence-dashboard.html",
     )
     args = parser.parse_args()
     dashboard = build_dashboard(root, args.manifest)
-    markdown = render_markdown(dashboard)
-    for path in (args.json, args.markdown, args.html):
+    for path in (args.json, args.html):
         path.parent.mkdir(parents=True, exist_ok=True)
     args.json.write_text(
         json.dumps(dashboard, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    args.markdown.write_text(markdown, encoding="utf-8")
-    args.html.write_text(render_html(dashboard, markdown), encoding="utf-8")
+    args.html.write_text(render_html(dashboard), encoding="utf-8")
     return 0
 
 

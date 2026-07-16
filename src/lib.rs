@@ -4,6 +4,7 @@ pub mod cli;
 pub mod config;
 pub mod context;
 pub(crate) mod context_graph;
+pub mod context_input;
 pub mod daemon;
 pub mod doctor;
 pub mod embedding;

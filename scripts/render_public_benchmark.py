@@ -294,7 +294,6 @@ def html(matrix: dict, baseline: dict | None = None) -> str:
             <h2>Change from frozen baseline</h2>
             <p><code>{escape(current_mode)}</code> improves nDCG@10 by {ndcg_change:+.2%} and MRR@10 by {mrr_change:+.2%} over <code>{escape(baseline_mode)}</code> at commit <code>{escape(baseline["ivygrep_commit"][:12])}</code>. The raw JSON retains every task and run.</p>
         </section>"""
-    slug = report_slug(matrix)
     query_text_limit = matrix.get("query_text_limit")
     query_limit_stat = (
         f"""            <div class="report-stat"><strong>{escape(str(query_text_limit))}</strong><span>query char limit</span></div>
@@ -319,7 +318,7 @@ def html(matrix: dict, baseline: dict | None = None) -> str:
     <main class="report-shell relative z-10">
         <nav class="report-nav">
             <a class="report-brand" href="../"><img src="../assets/icon.svg" alt="ivygrep"><span>ivygrep benchmarks</span></a>
-            <div class="report-links"><a href="index.html">Reports</a><a href="{escape(default_output_name(matrix))}">Raw JSON</a><a href="https://github.com/bvolpato/ivygrep/blob/main/docs/benchmarks/{escape(slug)}.md">Source</a></div>
+            <div class="report-links"><a href="index.html">Reports</a><a href="{escape(default_output_name(matrix))}">Raw JSON</a></div>
         </nav>
         <section class="report-hero">
             <div class="report-eyebrow">Public benchmark</div>
@@ -364,7 +363,6 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--baseline", type=Path)
-    parser.add_argument("--markdown", type=Path, required=True)
     parser.add_argument("--html", type=Path, required=True)
     args = parser.parse_args()
     matrix = json.loads(args.input.read_text(encoding="utf-8"))
@@ -373,7 +371,6 @@ def main() -> int:
         if args.baseline
         else None
     )
-    args.markdown.write_text(markdown(matrix, baseline), encoding="utf-8")
     args.html.write_text(html(matrix, baseline), encoding="utf-8")
     return 0
 

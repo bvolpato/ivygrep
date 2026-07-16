@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">ivygrep task context workflow</title>
+  <desc id="desc">Turn a code task into a focused context pack, give it to a coding agent, and reach passing tests.</desc>
+  <defs>
+    <linearGradient id="background" x1="80" y1="40" x2="1190" y2="620" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#101826"/>
+      <stop offset="0.55" stop-color="#070a10"/>
+      <stop offset="1" stop-color="#050609"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#34d399"/>
+      <stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(1050 90) rotate(135) scale(520 320)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#34d399" stop-opacity="0.18"/>
+      <stop offset="1" stop-color="#34d399" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#94a3b8" stroke-opacity="0.06"/>
+    </pattern>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="18" stdDeviation="28" flood-color="#000" flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="640" rx="28" fill="url(#background)"/>
+  <rect width="1280" height="640" rx="28" fill="url(#glow)"/>
+  <rect width="1280" height="640" rx="28" fill="url(#grid)"/>
+  <rect x="1" y="1" width="1278" height="638" rx="27" fill="none" stroke="#334155"/>
+
+  <g transform="translate(70 54)">
+    <g transform="translate(4 4)">
+      <path d="M34 36C10 18 12 4 34 0C56 4 58 18 34 36Z" fill="#34d399"/>
+      <path d="M34 36C15 20 2 28 0 43C10 57 25 53 34 36Z" fill="#22c55e"/>
+      <path d="M34 36C53 20 66 28 68 43C58 57 43 53 34 36Z" fill="#10b981"/>
+      <circle cx="34" cy="37" r="17" fill="#38bdf8" fill-opacity="0.25" stroke="#e2e8f0" stroke-width="5"/>
+      <path d="M46 50L62 66" stroke="#94a3b8" stroke-width="7" stroke-linecap="round"/>
+      <path d="M26 37L32 43L43 31" fill="none" stroke="#fff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+    <text x="92" y="52" fill="#f8fafc" font-family="DejaVu Sans" font-size="42" font-weight="800">ivy<tspan fill="#34d399">grep</tspan></text>
+    <text x="1138" y="46" text-anchor="end" fill="#94a3b8" font-family="DejaVu Sans" font-size="19" font-weight="600" letter-spacing="2">LOCAL CODE INTELLIGENCE</text>
+  </g>
+
+  <text x="72" y="195" fill="#f8fafc" font-family="DejaVu Sans" font-size="57" font-weight="800">Turn a code task into</text>
+  <text x="72" y="260" fill="url(#accent)" font-family="DejaVu Sans" font-size="57" font-weight="800">a passing change.</text>
+  <text x="74" y="305" fill="#a8b4c6" font-family="DejaVu Sans" font-size="23">One local command. Focused evidence. No code upload.</text>
+
+  <g transform="translate(72 355)" font-family="DejaVu Sans" font-weight="700" filter="url(#shadow)">
+    <rect width="210" height="72" rx="14" fill="#111827" stroke="#334155"/>
+    <text x="105" y="44" text-anchor="middle" fill="#e2e8f0" font-size="21">CODE TASK</text>
+    <path d="M224 36H260" stroke="#64748b" stroke-width="3"/>
+    <path d="M252 27L261 36L252 45" fill="none" stroke="#64748b" stroke-width="3"/>
+
+    <rect x="278" width="244" height="72" rx="14" fill="#0f1f1b" stroke="#34d399"/>
+    <text x="400" y="44" text-anchor="middle" fill="#6ee7b7" font-size="21">CONTEXT PACK</text>
+    <path d="M536 36H572" stroke="#64748b" stroke-width="3"/>
+    <path d="M564 27L573 36L564 45" fill="none" stroke="#64748b" stroke-width="3"/>
+
+    <rect x="590" width="210" height="72" rx="14" fill="#111827" stroke="#334155"/>
+    <text x="695" y="44" text-anchor="middle" fill="#e2e8f0" font-size="21">AGENT</text>
+    <path d="M814 36H850" stroke="#64748b" stroke-width="3"/>
+    <path d="M842 27L851 36L842 45" fill="none" stroke="#64748b" stroke-width="3"/>
+
+    <rect x="868" width="268" height="72" rx="14" fill="#10202a" stroke="#38bdf8"/>
+    <circle cx="913" cy="36" r="15" fill="#38bdf8"/>
+    <path d="M905 36L911 42L922 29" fill="none" stroke="#04131b" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="1028" y="44" text-anchor="middle" fill="#7dd3fc" font-size="21">TESTS PASS</text>
+  </g>
+
+  <g transform="translate(72 470)" filter="url(#shadow)">
+    <rect width="1136" height="102" rx="16" fill="#030509" stroke="#263244"/>
+    <circle cx="26" cy="25" r="5" fill="#fb7185"/>
+    <circle cx="46" cy="25" r="5" fill="#fbbf24"/>
+    <circle cx="66" cy="25" r="5" fill="#34d399"/>
+    <text x="28" y="70" fill="#34d399" font-family="DejaVu Sans Mono" font-size="24">$</text>
+    <text x="53" y="70" fill="#e2e8f0" font-family="DejaVu Sans Mono" font-size="24">ig context "fix refresh-token races" --since main</text>
+  </g>
+
+  <text x="72" y="612" fill="#64748b" font-family="DejaVu Sans" font-size="17" font-weight="600" letter-spacing="1.6">CLI  •  MCP  •  WEB  •  GIT-AWARE  •  TOKEN-BUDGETED</text>
+</svg>

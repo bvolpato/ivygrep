@@ -218,12 +218,10 @@ def main() -> int:
     parser.add_argument("--deterministic", type=Path, required=True)
     parser.add_argument("--learned", type=Path, required=True)
     parser.add_argument("--json", type=Path, required=True)
-    parser.add_argument("--markdown", type=Path, required=True)
     parser.add_argument("--html", type=Path, required=True)
     args = parser.parse_args()
     report = build_report(args.model, args.deterministic, args.learned)
     args.json.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
-    args.markdown.write_text(render_markdown(report), encoding="utf-8")
     args.html.write_text(render_html(report), encoding="utf-8")
     if not report["integrated_evaluation"]["gate"]["passed"]:
         raise SystemExit("learned reranker acceptance gate failed")

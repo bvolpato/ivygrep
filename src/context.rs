@@ -1,12 +1,20 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::context_graph::{FileEdgeKind, expand_context_graph};
+use crate::context_graph::{
+    FileEdgeKind, GraphExpansion, expand_context_graph, extract_file_graph,
+};
+use crate::context_input::{
+    ContextChangeScope, ContextInputPath, ContextSeed, collect_context_input, path_is_git_ignored,
+};
 use crate::embedding::{EmbeddingModel, HashEmbeddingModel};
 use crate::indexer::reconcile_worktree_overlay;
+use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
 use crate::search::{SearchContext, SearchOptions, hybrid_search_with_context};
 use crate::symbols::{
@@ -67,6 +75,7 @@ pub struct ContextCoverage {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ContextItem {
+    #[serde(serialize_with = "crate::context_input::serialize_index_path")]
     pub file_path: PathBuf,
     pub start_line: usize,
     pub end_line: usize,
@@ -81,6 +90,9 @@ pub struct ContextItem {
 pub struct ContextBundle {
     pub task: String,
     pub workspace: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change_scope: Option<ContextChangeScope>,
+    pub referenced_paths: Vec<ContextInputPath>,
     pub budget_tokens: usize,
     pub used_tokens: usize,
     pub candidate_count: usize,
@@ -88,6 +100,11 @@ pub struct ContextBundle {
     pub anchor_symbols: Vec<String>,
     pub coverage: ContextCoverage,
     pub items: Vec<ContextItem>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ContextBuildOptions<'a> {
+    pub since: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +122,24 @@ pub fn build_context_bundle(
     base_options: &SearchOptions,
     budget_tokens: usize,
 ) -> Result<ContextBundle> {
+    build_context_bundle_with_options(
+        workspace,
+        task,
+        embedding_model,
+        base_options,
+        budget_tokens,
+        &ContextBuildOptions::default(),
+    )
+}
+
+pub fn build_context_bundle_with_options(
+    workspace: &Workspace,
+    task: &str,
+    embedding_model: Option<&dyn EmbeddingModel>,
+    base_options: &SearchOptions,
+    budget_tokens: usize,
+    context_options: &ContextBuildOptions<'_>,
+) -> Result<ContextBundle> {
     let fallback_model;
     let reconciliation_model = if let Some(model) = embedding_model {
         model
@@ -113,6 +148,8 @@ pub fn build_context_bundle(
         &fallback_model
     };
     reconcile_worktree_overlay(workspace, reconciliation_model)?;
+
+    let input = collect_context_input(workspace, task, context_options.since, base_options)?;
 
     let wants_vectors = embedding_model.is_some();
     let wants_neural = embedding_model.is_some_and(|model| model.model_identity().is_some());
@@ -125,6 +162,58 @@ pub fn build_context_bundle(
     )?;
     let candidate_limit = (budget_tokens / 250).clamp(8, 24);
     let mut candidates = BTreeMap::<(PathBuf, usize, usize), Candidate>::new();
+    let mut input_graph_seeds = Vec::new();
+    let mut retrieval_graph_seed_paths = Vec::new();
+    let mut primary_hits = Vec::new();
+    let mut fallback_input_count = 0usize;
+
+    for seed in input.seeds.iter().take(24) {
+        let Some(hit) = context_seed_hit(&workspace.root, seed, task)? else {
+            continue;
+        };
+        let explicit_match = task_symbols(task).iter().any(|symbol| {
+            let symbol = symbol.to_ascii_lowercase();
+            hit.file_path
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .contains(&symbol)
+                || hit.preview.to_ascii_lowercase().contains(&symbol)
+        });
+        let task_relevant =
+            seed.source == "task_input" || explicit_match || hit_matches_task(&hit, task);
+        if !task_relevant {
+            if fallback_input_count == 4 {
+                continue;
+            }
+            fallback_input_count += 1;
+        }
+        primary_hits.push(hit.clone());
+        input_graph_seeds.push(seed.clone());
+        add_candidate(
+            &mut candidates,
+            hit.clone(),
+            if task_relevant {
+                ContextRole::Primary
+            } else {
+                ContextRole::Related
+            },
+            seed.reason.clone(),
+            if task_relevant {
+                0.20 + f64::from(seed.priority) * 0.10
+            } else {
+                0.03
+            },
+        );
+        if let Some(role) = classify_file_role(&hit) {
+            add_candidate(
+                &mut candidates,
+                hit,
+                role,
+                format!("{} file in context input", role.label()),
+                0.08,
+            );
+        }
+    }
 
     let query_specs = [
         (
@@ -144,8 +233,6 @@ pub fn build_context_bundle(
         ),
     ];
 
-    let mut primary_hits = Vec::new();
-    let mut graph_seed_paths = Vec::new();
     for (query, requested_role, weight, context_lines, retrieval_label) in query_specs {
         let mut options = base_options.clone();
         options.limit = Some(candidate_limit);
@@ -158,7 +245,7 @@ pub fn build_context_bundle(
             &options,
         )?;
         if requested_role == ContextRole::Primary {
-            primary_hits = hits.clone();
+            primary_hits.extend(hits.clone());
         }
         for (rank, hit) in hits.into_iter().enumerate() {
             if requested_role == ContextRole::Primary && rank > 0 && !hit_matches_task(&hit, task) {
@@ -176,7 +263,7 @@ pub fn build_context_bundle(
                 continue;
             }
             if requested_role == ContextRole::Primary {
-                graph_seed_paths.push(hit.file_path.clone());
+                retrieval_graph_seed_paths.push(hit.file_path.clone());
             }
             add_candidate(
                 &mut candidates,
@@ -243,11 +330,30 @@ pub fn build_context_bundle(
         }
     }
 
+    let mut transient_seen = HashSet::new();
+    let transient_seeds = input_graph_seeds
+        .iter()
+        .filter(|seed| transient_seen.insert(seed.file_path.clone()))
+        .take(12)
+        .cloned()
+        .collect::<Vec<_>>();
+    add_transient_graph_candidates(
+        workspace,
+        task,
+        &transient_seeds,
+        &search_context,
+        base_options,
+        &mut candidates,
+    );
+
     let mut seen_seed_paths = HashSet::new();
-    let seed_paths = graph_seed_paths
+    let seed_paths = input_graph_seeds
         .into_iter()
+        .map(|seed| seed.file_path)
+        .take(8)
+        .chain(retrieval_graph_seed_paths.into_iter().take(4))
         .filter(|path| seen_seed_paths.insert(path.clone()))
-        .take(4)
+        .take(12)
         .collect::<Vec<_>>();
     match expand_context_graph(workspace, &seed_paths, base_options) {
         Ok(expansions) => {
@@ -258,10 +364,8 @@ pub fn build_context_bundle(
                     base_options.skip_gitignore,
                 ) {
                     Ok(Some(mut hit)) => {
-                        if matches!(
-                            expansion.kind,
-                            FileEdgeKind::Config | FileEdgeKind::Documentation
-                        ) && !graph_support_matches_task(&hit, task, expansion.kind)
+                        if expansion.kind == FileEdgeKind::Documentation
+                            && !graph_support_matches_task(&hit, task, expansion.kind)
                         {
                             continue;
                         }
@@ -290,8 +394,233 @@ pub fn build_context_bundle(
         &workspace.root,
         budget_tokens,
         anchor_symbols,
+        input.change_scope,
+        input.referenced_paths,
         candidates.into_values().collect(),
     ))
+}
+
+fn context_seed_hit(root: &Path, seed: &ContextSeed, task: &str) -> Result<Option<SearchHit>> {
+    let Some(content) = context_seed_content(root, seed)? else {
+        return Ok(None);
+    };
+    let mut chunks = crate::chunking::chunk_source(&seed.file_path, &content);
+    if chunks.is_empty() {
+        return Ok(None);
+    }
+    let terms = significant_task_terms(task);
+    chunks.sort_by(|left, right| {
+        seed_chunk_score(right, seed.line, &terms)
+            .cmp(&seed_chunk_score(left, seed.line, &terms))
+            .then_with(|| left.start_line.cmp(&right.start_line))
+    });
+    let chunk = chunks.remove(0);
+    let path_header = format!("// {}\n\n", seed.file_path.display());
+    let preview = chunk
+        .text
+        .strip_prefix(&path_header)
+        .unwrap_or(&chunk.text)
+        .to_string();
+    Ok(Some(SearchHit {
+        file_path: seed.file_path.clone(),
+        start_line: chunk.start_line,
+        end_line: chunk.end_line,
+        preview,
+        reason: seed.reason.clone(),
+        score: 0.0,
+        sources: vec![seed.source.clone()],
+        neural_requested: false,
+        neural_executed: false,
+    }))
+}
+
+fn context_seed_content(root: &Path, seed: &ContextSeed) -> Result<Option<String>> {
+    const MAX_CONTEXT_FILE_BYTES: u64 = 4 * 1024 * 1024;
+    let path = root.join(&seed.file_path);
+    if path.is_file() {
+        if path.metadata()?.len() > MAX_CONTEXT_FILE_BYTES {
+            return Ok(None);
+        }
+        return match fs::read_to_string(path) {
+            Ok(content) if !content.trim().is_empty() => Ok(Some(content)),
+            Ok(_) => Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => Ok(None),
+            Err(error) => Err(error.into()),
+        };
+    }
+    let Some(revision) = seed.git_revision.as_deref() else {
+        return Ok(None);
+    };
+    let prefix = Command::new("git")
+        .args(["rev-parse", "--show-prefix"])
+        .current_dir(root)
+        .output()?;
+    if !prefix.status.success() {
+        return Ok(None);
+    }
+    let repo_path = Path::new(String::from_utf8_lossy(&prefix.stdout).trim())
+        .join(&seed.file_path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    let object = format!("{revision}:{repo_path}");
+    let size = Command::new("git")
+        .args(["cat-file", "-s", &object])
+        .current_dir(root)
+        .output()?;
+    if !size.status.success()
+        || String::from_utf8_lossy(&size.stdout)
+            .trim()
+            .parse::<u64>()
+            .map_or(true, |size| size > MAX_CONTEXT_FILE_BYTES)
+    {
+        return Ok(None);
+    }
+    let output = Command::new("git")
+        .args(["cat-file", "blob", &object])
+        .current_dir(root)
+        .output()?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let content = match String::from_utf8(output.stdout) {
+        Ok(content) if !content.trim().is_empty() => content,
+        _ => return Ok(None),
+    };
+    Ok(Some(content))
+}
+
+fn seed_chunk_score(
+    chunk: &crate::chunking::Chunk,
+    line: Option<usize>,
+    terms: &[String],
+) -> usize {
+    let line_score = line.map_or(0, |line| {
+        if (chunk.start_line..=chunk.end_line).contains(&line) {
+            10_000
+        } else {
+            1_000usize.saturating_sub(chunk.start_line.abs_diff(line).min(1_000))
+        }
+    });
+    let lower = chunk.text.to_ascii_lowercase();
+    line_score
+        + terms
+            .iter()
+            .filter(|term| lower.contains(term.as_str()))
+            .map(String::len)
+            .sum::<usize>()
+}
+
+fn add_transient_graph_candidates(
+    workspace: &Workspace,
+    task: &str,
+    seeds: &[ContextSeed],
+    search_context: &SearchContext,
+    options: &SearchOptions,
+    candidates: &mut BTreeMap<(PathBuf, usize, usize), Candidate>,
+) {
+    let Ok(path_matcher) = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)
+    else {
+        return;
+    };
+    for seed in seeds {
+        let seed_path = &seed.file_path;
+        let Ok(Some(content)) = context_seed_content(&workspace.root, seed) else {
+            continue;
+        };
+        let edges = extract_file_graph(&workspace.root, None, seed_path, &content).edges;
+        let mut ordered_edges = Vec::new();
+        let mut claimed = HashSet::new();
+        for kind in [
+            FileEdgeKind::Test,
+            FileEdgeKind::Config,
+            FileEdgeKind::Dependency,
+            FileEdgeKind::Documentation,
+        ] {
+            if let Some((index, edge)) = edges
+                .iter()
+                .enumerate()
+                .find(|(index, edge)| !claimed.contains(index) && edge.kind == kind)
+            {
+                claimed.insert(index);
+                ordered_edges.push(edge.clone());
+            }
+        }
+        ordered_edges.extend(
+            edges
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, edge)| (!claimed.contains(&index)).then_some(edge)),
+        );
+        for edge in ordered_edges.into_iter().take(12) {
+            let outgoing = edge.source_path == *seed_path;
+            let file_path = if outgoing {
+                edge.target_path.clone()
+            } else {
+                edge.source_path.clone()
+            };
+            if !context_path_allowed(&file_path, options, &path_matcher) {
+                continue;
+            }
+            let expansion = GraphExpansion {
+                file_path: file_path.clone(),
+                seed_path: seed_path.clone(),
+                kind: edge.kind,
+                outgoing,
+                score: 0.0,
+                cochange_count: 0,
+            };
+            let hit = search_context
+                .representative_hit_for_file(&file_path, task, options.skip_gitignore)
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    if !options.skip_gitignore && path_is_git_ignored(&workspace.root, &file_path) {
+                        return None;
+                    }
+                    context_seed_hit(
+                        &workspace.root,
+                        &ContextSeed {
+                            file_path: file_path.clone(),
+                            line: None,
+                            git_revision: None,
+                            reason: expansion.reason(),
+                            source: edge.kind.source_label().to_string(),
+                            priority: 0,
+                        },
+                        task,
+                    )
+                    .ok()
+                    .flatten()
+                });
+            let Some(mut hit) = hit else {
+                continue;
+            };
+            hit.sources.push(edge.kind.source_label().to_string());
+            add_candidate(
+                candidates,
+                hit,
+                graph_context_role(edge.kind, outgoing),
+                expansion.reason(),
+                0.12,
+            );
+        }
+    }
+}
+
+fn context_path_allowed(
+    path: &Path,
+    options: &SearchOptions,
+    path_matcher: &PathGlobMatcher,
+) -> bool {
+    path_matcher.matches(path)
+        && options
+            .scope_filter
+            .as_ref()
+            .is_none_or(|scope| scope.matches(path))
+        && options.type_filter.as_deref().is_none_or(|filter| {
+            let expected = crate::chunking::resolve_type_alias(filter).unwrap_or(filter);
+            crate::chunking::language_for_path(path) == Some(expected)
+        })
 }
 
 fn graph_context_role(kind: FileEdgeKind, outgoing: bool) -> ContextRole {
@@ -387,8 +716,25 @@ fn assemble_bundle(
     workspace: &Path,
     budget_tokens: usize,
     anchor_symbols: Vec<String>,
+    change_scope: Option<ContextChangeScope>,
+    mut referenced_paths: Vec<ContextInputPath>,
     mut candidates: Vec<Candidate>,
 ) -> ContextBundle {
+    let change_scope = change_scope.map(|scope| bound_change_scope(scope, budget_tokens));
+    let referenced_path_limit = (budget_tokens / 64).clamp(1, 32);
+    let referenced_paths_truncated = referenced_paths.len() > referenced_path_limit;
+    referenced_paths.truncate(referenced_path_limit);
+    let fixed_header_tokens = estimated_header_tokens(
+        "",
+        workspace,
+        budget_tokens,
+        &anchor_symbols,
+        candidates.len(),
+        change_scope.as_ref(),
+        &referenced_paths,
+    );
+    let task_budget = budget_tokens.saturating_sub(fixed_header_tokens).min(1_024);
+    let (output_task, task_truncated, _) = truncate_to_token_budget(task, task_budget, task);
     candidates.sort_by(|left, right| {
         right
             .fused_score
@@ -428,14 +774,16 @@ fn assemble_bundle(
 
     let mut items: Vec<ContextItem> = Vec::new();
     let mut used_tokens = estimated_header_tokens(
-        task,
+        &output_task,
         workspace,
         budget_tokens,
         &anchor_symbols,
         candidate_count,
+        change_scope.as_ref(),
+        &referenced_paths,
     );
     let mut file_counts = HashMap::<PathBuf, usize>::new();
-    let mut truncated = false;
+    let mut truncated = task_truncated || referenced_paths_truncated;
     for candidate in ordered {
         if items.len() == MAX_ITEMS || used_tokens >= budget_tokens {
             truncated = true;
@@ -494,8 +842,10 @@ fn assemble_bundle(
         items.push(item);
     }
     let mut bundle = ContextBundle {
-        task: task.to_string(),
+        task: output_task,
         workspace: workspace.to_path_buf(),
+        change_scope,
+        referenced_paths,
         budget_tokens,
         used_tokens,
         candidate_count,
@@ -513,16 +863,40 @@ fn assemble_bundle(
     bundle
 }
 
+fn bound_change_scope(mut scope: ContextChangeScope, budget_tokens: usize) -> ContextChangeScope {
+    let change_limit = (budget_tokens / 256).clamp(1, 12);
+    let token_limit = (budget_tokens / 4).clamp(32, 1_024);
+    let original_len = scope.changes.len();
+    let mut used_tokens = 0;
+    let mut changes = Vec::with_capacity(change_limit.min(original_len));
+    for change in scope.changes.into_iter().take(change_limit) {
+        let tokens = serde_json::to_string(&change)
+            .map(|serialized| estimate_tokens(&serialized))
+            .unwrap_or(token_limit.saturating_add(1));
+        if tokens <= token_limit.saturating_sub(used_tokens) {
+            used_tokens += tokens;
+            changes.push(change);
+        }
+    }
+    scope.changes_truncated |= scope.total_changes > changes.len() || original_len > changes.len();
+    scope.changes = changes;
+    scope
+}
+
 fn estimated_header_tokens(
     task: &str,
     workspace: &Path,
     budget_tokens: usize,
     anchor_symbols: &[String],
     candidate_count: usize,
+    change_scope: Option<&ContextChangeScope>,
+    referenced_paths: &[ContextInputPath],
 ) -> usize {
     let bundle = ContextBundle {
         task: task.to_string(),
         workspace: workspace.to_path_buf(),
+        change_scope: change_scope.cloned(),
+        referenced_paths: referenced_paths.to_vec(),
         budget_tokens,
         used_tokens: budget_tokens,
         candidate_count,
@@ -970,6 +1344,7 @@ fn task_symbols(task: &str) -> Vec<String> {
     })
     .map(|part| part.trim_matches([':', '.', '$']))
     .filter(|part| part.len() >= 3)
+    .filter(|part| !looks_like_path_location(part))
     .filter(|part| {
         part.contains('_')
             || part.contains("::")
@@ -980,6 +1355,16 @@ fn task_symbols(task: &str) -> Vec<String> {
     .filter(|part| seen.insert(part.to_ascii_lowercase()))
     .map(ToOwned::to_owned)
     .collect()
+}
+
+fn looks_like_path_location(token: &str) -> bool {
+    let Some((prefix, line_or_column)) = token.rsplit_once(':') else {
+        return false;
+    };
+    line_or_column
+        .chars()
+        .all(|character| character.is_ascii_digit())
+        && prefix.contains('.')
 }
 
 fn looks_like_mixed_case_identifier(token: &str) -> bool {
@@ -1292,6 +1677,73 @@ pub fn render_markdown(bundle: &ContextBundle) -> String {
     output.push_str("# ivygrep context\n\n");
     output.push_str(&format!("Task: {}\n\n", bundle.task));
     output.push_str(&format!("Workspace: {}\n\n", bundle.workspace.display()));
+    if let Some(scope) = &bundle.change_scope {
+        let since = scope.since.as_deref().map_or_else(
+            || "HEAD".to_string(),
+            |reference| format!("{reference}...HEAD"),
+        );
+        output.push_str(&format!(
+            "Changes: {} file{} from {since}{}{}\n",
+            scope.total_changes,
+            if scope.total_changes == 1 { "" } else { "s" },
+            if scope.dirty_worktree {
+                " plus dirty worktree"
+            } else {
+                ""
+            },
+            if scope.changes_truncated {
+                " (list truncated)"
+            } else {
+                ""
+            },
+        ));
+        let change_limit = (bundle.budget_tokens / 256).clamp(1, 12);
+        for change in scope.changes.iter().take(change_limit) {
+            let sources = change
+                .sources
+                .iter()
+                .map(|source| source.label())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let rename = change.old_path.as_ref().map_or_else(String::new, |old| {
+                format!(" from {}", crate::workspace::index_path_string(old))
+            });
+            output.push_str(&format!(
+                "- {}: {}{rename} ({sources})\n",
+                change.status.label(),
+                crate::workspace::index_path_string(&change.file_path),
+            ));
+        }
+        if scope.total_changes > change_limit {
+            output.push_str(&format!(
+                "- ... {} more\n",
+                scope.total_changes - change_limit
+            ));
+        }
+        output.push('\n');
+    }
+    if !bundle.referenced_paths.is_empty() {
+        output.push_str("Input paths: ");
+        output.push_str(
+            &bundle
+                .referenced_paths
+                .iter()
+                .map(|reference| {
+                    reference.line.map_or_else(
+                        || crate::workspace::index_path_string(&reference.file_path),
+                        |line| {
+                            format!(
+                                "{}:{line}",
+                                crate::workspace::index_path_string(&reference.file_path)
+                            )
+                        },
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        output.push_str("\n\n");
+    }
     output.push_str(&format!(
         "Budget: {} / {} estimated tokens{}\n",
         bundle.used_tokens,
@@ -1336,7 +1788,7 @@ fn render_markdown_item(index: usize, item: &ContextItem) -> String {
     let mut output = format!(
         "\n### {}. {}:{}-{} [{}]\n\n",
         index,
-        item.file_path.display(),
+        crate::workspace::index_path_string(&item.file_path),
         item.start_line,
         item.end_line,
         roles
@@ -1405,6 +1857,33 @@ mod tests {
     }
 
     #[test]
+    fn task_path_seed_reads_current_file_at_referenced_line() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src")).unwrap();
+        fs::write(
+            root.path().join("src/auth.rs"),
+            "pub fn refresh_token() -> bool { refresh_token_race_fix() }\nfn refresh_token_race_fix() -> bool { true }\n",
+        )
+        .unwrap();
+        let hit = context_seed_hit(
+            root.path(),
+            &ContextSeed {
+                file_path: PathBuf::from("src/auth.rs"),
+                line: Some(2),
+                git_revision: None,
+                reason: "mentioned at line 2 in task or stack trace".to_string(),
+                source: "task_input".to_string(),
+                priority: 3,
+            },
+            "panic at src/auth.rs:2:7",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(hit.preview.contains("refresh_token_race_fix"));
+        assert_eq!(hit.sources, ["task_input"]);
+    }
+
+    #[test]
     fn graph_roles_follow_edge_direction() {
         assert_eq!(
             graph_context_role(FileEdgeKind::Test, true),
@@ -1462,6 +1941,8 @@ mod tests {
             Path::new("/repo"),
             500,
             vec!["validate_token".to_string()],
+            None,
+            Vec::new(),
             candidates,
         );
         assert!(bundle.used_tokens <= bundle.budget_tokens);
@@ -1505,6 +1986,8 @@ mod tests {
                 Path::new("/repo"),
                 budget,
                 Vec::new(),
+                None,
+                Vec::new(),
                 candidates,
             );
             assert!(bundle.used_tokens <= budget, "{bundle:#?}");
@@ -1517,12 +2000,87 @@ mod tests {
     }
 
     #[test]
+    fn long_issue_input_is_bounded_and_marked_truncated() {
+        let task = "stack frame at src/auth.rs:42 with refresh token failure\n".repeat(2_000);
+        let bundle = assemble_bundle(
+            &task,
+            Path::new("/repo"),
+            256,
+            Vec::new(),
+            None,
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(bundle.truncated);
+        assert!(bundle.task.len() < task.len());
+        assert!(bundle.used_tokens <= bundle.budget_tokens, "{bundle:#?}");
+        assert_eq!(
+            bundle.used_tokens,
+            estimate_tokens(&render_markdown(&bundle))
+        );
+    }
+
+    #[test]
+    fn serialized_diff_metadata_stays_inside_small_pack_budget() {
+        let changes = (0..40)
+            .map(|index| crate::context_input::ContextChange {
+                file_path: PathBuf::from(format!("src/changed_module_{index}.rs")),
+                old_path: None,
+                status: crate::context_input::ContextChangeStatus::Modified,
+                sources: vec![crate::context_input::ContextChangeSource::Since],
+            })
+            .collect::<Vec<_>>();
+        let bundle = assemble_bundle(
+            "change modules",
+            Path::new("/repo"),
+            256,
+            Vec::new(),
+            Some(ContextChangeScope {
+                since: Some("main".to_string()),
+                base_commit: Some("abc123".to_string()),
+                dirty_worktree: false,
+                total_changes: changes.len(),
+                changes_truncated: false,
+                changes,
+            }),
+            Vec::new(),
+            vec![candidate(
+                "src/changed_module_0.rs",
+                1,
+                ContextRole::Primary,
+                "pub fn changed_module() {}",
+                1.0,
+            )],
+        );
+        assert!(bundle.used_tokens <= bundle.budget_tokens, "{bundle:#?}");
+        assert_eq!(
+            bundle.used_tokens,
+            estimate_tokens(&render_markdown(&bundle))
+        );
+        let scope = bundle.change_scope.as_ref().unwrap();
+        assert_eq!(scope.changes.len(), 1);
+        assert!(scope.changes_truncated);
+        assert!(
+            estimate_tokens(&serde_json::to_string(&scope.changes).unwrap())
+                <= bundle.budget_tokens / 4
+        );
+    }
+
+    #[test]
     fn overlapping_snippets_are_not_repeated() {
         let candidates = vec![
             candidate("src/lib.rs", 10, ContextRole::Primary, "a\nb\nc\nd", 1.0),
             candidate("src/lib.rs", 11, ContextRole::Related, "b\nc\nd\ne", 0.9),
         ];
-        let bundle = assemble_bundle("task", Path::new("/repo"), 500, Vec::new(), candidates);
+        let bundle = assemble_bundle(
+            "task",
+            Path::new("/repo"),
+            500,
+            Vec::new(),
+            None,
+            Vec::new(),
+            candidates,
+        );
         assert_eq!(bundle.items.len(), 1);
     }
 
@@ -1534,6 +2092,7 @@ mod tests {
         );
         assert!(task_symbols("where is authentication handled").is_empty());
         assert!(task_symbols("choose HTTP TLS APIs").is_empty());
+        assert!(task_symbols("panic at src/auth.rs:42:7").is_empty());
         assert!(task_symbols("fix src/auth.rs and config.yaml").is_empty());
         assert_eq!(
             task_symbols("change UserService and std::io and client.send"),

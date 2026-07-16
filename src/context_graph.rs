@@ -27,6 +27,8 @@ const MANIFEST_NAMES: &[&str] = &[
     "pom.xml",
     "build.gradle",
     "build.gradle.kts",
+    "settings.gradle",
+    "settings.gradle.kts",
     "Gemfile",
     "composer.json",
     "Package.swift",
@@ -35,6 +37,10 @@ const MANIFEST_NAMES: &[&str] = &[
     "CMakeLists.txt",
     "MODULE.bazel",
     "WORKSPACE",
+    "Directory.Build.props",
+    "Directory.Build.targets",
+    "Directory.Packages.props",
+    "global.json",
 ];
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd)]
@@ -128,8 +134,8 @@ pub(crate) struct GraphExpansion {
 
 impl GraphExpansion {
     pub(crate) fn reason(&self) -> String {
-        let file = self.file_path.display();
-        let seed = self.seed_path.display();
+        let file = index_path_string(&self.file_path);
+        let seed = index_path_string(&self.seed_path);
         match (self.kind, self.outgoing) {
             (FileEdgeKind::Dependency, true) => format!("{seed} depends on {file}"),
             (FileEdgeKind::Dependency, false) => format!("{file} depends on {seed}"),
@@ -212,11 +218,30 @@ pub(crate) fn extract_file_graph(
     {
         insert_edge(&mut edges, rel_path, &manifest, FileEdgeKind::Config);
     }
-    for related in likely_test_edges(root, snapshot, rel_path) {
-        if path_looks_like_test(rel_path) {
-            insert_edge(&mut edges, &related, rel_path, FileEdgeKind::Test);
-        } else {
-            insert_edge(&mut edges, rel_path, &related, FileEdgeKind::Test);
+    let late_bound_tests = if is_jvm_dotnet_language(language) {
+        late_bound_test_candidates(rel_path)
+    } else {
+        BTreeSet::new()
+    };
+    for related in likely_test_candidates(rel_path) {
+        if existing_workspace_file(root, snapshot, &related).is_some() {
+            if path_looks_like_test(rel_path) {
+                insert_edge(&mut edges, &related, rel_path, FileEdgeKind::Test);
+            } else {
+                insert_edge(&mut edges, rel_path, &related, FileEdgeKind::Test);
+            }
+        } else if late_bound_tests.contains(&related)
+            && let Some(lookup_key) = late_bound_owner_lookup_key(rel_path)
+        {
+            unresolved_dependencies.insert(UnresolvedDependency {
+                source_path: rel_path.to_path_buf(),
+                language: "context_test".to_string(),
+                spec: "conventional_test".to_string(),
+                lookup_key,
+            });
+        }
+        if edges.len() >= MAX_EDGES_PER_FILE {
+            break;
         }
     }
     if language == "markdown" {
@@ -247,6 +272,10 @@ pub(crate) fn extract_file_graph(
     }
 }
 
+fn is_jvm_dotnet_language(language: &str) -> bool {
+    matches!(language, "java" | "kotlin" | "scala" | "groovy" | "csharp")
+}
+
 pub(crate) fn resolve_dependency_spec(
     root: &Path,
     snapshot: Option<&MerkleSnapshot>,
@@ -254,6 +283,13 @@ pub(crate) fn resolve_dependency_spec(
     language: &str,
     spec: &str,
 ) -> Option<PathBuf> {
+    if language == "context_test" {
+        return (spec == "conventional_test")
+            .then(|| late_bound_test_candidates(source_path))
+            .into_iter()
+            .flatten()
+            .find_map(|path| existing_workspace_file(root, snapshot, &path));
+    }
     let local_rust_crate = (language == "rust" && rust_file_may_import_library(source_path))
         .then(|| rust_crate_context(root, snapshot, source_path))
         .flatten();
@@ -293,19 +329,36 @@ pub(crate) fn dependency_lookup_keys(value: &str) -> BTreeSet<String> {
 }
 
 pub(crate) fn path_lookup_keys(path: &Path) -> BTreeSet<String> {
-    path.components()
+    let mut keys = path
+        .components()
         .filter_map(|component| match component {
             Component::Normal(value) => value.to_str(),
             _ => None,
         })
         .flat_map(dependency_lookup_keys)
-        .collect()
+        .collect::<BTreeSet<_>>();
+    if let Some(stem) = path.file_stem().and_then(|stem| stem.to_str())
+        && let Some(singular_test) = stem.strip_suffix("Tests")
+    {
+        keys.insert(
+            crate::text::split_identifier_segments(&format!("{singular_test}Test")).join("_"),
+        );
+    }
+    keys
 }
 
 pub(crate) fn is_manifest_path(path: &Path) -> bool {
     path.file_name()
         .and_then(|value| value.to_str())
-        .is_some_and(|name| MANIFEST_NAMES.contains(&name))
+        .is_some_and(|name| {
+            MANIFEST_NAMES.contains(&name)
+                || path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| {
+                        matches!(extension, "csproj" | "fsproj" | "vbproj" | "sln" | "slnx")
+                    })
+        })
 }
 
 pub(crate) fn manifest_resolution_signature(path: &Path, content: &str) -> Option<String> {
@@ -395,8 +448,8 @@ fn insert_edge(
 ) {
     if source_path != target_path {
         edges.insert(FileEdge {
-            source_path: source_path.to_path_buf(),
-            target_path: target_path.to_path_buf(),
+            source_path: PathBuf::from(index_path_string(source_path)),
+            target_path: PathBuf::from(index_path_string(target_path)),
             kind,
         });
     }
@@ -1440,7 +1493,7 @@ fn normalize_relative_path(path: &Path) -> Option<PathBuf> {
             Component::RootDir | Component::Prefix(_) => return None,
         }
     }
-    (!normalized.as_os_str().is_empty()).then_some(normalized)
+    (!normalized.as_os_str().is_empty()).then(|| PathBuf::from(index_path_string(&normalized)))
 }
 
 fn nearest_manifest(
@@ -1459,6 +1512,11 @@ fn nearest_manifest(
                 return Some(candidate);
             }
         }
+        if language == "csharp"
+            && let Some(candidate) = nearest_dotnet_project(root, snapshot, directory, rel_path)
+        {
+            return Some(candidate);
+        }
     }
     None
 }
@@ -1469,7 +1527,19 @@ fn manifest_names_for_language(language: &str) -> &'static [&'static str] {
         "javascript" | "typescript" => &["package.json"],
         "python" => &["pyproject.toml"],
         "go" => &["go.mod"],
-        "java" | "kotlin" | "scala" | "groovy" => &["pom.xml", "build.gradle", "build.gradle.kts"],
+        "java" | "kotlin" | "scala" | "groovy" => &[
+            "pom.xml",
+            "build.gradle",
+            "build.gradle.kts",
+            "settings.gradle",
+            "settings.gradle.kts",
+        ],
+        "csharp" => &[
+            "Directory.Build.props",
+            "Directory.Build.targets",
+            "Directory.Packages.props",
+            "global.json",
+        ],
         "ruby" => &["Gemfile"],
         "php" => &["composer.json"],
         "swift" => &["Package.swift"],
@@ -1479,6 +1549,39 @@ fn manifest_names_for_language(language: &str) -> &'static [&'static str] {
         "dart" => &["pubspec.yaml"],
         _ => &[],
     }
+}
+
+fn nearest_dotnet_project(
+    root: &Path,
+    snapshot: Option<&MerkleSnapshot>,
+    directory: &Path,
+    rel_path: &Path,
+) -> Option<PathBuf> {
+    let is_project = |path: &Path| {
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                matches!(extension, "csproj" | "fsproj" | "vbproj" | "sln" | "slnx")
+            })
+    };
+    let mut candidates = if let Some(snapshot) = snapshot {
+        snapshot
+            .files
+            .keys()
+            .map(Path::new)
+            .filter(|path| path.parent() == Some(directory) && is_project(path))
+            .map(Path::to_path_buf)
+            .collect::<Vec<_>>()
+    } else {
+        fs::read_dir(root.join(directory))
+            .ok()?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| directory.join(entry.file_name()))
+            .filter(|path| path != rel_path && is_project(path) && root.join(path).is_file())
+            .collect::<Vec<_>>()
+    };
+    candidates.sort();
+    candidates.into_iter().next()
 }
 
 fn rust_crate_context(
@@ -1605,6 +1708,8 @@ fn rust_module_declaration_base(source_path: &Path) -> PathBuf {
 fn test_suffixes(extension: &str) -> &'static [&'static str] {
     if extension == "rb" {
         &["_test", "_tests", "_spec", ".test", ".spec"]
+    } else if matches!(extension, "java" | "kt" | "scala" | "groovy" | "cs") {
+        &["Test", "Tests", "_test", "_tests", ".test", ".spec"]
     } else {
         &["_test", "_tests", ".test", ".spec"]
     }
@@ -1618,11 +1723,7 @@ fn test_directories(extension: &str) -> &'static [&'static str] {
     }
 }
 
-fn likely_test_edges(
-    root: &Path,
-    snapshot: Option<&MerkleSnapshot>,
-    rel_path: &Path,
-) -> Vec<PathBuf> {
+fn likely_test_candidates(rel_path: &Path) -> Vec<PathBuf> {
     let Some(stem) = rel_path.file_stem().and_then(|value| value.to_str()) else {
         return Vec::new();
     };
@@ -1639,6 +1740,14 @@ fn likely_test_edges(
         .or_else(|| stem.strip_suffix("_spec"))
         .or_else(|| stem.strip_suffix(".test"))
         .or_else(|| stem.strip_suffix(".spec"))
+        .or_else(|| {
+            is_jvm_dotnet_extension(extension)
+                .then(|| {
+                    stem.strip_suffix("Tests")
+                        .or_else(|| stem.strip_suffix("Test"))
+                })
+                .flatten()
+        })
         .unwrap_or(stem);
     let mut candidates = BTreeSet::new();
 
@@ -1706,13 +1815,196 @@ fn likely_test_edges(
         }
     }
 
+    add_jvm_test_candidates(
+        rel_path,
+        stem,
+        production_stem,
+        extension,
+        is_test,
+        &mut candidates,
+    );
+    if extension == "cs" {
+        add_dotnet_test_candidates(rel_path, stem, production_stem, is_test, &mut candidates);
+    }
+
     candidates
         .into_iter()
-        .filter(|candidate| {
-            candidate != rel_path && existing_workspace_file(root, snapshot, candidate).is_some()
-        })
-        .take(8)
+        .filter(|candidate| candidate != rel_path)
         .collect()
+}
+
+fn is_jvm_dotnet_extension(extension: &str) -> bool {
+    matches!(extension, "java" | "kt" | "scala" | "groovy" | "cs")
+}
+
+fn late_bound_test_candidates(rel_path: &Path) -> BTreeSet<PathBuf> {
+    let Some(stem) = rel_path.file_stem().and_then(|stem| stem.to_str()) else {
+        return BTreeSet::new();
+    };
+    let extension = rel_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("");
+    if !is_jvm_dotnet_extension(extension) {
+        return BTreeSet::new();
+    }
+    let is_test = path_looks_like_test(rel_path);
+    let production_stem = stem
+        .strip_suffix("Tests")
+        .or_else(|| stem.strip_suffix("Test"))
+        .unwrap_or(stem);
+    let parent = rel_path.parent().unwrap_or_else(|| Path::new(""));
+    let mut candidates = BTreeSet::new();
+    if is_test {
+        candidates.insert(parent.join(format!("{production_stem}.{extension}")));
+    } else {
+        candidates.insert(parent.join(format!("{stem}Test.{extension}")));
+        candidates.insert(parent.join(format!("{stem}Tests.{extension}")));
+    }
+    add_jvm_test_candidates(
+        rel_path,
+        stem,
+        production_stem,
+        extension,
+        is_test,
+        &mut candidates,
+    );
+    if extension == "cs" {
+        add_dotnet_test_candidates(rel_path, stem, production_stem, is_test, &mut candidates);
+    }
+    candidates.remove(rel_path);
+    candidates
+}
+
+fn late_bound_owner_lookup_key(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_str()?;
+    let waiting_for = if path_looks_like_test(path) {
+        stem.strip_suffix("Tests")
+            .or_else(|| stem.strip_suffix("Test"))
+            .unwrap_or(stem)
+            .to_string()
+    } else {
+        format!("{stem}Test")
+    };
+    let segments = crate::text::split_identifier_segments(&waiting_for);
+    (!segments.is_empty()).then(|| segments.join("_"))
+}
+
+fn add_jvm_test_candidates(
+    rel_path: &Path,
+    stem: &str,
+    production_stem: &str,
+    extension: &str,
+    is_test: bool,
+    candidates: &mut BTreeSet<PathBuf>,
+) {
+    const JVM_LAYOUTS: &[(&str, &str)] = &[
+        ("java", "java"),
+        ("kotlin", "kt"),
+        ("scala", "scala"),
+        ("groovy", "groovy"),
+    ];
+    if !JVM_LAYOUTS
+        .iter()
+        .any(|(_, source_extension)| *source_extension == extension)
+    {
+        return;
+    }
+
+    for (language_dir, candidate_extension) in JVM_LAYOUTS {
+        let source_root = PathBuf::from("src/main").join(language_dir);
+        let test_root = PathBuf::from("src/test").join(language_dir);
+        if is_test {
+            for (test_language_dir, _) in JVM_LAYOUTS {
+                let candidate_test_root = PathBuf::from("src/test").join(test_language_dir);
+                let Ok(relative) = rel_path.strip_prefix(&candidate_test_root) else {
+                    continue;
+                };
+                let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+                candidates.insert(
+                    source_root
+                        .join(parent)
+                        .join(format!("{production_stem}.{candidate_extension}")),
+                );
+            }
+        } else if let Ok(relative) = rel_path.strip_prefix(&source_root) {
+            let parent = relative.parent().unwrap_or_else(|| Path::new(""));
+            candidates.insert(
+                test_root
+                    .join(parent)
+                    .join(format!("{stem}Test.{candidate_extension}")),
+            );
+            candidates.insert(
+                test_root
+                    .join(parent)
+                    .join(format!("{stem}Tests.{candidate_extension}")),
+            );
+        }
+    }
+}
+
+fn add_dotnet_test_candidates(
+    rel_path: &Path,
+    stem: &str,
+    production_stem: &str,
+    is_test: bool,
+    candidates: &mut BTreeSet<PathBuf>,
+) {
+    if is_test {
+        for root in ["tests", "test", "src"] {
+            let Ok(relative) = rel_path.strip_prefix(root) else {
+                continue;
+            };
+            let mut components = relative.components();
+            let Some(Component::Normal(project)) = components.next() else {
+                continue;
+            };
+            let Some(project) = project.to_str().and_then(dotnet_production_project_name) else {
+                continue;
+            };
+            let remainder = components.collect::<PathBuf>();
+            let parent = remainder.parent().unwrap_or_else(|| Path::new(""));
+            candidates.insert(
+                PathBuf::from("src")
+                    .join(project)
+                    .join(parent)
+                    .join(format!("{production_stem}.cs")),
+            );
+        }
+    } else if let Ok(relative) = rel_path.strip_prefix("src") {
+        let mut components = relative.components();
+        let Some(Component::Normal(project)) = components.next() else {
+            return;
+        };
+        let remainder = components.collect::<PathBuf>();
+        let parent = remainder.parent().unwrap_or_else(|| Path::new(""));
+        for root in ["tests", "test"] {
+            for suffix in ["Test", "Tests"] {
+                candidates.insert(
+                    PathBuf::from(root)
+                        .join(format!("{}.Tests", project.to_string_lossy()))
+                        .join(parent)
+                        .join(format!("{stem}{suffix}.cs")),
+                );
+            }
+        }
+        for suffix in ["Test", "Tests"] {
+            candidates.insert(
+                PathBuf::from("src")
+                    .join(format!("{}.Tests", project.to_string_lossy()))
+                    .join(parent)
+                    .join(format!("{stem}{suffix}.cs")),
+            );
+        }
+    }
+}
+
+fn dotnet_production_project_name(project: &str) -> Option<&str> {
+    project
+        .strip_suffix(".Tests")
+        .or_else(|| project.strip_suffix(".Test"))
+        .or_else(|| project.strip_suffix("Tests"))
+        .filter(|project| !project.is_empty())
 }
 
 fn strip_test_component(path: &Path) -> PathBuf {
@@ -1735,6 +2027,8 @@ fn strip_test_component(path: &Path) -> PathBuf {
 fn path_looks_like_test(path: &Path) -> bool {
     path.components().any(|component| {
         matches!(component, Component::Normal(value) if value == "test" || value == "tests" || value == "spec" || value == "specs" || value == "__tests__")
+    }) || path.components().any(|component| {
+        matches!(component, Component::Normal(value) if value.to_str().is_some_and(|value| value.ends_with(".Tests") || value.ends_with(".Test")))
     }) || path
         .file_stem()
         .and_then(|value| value.to_str())
@@ -1745,6 +2039,11 @@ fn path_looks_like_test(path: &Path) -> bool {
                 || stem.ends_with(".test")
                 || stem.ends_with(".spec")
                 || stem.starts_with("test_")
+                || (path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(is_jvm_dotnet_extension)
+                    && (stem.ends_with("Test") || stem.ends_with("Tests")))
         })
 }
 
@@ -3690,5 +3989,115 @@ mod tests {
             expansion(FileEdgeKind::Documentation, false).reason(),
             "neighbor documents seed"
         );
+    }
+
+    #[test]
+    fn jvm_layouts_map_sources_and_tests_in_both_directions() {
+        let root = tempfile::tempdir().unwrap();
+        for (directory, extension) in [
+            ("java", "java"),
+            ("kotlin", "kt"),
+            ("scala", "scala"),
+            ("groovy", "groovy"),
+        ] {
+            let source = PathBuf::from(format!("src/main/{directory}/com/acme/Auth.{extension}"));
+            let test = PathBuf::from(format!(
+                "src/test/{directory}/com/acme/AuthTest.{extension}"
+            ));
+            fs::create_dir_all(root.path().join(source.parent().unwrap())).unwrap();
+            fs::create_dir_all(root.path().join(test.parent().unwrap())).unwrap();
+            fs::write(root.path().join(&source), "class Auth {}\n").unwrap();
+            fs::write(root.path().join(&test), "class AuthTest {}\n").unwrap();
+
+            for inspected in [&source, &test] {
+                let edges = extract_file_edges(root.path(), None, inspected, "class Fixture {}\n");
+                assert!(
+                    edges.iter().any(|edge| {
+                        edge.kind == FileEdgeKind::Test
+                            && edge.source_path == source
+                            && edge.target_path == test
+                    }),
+                    "missing JVM test edge for {}",
+                    inspected.display()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dotnet_project_layout_maps_sources_and_tests_in_both_directions() {
+        let root = tempfile::tempdir().unwrap();
+        let source = Path::new("src/Auth/Services/Token.cs");
+        let test = Path::new("tests/Auth.Tests/Services/TokenTests.cs");
+        fs::create_dir_all(root.path().join(source.parent().unwrap())).unwrap();
+        fs::create_dir_all(root.path().join(test.parent().unwrap())).unwrap();
+        fs::write(root.path().join(source), "class Token {}\n").unwrap();
+        fs::write(root.path().join(test), "class TokenTests {}\n").unwrap();
+
+        for inspected in [source, test] {
+            let edges = extract_file_edges(root.path(), None, inspected, "class Fixture {}\n");
+            assert!(
+                edges.iter().any(|edge| {
+                    edge.kind == FileEdgeKind::Test
+                        && edge.source_path == source
+                        && edge.target_path == test
+                }),
+                "missing .NET test edge for {}",
+                inspected.display()
+            );
+        }
+    }
+
+    #[test]
+    fn late_jvm_test_path_is_recorded_and_resolves_after_add() {
+        let root = tempfile::tempdir().unwrap();
+        let source = Path::new("src/main/java/com/acme/Auth.java");
+        let test = Path::new("src/test/java/com/acme/AuthTest.java");
+        fs::create_dir_all(root.path().join(source.parent().unwrap())).unwrap();
+        fs::write(root.path().join(source), "class Auth {}\n").unwrap();
+
+        let graph = extract_file_graph(root.path(), None, source, "class Auth {}\n");
+        let unresolved = graph
+            .unresolved_dependencies
+            .iter()
+            .find(|dependency| dependency.language == "context_test")
+            .unwrap();
+        assert_eq!(unresolved.spec, "conventional_test");
+        assert!(
+            resolve_dependency_spec(
+                root.path(),
+                None,
+                source,
+                &unresolved.language,
+                &unresolved.spec,
+            )
+            .is_none()
+        );
+
+        fs::create_dir_all(root.path().join(test.parent().unwrap())).unwrap();
+        fs::write(root.path().join(test), "class AuthTest {}\n").unwrap();
+        assert_eq!(
+            resolve_dependency_spec(
+                root.path(),
+                None,
+                source,
+                &unresolved.language,
+                &unresolved.spec,
+            ),
+            Some(test.to_path_buf())
+        );
+    }
+
+    #[test]
+    fn dotnet_project_files_are_configuration_targets() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("src/Auth")).unwrap();
+        fs::write(root.path().join("src/Auth/Auth.csproj"), "<Project />\n").unwrap();
+        fs::write(root.path().join("src/Auth/Token.cs"), "class Token {}\n").unwrap();
+        assert_eq!(
+            configuration_target(root.path(), None, Path::new("src/Auth/Token.cs")),
+            Some(PathBuf::from("src/Auth/Auth.csproj"))
+        );
+        assert!(is_manifest_path(Path::new("src/Auth/Auth.csproj")));
     }
 }

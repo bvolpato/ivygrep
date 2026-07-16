@@ -263,6 +263,45 @@ fn web_server_serves_status_search_and_file() {
         "search response: {search:#}"
     );
 
+    std::fs::write(
+        repo.path().join("web.rs"),
+        "pub fn web_marker_search_target() -> &'static str { \"dirty context marker\" }\n",
+    )
+    .unwrap();
+    let context_path = format!(
+        "/api/search?mode=context&q={}&workspace={workspace}&since=main&budget_tokens=4000",
+        percent_encode("panic at web.rs:1:7")
+    );
+    let context: serde_json::Value = serde_json::from_str(&http_get(port, &context_path)).unwrap();
+    assert_eq!(context["context_pack"]["change_scope"]["since"], "main");
+    assert_eq!(
+        context["context_pack"]["change_scope"]["dirty_worktree"],
+        true
+    );
+    assert_eq!(
+        context["context_pack"]["referenced_paths"][0]["file_path"],
+        "web.rs"
+    );
+    assert!(
+        context["context_pack"]["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["preview"]
+                .as_str()
+                .is_some_and(|preview| preview.contains("dirty context marker"))),
+        "context response: {context:#}"
+    );
+    let invalid_budget: serde_json::Value = serde_json::from_str(&http_get(
+        port,
+        &format!("/api/search?mode=context&q=task&workspace={workspace}&budget_tokens=1"),
+    ))
+    .unwrap();
+    assert_eq!(
+        invalid_budget["error"],
+        "budget_tokens must be between 256 and 131072"
+    );
+
     let all_search: serde_json::Value = serde_json::from_str(&http_get(
         port,
         "/api/search?q=web_marker_search_target&limit=5",
