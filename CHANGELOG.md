@@ -6,6 +6,9 @@ All notable changes to ivygrep are documented in this file.
 
 ## [1.2.1] - 2026-07-16
 
+### Fixed
+- **Windows installation retries transient GitHub failures.** Release metadata, archive, and checksum requests use bounded exponential backoff instead of failing on a single service outage.
+
 ### Performance
 - **Filtered search avoids redundant candidate work.** One shared semantic filter plan serves hash and neural vectors, broad indexed filters use a bounded SQLite preflight, exact and directory include globs use indexed path ranges, and repeated glob path filters use a bounded request cache. On a deterministic 100,001-chunk profile, broad filtering improved `35.40 ms` to `9.48 ms` (`3.73x`), exact paths `61.52 ms` to `1.24 ms` (`49.62x`), missing prefixes `62.99 ms` to `0.325 ms` (`194.08x`), and filtered literal search `6.71 ms` to `2.54 ms` (`2.64x`). Unfiltered search also improved `1.217 ms` to `1.085 ms`.
 - **Incremental indexing updates cached chunk and file statistics transactionally.** A controlled one-file update reduced finalize latency from `266.97 ms` to `225.48 ms` (`15.5%`) while preserving exact cached counts across additions, replacements, deletions, and empty files.
