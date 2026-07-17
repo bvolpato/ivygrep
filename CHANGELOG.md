@@ -7,7 +7,7 @@ All notable changes to ivygrep are documented in this file.
 ## [1.2.3] - 2026-07-17
 
 ### Performance
-- **Exact substring and regex search use compact file-level trigram candidates.** On the 1,000-file benchmark, literal search improved from `0.923 ms` to `0.704 ms` (`23.8%`) and regex search from `9.24 ms` to `1.99 ms` (`4.65x`). A real-repository index grew `5.7%` overall while fresh 30,000-chunk indexing improved from `159.54 ms` to `153.38 ms` (`3.9%`).
+- **Exact substring and regex search use compact file-level trigram candidates.** On the 1,000-file benchmark, literal search improved from `0.923 ms` to `0.704 ms` (`23.8%`) and regex search from `9.24 ms` to `1.99 ms` (`4.65x`). A real-repository index grew `5.1%` overall while fresh 30,000-chunk indexing improved from `159.54 ms` to `157.56 ms` (`1.2%`).
 
 ### Fixed
 - **Literal and regex search no longer miss substrings inside identifiers.** Queries such as `ppl` now find `applyFilter`, regex literal extraction ignores optional and alternative branches, indexed regex respects gitignore state, and overlapping structural chunks produce one literal hit per source line.
