@@ -599,11 +599,17 @@ impl SearchContext {
                 .then_with(|| left.start_line.cmp(&right.start_line))
         });
         let chunk = chunks.remove(0);
+        let path_header = format!("// {}\n\n", chunk.file_path.display());
+        let preview = chunk
+            .text
+            .strip_prefix(&path_header)
+            .unwrap_or(&chunk.text)
+            .to_string();
         Ok(Some(SearchHit {
             file_path: chunk.file_path,
             start_line: chunk.start_line,
             end_line: chunk.end_line,
-            preview: chunk.text,
+            preview,
             reason: "context graph relationship".to_string(),
             score: 0.0,
             sources: Vec::new(),
@@ -3666,6 +3672,16 @@ enum IndexedIncludePath {
     Prefix(String),
 }
 
+const MAX_EXACT_FILTERED_CANDIDATES: usize = 50_000;
+const MAX_FILTERED_ANN_MULTIPLIER: usize = 10;
+
+fn broad_filter_ann_multiplier(total_docs: u64) -> usize {
+    total_docs
+        .saturating_mul(3)
+        .div_ceil((MAX_EXACT_FILTERED_CANDIDATES as u64 + 1) * 2)
+        .clamp(2, MAX_FILTERED_ANN_MULTIPLIER as u64) as usize
+}
+
 fn indexed_include_path_filter(glob: &str) -> Option<IndexedIncludePath> {
     let normalized = glob.trim().trim_start_matches("./").trim_end_matches('/');
     if normalized.is_empty() {
@@ -3728,8 +3744,15 @@ fn collect_semantic_candidates(
     // loading all matching rows from SQLite (which could be millions for common
     // language filters like "Go" on large repos).
     let ann_limit = if has_filters {
-        // Over-fetch so we still have enough candidates after filtering.
-        (candidate_limit * 10).min(20_000)
+        // Broad filters match more than 50K chunks. Size the ANN pool from that
+        // guaranteed lower bound, with 1.5x safety and a bounded fallback.
+        let total_docs = ctx
+            .searchers
+            .iter()
+            .map(tantivy::Searcher::num_docs)
+            .sum::<u64>();
+        let multiplier = broad_filter_ann_multiplier(total_docs);
+        (candidate_limit * multiplier).min(20_000)
     } else {
         candidate_limit
     };
@@ -3760,6 +3783,39 @@ fn collect_semantic_candidates(
             semantic_chunks.push((chunk, vector_match.score));
             if semantic_chunks.len() >= candidate_limit {
                 break;
+            }
+        }
+    }
+
+    if has_filters && semantic_chunks.len() < candidate_limit && ann_limit < 20_000 {
+        let fallback_limit = (candidate_limit * MAX_FILTERED_ANN_MULTIPLIER)
+            .max(ann_limit * 2)
+            .min(20_000);
+        if fallback_limit > ann_limit {
+            let fallback_matches = collect_semantic_vector_matches(
+                query_vector,
+                fallback_limit,
+                primary_store,
+                base_store,
+            );
+            let fallback_keys = fallback_matches
+                .iter()
+                .map(|vector_match| vector_match.key)
+                .collect::<Vec<_>>();
+            let mut fallback_chunks = ctx.fetch_chunks_by_vector_keys_batch(&fallback_keys)?;
+            semantic_chunks.clear();
+            for vector_match in fallback_matches {
+                if let Some(chunk) = fallback_chunks.remove(&vector_match.key)
+                    && (options.skip_gitignore || !chunk.is_ignored)
+                    && type_matches(&chunk, options.type_filter.as_deref())
+                    && scope_matches(&chunk, options.scope_filter.as_ref())
+                    && path_matches(&chunk, path_matcher)
+                {
+                    semantic_chunks.push((chunk, vector_match.score));
+                    if semantic_chunks.len() >= candidate_limit {
+                        break;
+                    }
+                }
             }
         }
     }
@@ -3823,7 +3879,6 @@ fn build_semantic_filter_plan(
     path_matcher: &PathGlobMatcher,
     options: &SearchOptions,
 ) -> SemanticFilterPlan {
-    const MAX_EXACT_FILTERED_CANDIDATES: usize = 50_000;
     if indexed_filter_exceeds_exact_limit(ctx, options, MAX_EXACT_FILTERED_CANDIDATES) {
         return SemanticFilterPlan::Broad;
     }
@@ -5918,6 +5973,14 @@ mod tests {
         assert_eq!(corpus_candidate_multiplier(50_001), 2);
         assert_eq!(corpus_candidate_multiplier(500_000), 2);
         assert_eq!(corpus_candidate_multiplier(500_001), 3);
+    }
+
+    #[test]
+    fn broad_filter_ann_budget_scales_from_exact_filter_threshold() {
+        assert_eq!(broad_filter_ann_multiplier(50_001), 2);
+        assert_eq!(broad_filter_ann_multiplier(100_000), 3);
+        assert_eq!(broad_filter_ann_multiplier(200_000), 6);
+        assert_eq!(broad_filter_ann_multiplier(400_000), 10);
     }
 
     #[test]

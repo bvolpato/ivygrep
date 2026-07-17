@@ -896,9 +896,12 @@ async fn run_status(json: bool) -> Result<()> {
                         println!("{prefix}          Error: {}", err_line.red());
                     }
                 } else if ws.chunk_count > 0 {
+                    let pct = format!("{:.0}%", ws.hash_coverage_percent);
                     println!(
-                        "{prefix}  Search: {} (fast, run a query to trigger neural upgrade)",
-                        "◆ hash".yellow()
+                        "{prefix}  Search: {} ({} / {} vectors, {pct}; run a query to trigger neural upgrade)",
+                        "◆ hash".yellow(),
+                        ws.hash_vector_count,
+                        ws.vector_key_count,
                     );
                 } else {
                     println!("{prefix}  Search: {}", "○ empty".bright_black());
@@ -1032,6 +1035,8 @@ async fn run_add(
             }
         } else {
             remove_workspace_index(&workspace)?;
+            workspace.ensure_dirs()?;
+            workspace.write_metadata(&meta)?;
         }
     }
 
@@ -2010,6 +2015,10 @@ fn run_doctor(path: Option<&Path>, fix: bool, deep: bool, json: bool) -> Result<
     println!(
         "Chunks: {}  Files: {}",
         report.chunk_count, report.file_count
+    );
+    println!(
+        "Hash: {} / {} vectors ({:.1}%)",
+        report.hash_vector_count, report.vector_key_count, report.hash_coverage_percent,
     );
     println!(
         "Neural: {} / {} vectors ({:.1}%), {} {}d",

@@ -272,6 +272,8 @@ mod tests {
         assert_eq!(workspaces.len(), 1);
         assert_eq!(workspaces[0].compaction.format_version, 0);
         assert!(!workspaces[0].compaction.healthy);
+        assert_eq!(workspaces[0].hash_vector_count, 0);
+        assert_eq!(workspaces[0].hash_coverage_percent, 0.0);
     }
 
     #[test]

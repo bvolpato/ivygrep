@@ -78,6 +78,33 @@ fn git_checked(root: &Path, args: &[&str]) {
 
 #[test]
 #[serial]
+fn cli_force_add_preserves_watch_intent_without_daemon() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    init_git_repo(&root);
+    std::fs::write(root.join("lib.rs"), "pub fn watched() {}\n").unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .arg("--add")
+        .arg(&root)
+        .args(["--force", "--hash"])
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .assert()
+        .success();
+
+    unsafe { std::env::set_var("IVYGREP_HOME", &home) };
+    let metadata = Workspace::resolve(&root)
+        .unwrap()
+        .read_metadata()
+        .unwrap()
+        .unwrap();
+    assert!(metadata.watch_enabled);
+}
+
+#[test]
+#[serial]
 fn cli_help_snapshot() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
     let output = cmd
@@ -1830,8 +1857,9 @@ fn cli_context_combines_since_dirty_and_stack_trace_inputs() {
     git_checked(&root, &["commit", "-qm", "base"]);
 
     Command::new(assert_cmd::cargo::cargo_bin!("ig"))
-        .args(["--add", "--force", "--no-watch", "--hash"])
+        .arg("--add")
         .arg(&root)
+        .args(["--force", "--no-watch", "--hash"])
         .env("IVYGREP_HOME", &home)
         .env("IVYGREP_NO_AUTOSPAWN", "1")
         .assert()
@@ -1969,8 +1997,9 @@ fn cli_context_bounds_changes_to_requested_scope_and_budget() {
     git_checked(&root, &["commit", "-qm", "base"]);
 
     Command::new(assert_cmd::cargo::cargo_bin!("ig"))
-        .args(["--add", "--force", "--no-watch", "--hash"])
+        .arg("--add")
         .arg(&root)
+        .args(["--force", "--no-watch", "--hash"])
         .env("IVYGREP_HOME", &home)
         .env("IVYGREP_NO_AUTOSPAWN", "1")
         .assert()
@@ -2049,8 +2078,9 @@ fn cli_context_since_hydrates_deleted_files_and_callers() {
     git_checked(&root, &["commit", "-qm", "base"]);
 
     Command::new(assert_cmd::cargo::cargo_bin!("ig"))
-        .args(["--add", "--force", "--no-watch", "--hash"])
+        .arg("--add")
         .arg(&root)
+        .args(["--force", "--no-watch", "--hash"])
         .env("IVYGREP_HOME", &home)
         .env("IVYGREP_NO_AUTOSPAWN", "1")
         .assert()
@@ -2129,8 +2159,9 @@ fn cli_context_maps_new_jvm_and_dotnet_tests() {
     git_checked(&root, &["add", "."]);
     git_checked(&root, &["commit", "-qm", "sources"]);
     Command::new(assert_cmd::cargo::cargo_bin!("ig"))
-        .args(["--add", "--force", "--no-watch", "--hash"])
+        .arg("--add")
         .arg(&root)
+        .args(["--force", "--no-watch", "--hash"])
         .env("IVYGREP_HOME", &home)
         .env("IVYGREP_NO_AUTOSPAWN", "1")
         .assert()
