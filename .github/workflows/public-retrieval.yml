@@ -126,12 +126,8 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-
-      - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
-          shared-key: "public-retrieval"
-          cache-bin: "false"
+          enable-cache: false
 
       - name: Select matrix parameters
         id: parameters
