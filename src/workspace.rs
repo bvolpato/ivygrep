@@ -347,7 +347,7 @@ impl Workspace {
     }
 
     pub fn hash_vector_count(&self) -> u64 {
-        let path = self.vector_path();
+        let path = hash_vector_store_path(&self.index_dir);
         if !path.exists() {
             return 0;
         }
@@ -1344,7 +1344,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
         let compaction = index_compaction_health(&index_dir);
         let vector_key_count = read_sqlite_vector_key_count(&index_dir);
         let hash_vector_count = vector_store_size(
-            &index_dir.join("vectors.usearch"),
+            &hash_vector_store_path(&index_dir),
             crate::EMBEDDING_DIMENSIONS,
             crate::vector_store::HASH_VECTOR_QUANTIZATION,
         )
@@ -1806,6 +1806,14 @@ fn read_sqlite_vector_key_count(index_dir: &Path) -> u64 {
         .ok()
     })
     .unwrap_or(0) as u64
+}
+
+fn hash_vector_store_path(index_dir: &Path) -> PathBuf {
+    if index_dir.join("overlay.sqlite3").exists() {
+        index_dir.join("overlay_vectors.usearch")
+    } else {
+        index_dir.join("vectors.usearch")
+    }
 }
 
 fn read_sqlite_counts_live(sqlite_path: &Path) -> Result<(u64, u64)> {
@@ -2355,9 +2363,12 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn worktree_overlay_only_requires_hash_enrichment() {
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
         let tmp = tempfile::tempdir().unwrap();
-        let index_dir = tmp.path().join("index");
+        let index_dir = config::indexes_root().unwrap().join("overlay");
         std::fs::create_dir_all(&index_dir).unwrap();
 
         let ws = Workspace {
@@ -2367,6 +2378,16 @@ mod tests {
             repo_id: Some("repo".to_string()),
             base_index_dir: Some(tmp.path().join("base-index")),
         };
+        ws.write_metadata(&WorkspaceMetadata {
+            id: ws.id.clone(),
+            root: ws.root.clone(),
+            created_at_unix: 0,
+            last_indexed_at_unix: Some(1),
+            watch_enabled: false,
+            skip_gitignore: false,
+            index_generation: 0,
+        })
+        .unwrap();
 
         let conn = crate::indexer::open_sqlite(&ws.overlay_sqlite_path()).unwrap();
         conn.execute("INSERT INTO chunks (file_path, start_line, end_line, language, kind, text, vector_key, modified_unix) VALUES ('', 0, 0, '', '', x'', 1, 0)", []).unwrap();
@@ -2401,6 +2422,16 @@ mod tests {
         std::fs::write(ws.hash_enhanced_generation_path(), "0").unwrap();
 
         assert!(!ws.needs_neural_enhancement());
+        assert_eq!(ws.hash_vector_count(), 1);
+        assert_eq!(ws.hash_coverage_percent(), 100.0);
+
+        let status = list_workspaces()
+            .unwrap()
+            .into_iter()
+            .find(|status| status.id == ws.id)
+            .unwrap();
+        assert_eq!(status.hash_vector_count, 1);
+        assert_eq!(status.hash_coverage_percent, 100.0);
     }
 
     #[test]
