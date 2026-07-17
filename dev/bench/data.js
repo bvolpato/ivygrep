@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784212407267,
+  "lastUpdate": 1784250333383,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -39149,6 +39149,185 @@ window.BENCHMARK_DATA = {
           {
             "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
             "value": 2781.08,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "bbf04075a6aa00ddb8bea75cf2221378f41412b9",
+          "message": "[perf] speed up filtered search and incremental indexing (#183)\n\n* [perf] accelerate filtered search and incremental indexing\n\n* [fix] retry transient Windows installer requests",
+          "timestamp": "2026-07-16T20:19:43-04:00",
+          "tree_id": "c8d993243df71bb754ca9a9016560ecb514dd1eb",
+          "url": "https://github.com/bvolpato/ivygrep/commit/bbf04075a6aa00ddb8bea75cf2221378f41412b9"
+        },
+        "date": 1784250332524,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 56477.93,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 3871.52,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/worktree_overlay_one_file_delta",
+            "value": 47330.09,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer_bulk/fresh_index_30k_chunks",
+            "value": 220745.39,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_small_file",
+            "value": 12.88,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 1968.3,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 1569.38,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11218.38,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 10799.76,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 1.92,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 131.55,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 5111.18,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 2069.47,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 1174.86,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_simple_symbol_1000_files",
+            "value": 3038.26,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_complex_phrase_1000_files",
+            "value": 3295.22,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/bounded_rerank_100_candidates_1000_files",
+            "value": 3638.19,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/literal_simple_symbol_1000_files",
+            "value": 1047.07,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/regex_symbol_1000_files",
+            "value": 9252.24,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 450472.57,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 179.71,
+            "unit": "µs"
+          },
+          {
+            "name": "hash_vector_build/ingest_5k_hash_vectors",
+            "value": 94834.83,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_one_file_change_10k_chunks",
+            "value": 19655.55,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_100_file_burst_10k_chunks",
+            "value": 114012.65,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/quick_health_cached_10k_chunks",
+            "value": 381.83,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k",
+            "value": 775.11,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k_hot",
+            "value": 21.06,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_top_50_in_50k_hot",
+            "value": 4259.13,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/500",
+            "value": 101.94,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/5000",
+            "value": 474.17,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
+            "value": 2153.13,
             "unit": "µs"
           }
         ]
