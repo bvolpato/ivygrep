@@ -5,6 +5,16 @@ use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
 
 /// Tokenizer name registered with every Tantivy index.
 pub const CODE_TOKENIZER_NAME: &str = "code";
+pub const TRIGRAM_TOKENIZER_NAME: &str = "trigram";
+
+pub fn build_trigram_analyzer() -> tantivy::tokenizer::TextAnalyzer {
+    tantivy::tokenizer::TextAnalyzer::builder(
+        tantivy::tokenizer::NgramTokenizer::all_ngrams(3, 3)
+            .expect("fixed trigram tokenizer configuration is valid"),
+    )
+    .filter(tantivy::tokenizer::LowerCaser)
+    .build()
+}
 
 /// A code-aware tokenizer that splits text on whitespace, punctuation,
 /// camelCase boundaries, and underscore separators — producing lowercase

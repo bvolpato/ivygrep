@@ -62,6 +62,7 @@ const MAX_CACHEABLE_HITS: usize = 2_000;
 struct WatchRegistration {
     _watcher: RecommendedWatcher,
     control: Arc<WatchControl>,
+    job_nonce: Option<String>,
 }
 
 #[derive(Clone)]
@@ -952,7 +953,11 @@ fn restore_configured_watchers(state: &DaemonState) {
 fn stop_watcher(workspace: &Workspace, registration: WatchRegistration) {
     registration.control.active.store(false, Ordering::Relaxed);
     registration.control.notify.notify_waiters();
-    let _ = jobs::finish_job(workspace, JobKind::Watcher, "stopped", None);
+    if let Some(nonce) = registration.job_nonce {
+        let _ = jobs::finish_job_if_current(workspace, JobKind::Watcher, &nonce, "stopped", None);
+    } else {
+        let _ = jobs::finish_job(workspace, JobKind::Watcher, "stopped", None);
+    }
     let _ = std::fs::remove_file(workspace.watcher_pid_path());
 }
 
@@ -1792,18 +1797,21 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
             return Err(err.into());
         }
     }
+    let job_nonce = jobs::start_job(&workspace, JobKind::Watcher, "idle", 1)
+        .ok()
+        .and_then(|record| record.nonce);
     watchers.insert(
         workspace.id.clone(),
         WatchRegistration {
             _watcher: watcher,
             control: control.clone(),
+            job_nonce: job_nonce.clone(),
         },
     );
     drop(watchers);
 
-    let _ = jobs::start_job(&workspace, JobKind::Watcher, "idle", 1);
-    spawn_watch_heartbeat(control.clone());
-    spawn_watch_worker(state.clone(), control);
+    spawn_watch_heartbeat(control.clone(), job_nonce.clone());
+    spawn_watch_worker(state.clone(), control, job_nonce);
 
     if let Ok(Some(mut metadata)) = workspace.read_metadata()
         && !metadata.watch_enabled
@@ -1821,7 +1829,13 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn spawn_watch_heartbeat(control: Arc<WatchControl>) {
+fn update_watcher_job(control: &WatchControl, job_nonce: Option<&str>, update: JobUpdate) {
+    if let Some(nonce) = job_nonce {
+        let _ = jobs::heartbeat_job_if_current(&control.workspace, JobKind::Watcher, nonce, update);
+    }
+}
+
+fn spawn_watch_heartbeat(control: Arc<WatchControl>, job_nonce: Option<String>) {
     tokio::spawn(async move {
         loop {
             if !control.active.load(Ordering::Relaxed) {
@@ -1847,13 +1861,13 @@ fn spawn_watch_heartbeat(control: Arc<WatchControl>) {
             update
                 .details
                 .insert("coalesced_events".to_string(), coalesced_events.to_string());
-            let _ = jobs::heartbeat_job(&control.workspace, JobKind::Watcher, update);
+            update_watcher_job(&control, job_nonce.as_deref(), update);
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
     });
 }
 
-fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
+fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>, job_nonce: Option<String>) {
     tokio::spawn(async move {
         loop {
             control.notify.notified().await;
@@ -1885,7 +1899,7 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                 update
                     .details
                     .insert("pending_events".to_string(), pending.to_string());
-                let _ = jobs::heartbeat_job(&control.workspace, JobKind::Watcher, update);
+                update_watcher_job(&control, job_nonce.as_deref(), update);
 
                 let workspace = control.workspace.clone();
                 let changed_paths = control.take_dirty_paths();
@@ -1934,7 +1948,7 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                             last_error: Some(None),
                             ..Default::default()
                         };
-                        let _ = jobs::heartbeat_job(&control.workspace, JobKind::Watcher, success);
+                        update_watcher_job(&control, job_nonce.as_deref(), success);
                     }
                     Err(err) => {
                         daemon_log(&format!(
@@ -1950,7 +1964,7 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                             last_error: Some(Some(format!("{err:#}"))),
                             ..Default::default()
                         };
-                        let _ = jobs::heartbeat_job(&control.workspace, JobKind::Watcher, failed);
+                        update_watcher_job(&control, job_nonce.as_deref(), failed);
                     }
                 }
 
@@ -1968,7 +1982,7 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                 }),
                 ..Default::default()
             };
-            let _ = jobs::heartbeat_job(&control.workspace, JobKind::Watcher, idle);
+            update_watcher_job(&control, job_nonce.as_deref(), idle);
         }
     });
 }

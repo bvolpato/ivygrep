@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -753,10 +753,9 @@ fn representative_chunk_score(chunk: &IndexedChunk, task_terms: &HashSet<String>
 
 /// Fast index-backed literal text search.
 ///
-/// Uses Tantivy to find candidate chunks containing the query terms,
-/// then verifies exact case-insensitive substring matches only on those
-/// candidates. Falls back to a full SQLite scan only when the query
-/// contains terms that wouldn't be in the Tantivy tokenizer.
+/// Uses file-level trigram postings to find candidates, then verifies exact
+/// case-insensitive substring matches against live files. Queries without an
+/// indexable trigram fall back to a parallel source walk.
 pub fn literal_search(
     workspace: &Workspace,
     query_text: &str,
@@ -779,82 +778,171 @@ pub fn literal_search_with_context(
     if query.is_empty() {
         return Ok(vec![]);
     }
+    if options.limit == Some(0) {
+        return Ok(vec![]);
+    }
 
     let query_lower = query.to_ascii_lowercase();
     let max_hits = options.limit.unwrap_or(500);
-    let candidate_chunks = exact_literal_chunks_with_context(ctx, query, options, false)?;
+    let runs = substring_candidate_runs(query);
+    let hits = if runs.is_empty() {
+        literal_search_walk(workspace, &query_lower, options, max_hits)?
+    } else {
+        let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
+        match substring_candidate_files(workspace, ctx, &runs, options, &path_matcher)? {
+            Some(candidate_paths) => {
+                literal_search_paths(&query_lower, options.context, max_hits, &candidate_paths)?
+            }
+            None => literal_search_walk(workspace, &query_lower, options, max_hits)?,
+        }
+    };
 
-    tracing::trace!(
-        "literal_scan={:?} candidates={}",
-        t0.elapsed(),
-        candidate_chunks.len()
-    );
+    tracing::trace!("literal_total={:?} hits={}", t0.elapsed(), hits.len());
+    Ok(hits)
+}
 
-    // Now scan only the candidate chunks' source lines for precise matches and snippet extraction.
-    // Group by file to read each file only once.
-    let mut chunks_by_file: BTreeMap<PathBuf, Vec<IndexedChunk>> = BTreeMap::new();
-    for chunk in candidate_chunks {
-        chunks_by_file
-            .entry(workspace.root.join(&chunk.file_path))
-            .or_default()
-            .push(chunk);
+fn literal_search_walk(
+    workspace: &Workspace,
+    query_lower: &str,
+    options: &SearchOptions,
+    max_hits: usize,
+) -> Result<Vec<SearchHit>> {
+    let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
+    let mut paths = Vec::new();
+    for entry in crate::walker::source_walker(&workspace.root, options.skip_gitignore).build() {
+        let entry = entry?;
+        if !entry
+            .file_type()
+            .is_some_and(|file_type| file_type.is_file())
+        {
+            continue;
+        }
+        let path = entry.path();
+        let rel_path = path.strip_prefix(&workspace.root).unwrap_or(path);
+        if options
+            .scope_filter
+            .as_ref()
+            .is_some_and(|scope| !scope.matches(rel_path))
+            || !path_matcher.matches(rel_path)
+            || options.type_filter.as_deref().is_some_and(|filter| {
+                let expected = crate::chunking::resolve_type_alias(filter).unwrap_or(filter);
+                crate::chunking::language_for_path(rel_path) != Some(expected)
+            })
+        {
+            continue;
+        }
+        paths.push((rel_path.to_path_buf(), path.to_path_buf()));
     }
-    for chunks in chunks_by_file.values_mut() {
-        chunks.sort_by(|a, b| {
-            a.start_line
-                .cmp(&b.start_line)
-                .then_with(|| a.end_line.cmp(&b.end_line))
-                .then_with(|| a.vector_key.cmp(&b.vector_key))
-        });
-    }
 
-    let mut hits = Vec::new();
-    'outer: for (file_path, chunks) in &chunks_by_file {
-        let content = match fs::read_to_string(file_path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-        let lines: Vec<&str> = content.lines().collect();
+    literal_search_paths(query_lower, options.context, max_hits, &paths)
+}
 
-        for chunk in chunks {
-            // Scan lines within this chunk's range for the literal text.
-            // Chunk bounds come from the index but the file is read live, so a
-            // file truncated since indexing can make start exceed end — clamp
-            // start to end to avoid an out-of-range slice panic.
-            let end = chunk.end_line.min(lines.len());
-            let start = chunk.start_line.saturating_sub(1).min(end);
-
-            for (i, line) in lines[start..end].iter().enumerate() {
-                let line_num = start + i + 1;
-                let match_found = line.to_ascii_lowercase().contains(&query_lower);
-
-                if match_found {
-                    let (snippet_start, snippet_end) =
-                        snippet_bounds(line_num, options.context, lines.len());
-                    let preview = lines[snippet_start.saturating_sub(1)..snippet_end].join("\n");
-
-                    hits.push(SearchHit {
-                        file_path: chunk.file_path.clone(),
-                        start_line: snippet_start,
-                        end_line: snippet_end,
-                        preview,
+fn literal_search_paths(
+    query_lower: &str,
+    context: usize,
+    max_hits: usize,
+    paths: &[(PathBuf, PathBuf)],
+) -> Result<Vec<SearchHit>> {
+    let mut hits = paths
+        .par_iter()
+        .flat_map_iter(|(rel_path, path)| {
+            let Ok(content) = fs::read_to_string(path) else {
+                return Vec::new();
+            };
+            let lines = content.lines().collect::<Vec<_>>();
+            lines
+                .iter()
+                .enumerate()
+                .filter(|(_, line)| line.to_ascii_lowercase().contains(query_lower))
+                .map(|(index, line)| {
+                    let line_number = index + 1;
+                    let (start_line, end_line) = snippet_bounds(line_number, context, lines.len());
+                    SearchHit {
+                        file_path: rel_path.clone(),
+                        start_line,
+                        end_line,
+                        preview: lines[start_line.saturating_sub(1)..end_line].join("\n"),
                         reason: format!("literal match: {}", truncate_for_reason(line.trim())),
                         score: 1.0,
                         sources: vec!["literal".to_string()],
                         neural_requested: false,
                         neural_executed: false,
-                    });
-
-                    if hits.len() >= max_hits {
-                        break 'outer;
                     }
-                }
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    hits.sort_by(|left, right| {
+        left.file_path
+            .cmp(&right.file_path)
+            .then_with(|| left.start_line.cmp(&right.start_line))
+            .then_with(|| left.end_line.cmp(&right.end_line))
+    });
+    hits.truncate(max_hits);
+    Ok(hits)
+}
+
+fn substring_candidate_files(
+    workspace: &Workspace,
+    ctx: &SearchContext,
+    runs: &[String],
+    options: &SearchOptions,
+    path_matcher: &PathGlobMatcher,
+) -> Result<Option<Vec<(PathBuf, PathBuf)>>> {
+    let Some(field) = ctx.fields.text_trigrams else {
+        return Ok(None);
+    };
+    let Some(query) = substring_candidate_query(field, runs) else {
+        return Ok(None);
+    };
+    let query = constrain_query_to_scope(query, &ctx.fields, options.scope_filter.as_ref())?;
+    let mut paths = HashSet::new();
+    for (index, searcher) in ctx.searchers.iter().enumerate() {
+        let docs = searcher.search(&query, &TopDocs::with_limit(10_000).order_by_score())?;
+        if docs.len() == 10_000 {
+            return Ok(None);
+        }
+        for (_score, address) in docs {
+            let doc: TantivyDocument = searcher.doc(address)?;
+            let Some(path) = doc
+                .get_first(ctx.fields.file_path)
+                .and_then(|value| tantivy::schema::Value::as_str(&value))
+                .map(PathBuf::from)
+            else {
+                continue;
+            };
+            let ignored = ctx
+                .fields
+                .is_ignored
+                .and_then(|field| doc.get_first(field))
+                .and_then(|value| tantivy::schema::Value::as_u64(&value))
+                .is_some_and(|value| value > 0);
+            if ctx.is_shadowed_base_file(index, &path)
+                || (!options.skip_gitignore && ignored)
+                || options
+                    .scope_filter
+                    .as_ref()
+                    .is_some_and(|scope| !scope.matches(&path))
+                || !path_matcher.matches(&path)
+                || options.type_filter.as_deref().is_some_and(|filter| {
+                    let expected = crate::chunking::resolve_type_alias(filter).unwrap_or(filter);
+                    crate::chunking::language_for_path(&path) != Some(expected)
+                })
+            {
+                continue;
             }
+            paths.insert(path);
         }
     }
-
-    tracing::trace!("literal_total={:?} hits={}", t0.elapsed(), hits.len());
-    Ok(hits)
+    let mut paths = paths
+        .into_iter()
+        .map(|path| {
+            let full_path = workspace.root.join(&path);
+            (path, full_path)
+        })
+        .collect::<Vec<_>>();
+    paths.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(Some(paths))
 }
 
 pub(crate) fn exact_literal_chunks(
@@ -1183,6 +1271,41 @@ fn literal_candidate_query(
     }
 
     Some(Box::new(BooleanQuery::new(variant_queries)))
+}
+
+pub(crate) fn substring_candidate_query(
+    field: tantivy::schema::Field,
+    runs: &[String],
+) -> Option<Box<dyn Query>> {
+    let mut clauses = Vec::new();
+    for run in runs.iter().take(3) {
+        let offsets = [0, (run.len() - 3) / 2, run.len() - 3];
+        let mut previous = None;
+        for offset in offsets {
+            if previous == Some(offset) {
+                continue;
+            }
+            previous = Some(offset);
+            let trigram = run.get(offset..offset + 3)?;
+            clauses.push((
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    tantivy::Term::from_field_text(field, trigram),
+                    IndexRecordOption::Basic,
+                )) as Box<dyn Query>,
+            ));
+        }
+    }
+    (!clauses.is_empty()).then(|| Box::new(BooleanQuery::new(clauses)) as Box<dyn Query>)
+}
+
+fn substring_candidate_runs(query: &str) -> Vec<String> {
+    query
+        .as_bytes()
+        .split(|byte| !byte.is_ascii_alphanumeric())
+        .filter(|run| run.len() >= 3 && run.is_ascii())
+        .map(|run| String::from_utf8_lossy(run).to_ascii_lowercase())
+        .collect()
 }
 
 fn literal_candidate_term_query(
@@ -6841,6 +6964,48 @@ mod tests {
 
     #[test]
     #[serial]
+    fn literal_search_finds_substring_inside_identifier_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            tmp.path().join("filter.rs"),
+            "pub fn applyFilter() -> bool { true }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = literal_search(&workspace, "ppl", &SearchOptions::default()).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].file_path, PathBuf::from("filter.rs"));
+    }
+
+    #[test]
+    #[serial]
+    fn literal_search_deduplicates_overlapping_structural_chunks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            tmp.path().join("filter.rs"),
+            "struct Filter;\nimpl Filter {\n    fn apply_filter(&self) -> bool { true }\n}\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = literal_search(&workspace, "apply_filter", &SearchOptions::default()).unwrap();
+        assert_eq!(hits.len(), 1, "same source line must appear once: {hits:?}");
+        assert!(hits[0].preview.contains("fn apply_filter"));
+    }
+
+    #[test]
+    #[serial]
     fn literal_search_limit_returns_deterministic_equal_score_subset() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
@@ -7470,6 +7635,7 @@ function sendfile(res, path, options, callback) {
             language: schema.add_text_field("language", tantivy::schema::STRING),
             kind: schema.add_text_field("kind", tantivy::schema::STRING),
             text: schema.add_text_field("text", tantivy::schema::TEXT),
+            text_trigrams: None,
             is_ignored: None,
             file_path_text: Some(schema.add_text_field("file_path_text", tantivy::schema::TEXT)),
             signature: Some(schema.add_text_field("signature", tantivy::schema::TEXT)),

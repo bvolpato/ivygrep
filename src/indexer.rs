@@ -21,7 +21,10 @@ use tantivy::schema::{
 };
 use tantivy::{Index as TantivyIndex, TantivyDocument, Term};
 
-use crate::text::{CODE_TOKENIZER_NAME, build_code_analyzer, first_code_line_range};
+use crate::text::{
+    CODE_TOKENIZER_NAME, TRIGRAM_TOKENIZER_NAME, build_code_analyzer, build_trigram_analyzer,
+    first_code_line_range,
+};
 
 use crate::chunking::{
     Chunk, RustDocInclude, chunk_rust_doc_include, chunk_source_with_metadata, is_indexable_file,
@@ -432,6 +435,7 @@ pub struct TantivyFields {
     pub language: Field,
     pub kind: Field,
     pub text: Field,
+    pub text_trigrams: Option<Field>,
     pub is_ignored: Option<Field>,
     pub file_path_text: Option<Field>,
     pub signature: Option<Field>,
@@ -474,29 +478,68 @@ impl FreshIndexStaging {
     }
 
     fn promote(mut self, workspace: &Workspace) -> Result<()> {
-        remove_main_store_artifacts(workspace)?;
-        fs::rename(&self.sqlite_path, workspace.sqlite_path()).with_context(|| {
-            format!(
-                "failed to promote SQLite index {} -> {}",
-                self.sqlite_path.display(),
-                workspace.sqlite_path().display()
-            )
-        })?;
-        fs::rename(&self.tantivy_dir, workspace.tantivy_dir()).with_context(|| {
-            format!(
-                "failed to promote Tantivy index {} -> {}",
-                self.tantivy_dir.display(),
-                workspace.tantivy_dir().display()
-            )
-        })?;
-        fs::rename(&self.vector_path, workspace.vector_path()).with_context(|| {
-            format!(
-                "failed to promote vector store {} -> {}",
-                self.vector_path.display(),
-                workspace.vector_path().display()
-            )
-        })?;
+        anyhow::ensure!(self.sqlite_path.is_file(), "staged SQLite index is missing");
+        anyhow::ensure!(self.tantivy_dir.is_dir(), "staged Tantivy index is missing");
+        anyhow::ensure!(self.vector_path.is_file(), "staged vector index is missing");
+
+        let backup_dir = workspace
+            .index_dir
+            .join(format!(".fresh-index-backup-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&backup_dir)?;
+        let mut backups = Vec::new();
+        for (index, live_path) in main_store_artifacts(workspace).into_iter().enumerate() {
+            if !live_path.exists() {
+                continue;
+            }
+            let backup_path = backup_dir.join(index.to_string());
+            if let Err(error) = fs::rename(&live_path, &backup_path) {
+                if let Err(rollback_error) = restore_main_store_backups(&backups) {
+                    anyhow::bail!(
+                        "failed to preserve live index {}: {error}; rollback failed: \
+                         {rollback_error:#}; backups retained at {}",
+                        live_path.display(),
+                        backup_dir.display()
+                    );
+                }
+                let _ = fs::remove_dir_all(&backup_dir);
+                return Err(error).with_context(|| {
+                    format!("failed to preserve live index {}", live_path.display())
+                });
+            }
+            backups.push((live_path, backup_path));
+        }
+
+        let promotions = [
+            (self.sqlite_path.clone(), workspace.sqlite_path()),
+            (self.tantivy_dir.clone(), workspace.tantivy_dir()),
+            (self.vector_path.clone(), workspace.vector_path()),
+        ];
+        let mut promoted = Vec::<PathBuf>::new();
+        for (staged_path, live_path) in promotions {
+            if let Err(error) = fs::rename(&staged_path, &live_path) {
+                if let Err(rollback_error) = rollback_main_store(&promoted, &backups) {
+                    anyhow::bail!(
+                        "failed to promote staged index {} -> {}: {error}; rollback failed: \
+                         {rollback_error:#}; backups retained at {}",
+                        staged_path.display(),
+                        live_path.display(),
+                        backup_dir.display()
+                    );
+                }
+                let _ = fs::remove_dir_all(&backup_dir);
+                return Err(error).with_context(|| {
+                    format!(
+                        "failed to promote staged index {} -> {}",
+                        staged_path.display(),
+                        live_path.display()
+                    )
+                });
+            }
+            promoted.push(live_path);
+        }
+
         self.active = false;
+        let _ = fs::remove_dir_all(backup_dir);
         let _ = fs::remove_dir_all(&self.dir);
         Ok(())
     }
@@ -559,19 +602,37 @@ fn remove_path_if_exists(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn remove_main_store_artifacts(workspace: &Workspace) -> Result<()> {
+fn main_store_artifacts(workspace: &Workspace) -> [PathBuf; 6] {
     let sqlite_path = workspace.sqlite_path();
-    for path in [
+    [
         sqlite_path.clone(),
         sqlite_sidecar_path(&sqlite_path, "-wal"),
         sqlite_sidecar_path(&sqlite_path, "-shm"),
         workspace.tantivy_dir(),
         workspace.vector_path(),
         workspace.vector_path().with_extension("usearch.bak"),
-    ] {
-        remove_path_if_exists(&path)?;
+    ]
+}
+
+fn restore_main_store_backups(backups: &[(PathBuf, PathBuf)]) -> Result<()> {
+    for (live_path, backup_path) in backups.iter().rev() {
+        fs::rename(backup_path, live_path).with_context(|| {
+            format!(
+                "failed to restore live index {} from {}",
+                live_path.display(),
+                backup_path.display()
+            )
+        })?;
     }
     Ok(())
+}
+
+fn rollback_main_store(promoted: &[PathBuf], backups: &[(PathBuf, PathBuf)]) -> Result<()> {
+    for path in promoted.iter().rev() {
+        remove_path_if_exists(path)
+            .with_context(|| format!("failed to remove partial index {}", path.display()))?;
+    }
+    restore_main_store_backups(backups)
 }
 
 pub fn open_storage(workspace: &Workspace, embedding_dimensions: usize) -> Result<StorageHandles> {
@@ -1492,13 +1553,20 @@ fn index_workspace_inner(
                         );
                         chunked.chunks.extend(included_chunks);
                         let mut seen_vector_keys = HashSet::new();
-                        let indexed: Vec<_> = chunked
+                        let mut indexed: Vec<_> = chunked
                             .chunks
                             .into_iter()
                             .map(|c| build_indexed_chunk(c, *is_ignored))
                             .filter(|chunk| seen_vector_keys.insert(chunk.vector_key))
                             .map(|chunk| prepare_indexed_chunk(chunk, &producer_fields))
                             .collect();
+                        if let (Some(field), Some(first)) =
+                            (producer_fields.text_trigrams, indexed.first_mut())
+                        {
+                            first
+                                .tantivy_doc
+                                .add_text(field, trigram_source_text(&content));
+                        }
 
                         let n = progress_counter_clone
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -3354,6 +3422,21 @@ fn build_chunk_doc(
     doc
 }
 
+fn trigram_source_text(content: &str) -> String {
+    let mut normalized = String::with_capacity(content.len());
+    for run in content
+        .as_bytes()
+        .split(|byte| !byte.is_ascii_alphanumeric())
+        .filter(|run| run.len() >= 3)
+    {
+        if !normalized.is_empty() {
+            normalized.push_str("\n\n");
+        }
+        normalized.push_str(std::str::from_utf8(run).expect("ASCII run is valid UTF-8"));
+    }
+    normalized
+}
+
 fn insert_chunk(
     statements: &mut PersistStatements<'_>,
     chunk: &IndexedChunk,
@@ -3731,6 +3814,10 @@ fn build_schema() -> Schema {
         .set_tokenizer(CODE_TOKENIZER_NAME)
         .set_index_option(IndexRecordOption::WithFreqs);
     let code_text_opts = TextOptions::default().set_indexing_options(code_indexing.clone());
+    let trigram_indexing = TextFieldIndexing::default()
+        .set_tokenizer(TRIGRAM_TOKENIZER_NAME)
+        .set_index_option(IndexRecordOption::Basic);
+    let trigram_text_opts = TextOptions::default().set_indexing_options(trigram_indexing);
     let boosted_aux_indexing = TextFieldIndexing::default()
         .set_tokenizer(CODE_TOKENIZER_NAME)
         .set_index_option(IndexRecordOption::Basic);
@@ -3745,6 +3832,7 @@ fn build_schema() -> Schema {
     schema.add_text_field("kind", STRING | STORED);
     // Full text indexed with code-aware tokenizer (not STORED — lives in SQLite)
     schema.add_text_field("text", code_text_opts.clone());
+    schema.add_text_field("text_trigrams", trigram_text_opts);
     schema.add_u64_field("is_ignored", STORED);
     // BM25F fields: tokenized path + definition signature with code tokenizer
     schema.add_text_field("file_path_text", boosted_aux_text_opts.clone());
@@ -3767,6 +3855,9 @@ pub fn open_tantivy_index(path: &Path) -> Result<(TantivyIndex, TantivyFields)> 
     index
         .tokenizers()
         .register(CODE_TOKENIZER_NAME, build_code_analyzer());
+    index
+        .tokenizers()
+        .register(TRIGRAM_TOKENIZER_NAME, build_trigram_analyzer());
 
     let schema = index.schema();
     let fields = TantivyFields {
@@ -3777,6 +3868,7 @@ pub fn open_tantivy_index(path: &Path) -> Result<(TantivyIndex, TantivyFields)> 
         language: schema.get_field("language")?,
         kind: schema.get_field("kind")?,
         text: schema.get_field("text")?,
+        text_trigrams: schema.get_field("text_trigrams").ok(),
         is_ignored: schema.get_field("is_ignored").ok(),
         file_path_text: schema.get_field("file_path_text").ok(),
         signature: schema.get_field("signature").ok(),
@@ -4234,6 +4326,43 @@ mod tests {
                 .exists()
         );
         assert!(!staging_dir.exists());
+    }
+
+    #[test]
+    fn fresh_index_staging_failure_preserves_main_artifacts() {
+        let root = tempdir().unwrap();
+        let index_root = tempdir().unwrap();
+        let workspace = Workspace {
+            id: "staging-rollback-test".to_string(),
+            root: root.path().to_path_buf(),
+            index_dir: index_root.path().join("index"),
+            repo_id: None,
+            base_index_dir: None,
+        };
+        fs::create_dir_all(&workspace.index_dir).unwrap();
+        fs::write(workspace.lock_path(), "locked").unwrap();
+        fs::write(workspace.sqlite_path(), "old sqlite").unwrap();
+        fs::create_dir_all(workspace.tantivy_dir()).unwrap();
+        fs::write(workspace.tantivy_dir().join("old"), "old tantivy").unwrap();
+        fs::write(workspace.vector_path(), "old vector").unwrap();
+
+        let staging = FreshIndexStaging::create(&workspace).unwrap();
+        fs::write(&staging.sqlite_path, "new sqlite").unwrap();
+        fs::create_dir_all(&staging.tantivy_dir).unwrap();
+        fs::write(staging.tantivy_dir.join("new"), "new tantivy").unwrap();
+        // Missing staging vector simulates an incomplete build or promotion failure.
+
+        assert!(staging.promote(&workspace).is_err());
+        assert_eq!(fs::read_to_string(workspace.lock_path()).unwrap(), "locked");
+        assert_eq!(
+            fs::read_to_string(workspace.sqlite_path()).unwrap(),
+            "old sqlite"
+        );
+        assert!(workspace.tantivy_dir().join("old").exists());
+        assert_eq!(
+            fs::read_to_string(workspace.vector_path()).unwrap(),
+            "old vector"
+        );
     }
 
     #[test]

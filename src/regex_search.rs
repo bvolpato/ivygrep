@@ -8,9 +8,10 @@ use grep_regex::RegexMatcherBuilder;
 use grep_searcher::sinks::UTF8;
 use grep_searcher::{Searcher, SearcherBuilder};
 use rayon::prelude::*;
+use regex_syntax::hir::{Hir, HirKind};
 use tantivy::TantivyDocument;
 use tantivy::collector::TopDocs;
-use tantivy::query::{BooleanQuery, Occur, Query, QueryParser, RegexQuery, TermQuery};
+use tantivy::query::{BooleanQuery, Occur, Query, RegexQuery, TermQuery};
 use tantivy::schema::IndexRecordOption;
 use tantivy::schema::Value;
 
@@ -38,6 +39,9 @@ pub fn regex_search(
     skip_gitignore: bool,
 ) -> Result<Vec<SearchHit>> {
     let max_hits = limit.unwrap_or(usize::MAX);
+    if max_hits == 0 {
+        return Ok(Vec::new());
+    }
     let path_matcher = PathGlobMatcher::new(include_globs, exclude_globs)?;
 
     // Try to use index-backed pre-filtering via literal extraction.
@@ -67,79 +71,41 @@ pub fn regex_search(
     }
 }
 
-/// Extract literal fragments from a regex pattern.
-///
-/// Splits the pattern on common regex metacharacters and returns fragments
-/// that are long enough to be useful as Tantivy query terms (≥ 3 chars).
-/// Returns them sorted longest-first so the rarest (most selective) terms
-/// are queried first.
-fn extract_literal_fragments(pattern: &str) -> Vec<String> {
-    let mut fragments = Vec::new();
-    let mut current = String::new();
-
-    let chars: Vec<char> = pattern.chars().collect();
-    let mut i = 0;
-
-    while i < chars.len() {
-        let ch = chars[i];
-        match ch {
-            // Escape sequence: take the next character literally
-            '\\' if i + 1 < chars.len() => {
-                let next = chars[i + 1];
-                // \d, \w, \s, etc. — break the fragment
-                if next.is_alphanumeric() && "dDwWsSbB".contains(next) {
-                    if current.len() >= 3 {
-                        fragments.push(current.clone());
-                    }
-                    current.clear();
-                } else {
-                    current.push(next);
-                }
-                i += 2;
-            }
-            // Metacharacters that break literal sequences
-            '.' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$' => {
-                if current.len() >= 3 {
-                    fragments.push(current.clone());
-                }
-                current.clear();
-                i += 1;
-            }
-            // Regular literal character
-            _ => {
-                current.push(ch);
-                i += 1;
-            }
-        }
-    }
-    if current.len() >= 3 {
-        fragments.push(current);
-    }
-
-    // Sort longest first (most selective)
-    fragments.sort_by_key(|f| std::cmp::Reverse(f.len()));
-    fragments.dedup();
-    fragments
+fn required_literal_runs(pattern: &str) -> Option<Vec<String>> {
+    let hir = regex_syntax::Parser::new().parse(pattern).ok()?;
+    let mut literals = Vec::new();
+    collect_required_literals(&hir, &mut literals)?;
+    let mut runs = literals
+        .into_iter()
+        .flat_map(|literal| {
+            literal
+                .split(|byte: &u8| !byte.is_ascii_alphanumeric())
+                .filter(|run| run.len() >= 3 && run.is_ascii())
+                .map(|run| String::from_utf8_lossy(run).to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    runs.sort_by_key(|run| std::cmp::Reverse(run.len()));
+    runs.dedup();
+    (!runs.is_empty()).then_some(runs)
 }
 
-/// True if the pattern contains regex alternation (`|`) at the top level —
-/// i.e. an unescaped `|` that is not inside a `[...]` character class. Such
-/// patterns match any branch, so the AND-style fragment prefilter is unsafe.
-fn pattern_has_alternation(pattern: &str) -> bool {
-    let mut chars = pattern.chars();
-    let mut in_class = false;
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => {
-                chars.next(); // skip the escaped character
-            }
-            '[' => in_class = true,
-            ']' => in_class = false,
-            '|' if !in_class => return true,
-            _ => {}
+fn collect_required_literals(hir: &Hir, literals: &mut Vec<Vec<u8>>) -> Option<()> {
+    match hir.kind() {
+        HirKind::Literal(literal) => literals.push(literal.0.to_vec()),
+        HirKind::Repetition(repetition) if repetition.min > 0 => {
+            collect_required_literals(&repetition.sub, literals)?;
         }
+        HirKind::Capture(capture) => collect_required_literals(&capture.sub, literals)?,
+        HirKind::Concat(expressions) => {
+            for expression in expressions {
+                collect_required_literals(expression, literals)?;
+            }
+        }
+        HirKind::Alternation(_) => return None,
+        HirKind::Empty | HirKind::Class(_) | HirKind::Look(_) | HirKind::Repetition(_) => {}
     }
-    false
+    Some(())
 }
 
 /// Use the Tantivy index to find files containing the literal fragments
@@ -150,20 +116,9 @@ fn index_prefilter_files(
     pattern: &str,
     scope_filter: Option<&WorkspaceScope>,
     path_matcher: &PathGlobMatcher,
-    _skip_gitignore: bool,
+    skip_gitignore: bool,
 ) -> Option<Vec<PathBuf>> {
-    // The fragment prefilter intersects literals, treating them as a required
-    // sequence. That is incorrect for alternation: a file matching only one
-    // branch of `(a|b|c)` would be dropped, producing missing results. For any
-    // pattern with top-level alternation, fall back to a full walk (None).
-    if pattern_has_alternation(pattern) {
-        return None;
-    }
-
-    let fragments = extract_literal_fragments(pattern);
-    if fragments.is_empty() {
-        return None;
-    }
+    let required_runs = required_literal_runs(pattern)?;
 
     let tantivy_dir = workspace.tantivy_dir();
     if !tantivy_dir.exists() {
@@ -174,11 +129,7 @@ fn index_prefilter_files(
     let reader = idx.reader().ok()?;
     let searcher = reader.searcher();
 
-    // Query the text field for the longest (most selective) literal fragment
-    let parser = QueryParser::for_index(&idx, vec![fields.text]);
-
-    let search_term = &fragments[0];
-    let query = parser.parse_query(search_term).ok()?;
+    let query = crate::search::substring_candidate_query(fields.text_trigrams?, &required_runs)?;
     let query = constrain_query_to_scope(query, fields.file_path, scope_filter)?;
 
     // Get up to 10K candidate chunks — we only need their file_path
@@ -192,6 +143,12 @@ fn index_prefilter_files(
     let mut candidate_files = HashSet::new();
     for (_score, addr) in docs {
         if let Ok(doc) = searcher.doc::<TantivyDocument>(addr)
+            && (skip_gitignore
+                || fields
+                    .is_ignored
+                    .and_then(|field| doc.get_first(field))
+                    .and_then(|value| value.as_u64())
+                    .is_none_or(|value| value == 0))
             && let Some(path_val) = doc.get_first(fields.file_path)
             && let Some(path_str) = path_val.as_str()
         {
@@ -199,32 +156,6 @@ fn index_prefilter_files(
             if scope_filter.is_none_or(|s| s.matches(&rel)) && path_matcher.matches(&rel) {
                 candidate_files.insert(rel);
             }
-        }
-    }
-
-    // If we have additional literal fragments, further filter by querying
-    // for each additional fragment and intersecting
-    for frag in fragments.iter().skip(1).take(2) {
-        if candidate_files.len() <= 100 {
-            break; // Already small enough
-        }
-        if let Ok(q2) = parser.parse_query(frag)
-            && let Some(q2) = constrain_query_to_scope(q2, fields.file_path, scope_filter)
-            && let Ok(docs2) = searcher.search(&q2, &TopDocs::with_limit(10_000).order_by_score())
-        {
-            if docs2.len() == 10_000 {
-                return None;
-            }
-            let mut frag_files = HashSet::new();
-            for (_score, addr) in docs2 {
-                if let Ok(doc) = searcher.doc::<TantivyDocument>(addr)
-                    && let Some(path_val) = doc.get_first(fields.file_path)
-                    && let Some(path_str) = path_val.as_str()
-                {
-                    frag_files.insert(PathBuf::from(path_str));
-                }
-            }
-            candidate_files = candidate_files.intersection(&frag_files).cloned().collect();
         }
     }
 
@@ -409,24 +340,29 @@ mod tests {
     use crate::workspace::{Workspace, WorkspaceScope};
 
     #[test]
-    fn test_extract_literal_fragments() {
+    fn required_literal_runs_ignore_optional_and_alternative_text() {
         assert_eq!(
-            extract_literal_fragments("func.*DDSQLizer"),
-            vec!["DDSQLizer".to_string(), "func".to_string()]
+            required_literal_runs("func.*DDSQLizer").unwrap(),
+            vec!["ddsqlizer".to_string(), "func".to_string()]
         );
         assert_eq!(
-            extract_literal_fragments("SELECT.*FROM.*WHERE"),
+            required_literal_runs("SELECT.*FROM.*WHERE").unwrap(),
             vec![
-                "SELECT".to_string(),
-                "WHERE".to_string(),
-                "FROM".to_string()
+                "select".to_string(),
+                "where".to_string(),
+                "from".to_string()
             ]
         );
-        assert_eq!(extract_literal_fragments("a{2}"), Vec::<String>::new());
         assert_eq!(
-            extract_literal_fragments("hello_world"),
-            vec!["hello_world".to_string()]
+            required_literal_runs("hello_world").unwrap(),
+            vec!["hello".to_string(), "world".to_string()]
         );
+        assert_eq!(
+            required_literal_runs(r"cache(_token)?").unwrap(),
+            vec!["cache".to_string()]
+        );
+        assert!(required_literal_runs("error|warning").is_none());
+        assert!(required_literal_runs("[abcdef]{200}").is_none());
     }
 
     #[test]
@@ -640,5 +576,82 @@ mod tests {
             files.contains("c.rs"),
             "must find critical branch file; got {files:?}"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn indexed_regex_optional_group_does_not_require_optional_literal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            tmp.path().join("cache.rs"),
+            "const NAME: &str = \"cache\";\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits =
+            regex_search(&workspace, r"cache(_token)?", None, None, &[], &[], false).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].file_path, PathBuf::from("cache.rs"));
+    }
+
+    #[test]
+    #[serial]
+    fn indexed_regex_finds_literal_inside_identifier_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            tmp.path().join("filter.rs"),
+            "pub fn applyFilter() -> bool { true }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = regex_search(&workspace, "ppl", None, None, &[], &[], false).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].file_path, PathBuf::from("filter.rs"));
+    }
+
+    #[test]
+    #[serial]
+    fn indexed_regex_respects_gitignore_filter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(tmp.path().join(".gitignore"), "ignored.rs\n").unwrap();
+        std::fs::write(tmp.path().join("visible.rs"), "fn visible_marker() {}\n").unwrap();
+        std::fs::write(tmp.path().join("ignored.rs"), "fn ignored_marker() {}\n").unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        workspace.ensure_dirs().unwrap();
+        workspace
+            .write_metadata(&crate::workspace::WorkspaceMetadata {
+                id: workspace.id.clone(),
+                root: workspace.root.clone(),
+                created_at_unix: 0,
+                last_indexed_at_unix: None,
+                watch_enabled: false,
+                skip_gitignore: true,
+                index_generation: 0,
+            })
+            .unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let default_hits = regex_search(&workspace, "marker", None, None, &[], &[], false).unwrap();
+        assert_eq!(default_hits.len(), 1);
+        assert_eq!(default_hits[0].file_path, PathBuf::from("visible.rs"));
+
+        let all_hits = regex_search(&workspace, "marker", None, None, &[], &[], true).unwrap();
+        assert_eq!(all_hits.len(), 2);
     }
 }

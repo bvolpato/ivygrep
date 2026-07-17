@@ -128,7 +128,7 @@ pub fn start_job(
     let nonce = Uuid::new_v4().to_string();
     let now = now_unix();
 
-    update_job(workspace, kind, |ledger| {
+    update_job(workspace, |ledger| {
         let generation = ledger.get(kind).map(|job| job.generation + 1).unwrap_or(1);
         let mut details = ledger
             .get(kind)
@@ -156,8 +156,8 @@ pub fn start_job(
 
 pub fn heartbeat_job(workspace: &Workspace, kind: JobKind, update: JobUpdate) -> Result<JobRecord> {
     let now = now_unix();
-    update_job(workspace, kind, move |ledger| {
-        let mut record = ledger.get(kind).cloned().unwrap_or(JobRecord {
+    update_job(workspace, move |ledger| {
+        let record = ledger.get(kind).cloned().unwrap_or(JobRecord {
             kind,
             pid: Some(std::process::id()),
             pid_start_time: process_start_time_token(std::process::id()),
@@ -171,22 +171,27 @@ pub fn heartbeat_job(workspace: &Workspace, kind: JobKind, update: JobUpdate) ->
             details: BTreeMap::new(),
             active: true,
         });
-
-        record.heartbeat_at_unix = Some(now);
-        if let Some(phase) = update.phase {
-            record.phase = phase;
-        }
-        if let Some(last_error) = update.last_error {
-            record.last_error = last_error;
-        }
-        if let Some(active) = update.active {
-            record.active = active;
-        }
-        for (key, value) in update.details {
-            record.details.insert(key, value);
-        }
+        let record = apply_heartbeat_update(record, update, now);
         ledger.upsert(record.clone());
         record
+    })
+}
+
+pub fn heartbeat_job_if_current(
+    workspace: &Workspace,
+    kind: JobKind,
+    expected_nonce: &str,
+    update: JobUpdate,
+) -> Result<Option<JobRecord>> {
+    let now = now_unix();
+    update_job(workspace, move |ledger| {
+        let record = ledger
+            .get(kind)
+            .filter(|record| record.nonce.as_deref() == Some(expected_nonce))
+            .cloned()?;
+        let record = apply_heartbeat_update(record, update, now);
+        ledger.upsert(record.clone());
+        Some(record)
     })
 }
 
@@ -198,8 +203,8 @@ pub fn finish_job(
 ) -> Result<JobRecord> {
     let phase = phase.into();
     let now = now_unix();
-    update_job(workspace, kind, move |ledger| {
-        let mut record = ledger.get(kind).cloned().unwrap_or(JobRecord {
+    update_job(workspace, move |ledger| {
+        let record = ledger.get(kind).cloned().unwrap_or(JobRecord {
             kind,
             pid: None,
             pid_start_time: None,
@@ -213,17 +218,63 @@ pub fn finish_job(
             details: BTreeMap::new(),
             active: false,
         });
-
-        record.active = false;
-        record.pid = None;
-        record.pid_start_time = None;
-        record.nonce = None;
-        record.heartbeat_at_unix = Some(now);
-        record.phase = phase;
-        record.last_error = last_error;
+        let record = finish_record(record, phase, last_error, now);
         ledger.upsert(record.clone());
         record
     })
+}
+
+pub fn finish_job_if_current(
+    workspace: &Workspace,
+    kind: JobKind,
+    expected_nonce: &str,
+    phase: impl Into<String>,
+    last_error: Option<String>,
+) -> Result<Option<JobRecord>> {
+    let phase = phase.into();
+    let now = now_unix();
+    update_job(workspace, move |ledger| {
+        let record = ledger
+            .get(kind)
+            .filter(|record| record.nonce.as_deref() == Some(expected_nonce))
+            .cloned()?;
+        let record = finish_record(record, phase, last_error, now);
+        ledger.upsert(record.clone());
+        Some(record)
+    })
+}
+
+fn apply_heartbeat_update(mut record: JobRecord, update: JobUpdate, now: u64) -> JobRecord {
+    record.heartbeat_at_unix = Some(now);
+    if let Some(phase) = update.phase {
+        record.phase = phase;
+    }
+    if let Some(last_error) = update.last_error {
+        record.last_error = last_error;
+    }
+    if let Some(active) = update.active {
+        record.active = active;
+    }
+    for (key, value) in update.details {
+        record.details.insert(key, value);
+    }
+    record
+}
+
+fn finish_record(
+    mut record: JobRecord,
+    phase: String,
+    last_error: Option<String>,
+    now: u64,
+) -> JobRecord {
+    record.active = false;
+    record.pid = None;
+    record.pid_start_time = None;
+    record.nonce = None;
+    record.heartbeat_at_unix = Some(now);
+    record.phase = phase;
+    record.last_error = last_error;
+    record
 }
 
 pub fn job_status(workspace: &Workspace, kind: JobKind, ttl_secs: u64) -> JobStatus {
@@ -330,11 +381,7 @@ pub fn now_unix() -> u64 {
         .as_secs()
 }
 
-fn update_job(
-    workspace: &Workspace,
-    kind: JobKind,
-    updater: impl FnOnce(&mut JobLedger) -> JobRecord,
-) -> Result<JobRecord> {
+fn update_job<T>(workspace: &Workspace, updater: impl FnOnce(&mut JobLedger) -> T) -> Result<T> {
     workspace.ensure_dirs()?;
     let lock_path = workspace.job_lock_path();
     let lock = fs::OpenOptions::new()
@@ -350,7 +397,6 @@ fn update_job(
     let record = updater(&mut ledger);
     write_job_ledger_locked(workspace.job_ledger_path(), &ledger)?;
     let _ = lock.unlock();
-    let _ = kind;
     Ok(record)
 }
 
@@ -401,5 +447,52 @@ mod tests {
 
         assert!(job_status_at(&snapshot, JobKind::Indexing, 20, now_unix()).active());
         assert!(!job_status(&workspace, JobKind::Indexing, 20).active());
+    }
+
+    #[test]
+    #[serial]
+    fn stale_job_generation_cannot_overwrite_current_record() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+
+        let first = start_job(&workspace, JobKind::Watcher, "first", 1).unwrap();
+        let second = start_job(&workspace, JobKind::Watcher, "second", 1).unwrap();
+        let first_nonce = first.nonce.as_deref().unwrap();
+        let second_nonce = second.nonce.as_deref().unwrap();
+
+        assert!(
+            heartbeat_job_if_current(
+                &workspace,
+                JobKind::Watcher,
+                first_nonce,
+                JobUpdate {
+                    phase: Some("stale-heartbeat".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            finish_job_if_current(
+                &workspace,
+                JobKind::Watcher,
+                first_nonce,
+                "stale-finish",
+                None,
+            )
+            .unwrap()
+            .is_none()
+        );
+
+        let current = read_job_ledger(&workspace)
+            .get(JobKind::Watcher)
+            .unwrap()
+            .clone();
+        assert_eq!(current.nonce.as_deref(), Some(second_nonce));
+        assert_eq!(current.phase, "second");
+        assert!(current.active);
     }
 }
