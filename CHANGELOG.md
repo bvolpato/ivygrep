@@ -4,6 +4,20 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.2.3] - 2026-07-17
+
+### Performance
+- **Exact substring and regex search use compact file-level trigram candidates.** On the 1,000-file benchmark, literal search improved from `0.923 ms` to `0.704 ms` (`23.8%`) and regex search from `9.24 ms` to `1.99 ms` (`4.65x`). A real-repository index grew `5.1%` overall while fresh 30,000-chunk indexing improved from `159.54 ms` to `157.56 ms` (`1.2%`).
+
+### Fixed
+- **Literal and regex search no longer miss substrings inside identifiers.** Queries such as `ppl` now find `applyFilter`, regex literal extraction ignores optional and alternative branches, indexed regex respects gitignore state, and overlapping structural chunks produce one literal hit per source line.
+- **Failed fresh rebuilds preserve the last healthy index.** Staged artifacts are validated before promotion, live stores move to a rollback directory, and partial promotion failures restore every previous artifact without replacing the active lock inode.
+- **Watcher job generations cannot overwrite newer state.** Heartbeats and completion updates carry the watcher nonce, so detached work from a stopped watcher cannot revive or modify a replacement watcher record.
+- **Invalid vector dimensions cannot delete existing embeddings.** Optimized vector upserts validate dimensions before removing an existing key, and search and score APIs now match portable-backend rejection behavior.
+
+### Testing
+- **Correctness and performance candidates were independently gated.** Focused regressions cover index preservation, watcher generations, vector replacement, substring recall, optional regex groups, gitignore filtering, and literal deduplication. Wildcard-bigram candidates (`82x` slower), chunk-level trigrams (`42%` larger index), and raw scans (`3.3x` slower) were discarded.
+
 ## [1.2.2] - 2026-07-17
 
 ### Performance

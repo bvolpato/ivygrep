@@ -5,6 +5,67 @@ use tantivy::tokenizer::{Token, TokenStream, Tokenizer};
 
 /// Tokenizer name registered with every Tantivy index.
 pub const CODE_TOKENIZER_NAME: &str = "code";
+pub const TRIGRAM_TOKENIZER_NAME: &str = "trigram";
+
+#[derive(Clone, Default)]
+pub struct AsciiTrigramTokenizer {
+    token: Token,
+}
+
+pub struct AsciiTrigramTokenStream<'a> {
+    text: &'a str,
+    cursor: usize,
+    token: &'a mut Token,
+}
+
+impl Tokenizer for AsciiTrigramTokenizer {
+    type TokenStream<'a> = AsciiTrigramTokenStream<'a>;
+
+    fn token_stream<'a>(&'a mut self, text: &'a str) -> Self::TokenStream<'a> {
+        self.token.reset();
+        AsciiTrigramTokenStream {
+            text,
+            cursor: 0,
+            token: &mut self.token,
+        }
+    }
+}
+
+impl TokenStream for AsciiTrigramTokenStream<'_> {
+    fn advance(&mut self) -> bool {
+        let bytes = self.text.as_bytes();
+        while self.cursor.saturating_add(3) <= bytes.len() {
+            let start = self.cursor;
+            self.cursor += 1;
+            let trigram = &bytes[start..start + 3];
+            if !trigram.iter().all(u8::is_ascii_alphanumeric) {
+                continue;
+            }
+
+            self.token.offset_from = start;
+            self.token.offset_to = start + 3;
+            self.token.position = start;
+            self.token.text.clear();
+            self.token
+                .text
+                .extend(trigram.iter().map(u8::to_ascii_lowercase).map(char::from));
+            return true;
+        }
+        false
+    }
+
+    fn token(&self) -> &Token {
+        self.token
+    }
+
+    fn token_mut(&mut self) -> &mut Token {
+        self.token
+    }
+}
+
+pub fn build_trigram_analyzer() -> tantivy::tokenizer::TextAnalyzer {
+    tantivy::tokenizer::TextAnalyzer::from(AsciiTrigramTokenizer::default())
+}
 
 /// A code-aware tokenizer that splits text on whitespace, punctuation,
 /// camelCase boundaries, and underscore separators — producing lowercase

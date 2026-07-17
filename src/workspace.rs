@@ -52,7 +52,8 @@ pub struct Workspace {
 ///  17 — Main text Tantivy postings store frequencies without positions
 ///  18 — Compact typed file relationships support task-local context graphs
 ///  19 — JVM and .NET source-test mappings persist late-bound graph ownership
-pub const INDEX_FORMAT_VERSION: u32 = 19;
+///  20 — File-level trigram postings support exact substring candidate search
+pub const INDEX_FORMAT_VERSION: u32 = 20;
 const COMPACTION_FREE_BYTES_THRESHOLD: u64 = 16 * 1024 * 1024;
 const COMPACTION_FREE_PERCENT_THRESHOLD: f64 = 20.0;
 

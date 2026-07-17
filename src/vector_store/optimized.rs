@@ -339,12 +339,14 @@ impl VectorStore {
     /// Add a vector without checking for duplicates. Use only when the caller
     /// guarantees the key does not already exist (e.g., fresh enhancement).
     pub fn add_unchecked(&mut self, key: u64, vector: Vec<f32>) -> Result<()> {
+        self.validate_vector(&vector)?;
         self.ensure_capacity_for_insert()?;
         self.index.add(key, &vector)?;
         Ok(())
     }
 
     pub fn upsert(&mut self, key: u64, vector: Vec<f32>) -> Result<()> {
+        self.validate_vector(&vector)?;
         self.ensure_capacity_for_insert()?;
 
         if self.index.contains(key) {
@@ -366,6 +368,9 @@ impl VectorStore {
     }
 
     pub fn search(&self, query: &[f32], count: usize) -> Vec<VectorMatch> {
+        if query.len() != self.index.dimensions() {
+            return Vec::new();
+        }
         match self.index.search(query, count) {
             Ok(matches) => matches
                 .keys
@@ -388,7 +393,7 @@ impl VectorStore {
     /// Score a single vector by key against a query vector.
     /// Returns None if the key doesn't exist in the index.
     pub fn score(&self, key: u64, query: &[f32]) -> Option<f32> {
-        if !self.index.contains(key) {
+        if query.len() != self.index.dimensions() || !self.index.contains(key) {
             return None;
         }
         // Use search with the query and check if this key appears
@@ -452,6 +457,16 @@ impl VectorStore {
         } else {
             score_chunk(keys)
         }
+    }
+
+    fn validate_vector(&self, vector: &[f32]) -> Result<()> {
+        anyhow::ensure!(
+            vector.len() == self.index.dimensions(),
+            "vector dimensions mismatch ({} != {})",
+            vector.len(),
+            self.index.dimensions()
+        );
+        Ok(())
     }
 
     fn ensure_capacity_for_insert(&mut self) -> Result<()> {
@@ -715,6 +730,21 @@ mod tests {
         assert_eq!(store.size(), 1);
         let hits = store.search(&[0.0, 1.0, 0.0, 0.0], 1);
         assert_eq!(hits[0].key, 1);
+    }
+
+    #[test]
+    fn invalid_upsert_preserves_existing_vector() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.bin");
+
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
+
+        assert!(store.upsert(1, vec![0.0, 1.0]).is_err());
+        assert!(store.contains(1));
+        assert!(store.score(1, &[1.0, 0.0]).is_none());
+        assert!(store.search(&[1.0, 0.0], 1).is_empty());
+        assert!(store.score(1, &[1.0, 0.0, 0.0, 0.0]).unwrap() > 0.9);
     }
 
     #[test]
