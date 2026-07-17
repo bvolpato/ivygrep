@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/social-card.png" alt="Task to context pack to agent to passing tests" width="800" />
+  <img src="assets/hero-banner.png" alt="ivygrep semantic search returning matching code" width="800" />
 </p>
 
 <p align="center">
@@ -26,41 +26,27 @@
   <a href="https://github.com/bvolpato/ivygrep/discussions">Discussions</a>
 </p>
 
-## 30-second task loop
+## Try it in 30 seconds
 
 ```bash
-# 1. Build task context from branch changes, dirty files, and code relationships
+# Search code by intent
+ig "where is refresh token rotated?"
+
+# Build focused context from code and current changes
 ig context "fix refresh-token races" --since main --budget 8000
-
-# 2. Connect coding agent once
-ig agent install codex
-
-# 3. Ask agent to use ivygrep context, implement fix, and run focused test
-codex "Use ig context for refresh-token race. Fix it and run auth tests."
 ```
 
 ```text
-✓ task anchors: refresh token, race
-✓ changed files: 3 staged/dirty paths since main
-✓ relationships: definitions, callers, dependents, tests, config, docs
-✓ selected: 14 snippets / 7,642 estimated tokens
-test auth::refresh_token_is_single_use ... ok
+src/auth/refresh.rs:118
+fn rotate_refresh_token(...)
+
+✓ context pack: 14 snippets / 7,642 estimated tokens
+✓ evidence: changed files, definitions, callers, dependents, tests
 ```
 
-`ig context` returns one bounded, evidence-rich pack instead of making agents
-guess paths or load whole files. Every snippet includes selection reason and
-relationship. CLI, MCP, and Web use same structured pack.
-
-```bash
-ig context "fix refresh-token races" --budget 8000  # complete task pack
-ig context "fix refresh-token races" --since main   # commits + dirty worktree
-cat stacktrace.log | ig context - --budget 8000      # issue or trace from stdin
-ig --json context "task" --budget 16000              # structured output
-```
-
-Packs cover definitions, callers, references, dependencies, dependents, tests,
-configuration, documentation, exact paths/lines, and recent co-change evidence.
-`--type`, `--include`, and `--exclude` scope complete Markdown pack.
+First command finds relevant code. Second turns task, branch changes, dirty
+files, and code relationships into one bounded, complete Markdown pack. Every
+snippet includes selection reason and relationship.
 
 ## Install
 
@@ -147,6 +133,9 @@ Agents call `ig_search` for discovery. Set `output=context_pack` and
 `budget_tokens=8000` for implementation packs. Pass absolute current repository
 or worktree path. Worktrees reuse base index and store only divergent chunks and
 tombstones.
+
+Context packs cover definitions, callers, references, dependencies, dependents,
+tests, configuration, and docs.
 
 Recommended agent instruction:
 

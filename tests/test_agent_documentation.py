@@ -44,9 +44,17 @@ class AgentDocumentationTest(unittest.TestCase):
         self.assertIn("preserves existing", self.readme)
 
     def test_task_context_packs_are_prominent_and_consistent(self) -> None:
+        search_command = 'ig "where is refresh token rotated?"'
+        context_command = (
+            'ig context "fix refresh-token races" --since main --budget 8000'
+        )
         for document in [self.readme, self.site]:
             with self.subTest(document=document[:20]):
-                self.assertIn('ig context "fix refresh-token races" --budget 8000', document)
+                self.assertIn(search_command, document)
+                self.assertIn(context_command, document)
+                self.assertLess(
+                    document.index(search_command), document.index(context_command)
+                )
                 self.assertIn("definitions", document)
                 self.assertIn("callers", document)
                 self.assertIn("references", document)
@@ -57,6 +65,26 @@ class AgentDocumentationTest(unittest.TestCase):
                 self.assertIn("budget_tokens", document)
         self.assertIn('id="context-packs"', self.site)
         self.assertIn("complete Markdown pack", self.readme)
+
+    def test_quick_start_has_one_search_and_one_context_command(self) -> None:
+        readme_quick_start = self.readme.split("## Try it in 30 seconds", 1)[1].split(
+            "## Install", 1
+        )[0]
+        site_demo = self.site.split("<!-- Demo terminal -->", 1)[1].split(
+            "<!-- Social proof strip -->", 1
+        )[0]
+
+        for section in [readme_quick_start, site_demo]:
+            with self.subTest(section=section[:20]):
+                self.assertEqual(section.count('ig "where is refresh token rotated?"'), 1)
+                self.assertEqual(
+                    section.count(
+                        'ig context "fix refresh-token races" --since main --budget 8000'
+                    ),
+                    1,
+                )
+                self.assertNotIn("ig agent", section)
+                self.assertNotIn("--mcp", section)
 
     def test_opencode_uses_current_local_server_shape(self) -> None:
         self.assertIn('"type": "local"', self.readme)
