@@ -346,6 +346,7 @@ pub struct SearchContext {
     pub tombstones: HashSet<String>,
     pub overlay_files: HashSet<String>,
     file_contents: RefCell<HashMap<PathBuf, CachedFileContent>>,
+    glob_path_filters: RefCell<HashMap<GlobPathFilterCacheKey, GlobPathQueryFilter>>,
 }
 
 #[derive(Clone)]
@@ -472,6 +473,7 @@ impl SearchContext {
                 tombstones,
                 overlay_files,
                 file_contents: RefCell::new(HashMap::new()),
+                glob_path_filters: RefCell::new(HashMap::new()),
             })
         } else {
             let sqlite = open_sqlite_readonly(&workspace.sqlite_path())?;
@@ -521,6 +523,7 @@ impl SearchContext {
                 tombstones: HashSet::new(),
                 overlay_files: HashSet::new(),
                 file_contents: RefCell::new(HashMap::new()),
+                glob_path_filters: RefCell::new(HashMap::new()),
             })
         }
     }
@@ -2104,6 +2107,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
             semantic_by_id = collect_unfiltered_semantic_candidates(ctx, options, sources)?;
             tracing::trace!("semantic_hydrate={:?}", semantic_started.elapsed());
         } else {
+            let filter_plan = build_semantic_filter_plan(ctx, &path_matcher, options);
             if has_hash_vectors {
                 let hash_query_vector = embed_hash_query(trimmed);
                 tracing::trace!("semantic_hash_embed={:?}", semantic_started.elapsed());
@@ -2113,8 +2117,8 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
                     options,
                     &hash_query_vector,
                     semantic_limit,
-                    ctx.hash_vectors.as_ref(),
-                    ctx.base_hash_vectors.as_ref(),
+                    (ctx.hash_vectors.as_ref(), ctx.base_hash_vectors.as_ref()),
+                    Some(&filter_plan),
                 )?;
                 merge_semantic_candidates(&mut semantic_by_id, hash_hits, hash_weight, "hash");
             }
@@ -2129,8 +2133,11 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
                     options,
                     &neural_query_vector,
                     semantic_limit,
-                    ctx.neural_vectors.as_ref(),
-                    ctx.base_neural_vectors.as_ref(),
+                    (
+                        ctx.neural_vectors.as_ref(),
+                        ctx.base_neural_vectors.as_ref(),
+                    ),
+                    Some(&filter_plan),
                 )?;
                 merge_semantic_candidates(&mut semantic_by_id, neural_hits, 1.08, "neural");
             }
@@ -3305,10 +3312,18 @@ fn constrain_query_to_scope(
 
 const MAX_GLOB_PATH_TERMS: usize = 10_000;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct GlobPathQueryFilter {
     included_paths: Option<Vec<String>>,
     excluded_paths: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct GlobPathFilterCacheKey {
+    include_globs: Vec<String>,
+    exclude_globs: Vec<String>,
+    scope_path: Option<String>,
+    scope_is_file: bool,
 }
 
 /// Build an exact-path Tantivy filter for focused globs before TopDocs ranking.
@@ -3327,6 +3342,22 @@ fn build_glob_path_query_filter(
     };
     if filter.included_paths.is_none() && filter.excluded_paths.is_none() {
         return Ok(filter);
+    }
+
+    let cache_key = GlobPathFilterCacheKey {
+        include_globs: options.include_globs.clone(),
+        exclude_globs: options.exclude_globs.clone(),
+        scope_path: options
+            .scope_filter
+            .as_ref()
+            .map(|scope| index_path_string(&scope.rel_path)),
+        scope_is_file: options
+            .scope_filter
+            .as_ref()
+            .is_some_and(|scope| scope.is_file),
+    };
+    if let Some(cached) = ctx.glob_path_filters.borrow().get(&cache_key).cloned() {
+        return Ok(cached);
     }
 
     let mut seen_paths = HashSet::new();
@@ -3366,6 +3397,16 @@ fn build_glob_path_query_filter(
     let should_continue = visit_distinct_file_paths(&ctx.sqlite, |path| collect_path(path, 0))?;
     if should_continue && let Some(base_sqlite) = &ctx.base_sqlite {
         visit_distinct_file_paths(base_sqlite, |path| collect_path(path, 1))?;
+    }
+
+    let cached_terms = filter.included_paths.as_ref().map_or(0, Vec::len)
+        + filter.excluded_paths.as_ref().map_or(0, Vec::len);
+    if cached_terms <= 2_048 {
+        let mut cache = ctx.glob_path_filters.borrow_mut();
+        if cache.len() >= 16 {
+            cache.clear();
+        }
+        cache.insert(cache_key, filter.clone());
     }
 
     Ok(filter)
@@ -3531,6 +3572,31 @@ fn query_filtered_chunks(
         }
     }
 
+    // Push exact paths and trailing-wildcard directory patterns into the
+    // file_path index. Rust glob matching below remains the source of truth.
+    let indexed_path_filters = query
+        .include_globs
+        .iter()
+        .map(|glob| indexed_include_path_filter(glob))
+        .collect::<Option<Vec<_>>>();
+    if let Some(filters) = indexed_path_filters.filter(|filters| !filters.is_empty()) {
+        let mut clauses = Vec::with_capacity(filters.len());
+        for filter in filters {
+            match filter {
+                IndexedIncludePath::Exact(path) => {
+                    clauses.push("file_path = ?");
+                    params_vec.push(Box::new(path));
+                }
+                IndexedIncludePath::Prefix(prefix) => {
+                    clauses.push("(file_path >= ? AND file_path < ?)");
+                    params_vec.push(Box::new(format!("{prefix}/")));
+                    params_vec.push(Box::new(format!("{prefix}0")));
+                }
+            }
+        }
+        sql.push_str(&format!(" AND ({})", clauses.join(" OR ")));
+    }
+
     // Push simple extension globs into SQL for massive performance gains.
     // e.g., "*.yaml" -> language IN ('yaml') (Hits the SQLite index instantly!)
     // Instead of doing `file_path LIKE '%.yaml'` which triggers a full table scan.
@@ -3595,33 +3661,55 @@ fn query_filtered_chunks(
         .collect()
 }
 
+enum IndexedIncludePath {
+    Exact(String),
+    Prefix(String),
+}
+
+fn indexed_include_path_filter(glob: &str) -> Option<IndexedIncludePath> {
+    let normalized = glob.trim().trim_start_matches("./").trim_end_matches('/');
+    if normalized.is_empty() {
+        return None;
+    }
+    let contains_meta = |value: &str| value.chars().any(|ch| matches!(ch, '*' | '?' | '[' | '{'));
+    if !contains_meta(normalized) {
+        return Some(IndexedIncludePath::Exact(normalized.to_string()));
+    }
+    for suffix in ["/**", "/*"] {
+        if let Some(prefix) = normalized.strip_suffix(suffix)
+            && !prefix.is_empty()
+            && !contains_meta(prefix)
+        {
+            return Some(IndexedIncludePath::Prefix(prefix.to_string()));
+        }
+    }
+    None
+}
+
 fn collect_semantic_candidates(
     ctx: &SearchContext,
     path_matcher: &PathGlobMatcher,
     options: &SearchOptions,
     query_vector: &[f32],
     candidate_limit: usize,
-    primary_store: Option<&VectorStore>,
-    base_store: Option<&VectorStore>,
+    stores: (Option<&VectorStore>, Option<&VectorStore>),
+    filter_plan: Option<&SemanticFilterPlan>,
 ) -> Result<Vec<(IndexedChunk, f32)>> {
-    const MAX_EXACT_FILTERED_CANDIDATES: usize = 50_000;
-
+    let (primary_store, base_store) = stores;
     let has_filters = has_semantic_filters(options);
 
     // ANN cannot push path filters into the graph. For focused searches, exact
     // scoring over the filtered subset is both complete and cheap. This avoids
     // losing the best scoped result behind globally-nearer out-of-scope chunks.
     if has_filters {
-        let filtered = collect_filtered_chunks(
-            ctx,
-            path_matcher,
-            options.scope_filter.as_ref(),
-            options.type_filter.as_deref(),
-            &options.include_globs,
-            options.skip_gitignore,
-            MAX_EXACT_FILTERED_CANDIDATES + 1,
-        );
-        if filtered.len() <= MAX_EXACT_FILTERED_CANDIDATES {
+        let owned_plan;
+        let plan = if let Some(plan) = filter_plan {
+            plan
+        } else {
+            owned_plan = build_semantic_filter_plan(ctx, path_matcher, options);
+            &owned_plan
+        };
+        if let SemanticFilterPlan::Exact(filtered) = plan {
             return score_filtered_semantic_candidates(
                 ctx,
                 filtered,
@@ -3677,6 +3765,82 @@ fn collect_semantic_candidates(
     }
 
     Ok(semantic_chunks)
+}
+
+/// Return true when SQLite can prove an index-backed filter exceeds the exact
+/// scoring budget without materializing candidate metadata. Complex globs and
+/// worktree overlays retain the existing collection path.
+fn indexed_filter_exceeds_exact_limit(
+    ctx: &SearchContext,
+    options: &SearchOptions,
+    limit: usize,
+) -> bool {
+    if ctx.base_sqlite.is_some()
+        || !options.include_globs.is_empty()
+        || !options.exclude_globs.is_empty()
+    {
+        return false;
+    }
+
+    let mut sql = String::from("SELECT 1 FROM chunks WHERE 1=1");
+    let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+    if !options.skip_gitignore {
+        sql.push_str(" AND is_ignored = 0");
+    }
+    if let Some(type_filter) = options.type_filter.as_deref() {
+        sql.push_str(" AND language = ?");
+        params_vec.push(Box::new(type_filter.to_string()));
+    }
+    if let Some(scope) = options.scope_filter.as_ref() {
+        let prefix = index_path_string(&scope.rel_path);
+        if scope.is_file {
+            sql.push_str(" AND file_path = ?");
+            params_vec.push(Box::new(prefix));
+        } else {
+            let dir_prefix = format!("{prefix}/");
+            sql.push_str(" AND file_path LIKE ? ESCAPE '\\'");
+            params_vec.push(Box::new(format!("{}%", escape_like_pattern(&dir_prefix))));
+        }
+    }
+    sql.push_str(" LIMIT 1 OFFSET ?");
+    params_vec.push(Box::new(limit as i64));
+    let params_refs = params_vec
+        .iter()
+        .map(|value| value.as_ref())
+        .collect::<Vec<&dyn rusqlite::types::ToSql>>();
+    ctx.sqlite
+        .query_row(&sql, params_refs.as_slice(), |_| Ok(()))
+        .is_ok()
+}
+
+enum SemanticFilterPlan {
+    Exact(Vec<RawIndexedChunk>),
+    Broad,
+}
+
+fn build_semantic_filter_plan(
+    ctx: &SearchContext,
+    path_matcher: &PathGlobMatcher,
+    options: &SearchOptions,
+) -> SemanticFilterPlan {
+    const MAX_EXACT_FILTERED_CANDIDATES: usize = 50_000;
+    if indexed_filter_exceeds_exact_limit(ctx, options, MAX_EXACT_FILTERED_CANDIDATES) {
+        return SemanticFilterPlan::Broad;
+    }
+    let filtered = collect_filtered_chunks(
+        ctx,
+        path_matcher,
+        options.scope_filter.as_ref(),
+        options.type_filter.as_deref(),
+        &options.include_globs,
+        options.skip_gitignore,
+        MAX_EXACT_FILTERED_CANDIDATES + 1,
+    );
+    if filtered.len() <= MAX_EXACT_FILTERED_CANDIDATES {
+        SemanticFilterPlan::Exact(filtered)
+    } else {
+        SemanticFilterPlan::Broad
+    }
 }
 
 fn has_semantic_filters(options: &SearchOptions) -> bool {
@@ -3771,7 +3935,7 @@ fn collect_unfiltered_semantic_candidates(
 
 fn score_filtered_semantic_candidates(
     ctx: &SearchContext,
-    filtered: Vec<RawIndexedChunk>,
+    filtered: &[RawIndexedChunk],
     query_vector: &[f32],
     candidate_limit: usize,
     primary_store: Option<&VectorStore>,
@@ -3795,7 +3959,7 @@ fn score_filtered_semantic_candidates(
         }
     }
     let mut scored = filtered
-        .into_iter()
+        .iter()
         .filter_map(|chunk| {
             scores
                 .get(&chunk.vector_key)
@@ -6349,8 +6513,11 @@ mod tests {
             &options,
             &hash_query_vector,
             candidate_limit,
-            context.hash_vectors.as_ref(),
-            context.base_hash_vectors.as_ref(),
+            (
+                context.hash_vectors.as_ref(),
+                context.base_hash_vectors.as_ref(),
+            ),
+            None,
         )
         .unwrap();
         merge_semantic_candidates(&mut separate, hash_hits, hash_weight, "hash");
@@ -6360,8 +6527,11 @@ mod tests {
             &options,
             &neural_query_vector,
             candidate_limit,
-            context.neural_vectors.as_ref(),
-            context.base_neural_vectors.as_ref(),
+            (
+                context.neural_vectors.as_ref(),
+                context.base_neural_vectors.as_ref(),
+            ),
+            None,
         )
         .unwrap();
         merge_semantic_candidates(&mut separate, neural_hits, 1.08, "neural");
@@ -6678,6 +6848,11 @@ mod tests {
             SearchOptions {
                 limit: Some(1),
                 include_globs: vec!["scoped/**".to_string()],
+                ..SearchOptions::default()
+            },
+            SearchOptions {
+                limit: Some(1),
+                include_globs: vec!["scoped/match.rs".to_string()],
                 ..SearchOptions::default()
             },
             SearchOptions {

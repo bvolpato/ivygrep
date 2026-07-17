@@ -87,6 +87,53 @@ fn chunk_count(workspace: &Workspace) -> usize {
     count as usize
 }
 
+fn assert_cached_stats_match_chunks(workspace: &Workspace) {
+    let conn = open_sqlite(&workspace.sqlite_path()).unwrap();
+    for (key, query) in [
+        ("chunk_count", "SELECT COUNT(*) FROM chunks"),
+        ("file_count", "SELECT COUNT(DISTINCT file_path) FROM chunks"),
+        (
+            "vector_key_count",
+            "SELECT COUNT(DISTINCT vector_key) FROM chunks",
+        ),
+    ] {
+        let cached: i64 = conn
+            .query_row("SELECT value FROM _stats WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let actual: i64 = conn.query_row(query, [], |row| row.get(0)).unwrap();
+        assert_eq!(cached, actual, "cached {key} drifted from chunks table");
+    }
+}
+
+#[test]
+#[serial]
+fn incremental_index_keeps_cached_stats_exact() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    fs::write(root.path().join("alpha.rs"), "fn alpha() {}\n").unwrap();
+    fs::write(root.path().join("beta.rs"), "fn beta() {}\n").unwrap();
+
+    setup_and_index(root.path(), home.path());
+    let workspace = workspace_for(root.path());
+    assert_cached_stats_match_chunks(&workspace);
+
+    fs::write(
+        root.path().join("alpha.rs"),
+        "fn alpha_changed() {}\nfn alpha_extra() {}\n",
+    )
+    .unwrap();
+    fs::remove_file(root.path().join("beta.rs")).unwrap();
+    fs::write(root.path().join("gamma.rs"), "fn gamma() {}\n").unwrap();
+    setup_and_index(root.path(), home.path());
+    assert_cached_stats_match_chunks(&workspace);
+
+    fs::write(root.path().join("alpha.rs"), "").unwrap();
+    setup_and_index(root.path(), home.path());
+    assert_cached_stats_match_chunks(&workspace);
+}
+
 // ---------------------------------------------------------------------------
 // CREATE: Adding new files to an already-indexed workspace
 // ---------------------------------------------------------------------------

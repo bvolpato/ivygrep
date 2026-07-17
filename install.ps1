@@ -27,10 +27,36 @@ function Get-GitHubHeaders {
     return $headers
 }
 
+function Invoke-WithRetry {
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$Operation,
+        [Parameter(Mandatory = $true)]
+        [string]$Description,
+        [int]$MaxAttempts = 5
+    )
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            return & $Operation
+        } catch {
+            if ($attempt -eq $MaxAttempts) {
+                throw
+            }
+
+            $delaySeconds = [int][Math]::Pow(2, $attempt - 1)
+            Write-Warning "$Description failed (attempt $attempt/$MaxAttempts). Retrying in $delaySeconds seconds: $($_.Exception.Message)"
+            Start-Sleep -Seconds $delaySeconds
+        }
+    }
+}
+
 if ($version -eq "latest") {
-    $release = Invoke-RestMethod `
-        -Uri "https://api.github.com/repos/$repository/releases/latest" `
-        -Headers (Get-GitHubHeaders)
+    $release = Invoke-WithRetry -Description "Release metadata request" -Operation {
+        Invoke-RestMethod `
+            -Uri "https://api.github.com/repos/$repository/releases/latest" `
+            -Headers (Get-GitHubHeaders)
+    }
     $tag = $release.tag_name
 } elseif ($version.StartsWith("v")) {
     $tag = $version
@@ -47,8 +73,12 @@ try {
     New-Item $tempDir -ItemType Directory -Force | Out-Null
     $archivePath = Join-Path $tempDir $asset
     $checksumPath = "$archivePath.sha256"
-    Invoke-WebRequest "$baseUrl/$asset" -OutFile $archivePath
-    Invoke-WebRequest "$baseUrl/$asset.sha256" -OutFile $checksumPath
+    Invoke-WithRetry -Description "Archive download" -Operation {
+        Invoke-WebRequest "$baseUrl/$asset" -OutFile $archivePath
+    } | Out-Null
+    Invoke-WithRetry -Description "Checksum download" -Operation {
+        Invoke-WebRequest "$baseUrl/$asset.sha256" -OutFile $checksumPath
+    } | Out-Null
 
     $expected = (Get-Content $checksumPath -Raw).Split()[0].ToLowerInvariant()
     $actual = (Get-FileHash $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use rayon::prelude::*;
-use rusqlite::{Connection, Statement, ToSql, params, params_from_iter};
+use rusqlite::{Connection, OptionalExtension, Statement, ToSql, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 
 use tantivy::directory::error::{DeleteError, LockError, OpenReadError, OpenWriteError};
@@ -1327,10 +1327,18 @@ fn index_workspace_inner(
     // Batch SQLite writes in a transaction for ~10-50x speedup.
     // Mutable so we can periodically commit and avert massive WAL files.
     let mut tx = sqlite.transaction()?;
+    let mut incremental_stats = if is_fresh_index {
+        None
+    } else {
+        IncrementalStatsDelta::load(&tx)?
+    };
 
     macro_rules! checkpoint_deletion_tombstones {
         () => {
             if vector_tombstones.should_checkpoint() {
+                if let Some(stats) = &mut incremental_stats {
+                    stats.checkpoint(&tx)?;
+                }
                 commit_with_vector_tombstones(tx, &mut vector_tombstones)?;
                 if !is_fresh_index {
                     writer.commit()?;
@@ -1344,7 +1352,11 @@ fn index_workspace_inner(
     // that have returned to base content or were removed after being overlay-only.
     if use_overlay {
         for rel_path in &clear_overlay_paths {
-            remove_file_chunks(&tx, &mut writer, &fields, &mut vector_tombstones, rel_path)?;
+            let removed_keys =
+                remove_file_chunks(&tx, &mut writer, &fields, &mut vector_tombstones, rel_path)?;
+            if let Some(stats) = &mut incremental_stats {
+                stats.record_removal(rel_path, &removed_keys);
+            }
             tx.execute(
                 "DELETE FROM tombstones WHERE file_path = ?1",
                 params![index_path_string(rel_path)],
@@ -1354,7 +1366,11 @@ fn index_workspace_inner(
 
         for rel_path in &diff.deleted {
             let rel_str = index_path_string(rel_path);
-            remove_file_chunks(&tx, &mut writer, &fields, &mut vector_tombstones, rel_path)?;
+            let removed_keys =
+                remove_file_chunks(&tx, &mut writer, &fields, &mut vector_tombstones, rel_path)?;
+            if let Some(stats) = &mut incremental_stats {
+                stats.record_removal(rel_path, &removed_keys);
+            }
             if path_exists_in_base(rel_path) {
                 tx.execute(
                     "INSERT OR IGNORE INTO tombstones (file_path) VALUES (?1)",
@@ -1381,7 +1397,11 @@ fn index_workspace_inner(
         }
     } else {
         for rel_path in &diff.deleted {
-            remove_file_chunks(&tx, &mut writer, &fields, &mut vector_tombstones, rel_path)?;
+            let removed_keys =
+                remove_file_chunks(&tx, &mut writer, &fields, &mut vector_tombstones, rel_path)?;
+            if let Some(stats) = &mut incremental_stats {
+                stats.record_removal(rel_path, &removed_keys);
+            }
             checkpoint_deletion_tombstones!();
         }
     }
@@ -1550,13 +1570,19 @@ fn index_workspace_inner(
             chunks_since_commit += indexed_chunks.len();
 
             if !is_fresh_index {
-                persist_or_stop!(remove_file_chunks(
+                let removed_keys = persist_or_stop!(remove_file_chunks(
                     &tx,
                     &mut writer,
                     &fields,
                     &mut vector_tombstones,
                     &rel_path,
                 ));
+                if let Some(stats) = &mut incremental_stats {
+                    stats.record_removal(&rel_path, &removed_keys);
+                }
+            }
+            if let Some(stats) = &mut incremental_stats {
+                stats.record_insertion(&rel_path, indexed_chunks.len());
             }
 
             for included_path in indexed_file.included_paths {
@@ -1602,6 +1628,9 @@ fn index_workspace_inner(
             if chunks_since_commit >= 25_000 || vector_tombstones.should_checkpoint() {
                 persist_or_stop!(persist_statements.flush_symbols());
                 drop(persist_statements);
+                if let Some(stats) = &mut incremental_stats {
+                    persist_or_stop!(stats.checkpoint(&tx));
+                }
                 persist_or_stop!(commit_with_vector_tombstones(tx, &mut vector_tombstones));
                 if !is_fresh_index {
                     persist_or_stop!(writer.commit());
@@ -1635,19 +1664,22 @@ fn index_workspace_inner(
     finalize_graph_indexes(&tx)?;
 
     // Update cached stats before committing so status reads are O(1).
-    let chunk_count: i64 = tx
-        .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
-        .unwrap_or(0);
-    let file_count: i64 = tx
-        .query_row("SELECT COUNT(DISTINCT file_path) FROM chunks", [], |row| {
-            row.get(0)
-        })
-        .unwrap_or(0);
-    let vector_key_count: i64 = tx
-        .query_row("SELECT COUNT(DISTINCT vector_key) FROM chunks", [], |row| {
-            row.get(0)
-        })
-        .unwrap_or(0);
+    let (chunk_count, file_count, vector_key_count) = if let Some(stats) = incremental_stats {
+        stats.final_counts(&tx)?
+    } else {
+        (
+            tx.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
+                .unwrap_or(0),
+            tx.query_row("SELECT COUNT(DISTINCT file_path) FROM chunks", [], |row| {
+                row.get(0)
+            })
+            .unwrap_or(0),
+            tx.query_row("SELECT COUNT(DISTINCT vector_key) FROM chunks", [], |row| {
+                row.get(0)
+            })
+            .unwrap_or(0),
+        )
+    };
     tx.execute(
         "INSERT OR REPLACE INTO _stats (key, value) VALUES ('chunk_count', ?1)",
         params![chunk_count],
@@ -3016,7 +3048,7 @@ fn remove_file_chunks(
     fields: &TantivyFields,
     vector_tombstones: &mut VectorTombstoneJournals,
     rel_path: &Path,
-) -> Result<()> {
+) -> Result<Vec<u64>> {
     let rel_str = index_path_string(rel_path);
     let keys = chunk_vector_keys_for_file(sqlite, &rel_str)?;
 
@@ -3046,7 +3078,99 @@ fn remove_file_chunks(
         "DELETE FROM manifest_resolution_signatures WHERE file_path = ?1",
         params![rel_str],
     )?;
-    Ok(())
+    Ok(keys)
+}
+
+struct IncrementalStatsDelta {
+    base_chunk_count: i64,
+    base_file_count: i64,
+    chunk_delta: i64,
+    initial_file_presence: HashMap<String, bool>,
+}
+
+impl IncrementalStatsDelta {
+    fn load(conn: &Connection) -> Result<Option<Self>> {
+        let read = |key: &str| {
+            conn.query_row(
+                "SELECT value FROM _stats WHERE key = ?1",
+                params![key],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+        };
+        let Some(base_chunk_count) = read("chunk_count")? else {
+            return Ok(None);
+        };
+        let Some(base_file_count) = read("file_count")? else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            base_chunk_count,
+            base_file_count,
+            chunk_delta: 0,
+            initial_file_presence: HashMap::new(),
+        }))
+    }
+
+    fn record_removal(&mut self, rel_path: &Path, vector_keys: &[u64]) {
+        self.initial_file_presence
+            .entry(index_path_string(rel_path))
+            .or_insert(!vector_keys.is_empty());
+        self.chunk_delta -= vector_keys.len() as i64;
+    }
+
+    fn record_insertion(&mut self, rel_path: &Path, chunk_count: usize) {
+        self.initial_file_presence
+            .entry(index_path_string(rel_path))
+            .or_insert(false);
+        self.chunk_delta += chunk_count as i64;
+    }
+
+    fn chunk_and_file_counts(&self, conn: &Connection) -> Result<(i64, i64)> {
+        let mut file_delta = 0;
+        for (path, initial) in &self.initial_file_presence {
+            let present: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM chunks WHERE file_path = ?1)",
+                params![path],
+                |row| row.get(0),
+            )?;
+            file_delta += present as i64 - *initial as i64;
+        }
+
+        Ok((
+            self.base_chunk_count + self.chunk_delta,
+            self.base_file_count + file_delta,
+        ))
+    }
+
+    fn checkpoint(&mut self, conn: &Connection) -> Result<()> {
+        let (chunk_count, file_count) = self.chunk_and_file_counts(conn)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO _stats (key, value) VALUES ('chunk_count', ?1)",
+            params![chunk_count],
+        )?;
+        conn.execute(
+            "INSERT OR REPLACE INTO _stats (key, value) VALUES ('file_count', ?1)",
+            params![file_count],
+        )?;
+        self.base_chunk_count = chunk_count;
+        self.base_file_count = file_count;
+        self.chunk_delta = 0;
+        self.initial_file_presence.clear();
+        Ok(())
+    }
+
+    fn final_counts(self, conn: &Connection) -> Result<(i64, i64, i64)> {
+        let (chunk_count, file_count) = self.chunk_and_file_counts(conn)?;
+
+        Ok((
+            chunk_count,
+            file_count,
+            conn.query_row("SELECT COUNT(DISTINCT vector_key) FROM chunks", [], |row| {
+                row.get(0)
+            })?,
+        ))
+    }
 }
 
 /// Stale vector keys collected for one SQLite transaction. The matching
@@ -4251,6 +4375,51 @@ mod tests {
             fs::read_to_string(hash_path).unwrap().lines().count(),
             10_000
         );
+    }
+
+    #[test]
+    fn incremental_stats_checkpoint_persists_and_resets_delta() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chunks (file_path TEXT NOT NULL, vector_key INTEGER NOT NULL);
+             CREATE TABLE _stats (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+             INSERT INTO chunks VALUES ('a.rs', 1), ('b.rs', 2);
+             INSERT INTO _stats VALUES ('chunk_count', 2), ('file_count', 2);",
+        )
+        .unwrap();
+        let mut stats = IncrementalStatsDelta::load(&conn).unwrap().unwrap();
+
+        conn.execute("DELETE FROM chunks WHERE file_path = 'a.rs'", [])
+            .unwrap();
+        stats.record_removal(Path::new("a.rs"), &[1]);
+        conn.execute("INSERT INTO chunks VALUES ('c.rs', 3), ('c.rs', 4)", [])
+            .unwrap();
+        stats.record_insertion(Path::new("c.rs"), 2);
+        stats.checkpoint(&conn).unwrap();
+
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM _stats WHERE key = 'chunk_count'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            3
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM _stats WHERE key = 'file_count'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            2
+        );
+
+        conn.execute("DELETE FROM chunks WHERE file_path = 'b.rs'", [])
+            .unwrap();
+        stats.record_removal(Path::new("b.rs"), &[2]);
+        assert_eq!(stats.final_counts(&conn).unwrap(), (2, 1, 2));
     }
 
     #[test]
