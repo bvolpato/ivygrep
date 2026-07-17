@@ -643,6 +643,7 @@ fn focus_hit_on_symbol(
     context_lines: usize,
     prefer_last: bool,
 ) -> SearchHit {
+    strip_path_header(&mut hit);
     let lines = hit.preview.lines().collect::<Vec<_>>();
     let symbol = symbol.to_ascii_lowercase();
     let matches = lines
@@ -664,6 +665,13 @@ fn focus_hit_on_symbol(
     hit.end_line = hit.start_line.saturating_add(end.saturating_sub(start + 1));
     hit.preview = lines[start..end].join("\n");
     hit
+}
+
+fn strip_path_header(hit: &mut SearchHit) {
+    let path_header = format!("// {}\n\n", hit.file_path.display());
+    if let Some(preview) = hit.preview.strip_prefix(&path_header) {
+        hit.preview = preview.to_string();
+    }
 }
 
 fn add_candidate(

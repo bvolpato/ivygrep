@@ -86,6 +86,10 @@ pub struct WorkspaceStatus {
     #[serde(default)]
     pub compaction: IndexCompactionHealth,
     pub vector_key_count: u64,
+    #[serde(default)]
+    pub hash_vector_count: u64,
+    #[serde(default)]
+    pub hash_coverage_percent: f64,
     pub has_neural_vectors: bool,
     pub neural_vector_count: u64,
     pub neural_coverage_percent: f64,
@@ -340,6 +344,28 @@ impl Workspace {
             crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
         )
         .unwrap_or(0)
+    }
+
+    pub fn hash_vector_count(&self) -> u64 {
+        let path = self.vector_path();
+        if !path.exists() {
+            return 0;
+        }
+        vector_store_size(
+            &path,
+            crate::EMBEDDING_DIMENSIONS,
+            crate::vector_store::HASH_VECTOR_QUANTIZATION,
+        )
+        .unwrap_or(0)
+    }
+
+    pub fn hash_coverage_percent(&self) -> f64 {
+        let total = self.vector_key_count();
+        if total == 0 {
+            100.0
+        } else {
+            (self.hash_vector_count() as f64 / total as f64 * 100.0).min(100.0)
+        }
     }
 
     pub fn neural_coverage_percent(&self) -> f64 {
@@ -1317,6 +1343,17 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
         let index_components = index_component_sizes(&index_dir);
         let compaction = index_compaction_health(&index_dir);
         let vector_key_count = read_sqlite_vector_key_count(&index_dir);
+        let hash_vector_count = vector_store_size(
+            &index_dir.join("vectors.usearch"),
+            crate::EMBEDDING_DIMENSIONS,
+            crate::vector_store::HASH_VECTOR_QUANTIZATION,
+        )
+        .unwrap_or(0);
+        let hash_coverage_percent = if vector_key_count > 0 {
+            (hash_vector_count as f64 / vector_key_count as f64 * 100.0).min(100.0)
+        } else {
+            100.0
+        };
         let neural_model = fs::read_to_string(index_dir.join("neural_model.json"))
             .ok()
             .and_then(|value| {
@@ -1476,6 +1513,8 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
                 index_components,
                 compaction,
                 vector_key_count,
+                hash_vector_count,
+                hash_coverage_percent,
                 has_neural_vectors,
                 neural_vector_count,
                 neural_coverage_percent,
@@ -2239,6 +2278,8 @@ mod tests {
         // 2 chunks, no hash vectors -> true
         assert!(ws.needs_neural_enhancement());
         assert!(!ws.has_neural_vectors());
+        assert_eq!(ws.hash_vector_count(), 0);
+        assert_eq!(ws.hash_coverage_percent(), 0.0);
 
         {
             let mut store = crate::vector_store::VectorStore::open(
@@ -2259,6 +2300,8 @@ mod tests {
 
         // Hash vectors are complete, but neural vectors are missing -> true
         assert!(ws.needs_neural_enhancement());
+        assert_eq!(ws.hash_vector_count(), 2);
+        assert_eq!(ws.hash_coverage_percent(), 100.0);
 
         let neural_dimensions = crate::embedding::configured_neural_model_identity().dimensions;
         {

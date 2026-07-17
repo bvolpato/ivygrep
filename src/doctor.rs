@@ -22,6 +22,8 @@ pub struct DoctorReport {
     pub chunk_count: u64,
     pub file_count: u64,
     pub vector_key_count: u64,
+    pub hash_vector_count: u64,
+    pub hash_coverage_percent: f64,
     pub neural_vector_count: u64,
     pub neural_coverage_percent: f64,
     pub neural_profile: String,
@@ -57,6 +59,8 @@ impl DoctorReport {
             chunk_count: health.chunk_count,
             file_count: health.file_count,
             vector_key_count: workspace.vector_key_count(),
+            hash_vector_count: workspace.hash_vector_count(),
+            hash_coverage_percent: workspace.hash_coverage_percent(),
             neural_vector_count: workspace.neural_vector_count(),
             neural_coverage_percent: workspace.neural_coverage_percent(),
             neural_profile: workspace

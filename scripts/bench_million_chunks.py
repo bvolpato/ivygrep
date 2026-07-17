@@ -125,10 +125,11 @@ def generate_corpus(root: Path, files: int, chunks_per_file: int) -> dict:
     if manifest_path.exists():
         existing = json.loads(manifest_path.read_text(encoding="utf-8"))
         if existing == expected:
+            ensure_git_boundary(root)
             return existing
         shutil.rmtree(root)
     root.mkdir(parents=True, exist_ok=True)
-    (root / ".git").mkdir(exist_ok=True)
+    ensure_git_boundary(root)
 
     def write_file(file_index: int) -> None:
         shard = root / f"shard_{file_index // 1000:02}"
@@ -143,6 +144,18 @@ def generate_corpus(root: Path, files: int, chunks_per_file: int) -> dict:
         encoding="utf-8",
     )
     return expected
+
+
+def ensure_git_boundary(root: Path) -> None:
+    if (root / ".git" / "HEAD").is_file():
+        return
+    subprocess.run(
+        ["git", "init", "-q"],
+        cwd=root,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
 
 
 def percentile(values: list[float], quantile: float) -> float:
@@ -683,6 +696,16 @@ def main() -> int:
     parser.add_argument("--query-samples", type=int, default=100)
     parser.add_argument("--reuse-index", action="store_true")
     parser.add_argument(
+        "--enhance-hash",
+        action="store_true",
+        help="measure foreground hash enhancement before running queries",
+    )
+    parser.add_argument(
+        "--enhance-neural",
+        action="store_true",
+        help="measure foreground hash + neural enhancement before running queries",
+    )
+    parser.add_argument(
         "--source-commit",
         default=None,
         help="commit that produced --binary (defaults to the current checkout)",
@@ -723,6 +746,25 @@ def main() -> int:
         index_summary = json.loads(result.stdout)
     else:
         index_summary = {}
+    readiness_metrics = []
+    if args.enhance_hash:
+        _, metrics = timed(
+            [str(binary), "--enhance-hash-internal", str(corpus)],
+            root,
+            env,
+            monitor_path=home,
+        )
+        readiness_metrics.append({"phase": "hash_enhancement", "metrics": metrics})
+    if args.enhance_neural:
+        _, metrics = timed(
+            [str(binary), "--enhance-internal", str(corpus)],
+            root,
+            env,
+            monitor_path=home,
+        )
+        readiness_metrics.append(
+            {"phase": "hash_and_neural_enhancement", "metrics": metrics}
+        )
     status = json.loads(
         subprocess.run(
             [str(binary), "--status", "--json"],
@@ -768,6 +810,15 @@ def main() -> int:
                 if index_metrics
                 else None
             ),
+        },
+        "readiness": {
+            "phases": readiness_metrics,
+            "total_wall_ms": (index_metrics["wall_ms"] if index_metrics else 0.0)
+            + sum(phase["metrics"]["wall_ms"] for phase in readiness_metrics),
+            "hash_ready": workspace.get("hash_vector_count", 0)
+            >= workspace.get("vector_key_count", workspace["chunk_count"])
+            > 0,
+            "neural_ready": bool(workspace.get("has_neural_vectors")),
         },
         "queries": query_suite(
             binary,

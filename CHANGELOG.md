@@ -4,6 +4,20 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-07-17
+
+### Performance
+- **Broad filtered semantic search uses an adaptive ANN budget.** Three alternating 100,000-chunk trials improved p50 latency from `11.93 ms` to `9.65 ms` (`19.1%`) and p95 from `13.90 ms` to `11.50 ms` (`17.3%`) with identical recall and MRR. Underfilled filtered results retain a bounded fallback.
+
+### Fixed
+- **Forced local rebuilds preserve watcher intent.** `ig --add PATH --force` rewrites workspace metadata after removing an index when no daemon handles the request, so later daemon startup resumes file watching.
+- **Context relationships retain correct source ranges.** Synthetic path headers are removed before focusing graph definitions, callers, and references, preventing useful relationship evidence from being discarded as overlapping.
+- **Hash readiness is visible.** Status, doctor, and JSON workspace output report hash-vector count and coverage alongside neural coverage.
+
+### Testing
+- **Performance evidence covers retrieval, readiness, and daemon stability.** Release tags run three public-retrieval repetitions; relevance checks upload historical context-pack evidence; million-scale scheduled runs include concurrent query and watcher-mutation soak results.
+- **Rejected experiments remain out.** Global and low-confidence candidate widening, higher HNSW connectivity, lower search expansion, automatic vector compaction, short-token boundary changes, and always-on neural search lost quality or cost too much latency, memory, build time, or storage.
+
 ## [1.2.1] - 2026-07-16
 
 ### Fixed

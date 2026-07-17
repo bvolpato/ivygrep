@@ -17,6 +17,7 @@ on:
       - "src/**/*.rs"
       - "scripts/eval_relevance.py"
       - "scripts/eval_code_retrieval.py"
+      - "scripts/bench_context_retrieval.py"
       - "tests/fixtures/retrieval/**"
       - "tests/fixtures/ivygrep_relevance_queries.json"
       - ".github/workflows/relevance.yml"
@@ -39,6 +40,9 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
@@ -73,8 +77,17 @@ jobs:
             --min-precision-at-5 0.18 \
             --min-recall-at-20 0.95
 
+      - name: Context retrieval evidence
+        run: |
+          uv run scripts/bench_context_retrieval.py \
+            --binary target/release/ig \
+            --repo . \
+            --output context-retrieval-results.json
+
       - name: Upload public retrieval result
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: public-retrieval-results
-          path: retrieval-results.json
+          path: |
+            retrieval-results.json
+            context-retrieval-results.json

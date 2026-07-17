@@ -1,6 +1,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -52,6 +53,23 @@ def artifact(
 
 
 class MillionBenchmarkTest(unittest.TestCase):
+    def test_generated_corpus_is_its_own_git_workspace(self):
+        with tempfile.TemporaryDirectory() as temp:
+            outer = Path(temp)
+            subprocess.run(["git", "init", "-q"], cwd=outer, check=True)
+            corpus = outer / "corpus"
+
+            benchmark.generate_corpus(corpus, files=1, chunks_per_file=1)
+
+            top_level = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                cwd=corpus,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout.strip()
+            self.assertEqual(Path(top_level), corpus)
+
     def test_start_daemon_creates_fresh_home_before_opening_log(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp) / "fresh-home"
