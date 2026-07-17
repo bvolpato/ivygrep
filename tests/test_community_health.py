@@ -89,12 +89,16 @@ class CommunityHealthTest(unittest.TestCase):
         self.assertFalse(list(ROOT.rglob("AGENTS_*.md")))
         self.assertIn("AGENTS_*", self.read(".gitignore"))
 
-    def test_social_card_has_share_dimensions(self) -> None:
-        png = (ROOT / "assets" / "social-card.png").read_bytes()
+    def test_social_card_has_share_dimensions_and_size(self) -> None:
+        image = ROOT / "assets" / "hero-banner-social.png"
+        png = image.read_bytes()
         self.assertEqual(png[:8], b"\x89PNG\r\n\x1a\n")
-        self.assertEqual(struct.unpack(">II", png[16:24]), (1280, 640))
-        svg = self.read("assets/social-card.svg")
-        self.assertIn('width="1280" height="640"', svg)
+        self.assertEqual(struct.unpack(">II", png[16:24]), (1280, 698))
+        self.assertLess(image.stat().st_size, 5_000_000)
+
+        website = self.read("docs/index.html")
+        social_image = "assets/hero-banner-social.png"
+        self.assertEqual(website.count(social_image), 2)
 
     def test_release_metadata_is_synchronized(self) -> None:
         cargo = tomllib.loads(self.read("Cargo.toml"))
