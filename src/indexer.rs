@@ -1563,9 +1563,7 @@ fn index_workspace_inner(
                         if let (Some(field), Some(first)) =
                             (producer_fields.text_trigrams, indexed.first_mut())
                         {
-                            first
-                                .tantivy_doc
-                                .add_text(field, trigram_source_text(&content));
+                            first.tantivy_doc.add_text(field, &content);
                         }
 
                         let n = progress_counter_clone
@@ -3420,21 +3418,6 @@ fn build_chunk_doc(
         doc.add_text(f, signature);
     }
     doc
-}
-
-fn trigram_source_text(content: &str) -> String {
-    let mut normalized = String::with_capacity(content.len());
-    for run in content
-        .as_bytes()
-        .split(|byte| !byte.is_ascii_alphanumeric())
-        .filter(|run| run.len() >= 3)
-    {
-        if !normalized.is_empty() {
-            normalized.push_str("\n\n");
-        }
-        normalized.push_str(std::str::from_utf8(run).expect("ASCII run is valid UTF-8"));
-    }
-    normalized
 }
 
 fn insert_chunk(
