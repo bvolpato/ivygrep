@@ -3,26 +3,26 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ivygrep - Turn code tasks into passing changes</title>
+    <title>ivygrep - Search code and build task-ready context</title>
     <meta name="description" content="Turn code tasks, diffs, and stack traces into focused local context packs for coding agents. CLI, MCP, and Web. No code upload.">
     <meta name="theme-color" content="#06070a">
 
     <!-- Open Graph -->
-    <meta property="og:title" content="ivygrep - Turn code tasks into passing changes">
+    <meta property="og:title" content="ivygrep - Search code and build task-ready context">
     <meta property="og:description" content="One local command turns tasks, diffs, and traces into focused context packs for coding agents.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://bvolpato.github.io/ivygrep">
-    <meta property="og:image" content="https://bvolpato.github.io/ivygrep/assets/social-card.png">
+    <meta property="og:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner-social.png">
     <meta property="og:image:width" content="1280">
-    <meta property="og:image:height" content="640">
-    <meta property="og:image:alt" content="ivygrep task to context pack to agent to passing tests workflow">
+    <meta property="og:image:height" content="698">
+    <meta property="og:image:alt" content="ivygrep semantic search returning matching code">
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="ivygrep - Turn code tasks into passing changes">
+    <meta name="twitter:title" content="ivygrep - Search code and build task-ready context">
     <meta name="twitter:description" content="One local command turns tasks, diffs, and traces into focused context packs for coding agents.">
-    <meta name="twitter:image" content="https://bvolpato.github.io/ivygrep/assets/social-card.png">
-    <meta name="twitter:image:alt" content="ivygrep task to context pack to agent to passing tests workflow">
+    <meta name="twitter:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner-social.png">
+    <meta name="twitter:image:alt" content="ivygrep semantic search returning matching code">
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -81,8 +81,8 @@
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" width="190" height="200" onerror="this.src='assets/logo.png'"/>
             </div>
-            <h1 class="slide-up delay-1">Turn a code task into<br/><span class="highlight-gradient">a passing change.</span></h1>
-            <p class="subtitle slide-up delay-2">One local command connects task intent, branch diff, dirty files, callers, dependents, tests, config, and docs. Give coding agents focused evidence, not a repository dump.</p>
+            <h1 class="slide-up delay-1">Search code.<br/><span class="highlight-gradient">Build task-ready context.</span></h1>
+            <p class="subtitle slide-up delay-2">Search once by intent. Build one bounded pack from task, active changes, and code relationships. Everything stays local.</p>
 
             <div class="cta-row slide-up delay-3">
                 <a href="#install" class="btn btn-primary">
@@ -92,10 +92,6 @@
                 <a href="https://github.com/bvolpato/ivygrep" class="btn btn-ghost" target="_blank" rel="noopener">
                     <svg height="18" viewBox="0 0 16 16" width="18" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
                     Source
-                </a>
-                <a href="#mcp" class="btn btn-ghost">
-                    <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 1v6m0 6v6M1 12h6m6 0h6"/></svg>
-                    Connect agent
                 </a>
                 <a href="#context-packs" class="btn btn-ghost">Context Packs</a>
             </div>
@@ -113,14 +109,13 @@
                     <span class="mockup-title">Terminal - ig</span>
                 </div>
                 <div class="mockup-body code-font">
-                    <div class="line"><span class="comment"># Task → context pack → agent → passing test</span></div>
-                    <div class="line typing"><span class="prompt">$</span> ig context "fix refresh-token races" --since main --budget 8000</div>
+                    <div class="line"><span class="comment"># One search. One task context pack.</span></div>
+                    <div class="line typing"><span class="prompt">$</span> ig "where is refresh token rotated?"</div>
+                    <div class="line output"><span class="path">src/auth/refresh.rs:118</span></div>
+                    <div class="line output">fn rotate_refresh_token(...) -&gt; Result&lt;Token&gt;</div>
+                    <div class="line"><span class="prompt">$</span> ig context "fix refresh-token races" --since main --budget 8000</div>
                     <div class="line output success">✓ 14 focused snippets · 7,642 tokens · 3 changed files</div>
-                    <div class="line output"><span class="path">relationships</span> definitions · callers · dependents · tests · config · docs</div>
-                    <div class="line"><span class="prompt">$</span> ig agent install codex</div>
-                    <div class="line output success">✓ MCP handshake · real search · configuration preserved</div>
-                    <div class="line"><span class="prompt">$</span> codex "Use ig context. Fix refresh-token race and test it."</div>
-                    <div class="line output success">test auth::refresh_token_is_single_use ... ok</div>
+                    <div class="line output"><span class="path">evidence</span> definitions · callers · dependents · tests</div>
                 </div>
             </div>
         </div>
@@ -170,11 +165,10 @@
                         <span>Primary</span><span>Dependencies</span><span>Dependents</span><span>Definitions</span><span>Callers</span><span>References</span>
                         <span>Tests</span><span>Config</span><span>Docs</span>
                     </div>
-                    <p>Each item explains its relationship. CLI, MCP, and Web return same structured pack.</p>
+                    <p>Each item explains why it was selected and how it relates to task.</p>
                 </div>
                 <div class="install-code relative">
-                    <pre class="code-block"><span class="prompt">$</span> ig context "fix refresh-token races" --budget 8000
-<span class="prompt">$</span> ig context "fix refresh-token races" --since main
+                    <pre class="code-block"><span class="prompt">$</span> ig context "fix refresh-token races" --since main --budget 8000
 
 # ivygrep context
 Budget: 3842 / 8000 estimated tokens
@@ -812,7 +806,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
         const typingEl = document.querySelector('.typing');
         if (typingEl) {
             const prompt = '<span class="prompt">$</span> ';
-            const textToType = 'ig context "fix refresh-token races" --since main --budget 8000';
+            const textToType = 'ig "where is refresh token rotated?"';
             typingEl.innerHTML = prompt;
             const outputs = document.querySelectorAll('.output');
             outputs.forEach(out => { out.style.transform = 'translateY(8px)'; });
