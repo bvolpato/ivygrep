@@ -185,3 +185,42 @@ jobs:
             public-code-retrieval-results.json
             public-code-retrieval.html
             ${{ runner.temp }}/public-results/*.json
+
+  publish-release-evidence:
+    name: Attach retrieval evidence to release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: matrix
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download public benchmark evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: public-code-retrieval-public-core
+          path: release-evidence
+
+      - name: Attach evidence to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          results_path=$(find release-evidence -type f -name public-code-retrieval-results.json -print -quit)
+          report_path=$(find release-evidence -type f -name public-code-retrieval.html -print -quit)
+          if [ -z "$results_path" ] || [ -z "$report_path" ]; then
+            echo "Downloaded public retrieval evidence is incomplete" >&2
+            exit 1
+          fi
+          for attempt in {1..30}; do
+            if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then
+              echo "GitHub release $GITHUB_REF_NAME was not available after 15 minutes" >&2
+              exit 1
+            fi
+            sleep 30
+          done
+          gh release upload "$GITHUB_REF_NAME" \
+            "$results_path" \
+            "$report_path" \
+            --clobber

@@ -4,8 +4,8 @@ name: Relevance
 # code or the labeled query set, plus manual dispatch. Uses the deterministic
 # hash path so the gate is stable across runs and runners (no model download,
 # no SIMD float variance); it still catches regressions in the shared fusion /
-# boosting / chunking logic. Neural relevance can be measured locally with
-# `scripts/eval_relevance.py --neural`.
+# boosting / chunking logic. A bounded public neural sample covers model-backed
+# routing and retrieval without running the full release matrix on every PR.
 on:
   pull_request:
     branches: [main]
@@ -31,7 +31,7 @@ permissions:
 
 jobs:
   relevance-gate:
-    name: Relevance gate (hash, deterministic)
+    name: Relevance gates (hash + neural smoke)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -85,10 +85,52 @@ jobs:
             --repo . \
             --output context-retrieval-results.json
 
+      - name: Build ig (neural smoke)
+        run: cargo build --release --locked --bin ig
+
+      - name: Neural retrieval smoke
+        run: |
+          uv run scripts/run_public_benchmark_matrix.py \
+            --profile model-bakeoff \
+            --modes neural \
+            --runs 1 \
+            --datasets-root "$RUNNER_TEMP/public-datasets" \
+            --work-root "$RUNNER_TEMP/neural-smoke" \
+            --binary target/release/ig \
+            --skip-build \
+            --output neural-smoke-results.json
+          jq '
+            .summary.neural.metrics
+            | {
+                ndcg_at_10: .ndcg_at_10.mean,
+                mrr_at_10: .mrr_at_10.mean,
+                recall_at_20: .recall_at_20.mean,
+                no_hit_rate: .no_hit_rate.mean
+              }
+          ' neural-smoke-results.json
+          # ANN graph construction varies slightly across runner CPUs. These
+          # floors retain about 10% regression margin below the repeated local
+          # baseline while the deterministic hash gate above remains strict.
+          jq -e '
+            .summary.neural.metrics as $metrics
+            | if (
+                $metrics.ndcg_at_10.mean >= 0.53
+                and $metrics.mrr_at_10.mean >= 0.47
+                and $metrics.recall_at_20.mean >= 0.70
+                and $metrics.no_hit_rate.mean == 0
+              )
+              then true
+              else error("neural retrieval smoke fell below quality floor")
+              end
+          ' neural-smoke-results.json
+
       - name: Upload public retrieval result
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: public-retrieval-results
           path: |
             retrieval-results.json
             context-retrieval-results.json
+            neural-smoke-results.json
+            ${{ runner.temp }}/neural-smoke/*.json
