@@ -1,6 +1,6 @@
 [package]
 name = "ivygrep"
-version = "1.2.3"
+version = "1.2.4"
 edition = "2024"
 description = "Local code search and relationship-aware context packs for coding agents"
 license = "MIT"

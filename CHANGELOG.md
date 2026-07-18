@@ -4,6 +4,17 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.2.4] - 2026-07-18
+
+### Performance
+- **Exact daemon queries no longer load the neural model unnecessarily.** Model startup now follows query routing. In an indexed neural workspace, an exact identifier query reduced daemon RSS from `68,596 KiB` to `26,352 KiB` while preserving identical results; a later natural-language query still loaded neural search on demand.
+
+### Testing
+- **Pull requests now exercise bounded neural retrieval.** A 100-query public smoke profile gates nDCG, MRR, recall, and no-hit rate alongside deterministic hash and context-pack checks.
+- **Million-scale regression detection is tighter.** Statistically significant regressions now fail at `10%` instead of `15%`; a controlled three-run comparison accepted the known-good `0.9241` throughput ratio while a `7.5%` gate produced a false positive.
+- **Release retrieval evidence is permanent.** Tag workflows attach public retrieval JSON and HTML directly to each GitHub release after the benchmark matrix completes.
+- **Speculative candidates stayed out.** Intent-specific fusion, wider candidate pools, borrowed query-plan fields, bulk persistence variants, score-only context ranking, and a permanent external-tool gate were discarded after neutral, regressive, or non-comparable A/B results.
+
 ## [1.2.3] - 2026-07-17
 
 ### Performance

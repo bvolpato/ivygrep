@@ -59,6 +59,10 @@ const MAX_READY_WORKSPACES: usize = 256;
 /// strings; large `--no-limit` results would bloat the query cache).
 const MAX_CACHEABLE_HITS: usize = 2_000;
 
+fn should_start_model_load(has_neural_vectors: bool, query: &str, force_neural: bool) -> bool {
+    has_neural_vectors && query_uses_neural(query, force_neural)
+}
+
 struct WatchRegistration {
     _watcher: RecommendedWatcher,
     control: Arc<WatchControl>,
@@ -1244,7 +1248,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 };
             }
             let has_neural_vectors = neural_identities.iter().any(Option::is_some);
-            if has_neural_vectors {
+            if should_start_model_load(has_neural_vectors, &query, force_neural) {
                 state_clone.maybe_start_model_load();
             }
             tracing::trace!(
@@ -2615,6 +2619,22 @@ mod tests {
         workspace.write_index_format_version().unwrap();
         let changed = workspace_readiness_signature(&workspace);
         assert!(!state.workspace_is_ready(&workspace, false, &changed));
+    }
+
+    #[test]
+    fn neural_model_load_follows_query_routing() {
+        assert!(!should_start_model_load(true, "SearchContext", false));
+        assert!(should_start_model_load(
+            true,
+            "where is search context loaded",
+            false
+        ));
+        assert!(should_start_model_load(true, "SearchContext", true));
+        assert!(!should_start_model_load(
+            false,
+            "where is search context loaded",
+            false
+        ));
     }
 
     #[test]
