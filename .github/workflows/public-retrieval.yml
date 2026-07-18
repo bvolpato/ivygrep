@@ -204,6 +204,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          results_path=$(find release-evidence -type f -name public-code-retrieval-results.json -print -quit)
+          report_path=$(find release-evidence -type f -name public-code-retrieval.html -print -quit)
+          if [ -z "$results_path" ] || [ -z "$report_path" ]; then
+            echo "Downloaded public retrieval evidence is incomplete" >&2
+            exit 1
+          fi
           for attempt in {1..30}; do
             if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
               break
@@ -215,6 +221,6 @@ jobs:
             sleep 30
           done
           gh release upload "$GITHUB_REF_NAME" \
-            release-evidence/public-code-retrieval-results.json \
-            release-evidence/public-code-retrieval.html \
+            "$results_path" \
+            "$report_path" \
             --clobber
