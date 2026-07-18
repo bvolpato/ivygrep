@@ -51,6 +51,11 @@ on:
         required: true
         default: "3"
         type: string
+      release_tag:
+        description: "Existing release tag to backfill with generated evidence"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -67,6 +72,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Run benchmark tooling tests
         run: |
@@ -120,6 +126,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
@@ -136,8 +143,9 @@ jobs:
           INPUT_PROFILE: ${{ inputs.profile }}
           INPUT_MODES: ${{ inputs.modes }}
           INPUT_REPETITIONS: ${{ inputs.repetitions }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          if [[ "$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "push" ]]; then
+          if [[ "$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "push" || -n "$INPUT_RELEASE_TAG" ]]; then
             {
               echo "profile=public-core"
               echo "modes=lexical,hash,hybrid,blended,neural"
@@ -188,7 +196,7 @@ jobs:
 
   publish-release-evidence:
     name: Attach retrieval evidence to release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
     needs: matrix
     runs-on: ubuntu-latest
     permissions:
@@ -203,6 +211,8 @@ jobs:
       - name: Attach evidence to GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
           results_path=$(find release-evidence -type f -name public-code-retrieval-results.json -print -quit)
           report_path=$(find release-evidence -type f -name public-code-retrieval.html -print -quit)
@@ -211,16 +221,16 @@ jobs:
             exit 1
           fi
           for attempt in {1..30}; do
-            if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
               break
             fi
             if [ "$attempt" -eq 30 ]; then
-              echo "GitHub release $GITHUB_REF_NAME was not available after 15 minutes" >&2
+              echo "GitHub release $RELEASE_TAG was not available after 15 minutes" >&2
               exit 1
             fi
             sleep 30
           done
-          gh release upload "$GITHUB_REF_NAME" \
+          gh release upload "$RELEASE_TAG" \
             "$results_path" \
             "$report_path" \
             --clobber
