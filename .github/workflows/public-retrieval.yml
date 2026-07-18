@@ -143,8 +143,9 @@ jobs:
           INPUT_PROFILE: ${{ inputs.profile }}
           INPUT_MODES: ${{ inputs.modes }}
           INPUT_REPETITIONS: ${{ inputs.repetitions }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          if [[ "$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "push" ]]; then
+          if [[ "$EVENT_NAME" == "schedule" || "$EVENT_NAME" == "push" || -n "$INPUT_RELEASE_TAG" ]]; then
             {
               echo "profile=public-core"
               echo "modes=lexical,hash,hybrid,blended,neural"
