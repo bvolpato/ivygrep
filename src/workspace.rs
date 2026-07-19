@@ -488,6 +488,10 @@ impl Workspace {
         self.index_dir.join(".enhancing.pid")
     }
 
+    fn queued_neural_enhancement_path(&self) -> PathBuf {
+        self.index_dir.join(".enhancing.neural-requested")
+    }
+
     pub fn enhancing_progress_path(&self) -> PathBuf {
         self.index_dir.join(".enhancing.progress")
     }
@@ -720,12 +724,57 @@ impl Workspace {
         self.trigger_background_enhancement_command("--enhance-hash-internal", true)
     }
 
+    /// Build neural vectors only after a neural-routed query requests them.
+    /// Once a neural store exists, keep it current for all later index updates.
+    pub fn search_enhancement_uses_neural(&self, query_uses_neural: bool) -> bool {
+        query_uses_neural || self.has_neural_vectors()
+    }
+
+    pub fn needs_search_enhancement(&self, query_uses_neural: bool) -> bool {
+        if self.search_enhancement_uses_neural(query_uses_neural) {
+            self.needs_neural_enhancement()
+        } else {
+            self.needs_hash_enhancement()
+        }
+    }
+
+    pub fn trigger_background_search_enhancement(&self, query_uses_neural: bool) -> Result<()> {
+        if self.search_enhancement_uses_neural(query_uses_neural) {
+            self.trigger_background_enhancement()
+        } else {
+            self.trigger_background_hash_enhancement()
+        }
+    }
+
+    fn queue_neural_enhancement_after_active(&self) -> Result<()> {
+        fs::write(self.queued_neural_enhancement_path(), b"")?;
+        if !self.is_enhancing_active() {
+            self.trigger_queued_neural_enhancement()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn trigger_queued_neural_enhancement(&self) -> Result<()> {
+        match fs::remove_file(self.queued_neural_enhancement_path()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+        if self.needs_neural_enhancement() {
+            self.trigger_background_enhancement()?;
+        }
+        Ok(())
+    }
+
     fn trigger_background_enhancement_command(&self, command: &str, hash_only: bool) -> Result<()> {
         let exe = std::env::current_exe()?;
         let pid_path = self.enhancing_pid_path();
 
         let status = jobs::job_status(self, JobKind::Enhancement, ENHANCEMENT_HEARTBEAT_TTL_SECS);
         if status.active() {
+            if !hash_only {
+                self.queue_neural_enhancement_after_active()?;
+            }
             return Ok(());
         }
         if status.stalled {
@@ -783,7 +832,11 @@ impl Workspace {
                     let _ = child.wait();
                 });
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !hash_only {
+                    self.queue_neural_enhancement_after_active()?;
+                }
+            }
             Err(error) => return Err(error.into()),
         }
 
@@ -792,7 +845,11 @@ impl Workspace {
         // trigger so the base index receives upgrades in the background too.
         if let Some(main_root) = self.main_worktree_root()
             && let Ok(base_ws) = Workspace::resolve(&main_root)
-            && base_ws.needs_neural_enhancement()
+            && if hash_only {
+                base_ws.needs_hash_enhancement()
+            } else {
+                base_ws.needs_neural_enhancement()
+            }
         {
             let _ = if hash_only {
                 base_ws.trigger_background_hash_enhancement()
@@ -2309,6 +2366,10 @@ mod tests {
 
         // Hash vectors are complete, but neural vectors are missing -> true
         assert!(ws.needs_neural_enhancement());
+        assert!(!ws.search_enhancement_uses_neural(false));
+        assert!(!ws.needs_search_enhancement(false));
+        assert!(ws.search_enhancement_uses_neural(true));
+        assert!(ws.needs_search_enhancement(true));
         assert_eq!(ws.hash_vector_count(), 2);
         assert_eq!(ws.hash_coverage_percent(), 100.0);
 
@@ -2351,6 +2412,7 @@ mod tests {
 
         // 2 vectors == 2 chunks with matching identity → false
         assert!(ws.has_neural_vectors());
+        assert!(ws.search_enhancement_uses_neural(false));
         assert!(!ws.needs_neural_enhancement());
         std::fs::write(ws.neural_enhanced_generation_path(), "0").unwrap();
         assert!(!ws.needs_neural_enhancement());
@@ -2361,6 +2423,31 @@ mod tests {
             "a mismatched persisted model identity must force re-embedding"
         );
         unsafe { std::env::remove_var("IVYGREP_MODEL_PROFILE") };
+    }
+
+    #[test]
+    #[serial]
+    fn neural_request_is_queued_behind_active_hash_enhancement() {
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let root = tempfile::tempdir().unwrap();
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        workspace.ensure_dirs().unwrap();
+        std::fs::write(
+            workspace.enhancing_pid_path(),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+
+        workspace.trigger_background_hash_enhancement().unwrap();
+        assert!(!workspace.queued_neural_enhancement_path().exists());
+
+        workspace.trigger_background_enhancement().unwrap();
+        assert!(workspace.queued_neural_enhancement_path().exists());
+
+        std::fs::remove_file(workspace.enhancing_pid_path()).unwrap();
+        workspace.trigger_queued_neural_enhancement().unwrap();
+        assert!(!workspace.queued_neural_enhancement_path().exists());
     }
 
     #[test]

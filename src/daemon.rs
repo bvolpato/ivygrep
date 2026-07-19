@@ -1297,10 +1297,11 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 tracing::trace!("daemon_search_prepare={:?}", task_started.elapsed());
                 let background_enhancement_enabled =
                     crate::config::background_enhancement_enabled();
-                let ws_neural_missing = if background_enhancement_enabled {
+                let query_uses_neural = query_uses_neural(&query, options.force_neural);
+                let workspaces_needing_enhancement = if background_enhancement_enabled {
                     workspaces
                         .iter()
-                        .filter(|workspace| workspace.needs_neural_enhancement())
+                        .filter(|workspace| workspace.needs_search_enhancement(query_uses_neural))
                         .map(|workspace| workspace.root.clone())
                         .collect::<Vec<PathBuf>>()
                 } else {
@@ -1329,9 +1330,9 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 );
                 if let Some(cached_hits) = state_clone.cached_query_results(&cache_key) {
                     if background_enhancement_enabled {
-                        for root in ws_neural_missing {
+                        for root in workspaces_needing_enhancement {
                             if let Ok(ws) = Workspace::resolve(&root) {
-                                let _ = ws.trigger_background_enhancement();
+                                let _ = ws.trigger_background_search_enhancement(query_uses_neural);
                             }
                         }
                     }
@@ -1427,9 +1428,9 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 }
                 // Spawn background hash and neural enhancement for workspaces that need it.
                 if background_enhancement_enabled {
-                    for root in ws_neural_missing {
+                    for root in workspaces_needing_enhancement {
                         if let Ok(ws) = Workspace::resolve(&root) {
-                            let _ = ws.trigger_background_enhancement();
+                            let _ = ws.trigger_background_search_enhancement(query_uses_neural);
                         }
                     }
                 }
@@ -1935,9 +1936,11 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>, job_nonce:
                     Ok(()) => {
                         state.clear_workspace_contexts(&control.workspace);
                         if crate::config::background_enhancement_enabled()
-                            && control.workspace.needs_neural_enhancement()
+                            && control.workspace.needs_search_enhancement(false)
                         {
-                            let _ = control.workspace.trigger_background_enhancement();
+                            let _ = control
+                                .workspace
+                                .trigger_background_search_enhancement(false);
                         }
                         daemon_log(&format!(
                             "watch update indexed {}",

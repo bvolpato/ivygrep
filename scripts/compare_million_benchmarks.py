@@ -10,6 +10,15 @@ from pathlib import Path
 import random
 import statistics
 
+QUERY_PATHS = (
+    "process_cold",
+    "cli_warm_distinct",
+    "warm_distinct",
+    "cache_replay",
+    "filtered",
+    "concurrent",
+)
+
 
 def percentile(values: list[float], quantile: float) -> float:
     ordered = sorted(values)
@@ -74,15 +83,39 @@ def compare_runs(
 ) -> dict:
     if not baseline_runs or not current_runs:
         raise ValueError("at least one baseline and current run is required")
-    baseline_warm = [run["queries"]["warm_distinct"] for run in baseline_runs]
-    current_warm = [run["queries"]["warm_distinct"] for run in current_runs]
-    latency = bootstrap_p95_ratio(
-        [sample for run in baseline_warm for sample in run["latency_samples_ms"]],
-        [sample for run in current_warm for sample in run["latency_samples_ms"]],
-    )
-    latency["significant_regression"] = (
-        latency["ci95_lower"] > significant_regression_ratio
-    )
+    comparable_query_paths = [
+        path
+        for path in QUERY_PATHS
+        if all(path in run["queries"] for run in baseline_runs + current_runs)
+    ]
+    query_latency_ratios = {}
+    query_quality_losses = {}
+    for path in comparable_query_paths:
+        baseline_queries = [run["queries"][path] for run in baseline_runs]
+        current_queries = [run["queries"][path] for run in current_runs]
+        latency = bootstrap_p95_ratio(
+            [
+                sample
+                for query in baseline_queries
+                for sample in query["latency_samples_ms"]
+            ],
+            [
+                sample
+                for query in current_queries
+                for sample in query["latency_samples_ms"]
+            ],
+        )
+        latency["significant_regression"] = (
+            latency["ci95_lower"] > significant_regression_ratio
+        )
+        query_latency_ratios[path] = latency
+        query_quality_losses[path] = statistics.median(
+            [query["expected_recall_at_20"] for query in baseline_queries]
+        ) - statistics.median(
+            [query["expected_recall_at_20"] for query in current_queries]
+        )
+
+    latency = query_latency_ratios["warm_distinct"]
 
     baseline_throughputs = [
         run["index"]["chunks_per_second"]
@@ -103,13 +136,7 @@ def compare_runs(
         index_ratio["significant_regression"] = (
             index_ratio["ci95_upper"] < 1.0 / significant_regression_ratio
         )
-    baseline_recall = statistics.median(
-        [run["expected_recall_at_20"] for run in baseline_warm]
-    )
-    current_recall = statistics.median(
-        [run["expected_recall_at_20"] for run in current_warm]
-    )
-    quality_loss = baseline_recall - current_recall
+    quality_loss = query_quality_losses["warm_distinct"]
     baseline_sizes = [
         run["index"]["size_bytes"]
         for run in baseline_runs
@@ -142,10 +169,11 @@ def compare_runs(
         return statistics.median(current) / statistics.median(baseline)
 
     failures = []
-    if latency["significant_regression"]:
-        failures.append(
-            "warm distinct-query p95 has a statistically significant regression"
-        )
+    for path, comparison in query_latency_ratios.items():
+        if comparison["significant_regression"]:
+            failures.append(
+                f"{path.replace('_', ' ')} p95 has a statistically significant regression"
+            )
     if index_ratio is not None and index_ratio["significant_regression"]:
         failures.append(
             "fresh-index throughput has a statistically significant regression"
@@ -163,11 +191,12 @@ def compare_runs(
             f"{index_ratio['observed'] if index_ratio else 0.0:.3f} is below "
             f"required {required_index_ratio:.3f}"
         )
-    if quality_loss > maximum_quality_loss:
-        failures.append(
-            f"expected recall@20 loss {quality_loss:.4f} exceeds "
-            f"allowed {maximum_quality_loss:.4f}"
-        )
+    for path, path_quality_loss in query_quality_losses.items():
+        if path_quality_loss > maximum_quality_loss:
+            failures.append(
+                f"{path.replace('_', ' ')} expected recall@20 loss "
+                f"{path_quality_loss:.4f} exceeds allowed {maximum_quality_loss:.4f}"
+            )
     if index_size_ratio is not None and index_size_ratio > maximum_index_size_ratio:
         failures.append(
             f"index size ratio {index_size_ratio:.3f} exceeds "
@@ -181,11 +210,13 @@ def compare_runs(
         "baseline_runs": len(baseline_runs),
         "current_runs": len(current_runs),
         "warm_distinct_p95_ratio": latency,
+        "query_path_p95_ratios": query_latency_ratios,
         "index_throughput_ratio": index_ratio,
         "index_size_ratio": index_size_ratio,
         "peak_disk_ratio": resource_ratio("peak_disk_bytes"),
         "peak_rss_ratio": resource_ratio("peak_rss_bytes"),
         "expected_recall_at_20_loss": quality_loss,
+        "query_path_expected_recall_at_20_losses": query_quality_losses,
         "passed": not failures,
         "failures": failures,
     }

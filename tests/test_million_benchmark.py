@@ -293,6 +293,39 @@ class MillionBenchmarkTest(unittest.TestCase):
         self.assertFalse(result["passed"])
         self.assertTrue(result["warm_distinct_p95_ratio"]["significant_regression"])
 
+    def test_comparison_rejects_filtered_path_regression_when_warm_path_is_stable(self):
+        baseline = artifact([100.0] * 40)
+        current = artifact([100.0] * 40)
+        baseline["queries"]["filtered"] = {
+            "latency_samples_ms": [10.0] * 40,
+            "expected_recall_at_20": 1.0,
+        }
+        current["queries"]["filtered"] = {
+            "latency_samples_ms": [15.0] * 40,
+            "expected_recall_at_20": 1.0,
+        }
+
+        result = comparator.compare(
+            baseline,
+            current,
+            significant_regression_ratio=1.15,
+            required_warm_ratio=None,
+            required_index_ratio=None,
+            maximum_quality_loss=0.0,
+        )
+
+        self.assertFalse(result["passed"])
+        self.assertFalse(
+            result["query_path_p95_ratios"]["warm_distinct"][
+                "significant_regression"
+            ]
+        )
+        self.assertTrue(
+            result["query_path_p95_ratios"]["filtered"][
+                "significant_regression"
+            ]
+        )
+
     def test_comparison_rejects_significant_index_regression_across_runs(self):
         baselines = [
             artifact([100.0] * 40, throughput=value, commit="base")

@@ -65,6 +65,7 @@ const NEURAL_CUDA_ACTIVE_UTILIZATION_PERCENT: u32 = 25;
 const NEURAL_BATCH_SIZE_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_CONFIGURED_NEURAL_BATCH_SIZE: usize = 4096;
 const SYMBOL_INSERT_BATCH_ROWS: usize = 256;
+const INDEX_FILE_BATCH_SIZE: usize = 64;
 // Soft per-transaction target, checked after each file. One file's bounded
 // chunk-key batch may exceed it before the journal and SQLite commit checkpoint.
 const MAX_VECTOR_TOMBSTONE_TRANSACTION_BYTES: usize = 1024 * 1024;
@@ -1317,7 +1318,6 @@ fn index_workspace_inner(
     };
 
     let defer_secondary_indexes = !use_overlay && is_fresh_index;
-
     if !use_overlay && fresh_staging.is_none() {
         let preserved_metadata = workspace.read_metadata().ok().flatten();
         if let Err(err) = open_storage_with_options(
@@ -1473,11 +1473,11 @@ fn index_workspace_inner(
 
     let t0 = std::time::Instant::now();
     let mut total_chunks_processed = 0;
+    let mut indexed_files_with_chunks = 0;
     let mut touched_files = HashSet::new();
     let mut chunks_since_commit = 0;
 
     // Stream through batches to rigidly bound memory footprints.
-    // 4096 files is highly parallelizable while capping memory overhead effectively.
     let (tx_batch, rx_batch) = std::sync::mpsc::sync_channel::<IndexedFileBatch>(2);
 
     let progress_counter_clone = progress_counter.clone();
@@ -1490,7 +1490,7 @@ fn index_workspace_inner(
     let _ = fs::write(&progress_path_clone, format!("0/{total}"));
 
     let producer_handle = std::thread::spawn(move || {
-        for batch_paths in diff_paths.chunks(128) {
+        for batch_paths in diff_paths.chunks(INDEX_FILE_BATCH_SIZE) {
             let file_chunks: Vec<_> = indexing_pool().install(|| {
                 batch_paths
                     .par_iter()
@@ -1632,6 +1632,7 @@ fn index_workspace_inner(
             let indexed_chunks = indexed_file.chunks;
             let rel_path_string = index_path_string(&rel_path);
             touched_files.insert(rel_path_string.clone());
+            indexed_files_with_chunks += usize::from(!indexed_chunks.is_empty());
             total_chunks_processed += indexed_chunks.len();
             chunks_since_commit += indexed_chunks.len();
 
@@ -1734,12 +1735,8 @@ fn index_workspace_inner(
         stats.final_counts(&tx)?
     } else {
         (
-            tx.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
-                .unwrap_or(0),
-            tx.query_row("SELECT COUNT(DISTINCT file_path) FROM chunks", [], |row| {
-                row.get(0)
-            })
-            .unwrap_or(0),
+            total_chunks_processed as i64,
+            indexed_files_with_chunks as i64,
             tx.query_row("SELECT COUNT(DISTINCT vector_key) FROM chunks", [], |row| {
                 row.get(0)
             })

@@ -530,6 +530,9 @@ pub async fn run() -> Result<()> {
         let _ = std::fs::remove_file(workspace.enhancing_progress_path());
         let _ = std::fs::remove_file(workspace.enhancing_phase_path());
         let _ = std::fs::remove_file(workspace.enhancing_paused_path());
+        if result.is_ok() {
+            workspace.trigger_queued_neural_enhancement()?;
+        }
         return result.map(|_| ());
     }
 
@@ -629,6 +632,16 @@ pub async fn run() -> Result<()> {
         let _ = std::fs::remove_file(&pid_path);
         let _ = std::fs::remove_file(workspace.enhancing_progress_path());
         let _ = std::fs::remove_file(workspace.enhancing_phase_path());
+        if let Err(error) = workspace.trigger_queued_neural_enhancement() {
+            let _ = jobs::finish_job(
+                &workspace,
+                JobKind::Enhancement,
+                "queue-failed",
+                Some(error.to_string()),
+            );
+            eprintln!("Failed to start queued neural enhancement: {error:#}");
+            std::process::exit(1);
+        }
         std::process::exit(0);
     }
 
@@ -1095,13 +1108,17 @@ async fn trigger_workspace_enhancement(
         return Ok(());
     }
 
-    if !active {
-        if !config::background_enhancement_enabled() {
-            if wait {
-                bail!("background enhancement is disabled by environment configuration");
-            }
-            return Ok(());
+    if !config::background_enhancement_enabled() {
+        if wait {
+            bail!("background enhancement is disabled by environment configuration");
         }
+        return Ok(());
+    }
+    if active {
+        if !hash_only {
+            workspace.trigger_background_enhancement()?;
+        }
+    } else {
         if hash_only {
             workspace.trigger_background_hash_enhancement()?;
         } else {
@@ -1138,6 +1155,12 @@ async fn wait_for_workspace_enhancement(workspace: &Workspace, hash_only: bool) 
             );
         }
         if !workspace.is_enhancing_active() {
+            if !hash_only && workspace.needs_neural_enhancement() {
+                workspace.trigger_background_enhancement()?;
+                if workspace.is_enhancing_active() {
+                    continue;
+                }
+            }
             terminal_error = status.enhancing_error.clone();
             break;
         }
@@ -1568,8 +1591,12 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             print!("{}", crate::context::render_markdown(&bundle));
         }
         if !cli.lexical_only {
+            let query_uses_neural = crate::search::query_uses_neural(query, cli.force_neural);
+            let hash_only =
+                cli.hash || !workspace.search_enhancement_uses_neural(query_uses_neural);
             let result =
-                trigger_workspace_enhancement(&workspace, cli.hash, cli.wait_for_enhancement).await;
+                trigger_workspace_enhancement(&workspace, hash_only, cli.wait_for_enhancement)
+                    .await;
             if cli.wait_for_enhancement {
                 result?;
             }
@@ -1859,8 +1886,10 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         && !cli.refs
         && !cli.callers
     {
+        let query_uses_neural = crate::search::query_uses_neural(query, cli.force_neural);
+        let hash_only = cli.hash || !workspace.search_enhancement_uses_neural(query_uses_neural);
         let result =
-            trigger_workspace_enhancement(&workspace, cli.hash, cli.wait_for_enhancement).await;
+            trigger_workspace_enhancement(&workspace, hash_only, cli.wait_for_enhancement).await;
         if cli.wait_for_enhancement {
             result?;
         }
