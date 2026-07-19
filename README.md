@@ -60,6 +60,14 @@ curl -fsSL https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.sh | 
 irm https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.ps1 | iex
 ```
 
+```powershell
+winget install BrunoVolpato.ivygrep
+```
+
+```bash
+cargo install ivygrep --locked
+```
+
 Installers select a compatible archive, verify its SHA-256 checksum, install `ig`, and report the selected backend. Apple Silicon uses Metal. NVIDIA Linux hosts use the Linux x86_64 CUDA build when CUDA 13 and compute capability 8.0 or newer are available. Other systems use portable local inference. Run `ig hardware` to see detected hardware, compatibility limits, and the matching reinstall command.
 
 Build from source:
@@ -89,6 +97,16 @@ ig --web "auth flow" .                       # local Web UI
 Useful controls include `-n` for result files, `-C` for context lines, `--type` for language, `--include` and `--exclude` for path globs, plus `--lexical-only`, `--hash`, `--json`, and `--no-index`. Run `ig --help` for the full reference.
 
 ## Connect coding agents
+
+Codex and Claude Code packages install MCP configuration plus focused task-context skill:
+
+```bash
+codex plugin marketplace add bvolpato/ivygrep
+codex plugin add ivygrep@ivygrep
+
+claude plugin marketplace add bvolpato/ivygrep
+claude plugin install ivygrep@ivygrep
+```
 
 Automatic setup detects the client, preserves existing configuration, writes the absolute `ig` path, verifies the MCP handshake, and runs a search:
 
@@ -122,6 +140,8 @@ OpenCode `opencode.json`:
 Agents call `ig_search` for discovery. Set `output=context_pack` and `budget_tokens=8000` when the task needs implementation context. Pass the absolute path to the active repository or worktree. Worktrees reuse the base index and store only changed chunks and tombstones.
 
 Context packs can include definitions, callers, references, dependencies, dependents, tests, configuration, and docs.
+
+Setup guides: [Codex](https://bvolpato.github.io/ivygrep/integrations/codex.html), [Claude Code](https://bvolpato.github.io/ivygrep/integrations/claude-code.html), [Cursor](https://bvolpato.github.io/ivygrep/integrations/cursor.html), [Gemini CLI](https://bvolpato.github.io/ivygrep/integrations/gemini-cli.html), [OpenCode](https://bvolpato.github.io/ivygrep/integrations/opencode.html), and [MCP](https://bvolpato.github.io/ivygrep/integrations/mcp.html).
 
 Recommended agent instruction:
 

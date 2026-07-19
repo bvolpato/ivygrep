@@ -1,21 +1,24 @@
 [package]
-categories=["cuda", "embeddings", "huggingface", "search", "vectors"]
-description="Text embeddings with Candle. Fast and configurable. Use any model from Hugging Face. CUDA or CPU powered."
+categories=["algorithms", "science"]
+description="ivygrep-maintained Candle text embedding fork"
 edition="2021"
-homepage="https://github.com/shelbyJenkins/candle_embed"
+homepage="https://github.com/bvolpato/ivygrep"
 keywords=["cuda", "embeddings", "huggingface", "search", "vectors"]
 license="MIT"
+name="ivygrep-candle-embed"
+repository="https://github.com/bvolpato/ivygrep"
+version="0.1.4-ivygrep.1"
+
+[lib]
 name="candle_embed"
-readme="README.md"
-repository="https://github.com/shelbyJenkins/candle_embed"
-version="0.1.4"
+path="src/lib.rs"
 
 [dependencies]
 anyhow="1.0.82"
 candle={version="0.10.2", package="candle-core", default-features=false}
 candle-transformers="0.10.2"
 candle_nn={version="0.10.2", package="candle-nn", default-features=false}
-hf-hub={version="0.3.2", features=["tokio"]}
+hf-hub={package="ivygrep-hf-hub", path="../hf-hub", version="=0.3.2-ivygrep.1", features=["tokio"]}
 serde_json="1.0.116"
 tokenizers="0.19.1"
 

@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ivygrep MCP server</title><meta name="description" content="Install ivygrep through MCP Registry or connect its local stdio server.">
+    <link rel="stylesheet" href="../style.css"><link rel="stylesheet" href="integration.css"><link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
+</head>
+<body>
+    <div class="bg-fx"></div><div class="bg-fx-glow"></div>
+    <nav class="navbar relative z-10"><div class="container nav-content"><a href="../index.html" class="logo"><img src="../assets/icon.svg" alt="ivygrep" width="38" height="34"></a><div class="integration-nav"><a href="codex.html">Codex</a><a href="claude-code.html">Claude Code</a><a href="cursor.html">Cursor</a><a href="gemini-cli.html">Gemini CLI</a><a href="opencode.html">OpenCode</a><a href="mcp.html" aria-current="page">MCP</a></div></div></nav>
+    <main class="integration-main relative z-10"><div class="container">
+        <header class="integration-header"><span class="section-tag">Model Context Protocol</span><h1>One local server. Every supported agent.</h1><p>Install checksum-pinned cross-platform MCP bundle from registry client or connect existing <code>ig</code> binary over stdio.</p></header>
+        <div class="integration-grid">
+            <section class="glass-panel integration-card"><h2>Server</h2><pre class="integration-command">ig --mcp</pre><p>MCP bundle contains ivygrep binaries for macOS, Linux, and Windows. Registry metadata pins bundle SHA-256. Release workflow publishes metadata with GitHub OIDC.</p><h3>Core request</h3><pre class="integration-command">tool: ig_search
+query: fix refresh-token races
+path: /absolute/repository/path
+output: context_pack
+since: main
+budget_tokens: 8000</pre></section>
+            <aside class="glass-panel integration-card"><h2>Tools</h2><ul><li><code>ig_search</code>: search or context pack</li><li><code>ig_status</code>: index state</li><li>stdio transport</li><li>Local source, queries, embeddings, indexes</li></ul><div class="integration-links"><a class="btn btn-ghost" href="https://registry.modelcontextprotocol.io/">MCP Registry</a><a class="btn btn-ghost" href="https://github.com/bvolpato/ivygrep/releases/latest">Release bundle</a></div></aside>
+        </div>
+    </div></main>
+</body>
+</html>

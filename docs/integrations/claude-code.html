@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ivygrep for Claude Code</title>
+    <meta name="description" content="Install ivygrep MCP and focused repository context instructions for Claude Code.">
+    <link rel="stylesheet" href="../style.css"><link rel="stylesheet" href="integration.css"><link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
+</head>
+<body>
+    <div class="bg-fx"></div><div class="bg-fx-glow"></div>
+    <nav class="navbar relative z-10"><div class="container nav-content"><a href="../index.html" class="logo"><img src="../assets/icon.svg" alt="ivygrep" width="38" height="34"></a><div class="integration-nav"><a href="codex.html">Codex</a><a href="claude-code.html" aria-current="page">Claude Code</a><a href="cursor.html">Cursor</a><a href="gemini-cli.html">Gemini CLI</a><a href="opencode.html">OpenCode</a><a href="mcp.html">MCP</a></div></div></nav>
+    <main class="integration-main relative z-10"><div class="container">
+        <header class="integration-header"><span class="section-tag">Claude Code integration</span><h1>Give Claude Code focused code context.</h1><p>Plugin installs ivygrep MCP server and shared Agent Skill. One task pack connects branch changes, definitions, callers, dependents, and tests.</p></header>
+        <div class="integration-grid">
+            <section class="glass-panel integration-card"><h2>Install</h2><p>Install <code>ig</code>, then add marketplace and plugin:</p><pre class="integration-command">brew install bvolpato/tap/ivygrep
+claude plugin marketplace add bvolpato/ivygrep
+claude plugin install ivygrep@ivygrep</pre><p>Restart Claude Code after installation. Plugin invokes local <code>ig --mcp</code>.</p><h3>Use</h3><pre class="integration-command">Use ivygrep context for refresh-token race. Fix it and run auth tests.</pre></section>
+            <aside class="glass-panel integration-card"><h2>Included</h2><ul><li><code>ig_search</code> and <code>ig_status</code> MCP tools</li><li><code>use-ivygrep</code> Agent Skill</li><li>Local indexes shared across worktrees</li></ul><div class="integration-links"><a class="btn btn-ghost" href="https://github.com/bvolpato/ivygrep/tree/main/plugins/ivygrep">Inspect plugin</a><a class="btn btn-ghost" href="mcp.html">MCP details</a></div></aside>
+        </div>
+    </div></main>
+</body>
+</html>

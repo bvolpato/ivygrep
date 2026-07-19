@@ -1,3 +1,4 @@
+import tomllib
 import unittest
 from pathlib import Path
 
@@ -7,13 +8,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class WindowsManifestTest(unittest.TestCase):
     def test_windows_usearch_portability_preserves_proven_backend(self) -> None:
-        manifest = (ROOT / "Cargo.toml").read_text(encoding="utf-8")
+        manifest = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        usearch = manifest["dependencies"]["usearch"]
 
-        self.assertIn(
-            'usearch = { version = "=2.24.0", default-features = false, features = ["fp16lib"] }',
-            manifest,
-        )
-        self.assertNotIn('usearch = { version = "2.25', manifest)
+        self.assertEqual(usearch["package"], "ivygrep-usearch")
+        self.assertEqual(usearch["version"], "=2.24.0-ivygrep.1")
+        self.assertFalse(usearch["default-features"])
+        self.assertEqual(usearch["features"], ["fp16lib"])
 
     def test_msvc_binary_embeds_long_path_manifest(self) -> None:
         build_script = (ROOT / "build.rs").read_text(encoding="utf-8")

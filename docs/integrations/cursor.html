@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ivygrep for Cursor</title><meta name="description" content="Connect Cursor to local ivygrep code search and context packs.">
+    <link rel="stylesheet" href="../style.css"><link rel="stylesheet" href="integration.css"><link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
+</head>
+<body>
+    <div class="bg-fx"></div><div class="bg-fx-glow"></div>
+    <nav class="navbar relative z-10"><div class="container nav-content"><a href="../index.html" class="logo"><img src="../assets/icon.svg" alt="ivygrep" width="38" height="34"></a><div class="integration-nav"><a href="codex.html">Codex</a><a href="claude-code.html">Claude Code</a><a href="cursor.html" aria-current="page">Cursor</a><a href="gemini-cli.html">Gemini CLI</a><a href="opencode.html">OpenCode</a><a href="mcp.html">MCP</a></div></div></nav>
+    <main class="integration-main relative z-10"><div class="container">
+        <header class="integration-header"><span class="section-tag">Cursor integration</span><h1>Search local code from Cursor.</h1><p>Automatic setup updates Cursor MCP configuration, preserves existing servers, verifies handshake, and runs one smoke search.</p></header>
+        <div class="integration-grid">
+            <section class="glass-panel integration-card"><h2>Install</h2><pre class="integration-command">brew install bvolpato/tap/ivygrep
+ig agent install cursor
+ig agent doctor</pre><p>Restart Cursor after setup. For project-local configuration, add this to <code>.cursor/mcp.json</code>:</p><pre class="integration-command">{"mcpServers":{"ig":{"type":"stdio","command":"ig","args":["--mcp"]}}}</pre><h3>Use</h3><pre class="integration-command">Use ig_search with output=context_pack and budget_tokens=8000 for this task.</pre></section>
+            <aside class="glass-panel integration-card"><h2>Good task pack</h2><ul><li>Concrete task or error as query</li><li>Absolute repository path</li><li><code>since=main</code> for active changes</li><li>One focused literal search only if needed</li></ul><div class="integration-links"><a class="btn btn-ghost" href="mcp.html">MCP details</a></div></aside>
+        </div>
+    </div></main>
+</body>
+</html>

@@ -1,0 +1,18 @@
+{
+  "name": "ivygrep",
+  "owner": {
+    "name": "Bruno Volpato"
+  },
+  "metadata": {
+    "description": "Local code search and task context for coding agents"
+  },
+  "plugins": [
+    {
+      "name": "ivygrep",
+      "source": "./plugins/ivygrep",
+      "description": "Build bounded local context packs before coding agents explore a repository",
+      "category": "Development",
+      "tags": ["code-search", "context", "mcp", "local-first"]
+    }
+  ]
+}

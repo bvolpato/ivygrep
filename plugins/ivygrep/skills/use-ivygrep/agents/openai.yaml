@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use ivygrep"
+  short_description: "Build focused local code context packs"
+  default_prompt: "Use $use-ivygrep to gather focused context for this coding task."

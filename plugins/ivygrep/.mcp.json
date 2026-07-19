@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ivygrep": {
+      "command": "ig",
+      "args": ["--mcp"]
+    }
+  }
+}
