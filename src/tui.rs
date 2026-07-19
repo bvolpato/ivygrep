@@ -487,12 +487,13 @@ fn local_search_detached(
         all_hits.truncate(limit);
     }
 
+    let query_uses_neural = crate::search::query_uses_neural(query, cli.force_neural);
     if !cli.all_indices
         && !cli.hash
         && std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
-        && workspace.needs_neural_enhancement()
+        && workspace.needs_search_enhancement(query_uses_neural)
     {
-        let _ = workspace.trigger_background_enhancement();
+        let _ = workspace.trigger_background_search_enhancement(query_uses_neural);
     }
 
     Ok(all_hits)

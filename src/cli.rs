@@ -1568,8 +1568,10 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             print!("{}", crate::context::render_markdown(&bundle));
         }
         if !cli.lexical_only {
+            let hash_only = cli.hash || !crate::search::query_uses_neural(query, cli.force_neural);
             let result =
-                trigger_workspace_enhancement(&workspace, cli.hash, cli.wait_for_enhancement).await;
+                trigger_workspace_enhancement(&workspace, hash_only, cli.wait_for_enhancement)
+                    .await;
             if cli.wait_for_enhancement {
                 result?;
             }
@@ -1859,8 +1861,9 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         && !cli.refs
         && !cli.callers
     {
+        let hash_only = cli.hash || !crate::search::query_uses_neural(query, cli.force_neural);
         let result =
-            trigger_workspace_enhancement(&workspace, cli.hash, cli.wait_for_enhancement).await;
+            trigger_workspace_enhancement(&workspace, hash_only, cli.wait_for_enhancement).await;
         if cli.wait_for_enhancement {
             result?;
         }

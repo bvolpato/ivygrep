@@ -809,10 +809,11 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
                 since: args.since.as_deref(),
             },
         )?;
+        let query_uses_neural = crate::search::query_uses_neural(query, false);
         if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
-            && workspace.needs_neural_enhancement()
+            && workspace.needs_search_enhancement(query_uses_neural)
         {
-            let _ = workspace.trigger_background_enhancement();
+            let _ = workspace.trigger_background_search_enhancement(query_uses_neural);
         }
         let payload = json!({
             "workspace_root": current_workspace.root,
@@ -965,12 +966,13 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
                 cancel_token: None,
             },
         )?;
-        // Build hash ANN, then neural vectors, in a niced subprocess after the
-        // lexical-first response is computed.
+        // Build query-appropriate vectors in a niced subprocess after the
+        // lexical-first response is computed. Exact queries stop after hash.
+        let query_uses_neural = crate::search::query_uses_neural(query, false);
         if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
-            && workspace.needs_neural_enhancement()
+            && workspace.needs_search_enhancement(query_uses_neural)
         {
-            let _ = workspace.trigger_background_enhancement();
+            let _ = workspace.trigger_background_search_enhancement(query_uses_neural);
         }
         hits
     };
