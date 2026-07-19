@@ -245,12 +245,12 @@ jobs:
             --output "$PROVENANCE_PATH"
 
       - name: Attest build provenance
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
         with:
           subject-path: dist/ivygrep-${{ github.ref_name }}-${{ matrix.archive_name }}.${{ matrix.archive }}
 
       - name: Attest SBOM
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
         with:
           subject-path: dist/ivygrep-${{ github.ref_name }}-${{ matrix.archive_name }}.${{ matrix.archive }}
           sbom-path: dist/ivygrep-${{ github.ref_name }}-${{ matrix.archive_name }}.spdx.json
@@ -562,7 +562,7 @@ jobs:
           echo "notes_file=release_notes.md" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
           body_path: ${{ steps.extract_notes.outputs.notes_file }}
           files: release-assets/*
