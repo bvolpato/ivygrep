@@ -296,6 +296,10 @@ function byId<T extends HTMLElement = HTMLElement>(id: string): T {
   return element as T;
 }
 
+function countText(count: number, singular: string, plural = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
 function enc(value: string): string {
   return encodeURIComponent(value || "");
 }
@@ -329,7 +333,7 @@ function workspaceLabel(ws: WorkspaceStatus): string {
 
 function workspaceMeta(ws: WorkspaceStatus): string {
   if (ws.root === ALL_WORKSPACES) return "Search every tracked index";
-  const counts = `${ws.file_count || 0} files, ${ws.chunk_count || 0} chunks`;
+  const counts = `${countText(ws.file_count || 0, "file")}, ${countText(ws.chunk_count || 0, "chunk")}`;
   const watch = ws.watch_enabled ? (ws.watcher_alive ? "watch live" : "watch offline") : "watch off";
   let search = "hash";
   if (ws.enhancing_stalled) {
@@ -362,7 +366,7 @@ async function loadStatus(): Promise<void> {
   renderWorkspaces();
   updateScopeLabel();
   await loadTree(state.scope || ".");
-  setStatus(`${state.workspaces.length} workspace(s), v${payload.version || boot.version || "dev"}`);
+  setStatus(`${countText(state.workspaces.length, "workspace")}, v${payload.version || boot.version || "dev"}`);
 }
 
 function resolveRequestedWorkspace(): void {
@@ -536,7 +540,7 @@ function runSearch(options: { preserveSelection?: boolean } = {}): void {
     setSearching(false);
     updateCopyAvailability();
     byId("summary").textContent = "Select one workspace for a context pack.";
-    byId("results").innerHTML = '<div class="empty">Context graphs and Git diffs belong to one workspace. Select it on the left.</div>';
+    byId("results").innerHTML = '<div class="empty">Select one workspace to build context from its files, Git changes, and relationships.</div>';
     return;
   }
   syncUrlState();
@@ -630,9 +634,9 @@ function renderResults(payload: SearchPayload): void {
   pruneResultKeySets();
   updateCopyAvailability();
   const errorSummary = state.searchErrors.length
-    ? `, ${state.searchErrors.length} workspace error(s): ${state.searchErrors.join("; ")}`
+    ? `, ${countText(state.searchErrors.length, "workspace error")}: ${state.searchErrors.join("; ")}`
     : "";
-  byId("summary").textContent = `${hits.length} hit(s) in ${Number(payload.elapsed_ms || 0).toFixed(1)} ms${errorSummary}`;
+  byId("summary").textContent = `${countText(hits.length, "hit")} in ${Number(payload.elapsed_ms || 0).toFixed(1)} ms${errorSummary}`;
   if (!hits.length) {
     state.currentHitKey = "";
     byId("results").innerHTML = '<div class="empty">No hits. Try a broader query, fewer filters, or a different search mode.</div>';
@@ -693,9 +697,9 @@ function renderContextPack(bundle: ContextBundle, elapsedMs: number): void {
   updateCopyAvailability();
   const coverage = bundle.coverage;
   const changeText = bundle.change_scope
-    ? `, ${bundle.change_scope.total_changes} changed${bundle.change_scope.dirty_worktree ? " including worktree" : ""}`
+    ? `, ${countText(bundle.change_scope.total_changes, "changed file")}${bundle.change_scope.dirty_worktree ? " including worktree" : ""}`
     : "";
-  byId("summary").textContent = `${coverage.files} files, ${bundle.used_tokens}/${bundle.budget_tokens} tokens${changeText}, ${elapsedMs.toFixed(1)} ms`;
+  byId("summary").textContent = `${countText(coverage.files, "file")}, ${bundle.used_tokens}/${bundle.budget_tokens} tokens${changeText}, ${elapsedMs.toFixed(1)} ms`;
   const root = byId("results");
   root.innerHTML = "";
   const overview = document.createElement("section");
@@ -713,8 +717,8 @@ function renderContextPack(bundle: ContextBundle, elapsedMs: number): void {
     `<li><strong>${escapeHtml(change.status)}</strong> ${escapeHtml(change.file_path)} <span>${escapeHtml(change.sources.join(", "))}</span></li>`
   ).join("") || "";
   overview.innerHTML = `
-    <div class="context-title">Structured context pack</div>
-    <div>${escapeHtml(coverageText || "No relationship coverage")}${bundle.truncated ? " | truncated to budget" : ""}</div>
+    <div class="context-title">Context pack</div>
+    <div>${escapeHtml(coverageText || "No linked definitions, callers, tests, or dependencies")}${bundle.truncated ? " | truncated to budget" : ""}</div>
     ${bundle.anchor_symbols.length ? `<div>Anchors: ${escapeHtml(bundle.anchor_symbols.join(", "))}</div>` : ""}
     ${changes ? `<ul class="context-changes">${changes}</ul>` : ""}`;
   root.appendChild(overview);
@@ -747,7 +751,7 @@ function renderContextPack(bundle: ContextBundle, elapsedMs: number): void {
     root.appendChild(article);
   }
   if (!hits.length) {
-    root.insertAdjacentHTML("beforeend", '<div class="empty">No context evidence found.</div>');
+    root.insertAdjacentHTML("beforeend", '<div class="empty">No relevant context found.</div>');
   } else if (!state.manualOpen) {
     void openHit(hits[0]).catch((err: Error) => setStatus(err.message));
   }
@@ -820,7 +824,7 @@ async function copyVisibleResults(): Promise<void> {
     return;
   }
   await writeClipboard(text);
-  setStatus(`Copied ${hits.length} result(s)`);
+  setStatus(`Copied ${countText(hits.length, "result")}`);
 }
 
 function currentCopyScope(): CopyScope {

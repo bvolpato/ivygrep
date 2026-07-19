@@ -751,16 +751,10 @@ fn index_workspace_with_options(
 ) -> Result<IndexingSummary> {
     workspace.ensure_dirs()?;
 
-    // Refuse to start indexing if available memory is critically low.
     check_memory_before_index()?;
 
-    // Acquire an exclusive file lock to prevent concurrent writes to the
-    // vector store (usearch) and other index files. The lock is advisory
-    // and automatically released when `_lock_file` is dropped.
-    //
-    // IMPORTANT: The health check and rebuild MUST happen AFTER acquiring
-    // this lock. Doing them before would destroy the lock file inode,
-    // breaking flock mutual exclusion for any concurrent holder.
+    // Rebuild only after locking. Replacing the lock inode first would break
+    // mutual exclusion with a process that still holds the old inode.
     let lock_path = workspace.lock_path();
     let lock_file = fs::OpenOptions::new()
         .create(true)
@@ -771,9 +765,6 @@ fn index_workspace_with_options(
     fs2::FileExt::lock_exclusive(&lock_file)
         .with_context(|| format!("failed to acquire index lock {}", lock_path.display()))?;
 
-    // Now that we truly own the workspace via flock, it's safe to inspect
-    // health and rebuild if needed. rebuild_index_storage preserves the
-    // lock file so our flock remains valid.
     let preserved_metadata = workspace.read_metadata().ok().flatten();
     if workspace.quick_index_health().needs_rebuild() {
         rebuild_index_storage(workspace, preserved_metadata.as_ref())?;
@@ -1043,8 +1034,6 @@ fn index_workspace_inner(
         {
             eprintln!("  ⚡ base workspace is not indexed, running full base indexing first...");
             let base_workspace = crate::workspace::Workspace::resolve(&main_root)?;
-            // We recursively call index_workspace on the base. It will acquire its
-            // own safe lock and index natively.
             let _ = index_workspace(&base_workspace, embedding_model)?;
             base_refreshed = true;
             eprintln!("  ⚡ base indexing complete, proceeding with overlay...");
@@ -1155,11 +1144,8 @@ fn index_workspace_inner(
         })
     };
     let path_exists_in_base = |rel_path: &Path| base_ignored_status(rel_path).is_some();
-    // When not in overlay creation mode, use the standard Merkle diff path.
-    // IMPORTANT: The snapshot is NOT saved here — it is deferred to after all
-    // store commits complete. Saving it earlier creates a crash window where
-    // the snapshot claims files are indexed but the actual stores are empty/partial.
-    // See: snapshot must be a high-water mark of persisted state, not of intent.
+    // Save the Merkle snapshot only after every store commits. An earlier
+    // snapshot could claim that files exist in a partial index after a crash.
     let (mut diff, pending_snapshot, clear_overlay_paths) = if let Some(overlay_diff) = overlay_mode
     {
         (overlay_diff, None, Vec::new())
@@ -1385,8 +1371,7 @@ fn index_workspace_inner(
         (!use_overlay).then(|| workspace.neural_tombstones_path()),
     );
 
-    // Batch SQLite writes in a transaction for ~10-50x speedup.
-    // Mutable so we can periodically commit and avert massive WAL files.
+    // Periodic commits keep the WAL bounded during large indexes.
     let mut tx = sqlite.transaction()?;
     let mut incremental_stats = if is_fresh_index {
         None
@@ -1803,10 +1788,8 @@ fn index_workspace_inner(
     // that changes the layout forces a rebuild (see INDEX_FORMAT_VERSION).
     workspace.write_index_format_version()?;
 
-    // Persist the Merkle snapshot AFTER all stores are committed and metadata
-    // is written. This ensures the snapshot is a high-water mark: if we crash
-    // before this point, the next run will see a non-empty diff and re-index
-    // the affected files. `remove_file_chunks` cleans any partial state.
+    // The snapshot records persisted state. If indexing stops before this
+    // point, the next run sees a diff and repairs partial file data.
     if let Some(snapshot) = pending_snapshot {
         snapshot.save(&workspace.merkle_snapshot_path())?;
     }
@@ -2535,15 +2518,11 @@ fn parse_pmset_therm(stdout: &str) -> Option<String> {
     }
 }
 
-/// Load-average multiple of the CPU count above which background neural
-/// enhancement pauses. Configurable via `IVYGREP_ENHANCE_MAX_LOAD_RATIO`.
-///
-/// The enhancement subprocess is already `nice(10)` and capped at ~25% of
-/// cores, so it yields to interactive work. The previous 0.75–0.8× threshold
-/// paused it on routinely-busy machines (a dev box mid-build, a shared host),
-/// so neural vectors were never built and search stayed on the lower-quality
-/// hash path. Default 2.0× pauses only under genuine sustained oversubscription;
-/// a value <= 0 disables the load check entirely.
+/// Load-average multiple of CPU count that pauses background neural work.
+/// `IVYGREP_ENHANCE_MAX_LOAD_RATIO` overrides the 2.0 default; values at or
+/// below zero disable the check. The worker already runs at `nice(10)` with a
+/// limited core budget, so lower thresholds can prevent it from completing on
+/// routinely busy hosts.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn enhance_max_load_ratio() -> f64 {
     std::env::var("IVYGREP_ENHANCE_MAX_LOAD_RATIO")
@@ -3310,8 +3289,7 @@ fn commit_with_vector_tombstones(
     tx: rusqlite::Transaction<'_>,
     vector_tombstones: &mut VectorTombstoneJournals,
 ) -> Result<()> {
-    // Conservative ordering is intentional: a crash between these operations
-    // may cause harmless extra vector repair, never committed stale vectors.
+    // Flush first so a crash can cause extra repair but cannot commit stale vectors.
     vector_tombstones.flush()?;
     tx.commit()?;
     Ok(())
@@ -3590,8 +3568,7 @@ fn count_workspace_chunks(workspace: &Workspace) -> Result<usize> {
     let mut count = count_chunks(&workspace.sqlite_path()).unwrap_or(0);
     if workspace.has_overlay() {
         count += count_chunks(&workspace.overlay_sqlite_path()).unwrap_or(0);
-        // We don't subtract tombstones here because this is just an approximate
-        // indicator of index size for the CLI output / summary.
+        // CLI size reporting is approximate, so overlay tombstones are not subtracted.
     }
     Ok(count)
 }

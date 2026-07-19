@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render benchmark history from retained machine-readable artifacts."""
+"""Render benchmark history from published machine-readable artifacts."""
 
 from __future__ import annotations
 
@@ -24,15 +24,15 @@ def sha256_file(path: Path) -> str:
 
 
 def publication_commit(
-    root: Path, path: Path, retained_commit: str | None = None
+    root: Path, path: Path, published_commit: str | None = None
 ) -> str:
-    if retained_commit is not None:
-        normalized = retained_commit.lower()
+    if published_commit is not None:
+        normalized = published_commit.lower()
         if len(normalized) != 40 or any(
             char not in "0123456789abcdef" for char in normalized
         ):
             raise ValueError(
-                f"{path} has an invalid retained publication commit"
+                f"{path} has an invalid publication commit"
             )
         return normalized
     result = subprocess.run(
@@ -69,25 +69,7 @@ def mean_metric(summary: dict, mode: str, metric: str) -> float | None:
     return value.get("mean") if value else None
 
 
-def daemon_summary(path: Path) -> dict:
-    rows = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if not line or line.startswith("#") or line.startswith("iteration\t"):
-            continue
-        fields = line.split("\t")
-        if len(fields) >= 7 and fields[5] in {"baseline", "keep"}:
-            rows.append((fields[1], float(fields[2])))
-    return {
-        "source_commit": rows[-1][0] if rows else None,
-        "retained_warm_p95_ms": rows[-1][1] if rows else None,
-        "retained_iterations": max(0, len(rows) - 1),
-    }
-
-
 def summarize(evidence_id: str, path: Path) -> tuple[str | None, dict]:
-    if path.suffix == ".tsv":
-        summary = daemon_summary(path)
-        return summary.pop("source_commit"), summary
     if path.suffix not in {".json"}:
         text = path.read_text(encoding="utf-8")
         targets = {
@@ -260,7 +242,7 @@ def evidence_point(
         "variance": variance
         or {
             "status": "unavailable",
-            "reason": "The retained artifact is a single deterministic run.",
+            "reason": "The published artifact is a single deterministic run.",
         },
         "context": context,
         "source_commit": source_commit or item.get("source_commit"),
@@ -476,7 +458,6 @@ def render_markdown(dashboard: dict) -> str:
     retrieval = by_id["public-retrieval-current"]["summary"]
     million = by_id["million-scale"]["summary"]
     reranker = by_id["learned-reranker"]["summary"]
-    daemon = by_id["daemon-cache"]["summary"]
     releases = dashboard["release_history"]["releases"]
     latest_release = releases[0] if releases else None
     release_text = (
@@ -522,21 +503,21 @@ def render_markdown(dashboard: dict) -> str:
     }.get(retrieval["mode"], f"Public {retrieval['mode']} retrieval")
     return f"""# Benchmark dashboard
 
-This page is generated from retained benchmark and release artifacts. Every
+This page is generated from published benchmark and release artifacts. Every
 artifact link is pinned to the commit that published its bytes.
 
-| Area | Latest retained result |
+| Area | Current published result |
 |---|---|
 | {retrieval_label} | nDCG@10 {format_number(retrieval['ndcg_at_10'], 4)}, MRR@10 {format_number(retrieval['mrr_at_10'], 4)}, {retrieval['queries']} queries x {retrieval['repetitions']} runs |
 | Learned reranker | gate {"passed" if reranker["passed"] else "failed"}, nDCG@10 delta {format_number(reranker["ndcg_at_10_delta"], 4)} |
 | Million-chunk latency | {format_number(million["warm_p95_ms"])} ms warm p95, {format_number(million["warm_speedup"])}x baseline |
 | Million-chunk footprint | {million["index_size_bytes"]} bytes, ratio {format_number(million["index_size_ratio"], 3)} |
-| Daemon cache | {format_number(daemon["retained_warm_p95_ms"])} ms retained warm p95 |
+| Million-chunk indexing | {format_number(million["current"]["chunks_per_second"])} chunks/s |
 | Release archive history | {release_text} |
 
 ## Versioned histories
 
-| Metric family | Retained points | Unavailable points |
+| Metric family | Published points | Unavailable points |
 |---|---:|---:|
 {history_rows}
 
@@ -607,11 +588,6 @@ def render_html(dashboard: dict) -> str:
         for item in dashboard["evidence"]
         if item["id"] == "public-retrieval-current"
     )
-    daemon = next(
-        item["summary"]
-        for item in dashboard["evidence"]
-        if item["id"] == "daemon-cache"
-    )
     million = next(
         item["summary"]
         for item in dashboard["evidence"]
@@ -631,12 +607,12 @@ def render_html(dashboard: dict) -> str:
 <body class="report-page">
   <main class="report-shell relative z-10">
     <nav class="report-nav"><a class="report-brand" href="index.html">ivygrep benchmarks</a><div class="report-links"><a href="evidence-dashboard.json">Raw JSON</a></div></nav>
-    <section class="report-hero"><div class="report-eyebrow">Retained numbers</div><h1>Benchmark dashboard</h1><p>Quality, latency, indexing, memory, footprint, and release metrics.</p></section>
+    <section class="report-hero"><div class="report-eyebrow">Published evidence</div><h1>Benchmark dashboard</h1><p>Quality, latency, indexing, memory, footprint, and release metrics.</p></section>
     <section class="report-grid">
       <article class="report-card"><h2>nDCG@10</h2><div class="metric-value">{retrieval['ndcg_at_10']:.4f}</div></article>
-      <article class="report-card"><h2>Warm speedup</h2><div class="metric-value">{million['warm_speedup']:.2f}x</div></article>
+      <article class="report-card"><h2>Warm p95</h2><div class="metric-value">{million['warm_p95_ms']:.2f} ms</div></article>
       <article class="report-card"><h2>Index footprint</h2><div class="metric-value">{(1.0 - million['index_size_ratio']) * 100:.1f}% smaller</div></article>
-      <article class="report-card"><h2>Daemon p95</h2><div class="metric-value">{daemon['retained_warm_p95_ms']:.2f} ms</div></article>
+      <article class="report-card"><h2>Index throughput</h2><div class="metric-value">{million['current']['chunks_per_second']:,.0f} chunks/s</div></article>
     </section>
     <section class="report-card"><h2>Benchmark artifacts</h2><div class="table-wrap"><table><thead><tr><th>Artifact</th><th>Kind</th><th>Publication</th><th>SHA-256</th></tr></thead><tbody>{evidence_rows}</tbody></table></div></section>
     <section class="report-card"><h2>Versioned histories</h2><p>Every point carries unit, context, variance status, and immutable source metadata in the raw JSON.</p><div class="table-wrap"><table><thead><tr><th>Metric family</th><th>Points</th><th>Unavailable</th></tr></thead><tbody>{history_rows}</tbody></table></div></section>

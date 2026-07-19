@@ -7,8 +7,7 @@ reporting when practical.
 
 ## Report a vulnerability
 
-Use [GitHub private vulnerability reporting][report]. Do not open public issue,
-discussion, or pull request for undisclosed vulnerability.
+Use [GitHub private vulnerability reporting][report]. Do not open public issues, discussions, or pull requests for undisclosed vulnerabilities.
 
 Include:
 
