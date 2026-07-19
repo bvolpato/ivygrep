@@ -10,6 +10,9 @@ All notable changes to ivygrep are documented in this file.
 - **Exact queries defer neural-store construction until neural retrieval is useful.** On a 7,842-chunk hash-indexed workspace, an exact identifier query reduced wall time from `1.06 s` to `0.55 s` and peak RSS from `334,432 KiB` to `28,740 KiB` without building neural vectors. Natural-language queries still request neural enhancement, and existing neural stores remain current.
 - **Fresh indexing uses observed counts and smaller producer batches.** Five alternating 1,000,001-chunk baseline/candidate pairs improved median throughput by `1.62%` and reduced peak RSS by `14.55%` while preserving exact file, chunk, vector, and index-size results.
 
+### Fixed
+- **Neural enhancement requests survive concurrent hash work.** Exact CLI searches keep existing neural stores current after index updates, and natural-language requests arriving during a hash-only worker persist a neural upgrade that starts when hash enhancement completes.
+
 ### Testing
 - **Million-scale regression checks cover every measured query path.** Process-cold, CLI warm, daemon warm, cache replay, filtered, and concurrent paths now gate p95 latency and recall independently. This caught and rejected a true-LRU prototype that made cache replay `32.1%` slower.
 - **Pull requests exercise every retrieval route.** The public 100-query matrix now gates hash, hybrid, automatic blended, and forced-neural modes instead of neural alone.

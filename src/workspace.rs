@@ -488,6 +488,10 @@ impl Workspace {
         self.index_dir.join(".enhancing.pid")
     }
 
+    fn queued_neural_enhancement_path(&self) -> PathBuf {
+        self.index_dir.join(".enhancing.neural-requested")
+    }
+
     pub fn enhancing_progress_path(&self) -> PathBuf {
         self.index_dir.join(".enhancing.progress")
     }
@@ -742,12 +746,35 @@ impl Workspace {
         }
     }
 
+    fn queue_neural_enhancement_after_active(&self) -> Result<()> {
+        fs::write(self.queued_neural_enhancement_path(), b"")?;
+        if !self.is_enhancing_active() {
+            self.trigger_queued_neural_enhancement()?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn trigger_queued_neural_enhancement(&self) -> Result<()> {
+        match fs::remove_file(self.queued_neural_enhancement_path()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        }
+        if self.needs_neural_enhancement() {
+            self.trigger_background_enhancement()?;
+        }
+        Ok(())
+    }
+
     fn trigger_background_enhancement_command(&self, command: &str, hash_only: bool) -> Result<()> {
         let exe = std::env::current_exe()?;
         let pid_path = self.enhancing_pid_path();
 
         let status = jobs::job_status(self, JobKind::Enhancement, ENHANCEMENT_HEARTBEAT_TTL_SECS);
         if status.active() {
+            if !hash_only {
+                self.queue_neural_enhancement_after_active()?;
+            }
             return Ok(());
         }
         if status.stalled {
@@ -805,7 +832,11 @@ impl Workspace {
                     let _ = child.wait();
                 });
             }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !hash_only {
+                    self.queue_neural_enhancement_after_active()?;
+                }
+            }
             Err(error) => return Err(error.into()),
         }
 
@@ -2392,6 +2423,31 @@ mod tests {
             "a mismatched persisted model identity must force re-embedding"
         );
         unsafe { std::env::remove_var("IVYGREP_MODEL_PROFILE") };
+    }
+
+    #[test]
+    #[serial]
+    fn neural_request_is_queued_behind_active_hash_enhancement() {
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let root = tempfile::tempdir().unwrap();
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        workspace.ensure_dirs().unwrap();
+        std::fs::write(
+            workspace.enhancing_pid_path(),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+
+        workspace.trigger_background_hash_enhancement().unwrap();
+        assert!(!workspace.queued_neural_enhancement_path().exists());
+
+        workspace.trigger_background_enhancement().unwrap();
+        assert!(workspace.queued_neural_enhancement_path().exists());
+
+        std::fs::remove_file(workspace.enhancing_pid_path()).unwrap();
+        workspace.trigger_queued_neural_enhancement().unwrap();
+        assert!(!workspace.queued_neural_enhancement_path().exists());
     }
 
     #[test]
