@@ -966,8 +966,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
                 cancel_token: None,
             },
         )?;
-        // Build query-appropriate vectors in a niced subprocess after the
-        // lexical-first response is computed. Exact queries stop after hash.
+        // Exact queries build hash vectors; natural-language queries also build neural vectors.
         let query_uses_neural = crate::search::query_uses_neural(query, false);
         if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
             && workspace.needs_search_enhancement(query_uses_neural)

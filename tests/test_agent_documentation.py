@@ -64,12 +64,12 @@ class AgentDocumentationTest(unittest.TestCase):
                 self.assertIn("output=context_pack", document)
                 self.assertIn("budget_tokens", document)
         self.assertIn('id="context-packs"', self.site)
-        self.assertIn("complete Markdown pack", self.readme)
+        self.assertRegex(self.readme, r"bounded (?:Markdown )?pack")
 
     def test_quick_start_has_one_search_and_one_context_command(self) -> None:
-        readme_quick_start = self.readme.split("## Try it in 30 seconds", 1)[1].split(
-            "## Install", 1
-        )[0]
+        readme_quick_start = self.readme.split(
+            "## Search and build context", 1
+        )[1].split("## Install", 1)[0]
         site_demo = self.site.split("<!-- Demo terminal -->", 1)[1].split(
             "<!-- Social proof strip -->", 1
         )[0]
@@ -121,7 +121,7 @@ class AgentDocumentationTest(unittest.TestCase):
         self.assertIn('SetEnvironmentVariable("Path"', self.windows_installer)
 
     def test_agent_guidance_requires_explicit_worktree_scope(self) -> None:
-        self.assertIn("Pass absolute current repository", self.readme)
+        self.assertIn("absolute path to the active repository or worktree", self.readme)
         self.assertIn("absolute active worktree path", self.readme)
         self.assertIn("store only divergent chunks and tombstones", self.site)
 

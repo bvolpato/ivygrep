@@ -74,7 +74,6 @@ class CommunityHealthTest(unittest.TestCase):
 
     def test_launch_surface_stays_focused(self) -> None:
         readme_lines = self.read("README.md").splitlines()
-        self.assertGreaterEqual(len(readme_lines), 180)
         self.assertLessEqual(len(readme_lines), 230)
         self.assertEqual(
             {

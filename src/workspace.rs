@@ -57,6 +57,32 @@ pub const INDEX_FORMAT_VERSION: u32 = 20;
 const COMPACTION_FREE_BYTES_THRESHOLD: u64 = 16 * 1024 * 1024;
 const COMPACTION_FREE_PERCENT_THRESHOLD: f64 = 20.0;
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum EnhancementMode {
+    HashOnly,
+    Full,
+}
+
+impl EnhancementMode {
+    fn command(self) -> &'static str {
+        match self {
+            Self::HashOnly => "--enhance-hash-internal",
+            Self::Full => "--enhance-internal",
+        }
+    }
+
+    fn needs_work(self, workspace: &Workspace) -> bool {
+        match self {
+            Self::HashOnly => workspace.needs_hash_enhancement(),
+            Self::Full => workspace.needs_neural_enhancement(),
+        }
+    }
+
+    fn includes_neural(self) -> bool {
+        self == Self::Full
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceMetadata {
     pub id: String,
@@ -708,20 +734,18 @@ impl Workspace {
             return (enhanced as u64) < vector_key_count;
         }
 
-        // If we can't open it but it exists and we have chunks, assume we need a rebuild/upgrade
+        // An unreadable store must be rebuilt.
         true
     }
 
-    /// Triggers an atomic background spawn of the hash and neural enhancement process.
-    /// Uses O_EXCL file lock mechanics to mathematically prevent race conditions
-    /// even if multiple threads or processes try to spawn this simultaneously.
+    /// Starts hash and neural enhancement in a background process.
     pub fn trigger_background_enhancement(&self) -> Result<()> {
-        self.trigger_background_enhancement_command("--enhance-internal", false)
+        self.trigger_background_enhancement_command(EnhancementMode::Full)
     }
 
-    /// Triggers only hash-vector enhancement for explicit hash-mode workflows.
+    /// Starts hash-vector enhancement without loading the neural model.
     pub fn trigger_background_hash_enhancement(&self) -> Result<()> {
-        self.trigger_background_enhancement_command("--enhance-hash-internal", true)
+        self.trigger_background_enhancement_command(EnhancementMode::HashOnly)
     }
 
     /// Build neural vectors only after a neural-routed query requests them.
@@ -731,19 +755,21 @@ impl Workspace {
     }
 
     pub fn needs_search_enhancement(&self, query_uses_neural: bool) -> bool {
-        if self.search_enhancement_uses_neural(query_uses_neural) {
-            self.needs_neural_enhancement()
+        let mode = if self.search_enhancement_uses_neural(query_uses_neural) {
+            EnhancementMode::Full
         } else {
-            self.needs_hash_enhancement()
-        }
+            EnhancementMode::HashOnly
+        };
+        mode.needs_work(self)
     }
 
     pub fn trigger_background_search_enhancement(&self, query_uses_neural: bool) -> Result<()> {
-        if self.search_enhancement_uses_neural(query_uses_neural) {
-            self.trigger_background_enhancement()
+        let mode = if self.search_enhancement_uses_neural(query_uses_neural) {
+            EnhancementMode::Full
         } else {
-            self.trigger_background_hash_enhancement()
-        }
+            EnhancementMode::HashOnly
+        };
+        self.trigger_background_enhancement_command(mode)
     }
 
     fn queue_neural_enhancement_after_active(&self) -> Result<()> {
@@ -766,13 +792,13 @@ impl Workspace {
         Ok(())
     }
 
-    fn trigger_background_enhancement_command(&self, command: &str, hash_only: bool) -> Result<()> {
+    fn trigger_background_enhancement_command(&self, mode: EnhancementMode) -> Result<()> {
         let exe = std::env::current_exe()?;
         let pid_path = self.enhancing_pid_path();
 
         let status = jobs::job_status(self, JobKind::Enhancement, ENHANCEMENT_HEARTBEAT_TTL_SECS);
         if status.active() {
-            if !hash_only {
+            if mode.includes_neural() {
                 self.queue_neural_enhancement_after_active()?;
             }
             return Ok(());
@@ -799,13 +825,12 @@ impl Workspace {
         match lock {
             Ok(_) => {
                 let mut cmd = std::process::Command::new(&exe);
-                cmd.arg(command).arg(&self.root);
+                cmd.arg(mode.command()).arg(&self.root);
                 cmd.stdin(std::process::Stdio::null());
                 cmd.stdout(std::process::Stdio::null());
                 cmd.stderr(std::process::Stdio::null());
 
-                // Lower the scheduling priority of the background process so
-                // interactive work (editor, shell, search) is never starved.
+                // Keep background indexing from competing with interactive work.
                 #[cfg(unix)]
                 {
                     use std::os::unix::process::CommandExt;
@@ -824,38 +849,25 @@ impl Workspace {
                 })?;
                 let _ = std::fs::write(&pid_path, child.id().to_string());
 
-                // Spawn a detached thread solely to waitpid() the child.
-                // Without this, the background process becomes a <defunct> zombie
-                // in the daemon's process table forever when it exits, causing
-                // `kill(pid, 0)` liveness checks to falsely return positive infinitely!
+                // Reap the child so PID liveness checks do not see a zombie process.
                 std::thread::spawn(move || {
                     let _ = child.wait();
                 });
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if !hash_only {
+                if mode.includes_neural() {
                     self.queue_neural_enhancement_after_active()?;
                 }
             }
             Err(error) => return Err(error.into()),
         }
 
-        // If this is a worktree overlay, its hybrid search strongly relies on the
-        // base repository's vectors. We explicitly cascade the background enhancement
-        // trigger so the base index receives upgrades in the background too.
+        // Worktree overlays share vectors with the base workspace.
         if let Some(main_root) = self.main_worktree_root()
             && let Ok(base_ws) = Workspace::resolve(&main_root)
-            && if hash_only {
-                base_ws.needs_hash_enhancement()
-            } else {
-                base_ws.needs_neural_enhancement()
-            }
+            && mode.needs_work(&base_ws)
         {
-            let _ = if hash_only {
-                base_ws.trigger_background_hash_enhancement()
-            } else {
-                base_ws.trigger_background_enhancement()
-            };
+            let _ = base_ws.trigger_background_enhancement_command(mode);
         }
 
         Ok(())
@@ -1304,9 +1316,7 @@ pub fn repo_id_from_common_dir(common_dir: &Path) -> String {
     hex::encode(xxhash_rust::xxh3::xxh3_128(&prefix).to_le_bytes())
 }
 
-/// Get the git common directory for a repository root.
-/// For regular repos this is `<root>/.git`, for worktrees this is the main repo's `.git`.
-/// Returns `None` if not a git repository.
+/// Returns the shared Git directory for a checkout or worktree.
 pub fn git_common_dir(root: &Path) -> Option<PathBuf> {
     let git_dir = root.join(".git");
     if git_dir.is_dir() && !git_dir.join("commondir").is_file() && is_git_dir(&git_dir) {
@@ -1328,40 +1338,20 @@ pub fn git_common_dir(root: &Path) -> Option<PathBuf> {
         return None;
     }
     let path = PathBuf::from(&raw);
-    // git may return a relative path — resolve relative to root
     let resolved = if path.is_absolute() {
         path
     } else {
         root.join(&path)
     };
-    // Canonicalize to resolve symlinks and ../ components
     resolved.canonicalize().ok().or(Some(resolved))
 }
 
-/// Get the root directory of the main worktree for a repository.
-/// For a regular checkout, this returns the same root.
-/// For a worktree, this returns the main checkout's root.
+/// Returns the main checkout root for a checkout or linked worktree.
 fn git_main_worktree_root(root: &Path) -> Option<PathBuf> {
     let git_entry = root.join(".git");
     if git_entry.is_file() {
-        // This is a worktree — .git is a file containing "gitdir: ..."
-        // The main worktree root is the parent of the common dir
-        let common = git_common_dir(root)?;
-        // common_dir is like /path/to/main/.git — its parent is the main root
-        // But we need to be careful: common_dir might end with /.git
-        let parent = common.parent()?;
-        let parent_name = parent.file_name()?.to_str()?;
-        if parent_name == ".git" {
-            // common_dir is /path/to/main/.git → main root is /path/to/main
-            // Wait, that means parent IS .git, so the main root is parent's parent
-            // Actually no — git_common_dir returns /path/to/main/.git directly
-            // So the main root is parent of the common_dir
-            return parent.parent().map(|p| p.to_path_buf());
-        }
-        // common_dir might be /path/to/main/.git itself
-        Some(parent.to_path_buf())
+        git_common_dir(root)?.parent().map(Path::to_path_buf)
     } else if git_entry.is_dir() {
-        // Regular checkout — this IS the main worktree
         Some(root.to_path_buf())
     } else {
         None

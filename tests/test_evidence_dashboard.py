@@ -25,17 +25,17 @@ renderer = load_script("render_evidence_dashboard")
 
 
 class EvidenceDashboardTest(unittest.TestCase):
-    def test_retained_publication_commit_does_not_require_git_history(
+    def test_published_commit_does_not_require_git_history(
         self,
     ) -> None:
-        retained = "a" * 40
+        published = "a" * 40
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "artifact.json"
             path.write_text("{}\n", encoding="utf-8")
             with mock.patch.object(renderer.subprocess, "run") as run:
-                commit = renderer.publication_commit(root, path, retained)
-        self.assertEqual(commit, retained)
+                commit = renderer.publication_commit(root, path, published)
+        self.assertEqual(commit, published)
         run.assert_not_called()
 
     def test_release_history_retains_missing_sidecars(self) -> None:
@@ -98,20 +98,6 @@ class EvidenceDashboardTest(unittest.TestCase):
             with zipfile.ZipFile(archive, "w") as handle:
                 handle.writestr("ivygrep-v1.0.0-windows-x86_64/ig.exe", b"exe")
             self.assertEqual(history.binary_size(archive), 3)
-
-    def test_daemon_summary_uses_last_retained_iteration(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "results.tsv"
-            path.write_text(
-                "iteration\tcommit\tmetric\tdelta\tguard\tstatus\tdescription\n"
-                "0\tbase\t455.0\t0\t-\tbaseline\tbaseline\n"
-                "1\tkept\t4.9\t-450.1\tpass\tkeep\tcache\n"
-                "2\tdropped\t3.0\t-1.9\tfail\tdiscard\tbroken\n",
-                encoding="utf-8",
-            )
-            source_commit, summary = renderer.summarize("daemon-cache", path)
-        self.assertEqual(source_commit, "kept")
-        self.assertEqual(summary["retained_warm_p95_ms"], 4.9)
 
     def test_release_gate_summary_requires_all_acceptance_controls(self) -> None:
         targets = "\n".join(
@@ -197,7 +183,7 @@ class EvidenceDashboardTest(unittest.TestCase):
         )
         self.assertIn("Benchmark dashboard", html)
         self.assertIn("nDCG@10", html)
-        self.assertIn("Daemon p95", html)
+        self.assertIn("Index throughput", html)
         self.assertNotIn("policy", html.lower())
         current = next(
             item

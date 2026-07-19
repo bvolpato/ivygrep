@@ -3,13 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ivygrep - Search code and build task-ready context</title>
-    <meta name="description" content="Turn code tasks, diffs, and stack traces into focused local context packs for coding agents. CLI, MCP, and Web. No code upload.">
+    <title>ivygrep - Local code search and task context</title>
+    <meta name="description" content="Search code by intent and build bounded context packs from tasks, Git changes, and code relationships. CLI, MCP, and Web run locally.">
     <meta name="theme-color" content="#06070a">
 
     <!-- Open Graph -->
-    <meta property="og:title" content="ivygrep - Search code and build task-ready context">
-    <meta property="og:description" content="One local command turns tasks, diffs, and traces into focused context packs for coding agents.">
+    <meta property="og:title" content="ivygrep - Local code search and task context">
+    <meta property="og:description" content="Search code by intent and build context packs from tasks, Git changes, and code relationships.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://bvolpato.github.io/ivygrep">
     <meta property="og:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner-social.png">
@@ -19,8 +19,8 @@
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="ivygrep - Search code and build task-ready context">
-    <meta name="twitter:description" content="One local command turns tasks, diffs, and traces into focused context packs for coding agents.">
+    <meta name="twitter:title" content="ivygrep - Local code search and task context">
+    <meta name="twitter:description" content="Search code by intent and build context packs from tasks, Git changes, and code relationships.">
     <meta name="twitter:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner-social.png">
     <meta name="twitter:image:alt" content="ivygrep semantic search returning matching code">
 
@@ -56,7 +56,7 @@
                 <a href="#how-it-works">Architecture</a>
                 <a href="#performance">Performance</a>
                 <a href="#languages">Languages</a>
-                <a href="#mcp">AI Agents</a>
+                <a href="#mcp">MCP</a>
                 <a href="#community">Contribute</a>
                 <a href="#install">Install</a>
                 <a href="https://github.com/bvolpato/ivygrep" class="btn btn-outline" target="_blank" rel="noopener">
@@ -81,13 +81,13 @@
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" width="190" height="200" onerror="this.src='assets/logo.png'"/>
             </div>
-            <h1 class="slide-up delay-1">Search code.<br/><span class="highlight-gradient">Build task-ready context.</span></h1>
-            <p class="subtitle slide-up delay-2">Search once by intent. Build one bounded pack from task, active changes, and code relationships. Everything stays local.</p>
+            <h1 class="slide-up delay-1">Local code search<br/><span class="highlight-gradient">with task context.</span></h1>
+            <p class="subtitle slide-up delay-2">Find code by intent, then build a bounded pack from the task, current Git changes, and linked code. Source and queries stay on your machine.</p>
 
             <div class="cta-row slide-up delay-3">
                 <a href="#install" class="btn btn-primary">
                     <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/></svg>
-                    Start in 30 seconds
+                    Install ivygrep
                 </a>
                 <a href="https://github.com/bvolpato/ivygrep" class="btn btn-ghost" target="_blank" rel="noopener">
                     <svg height="18" viewBox="0 0 16 16" width="18" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
@@ -109,13 +109,13 @@
                     <span class="mockup-title">Terminal - ig</span>
                 </div>
                 <div class="mockup-body code-font">
-                    <div class="line"><span class="comment"># One search. One task context pack.</span></div>
+                    <div class="line"><span class="comment"># Search by intent, then gather task context.</span></div>
                     <div class="line typing"><span class="prompt">$</span> ig "where is refresh token rotated?"</div>
                     <div class="line output"><span class="path">src/auth/refresh.rs:118</span></div>
                     <div class="line output">fn rotate_refresh_token(...) -&gt; Result&lt;Token&gt;</div>
                     <div class="line"><span class="prompt">$</span> ig context "fix refresh-token races" --since main --budget 8000</div>
-                    <div class="line output success">✓ 14 focused snippets · 7,642 tokens · 3 changed files</div>
-                    <div class="line output"><span class="path">evidence</span> definitions · callers · dependents · tests</div>
+                    <div class="line output success">Context: 14 snippets, 7,642 tokens, 3 changed files</div>
+                    <div class="line output"><span class="path">Coverage:</span> definitions, callers, dependents, tests</div>
                 </div>
             </div>
         </div>
@@ -152,20 +152,20 @@
     <section id="context-packs" class="container relative z-10 section-spacing">
         <div class="section-header">
             <span class="section-tag">Task context</span>
-            <h2 class="section-title text-center">One task in. Implementation-ready evidence out.</h2>
-            <p class="text-center subtitle-small">One local command retrieves, connects, deduplicates, and budgets evidence for coding agents.</p>
+            <h2 class="section-title text-center">Build context from a task and current branch</h2>
+            <p class="text-center subtitle-small">The context command selects related code, removes duplicates, and stays within a token budget.</p>
         </div>
 
         <div class="glass-panel fade-in-scroll mt-4">
             <div class="grid grid-2 align-center context-pack-grid">
                 <div>
-                    <h3>More useful than a list of search hits</h3>
-                    <p><code>ig context --since main</code> combines task intent, branch diff, dirty worktree, and exact paths from pasted issues or stack traces. It then traverses dependencies, dependents, definitions, callers, references, tests, configuration, docs, and co-changes.</p>
+                    <h3>What goes into a context pack</h3>
+                    <p><code>ig context --since main</code> combines the task with the branch diff, dirty worktree, and paths found in an issue or stack trace. It follows dependencies, dependents, definitions, callers, references, tests, configuration, docs, and recent co-changes.</p>
                     <div class="context-role-list" aria-label="Context pack evidence roles">
                         <span>Primary</span><span>Dependencies</span><span>Dependents</span><span>Definitions</span><span>Callers</span><span>References</span>
                         <span>Tests</span><span>Config</span><span>Docs</span>
                     </div>
-                    <p>Each item explains why it was selected and how it relates to task.</p>
+                    <p>Each item says why it was selected and how it relates to the task.</p>
                 </div>
                 <div class="install-code relative">
                     <pre class="code-block"><span class="prompt">$</span> ig context "fix refresh-token races" --since main --budget 8000
@@ -183,9 +183,9 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
         </div>
 
         <div class="grid grid-3 mt-4">
-            <div class="glass-card fade-in-scroll"><h3>2K: orient</h3><p>Small pack for locating ownership and first implementation paths.</p></div>
-            <div class="glass-card fade-in-scroll"><h3>8K: implement</h3><p>Default pack for code, relationships, tests, config, and docs.</p></div>
-            <div class="glass-card fade-in-scroll"><h3>16K+: cross-cutting</h3><p>Broader pack for changes spanning subsystems or languages.</p></div>
+            <div class="glass-card fade-in-scroll"><h3>2K tokens</h3><p>Enough to locate the owning code and nearby tests.</p></div>
+            <div class="glass-card fade-in-scroll"><h3>8K tokens</h3><p>The default for implementation work across code, tests, configuration, and docs.</p></div>
+            <div class="glass-card fade-in-scroll"><h3>16K+ tokens</h3><p>Useful when a change crosses subsystems or languages.</p></div>
         </div>
     </section>
 
@@ -200,23 +200,23 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
         <div class="grid grid-3 mt-4">
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">📦</span></div>
-                <h3>Task-ready context packs</h3>
-                <p>Turn task, issue, trace, diff, and dirty worktree into bounded graph evidence through CLI, MCP, or Web.</p>
+                <h3>Context packs</h3>
+                <p>Combine a task, issue, trace, diff, or dirty worktree with related code through CLI, MCP, or Web.</p>
             </div>
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">⚡</span></div>
-                <h3>Fast indexed search</h3>
+                <h3>Indexed search</h3>
                 <p>Warm daemon replay stays under 100 ms in current Linux validation. Hash results are available first; neural vectors build in the background.</p>
             </div>
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">🔒</span></div>
-                <h3>Local by default</h3>
-                <p>No hosted inference. No telemetry. Your source code, queries, and index data never leave your machine. Neural mode downloads model assets once on first use.</p>
+                <h3>Runs locally</h3>
+                <p>ivygrep has no hosted inference or telemetry. Source, queries, and index data stay on your machine. Neural mode downloads model assets on first use.</p>
             </div>
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">🧠</span></div>
-                <h3>Intent queries</h3>
-                <p>BM25 and local vector retrieval let prose queries find code without exact identifiers. Ask "where is the tax calculated?" and get the right function.</p>
+                <h3>Search by intent</h3>
+                <p>BM25 and local vector retrieval can find code without an exact identifier. A query such as "where is the tax calculated?" can lead to the relevant function.</p>
             </div>
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">🌿</span></div>
@@ -226,7 +226,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">🤖</span></div>
                 <h3>MCP server</h3>
-                <p>Built-in MCP server for Claude Code, Cursor, Codex, Gemini, and OpenCode. No separate plugin required.</p>
+                <p>The built-in MCP server works with Claude Code, Cursor, Codex, Gemini, and OpenCode without a separate plugin.</p>
             </div>
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">🖥️</span></div>
@@ -243,9 +243,9 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
         <div class="glass-panel fade-in-scroll mt-4">
             <div class="grid grid-2 align-center">
                 <div>
-                    <span class="section-tag">New in v1.1.0</span>
-                    <h3>Daemon-backed web UI</h3>
-                    <p>Open a browser UI without leaving local mode. Search all tracked workspaces, drill into one folder, browse indexed files, and keep result and file panes independently scrollable.</p>
+                    <span class="section-tag">Web interface</span>
+                    <h3>Browse indexed workspaces</h3>
+                    <p>The local browser UI searches tracked workspaces, scopes results to a folder, and opens indexed files beside the result list.</p>
                     <p>Result cards show language icons, syntax-highlighted snippets, line markers, and selected-state highlighting. The file viewer highlights focused result lines and previews Markdown with a source toggle.</p>
                     <p>Loopback stays zero-config. A non-loopback bind prints an authenticated URL. On another device, replace only <code>127.0.0.1</code> with the server's LAN or Tailscale address and preserve the complete <code>token=...</code> query string. Open it directly and do not share it: the browser exchanges it for an HttpOnly session cookie, then removes it from the address. Restart the daemon to invalidate access.</p>
                     <p>Non-loopback serving uses plain HTTP: the token authenticates requests but does not encrypt source or results. Use a trusted network only, preferably Tailscale or an SSH tunnel. Never expose the port directly to the internet or untrusted Wi-Fi.</p>
@@ -361,7 +361,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
     <section id="how-it-works" class="container relative z-10 section-spacing">
         <div class="section-header">
             <span class="section-tag">Architecture</span>
-            <h2 class="section-title text-center">Two-tier hybrid index</h2>
+            <h2 class="section-title text-center">How indexing and search fit together</h2>
             <p class="text-center subtitle-small">BM25 and literal search are available first; background jobs add hash and neural vectors.</p>
         </div>
 
@@ -395,15 +395,15 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
                 <svg width="22" height="22" fill="none" stroke="#10b981" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M16 8V5a1 1 0 0 0-1-1H9a1 1 0 0 0-1 1v3M8 16v3a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-3"/></svg>
                 Git-aware indexing
             </h3>
-            <p class="git-panel-subtitle">Worktrees share one base index; branch switches re-index changed files only.</p>
+            <p class="git-panel-subtitle">Worktrees share a base index. Branch switches re-index only changed files.</p>
             <div class="grid grid-2" style="gap: 1.5rem;">
                 <div class="git-feature">
                     <h4>Worktree overlays</h4>
-                    <p>Each worktree references one shared base index. SQLite, lexical, and vector overlays store only divergent chunks and tombstones.</p>
+                    <p>Each worktree references the shared base index. SQLite, lexical, and vector overlays store changed chunks and tombstones.</p>
                 </div>
                 <div class="git-feature">
                     <h4>Branch-switch deltas</h4>
-                    <p>Merkle reconciliation re-indexes <strong>only changed files</strong>. Content hashes skip byte-identical files across branches.</p>
+                    <p>Merkle reconciliation re-indexes <strong>changed files</strong>. Content hashes skip byte-identical files across branches.</p>
                 </div>
             </div>
         </div>
@@ -421,19 +421,19 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
             <div class="benchmark-row">
                 <div class="benchmark-tool"><code>Warm p95</code><span class="benchmark-mode">million-chunk current</span></div>
                 <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig" data-width="28%"><span class="benchmark-time">15.07 ms</span></div></div>
-                <div class="benchmark-speed benchmark-speed-hero">3.57x</div>
+                <div class="benchmark-speed benchmark-speed-hero">3.57x faster</div>
             </div>
             <div class="benchmark-row">
                 <div class="benchmark-tool"><code>Indexing</code><span class="benchmark-mode">million-chunk current</span></div>
                 <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig-semantic" data-width="100%"><span class="benchmark-time">109,006 chunks/s</span></div></div>
-                <div class="benchmark-speed benchmark-speed-hero">21.96x</div>
+                <div class="benchmark-speed benchmark-speed-hero">21.96x faster</div>
             </div>
             <div class="benchmark-row benchmark-row-highlight">
                 <div class="benchmark-tool"><code>Index size</code><span class="benchmark-mode">million-chunk current</span></div>
                 <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-rg" data-width="65%"><span class="benchmark-time">0.46 GiB</span></div></div>
-                <div class="benchmark-speed benchmark-speed-hero">-57.0%</div>
+                <div class="benchmark-speed benchmark-speed-hero">57% smaller</div>
             </div>
-            <p class="benchmark-note">Results vary with hardware, repository shape, index state, and system load.</p>
+            <p class="benchmark-note">Ratios compare current results with the frozen public baseline. Hardware, repository shape, index state, and system load affect absolute results.</p>
             <p class="benchmark-links" aria-label="Benchmark links">
                 <a href="benchmarks/public-million.html">Public million-chunk benchmark</a>
                 <a href="benchmarks/evidence-dashboard.html">Benchmark dashboard</a>
@@ -451,7 +451,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
 
         <div class="lang-grid glass-panel fade-in-scroll mt-4">
             <div class="lang-category">
-                <h3>🌲 Tree-sitter AST <span class="lang-badge">24 languages</span></h3>
+                <h3>Tree-sitter AST <span class="lang-badge">24 languages</span></h3>
                 <div class="lang-tags">
                     <span class="lang-tag lang-ast">Rust</span>
                     <span class="lang-tag lang-ast">Python</span>
@@ -480,7 +480,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
                 </div>
             </div>
             <div class="lang-category">
-                <h3>📐 Heuristic chunking <span class="lang-badge lang-badge-muted">21 more</span></h3>
+                <h3>Heuristic chunking <span class="lang-badge lang-badge-muted">21 more</span></h3>
                 <div class="lang-tags">
                     <span class="lang-tag">Nim</span>
                     <span class="lang-tag">Groovy</span>
@@ -514,12 +514,12 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
             <div class="section-header">
                 <span class="section-tag">Model Context Protocol</span>
                 <h2 class="section-title text-center">MCP for coding agents</h2>
-                <p class="text-center subtitle-small">Use normal MCP search for discovery. Set <code>output=context_pack</code>, optional <code>since=main</code>, and a token budget for same pack as CLI and Web.</p>
+                <p class="text-center subtitle-small">Use MCP search to find code. Set <code>output=context_pack</code>, optional <code>since=main</code>, and a token budget to build the same context pack available from CLI and Web.</p>
             </div>
 
             <div class="glass-panel fade-in-scroll mt-4 setup-panel">
                 <h3>One-command setup</h3>
-                <p>Preserves existing config, verifies MCP, and runs a real search.</p>
+                <p>The installer preserves existing configuration, verifies MCP, and runs a search.</p>
                 <div class="grid agent-grid">
                     <div class="agent-card glass-card">
                         <h4 class="agent-title">Claude Code</h4>
@@ -604,8 +604,8 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
             </div>
 
             <div class="glass-panel fade-in-scroll mt-4 agent-guidance">
-                <h3>Agent-safe defaults</h3>
-                <p>Pass absolute repository or worktree path to <code>ig_search</code>. Use natural-language queries for concepts, <code>literal=true</code> for identifiers, or <code>output=context_pack</code> with <code>since=main</code> and <code>budget_tokens=8000</code> for implementation.</p>
+                <h3>MCP search settings</h3>
+                <p>Pass the absolute repository or worktree path to <code>ig_search</code>. Use a natural-language query for concepts, <code>literal=true</code> for identifiers, or <code>output=context_pack</code> with <code>since=main</code> and <code>budget_tokens=8000</code> for implementation context.</p>
                 <p>The first search creates an index and starts incremental watching. Worktrees reuse one shared base index and store only divergent chunks and tombstones.</p>
                 <a href="#mcp" class="btn btn-ghost">Manual MCP setup</a>
             </div>
@@ -644,8 +644,8 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
     <section id="community" class="container relative z-10 section-spacing">
         <div class="section-header">
             <span class="section-tag">Open source</span>
-            <h2 class="section-title text-center">Make ivygrep better</h2>
-            <p class="text-center subtitle-small">Clear starter work, reproducible checks, public decisions.</p>
+            <h2 class="section-title text-center">Contributing</h2>
+            <p class="text-center subtitle-small">Choose a scoped issue, run the relevant checks, and keep the pull request focused.</p>
         </div>
 
         <div class="grid grid-3 mt-4">
@@ -655,13 +655,13 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
                 <a href="https://github.com/bvolpato/ivygrep/labels/good%20first%20issue" class="btn btn-ghost">Good first issues</a>
             </div>
             <div class="glass-panel fade-in-scroll install-card">
-                <h3>Shape ideas</h3>
-                <p>Ask questions and discuss designs before large changes.</p>
+                <h3>Discuss larger changes</h3>
+                <p>Use Discussions for questions and designs that affect storage, ranking, or compatibility.</p>
                 <a href="https://github.com/bvolpato/ivygrep/discussions" class="btn btn-ghost">Discussions</a>
             </div>
             <div class="glass-panel fade-in-scroll install-card">
-                <h3>Send a PR</h3>
-                <p>Use focused checks and evidence-based review guidance.</p>
+                <h3>Open a pull request</h3>
+                <p>Follow the contributor guide and include the checks that cover the change.</p>
                 <a href="https://github.com/bvolpato/ivygrep/blob/main/CONTRIBUTING.md" class="btn btn-ghost">Contributor guide</a>
             </div>
         </div>
@@ -672,12 +672,12 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
         <div class="section-header">
             <span class="section-tag">Get started</span>
             <h2 class="section-title text-center">Install ivygrep</h2>
-            <p class="text-center subtitle-small">Automatic CUDA on NVIDIA Linux hosts with compute capability 8.0+. Automatic Metal on Apple Silicon. Run <code>ig hardware</code> for selected build and exact fixes.</p>
+            <p class="text-center subtitle-small">The installer selects CUDA on compatible NVIDIA Linux hosts and Metal on Apple Silicon. Run <code>ig hardware</code> to inspect the selected build.</p>
         </div>
 
         <div class="grid grid-3 mt-4">
             <div class="glass-panel fade-in-scroll install-card">
-                <h3 class="install-title">🍺 Homebrew (macOS / Linux)</h3>
+                <h3 class="install-title">Homebrew for macOS and Linux</h3>
                 <div class="install-code relative">
                     <pre class="code-block"><span class="prompt">$</span> brew install bvolpato/tap/ivygrep</pre>
                     <button class="copy-btn" onclick="copyInstallCmd(this)">Copy</button>
@@ -685,7 +685,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
                 <p class="benchmark-note">Metal on Apple Silicon. Portable elsewhere.</p>
             </div>
             <div class="glass-panel fade-in-scroll install-card">
-                <h3 class="install-title">📦 Linux / macOS</h3>
+                <h3 class="install-title">Shell installer for Linux and macOS</h3>
                 <div class="install-code relative">
                     <pre class="code-block"><span class="prompt">$</span> curl -fsSL https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.sh | sh</pre>
                     <button class="copy-btn" onclick="copyInstallCmd(this)">Copy</button>
@@ -693,7 +693,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
                 <p class="benchmark-note">Detects CUDA, Metal, and missing runtime libraries.</p>
             </div>
             <div class="glass-panel fade-in-scroll install-card">
-                <h3 class="install-title">🪟 Windows PowerShell</h3>
+                <h3 class="install-title">Windows PowerShell</h3>
                 <div class="install-code relative">
                     <pre class="code-block">irm https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.ps1 | iex</pre>
                     <button class="copy-btn" onclick="copyInstallCmd(this)">Copy</button>
@@ -722,7 +722,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
                 <div class="quickstart-step">
                     <span class="quickstart-number">3</span>
                     <div>
-                        <h4>Or find exact identifiers</h4>
+                        <h4>Find an exact identifier</h4>
                         <code class="quickstart-code">ig --literal "handleAuth"</code>
                     </div>
                 </div>
@@ -736,7 +736,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
                 <div class="quickstart-step">
                     <span class="quickstart-number">5</span>
                     <div>
-                        <h4>Connect AI agents</h4>
+                        <h4>Configure an MCP client</h4>
                         <code class="quickstart-code">ig agent install claude</code>
                     </div>
                 </div>
@@ -765,7 +765,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md" class="footer-link">Changelog</a>
                 </div>
                 <div class="footer-copy">
-                    <p>Built by <a href="https://github.com/bvolpato" class="footer-link">@bvolpato</a> · MIT License · v1.2.5</p>
+                    <p>Maintained by <a href="https://github.com/bvolpato" class="footer-link">Bruno Volpato</a> · MIT License · v1.2.5</p>
                 </div>
             </div>
         </div>

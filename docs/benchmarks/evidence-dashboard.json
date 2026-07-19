@@ -998,20 +998,6 @@
       }
     },
     {
-      "id": "daemon-cache",
-      "immutable_url": "https://github.com/bvolpato/ivygrep/blob/a99f5fb6eafef9c41d656a42dccaf44e27972d32/docs/benchmarks/daemon-hot-query-cache-explore-results.tsv",
-      "kind": "latency",
-      "label": "Daemon hot-query cache",
-      "path": "docs/benchmarks/daemon-hot-query-cache-explore-results.tsv",
-      "publication_commit": "a99f5fb6eafef9c41d656a42dccaf44e27972d32",
-      "sha256": "bf168523793c2c3faa6104a52d55019c6ec8528b640cfe1dbd0a33eaae191426",
-      "source_commit": "445fcb829d8e519849162ba237eb609d57b9006e",
-      "summary": {
-        "retained_iterations": 1,
-        "retained_warm_p95_ms": 4.902387002948672
-      }
-    },
-    {
       "id": "release-workflow",
       "immutable_url": "https://github.com/bvolpato/ivygrep/blob/23f26c420a69af70561f402ad7d056005d696d62/.github/workflows/release.yml",
       "kind": "portability",
@@ -18841,7 +18827,7 @@
         "unit": "bytes",
         "value": 1143448112,
         "variance": {
-          "reason": "The retained artifact is a single deterministic run.",
+          "reason": "The published artifact is a single deterministic run.",
           "status": "unavailable"
         }
       },
@@ -18981,7 +18967,7 @@
         "unit": "bytes",
         "value": 491589780,
         "variance": {
-          "reason": "The retained artifact is a single deterministic run.",
+          "reason": "The published artifact is a single deterministic run.",
           "status": "unavailable"
         }
       }
@@ -19123,7 +19109,7 @@
         "unit": "chunks/s",
         "value": 4963.317419550483,
         "variance": {
-          "reason": "The retained artifact is a single deterministic run.",
+          "reason": "The published artifact is a single deterministic run.",
           "status": "unavailable"
         }
       },
@@ -19263,7 +19249,7 @@
         "unit": "chunks/s",
         "value": 109005.5024359201,
         "variance": {
-          "reason": "The retained artifact is a single deterministic run.",
+          "reason": "The published artifact is a single deterministic run.",
           "status": "unavailable"
         }
       }
@@ -19691,7 +19677,7 @@
         "unit": "bytes",
         "value": 491511808,
         "variance": {
-          "reason": "The retained artifact is a single deterministic run.",
+          "reason": "The published artifact is a single deterministic run.",
           "status": "unavailable"
         }
       },
@@ -19831,7 +19817,7 @@
         "unit": "bytes",
         "value": 298405888,
         "variance": {
-          "reason": "The retained artifact is a single deterministic run.",
+          "reason": "The published artifact is a single deterministic run.",
           "status": "unavailable"
         }
       }

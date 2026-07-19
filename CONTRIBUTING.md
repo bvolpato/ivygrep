@@ -62,7 +62,7 @@ Start with primary files and strongest behavior-level checks for changed area.
 ## Change workflow
 
 1. Fork repository and branch from current `main`.
-2. Add smallest useful test before or with behavior change.
+2. Add a focused test when behavior or a public contract changes.
 3. Match nearby error handling, naming, and abstraction patterns.
 4. Run focused tests while iterating.
 5. Run full required validation before opening pull request.
@@ -130,17 +130,19 @@ Claims need comparable before/after evidence:
 - latency distribution, memory, and index-size impact when relevant
 - relevance metrics and per-task regressions for search changes
 - held-out/public datasets instead of repository-specific ranking rules
-- discarded alternatives recorded when they explain final design
+- rejected approaches summarized in the pull request when they explain the final design
 
 Keep only changes with useful measured tradeoffs. Do not encode benchmark names,
 expected paths, or corpus-specific aliases in production ranking code.
+
+Do not commit one-off experiment transcripts, local paths, agent prompts, or raw optimization logs to `docs/`. Keep durable benchmark artifacts only when a documented workflow regenerates or validates them.
 
 ## Code style
 
 - Run `cargo fmt`.
 - Fix every Clippy warning.
 - Prefer `Result` and `?` over `unwrap()` in library code. `unwrap()` is fine in tests.
-- Explain non-obvious reasons, not obvious operations.
+- Comments should explain non-obvious reasons and invariants.
 - Preserve offline hash search and local-only code handling.
 - Avoid new dependencies when standard library or existing crate is sufficient.
 

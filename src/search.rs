@@ -5671,9 +5671,7 @@ fn location_intent_boost(chunk: &IndexedChunk, bctx: &ChunkBoostContext) -> f32 
     boost.max(0.0)
 }
 
-/// Bonus when a chunk's definition name (first non-blank line) contains query tokens.
-/// This is the "are we looking at the definition site?" signal — e.g., query "handle error"
-/// should strongly prefer `fn handle_error()` over a comment mentioning errors.
+/// Boosts definitions whose first non-blank line contains query tokens.
 fn definition_name_boost(query_tokens: &[String], bctx: &ChunkBoostContext) -> f32 {
     let first_line = bctx.first_line();
     if query_tokens.is_empty() || first_line.is_empty() {
@@ -5733,8 +5731,7 @@ fn compact_identifier(input: &str) -> String {
 
 fn chunk_kind_boost(chunk: &IndexedChunk) -> f32 {
     match chunk.kind.as_str() {
-        // Definition sites are the most valuable — this is PageRank-like thinking:
-        // the place where something is *defined* is almost always what the user wants.
+        // Definitions usually carry more authority than mentions.
         "Function" | "function" => 1.35,
         "Class" | "class" | "Struct" | "struct" | "Trait" | "trait" | "Interface" | "interface" => {
             1.4
@@ -5744,12 +5741,11 @@ fn chunk_kind_boost(chunk: &IndexedChunk) -> f32 {
         // and architecture queries, while remaining below definition sites.
         "Documentation" | "documentation" => 1.2,
 
-        // Imports and comments are rarely the target of a search
+        // Imports and comments are usually supporting context.
         "Comment" | "comment" => 0.6,
         "Import" | "import" | "Use" | "use" => 0.65,
 
-        // Generic blocks (if/for/match arms, raw lines) are low-signal:
-        // they match many terms but rarely contain the definition the user wants
+        // Generic blocks match many terms but rarely own a concept.
         "Block" | "block" => 0.75,
 
         _ => 1.0,
@@ -5765,7 +5761,7 @@ fn file_authority_score(bctx: &ChunkBoostContext) -> f32 {
 }
 
 fn file_authority_score_for_path(path: &str) -> f32 {
-    // Vendored / dependency code — almost never what the user wants
+    // Prefer project code over vendored and generated trees.
     if path.contains("vendor/")
         || path.contains("node_modules/")
         || path.contains("__pycache__/")
@@ -5777,7 +5773,7 @@ fn file_authority_score_for_path(path: &str) -> f32 {
         return 0.2;
     }
 
-    // Lock files, minified bundles, source maps — machine-generated noise
+    // Generated files rarely answer code-ownership queries.
     if path.ends_with(".lock")
         || path.ends_with(".min.js")
         || path.ends_with(".min.css")

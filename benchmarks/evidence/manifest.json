@@ -51,13 +51,6 @@
       "publication_commit": "14efc6643aadaf5114768d575610399ee48d5085"
     },
     {
-      "id": "daemon-cache",
-      "kind": "latency",
-      "label": "Daemon hot-query cache",
-      "path": "docs/benchmarks/daemon-hot-query-cache-explore-results.tsv",
-      "publication_commit": "a99f5fb6eafef9c41d656a42dccaf44e27972d32"
-    },
-    {
       "id": "release-workflow",
       "kind": "portability",
       "label": "Release artifact acceptance gate",

@@ -718,8 +718,7 @@ async fn run_status(json: bool) -> Result<()> {
                 b_is_base.cmp(&a_is_base).then_with(|| a.root.cmp(&b.root))
             });
 
-            // Make sure the group itself has a visually distinct header
-            // if the base repo isn't explicitly listed as an active workspace.
+            // Show the shared base even when it is not tracked as a workspace.
             if wss
                 .first()
                 .map(|w| w.base_repo_root.is_some())
@@ -1114,16 +1113,12 @@ async fn trigger_workspace_enhancement(
         }
         return Ok(());
     }
-    if active {
-        if !hash_only {
-            workspace.trigger_background_enhancement()?;
+    if hash_only {
+        if !active {
+            workspace.trigger_background_hash_enhancement()?;
         }
     } else {
-        if hash_only {
-            workspace.trigger_background_hash_enhancement()?;
-        } else {
-            workspace.trigger_background_enhancement()?;
-        }
+        workspace.trigger_background_enhancement()?;
     }
     if wait {
         wait_for_workspace_enhancement(workspace, hash_only).await?;
@@ -1374,7 +1369,6 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
                     search_via_daemon = true;
                 }
             } else {
-                // Non-interactive: just wait silently
                 if let Some(response) = response_future.await? {
                     if let DaemonResponse::Error { message } = response {
                         bail!(message);
@@ -1387,8 +1381,7 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         {
             search_via_daemon = true;
         } else {
-            // Already indexed. Just check if the daemon is online to route the search request.
-            // Also verify the daemon version matches — stale daemons silently break search.
+            // Route through a compatible daemon when one is available.
             let _t = std::time::Instant::now();
             match daemon::request::<fn(String, usize, usize)>(
                 &DaemonRequest::RuntimeStatus {
@@ -1873,12 +1866,9 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         cli.verbose,
     )?;
 
-    // Kick off background hash and neural enhancement if not already done.
-    // Normal queries return immediately; --wait-for-enhancement propagates
-    // worker failures and exits only after requested vectors are durable.
-    // We launch it as a separate hidden CLI process to prevent segmentation faults
-    // observed while tearing down neural-model state when the main process exits.
-    // Skipped in CI/test environments (IVYGREP_NO_AUTOSPAWN=1).
+    // A separate process avoids crashes during neural-model teardown. Normal
+    // queries return immediately; --wait-for-enhancement waits for durable vectors.
+    // IVYGREP_NO_AUTOSPAWN disables this path in tests and CI.
     if !cli.all_indices
         && !cli.regex
         && !cli.lexical_only

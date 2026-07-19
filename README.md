@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  <strong>Turn code tasks, diffs, and stack traces into focused context packs for coding agents.</strong><br/>
-  Local code intelligence. No code upload.
+  <strong>Local code search and task context for coding agents.</strong><br/>
+  Search by intent, inspect exact matches, and build context packs without uploading source.
 </p>
 
 <p align="center">
@@ -26,13 +26,13 @@
   <a href="https://github.com/bvolpato/ivygrep/discussions">Discussions</a>
 </p>
 
-## Try it in 30 seconds
+## Search and build context
 
 ```bash
-# Search code by intent
+# Find code by intent
 ig "where is refresh token rotated?"
 
-# Build focused context from code and current changes
+# Build context from code and current changes
 ig context "fix refresh-token races" --since main --budget 8000
 ```
 
@@ -40,13 +40,11 @@ ig context "fix refresh-token races" --since main --budget 8000
 src/auth/refresh.rs:118
 fn rotate_refresh_token(...)
 
-✓ context pack: 14 snippets / 7,642 estimated tokens
-✓ evidence: changed files, definitions, callers, dependents, tests
+Context pack: 14 snippets / 7,642 estimated tokens
+Coverage: changed files, definitions, callers, dependents, tests
 ```
 
-First command finds relevant code. Second turns task, branch changes, dirty
-files, and code relationships into one bounded, complete Markdown pack. Every
-snippet includes selection reason and relationship.
+The search finds relevant code without requiring an identifier. The context command combines the task with branch changes, dirty files, and code relationships in a bounded Markdown pack. Each snippet says why it was selected and how it relates to the task.
 
 ## Install
 
@@ -62,11 +60,7 @@ curl -fsSL https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.sh | 
 irm https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.ps1 | iex
 ```
 
-Installers select compatible archive, verify SHA-256, install `ig`, and report
-selected backend. Apple Silicon uses Metal. Supported NVIDIA Linux hosts use
-Linux x86_64 CUDA when CUDA 13 runtime and compute capability 8.0+ are present.
-Others use portable local inference. Run `ig hardware` for detected hardware,
-compatibility limits, and exact reinstall command.
+Installers select a compatible archive, verify its SHA-256 checksum, install `ig`, and report the selected backend. Apple Silicon uses Metal. NVIDIA Linux hosts use the Linux x86_64 CUDA build when CUDA 13 and compute capability 8.0 or newer are available. Other systems use portable local inference. Run `ig hardware` to see detected hardware, compatibility limits, and the matching reinstall command.
 
 Build from source:
 
@@ -78,8 +72,7 @@ install -m 0755 target/release/ig ~/.local/bin/ig
 
 ## Search
 
-First query auto-indexes current repository. Daemon then watches incremental
-changes.
+The first query indexes the current repository. The daemon then watches for changes and updates the index incrementally.
 
 ```bash
 ig "where is authentication handled?"       # hybrid semantic + lexical
@@ -93,14 +86,11 @@ ig --interactive "auth flow"                 # terminal UI
 ig --web "auth flow" .                       # local Web UI
 ```
 
-Useful controls: `-n` result files, `-C` context lines, `--type` language,
-`--include`/`--exclude` globs, `--lexical-only`, `--hash`, `--json`, and
-`--no-index`. Run `ig --help` for full reference.
+Useful controls include `-n` for result files, `-C` for context lines, `--type` for language, `--include` and `--exclude` for path globs, plus `--lexical-only`, `--hash`, `--json`, and `--no-index`. Run `ig --help` for the full reference.
 
 ## Connect coding agents
 
-Automatic setup detects client, preserves existing configuration, writes
-absolute `ig` path, verifies MCP handshake, and runs real search:
+Automatic setup detects the client, preserves existing configuration, writes the absolute `ig` path, verifies the MCP handshake, and runs a search:
 
 ```bash
 ig agent install claude
@@ -109,7 +99,7 @@ ig agent install cursor
 ig agent doctor
 ```
 
-Restart open client after installation. Manual MCP setup remains available:
+Restart an open client after installation. Manual MCP setup is also available:
 
 ```bash
 claude mcp add -s user ig -- ig --mcp
@@ -129,13 +119,9 @@ OpenCode `opencode.json`:
 {"mcp":{"ig":{"type": "local", "command": ["ig", "--mcp"], "enabled": true}}}
 ```
 
-Agents call `ig_search` for discovery. Set `output=context_pack` and
-`budget_tokens=8000` for implementation packs. Pass absolute current repository
-or worktree path. Worktrees reuse base index and store only divergent chunks and
-tombstones.
+Agents call `ig_search` for discovery. Set `output=context_pack` and `budget_tokens=8000` when the task needs implementation context. Pass the absolute path to the active repository or worktree. Worktrees reuse the base index and store only changed chunks and tombstones.
 
-Context packs cover definitions, callers, references, dependencies, dependents,
-tests, configuration, and docs.
+Context packs can include definitions, callers, references, dependencies, dependents, tests, configuration, and docs.
 
 Recommended agent instruction:
 
@@ -145,7 +131,7 @@ Use natural-language queries for concepts and literal=true for identifiers.
 For implementation, request output=context_pack with budget_tokens=8000.
 ```
 
-## Why ivygrep
+## What ivygrep adds
 
 | Capability | `rg` | Hosted search | ivygrep |
 |---|:---:|:---:|:---:|
@@ -157,36 +143,21 @@ For implementation, request output=context_pack with budget_tokens=8000.
 | Local-only code and queries | Yes | No | Yes |
 | CLI, MCP, and Web | CLI | Web/API | Yes |
 
-ivygrep combines Tantivy BM25, exact lookup, USearch ANN, Tree-sitter chunks,
-SQLite relationship graph, local Candle embeddings, and Git-aware incremental
-indexes. Search publishes lexical results first while neural vectors build in
-background. Ranking stays deterministic.
+ivygrep combines Tantivy BM25, exact lookup, USearch ANN, Tree-sitter chunks, a SQLite relationship graph, local Candle embeddings, and Git-aware incremental indexes. Lexical results are available while neural vectors build in the background. Ranking is deterministic.
 
-45 language and file types are supported. 24 use Tree-sitter AST chunking,
-including Rust, Python, Go, JavaScript, TypeScript, Java, C/C++, C#, Kotlin,
-Scala, PHP, Ruby, Swift, Elixir, Zig, Bash, Haskell, OCaml, Lua, Dart,
-Objective-C, Perl, and Starlark.
+ivygrep supports 45 language and file types. Twenty-four use Tree-sitter AST chunking, including Rust, Python, Go, JavaScript, TypeScript, Java, C/C++, C#, Kotlin, Scala, PHP, Ruby, Swift, Elixir, Zig, Bash, Haskell, OCaml, Lua, Dart, Objective-C, Perl, and Starlark.
 
 ## Measured performance
 
-Deterministic one-million-chunk benchmark currently records 15.07 ms warm p95,
-109,006 chunks/s controlled indexing, and 0.46 GiB final index. Hardware,
-repository shape, model, and index state affect results. See
-[benchmark dashboard](https://bvolpato.github.io/ivygrep/benchmarks/evidence-dashboard.html)
-and [raw evidence](https://bvolpato.github.io/ivygrep/benchmarks/evidence-dashboard.json).
+The deterministic one-million-chunk benchmark currently records 15.07 ms warm p95, 109,006 chunks/s controlled indexing, and a 0.46 GiB final index. Hardware, repository shape, model, and index state affect results. See the [benchmark dashboard](https://bvolpato.github.io/ivygrep/benchmarks/evidence-dashboard.html) and [raw evidence](https://bvolpato.github.io/ivygrep/benchmarks/evidence-dashboard.json).
 
 ## Local and private
 
-Code, queries, embeddings, and indexes stay local. Neural mode downloads pinned
-model assets once. Use `--hash` or hash-only build for no model download.
+Code, queries, embeddings, and indexes stay local. Neural mode downloads pinned model assets once. Use `--hash` or a hash-only build to avoid model downloads.
 
-`ig --web` binds loopback by default. Non-loopback mode prints authenticated
-URL but uses plain HTTP. Use trusted network, Tailscale, or encrypted tunnel.
-Never expose listener directly to internet. File contents, including non-ignored
-dotfiles, can appear in local index and snippets.
+`ig --web` binds to loopback by default. A non-loopback listener prints an authenticated URL but still uses plain HTTP. Use a trusted network, Tailscale, or an encrypted tunnel, and never expose the listener directly to the internet. File contents, including non-ignored dotfiles, can appear in the local index and snippets.
 
-Report vulnerabilities through [private security advisory](SECURITY.md), not
-public issue. Release archives include checksums, SBOMs, and provenance.
+Report vulnerabilities through a [private security advisory](SECURITY.md). Release archives include checksums, SBOMs, and provenance.
 
 ## Contribute
 
@@ -196,8 +167,6 @@ public issue. Release archives include checksums, SBOMs, and provenance.
 ./bench.sh
 ```
 
-Start with [good first issue](https://github.com/bvolpato/ivygrep/labels/good%20first%20issue),
-read [CONTRIBUTING.md](CONTRIBUTING.md), or shape ideas in
-[Discussions](https://github.com/bvolpato/ivygrep/discussions).
+Start with a [good first issue](https://github.com/bvolpato/ivygrep/labels/good%20first%20issue), read [CONTRIBUTING.md](CONTRIBUTING.md), or discuss an idea in [Discussions](https://github.com/bvolpato/ivygrep/discussions).
 
-MIT licensed. Built by [@bvolpato](https://github.com/bvolpato).
+MIT licensed. Maintained by [Bruno Volpato](https://github.com/bvolpato).
