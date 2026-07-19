@@ -4,6 +4,20 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.2.6] - 2026-07-19
+
+### Added
+- Codex and Claude Code marketplaces now install one ivygrep plugin containing MCP configuration and a focused task-context skill.
+- Release archives now include a cross-platform MCPB package and MCP Registry metadata. GitHub OIDC publishes each tagged release to registry.
+- Dedicated integration guides cover Codex, Claude Code, Cursor, Gemini CLI, OpenCode, and generic MCP clients.
+
+### Distribution
+- ivygrep and four behavior-critical dependency forks have publishable crates.io manifests without consumer-side `[patch.crates-io]` configuration.
+- Windows users gain a portable WinGet package backed by release archive checksum and nested executable validation.
+
+### Testing
+- Distribution contracts cover marketplace versions, plugin MCP configuration, crate dependency aliases, cross-platform MCPB contents and digest, WinGet metadata, agent pages, and publication workflows.
+
 ## [1.2.5] - 2026-07-18
 
 ### Performance

@@ -1,0 +1,46 @@
+{
+  "manifest_version": "0.3",
+  "name": "ivygrep",
+  "display_name": "ivygrep",
+  "version": "0.0.0",
+  "description": "Local code search and relationship-aware context packs for coding agents",
+  "long_description": "Search source by intent or exact identifiers and build bounded task packs from branch changes, definitions, callers, dependents, tests, configuration, and documentation. Source, queries, embeddings, and indexes stay local.",
+  "author": {
+    "name": "Bruno Volpato",
+    "url": "https://github.com/bvolpato"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bvolpato/ivygrep.git"
+  },
+  "homepage": "https://bvolpato.github.io/ivygrep/",
+  "documentation": "https://bvolpato.github.io/ivygrep/integrations/mcp.html",
+  "support": "https://github.com/bvolpato/ivygrep/issues",
+  "icon": "icon.png",
+  "server": {
+    "type": "node",
+    "entry_point": "server/launcher.cjs",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/server/launcher.cjs"]
+    }
+  },
+  "tools": [
+    {
+      "name": "ig_search",
+      "description": "Search local code or build one bounded task context pack"
+    },
+    {
+      "name": "ig_status",
+      "description": "Inspect local ivygrep indexes and indexing state"
+    }
+  ],
+  "keywords": ["code-search", "context", "coding-agents", "local-first"],
+  "license": "MIT",
+  "compatibility": {
+    "platforms": ["darwin", "win32", "linux"],
+    "runtimes": {
+      "node": ">=18.0.0"
+    }
+  }
+}

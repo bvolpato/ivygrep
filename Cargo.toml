@@ -1,6 +1,6 @@
 [package]
 name = "ivygrep"
-version = "1.2.5"
+version = "1.2.6"
 edition = "2024"
 description = "Local code search and relationship-aware context packs for coding agents"
 license = "MIT"
@@ -9,6 +9,19 @@ repository = "https://github.com/bvolpato/ivygrep"
 readme = "README.md"
 keywords = ["grep", "search", "semantic", "code-search", "mcp"]
 categories = ["command-line-utilities", "development-tools", "text-processing"]
+include = [
+    ".cargo/config.toml",
+    "assets/query_aliases.toml",
+    "assets/windows/ivygrep.manifest",
+    "benchmarks/public/reranker_model.json",
+    "build.rs",
+    "Cargo.lock",
+    "Cargo.toml",
+    "LICENSE",
+    "README.md",
+    "src/**",
+    "web/dist/**",
+]
 
 [[bin]]
 name = "ig"
@@ -74,7 +87,7 @@ tree-sitter-c = "0.24.1"
 tree-sitter-cpp = "0.23.4"
 tree-sitter-scala = "0.26.0"
 tree-sitter-bash = "0.25.1"
-tree-sitter-haskell = "0.23.1"
+tree-sitter-haskell = { package = "ivygrep-tree-sitter-haskell", path = "vendor/tree-sitter-haskell", version = "=0.23.1-ivygrep.1" }
 tree-sitter-ocaml = "0.25.0"
 tree-sitter-lua = "0.5.0"
 tree-sitter-dart = "0.2.0"
@@ -87,11 +100,11 @@ tree-sitter-zig = "1.1.2"
 streaming-iterator = "0.1.9"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 zstd = "0.13"
-candle_embed = { version = "0.1.4", default-features = false, optional = true }
+candle_embed = { package = "ivygrep-candle-embed", path = "vendor/candle_embed", version = "=0.1.4-ivygrep.1", default-features = false, optional = true }
 candle-core = { version = "0.11.0", optional = true }
-hf-hub = { version = "0.3.2", optional = true }
+hf-hub = { package = "ivygrep-hf-hub", path = "vendor/hf-hub", version = "=0.3.2-ivygrep.1", optional = true }
 tokenizers = { version = "0.23.1", optional = true }
-usearch = { version = "=2.24.0", default-features = false, features = ["fp16lib"] }
+usearch = { package = "ivygrep-usearch", path = "vendor/usearch", version = "=2.24.0-ivygrep.1", default-features = false, features = ["fp16lib"] }
 
 [dev-dependencies]
 assert_cmd = "2.2"
@@ -107,7 +120,7 @@ tempfile = "3.27"
 openssl = { version = "0.10", features = ["vendored"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-candle_embed = { version = "0.1.4", default-features = false, optional = true, features = ["metal"] }
+candle_embed = { package = "ivygrep-candle-embed", path = "vendor/candle_embed", version = "=0.1.4-ivygrep.1", default-features = false, optional = true, features = ["metal"] }
 candle-core = { version = "0.11.0", optional = true, features = ["accelerate", "metal"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -125,9 +138,3 @@ strip = "symbols"
 [[bench]]
 name = "indexer_bench"
 harness = false
-
-[patch.crates-io]
-hf-hub = { path = "vendor/hf-hub" }
-candle_embed = { path = "vendor/candle_embed" }
-usearch = { path = "vendor/usearch" }
-tree-sitter-haskell = { path = "vendor/tree-sitter-haskell" }

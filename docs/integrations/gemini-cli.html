@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ivygrep for Gemini CLI</title><meta name="description" content="Connect Gemini CLI to local ivygrep code search and task context packs.">
+    <link rel="stylesheet" href="../style.css"><link rel="stylesheet" href="integration.css"><link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
+</head>
+<body>
+    <div class="bg-fx"></div><div class="bg-fx-glow"></div>
+    <nav class="navbar relative z-10"><div class="container nav-content"><a href="../index.html" class="logo"><img src="../assets/icon.svg" alt="ivygrep" width="38" height="34"></a><div class="integration-nav"><a href="codex.html">Codex</a><a href="claude-code.html">Claude Code</a><a href="cursor.html">Cursor</a><a href="gemini-cli.html" aria-current="page">Gemini CLI</a><a href="opencode.html">OpenCode</a><a href="mcp.html">MCP</a></div></div></nav>
+    <main class="integration-main relative z-10"><div class="container">
+        <header class="integration-header"><span class="section-tag">Gemini CLI integration</span><h1>Bring repository context to Gemini CLI.</h1><p>Connect one local stdio MCP server. ivygrep returns search results or bounded context packs without uploading repository indexes.</p></header>
+        <div class="integration-grid">
+            <section class="glass-panel integration-card"><h2>Install</h2><pre class="integration-command">brew install bvolpato/tap/ivygrep
+gemini mcp add --scope user --transport stdio ig ig --mcp</pre><p>Confirm server after restarting Gemini CLI:</p><pre class="integration-command">gemini mcp list</pre><h3>Use</h3><pre class="integration-command">Use ig_search to build one 8000-token context pack for this task, scoped to current repository.</pre></section>
+            <aside class="glass-panel integration-card"><h2>Recommended inputs</h2><ul><li><code>output=context_pack</code></li><li><code>budget_tokens=8000</code></li><li><code>since=main</code> when branch changes matter</li><li>Absolute path to active worktree</li></ul><div class="integration-links"><a class="btn btn-ghost" href="mcp.html">MCP details</a></div></aside>
+        </div>
+    </div></main>
+</body>
+</html>

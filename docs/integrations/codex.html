@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ivygrep for Codex</title>
+    <meta name="description" content="Install ivygrep MCP and focused repository context instructions for Codex.">
+    <link rel="stylesheet" href="../style.css">
+    <link rel="stylesheet" href="integration.css">
+    <link rel="icon" type="image/svg+xml" href="../assets/icon.svg">
+</head>
+<body>
+    <div class="bg-fx"></div><div class="bg-fx-glow"></div>
+    <nav class="navbar relative z-10"><div class="container nav-content">
+        <a href="../index.html" class="logo"><img src="../assets/icon.svg" alt="ivygrep" width="38" height="34"></a>
+        <div class="integration-nav"><a href="codex.html" aria-current="page">Codex</a><a href="claude-code.html">Claude Code</a><a href="cursor.html">Cursor</a><a href="gemini-cli.html">Gemini CLI</a><a href="opencode.html">OpenCode</a><a href="mcp.html">MCP</a></div>
+    </div></nav>
+    <main class="integration-main relative z-10"><div class="container">
+        <header class="integration-header"><span class="section-tag">Codex integration</span><h1>Give Codex focused code context.</h1><p>Plugin installs ivygrep MCP configuration and a skill that starts coding tasks with one bounded context pack.</p></header>
+        <div class="integration-grid">
+            <section class="glass-panel integration-card"><h2>Install</h2><p>Install <code>ig</code>, then add repository marketplace and plugin:</p><pre class="integration-command">brew install bvolpato/tap/ivygrep
+codex plugin marketplace add bvolpato/ivygrep
+codex plugin add ivygrep@ivygrep</pre><p>Restart Codex after installation. Plugin invokes local <code>ig --mcp</code>; source and queries stay on machine.</p><h3>Use</h3><pre class="integration-command">Use ivygrep to gather context for refresh-token race. Fix it and run auth tests.</pre></section>
+            <aside class="glass-panel integration-card"><h2>Included</h2><ul><li><code>ig_search</code> and <code>ig_status</code> MCP tools</li><li><code>use-ivygrep</code> task-context skill</li><li>One 8,000-token context pack before broad exploration</li></ul><div class="integration-links"><a class="btn btn-ghost" href="https://github.com/bvolpato/ivygrep/tree/main/plugins/ivygrep">Inspect plugin</a><a class="btn btn-ghost" href="mcp.html">MCP details</a></div></aside>
+        </div>
+    </div></main>
+</body>
+</html>

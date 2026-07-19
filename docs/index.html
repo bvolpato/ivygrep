@@ -76,7 +76,7 @@
         <div class="container hero-content">
             <div class="hero-badge slide-up">
                 <span class="badge-dot"></span>
-                v1.2.5
+                v1.2.6
             </div>
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" width="190" height="200" onerror="this.src='assets/logo.png'"/>
@@ -607,7 +607,14 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
                 <h3>MCP search settings</h3>
                 <p>Pass the absolute repository or worktree path to <code>ig_search</code>. Use a natural-language query for concepts, <code>literal=true</code> for identifiers, or <code>output=context_pack</code> with <code>since=main</code> and <code>budget_tokens=8000</code> for implementation context.</p>
                 <p>The first search creates an index and starts incremental watching. Worktrees reuse one shared base index and store only divergent chunks and tombstones.</p>
-                <a href="#mcp" class="btn btn-ghost">Manual MCP setup</a>
+                <div class="integration-links">
+                    <a href="integrations/codex.html" class="btn btn-ghost">Codex guide</a>
+                    <a href="integrations/claude-code.html" class="btn btn-ghost">Claude Code guide</a>
+                    <a href="integrations/cursor.html" class="btn btn-ghost">Cursor guide</a>
+                    <a href="integrations/gemini-cli.html" class="btn btn-ghost">Gemini CLI guide</a>
+                    <a href="integrations/opencode.html" class="btn btn-ghost">OpenCode guide</a>
+                    <a href="integrations/mcp.html" class="btn btn-ghost">MCP Registry</a>
+                </div>
             </div>
 
             <div class="mcp-workflow glass-panel fade-in-scroll mt-4">
@@ -765,7 +772,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md" class="footer-link">Changelog</a>
                 </div>
                 <div class="footer-copy">
-                    <p>Maintained by <a href="https://github.com/bvolpato" class="footer-link">Bruno Volpato</a> · MIT License · v1.2.5</p>
+                    <p>Maintained by <a href="https://github.com/bvolpato" class="footer-link">Bruno Volpato</a> · MIT License · v1.2.6</p>
                 </div>
             </div>
         </div>

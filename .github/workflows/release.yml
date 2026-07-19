@@ -525,6 +525,21 @@ jobs:
           path: artifacts
           merge-multiple: false
 
+      - name: Install uv for MCP bundle packaging
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
+        with:
+          enable-cache: false
+
+      - name: Build MCP bundle and Registry metadata
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          mkdir -p release-assets
+          uv run scripts/package_mcpb.py \
+            --artifacts artifacts \
+            --version "$VERSION" \
+            --output "release-assets/ivygrep-mcp-v${VERSION}.mcpb" \
+            --server-json release-assets/server.json
+
       - name: Collect release assets
         run: |
           mkdir -p release-assets
@@ -552,6 +567,31 @@ jobs:
           body_path: ${{ steps.extract_notes.outputs.notes_file }}
           files: release-assets/*
           fail_on_unmatched_files: true
+
+  mcp-registry:
+    name: Publish MCP Registry metadata
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download Registry metadata from release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern server.json
+
+      - name: Install pinned MCP Registry publisher
+        run: |
+          curl -fsSLo mcp-publisher.tar.gz \
+            https://github.com/modelcontextprotocol/registry/releases/download/v1.8.0/mcp-publisher_linux_amd64.tar.gz
+          echo "1370446bbe74d562608e8005a6ccce02d146a661fbd78674e11cc70b9618d6cf  mcp-publisher.tar.gz" | sha256sum --check
+          tar xzf mcp-publisher.tar.gz mcp-publisher
+
+      - name: Publish to MCP Registry
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
 
   homebrew:
     name: Update Homebrew Tap
