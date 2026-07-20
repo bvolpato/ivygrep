@@ -3,13 +3,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ivygrep - Local code search and task context</title>
-    <meta name="description" content="Search code by intent and build bounded context packs from tasks, Git changes, and code relationships. CLI, MCP, and Web run locally.">
+    <title>ivygrep - Task-aware repository context for coding agents</title>
+    <meta name="description" content="Turn a coding task and current Git branch into one bounded implementation map with changed files, code relationships, tests, configuration, and docs.">
     <meta name="theme-color" content="#06070a">
 
     <!-- Open Graph -->
-    <meta property="og:title" content="ivygrep - Local code search and task context">
-    <meta property="og:description" content="Search code by intent and build context packs from tasks, Git changes, and code relationships.">
+    <meta property="og:title" content="ivygrep - Task-aware repository context for coding agents">
+    <meta property="og:description" content="Turn a task and current branch into one bounded implementation map with evidence for every selection.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://bvolpato.github.io/ivygrep">
     <meta property="og:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner-social.png">
@@ -19,8 +19,8 @@
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="ivygrep - Local code search and task context">
-    <meta name="twitter:description" content="Search code by intent and build context packs from tasks, Git changes, and code relationships.">
+    <meta name="twitter:title" content="ivygrep - Task-aware repository context for coding agents">
+    <meta name="twitter:description" content="Turn a task and current branch into one bounded implementation map with evidence for every selection.">
     <meta name="twitter:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner-social.png">
     <meta name="twitter:image:alt" content="ivygrep semantic search returning matching code">
 
@@ -54,7 +54,7 @@
                 <a href="#features">Features</a>
                 <a href="#context-packs">Context Packs</a>
                 <a href="#how-it-works">Architecture</a>
-                <a href="#performance">Performance</a>
+                <a href="#performance">Evidence</a>
                 <a href="#languages">Languages</a>
                 <a href="#mcp">MCP</a>
                 <a href="#community">Contribute</a>
@@ -81,8 +81,8 @@
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" width="190" height="200" onerror="this.src='assets/logo.png'"/>
             </div>
-            <h1 class="slide-up delay-1">Local code search<br/><span class="highlight-gradient">with task context.</span></h1>
-            <p class="subtitle slide-up delay-2">Find code by intent, then build a bounded pack from the task, current Git changes, and linked code. Source and queries stay on your machine.</p>
+            <h1 class="slide-up delay-1">Turn coding tasks into<br/><span class="highlight-gradient">focused repository context.</span></h1>
+            <p class="subtitle slide-up delay-2">One search for discovery. One implementation map from the task, current Git changes, and linked code. Every selection is explained. Everything stays local.</p>
 
             <div class="cta-row slide-up delay-3">
                 <a href="#install" class="btn btn-primary">
@@ -126,18 +126,18 @@
         <div class="container">
             <div class="proof-strip">
                 <div class="proof-item">
-                    <span class="proof-value">45</span>
-                    <span class="proof-label">Language/file types</span>
+                    <span class="proof-value">Task + diff</span>
+                    <span class="proof-label">Current work included</span>
                 </div>
                 <div class="proof-divider"></div>
                 <div class="proof-item">
-                    <span class="proof-value">15.07ms</span>
-                    <span class="proof-label">Million-chunk warm p95</span>
+                    <span class="proof-value">Graph</span>
+                    <span class="proof-label">Relationships followed</span>
                 </div>
                 <div class="proof-divider"></div>
                 <div class="proof-item">
-                    <span class="proof-value">109K/s</span>
-                    <span class="proof-label">Controlled index throughput</span>
+                    <span class="proof-value">8K</span>
+                    <span class="proof-label">Default token budget</span>
                 </div>
                 <div class="proof-divider"></div>
                 <div class="proof-item">
@@ -152,20 +152,20 @@
     <section id="context-packs" class="container relative z-10 section-spacing">
         <div class="section-header">
             <span class="section-tag">Task context</span>
-            <h2 class="section-title text-center">Build context from a task and current branch</h2>
-            <p class="text-center subtitle-small">The context command selects related code, removes duplicates, and stays within a token budget.</p>
+            <h2 class="section-title text-center">One task. One branch. One implementation map.</h2>
+            <p class="text-center subtitle-small">Not a longer result list. A bounded pack connecting current work to code an agent needs to understand before editing.</p>
         </div>
 
         <div class="glass-panel fade-in-scroll mt-4">
             <div class="grid grid-2 align-center context-pack-grid">
                 <div>
-                    <h3>What goes into a context pack</h3>
-                    <p><code>ig context --since main</code> combines the task with the branch diff, dirty worktree, and paths found in an issue or stack trace. It follows dependencies, dependents, definitions, callers, references, tests, configuration, docs, and recent co-changes.</p>
+                    <h3>Current work becomes retrieval signal</h3>
+                    <p><code>ig context --since main</code> combines task anchors with committed branch changes, staged and dirty files, untracked files, and paths found in an issue or stack trace. It follows dependencies, dependents, definitions, callers, references, tests, configuration, docs, and recent co-changes.</p>
                     <div class="context-role-list" aria-label="Context pack evidence roles">
                         <span>Primary</span><span>Dependencies</span><span>Dependents</span><span>Definitions</span><span>Callers</span><span>References</span>
                         <span>Tests</span><span>Config</span><span>Docs</span>
                     </div>
-                    <p>Each item says why it was selected and how it relates to the task.</p>
+                    <p>Each item includes exact lines, its role, why it was selected, and how it relates to the task.</p>
                 </div>
                 <div class="install-code relative">
                     <pre class="code-block"><span class="prompt">$</span> ig context "fix refresh-token races" --since main --budget 8000
@@ -183,9 +183,9 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
         </div>
 
         <div class="grid grid-3 mt-4">
-            <div class="glass-card fade-in-scroll"><h3>2K tokens</h3><p>Enough to locate the owning code and nearby tests.</p></div>
-            <div class="glass-card fade-in-scroll"><h3>8K tokens</h3><p>The default for implementation work across code, tests, configuration, and docs.</p></div>
-            <div class="glass-card fade-in-scroll"><h3>16K+ tokens</h3><p>Useful when a change crosses subsystems or languages.</p></div>
+            <div class="glass-card fade-in-scroll"><h3>Branch-aware</h3><p>Committed and uncommitted changes shape selection before graph expansion begins.</p></div>
+            <div class="glass-card fade-in-scroll"><h3>Relationship-aware</h3><p>Owning code, callers, dependencies, tests, configuration, and docs stay connected.</p></div>
+            <div class="glass-card fade-in-scroll"><h3>Budget-aware</h3><p>Selection, deduplication, and trimming produce one pack sized for the receiving agent.</p></div>
         </div>
     </section>
 
@@ -193,50 +193,50 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
     <section id="features" class="container relative z-10 section-spacing">
         <div class="section-header">
             <span class="section-tag">Capabilities</span>
-            <h2 class="section-title text-center">Local code search, indexed</h2>
-            <p class="text-center subtitle-small">BM25, vectors, AST chunks, browser UI, and MCP run on your machine.</p>
+            <h2 class="section-title text-center">Built for live repositories, not one-off searches</h2>
+            <p class="text-center subtitle-small">Task state, repository relationships, and incremental indexes stay connected across CLI, MCP, and Web.</p>
         </div>
 
         <div class="grid grid-3 mt-4">
             <div class="glass-card fade-in-scroll">
+                <div class="card-icon-wrap"><span class="card-icon-emoji">🎯</span></div>
+                <h3>Task-aware inputs</h3>
+                <p>Combine a task, issue, trace, branch diff, staged files, and dirty worktree before selecting code.</p>
+            </div>
+            <div class="glass-card fade-in-scroll">
+                <div class="card-icon-wrap"><span class="card-icon-emoji">🕸️</span></div>
+                <h3>Repository relationships</h3>
+                <p>Expand from task anchors through definitions, callers, references, dependencies, dependents, tests, configuration, docs, and recent co-changes.</p>
+            </div>
+            <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">📦</span></div>
-                <h3>Context packs</h3>
-                <p>Combine a task, issue, trace, diff, or dirty worktree with related code through CLI, MCP, or Web.</p>
-            </div>
-            <div class="glass-card fade-in-scroll">
-                <div class="card-icon-wrap"><span class="card-icon-emoji">⚡</span></div>
-                <h3>Indexed search</h3>
-                <p>Warm daemon replay stays under 100 ms in current Linux validation. Hash results are available first; neural vectors build in the background.</p>
-            </div>
-            <div class="glass-card fade-in-scroll">
-                <div class="card-icon-wrap"><span class="card-icon-emoji">🔒</span></div>
-                <h3>Runs locally</h3>
-                <p>ivygrep has no hosted inference or telemetry. Source, queries, and index data stay on your machine. Neural mode downloads model assets on first use.</p>
-            </div>
-            <div class="glass-card fade-in-scroll">
-                <div class="card-icon-wrap"><span class="card-icon-emoji">🧠</span></div>
-                <h3>Search by intent</h3>
-                <p>BM25 and local vector retrieval can find code without an exact identifier. A query such as "where is the tax calculated?" can lead to the relevant function.</p>
+                <h3>Bounded evidence</h3>
+                <p>Token-aware selection and deduplication produce one pack with exact paths, lines, roles, reasons, and relationships.</p>
             </div>
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">🌿</span></div>
-                <h3>Git-aware</h3>
-                <p>Branches, worktrees, and .gitignore are part of indexing. Branch switches use Merkle deltas instead of full rebuilds.</p>
+                <h3>Thin worktree overlays</h3>
+                <p>Worktrees reuse the repository base index and store only divergent chunks and tombstones across lexical, vector, and relationship stores.</p>
             </div>
             <div class="glass-card fade-in-scroll">
-                <div class="card-icon-wrap"><span class="card-icon-emoji">🤖</span></div>
-                <h3>MCP server</h3>
-                <p>The built-in MCP server works with Claude Code, Cursor, Codex, Gemini, and OpenCode without a separate plugin.</p>
+                <div class="card-icon-wrap"><span class="card-icon-emoji">⚡</span></div>
+                <h3>Incremental availability</h3>
+                <p>Changed chunks update incrementally. Lexical results remain available while hash and neural vectors build in the background.</p>
             </div>
             <div class="glass-card fade-in-scroll">
-                <div class="card-icon-wrap"><span class="card-icon-emoji">🖥️</span></div>
-                <h3>Web workspace browser</h3>
-                <p>Run <code>ig --web</code> for local HTTP search across indexed projects, folder focus, daemon status, streaming results, syntax-highlighted files, and Markdown preview. Non-loopback listeners use a per-daemon access token.</p>
+                <div class="card-icon-wrap"><span class="card-icon-emoji">🧭</span></div>
+                <h3>Exact and semantic</h3>
+                <p>Move between natural-language intent, literal text, symbols, references, callers, paths, and project-wide search in one engine.</p>
             </div>
             <div class="glass-card fade-in-scroll">
-                <div class="card-icon-wrap"><span class="card-icon-emoji">🏗️</span></div>
-                <h3>Code-aware chunks</h3>
-                <p>24 Tree-sitter AST languages plus heuristic chunking for the rest of the 45 supported types.</p>
+                <div class="card-icon-wrap"><span class="card-icon-emoji">🔁</span></div>
+                <h3>One context contract</h3>
+                <p>CLI, JSON, MCP, and Web expose the same structured search results and task-context packs.</p>
+            </div>
+            <div class="glass-card fade-in-scroll">
+                <div class="card-icon-wrap"><span class="card-icon-emoji">🔒</span></div>
+                <h3>Local by design</h3>
+                <p>No hosted inference or telemetry. Source, queries, embeddings, and indexes stay on your machine.</p>
             </div>
         </div>
 
@@ -259,102 +259,6 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
             </div>
         </div>
 
-        <!-- Comparison Table -->
-        <div class="comparison-table glass-panel mt-4 fade-in-scroll">
-            <div class="table-header">
-                <h3>How ivygrep compares</h3>
-            </div>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Feature</th>
-                        <th><a href="https://www.gnu.org/software/grep/" target="_blank" rel="noopener" style="color: inherit;"><code>grep</code></a> / <a href="https://github.com/BurntSushi/ripgrep" target="_blank" rel="noopener" style="color: inherit;"><code>rg</code></a></th>
-                        <th>GitHub Search</th>
-                        <th><a href="https://github.com/google/zoekt" target="_blank" rel="noopener" style="color: inherit;"><code>zoekt</code></a></th>
-                        <th><span class="highlight">ivygrep</span></th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr>
-                        <td>Works offline</td>
-                        <td>✅</td>
-                        <td>❌</td>
-                        <td>✅</td>
-                        <td><span class="highlight">✅</span></td>
-                    </tr>
-                    <tr>
-                        <td>Natural language queries</td>
-                        <td>❌</td>
-                        <td>⚠️</td>
-                        <td>❌</td>
-                        <td><span class="highlight">✅</span></td>
-                    </tr>
-                    <tr>
-                        <td>Semantic understanding</td>
-                        <td>❌</td>
-                        <td>❌</td>
-                        <td>❌</td>
-                        <td><span class="highlight">✅</span></td>
-                    </tr>
-                    <tr>
-                        <td>Warm indexed query latency</td>
-                        <td>✅</td>
-                        <td>❌</td>
-                        <td>✅</td>
-                        <td><span class="highlight">✅</span></td>
-                    </tr>
-                    <tr>
-                        <td>Privacy-first (no upload)</td>
-                        <td>✅</td>
-                        <td>❌</td>
-                        <td>✅</td>
-                        <td><span class="highlight">✅</span></td>
-                    </tr>
-                    <tr>
-                        <td>Structural code chunking</td>
-                        <td>❌</td>
-                        <td>❌</td>
-                        <td>⚠️</td>
-                        <td><span class="highlight">✅</span></td>
-                    </tr>
-                    <tr>
-                        <td>Incremental indexing</td>
-                        <td>❌</td>
-                        <td>❌</td>
-                        <td>❌</td>
-                        <td><span class="highlight">✅</span></td>
-                    </tr>
-                    <tr>
-                        <td>Git-native worktrees/branches</td>
-                        <td>❌</td>
-                        <td>❌</td>
-                        <td>❌</td>
-                        <td><span class="highlight">✅</span></td>
-                    </tr>
-                    <tr>
-                        <td>MCP server for AI agents</td>
-                        <td>❌</td>
-                        <td>❌</td>
-                        <td>❌</td>
-                        <td><span class="highlight">✅</span></td>
-                    </tr>
-                    <tr>
-                        <td>Task-aware, token-budgeted evidence packs</td>
-                        <td>❌</td>
-                        <td>❌</td>
-                        <td>❌</td>
-                        <td><span class="highlight">✅</span></td>
-                    </tr>
-                    <tr>
-                        <td>Local web UI</td>
-                        <td>❌</td>
-                        <td>✅</td>
-                        <td>✅</td>
-                        <td><span class="highlight">✅</span></td>
-                    </tr>
-                </tbody>
-            </table>
-        </div>
     </section>
 
     <!-- Architecture -->
@@ -412,28 +316,27 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
     <!-- Performance -->
     <section id="performance" class="container relative z-10 section-spacing">
         <div class="section-header">
-            <span class="section-tag">Benchmarks</span>
-            <h2 class="section-title text-center">Performance at scale</h2>
-            <p class="text-center subtitle-small">Public results from a deterministic one-million-chunk corpus.</p>
+            <span class="section-tag">System evidence</span>
+            <h2 class="section-title text-center">Context stays practical at repository scale</h2>
+            <p class="text-center subtitle-small">Absolute measurements from a deterministic one-million-chunk corpus show local indexing and query paths at scale.</p>
         </div>
 
         <div class="glass-panel fade-in-scroll benchmark-panel mt-4">
-            <div class="benchmark-row">
-                <div class="benchmark-tool"><code>Warm p95</code><span class="benchmark-mode">million-chunk current</span></div>
-                <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig" data-width="28%"><span class="benchmark-time">15.07 ms</span></div></div>
-                <div class="benchmark-speed benchmark-speed-hero">3.57x faster</div>
+            <div class="grid grid-3">
+                <div class="glass-card">
+                    <h3>15.07 ms</h3>
+                    <p>Warm query p95</p>
+                </div>
+                <div class="glass-card">
+                    <h3>109,006 chunks/s</h3>
+                    <p>Controlled indexing</p>
+                </div>
+                <div class="glass-card">
+                    <h3>0.46 GiB</h3>
+                    <p>Final index size</p>
+                </div>
             </div>
-            <div class="benchmark-row">
-                <div class="benchmark-tool"><code>Indexing</code><span class="benchmark-mode">million-chunk current</span></div>
-                <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-ig-semantic" data-width="100%"><span class="benchmark-time">109,006 chunks/s</span></div></div>
-                <div class="benchmark-speed benchmark-speed-hero">21.96x faster</div>
-            </div>
-            <div class="benchmark-row benchmark-row-highlight">
-                <div class="benchmark-tool"><code>Index size</code><span class="benchmark-mode">million-chunk current</span></div>
-                <div class="benchmark-bar-wrapper"><div class="benchmark-bar benchmark-bar-rg" data-width="65%"><span class="benchmark-time">0.46 GiB</span></div></div>
-                <div class="benchmark-speed benchmark-speed-hero">57% smaller</div>
-            </div>
-            <p class="benchmark-note">Ratios compare current results with the frozen public baseline. Hardware, repository shape, index state, and system load affect absolute results.</p>
+            <p class="benchmark-note">These are system measurements, not agent outcomes. Hardware, repository shape, model, index state, and load affect absolute results.</p>
             <p class="benchmark-links" aria-label="Benchmark links">
                 <a href="benchmarks/public-million.html">Public million-chunk benchmark</a>
                 <a href="benchmarks/evidence-dashboard.html">Benchmark dashboard</a>
