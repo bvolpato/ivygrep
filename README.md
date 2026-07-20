@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  <strong>Local code search and task context for coding agents.</strong><br/>
-  Search by intent, inspect exact matches, and build context packs without uploading source.
+  <strong>Turn coding tasks into bounded, branch-aware context.</strong><br/>
+  One search for discovery. One implementation map from task, current Git changes, and code relationships. Everything stays local.
 </p>
 
 <p align="center">
@@ -44,7 +44,9 @@ Context pack: 14 snippets / 7,642 estimated tokens
 Coverage: changed files, definitions, callers, dependents, tests
 ```
 
-The search finds relevant code without requiring an identifier. The context command combines the task with branch changes, dirty files, and code relationships in a bounded Markdown pack. Each snippet says why it was selected and how it relates to the task.
+Search answers where. Context answers what an agent needs to change safely.
+
+The context command combines task anchors with commits since the branch point, staged and dirty files, paths from an issue or trace, and indexed code relationships. It returns one bounded Markdown pack. Every snippet includes its path, lines, role, selection reason, and relationship to the task.
 
 ## Install
 
@@ -151,25 +153,27 @@ Use natural-language queries for concepts and literal=true for identifiers.
 For implementation, request output=context_pack with budget_tokens=8000.
 ```
 
-## What ivygrep adds
+## Repository context, not another result list
 
-| Capability | `rg` | Hosted search | ivygrep |
-|---|:---:|:---:|:---:|
-| Natural-language intent | No | Limited | Yes |
-| Exact and semantic retrieval | Exact | Varies | Yes |
-| Task/diff context packs | No | No | Yes |
-| Definitions, callers, tests, config, docs | No | Varies | Yes |
-| Git worktree overlays | No | No | Yes |
-| Local-only code and queries | Yes | No | Yes |
-| CLI, MCP, and Web | CLI | Web/API | Yes |
+- **Current work is input.** `--since main` brings committed branch changes, staged files, dirty files, and untracked files into retrieval.
+- **Relationships expand the task.** Definitions, callers, references, dependencies, dependents, tests, configuration, docs, and recent co-changes connect likely implementation surfaces.
+- **Token budget is a contract.** Context selection, deduplication, and trimming produce one pack sized for the receiving agent.
+- **Evidence stays inspectable.** Exact paths and lines, roles, reasons, and relationships explain why every snippet is present.
+- **Worktrees stay thin.** Each worktree reuses its repository's base index and stores only divergent chunks and tombstones.
+- **Indexes stay live.** Changed chunks update incrementally. Lexical results remain available while neural vectors build in the background.
+- **One context model serves every client.** CLI, JSON, MCP, and Web return the same structured evidence.
+
+Search when exploring. Build context when implementing.
 
 ivygrep combines Tantivy BM25, exact lookup, USearch ANN, Tree-sitter chunks, a SQLite relationship graph, local Candle embeddings, and Git-aware incremental indexes. Lexical results are available while neural vectors build in the background. Ranking is deterministic.
 
 ivygrep supports 45 language and file types. Twenty-four use Tree-sitter AST chunking, including Rust, Python, Go, JavaScript, TypeScript, Java, C/C++, C#, Kotlin, Scala, PHP, Ruby, Swift, Elixir, Zig, Bash, Haskell, OCaml, Lua, Dart, Objective-C, Perl, and Starlark.
 
-## Measured performance
+## System performance
 
-The deterministic one-million-chunk benchmark currently records 15.07 ms warm p95, 109,006 chunks/s controlled indexing, and a 0.46 GiB final index. Hardware, repository shape, model, and index state affect results. See the [benchmark dashboard](https://bvolpato.github.io/ivygrep/benchmarks/evidence-dashboard.html) and [raw evidence](https://bvolpato.github.io/ivygrep/benchmarks/evidence-dashboard.json).
+On the deterministic one-million-chunk corpus, warm query p95 is 15.07 ms, controlled indexing reaches 109,006 chunks/s, and the final index is 0.46 GiB. These are system measurements, not agent outcomes. Hardware, repository shape, model, index state, and load affect results.
+
+[Million-chunk methodology and results](https://bvolpato.github.io/ivygrep/benchmarks/public-million.html) · [Full benchmark dashboard](https://bvolpato.github.io/ivygrep/benchmarks/evidence-dashboard.html)
 
 ## Local and private
 
