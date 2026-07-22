@@ -1,9 +1,11 @@
 import importlib.util
 import json
 from pathlib import Path
+import statistics
 import subprocess
 import sys
 import tempfile
+import tomllib
 import unittest
 from unittest import mock
 
@@ -53,6 +55,35 @@ def artifact(
 
 
 class MillionBenchmarkTest(unittest.TestCase):
+    def test_current_release_snapshot_matches_package_and_trial_medians(self):
+        package = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+        snapshot = json.loads(
+            (ROOT / "docs/benchmarks/public-million-current.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertEqual(
+            snapshot["binary"]["version"],
+            f"ivygrep {package['package']['version']}",
+        )
+        self.assertEqual(snapshot["harness"]["trials"], len(snapshot["trials"]))
+        self.assertGreaterEqual(len(snapshot["trials"]), 3)
+        for metric in (
+            "index_wall_ms",
+            "chunks_per_second",
+            "index_size_bytes",
+            "peak_rss_bytes",
+            "warm_cli_p95_ms",
+            "warm_engine_p95_ms",
+            "process_cold_p95_ms",
+            "concurrent_queries_per_second",
+        ):
+            self.assertEqual(
+                snapshot["median"][metric],
+                statistics.median(trial[metric] for trial in snapshot["trials"]),
+            )
+
     def test_generated_corpus_is_its_own_git_workspace(self):
         with tempfile.TemporaryDirectory() as temp:
             outer = Path(temp)

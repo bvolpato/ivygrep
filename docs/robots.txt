@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://bvolpato.github.io/ivygrep/sitemap.xml

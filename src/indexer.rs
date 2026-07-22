@@ -749,6 +749,7 @@ fn index_workspace_with_options(
     watcher_paths: Option<&[PathBuf]>,
     reset_worktree_overlay: bool,
 ) -> Result<IndexingSummary> {
+    let indexing_started = Instant::now();
     workspace.ensure_dirs()?;
 
     check_memory_before_index()?;
@@ -766,11 +767,42 @@ fn index_workspace_with_options(
         .with_context(|| format!("failed to acquire index lock {}", lock_path.display()))?;
 
     let preserved_metadata = workspace.read_metadata().ok().flatten();
-    if workspace.quick_index_health().needs_rebuild() {
+    let index_health = workspace.quick_index_health();
+    if index_health.needs_rebuild() {
         rebuild_index_storage(workspace, preserved_metadata.as_ref())?;
     }
     if reset_worktree_overlay {
         clear_worktree_overlay_storage(workspace);
+    }
+
+    let tracks_reusable_base_state =
+        workspace.repo_id.is_some() && workspace.base_index_dir.is_none();
+    let clean_git_state_before = tracks_reusable_base_state
+        .then(|| clean_git_checkout_state(&workspace.root))
+        .flatten();
+    let reusable_index_is_current = clean_git_state_before.as_deref().is_some_and(|state| {
+        index_health.is_queryable()
+            && !preserved_metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.skip_gitignore)
+            && fs::read_to_string(indexed_git_state_path(workspace))
+                .ok()
+                .as_deref()
+                == Some(state)
+    });
+    if reusable_index_is_current
+        && clean_git_checkout_state(&workspace.root) == clean_git_state_before
+    {
+        return Ok(IndexingSummary {
+            workspace_id: workspace.id.clone(),
+            indexed_files: 0,
+            deleted_files: 0,
+            total_chunks: count_chunks(&workspace.sqlite_path())?,
+            phase_timings: IndexingPhaseTimings {
+                discovery_ms: indexing_started.elapsed().as_secs_f64() * 1_000.0,
+                ..Default::default()
+            },
+        });
     }
 
     let pid_path = workspace.indexing_pid_path();
@@ -817,11 +849,6 @@ fn index_workspace_with_options(
         }
     });
 
-    let tracks_reusable_base_state =
-        workspace.repo_id.is_some() && workspace.base_index_dir.is_none();
-    let clean_git_state_before = tracks_reusable_base_state
-        .then(|| clean_git_checkout_state(&workspace.root))
-        .flatten();
     let result = retry_transient_tantivy_writes(|| {
         index_workspace_inner(
             workspace,
@@ -2356,12 +2383,92 @@ fn git_worktree_is_clean(root: &Path) -> bool {
         .is_ok_and(|output| output.status.success() && output.stdout.is_empty())
 }
 
+fn git_path(root: &Path, args: &[&str]) -> Option<PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(raw);
+    Some(if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    })
+}
+
+fn git_ignore_state(root: &Path) -> Option<String> {
+    let mut state = Vec::new();
+    let configured_global_ignore =
+        git_path(root, &["config", "--path", "--get", "core.excludesFile"]);
+    let default_global_ignore = configured_global_ignore.is_none().then(|| {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|home| home.join(".config")))
+            .map(|config| config.join("git/ignore"))
+    });
+    for path in [
+        git_path(root, &["rev-parse", "--git-path", "info/exclude"]),
+        configured_global_ignore,
+        default_global_ignore.flatten(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        state.extend_from_slice(path.to_string_lossy().as_bytes());
+        state.push(0);
+        state.extend_from_slice(&fs::read(path).unwrap_or_default());
+        state.push(0);
+    }
+
+    let ignored_controls = std::process::Command::new("git")
+        .args([
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--",
+            ":(glob)**/.gitignore",
+            ":(glob)**/.ignore",
+        ])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !ignored_controls.status.success() {
+        return None;
+    }
+    for raw_path in ignored_controls.stdout.split(|byte| *byte == 0) {
+        if raw_path.is_empty() {
+            continue;
+        }
+        state.extend_from_slice(raw_path);
+        state.push(0);
+        state.extend_from_slice(
+            &fs::read(root.join(String::from_utf8_lossy(raw_path).as_ref())).ok()?,
+        );
+        state.push(0);
+    }
+
+    Some(hex::encode(
+        xxhash_rust::xxh3::xxh3_128(&state).to_le_bytes(),
+    ))
+}
+
 fn git_checkout_state(root: &Path) -> Option<String> {
     Some(format!(
-        "{}\n{}\n{}",
+        "{}\n{}\n{}\n{}",
         git_head(root)?,
         git_index_hash(root)?,
-        git_sparse_checkout_state(root)
+        git_sparse_checkout_state(root),
+        git_ignore_state(root)?,
     ))
 }
 
@@ -5015,6 +5122,49 @@ mod tests {
                 .iter()
                 .any(|text| text.contains("private cardinal documentation"))
         );
+    }
+
+    #[test]
+    #[serial]
+    fn clean_git_noop_invalidates_when_repository_excludes_change() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(["-c", "commit.gpgSign=false"])
+                .args(args)
+                .current_dir(root.path())
+                .env("GIT_AUTHOR_NAME", "Test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "Test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-b", "main"]);
+        fs::write(
+            root.path().join("visible.rs"),
+            "pub fn visible_marker() {}\n",
+        )
+        .unwrap();
+        git(&["add", "visible.rs"]);
+        git(&["commit", "-m", "base"]);
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        assert!(!indexed_texts_for_file(&workspace, "visible.rs").is_empty());
+
+        let no_change = index_workspace(&workspace, &model).unwrap();
+        assert_eq!(no_change.indexed_files, 0);
+        assert_eq!(no_change.deleted_files, 0);
+
+        fs::write(root.path().join(".git/info/exclude"), "visible.rs\n").unwrap();
+        let excluded = index_workspace(&workspace, &model).unwrap();
+        assert_eq!(excluded.deleted_files, 1);
+        assert!(indexed_texts_for_file(&workspace, "visible.rs").is_empty());
     }
 
     #[test]

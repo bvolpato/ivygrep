@@ -24,6 +24,7 @@ use crate::symbols::{
 use crate::workspace::Workspace;
 
 const MAX_ITEMS: usize = 20;
+const TARGET_CONTEXT_ITEMS: usize = 12;
 const MAX_ANCHOR_SYMBOLS: usize = 3;
 const RRF_K: f64 = 10.0;
 
@@ -751,6 +752,11 @@ fn assemble_bundle(
             .then_with(|| left.hit.start_line.cmp(&right.hit.start_line))
     });
     let candidate_count = candidates.len();
+    let required_roles = candidates
+        .iter()
+        .flat_map(|candidate| candidate.roles.iter().copied())
+        .filter(|role| *role != ContextRole::Related)
+        .collect::<BTreeSet<_>>();
     let mut ordered = Vec::with_capacity(candidates.len());
     let mut claimed = HashSet::new();
     for role in [
@@ -797,6 +803,10 @@ fn assemble_bundle(
             truncated = true;
             break;
         }
+        if items.len() >= TARGET_CONTEXT_ITEMS && context_roles_covered(&items, &required_roles) {
+            truncated = true;
+            break;
+        }
         if file_counts
             .get(&candidate.hit.file_path)
             .is_some_and(|count| *count >= 3)
@@ -826,7 +836,7 @@ fn assemble_bundle(
             truncated = true;
             break;
         }
-        let per_item_budget = (budget_tokens / 4).clamp(96, 600).min(remaining);
+        let per_item_budget = (budget_tokens / 4).clamp(96, 400).min(remaining);
         let (preview, preview_truncated, start_offset) =
             truncate_to_token_budget(&candidate.hit.preview, per_item_budget, task);
         if preview_truncated && estimate_tokens(&preview) < 32 {
@@ -869,6 +879,13 @@ fn assemble_bundle(
         finalize_bundle_metrics(&mut bundle);
     }
     bundle
+}
+
+fn context_roles_covered(items: &[ContextItem], required_roles: &BTreeSet<ContextRole>) -> bool {
+    required_roles
+        .iter()
+        .copied()
+        .all(|role| items.iter().any(|item| item.roles.contains(&role)))
 }
 
 fn bound_change_scope(mut scope: ContextChangeScope, budget_tokens: usize) -> ContextChangeScope {
@@ -1970,6 +1987,58 @@ mod tests {
                 .iter()
                 .any(|item| item.roles.contains(&ContextRole::Caller))
         );
+    }
+
+    #[test]
+    fn item_target_waits_for_required_relationship_roles() {
+        let mut candidates = vec![
+            candidate("src/shared.rs", 1, ContextRole::Primary, "shared", 1.0),
+            candidate("src/shared.rs", 1, ContextRole::Test, "shared", 0.9),
+        ];
+        candidates.extend((0..12).map(|index| {
+            candidate(
+                &format!("src/related_{index}.rs"),
+                1,
+                ContextRole::Related,
+                "related",
+                0.3 - index as f64 / 100.0,
+            )
+        }));
+        candidates.push(candidate(
+            "tests/fallback.rs",
+            1,
+            ContextRole::Test,
+            "fallback test",
+            0.1,
+        ));
+        candidates.push(candidate(
+            "src/trailing.rs",
+            1,
+            ContextRole::Related,
+            "trailing",
+            0.0,
+        ));
+
+        let bundle = assemble_bundle(
+            "change shared behavior",
+            Path::new("/repo"),
+            8_000,
+            Vec::new(),
+            None,
+            Vec::new(),
+            candidates,
+        );
+
+        assert!(bundle.items.len() > TARGET_CONTEXT_ITEMS);
+        assert!(bundle.items.len() < MAX_ITEMS);
+        assert!(
+            bundle
+                .items
+                .iter()
+                .any(|item| item.file_path == Path::new("tests/fallback.rs"))
+        );
+        let required_roles = BTreeSet::from([ContextRole::Primary, ContextRole::Test]);
+        assert!(context_roles_covered(&bundle.items, &required_roles));
     }
 
     #[test]
