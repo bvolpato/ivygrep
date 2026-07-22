@@ -2550,7 +2550,8 @@ fn base_index_checkout_state(workspace: &Workspace) -> BaseIndexCheckoutState {
 
     let same_head = indexed_state.lines().next() == current_state.lines().next();
     let same_sparse_checkout = indexed_state.lines().nth(2) == current_state.lines().nth(2);
-    if same_head && same_sparse_checkout {
+    let same_ignore_state = indexed_state.lines().nth(3) == current_state.lines().nth(3);
+    if same_head && same_sparse_checkout && same_ignore_state {
         BaseIndexCheckoutState::MetadataChanged
     } else {
         BaseIndexCheckoutState::Stale
