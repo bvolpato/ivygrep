@@ -60,6 +60,8 @@ Two combined confirmation runs produced identical quality:
 
 Latency p95 was noisy across short runs, so no context-latency claim is made. Test-file recall remained zero on two labeled tasks. Test-specific retrieval is next relevance target.
 
+CI release builds observed `6.9167` mean covered roles instead of the local `7.0` when parser timeouts removed one candidate role across 12 tasks. The integration floor is `6.8` to allow that environment-dependent candidate variation. A deterministic unit regression still requires role-aware selection to retain every available non-related role before stopping at 12 items.
+
 ### Neural routing and fusion
 
 The selected gate runs neural retrieval only when lexical evidence is weak or ambiguous. Forced neural mode still bypasses the gate. When neural executes, hash ANN remains in fusion.

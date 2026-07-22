@@ -89,7 +89,7 @@ jobs:
             --min-context-recall 0.70 \
             --min-context-primary-recall 0.75 \
             --max-context-zero-recall-rate 0.17 \
-            --min-context-covered-roles 7.0 \
+            --min-context-covered-roles 6.8 \
             --min-context-recall-per-1k-tokens 0.11
 
       - name: Build ig (neural smoke)
