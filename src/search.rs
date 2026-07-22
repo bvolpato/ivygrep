@@ -298,6 +298,29 @@ fn corpus_candidate_multiplier(document_count: u64) -> usize {
     }
 }
 
+fn neural_fallback_needed(
+    routing: QueryRouting,
+    force_neural: bool,
+    top_score: Option<f32>,
+    runner_up_score: Option<f32>,
+) -> bool {
+    const SCORE_THRESHOLD: f32 = 2.0;
+    const SCORE_GAP_THRESHOLD: f32 = 0.25;
+
+    if force_neural {
+        return true;
+    }
+    if !routing.use_neural {
+        return false;
+    }
+
+    let Some(top_score) = top_score else {
+        return true;
+    };
+    let score_gap = runner_up_score.map_or(top_score, |score| top_score - score);
+    top_score < SCORE_THRESHOLD || score_gap < SCORE_GAP_THRESHOLD
+}
+
 impl Default for SearchOptions {
     fn default() -> Self {
         Self {
@@ -2136,8 +2159,8 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     let has_neural_vectors = ctx.neural_vectors.as_ref().map_or(0, |v| v.size()) > 0
         || ctx.base_neural_vectors.as_ref().map_or(0, |v| v.size()) > 0;
 
-    // Neural embeddings are far higher quality than the provisional hash
-    // vectors. Keep full hash recall while neural enhancement is partial.
+    // Treat neural retrieval as fallback for weak or ambiguous lexical evidence.
+    // When it runs, retain hash candidates because the tiers have complementary recall.
     let neural_profile_matches = embedding_model.is_none_or(|model| {
         let Some(active_identity) = model.model_identity() else {
             let Some(active_profile) = model.profile_info() else {
@@ -2158,7 +2181,13 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
         };
         persisted_identity == active_identity
     });
-    let neural_available = routing.use_neural
+    let execute_neural = neural_fallback_needed(
+        routing,
+        options.force_neural,
+        lexical_chunks.first().map(|(_, score)| *score),
+        lexical_chunks.get(1).map(|(_, score)| *score),
+    );
+    let neural_available = execute_neural
         && embedding_model.is_some_and(|model| model.model_identity().is_some())
         && has_neural_vectors
         && neural_profile_matches;
@@ -2172,7 +2201,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     let hash_weight =
         semantic_hash_weight(neural_available, neural_vector_count, hash_vector_count);
     let neural_model = embedding_model.filter(|model| {
-        routing.use_neural
+        execute_neural
             && model.model_identity().is_some()
             && has_neural_vectors
             && neural_profile_matches
@@ -2209,13 +2238,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
                 None
             };
 
-            let skip_hash = neural_available
-                && neural_vector_count >= hash_vector_count
-                && neural_matches
-                    .as_ref()
-                    .is_some_and(|matches| neural_coverage_allows_hash_skip(matches, &direct_ids));
-
-            if has_hash_vectors && !skip_hash {
+            if has_hash_vectors {
                 let hash_query_vector = embed_hash_query(trimmed);
                 tracing::trace!("semantic_hash_embed={:?}", semantic_started.elapsed());
                 sources.push((
@@ -2424,34 +2447,6 @@ fn embed_hash_query(query_text: &str) -> Vec<f32> {
     let hash_model =
         SEARCH_HASH_MODEL.get_or_init(|| crate::embedding::HashEmbeddingModel::new(256));
     hash_model.embed(&build_semantic_query_text(query_text))
-}
-
-fn neural_direct_overlap_allows_hash_skip(
-    neural_matches: &[VectorMatch],
-    direct_ids: &HashSet<u64>,
-) -> bool {
-    // Lower overlap thresholds were faster but regressed broad retrieval.
-    // Require complete agreement before treating the hash tier as redundant.
-    const OVERLAP_WINDOW: usize = 10;
-    const MIN_DIRECT_OVERLAP: usize = 10;
-
-    neural_matches
-        .iter()
-        .take(OVERLAP_WINDOW)
-        .filter(|vector_match| direct_ids.contains(&vector_match.key))
-        .count()
-        >= MIN_DIRECT_OVERLAP
-}
-
-fn neural_coverage_allows_hash_skip(
-    neural_matches: &[VectorMatch],
-    direct_ids: &HashSet<u64>,
-) -> bool {
-    const MIN_DIRECT_EVIDENCE: usize = 10;
-    const MIN_NEURAL_EVIDENCE: usize = 10;
-
-    neural_direct_overlap_allows_hash_skip(neural_matches, direct_ids)
-        || (direct_ids.len() >= MIN_DIRECT_EVIDENCE && neural_matches.len() >= MIN_NEURAL_EVIDENCE)
 }
 
 fn to_hit(
@@ -6138,49 +6133,16 @@ mod tests {
     }
 
     #[test]
-    fn hash_skip_requires_all_direct_matches_in_the_top_ten() {
-        let direct_ids = (1..=10).collect::<HashSet<_>>();
-        let matches = (1..=10)
-            .map(|key| VectorMatch {
-                key,
-                score: key as f32,
-            })
-            .collect::<Vec<_>>();
-        assert!(neural_direct_overlap_allows_hash_skip(
-            &matches,
-            &direct_ids
-        ));
+    fn neural_fallback_uses_lexical_confidence() {
+        let routed = QueryRouting::classify("where is query caching handled");
+        assert!(neural_fallback_needed(routed, false, None, None));
+        assert!(neural_fallback_needed(routed, false, Some(1.99), Some(1.0)));
+        assert!(neural_fallback_needed(routed, false, Some(5.0), Some(4.8)));
+        assert!(!neural_fallback_needed(routed, false, Some(5.0), Some(4.5)));
 
-        let direct_ids = (1..=9).collect::<HashSet<_>>();
-        assert!(!neural_direct_overlap_allows_hash_skip(
-            &matches,
-            &direct_ids
-        ));
-    }
-
-    #[test]
-    fn hash_skip_allows_complete_neural_coverage_with_direct_evidence() {
-        let direct_ids = (1..=10).collect::<HashSet<_>>();
-        let matches = (101..=110)
-            .map(|key| VectorMatch {
-                key,
-                score: key as f32,
-            })
-            .collect::<Vec<_>>();
-
-        assert!(neural_coverage_allows_hash_skip(&matches, &direct_ids));
-
-        let sparse_direct_ids = (1..=9).collect::<HashSet<_>>();
-        assert!(!neural_coverage_allows_hash_skip(
-            &matches,
-            &sparse_direct_ids
-        ));
-
-        let sparse_matches = matches[..9].to_vec();
-        assert!(!neural_coverage_allows_hash_skip(
-            &sparse_matches,
-            &direct_ids
-        ));
+        let exact = QueryRouting::classify("SearchContext");
+        assert!(!neural_fallback_needed(exact, false, None, None));
+        assert!(neural_fallback_needed(exact, true, Some(5.0), Some(4.5)));
     }
 
     #[test]
@@ -6566,7 +6528,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn search_uses_hash_vectors_until_neural_vectors_are_ready() {
+    fn search_uses_neural_vectors_only_for_low_confidence_queries() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
@@ -6574,6 +6536,11 @@ mod tests {
         std::fs::write(
             tmp.path().join("auth.rs"),
             "pub fn authenticate_user(token: &str) -> bool { !token.is_empty() }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("service.rs"),
+            "pub fn authenticate_service(token: &str) -> bool { !token.is_empty() }\n",
         )
         .unwrap();
 
@@ -6614,8 +6581,22 @@ mod tests {
         assert!(
             hits_after
                 .iter()
+                .all(|hit| hit.sources.iter().all(|source| source != "neural")),
+            "confident lexical evidence should skip neural retrieval"
+        );
+
+        let ambiguous = hybrid_search(
+            &workspace,
+            "authenticate account",
+            Some(&neural_model),
+            &SearchOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            ambiguous
+                .iter()
                 .any(|hit| hit.sources.iter().any(|source| source == "neural")),
-            "neural vectors should be visible in result provenance"
+            "ambiguous lexical evidence should execute neural retrieval"
         );
         let exact_default = hybrid_search(
             &workspace,

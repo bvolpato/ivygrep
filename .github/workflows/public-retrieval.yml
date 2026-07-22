@@ -111,6 +111,7 @@ jobs:
             docs/benchmarks/public-million-query-current.json \
             docs/benchmarks/public-million-query-comparison.json \
             docs/benchmarks/public-million-quality-current.json \
+            docs/benchmarks/public-million-current.json \
             docs/benchmarks/public-million-results.json \
             docs/benchmarks/public-million.html \
             docs/benchmarks/evidence-dashboard.json \

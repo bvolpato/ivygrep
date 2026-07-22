@@ -19,6 +19,7 @@ on:
       - "scripts/eval_code_retrieval.py"
       - "scripts/bench_context_retrieval.py"
       - "tests/fixtures/retrieval/**"
+      - "tests/fixtures/context_retrieval_tasks.json"
       - "tests/fixtures/ivygrep_relevance_queries.json"
       - ".github/workflows/relevance.yml"
   workflow_dispatch:
@@ -83,7 +84,13 @@ jobs:
           uv run scripts/bench_context_retrieval.py \
             --binary target/release/ig \
             --repo . \
-            --output context-retrieval-results.json
+            --tasks-from tests/fixtures/context_retrieval_tasks.json \
+            --output context-retrieval-results.json \
+            --min-context-recall 0.70 \
+            --min-context-primary-recall 0.75 \
+            --max-context-zero-recall-rate 0.17 \
+            --min-context-covered-roles 6.8 \
+            --min-context-recall-per-1k-tokens 0.11
 
       - name: Build ig (neural smoke)
         run: cargo build --release --locked --bin ig

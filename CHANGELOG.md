@@ -4,6 +4,18 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Performance
+- Context packs use 34.1% fewer tokens on the frozen 12-task benchmark with unchanged `.7500` recall. A 400-token snippet cap and role-aware 12-item target preserve required relationship roles.
+- Automatic neural retrieval now follows lexical confidence and retains complementary hash candidates. On the 1,000-query public-core benchmark, neural executions fell 52.4% while nDCG@10 rose 2.10%, MRR@10 rose 3.21%, and recall@20 rose from `.469` to `.472`.
+- Repeated clean Git indexing reuses an exact repository-state marker. A 100,000-file no-op improved from 616 ms to 494 ms and reduced peak RSS by about 56%, with ignore, index, sparse-checkout, and worktree changes forcing full reconciliation.
+
+### Testing
+- Context relevance runs against frozen tasks in clean pre-change worktrees and gates recall, primary recall, zero-recall rate, relationship-role coverage, and recall per 1,000 tokens.
+- Current-release million-chunk evidence publishes three complete v1.2.6 trials and checks package version plus every reported median.
+
+### Documentation
+- README and site lead with one search and one bounded context example, current registry availability, a functional workflow hero, canonical integration pages, and current-release benchmark evidence.
+
 ## [1.2.6] - 2026-07-19
 
 ### Added

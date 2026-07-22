@@ -1656,6 +1656,69 @@ fn worktree_reconciles_base_after_sparse_checkout_change() {
 
 #[test]
 #[serial]
+fn worktree_reconciles_base_after_repository_excludes_change() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+
+    init_git_repo(root.path());
+    fs::write(
+        root.path().join("kept.rs"),
+        "pub fn repository_exclude_kept_marker() -> bool { true }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("excluded.rs"),
+        "pub fn repository_exclude_removed_marker() -> bool { true }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "repository exclude base"]);
+    git(root.path(), &["branch", "wt-repository-exclude", "main"]);
+
+    let wt_dir = tempdir().unwrap();
+    let wt_path = wt_dir.path().join("wt_repository_exclude");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            wt_path.to_str().unwrap(),
+            "wt-repository-exclude",
+        ],
+    );
+    setup_and_index(root.path(), home.path());
+
+    let base_ws = workspace_for(root.path());
+    assert!(stored_chunk_text(&base_ws, "excluded.rs").is_some());
+
+    fs::write(root.path().join(".git/info/exclude"), "excluded.rs\n").unwrap();
+    assert!(
+        git_output(root.path(), &["status", "--porcelain=v1"]).is_empty(),
+        "repository excludes must not dirty the checkout"
+    );
+
+    setup_and_index(&wt_path, home.path());
+    let wt_ws = workspace_for(&wt_path);
+    assert!(
+        stored_chunk_text(&base_ws, "excluded.rs").is_none(),
+        "base chunks must reconcile when repository excludes change"
+    );
+    assert!(
+        search_file_paths(&wt_ws, "repository_exclude_kept_marker")
+            .iter()
+            .any(|path| path.contains("kept.rs")),
+        "worktree must retain unaffected inherited content"
+    );
+    assert_only_overlay_stores(&wt_ws);
+
+    git(
+        root.path(),
+        &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+    );
+}
+
+#[test]
+#[serial]
 fn worktree_skip_gitignore_indexes_inherited_ignored_content_via_base() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();

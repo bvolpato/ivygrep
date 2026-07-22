@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="assets/hero-banner.png" alt="ivygrep semantic search returning matching code" width="800" />
+  <img src="assets/hero-workflow.svg" alt="ivygrep search followed by a bounded task-context pack" width="800" />
 </p>
 
 <p align="center">
@@ -62,13 +62,7 @@ curl -fsSL https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.sh | 
 irm https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.ps1 | iex
 ```
 
-```powershell
-winget install BrunoVolpato.ivygrep
-```
-
-```bash
-cargo install ivygrep --locked
-```
+WinGet submission is [awaiting registry approval](https://github.com/microsoft/winget-pkgs/pull/404590). crates.io publishing is prepared but not live yet. Use one of the supported installers above until those registries list ivygrep.
 
 Installers select a compatible archive, verify its SHA-256 checksum, install `ig`, and report the selected backend. Apple Silicon uses Metal. NVIDIA Linux hosts use the Linux x86_64 CUDA build when CUDA 13 and compute capability 8.0 or newer are available. Other systems use portable local inference. Run `ig hardware` to see detected hardware, compatibility limits, and the matching reinstall command.
 
@@ -171,9 +165,9 @@ ivygrep supports 45 language and file types. Twenty-four use Tree-sitter AST chu
 
 ## System performance
 
-On the deterministic one-million-chunk corpus, warm query p95 is 15.07 ms, controlled indexing reaches 109,006 chunks/s, and the final index is 0.46 GiB. These are system measurements, not agent outcomes. Hardware, repository shape, model, index state, and load affect results.
+On the deterministic one-million-chunk corpus, v1.2.6 median warm CLI p95 is 13.73 ms, controlled indexing reaches 159,649 chunks/s, and the final index is 0.42 GiB across three sequential trials. These are system measurements, not agent outcomes. Hardware, repository shape, model, index state, and load affect results.
 
-[Million-chunk methodology and results](https://bvolpato.github.io/ivygrep/benchmarks/public-million.html) · [Full benchmark dashboard](https://bvolpato.github.io/ivygrep/benchmarks/evidence-dashboard.html)
+[Current-release evidence](https://bvolpato.github.io/ivygrep/benchmarks/public-million-current.json) · [Million-chunk methodology and historical paired study](https://bvolpato.github.io/ivygrep/benchmarks/public-million.html) · [Full benchmark dashboard](https://bvolpato.github.io/ivygrep/benchmarks/evidence-dashboard.html)
 
 ## Local and private
 

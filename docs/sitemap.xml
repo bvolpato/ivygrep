@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://bvolpato.github.io/ivygrep/</loc></url>
+  <url><loc>https://bvolpato.github.io/ivygrep/integrations/codex.html</loc></url>
+  <url><loc>https://bvolpato.github.io/ivygrep/integrations/claude-code.html</loc></url>
+  <url><loc>https://bvolpato.github.io/ivygrep/integrations/cursor.html</loc></url>
+  <url><loc>https://bvolpato.github.io/ivygrep/integrations/gemini-cli.html</loc></url>
+  <url><loc>https://bvolpato.github.io/ivygrep/integrations/opencode.html</loc></url>
+  <url><loc>https://bvolpato.github.io/ivygrep/integrations/mcp.html</loc></url>
+  <url><loc>https://bvolpato.github.io/ivygrep/benchmarks/</loc></url>
+</urlset>

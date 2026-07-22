@@ -454,6 +454,7 @@ def render_html(report: dict) -> str:
         for name, values in quality["task_ndcg_at_10"].items()
     )
     gate = "PASS" if report["gate"]["passed"] else "FAIL"
+    study_version = escape(report["binaries"]["paired_current"]["version"])
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -466,8 +467,8 @@ def render_html(report: dict) -> str:
 </head>
 <body class="report-page">
   <main class="report-shell relative z-10">
-    <nav class="report-nav"><a class="report-brand" href="index.html"><img src="../assets/icon.svg" alt="ivygrep"><span>ivygrep benchmarks</span></a><div class="report-links"><a href="index.html">Reports</a><a href="public-million-results.json">Summary JSON</a><a href="https://github.com/bvolpato/ivygrep">GitHub</a></div></nav>
-    <section class="report-hero"><div class="report-eyebrow">Deterministic CC0 corpus</div><h1>Million-Chunk Performance</h1><p>Paired query latency, controlled indexing, full-system paths, and pinned public retrieval quality.</p></section>
+    <nav class="report-nav"><a class="report-brand" href="index.html"><img src="../assets/icon.svg" alt="ivygrep"><span>ivygrep benchmarks</span></a><div class="report-links"><a href="index.html">Reports</a><a href="public-million-current.json">Current release</a><a href="public-million-results.json">Study JSON</a><a href="https://github.com/bvolpato/ivygrep">GitHub</a></div></nav>
+    <section class="report-hero"><div class="report-eyebrow">Historical paired study · {study_version}</div><h1>Million-Chunk Performance</h1><p>Paired query latency, controlled indexing, full-system paths, and pinned public retrieval quality.</p></section>
     <section class="report-grid">
       <article class="report-card"><h2>Warm p95</h2><div class="metric-value">{paired["speedup"]:.2f}x</div><p>{paired["baseline_p95_ms"]:.2f} ms -> {paired["current_p95_ms"]:.2f} ms</p></article>
       <article class="report-card"><h2>Index throughput</h2><div class="metric-value">{indexing["chunks_per_second"]["ratio"]:.2f}x</div><p>{indexing["chunks_per_second"]["current"]:.0f} chunks/s</p></article>

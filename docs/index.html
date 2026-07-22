@@ -6,23 +6,40 @@
     <title>ivygrep - Task-aware repository context for coding agents</title>
     <meta name="description" content="Turn a coding task and current Git branch into one bounded implementation map with changed files, code relationships, tests, configuration, and docs.">
     <meta name="theme-color" content="#06070a">
+    <link rel="canonical" href="https://bvolpato.github.io/ivygrep/">
 
     <!-- Open Graph -->
     <meta property="og:title" content="ivygrep - Task-aware repository context for coding agents">
     <meta property="og:description" content="Turn a task and current branch into one bounded implementation map with evidence for every selection.">
     <meta property="og:type" content="website">
-    <meta property="og:url" content="https://bvolpato.github.io/ivygrep">
+    <meta property="og:url" content="https://bvolpato.github.io/ivygrep/">
+    <meta property="og:site_name" content="ivygrep">
     <meta property="og:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner-social.png">
     <meta property="og:image:width" content="1280">
     <meta property="og:image:height" content="698">
-    <meta property="og:image:alt" content="ivygrep semantic search returning matching code">
+    <meta property="og:image:alt" content="ivygrep search and bounded task-context workflow">
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:title" content="ivygrep - Task-aware repository context for coding agents">
     <meta name="twitter:description" content="Turn a task and current branch into one bounded implementation map with evidence for every selection.">
     <meta name="twitter:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner-social.png">
-    <meta name="twitter:image:alt" content="ivygrep semantic search returning matching code">
+    <meta name="twitter:image:alt" content="ivygrep search and bounded task-context workflow">
+
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "ivygrep",
+      "url": "https://bvolpato.github.io/ivygrep/",
+      "codeRepository": "https://github.com/bvolpato/ivygrep",
+      "description": "Local code search and bounded, branch-aware context packs for coding agents.",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "Linux, macOS, Windows",
+      "isAccessibleForFree": true,
+      "license": "https://opensource.org/license/mit"
+    }
+    </script>
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -324,20 +341,21 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
         <div class="glass-panel fade-in-scroll benchmark-panel mt-4">
             <div class="grid grid-3">
                 <div class="glass-card">
-                    <h3>15.07 ms</h3>
-                    <p>Warm query p95</p>
+                    <h3>13.73 ms</h3>
+                    <p>Warm CLI p95</p>
                 </div>
                 <div class="glass-card">
-                    <h3>109,006 chunks/s</h3>
+                    <h3>159,649 chunks/s</h3>
                     <p>Controlled indexing</p>
                 </div>
                 <div class="glass-card">
-                    <h3>0.46 GiB</h3>
+                    <h3>0.42 GiB</h3>
                     <p>Final index size</p>
                 </div>
             </div>
-            <p class="benchmark-note">These are system measurements, not agent outcomes. Hardware, repository shape, model, index state, and load affect absolute results.</p>
+            <p class="benchmark-note">Median of three sequential v1.2.6 trials. These are system measurements, not agent outcomes. Hardware, repository shape, model, index state, and load affect absolute results.</p>
             <p class="benchmark-links" aria-label="Benchmark links">
+                <a href="benchmarks/public-million-current.json">Current-release evidence</a>
                 <a href="benchmarks/public-million.html">Public million-chunk benchmark</a>
                 <a href="benchmarks/evidence-dashboard.html">Benchmark dashboard</a>
             </p>
@@ -613,41 +631,20 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
         </div>
 
         <div class="glass-panel fade-in-scroll mt-4 quickstart-panel">
-            <h3 class="text-center" style="margin-bottom: 1.5rem;">Quick start</h3>
+            <h3 class="text-center" style="margin-bottom: 1.5rem;">Search once. Build context once.</h3>
             <div class="quickstart-grid">
                 <div class="quickstart-step">
                     <span class="quickstart-number">1</span>
                     <div>
-                        <h4>Index your project</h4>
-                        <code class="quickstart-code">ig --add .</code>
+                        <h4>Find code by intent</h4>
+                        <code class="quickstart-code">ig "where is refresh token rotated?"</code>
                     </div>
                 </div>
                 <div class="quickstart-step">
                     <span class="quickstart-number">2</span>
                     <div>
-                        <h4>Search with natural language</h4>
-                        <code class="quickstart-code">ig "where is authentication handled?"</code>
-                    </div>
-                </div>
-                <div class="quickstart-step">
-                    <span class="quickstart-number">3</span>
-                    <div>
-                        <h4>Find an exact identifier</h4>
-                        <code class="quickstart-code">ig --literal "handleAuth"</code>
-                    </div>
-                </div>
-                <div class="quickstart-step">
-                    <span class="quickstart-number">4</span>
-                    <div>
-                        <h4>Browse in a local web UI</h4>
-                        <code class="quickstart-code">ig --web "auth flow" .</code>
-                    </div>
-                </div>
-                <div class="quickstart-step">
-                    <span class="quickstart-number">5</span>
-                    <div>
-                        <h4>Configure an MCP client</h4>
-                        <code class="quickstart-code">ig agent install claude</code>
+                        <h4>Build bounded task context</h4>
+                        <code class="quickstart-code">ig context "fix refresh-token races" --since main --budget 8000</code>
                     </div>
                 </div>
             </div>

@@ -534,7 +534,10 @@ impl DaemonState {
         query: &str,
         force_neural: bool,
     ) -> bool {
-        workspaces.len() == 1
+        // Automatic neural retrieval is decided after lexical scoring. Eager
+        // embedding would waste work for queries that clear the confidence gate.
+        force_neural
+            && workspaces.len() == 1
             && query_uses_neural(query, force_neural)
             && model.model_identity().is_some_and(|active_identity| {
                 self.cached_neural_identity(&workspaces[0]).as_ref() == Some(active_identity)
@@ -2751,11 +2754,17 @@ mod tests {
         crate::indexer::enhance_workspace_neural(&workspace, &TestNeuralModel).unwrap();
 
         assert!(state.cached_neural_identity(&workspace).is_some());
-        assert!(state.can_precompute_neural_query(
+        assert!(!state.can_precompute_neural_query(
             std::slice::from_ref(&workspace),
             &TestNeuralModel,
             "cached neural search",
             false,
+        ));
+        assert!(state.can_precompute_neural_query(
+            std::slice::from_ref(&workspace),
+            &TestNeuralModel,
+            "cached neural search",
+            true,
         ));
         assert_eq!(state.neural_statuses.lock().len(), 1);
 
@@ -2768,7 +2777,7 @@ mod tests {
             std::slice::from_ref(&workspace),
             &TestNeuralModel,
             "cached neural search",
-            false,
+            true,
         ));
     }
 

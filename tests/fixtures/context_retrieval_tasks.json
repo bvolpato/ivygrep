@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "description": "Frozen implementation tasks evaluated against clean repository state immediately before each change.",
+  "tasks": [
+    {
+      "id": "index-memory-neural-work",
+      "task": "reduce indexing memory and defer neural work",
+      "base_commit": "f0e6f9a48dce2f726a913a238ef9a6030ca89776",
+      "source_commit": "4bf16f00b8fe1d39898fde56be00e8aabfda50a5",
+      "expected_paths": ["src/indexer.rs", "src/daemon.rs", "src/workspace.rs"]
+    },
+    {
+      "id": "neural-model-loads",
+      "task": "avoid unnecessary neural model loads",
+      "base_commit": "5fb0f564bc5860102465dc5ba3c5649048974a35",
+      "source_commit": "ff0f996323700a3d352ae798ea832254da6af453",
+      "expected_paths": ["src/daemon.rs"]
+    },
+    {
+      "id": "filtered-search-indexing",
+      "task": "speed up filtered search and incremental indexing",
+      "base_commit": "1b7cd38876e6922f23cbfaac178ff4c4739a4377",
+      "source_commit": "bbf04075a6aa00ddb8bea75cf2221378f41412b9",
+      "expected_paths": ["src/indexer.rs", "src/search.rs", "tests/incremental_crud.rs"]
+    },
+    {
+      "id": "filtered-search-merkle",
+      "task": "speed up indexing and filtered search",
+      "base_commit": "a0c9c19bb09299d078268550063994e80c814327",
+      "source_commit": "1b7cd38876e6922f23cbfaac178ff4c4739a4377",
+      "expected_paths": ["src/indexer.rs", "src/merkle.rs", "src/search.rs"]
+    },
+    {
+      "id": "parallel-general-search",
+      "task": "parallelize general search",
+      "base_commit": "977418b6910df27bda1f481868989baa62cf753a",
+      "source_commit": "5a69f221894e9dbf95d324ece4ea56907aae6c2b",
+      "expected_paths": ["src/daemon.rs", "src/search.rs"]
+    },
+    {
+      "id": "derivational-stems",
+      "task": "rank derivational file stems",
+      "base_commit": "1e7fd975a71fbd4e83a32ac8a41504f29ad0de5d",
+      "source_commit": "a0ebcdaab365f3b2bde2a2efef0905866cd7415c",
+      "expected_paths": ["src/search.rs"]
+    },
+    {
+      "id": "natural-language-relevance",
+      "task": "improve natural language relevance",
+      "base_commit": "35a945500f0e51b11b3ed3e9c8fd0d3c33d6fcd4",
+      "source_commit": "e5e9741ffa35ec939271b39858d10f6d0eee800b",
+      "expected_paths": ["src/chunking.rs", "src/indexer.rs", "src/query_aliases.rs", "src/search.rs"]
+    },
+    {
+      "id": "incremental-cleanup",
+      "task": "improve incremental reindex cleanup",
+      "base_commit": "a2dc528ced110f617a1fe56fc14a3351d475b0af",
+      "source_commit": "9914ee3b94b12b5921f0f11df806ce700c21bd06",
+      "expected_paths": ["src/indexer.rs", "src/merkle.rs", "src/symbols.rs"]
+    },
+    {
+      "id": "index-status-scan",
+      "task": "avoid full status scan before indexing",
+      "base_commit": "0e4eeacb87f4e31e10a1d60e29d7f1b920489fbf",
+      "source_commit": "a2dc528ced110f617a1fe56fc14a3351d475b0af",
+      "expected_paths": ["src/cli.rs", "src/workspace.rs"]
+    },
+    {
+      "id": "web-search-recovery",
+      "task": "fix web search recovery",
+      "base_commit": "eea9ecb160fb2bcb72138939fa8bee678112acb4",
+      "source_commit": "1310e47aa739675b42776d9a125ea0c903eba9e2",
+      "expected_paths": ["src/daemon.rs"]
+    },
+    {
+      "id": "web-result-exploration",
+      "task": "improve web result exploration",
+      "base_commit": "d4d566a2272e2b3adfab0292e88c1ae585cb2f91",
+      "source_commit": "eea9ecb160fb2bcb72138939fa8bee678112acb4",
+      "expected_paths": ["src/web.rs", "tests/web_server.rs"]
+    },
+    {
+      "id": "exact-neural-route",
+      "task": "skip neural vector loads for exact routes",
+      "base_commit": "bdd67a98e795beedc17a8471bbbb3bb9e03d1c7f",
+      "source_commit": "2b0920c4d1e9931275fd9b1ae38aba4b52007cf4",
+      "expected_paths": ["src/search.rs"]
+    }
+  ]
+}
