@@ -401,12 +401,12 @@ fn metadata_file_hash(metadata: &fs::Metadata) -> String {
 }
 
 fn root_hash(files: &BTreeMap<String, String>) -> String {
-    let mut data = Vec::with_capacity(files.len() * 128);
+    let mut hasher = xxhash_rust::xxh3::Xxh3::new();
     for (path, hash) in files {
-        data.extend_from_slice(path.as_bytes());
-        data.extend_from_slice(hash.as_bytes());
+        hasher.update(path.as_bytes());
+        hasher.update(hash.as_bytes());
     }
-    hex::encode(xxhash_rust::xxh3::xxh3_128(&data).to_le_bytes())
+    hex::encode(hasher.digest128().to_le_bytes())
 }
 
 #[cfg(test)]
@@ -416,6 +416,27 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn streaming_root_hash_matches_contiguous_hash() {
+        let files = BTreeMap::from([
+            ("README.md".to_string(), "0123456789abcdef".to_string()),
+            ("src/lib.rs".to_string(), "fedcba9876543210".to_string()),
+            (
+                "unicode/ivy-\u{1f33f}.rs".to_string(),
+                "00ff00ff".to_string(),
+            ),
+        ]);
+        let contiguous: Vec<u8> = files
+            .iter()
+            .flat_map(|(path, hash)| path.bytes().chain(hash.bytes()))
+            .collect();
+
+        assert_eq!(
+            root_hash(&files),
+            hex::encode(xxhash_rust::xxh3::xxh3_128(&contiguous).to_le_bytes())
+        );
+    }
 
     #[test]
     fn load_corrupt_snapshot_falls_back_to_empty() {

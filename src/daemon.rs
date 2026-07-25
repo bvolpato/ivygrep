@@ -33,7 +33,8 @@ use crate::search::{
 };
 use crate::workspace::{Workspace, WorkspaceIndexState, WorkspaceScope, list_workspaces};
 
-const WATCH_QUIET_PERIOD: Duration = Duration::from_secs(2);
+const WATCH_SINGLE_EVENT_QUIET_PERIOD: Duration = Duration::from_millis(250);
+const WATCH_BURST_QUIET_PERIOD: Duration = Duration::from_millis(750);
 const WATCH_MAX_DEBOUNCE: Duration = Duration::from_secs(30);
 const MAX_DAEMON_LOG_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_DAEMON_REQUEST_BYTES: usize = 1024 * 1024;
@@ -336,9 +337,10 @@ impl QueryResultCache {
         }
     }
 
-    fn clear(&mut self) {
-        self.results.clear();
-        self.order.clear();
+    fn remove_workspace(&mut self, workspace_id: &str) {
+        self.results
+            .retain(|key, _| !key.workspace_ids.iter().any(|id| id == workspace_id));
+        self.order.retain(|key| self.results.contains_key(key));
     }
 }
 
@@ -746,7 +748,7 @@ impl DaemonState {
         self.ready_workspaces
             .lock()
             .retain(|key, _| key.workspace_id != workspace.id);
-        self.query_results.lock().clear();
+        self.query_results.lock().remove_workspace(&workspace.id);
     }
 
     fn cached_query_results(&self, key: &QueryCacheKey) -> Option<Vec<crate::protocol::SearchHit>> {
@@ -1155,7 +1157,9 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
 
             match index_result {
                 Ok(summary) => {
-                    state.clear_workspace_contexts(&workspace);
+                    if summary.indexed_files > 0 || summary.deleted_files > 0 {
+                        state.clear_workspace_contexts(&workspace);
+                    }
                     if watch {
                         if let Err(err) = register_watcher(&state, &path) {
                             return DaemonResponse::Error {
@@ -1921,7 +1925,7 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>, job_nonce:
                 let result = tokio::task::spawn_blocking(move || {
                     let _permit = permit;
                     let hash_model = cached_hash_model();
-                    let _ = if changed_paths.is_empty() {
+                    let summary = if changed_paths.is_empty() {
                         index_workspace_for_watcher(&workspace, hash_model.as_ref())?
                     } else {
                         index_workspace_paths_for_watcher(
@@ -1930,14 +1934,18 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>, job_nonce:
                             &changed_paths,
                         )?
                     };
-                    Result::<(), anyhow::Error>::Ok(())
+                    Result::<bool, anyhow::Error>::Ok(
+                        summary.indexed_files > 0 || summary.deleted_files > 0,
+                    )
                 })
                 .await
                 .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
 
                 match result {
-                    Ok(()) => {
-                        state.clear_workspace_contexts(&control.workspace);
+                    Ok(changed) => {
+                        if changed {
+                            state.clear_workspace_contexts(&control.workspace);
+                        }
                         if crate::config::background_enhancement_enabled()
                             && control.workspace.needs_search_enhancement(false)
                         {
@@ -2015,11 +2023,20 @@ async fn wait_for_watch_quiet(control: &WatchControl) {
             last_changed = now;
         }
 
-        if now.duration_since(last_changed) >= WATCH_QUIET_PERIOD
+        let quiet_period = watch_quiet_period(current);
+        if now.duration_since(last_changed) >= quiet_period
             || now.duration_since(started) >= WATCH_MAX_DEBOUNCE
         {
             break;
         }
+    }
+}
+
+fn watch_quiet_period(pending_events: u64) -> Duration {
+    if pending_events <= 1 {
+        WATCH_SINGLE_EVENT_QUIET_PERIOD
+    } else {
+        WATCH_BURST_QUIET_PERIOD
     }
 }
 
@@ -2659,6 +2676,57 @@ mod tests {
 
         state.clear_workspace_contexts(&workspace);
         assert!(!state.workspace_is_ready(&workspace, false, &signature));
+    }
+
+    #[test]
+    #[serial]
+    fn clearing_workspace_contexts_preserves_other_query_results() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let first_repo = tempdir().unwrap();
+        let second_repo = tempdir().unwrap();
+        let first = Workspace::resolve(first_repo.path()).unwrap();
+        let second = Workspace::resolve(second_repo.path()).unwrap();
+        let state = test_state();
+        let options = SearchOptions::default();
+        let first_key = query_cache_key(
+            std::slice::from_ref(&first),
+            Vec::new(),
+            "first",
+            &options,
+            256,
+            false,
+            false,
+        );
+        let second_key = query_cache_key(
+            std::slice::from_ref(&second),
+            Vec::new(),
+            "second",
+            &options,
+            256,
+            false,
+            false,
+        );
+        let combined_key = query_cache_key(
+            &[first.clone(), second],
+            Vec::new(),
+            "both",
+            &options,
+            256,
+            false,
+            true,
+        );
+        state.store_query_results(first_key.clone(), &[]);
+        state.store_query_results(second_key.clone(), &[]);
+        state.store_query_results(combined_key.clone(), &[]);
+
+        state.clear_workspace_contexts(&first);
+
+        let cache = state.query_results.lock();
+        assert!(!cache.results.contains_key(&first_key));
+        assert!(!cache.results.contains_key(&combined_key));
+        assert!(cache.results.contains_key(&second_key));
+        assert_eq!(cache.order, VecDeque::from([second_key]));
     }
 
     fn write_broken_completed_index_metadata(workspace: &Workspace, skip_gitignore: bool) {
@@ -3472,6 +3540,22 @@ mod tests {
         assert!(first_count > 0);
         assert_eq!(state.query_results.lock().results.len(), 1);
 
+        let indexed = handle_request(
+            state.clone(),
+            DaemonRequest::Index {
+                path: workspace.root.clone(),
+                watch: false,
+                skip_gitignore: false,
+            },
+        )
+        .await;
+        assert!(matches!(indexed, DaemonResponse::Ack { .. }));
+        assert_eq!(
+            state.query_results.lock().results.len(),
+            1,
+            "no-op indexing should preserve valid query results"
+        );
+
         state.search_contexts.lock().clear();
         let mut equivalent_request = request;
         let DaemonRequest::Search { query, .. } = &mut equivalent_request else {
@@ -3753,6 +3837,13 @@ mod tests {
         assert!(filter.path_should_reindex(&repo.path().join("target/debug/build.o")));
         assert!(filter.path_should_reindex(&repo.path().join("secret.txt")));
         assert!(!filter.path_should_reindex(&repo.path().join(".git/index")));
+    }
+
+    #[test]
+    fn watcher_debounce_adapts_to_single_events_and_bursts() {
+        assert_eq!(watch_quiet_period(1), WATCH_SINGLE_EVENT_QUIET_PERIOD);
+        assert_eq!(watch_quiet_period(2), WATCH_BURST_QUIET_PERIOD);
+        assert_eq!(watch_quiet_period(1_000), WATCH_BURST_QUIET_PERIOD);
     }
 
     #[test]
