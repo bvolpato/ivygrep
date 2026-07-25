@@ -2153,6 +2153,74 @@ pub(crate) fn expand_context_graph(
     Ok(expansions)
 }
 
+pub(crate) fn expand_context_tests(
+    workspace: &Workspace,
+    seed_paths: &[PathBuf],
+    options: &SearchOptions,
+) -> Result<Vec<GraphExpansion>> {
+    if seed_paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let seeds = seed_paths
+        .iter()
+        .map(|path| index_path_string(path))
+        .collect::<BTreeSet<_>>();
+    let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
+    let expected_language = options.type_filter.as_deref().and_then(resolve_type_alias);
+    let mut related = BTreeMap::<PathBuf, GraphExpansion>::new();
+    for edge in load_persisted_edges(workspace, &seeds)? {
+        let Some(expansion) = context_test_expansion(edge, &seeds) else {
+            continue;
+        };
+        let test_path = &expansion.file_path;
+        if !workspace.root.join(test_path).is_file()
+            || options
+                .scope_filter
+                .as_ref()
+                .is_some_and(|scope| !scope.matches(test_path))
+            || !path_matcher.matches(test_path)
+            || expected_language
+                .is_some_and(|expected| language_for_path(test_path) != Some(expected))
+        {
+            continue;
+        }
+        related
+            .entry(test_path.clone())
+            .and_modify(|expansion| expansion.score += 1.0)
+            .or_insert(expansion);
+    }
+    let mut expansions = related.into_values().collect::<Vec<_>>();
+    expansions.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| left.file_path.cmp(&right.file_path))
+    });
+    expansions.truncate(24);
+    Ok(expansions)
+}
+
+fn context_test_expansion(edge: RankedEdge, seeds: &BTreeSet<String>) -> Option<GraphExpansion> {
+    let source = index_path_string(&edge.source_path);
+    let target = index_path_string(&edge.target_path);
+    let (test_path, seed_path) =
+        if seeds.contains(&source) && path_looks_like_test(&edge.target_path) {
+            (edge.target_path, edge.source_path)
+        } else if seeds.contains(&target) && path_looks_like_test(&edge.source_path) {
+            (edge.source_path, edge.target_path)
+        } else {
+            return None;
+        };
+    Some(GraphExpansion {
+        file_path: test_path,
+        seed_path,
+        kind: FileEdgeKind::Test,
+        outgoing: true,
+        score: 1.0,
+        cochange_count: 0,
+    })
+}
+
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
 struct RankedEdge {
     source_path: PathBuf,
@@ -3989,6 +4057,38 @@ mod tests {
             expansion(FileEdgeKind::Documentation, false).reason(),
             "neighbor documents seed"
         );
+    }
+
+    #[test]
+    fn context_test_expansion_normalizes_dependency_first_duplicates() {
+        let seeds = BTreeSet::from(["src/auth.rs".to_string()]);
+        let edges = [
+            RankedEdge {
+                source_path: PathBuf::from("tests/auth.rs"),
+                target_path: PathBuf::from("src/auth.rs"),
+                kind: FileEdgeKind::Dependency,
+                cochange_count: 0,
+            },
+            RankedEdge {
+                source_path: PathBuf::from("src/auth.rs"),
+                target_path: PathBuf::from("tests/auth.rs"),
+                kind: FileEdgeKind::Test,
+                cochange_count: 0,
+            },
+        ];
+        let mut related = BTreeMap::<PathBuf, GraphExpansion>::new();
+        for edge in edges {
+            let expansion = context_test_expansion(edge, &seeds).unwrap();
+            related
+                .entry(expansion.file_path.clone())
+                .and_modify(|existing| existing.score += 1.0)
+                .or_insert(expansion);
+        }
+
+        let expansion = related.get(Path::new("tests/auth.rs")).unwrap();
+        assert!(expansion.outgoing);
+        assert_eq!(expansion.score, 2.0);
+        assert_eq!(expansion.reason(), "tests/auth.rs tests src/auth.rs");
     }
 
     #[test]

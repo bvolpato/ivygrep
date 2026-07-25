@@ -5,11 +5,16 @@ All notable changes to ivygrep are documented in this file.
 ## [Unreleased]
 
 ### Performance
+- Incremental indexing now maintains exact distinct-vector counts from up to 512 changed keys, falls back to a full count for larger transactions, streams Merkle root hashing without a corpus-sized buffer, and fetches only missing text blobs when neural enhancement is at least 75% complete. A one-million-entry Merkle A/B fell from 45.01 ms and 128 MB temporary memory to 14.85 ms and constant extra memory; a 90%-complete 200,000-row neural resume improved 33.6%.
+- Daemon query caches now invalidate only affected workspaces, survive no-op indexing, and use a 250 ms single-event or 750 ms burst watcher debounce. Measured single-event watcher latency fell from 2.009 s to 251.4 ms.
+- Context packs retrieve tests through direct graph ownership and bounded anchor queries, then allow 14 items after required roles are covered. Frozen-task recall rose from `.75000` to `.81944`, test recall from `.000` to `1.000`, and a preliminary three-task real-agent screen recovered all eight expected files with substantially less agent input than native discovery.
+- Context token estimates are calibrated against current `o200k_base` and `cl100k_base` tokenizers. Thirty packs moved median estimate/actual ratios from about `1.82` to `1.09` with no underestimates.
 - Context packs use 34.1% fewer tokens on the frozen 12-task benchmark with unchanged `.7500` recall. A 400-token snippet cap and role-aware 12-item target preserve required relationship roles.
 - Automatic neural retrieval now follows lexical confidence and retains complementary hash candidates. On the 1,000-query public-core benchmark, neural executions fell 52.4% while nDCG@10 rose 2.10%, MRR@10 rose 3.21%, and recall@20 rose from `.469` to `.472`.
 - Repeated clean Git indexing reuses an exact repository-state marker. A 100,000-file no-op improved from 616 ms to 494 ms and reduced peak RSS by about 56%, with ignore, index, sparse-checkout, and worktree changes forcing full reconciliation.
 
 ### Testing
+- Context relevance CI now gates test-file recall, and curated fixtures can label relevant unchanged paths against pinned base trees. Independent reports record retained and rejected context, indexing, neural, readiness, and agent-outcome experiments.
 - Context relevance runs against frozen tasks in clean pre-change worktrees and gates recall, primary recall, zero-recall rate, relationship-role coverage, and recall per 1,000 tokens.
 - Current-release million-chunk evidence publishes three complete v1.2.6 trials and checks package version plus every reported median.
 

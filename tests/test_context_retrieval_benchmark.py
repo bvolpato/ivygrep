@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -77,6 +78,29 @@ class ContextRetrievalBenchmarkTests(unittest.TestCase):
 
         self.assertFalse(destination.exists())
 
+    def test_curated_tasks_allow_relevant_unchanged_paths(self) -> None:
+        fixture = Path(self.temporary.name) / "curated.json"
+        fixture.write_text(
+            json.dumps(
+                {
+                    "tasks": [
+                        {
+                            "id": "curated-task",
+                            "task": "find old source behavior",
+                            "base_commit": self.base_commit,
+                            "expected_paths": ["src/old.rs"],
+                            "label_source": "curated",
+                        }
+                    ]
+                }
+            )
+        )
+
+        tasks = benchmark.load_tasks(self.repo, fixture)
+
+        self.assertEqual(tasks[0]["label_source"], "curated")
+        self.assertNotIn("source_commit", tasks[0])
+
     def test_metrics_report_role_recall_without_duplicate_file_credit(self) -> None:
         metrics = benchmark.retrieval_metrics(
             ["src/search.rs", "src/search.rs", "tests/search.rs"],
@@ -99,6 +123,7 @@ class ContextRetrievalBenchmarkTests(unittest.TestCase):
         arguments = SimpleNamespace(
             min_context_recall=0.76,
             min_context_primary_recall=0.75,
+            min_context_test_recall=None,
             max_context_zero_recall_rate=0.17,
             min_context_covered_roles=7.0,
             min_context_recall_per_1k_tokens=0.11,
@@ -119,12 +144,34 @@ class ContextRetrievalBenchmarkTests(unittest.TestCase):
         arguments = SimpleNamespace(
             min_context_recall=0.70,
             min_context_primary_recall=0.75,
+            min_context_test_recall=None,
             max_context_zero_recall_rate=0.17,
             min_context_covered_roles=7.0,
             min_context_recall_per_1k_tokens=0.11,
         )
 
         with self.assertRaisesRegex(SystemExit, "mean_covered_roles=6.900000"):
+            benchmark.check_context_gates([result], arguments)
+
+    def test_context_gates_reject_test_recall_loss(self) -> None:
+        result = {
+            "mode": "context",
+            "mean_recall": 0.82,
+            "zero_recall_rate": 0.08,
+            "mean_recall_per_1k_tokens": 0.17,
+            "mean_covered_roles": 7.2,
+            "mean_role_recall": {"primary": 0.82, "test": 0.5},
+        }
+        arguments = SimpleNamespace(
+            min_context_recall=0.80,
+            min_context_primary_recall=0.80,
+            min_context_test_recall=1.0,
+            max_context_zero_recall_rate=0.17,
+            min_context_covered_roles=7.0,
+            min_context_recall_per_1k_tokens=0.16,
+        )
+
+        with self.assertRaisesRegex(SystemExit, "mean_role_recall.test=0.500000"):
             benchmark.check_context_gates([result], arguments)
 
 

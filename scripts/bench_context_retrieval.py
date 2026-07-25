@@ -127,6 +127,7 @@ def historical_tasks(repo: Path, limit: int) -> list[dict[str, Any]]:
                 "base_commit": base_commit,
                 "source_commit": commit,
                 "expected_paths": expected,
+                "label_source": "changed_paths",
             }
         )
         if len(tasks) == limit:
@@ -142,7 +143,7 @@ def load_tasks(repo: Path, path: Path) -> list[dict[str, Any]]:
         raise ValueError("task fixture contains no tasks")
     for task in tasks:
         missing = sorted(
-            {"id", "task", "base_commit", "source_commit", "expected_paths"} - task.keys()
+            {"id", "task", "base_commit", "expected_paths"} - task.keys()
         )
         if missing:
             raise ValueError(f"task is missing required fields {missing}: {task}")
@@ -151,13 +152,10 @@ def load_tasks(repo: Path, path: Path) -> list[dict[str, Any]]:
         base_commit = git(
             repo, "rev-parse", "--verify", f"{task['base_commit']}^{{commit}}"
         ).strip()
-        source_commit = git(
-            repo, "rev-parse", "--verify", f"{task['source_commit']}^{{commit}}"
-        ).strip()
-        source_parent = git(repo, "rev-parse", f"{source_commit}^").strip()
-        if source_parent != base_commit:
+        label_source = task.get("label_source", "changed_paths")
+        if label_source not in {"changed_paths", "curated"}:
             raise ValueError(
-                f"task {task['id']} base {task['base_commit']} is not source parent {source_parent}"
+                f"task {task['id']} has unsupported label_source {label_source!r}"
             )
         unavailable = [
             expected
@@ -168,14 +166,28 @@ def load_tasks(repo: Path, path: Path) -> list[dict[str, Any]]:
             raise ValueError(
                 f"task {task['id']} paths do not exist at {task['base_commit']}: {unavailable}"
             )
-        changed_paths = set(
-            git(repo, "diff", "--name-only", task["base_commit"], source_commit).splitlines()
-        )
-        unchanged = [path for path in task["expected_paths"] if path not in changed_paths]
-        if unchanged:
-            raise ValueError(
-                f"task {task['id']} expected paths were not changed by {source_commit}: {unchanged}"
+        if label_source == "changed_paths":
+            if "source_commit" not in task:
+                raise ValueError(
+                    f"task {task['id']} uses changed_paths labels without source_commit"
+                )
+            source_commit = git(
+                repo, "rev-parse", "--verify", f"{task['source_commit']}^{{commit}}"
+            ).strip()
+            source_parent = git(repo, "rev-parse", f"{source_commit}^").strip()
+            if source_parent != base_commit:
+                raise ValueError(
+                    f"task {task['id']} base {task['base_commit']} is not source parent {source_parent}"
+                )
+            changed_paths = set(
+                git(repo, "diff", "--name-only", task["base_commit"], source_commit).splitlines()
             )
+            unchanged = [path for path in task["expected_paths"] if path not in changed_paths]
+            if unchanged:
+                raise ValueError(
+                    f"task {task['id']} expected paths were not changed by {source_commit}: {unchanged}"
+                )
+        task["label_source"] = label_source
     return tasks
 
 
@@ -393,6 +405,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--modes", default="search,context")
     parser.add_argument("--min-context-recall", type=float)
     parser.add_argument("--min-context-primary-recall", type=float)
+    parser.add_argument("--min-context-test-recall", type=float)
     parser.add_argument("--max-context-zero-recall-rate", type=float)
     parser.add_argument("--min-context-covered-roles", type=float)
     parser.add_argument("--min-context-recall-per-1k-tokens", type=float)
@@ -416,19 +429,25 @@ def check_context_gates(results: list[dict[str, Any]], args: argparse.Namespace)
         ),
     }
     context = next((result for result in results if result["mode"] == "context"), None)
-    has_gate = args.min_context_primary_recall is not None or any(
+    role_gates = {
+        "primary": args.min_context_primary_recall,
+        "test": args.min_context_test_recall,
+    }
+    has_gate = any(expected is not None for expected in role_gates.values()) or any(
         expected is not None for expected, _ in gates.values()
     )
     if context is None and has_gate:
         raise ValueError("context gates require context mode")
     failures = []
     if context is not None:
-        if args.min_context_primary_recall is not None:
-            primary_recall = context["mean_role_recall"].get("primary", 0.0)
-            if primary_recall < args.min_context_primary_recall:
+        for role, expected in role_gates.items():
+            if expected is not None:
+                role_recall = context["mean_role_recall"].get(role, 0.0)
+                if role_recall >= expected:
+                    continue
                 failures.append(
-                    "mean_role_recall.primary="
-                    f"{primary_recall:.6f}, threshold={args.min_context_primary_recall:.6f}"
+                    f"mean_role_recall.{role}="
+                    f"{role_recall:.6f}, threshold={expected:.6f}"
                 )
         for metric, (expected, predicate) in gates.items():
             if expected is None:

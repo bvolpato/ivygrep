@@ -1661,7 +1661,13 @@ fn index_workspace_inner(
                 }
             }
             if let Some(stats) = &mut incremental_stats {
-                stats.record_insertion(&rel_path, indexed_chunks.len());
+                stats.record_insertion(
+                    &tx,
+                    &rel_path,
+                    indexed_chunks
+                        .iter()
+                        .map(|prepared| prepared.chunk.vector_key),
+                )?;
             }
 
             for included_path in indexed_file.included_paths {
@@ -3007,17 +3013,26 @@ pub fn enhance_workspace_neural(
     let mut batch: Vec<(u64, String)> = Vec::with_capacity(initial_batch_size);
     let mut batch_keys = HashSet::with_capacity(initial_batch_size);
 
-    let scan_sql = if vector_store_covers_all_keys(&sqlite, &vector_index, total_chunks)? {
-        "SELECT vector_key, text FROM chunks WHERE 0"
-    } else {
-        "SELECT vector_key, text FROM chunks"
-    };
-    let mut stmt = sqlite.prepare(scan_sql)?;
-    let rows = stmt.query_map([], |row| {
-        let key = row.get::<_, i64>(0)? as u64;
-        let raw: Vec<u8> = row.get(1)?;
-        Ok((key, raw))
-    })?;
+    // A nearly-complete resume should not pull every compressed text blob
+    // through SQLite only to discard it after a vector-store membership check.
+    // Discover missing keys from the covering index, then point-fetch text for
+    // those keys. Keep the sequential scan for fresh or incomplete stores,
+    // where indexed point lookups cost more than one table pass.
+    let sparse_missing_keys =
+        if total_chunks > 0 && existing.saturating_mul(4) >= total_chunks.saturating_mul(3) {
+            let mut missing = Vec::with_capacity(remaining);
+            let mut stmt = sqlite.prepare("SELECT DISTINCT vector_key FROM chunks")?;
+            let rows = stmt.query_map([], |row| Ok(row.get::<_, i64>(0)? as u64))?;
+            for row in rows {
+                let key = row?;
+                if !vector_index.contains(key) {
+                    missing.push(key);
+                }
+            }
+            Some(missing)
+        } else {
+            None
+        };
 
     let process_batch = |batch: &mut Vec<(u64, String)>,
                          count: &mut usize,
@@ -3055,39 +3070,58 @@ pub fn enhance_workspace_neural(
         Ok(())
     };
 
-    for row in rows {
-        let (key, raw) = row?;
-
-        // Skip without decompressing if already embedded
-        if vector_index.contains(key) || !batch_keys.insert(key) {
-            continue;
-        }
-
-        // Only decompress text for keys we actually need to embed
-        let text = decompress_text(raw);
-        batch.push((key, text));
-
-        if batch.len() >= current_batch_size {
-            while neural_model.respects_system_constraints()
-                && let Some(reason) = check_system_constraints()
-            {
-                let _ = std::fs::write(&paused_path, &reason);
-                std::thread::sleep(std::time::Duration::from_secs(10));
-            }
-            let _ = std::fs::remove_file(&paused_path);
-
-            let processed_len = batch.len();
-            process_batch(&mut batch, &mut newly_processed, &mut vector_index)?;
-            batch_keys.clear();
-            progress_count += processed_len;
-            let _ = std::fs::write(&progress_path, progress_count.to_string());
-            if last_batch_size_refresh.elapsed() >= NEURAL_BATCH_SIZE_REFRESH_INTERVAL {
-                current_batch_size = neural_enhance_batch_size(neural_model);
-                last_batch_size_refresh = Instant::now();
+    {
+        let mut process_row = |key: u64, raw: Vec<u8>| -> Result<()> {
+            if vector_index.contains(key) || !batch_keys.insert(key) {
+                return Ok(());
             }
 
-            if newly_processed.is_multiple_of(16_384) {
-                vector_index.save()?;
+            let text = decompress_text(raw);
+            batch.push((key, text));
+
+            if batch.len() >= current_batch_size {
+                while neural_model.respects_system_constraints()
+                    && let Some(reason) = check_system_constraints()
+                {
+                    let _ = std::fs::write(&paused_path, &reason);
+                    std::thread::sleep(std::time::Duration::from_secs(10));
+                }
+                let _ = std::fs::remove_file(&paused_path);
+
+                let processed_len = batch.len();
+                process_batch(&mut batch, &mut newly_processed, &mut vector_index)?;
+                batch_keys.clear();
+                progress_count += processed_len;
+                let _ = std::fs::write(&progress_path, progress_count.to_string());
+                if last_batch_size_refresh.elapsed() >= NEURAL_BATCH_SIZE_REFRESH_INTERVAL {
+                    current_batch_size = neural_enhance_batch_size(neural_model);
+                    last_batch_size_refresh = Instant::now();
+                }
+
+                if newly_processed.is_multiple_of(16_384) {
+                    vector_index.save()?;
+                }
+            }
+            Ok(())
+        };
+
+        if let Some(missing_keys) = sparse_missing_keys {
+            let mut stmt =
+                sqlite.prepare("SELECT text FROM chunks WHERE vector_key = ?1 LIMIT 1")?;
+            for key in missing_keys {
+                let raw = stmt.query_row(params![key as i64], |row| row.get::<_, Vec<u8>>(0))?;
+                process_row(key, raw)?;
+            }
+        } else {
+            let mut stmt = sqlite.prepare("SELECT vector_key, text FROM chunks")?;
+            let rows = stmt.query_map([], |row| {
+                let key = row.get::<_, i64>(0)? as u64;
+                let raw: Vec<u8> = row.get(1)?;
+                Ok((key, raw))
+            })?;
+            for row in rows {
+                let (key, raw) = row?;
+                process_row(key, raw)?;
             }
         }
     }
@@ -3231,11 +3265,16 @@ fn remove_file_chunks(
     Ok(keys)
 }
 
+const MAX_TRACKED_INCREMENTAL_VECTOR_KEYS: usize = 512;
+
 struct IncrementalStatsDelta {
     base_chunk_count: i64,
     base_file_count: i64,
+    base_vector_key_count: i64,
     chunk_delta: i64,
     initial_file_presence: HashMap<String, bool>,
+    initial_vector_key_presence: HashMap<u64, bool>,
+    vector_key_count_requires_full_scan: bool,
 }
 
 impl IncrementalStatsDelta {
@@ -3254,11 +3293,17 @@ impl IncrementalStatsDelta {
         let Some(base_file_count) = read("file_count")? else {
             return Ok(None);
         };
+        let Some(base_vector_key_count) = read("vector_key_count")? else {
+            return Ok(None);
+        };
         Ok(Some(Self {
             base_chunk_count,
             base_file_count,
+            base_vector_key_count,
             chunk_delta: 0,
             initial_file_presence: HashMap::new(),
+            initial_vector_key_presence: HashMap::new(),
+            vector_key_count_requires_full_scan: false,
         }))
     }
 
@@ -3267,13 +3312,52 @@ impl IncrementalStatsDelta {
             .entry(index_path_string(rel_path))
             .or_insert(!vector_keys.is_empty());
         self.chunk_delta -= vector_keys.len() as i64;
+        for key in vector_keys {
+            if self.vector_key_count_requires_full_scan
+                || self.initial_vector_key_presence.contains_key(key)
+            {
+                continue;
+            }
+            if self.initial_vector_key_presence.len() >= MAX_TRACKED_INCREMENTAL_VECTOR_KEYS {
+                self.initial_vector_key_presence.clear();
+                self.vector_key_count_requires_full_scan = true;
+                continue;
+            }
+            self.initial_vector_key_presence.insert(*key, true);
+        }
     }
 
-    fn record_insertion(&mut self, rel_path: &Path, chunk_count: usize) {
+    fn record_insertion(
+        &mut self,
+        conn: &Connection,
+        rel_path: &Path,
+        vector_keys: impl IntoIterator<Item = u64>,
+    ) -> Result<()> {
         self.initial_file_presence
             .entry(index_path_string(rel_path))
             .or_insert(false);
-        self.chunk_delta += chunk_count as i64;
+        let mut chunk_count = 0;
+        for key in vector_keys {
+            chunk_count += 1;
+            if self.vector_key_count_requires_full_scan
+                || self.initial_vector_key_presence.contains_key(&key)
+            {
+                continue;
+            }
+            if self.initial_vector_key_presence.len() >= MAX_TRACKED_INCREMENTAL_VECTOR_KEYS {
+                self.initial_vector_key_presence.clear();
+                self.vector_key_count_requires_full_scan = true;
+                continue;
+            }
+            let present = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM chunks WHERE vector_key = ?1)",
+                params![key as i64],
+                |row| row.get(0),
+            )?;
+            self.initial_vector_key_presence.insert(key, present);
+        }
+        self.chunk_delta += chunk_count;
+        Ok(())
     }
 
     fn chunk_and_file_counts(&self, conn: &Connection) -> Result<(i64, i64)> {
@@ -3295,6 +3379,7 @@ impl IncrementalStatsDelta {
 
     fn checkpoint(&mut self, conn: &Connection) -> Result<()> {
         let (chunk_count, file_count) = self.chunk_and_file_counts(conn)?;
+        let vector_key_count = self.vector_key_count(conn)?;
         conn.execute(
             "INSERT OR REPLACE INTO _stats (key, value) VALUES ('chunk_count', ?1)",
             params![chunk_count],
@@ -3303,23 +3388,45 @@ impl IncrementalStatsDelta {
             "INSERT OR REPLACE INTO _stats (key, value) VALUES ('file_count', ?1)",
             params![file_count],
         )?;
+        conn.execute(
+            "INSERT OR REPLACE INTO _stats (key, value) VALUES ('vector_key_count', ?1)",
+            params![vector_key_count],
+        )?;
         self.base_chunk_count = chunk_count;
         self.base_file_count = file_count;
+        self.base_vector_key_count = vector_key_count;
         self.chunk_delta = 0;
         self.initial_file_presence.clear();
+        self.initial_vector_key_presence.clear();
+        self.vector_key_count_requires_full_scan = false;
         Ok(())
+    }
+
+    fn vector_key_count(&self, conn: &Connection) -> Result<i64> {
+        if self.vector_key_count_requires_full_scan {
+            return conn
+                .query_row("SELECT COUNT(DISTINCT vector_key) FROM chunks", [], |row| {
+                    row.get(0)
+                })
+                .map_err(Into::into);
+        }
+        let mut vector_key_delta = 0;
+        for (key, initial) in &self.initial_vector_key_presence {
+            let present: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM chunks WHERE vector_key = ?1)",
+                params![*key as i64],
+                |row| row.get(0),
+            )?;
+            vector_key_delta += present as i64 - *initial as i64;
+        }
+        Ok(self.base_vector_key_count + vector_key_delta)
     }
 
     fn final_counts(self, conn: &Connection) -> Result<(i64, i64, i64)> {
         let (chunk_count, file_count) = self.chunk_and_file_counts(conn)?;
+        let vector_key_count = self.vector_key_count(conn)?;
 
-        Ok((
-            chunk_count,
-            file_count,
-            conn.query_row("SELECT COUNT(DISTINCT vector_key) FROM chunks", [], |row| {
-                row.get(0)
-            })?,
-        ))
+        Ok((chunk_count, file_count, vector_key_count))
     }
 }
 
@@ -4578,7 +4685,8 @@ mod tests {
             "CREATE TABLE chunks (file_path TEXT NOT NULL, vector_key INTEGER NOT NULL);
              CREATE TABLE _stats (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
              INSERT INTO chunks VALUES ('a.rs', 1), ('b.rs', 2);
-             INSERT INTO _stats VALUES ('chunk_count', 2), ('file_count', 2);",
+             INSERT INTO _stats VALUES ('chunk_count', 2), ('file_count', 2),
+                 ('vector_key_count', 2);",
         )
         .unwrap();
         let mut stats = IncrementalStatsDelta::load(&conn).unwrap().unwrap();
@@ -4586,9 +4694,11 @@ mod tests {
         conn.execute("DELETE FROM chunks WHERE file_path = 'a.rs'", [])
             .unwrap();
         stats.record_removal(Path::new("a.rs"), &[1]);
+        stats
+            .record_insertion(&conn, Path::new("c.rs"), [3, 4])
+            .unwrap();
         conn.execute("INSERT INTO chunks VALUES ('c.rs', 3), ('c.rs', 4)", [])
             .unwrap();
-        stats.record_insertion(Path::new("c.rs"), 2);
         stats.checkpoint(&conn).unwrap();
 
         assert_eq!(
@@ -4609,11 +4719,77 @@ mod tests {
             .unwrap(),
             2
         );
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM _stats WHERE key = 'vector_key_count'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            3
+        );
 
         conn.execute("DELETE FROM chunks WHERE file_path = 'b.rs'", [])
             .unwrap();
         stats.record_removal(Path::new("b.rs"), &[2]);
         assert_eq!(stats.final_counts(&conn).unwrap(), (2, 1, 2));
+    }
+
+    #[test]
+    fn incremental_vector_key_delta_handles_shared_keys() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chunks (file_path TEXT NOT NULL, vector_key INTEGER NOT NULL);
+             CREATE INDEX idx_chunks_vector_key ON chunks(vector_key);
+             CREATE TABLE _stats (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+             INSERT INTO chunks VALUES ('a.rs', 1), ('b.rs', 1);
+             INSERT INTO _stats VALUES ('chunk_count', 2), ('file_count', 2),
+                 ('vector_key_count', 1);",
+        )
+        .unwrap();
+        let mut stats = IncrementalStatsDelta::load(&conn).unwrap().unwrap();
+
+        conn.execute("DELETE FROM chunks WHERE file_path = 'a.rs'", [])
+            .unwrap();
+        stats.record_removal(Path::new("a.rs"), &[1]);
+        stats
+            .record_insertion(&conn, Path::new("c.rs"), [1, 2])
+            .unwrap();
+        conn.execute("INSERT INTO chunks VALUES ('c.rs', 1), ('c.rs', 2)", [])
+            .unwrap();
+
+        assert_eq!(stats.final_counts(&conn).unwrap(), (3, 2, 2));
+    }
+
+    #[test]
+    fn incremental_vector_key_delta_falls_back_for_large_changes() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chunks (file_path TEXT NOT NULL, vector_key INTEGER NOT NULL);
+             CREATE INDEX idx_chunks_vector_key ON chunks(vector_key);
+             CREATE TABLE _stats (key TEXT PRIMARY KEY, value INTEGER NOT NULL);
+             INSERT INTO chunks VALUES ('base.rs', 1);
+             INSERT INTO _stats VALUES ('chunk_count', 1), ('file_count', 1),
+                 ('vector_key_count', 1);",
+        )
+        .unwrap();
+        let mut stats = IncrementalStatsDelta::load(&conn).unwrap().unwrap();
+        let added_keys = 2..=(MAX_TRACKED_INCREMENTAL_VECTOR_KEYS as u64 + 2);
+        stats
+            .record_insertion(&conn, Path::new("bulk.rs"), added_keys.clone())
+            .unwrap();
+        assert!(stats.vector_key_count_requires_full_scan);
+
+        let mut insert = conn
+            .prepare("INSERT INTO chunks VALUES ('bulk.rs', ?1)")
+            .unwrap();
+        for key in added_keys {
+            insert.execute(params![key as i64]).unwrap();
+        }
+        drop(insert);
+
+        let expected = MAX_TRACKED_INCREMENTAL_VECTOR_KEYS as i64 + 2;
+        assert_eq!(stats.final_counts(&conn).unwrap(), (expected, 2, expected));
     }
 
     #[test]
