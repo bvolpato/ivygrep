@@ -1691,16 +1691,19 @@ pub fn estimate_tokens(text: &str) -> usize {
         Word,
         Space,
         Newline,
-        Other,
+        AsciiOther,
+        Unicode,
     }
-    let mut total = 0usize;
+    let mut calibrated = 0usize;
+    let mut conservative = 0usize;
     let mut class = None;
     let mut run = 0usize;
     let flush = |class: Option<Class>, run: usize| match class {
-        Some(Class::Word) => run.div_ceil(4),
-        Some(Class::Space) => usize::from(run > 0),
-        Some(Class::Newline | Class::Other) => run,
-        None => 0,
+        Some(Class::Word) => (run.div_ceil(4), 0),
+        Some(Class::Space) => (usize::from(run > 0), 0),
+        Some(Class::Newline | Class::AsciiOther) => (run, 0),
+        Some(Class::Unicode) => (0, run),
+        None => (0, 0),
     };
     for character in text.chars() {
         let next = if character == '\n' {
@@ -1709,20 +1712,31 @@ pub fn estimate_tokens(text: &str) -> usize {
             Class::Space
         } else if character.is_ascii_alphanumeric() || character == '_' {
             Class::Word
+        } else if character.is_ascii() {
+            Class::AsciiOther
         } else {
-            Class::Other
+            Class::Unicode
         };
         if class == Some(next) {
             run += 1;
         } else {
-            total += flush(class, run);
+            let (calibrated_run, conservative_run) = flush(class, run);
+            calibrated += calibrated_run;
+            conservative += conservative_run;
             class = Some(next);
             run = 1;
         }
     }
+    let (calibrated_run, conservative_run) = flush(class, run);
+    calibrated += calibrated_run;
+    conservative += conservative_run;
     // Thirty representative code packs measured 1.79x-1.87x above
-    // o200k_base and cl100k_base. Retain an 8%-12% safety margin.
-    (total + flush(class, run)).saturating_mul(3).div_ceil(5)
+    // o200k_base and cl100k_base. Calibrate measured ASCII/code classes while
+    // retaining one estimate per Unicode scalar outside that sample.
+    calibrated
+        .saturating_mul(3)
+        .div_ceil(5)
+        .saturating_add(conservative)
 }
 
 fn truncate_to_token_budget(text: &str, budget: usize, task: &str) -> (String, bool, usize) {
@@ -1976,6 +1990,12 @@ mod tests {
             estimate_tokens("fn x() {\n  x();\n}")
         );
         assert_eq!(truncate_to_token_budget("", 100, "task").0, "");
+    }
+
+    #[test]
+    fn token_estimate_keeps_unicode_scalars_conservative() {
+        assert_eq!(estimate_tokens(&"🙂".repeat(100)), 100);
+        assert_eq!(estimate_tokens(&"索引".repeat(50)), 100);
     }
 
     #[test]
