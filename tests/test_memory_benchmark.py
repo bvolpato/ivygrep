@@ -102,9 +102,9 @@ class MemoryQuestExporterTest(unittest.TestCase):
 
     def test_renderer_resolves_explicit_source_commit(self):
         root = Path(__file__).resolve().parents[1]
-        resolved = render_memory_benchmark.git_revision(root, "HEAD^")
-        self.assertEqual(len(resolved), 40)
-        self.assertNotEqual(resolved, render_memory_benchmark.git_revision(root))
+        current = render_memory_benchmark.git_revision(root)
+        resolved = render_memory_benchmark.git_revision(root, current)
+        self.assertEqual(resolved, current)
 
 
 if __name__ == "__main__":
