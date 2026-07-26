@@ -71,15 +71,15 @@ fn is_note_path(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {
-            matches!(
-                extension.to_ascii_lowercase().as_str(),
-                "md" | "mdx" | "txt" | "rst" | "adoc" | "org"
-            )
+            ["md", "mdx", "txt", "rst", "adoc", "org"]
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
         })
 }
 
 fn should_expand_memory_query(query: &str, hits: &[SearchHit], limit: Option<usize>) -> bool {
-    if limit == Some(usize::MAX)
+    if hits.first().is_none_or(|hit| !is_note_path(&hit.file_path))
+        || limit == Some(usize::MAX)
         || query.split_whitespace().count() < 5
         || !query_uses_neural(query, false)
     {
@@ -1309,22 +1309,6 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
         } => {
             let request_started = std::time::Instant::now();
             let state_clone = state.clone();
-            let expansion_query = query.clone();
-            let expansion_request =
-                (!disable_memory_expansion && !force_neural).then(|| DaemonRequest::Search {
-                    path: path.clone(),
-                    query: query.clone(),
-                    limit,
-                    context,
-                    type_filter: type_filter.clone(),
-                    include_globs: include_globs.clone(),
-                    exclude_globs: exclude_globs.clone(),
-                    scope_path: scope_path.clone(),
-                    scope_is_file,
-                    skip_gitignore,
-                    force_neural,
-                    disable_memory_expansion: true,
-                });
 
             let workspaces = if let Some(ref p) = path {
                 match state_clone.resolve_workspace(p) {
@@ -1401,7 +1385,9 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 let _permit = permit;
                 let model = match state_clone.get_model_for_search(force_neural) {
                     Ok(model) => model,
-                    Err(err) => return (Vec::new(), vec![err.to_string()]),
+                    Err(err) => {
+                        return (Vec::new(), vec![err.to_string()], query, options);
+                    }
                 };
                 tracing::trace!("daemon_search_model={:?}", task_started.elapsed());
                 let mut all_hits = Vec::new();
@@ -1471,7 +1457,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                             }
                         }
                     }
-                    return (cached_hits, all_errors);
+                    return (cached_hits, all_errors, query, options);
                 }
 
                 let mut neural_query_vector_job = if state_clone.can_precompute_neural_query(
@@ -1570,29 +1556,50 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     }
                 }
                 tracing::trace!("daemon_search_task_total={:?}", task_started.elapsed());
-                (all_hits, all_errors)
+                (all_hits, all_errors, query, options)
             })
-            .await
-            .unwrap_or_else(|join_err| {
-                warn!("search task panicked: {join_err:#}");
-                (
-                    Vec::new(),
-                    vec![format!("search task panicked: {join_err:#}")],
-                )
-            });
+            .await;
+            let result = match result {
+                Ok(result) => result,
+                Err(join_err) => {
+                    warn!("search task panicked: {join_err:#}");
+                    return DaemonResponse::Error {
+                        message: format!("search task panicked: {join_err:#}"),
+                    };
+                }
+            };
             tracing::trace!("daemon_search_total={:?}", request_started.elapsed());
 
+            let (mut hits, errors, expansion_query, expansion_options) = result;
             // If ALL workspaces failed (no hits and at least one error),
             // propagate as Error so the CLI can fall back to local search.
-            if result.0.is_empty() && !result.1.is_empty() {
+            if hits.is_empty() && !errors.is_empty() {
                 DaemonResponse::Error {
-                    message: format!("search failed: {}", result.1.join("; ")),
+                    message: format!("search failed: {}", errors.join("; ")),
                 }
             } else {
-                let mut hits = result.0;
-                if let Some(expansion_request) = expansion_request
+                if !disable_memory_expansion
+                    && !force_neural
                     && should_expand_memory_query(&expansion_query, &hits, limit)
                 {
+                    let scope_is_file = expansion_options
+                        .scope_filter
+                        .as_ref()
+                        .is_some_and(|scope| scope.is_file);
+                    let expansion_request = DaemonRequest::Search {
+                        path,
+                        query: String::new(),
+                        limit: expansion_options.limit,
+                        context: expansion_options.context,
+                        type_filter: expansion_options.type_filter,
+                        include_globs: expansion_options.include_globs,
+                        exclude_globs: expansion_options.exclude_globs,
+                        scope_path: expansion_options.scope_filter.map(|scope| scope.rel_path),
+                        scope_is_file,
+                        skip_gitignore: expansion_options.skip_gitignore,
+                        force_neural: expansion_options.force_neural,
+                        disable_memory_expansion: true,
+                    };
                     let variants = memory_query_variants(&expansion_query);
                     let requests = variants
                         .map(|variant| search_request_with_query(&expansion_request, variant));
@@ -2796,6 +2803,10 @@ mod tests {
         let mut mixed_hits = note_hits;
         mixed_hits[3] = test_hit("src/planner.rs", 7.0);
         mixed_hits[4] = test_hit("src/calendar.rs", 6.0);
+        assert!(!should_expand_memory_query(query, &mixed_hits, Some(20)));
+
+        mixed_hits[3] = test_hit("notes/3.md", 7.0);
+        mixed_hits.swap(0, 4);
         assert!(!should_expand_memory_query(query, &mixed_hits, Some(20)));
     }
 
