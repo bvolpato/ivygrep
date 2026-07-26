@@ -68,14 +68,10 @@
                 <span style="display:none;" class="logo-text">ivy<span class="highlight">grep</span></span>
             </a>
             <div class="nav-links">
-                <a href="#features">Features</a>
+                <a href="#features">Product</a>
                 <a href="#memory">Notes & Memory</a>
-                <a href="#context-packs">Context Packs</a>
                 <a href="#how-it-works">Architecture</a>
                 <a href="#performance">Evidence</a>
-                <a href="#languages">Languages</a>
-                <a href="#mcp">MCP</a>
-                <a href="#community">Contribute</a>
                 <a href="#install">Install</a>
                 <a href="https://github.com/bvolpato/ivygrep" class="btn btn-outline" target="_blank" rel="noopener">
                     <svg height="18" viewBox="0 0 16 16" width="18" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
@@ -94,7 +90,7 @@
         <div class="container hero-content">
             <div class="hero-badge slide-up">
                 <span class="badge-dot"></span>
-                v1.2.6
+                v1.2.7
             </div>
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" width="190" height="200" onerror="this.src='assets/logo.png'"/>
@@ -112,6 +108,7 @@
                     Source
                 </a>
                 <a href="#context-packs" class="btn btn-ghost">Context Packs</a>
+                <a href="#memory" class="btn btn-ghost">Notes & Memory</a>
             </div>
         </div>
     </header>
@@ -127,10 +124,10 @@
                     <span class="mockup-title">Terminal - ig</span>
                 </div>
                 <div class="mockup-body code-font">
-                    <div class="line"><span class="comment"># Search by intent, then gather task context.</span></div>
-                    <div class="line typing"><span class="prompt">$</span> ig "where is refresh token rotated?"</div>
-                    <div class="line output"><span class="path">src/auth/refresh.rs:118</span></div>
-                    <div class="line output">fn rotate_refresh_token(...) -&gt; Result&lt;Token&gt;</div>
+                    <div class="line"><span class="comment"># Retrieve a decision from preindexed notes.</span></div>
+                    <div class="line typing"><span class="prompt">$</span> ig "what did we decide about cache invalidation?" ~/notes</div>
+                    <div class="line output"><span class="path">notes/decisions/cache.md:42</span></div>
+                    <div class="line output">Invalidate on writes; keep reads cache-first.</div>
                     <div class="line"><span class="prompt">$</span> ig context "fix refresh-token races" --since main --budget 8000</div>
                     <div class="line output success">Context: 14 snippets, 7,642 tokens, 3 changed files</div>
                     <div class="line output"><span class="path">Coverage:</span> definitions, callers, dependents, tests</div>
@@ -710,7 +707,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
                     <a href="https://github.com/bvolpato/ivygrep/blob/main/CHANGELOG.md" class="footer-link">Changelog</a>
                 </div>
                 <div class="footer-copy">
-                    <p>Maintained by <a href="https://github.com/bvolpato" class="footer-link">Bruno Volpato</a> · MIT License · v1.2.6</p>
+                    <p>Maintained by <a href="https://github.com/bvolpato" class="footer-link">Bruno Volpato</a> · MIT License · v1.2.7</p>
                 </div>
             </div>
         </div>
@@ -751,7 +748,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
         const typingEl = document.querySelector('.typing');
         if (typingEl) {
             const prompt = '<span class="prompt">$</span> ';
-            const textToType = 'ig "where is refresh token rotated?"';
+            const textToType = typingEl.textContent.replace(/^\$\s*/, '').trim();
             typingEl.innerHTML = prompt;
             const outputs = document.querySelectorAll('.output');
             outputs.forEach(out => { out.style.transform = 'translateY(8px)'; });

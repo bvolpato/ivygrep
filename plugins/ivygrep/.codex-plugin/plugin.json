@@ -1,7 +1,7 @@
 {
   "name": "ivygrep",
-  "version": "1.2.6",
-  "description": "Local code search and relationship-aware task context for coding agents",
+  "version": "1.2.7",
+  "description": "Local semantic search for code, notes, and memories with task context for coding agents",
   "author": {
     "name": "Bruno Volpato",
     "url": "https://github.com/bvolpato"
@@ -9,20 +9,21 @@
   "homepage": "https://bvolpato.github.io/ivygrep/integrations/codex.html",
   "repository": "https://github.com/bvolpato/ivygrep",
   "license": "MIT",
-  "keywords": ["code-search", "context", "mcp", "local-first"],
+  "keywords": ["semantic-search", "code-search", "notes", "memory", "context", "mcp", "local-first"],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "ivygrep",
-    "shortDescription": "Focused local context for coding tasks",
-    "longDescription": "Search code by intent and give Codex one bounded task pack containing current changes, definitions, callers, dependents, tests, configuration, and documentation.",
+    "shortDescription": "Local semantic search for code, notes, and memory",
+    "longDescription": "Retrieve code, notes, and memories by meaning, or give Codex one bounded task pack containing current changes, definitions, callers, dependents, tests, configuration, and documentation.",
     "developerName": "Bruno Volpato",
     "category": "Development",
     "capabilities": ["Read"],
     "websiteURL": "https://bvolpato.github.io/ivygrep/integrations/codex.html",
     "defaultPrompt": [
       "Use ivygrep to gather context for this task.",
-      "Find the code related to this failure with ivygrep."
+      "Find the code related to this failure with ivygrep.",
+      "Use ivygrep to retrieve the notes and decisions relevant to this question."
     ],
     "brandColor": "#73E2A7"
   }

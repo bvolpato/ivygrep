@@ -1,8 +1,8 @@
 [package]
 name = "ivygrep"
-version = "1.2.6"
+version = "1.2.7"
 edition = "2024"
-description = "Local code search and relationship-aware context packs for coding agents"
+description = "Local semantic search for code, notes, and memories with context packs for coding agents"
 license = "MIT"
 homepage = "https://bvolpato.github.io/ivygrep"
 repository = "https://github.com/bvolpato/ivygrep"

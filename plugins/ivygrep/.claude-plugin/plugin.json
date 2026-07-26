@@ -1,7 +1,7 @@
 {
   "name": "ivygrep",
-  "version": "1.2.6",
-  "description": "Local code search and relationship-aware task context for coding agents",
+  "version": "1.2.7",
+  "description": "Local semantic search for code, notes, and memories with task context for coding agents",
   "author": {
     "name": "Bruno Volpato",
     "url": "https://github.com/bvolpato"
@@ -9,7 +9,7 @@
   "homepage": "https://bvolpato.github.io/ivygrep/integrations/claude-code.html",
   "repository": "https://github.com/bvolpato/ivygrep",
   "license": "MIT",
-  "keywords": ["code-search", "context", "mcp", "local-first"],
+  "keywords": ["semantic-search", "code-search", "notes", "memory", "context", "mcp", "local-first"],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json"
 }
