@@ -12,7 +12,7 @@ fn is_false(value: &bool) -> bool {
 /// Compile-time version tag so the CLI can detect stale daemon processes.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Wire protocol version for daemon request compatibility.
-pub const DAEMON_PROTOCOL_VERSION: u32 = 4;
+pub const DAEMON_PROTOCOL_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchHit {
@@ -67,6 +67,8 @@ pub enum DaemonRequest {
         skip_gitignore: bool,
         #[serde(default)]
         force_neural: bool,
+        #[serde(default)]
+        disable_memory_expansion: bool,
     },
     RegexSearch {
         path: Option<PathBuf>,

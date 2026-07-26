@@ -44,12 +44,18 @@ class AgentDocumentationTest(unittest.TestCase):
         self.assertIn("preserves existing", self.readme)
 
     def test_task_context_packs_are_prominent_and_consistent(self) -> None:
-        search_command = 'ig "where is refresh token rotated?"'
         context_command = (
             'ig context "fix refresh-token races" --since main --budget 8000'
         )
-        for document in [self.readme, self.site]:
-            with self.subTest(document=document[:20]):
+        documents = [
+            (self.readme, 'ig "where is refresh token rotated?"'),
+            (
+                self.site,
+                'ig "what did we decide about cache invalidation?" ~/notes',
+            ),
+        ]
+        for document, search_command in documents:
+            with self.subTest(search_command=search_command):
                 self.assertIn(search_command, document)
                 self.assertIn(context_command, document)
                 self.assertLess(
@@ -74,9 +80,16 @@ class AgentDocumentationTest(unittest.TestCase):
             "<!-- Social proof strip -->", 1
         )[0]
 
-        for section in [readme_quick_start, site_demo]:
-            with self.subTest(section=section[:20]):
-                self.assertEqual(section.count('ig "where is refresh token rotated?"'), 1)
+        sections = [
+            (readme_quick_start, 'ig "where is refresh token rotated?"'),
+            (
+                site_demo,
+                'ig "what did we decide about cache invalidation?" ~/notes',
+            ),
+        ]
+        for section, search_command in sections:
+            with self.subTest(search_command=search_command):
+                self.assertEqual(section.count(search_command), 1)
                 self.assertEqual(
                     section.count(
                         'ig context "fix refresh-token races" --since main --budget 8000'

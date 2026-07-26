@@ -32,6 +32,8 @@ use crate::vector_store::{
 };
 use crate::workspace::{Workspace, WorkspaceScope, index_path_string};
 
+pub(crate) const DEFAULT_SEARCH_LIMIT: usize = 50;
+
 #[derive(Debug, Clone)]
 pub struct RawIndexedChunk {
     pub chunk_id: String,
@@ -1711,7 +1713,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     }
 
     let t0 = std::time::Instant::now();
-    let output_limit = options.limit.unwrap_or(50);
+    let output_limit = options.limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
     let mut routing = QueryRouting::classify(query_text);
     if options.force_neural {
         routing.use_neural = true;

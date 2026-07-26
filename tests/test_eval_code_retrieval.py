@@ -19,14 +19,32 @@ class RetrievalMetricsTest(unittest.TestCase):
         bad = eval_code_retrieval.score_query(["missing", "related", "best"], judgments)
         self.assertGreater(good["ndcg_at_10"], bad["ndcg_at_10"])
         self.assertGreater(good["mrr_at_10"], bad["mrr_at_10"])
+        self.assertEqual(good["recall_at_5"], 1.0)
+        self.assertEqual(good["recall_at_10"], 1.0)
         self.assertEqual(good["recall_at_20"], 1.0)
+        self.assertEqual(good["exact_at_5"], 1.0)
+        self.assertEqual(good["exact_at_10"], 1.0)
+        self.assertEqual(good["exact_at_20"], 1.0)
 
     def test_missing_results_score_zero(self):
         score = eval_code_retrieval.score_query([], {"expected": 2})
         self.assertEqual(score["ndcg_at_10"], 0.0)
         self.assertEqual(score["mrr_at_10"], 0.0)
         self.assertEqual(score["precision_at_5"], 0.0)
+        self.assertEqual(score["recall_at_5"], 0.0)
+        self.assertEqual(score["recall_at_10"], 0.0)
         self.assertEqual(score["recall_at_20"], 0.0)
+        self.assertEqual(score["exact_at_5"], 0.0)
+        self.assertEqual(score["exact_at_10"], 0.0)
+        self.assertEqual(score["exact_at_20"], 0.0)
+
+    def test_exact_recall_requires_every_memory(self):
+        score = eval_code_retrieval.score_query(
+            ["needed-a", "noise", "needed-b"],
+            {"needed-a": 1, "needed-b": 1, "needed-c": 1},
+        )
+        self.assertEqual(score["recall_at_5"], 2 / 3)
+        self.assertEqual(score["exact_at_5"], 0.0)
 
     def test_qrels_parser_accepts_beir_tsv(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -72,6 +90,128 @@ class RetrievalMetricsTest(unittest.TestCase):
         )
         self.assertEqual(command[-2], "--")
         self.assertEqual(command[-1], "-----Input-----\nexample")
+
+    def test_memory_query_expansion_keeps_original_and_adds_fixed_facets(self):
+        variants = eval_code_retrieval.expanded_query_texts(
+            "Plan a weekend away.",
+            "memory-facets",
+        )
+        self.assertEqual(variants[0], "Plan a weekend away.")
+        self.assertEqual(len(variants), 4)
+        self.assertTrue(any("preferences" in variant for variant in variants[1:]))
+        self.assertEqual(
+            eval_code_retrieval.expanded_query_texts(
+                "Plan a weekend away.",
+                "memory-action",
+            ),
+            [variants[0], variants[3]],
+        )
+
+    def test_memory_query_expansion_supports_probe_pairs(self):
+        all_variants = eval_code_retrieval.expanded_query_texts(
+            "Plan a weekend away.",
+            "memory-facets",
+        )
+        paired = eval_code_retrieval.expanded_query_texts(
+            "Plan a weekend away.",
+            "memory-context-action",
+        )
+        self.assertEqual(paired, [all_variants[0], all_variants[1], all_variants[3]])
+
+    def test_memory_query_expansion_can_bound_probe_text(self):
+        query = "0123456789"
+        variants = eval_code_retrieval.expanded_query_texts(
+            query,
+            "memory-context",
+            5,
+        )
+        self.assertEqual(variants[0], query)
+        self.assertTrue(variants[1].endswith("01234"))
+
+    def test_fuse_search_outputs_rewards_files_found_by_multiple_probes(self):
+        fused = eval_code_retrieval.fuse_search_outputs(
+            [
+                [{"file_path": "a.md"}, {"file_path": "b.md"}],
+                [{"file_path": "b.md"}, {"file_path": "c.md"}],
+            ]
+        )
+        self.assertEqual(fused[0]["file_path"], "b.md")
+
+    def test_fuse_search_outputs_can_anchor_original_ranking(self):
+        outputs = [
+            [{"file_path": "z-original.md"}],
+            [{"file_path": "a-probe.md"}],
+        ]
+        unweighted = eval_code_retrieval.fuse_search_outputs(outputs, rrf_k=20)
+        anchored = eval_code_retrieval.fuse_search_outputs(
+            outputs,
+            rrf_k=20,
+            original_weight=2,
+        )
+        self.assertEqual(unweighted[0]["file_path"], "a-probe.md")
+        self.assertEqual(anchored[0]["file_path"], "z-original.md")
+
+    def test_parallel_search_commands_preserve_probe_order(self):
+        commands = [["ig", "first"], ["ig", "second"], ["ig", "third"]]
+        with mock.patch.object(
+            eval_code_retrieval,
+            "run_json",
+            side_effect=lambda command, _cwd, _env: (command[-1], 0.0),
+        ):
+            outputs, elapsed_ms = eval_code_retrieval.run_search_commands(
+                commands,
+                Path("."),
+                {},
+                3,
+            )
+        self.assertEqual(outputs, ["first", "second", "third"])
+        self.assertGreaterEqual(elapsed_ms, 0.0)
+
+    def test_query_scope_stays_inside_materialized_repo(self):
+        with tempfile.TemporaryDirectory() as temp:
+            repo = Path(temp)
+            scope = repo / "users" / "user7"
+            scope.mkdir(parents=True)
+            query = {"metadata": {"scope": "users/user7"}}
+            self.assertEqual(
+                eval_code_retrieval.query_scope(query, repo),
+                "users/user7/**",
+            )
+            command = eval_code_retrieval.search_command(
+                Path("ig"),
+                "neural",
+                20,
+                "what should I remember?",
+                "users/user7/**",
+                ["users/user7/s9.md"],
+            )
+            self.assertEqual(
+                command[-6:],
+                [
+                    "--include",
+                    "users/user7/**",
+                    "--exclude",
+                    "users/user7/s9.md",
+                    "--",
+                    "what should I remember?",
+                ],
+            )
+
+    def test_query_scope_rejects_parent_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(ValueError, "unsafe query scope"):
+                eval_code_retrieval.query_scope(
+                    {"metadata": {"scope": "../private"}},
+                    Path(temp),
+                )
+
+    def test_query_excludes_reject_parent_path(self):
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(ValueError, "unsafe query exclude glob"):
+                eval_code_retrieval.query_exclude_globs(
+                    {"metadata": {"exclude_globs": ["../private.md"]}},
+                    Path(temp),
+                )
 
     def test_daemon_endpoint_matches_platform_transport(self):
         home = Path("benchmark-home")

@@ -642,6 +642,7 @@ fn build_search_request(
         scope_is_file: scoped.is_some_and(|s| s.is_file),
         skip_gitignore: cli.skip_gitignore,
         force_neural: cli.force_neural,
+        disable_memory_expansion: cli.no_memory_expansion_internal || cli.hash,
     }
 }
 

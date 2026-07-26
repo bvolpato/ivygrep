@@ -4,6 +4,12 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.2.7] - 2026-07-26
+
+### Added
+- Notes and memories are now a first-class retrieval use case. Default daemon-backed search blends semantic and lexical retrieval across CLI, MCP, Web, and TUI, then adds two bounded local memory probes when initial results are overwhelmingly note-like.
+- Public MemoryQuest evidence covers 535 implicit questions over 3,878 preindexed sessions. Default search retrieves 74.9% of required memories in the top 20 with 86.05 ms warm p95.
+
 ### Performance
 - Incremental indexing now maintains exact distinct-vector counts from up to 512 changed keys, falls back to a full count for larger transactions, streams Merkle root hashing without a corpus-sized buffer, and fetches only missing text blobs when neural enhancement is at least 75% complete. A one-million-entry Merkle A/B fell from 45.01 ms and 128 MB temporary memory to 14.85 ms and constant extra memory; a 90%-complete 200,000-row neural resume improved 33.6%.
 - Daemon query caches now invalidate only affected workspaces, survive no-op indexing, and use a 250 ms single-event or 750 ms burst watcher debounce. Measured single-event watcher latency fell from 2.009 s to 251.4 ms.
@@ -16,10 +22,10 @@ All notable changes to ivygrep are documented in this file.
 ### Testing
 - Context relevance CI now gates test-file recall, and curated fixtures can label relevant unchanged paths against pinned base trees. Independent reports record retained and rejected context, indexing, neural, readiness, and agent-outcome experiments.
 - Context relevance runs against frozen tasks in clean pre-change worktrees and gates recall, primary recall, zero-recall rate, relationship-role coverage, and recall per 1,000 tokens.
-- Current-release million-chunk evidence publishes three complete v1.2.6 trials and checks package version plus every reported median.
+- Current-release million-chunk evidence publishes three complete v1.2.7 trials and checks package version plus every reported median.
 
 ### Documentation
-- README and site lead with one search and one bounded context example, current registry availability, a functional workflow hero, canonical integration pages, and current-release benchmark evidence.
+- README and site lead with code, notes, memory retrieval, and bounded context examples, current registry availability, a functional workflow hero, canonical integration pages, and current-release benchmark evidence.
 
 ## [1.2.6] - 2026-07-19
 

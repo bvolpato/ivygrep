@@ -24,12 +24,13 @@ use crate::indexer::{
 use crate::jobs::{self, JobKind, JobUpdate};
 use crate::protocol::{
     BUILD_VERSION, DAEMON_PROTOCOL_VERSION, DaemonRequest, DaemonRequestEnvelope, DaemonResponse,
-    WorkspaceRuntimeStatus,
+    SearchHit, WorkspaceRuntimeStatus, group_hits_by_file,
 };
 use crate::regex_search::regex_search;
 use crate::search::{
-    NeuralQueryVectorJob, SearchContext, SearchOptions, hybrid_search_with_context_and_neural_job,
-    literal_search_with_context, query_uses_neural, workspace_neural_model_identity,
+    DEFAULT_SEARCH_LIMIT, NeuralQueryVectorJob, SearchContext, SearchOptions,
+    hybrid_search_with_context_and_neural_job, literal_search_with_context, query_uses_neural,
+    workspace_neural_model_identity,
 };
 use crate::workspace::{Workspace, WorkspaceIndexState, WorkspaceScope, list_workspaces};
 
@@ -56,12 +57,128 @@ const MAX_IDLE_SEARCH_CONTEXTS: usize = 32;
 const MAX_RESOLVED_WORKSPACES: usize = 128;
 const MAX_NEURAL_STATUSES: usize = 128;
 const MAX_READY_WORKSPACES: usize = 256;
+const MAX_MEMORY_PROBE_LIMIT: usize = 80;
+const MAX_MEMORY_PROBE_QUERY_CHARS: usize = 512;
+const MEMORY_ORIGINAL_RRF_WEIGHT: f32 = 1.25;
 /// Don't cache result sets larger than this (each hit carries preview/reason
 /// strings; large `--no-limit` results would bloat the query cache).
 const MAX_CACHEABLE_HITS: usize = 2_000;
 
 fn should_start_model_load(has_neural_vectors: bool, query: &str, force_neural: bool) -> bool {
     has_neural_vectors && query_uses_neural(query, force_neural)
+}
+
+fn is_note_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            ["md", "mdx", "txt", "rst", "adoc", "org"]
+                .iter()
+                .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+        })
+}
+
+fn should_expand_memory_query(query: &str, hits: &[SearchHit], limit: Option<usize>) -> bool {
+    if hits.first().is_none_or(|hit| !is_note_path(&hit.file_path))
+        || limit == Some(usize::MAX)
+        || query.split_whitespace().count() < 5
+        || !query_uses_neural(query, false)
+    {
+        return false;
+    }
+    let files = group_hits_by_file(hits, Some(5));
+    files.len() >= 3
+        && files
+            .iter()
+            .filter(|result| is_note_path(&result.file_path))
+            .count()
+            * 5
+            >= files.len() * 4
+}
+
+fn memory_query_variants(query: &str) -> [String; 2] {
+    let query = query
+        .char_indices()
+        .nth(MAX_MEMORY_PROBE_QUERY_CHARS)
+        .map_or(query, |(end, _)| &query[..end]);
+    [
+        format!(
+            "Personal context, prior preferences, constraints, and commitments relevant to: {query}"
+        ),
+        format!("Information needed before deciding, responding, or acting on: {query}"),
+    ]
+}
+
+fn search_request_with_query(request: &DaemonRequest, query: String) -> DaemonRequest {
+    let mut request = request.clone();
+    let DaemonRequest::Search {
+        query: request_query,
+        limit,
+        disable_memory_expansion,
+        ..
+    } = &mut request
+    else {
+        unreachable!("memory expansion requires a hybrid search request");
+    };
+    *request_query = query;
+    if let Some(limit) = limit {
+        *limit = limit
+            .saturating_mul(4)
+            .min(MAX_MEMORY_PROBE_LIMIT)
+            .max(*limit);
+    }
+    *disable_memory_expansion = true;
+    request
+}
+
+fn fuse_memory_probe_hits(
+    original: Vec<SearchHit>,
+    probes: Vec<Vec<SearchHit>>,
+    limit: Option<usize>,
+) -> Vec<SearchHit> {
+    if probes.is_empty() {
+        return original;
+    }
+
+    let mut scores = HashMap::<PathBuf, f32>::new();
+    let mut selected = HashMap::<PathBuf, SearchHit>::new();
+    for (output_index, output) in std::iter::once(original).chain(probes).enumerate() {
+        let weight = if output_index == 0 {
+            MEMORY_ORIGINAL_RRF_WEIGHT
+        } else {
+            1.0
+        };
+        for (rank, file) in group_hits_by_file(&output, None).into_iter().enumerate() {
+            *scores.entry(file.file_path.clone()).or_default() += weight / (61 + rank) as f32;
+            let Some(candidate) = file.hits.into_iter().next() else {
+                continue;
+            };
+            selected
+                .entry(file.file_path)
+                .and_modify(|current| {
+                    if candidate.score.total_cmp(&current.score).is_gt() {
+                        current.clone_from(&candidate);
+                    }
+                })
+                .or_insert(candidate);
+        }
+    }
+    let mut ranked = scores.into_iter().collect::<Vec<_>>();
+    ranked.sort_by(|(path_a, score_a), (path_b, score_b)| {
+        score_b.total_cmp(score_a).then_with(|| path_a.cmp(path_b))
+    });
+    ranked
+        .into_iter()
+        .take(limit.unwrap_or(DEFAULT_SEARCH_LIMIT))
+        .filter_map(|(path, score)| {
+            let mut hit = selected.remove(&path)?;
+            hit.score = score;
+            if !hit.sources.iter().any(|source| source == "memory") {
+                hit.sources.push("memory".to_string());
+            }
+            Some(hit)
+        })
+        .collect()
 }
 
 struct WatchRegistration {
@@ -1194,6 +1311,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             scope_is_file,
             skip_gitignore,
             force_neural,
+            disable_memory_expansion,
         } => {
             let request_started = std::time::Instant::now();
             let state_clone = state.clone();
@@ -1273,7 +1391,9 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 let _permit = permit;
                 let model = match state_clone.get_model_for_search(force_neural) {
                     Ok(model) => model,
-                    Err(err) => return (Vec::new(), vec![err.to_string()]),
+                    Err(err) => {
+                        return (Vec::new(), vec![err.to_string()], query, options);
+                    }
                 };
                 tracing::trace!("daemon_search_model={:?}", task_started.elapsed());
                 let mut all_hits = Vec::new();
@@ -1343,7 +1463,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                             }
                         }
                     }
-                    return (cached_hits, all_errors);
+                    return (cached_hits, all_errors, query, options);
                 }
 
                 let mut neural_query_vector_job = if state_clone.can_precompute_neural_query(
@@ -1442,26 +1562,75 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     }
                 }
                 tracing::trace!("daemon_search_task_total={:?}", task_started.elapsed());
-                (all_hits, all_errors)
+                (all_hits, all_errors, query, options)
             })
-            .await
-            .unwrap_or_else(|join_err| {
-                warn!("search task panicked: {join_err:#}");
-                (
-                    Vec::new(),
-                    vec![format!("search task panicked: {join_err:#}")],
-                )
-            });
+            .await;
+            let result = match result {
+                Ok(result) => result,
+                Err(join_err) => {
+                    warn!("search task panicked: {join_err:#}");
+                    return DaemonResponse::Error {
+                        message: format!("search task panicked: {join_err:#}"),
+                    };
+                }
+            };
             tracing::trace!("daemon_search_total={:?}", request_started.elapsed());
 
+            let (mut hits, errors, expansion_query, expansion_options) = result;
             // If ALL workspaces failed (no hits and at least one error),
             // propagate as Error so the CLI can fall back to local search.
-            if result.0.is_empty() && !result.1.is_empty() {
+            if hits.is_empty() && !errors.is_empty() {
                 DaemonResponse::Error {
-                    message: format!("search failed: {}", result.1.join("; ")),
+                    message: format!("search failed: {}", errors.join("; ")),
                 }
             } else {
-                DaemonResponse::SearchResults { hits: result.0 }
+                if !disable_memory_expansion
+                    && !force_neural
+                    && should_expand_memory_query(&expansion_query, &hits, limit)
+                {
+                    let scope_is_file = expansion_options
+                        .scope_filter
+                        .as_ref()
+                        .is_some_and(|scope| scope.is_file);
+                    let expansion_request = DaemonRequest::Search {
+                        path,
+                        query: String::new(),
+                        limit: expansion_options.limit,
+                        context: expansion_options.context,
+                        type_filter: expansion_options.type_filter,
+                        include_globs: expansion_options.include_globs,
+                        exclude_globs: expansion_options.exclude_globs,
+                        scope_path: expansion_options.scope_filter.map(|scope| scope.rel_path),
+                        scope_is_file,
+                        skip_gitignore: expansion_options.skip_gitignore,
+                        force_neural: expansion_options.force_neural,
+                        disable_memory_expansion: true,
+                    };
+                    let variants = memory_query_variants(&expansion_query);
+                    let requests = variants
+                        .map(|variant| search_request_with_query(&expansion_request, variant));
+                    let (first, second) = tokio::join!(
+                        Box::pin(handle_request(state.clone(), requests[0].clone())),
+                        Box::pin(handle_request(state.clone(), requests[1].clone())),
+                    );
+                    let mut probe_outputs = Vec::new();
+                    for response in [first, second] {
+                        match response {
+                            DaemonResponse::SearchResults {
+                                hits: expanded_hits,
+                            } if !expanded_hits.is_empty() => probe_outputs.push(expanded_hits),
+                            DaemonResponse::SearchResults { .. } => {}
+                            DaemonResponse::Error { message } => {
+                                warn!("memory query expansion failed: {message}");
+                            }
+                            other => {
+                                warn!("memory query expansion unavailable: {other:?}");
+                            }
+                        }
+                    }
+                    hits = fuse_memory_probe_hits(hits, probe_outputs, limit);
+                }
+                DaemonResponse::SearchResults { hits }
             }
         }
         DaemonRequest::RegexSearch {
@@ -2605,6 +2774,205 @@ mod tests {
         }
     }
 
+    fn test_hit(path: &str, score: f32) -> SearchHit {
+        test_hit_at(path, score, 1, path)
+    }
+
+    fn test_hit_at(path: &str, score: f32, start_line: usize, preview: &str) -> SearchHit {
+        SearchHit {
+            file_path: PathBuf::from(path),
+            start_line,
+            end_line: start_line + 1,
+            preview: preview.to_string(),
+            reason: String::new(),
+            score,
+            sources: vec!["test".to_string()],
+            neural_requested: false,
+            neural_executed: false,
+        }
+    }
+
+    #[test]
+    fn memory_expansion_requires_natural_query_and_bounded_note_results() {
+        let query = "What should I remember before planning this weekend trip?";
+        let note_hits = (0..5)
+            .map(|index| test_hit(&format!("notes/{index}.md"), 10.0 - index as f32))
+            .collect::<Vec<_>>();
+        assert!(should_expand_memory_query(query, &note_hits, Some(20)));
+        assert!(!should_expand_memory_query(
+            "weekend trip",
+            &note_hits,
+            Some(20)
+        ));
+        assert!(!should_expand_memory_query(
+            query,
+            &note_hits,
+            Some(usize::MAX)
+        ));
+
+        let mut mixed_hits = note_hits;
+        mixed_hits[3] = test_hit("src/planner.rs", 7.0);
+        mixed_hits[4] = test_hit("src/calendar.rs", 6.0);
+        assert!(!should_expand_memory_query(query, &mixed_hits, Some(20)));
+
+        mixed_hits[3] = test_hit("notes/3.md", 7.0);
+        mixed_hits.swap(0, 4);
+        assert!(!should_expand_memory_query(query, &mixed_hits, Some(20)));
+    }
+
+    #[test]
+    fn memory_probe_fusion_rewards_files_found_by_multiple_probes() {
+        let fused = fuse_memory_probe_hits(
+            vec![test_hit("a.md", 2.0), test_hit("b.md", 1.0)],
+            vec![vec![test_hit("b.md", 2.0), test_hit("c.md", 1.0)]],
+            Some(20),
+        );
+        assert_eq!(fused[0].file_path, PathBuf::from("b.md"));
+        assert!(fused[0].sources.iter().any(|source| source == "memory"));
+    }
+
+    #[test]
+    fn memory_probe_fusion_keeps_the_best_matching_snippet() {
+        let fused = fuse_memory_probe_hits(
+            vec![test_hit_at("a.md", 0.2, 1, "original passage")],
+            vec![
+                vec![test_hit_at("a.md", 0.9, 20, "matching memory")],
+                vec![test_hit_at("a.md", 0.7, 30, "other memory")],
+            ],
+            Some(20),
+        );
+        assert_eq!(fused.len(), 1);
+        assert_eq!(fused[0].start_line, 20);
+        assert_eq!(fused[0].preview, "matching memory");
+    }
+
+    #[test]
+    fn memory_probe_fusion_anchors_the_original_ranking() {
+        let fused = fuse_memory_probe_hits(
+            vec![test_hit("z-original.md", 1.0)],
+            vec![vec![test_hit("a-probe.md", 1.0)]],
+            Some(20),
+        );
+        assert_eq!(fused[0].file_path, PathBuf::from("z-original.md"));
+    }
+
+    #[test]
+    fn memory_probe_fusion_preserves_original_when_all_probes_fail() {
+        let original = vec![test_hit("a.md", 2.0), test_hit("b.md", 1.0)];
+        let fused = fuse_memory_probe_hits(original, Vec::new(), Some(20));
+        assert_eq!(fused.len(), 2);
+        assert_eq!(fused[0].score, 2.0);
+        assert_eq!(fused[0].sources, vec!["test"]);
+    }
+
+    #[test]
+    fn memory_probe_fusion_respects_requested_file_limit() {
+        let fused = fuse_memory_probe_hits(
+            vec![test_hit("a.md", 2.0), test_hit("b.md", 1.0)],
+            vec![vec![test_hit("c.md", 2.0), test_hit("d.md", 1.0)]],
+            Some(2),
+        );
+        assert_eq!(group_hits_by_file(&fused, None).len(), 2);
+    }
+
+    #[test]
+    fn memory_probe_fusion_respects_default_file_limit() {
+        let original = (0..60)
+            .map(|index| test_hit(&format!("original-{index}.md"), 100.0 - index as f32))
+            .collect();
+        let probe = (0..60)
+            .map(|index| test_hit(&format!("probe-{index}.md"), 100.0 - index as f32))
+            .collect();
+        let fused = fuse_memory_probe_hits(original, vec![probe], None);
+        assert_eq!(fused.len(), DEFAULT_SEARCH_LIMIT);
+        assert_eq!(group_hits_by_file(&fused, None).len(), DEFAULT_SEARCH_LIMIT);
+    }
+
+    #[test]
+    fn memory_probes_overfetch_with_a_bounded_limit() {
+        let request = DaemonRequest::Search {
+            path: None,
+            query: "original".to_string(),
+            limit: Some(20),
+            context: 2,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_path: None,
+            scope_is_file: false,
+            skip_gitignore: false,
+            force_neural: false,
+            disable_memory_expansion: false,
+        };
+        let DaemonRequest::Search {
+            query,
+            limit,
+            disable_memory_expansion,
+            ..
+        } = search_request_with_query(&request, "expanded".to_string())
+        else {
+            unreachable!();
+        };
+        assert_eq!(query, "expanded");
+        assert_eq!(limit, Some(MAX_MEMORY_PROBE_LIMIT));
+        assert!(disable_memory_expansion);
+    }
+
+    #[test]
+    fn memory_probe_queries_have_a_unicode_safe_length_bound() {
+        let query = "é".repeat(MAX_MEMORY_PROBE_QUERY_CHARS + 1);
+        let variants = memory_query_variants(&query);
+        assert_eq!(
+            variants[0].matches('é').count(),
+            MAX_MEMORY_PROBE_QUERY_CHARS
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn daemon_search_applies_default_memory_expansion() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        for index in 0..5 {
+            std::fs::write(
+                repo.path().join(format!("memory-{index}.md")),
+                format!(
+                    "# Weekend trip note\nRemember planning preference {index} for quiet travel."
+                ),
+            )
+            .unwrap();
+        }
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+
+        let request = DaemonRequest::Search {
+            path: Some(workspace.root.clone()),
+            query: "What should I remember before planning my weekend trip?".to_string(),
+            limit: Some(5),
+            context: 2,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_path: None,
+            scope_is_file: false,
+            skip_gitignore: false,
+            force_neural: false,
+            disable_memory_expansion: false,
+        };
+        let response = handle_request(test_state(), request).await;
+        let DaemonResponse::SearchResults { hits } = response else {
+            panic!("expected search results");
+        };
+        assert!(
+            hits.iter()
+                .any(|hit| hit.sources.iter().any(|source| source == "memory")),
+            "daemon-backed clients should receive default memory expansion"
+        );
+    }
+
     #[test]
     fn neural_query_cache_normalizes_and_bounds_entries() {
         let mut cache = NeuralQueryCache::default();
@@ -3472,6 +3840,7 @@ mod tests {
                 scope_is_file: false,
                 skip_gitignore: false,
                 force_neural: false,
+                disable_memory_expansion: true,
             },
         )
         .await;
@@ -3530,6 +3899,7 @@ mod tests {
             scope_is_file: false,
             skip_gitignore: false,
             force_neural: false,
+            disable_memory_expansion: true,
         };
 
         let first = handle_request(state.clone(), request.clone()).await;
@@ -3615,6 +3985,7 @@ mod tests {
                 scope_is_file: false,
                 skip_gitignore: false,
                 force_neural: false,
+                disable_memory_expansion: true,
             },
         )
         .await;
@@ -3674,6 +4045,7 @@ mod tests {
                 scope_is_file: false,
                 skip_gitignore: false,
                 force_neural: false,
+                disable_memory_expansion: true,
             },
         )
         .await;
@@ -3752,6 +4124,7 @@ mod tests {
             scope_is_file: false,
             skip_gitignore: false,
             force_neural: false,
+            disable_memory_expansion: true,
         };
         let all_request = DaemonRequest::Search {
             path: None,
@@ -3765,6 +4138,7 @@ mod tests {
             scope_is_file: false,
             skip_gitignore: false,
             force_neural: false,
+            disable_memory_expansion: true,
         };
 
         let normal = handle_request(state.clone(), normal_request).await;

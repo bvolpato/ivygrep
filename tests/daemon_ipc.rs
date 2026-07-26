@@ -247,6 +247,7 @@ async fn daemon_ipc_index_and_search_roundtrip() {
         scope_is_file: false,
         skip_gitignore: false,
         force_neural: false,
+        disable_memory_expansion: true,
     })
     .await;
 
@@ -446,6 +447,7 @@ async fn daemon_ipc_skip_gitignore() {
                     scope_is_file: _,
                     skip_gitignore,
                     force_neural,
+                    disable_memory_expansion: _,
                 } => {
                     let workspace =
                         ivygrep::workspace::Workspace::resolve(path.as_ref().unwrap()).unwrap();
@@ -507,6 +509,7 @@ async fn daemon_ipc_skip_gitignore() {
         scope_is_file: false,
         skip_gitignore: true,
         force_neural: false,
+        disable_memory_expansion: true,
     })
     .await;
 
@@ -534,6 +537,7 @@ async fn daemon_ipc_skip_gitignore() {
         scope_is_file: false,
         skip_gitignore: false,
         force_neural: false,
+        disable_memory_expansion: true,
     })
     .await;
 
