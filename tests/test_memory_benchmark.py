@@ -100,6 +100,12 @@ class MemoryQuestExporterTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "benchmark-only query expansion"):
             render_memory_benchmark.validate_published_mode("blended", result)
 
+    def test_renderer_resolves_explicit_source_commit(self):
+        root = Path(__file__).resolve().parents[1]
+        resolved = render_memory_benchmark.git_revision(root, "HEAD^")
+        self.assertEqual(len(resolved), 40)
+        self.assertNotEqual(resolved, render_memory_benchmark.git_revision(root))
+
 
 if __name__ == "__main__":
     unittest.main()

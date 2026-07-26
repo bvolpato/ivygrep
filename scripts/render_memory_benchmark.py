@@ -66,9 +66,9 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def git_revision(root: Path) -> str:
+def git_revision(root: Path, revision: str = "HEAD") -> str:
     completed = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
+        ["git", "rev-parse", "--verify", f"{revision}^{{commit}}"],
         cwd=root,
         check=True,
         text=True,
@@ -161,6 +161,7 @@ def build_publication(
     dataset: Path,
     result_paths: list[Path],
     control_path: Path | None = None,
+    source_commit: str = "HEAD",
 ) -> dict:
     provenance = json.loads((dataset / "provenance.json").read_text(encoding="utf-8"))
     query_users = {
@@ -264,7 +265,7 @@ def build_publication(
     return {
         "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "ivygrep_commit": git_revision(root),
+        "ivygrep_commit": git_revision(root, source_commit),
         "runs": 1,
         "dataset": provenance,
         "harness_sha256": {
@@ -409,7 +410,7 @@ uv run scripts/eval_code_retrieval.py --dataset /tmp/ivygrep-memoryquest --binar
 uv run scripts/eval_code_retrieval.py --dataset /tmp/ivygrep-memoryquest --binary target/release/ig --mode blended --output /tmp/memoryquest-blended.json
 uv run scripts/eval_code_retrieval.py --dataset /tmp/ivygrep-memoryquest --binary target/release/ig --mode neural --output /tmp/memoryquest-neural.json
 {control_reproduce}
-uv run scripts/render_memory_benchmark.py --dataset /tmp/ivygrep-memoryquest --result /tmp/memoryquest-lexical.json --result /tmp/memoryquest-blended.json --result /tmp/memoryquest-neural.json{control_render_arg} --output-json docs/benchmarks/public-memory-retrieval-results.json --output-html docs/benchmarks/public-memory-retrieval.html</code></pre>
+uv run scripts/render_memory_benchmark.py --dataset /tmp/ivygrep-memoryquest --result /tmp/memoryquest-lexical.json --result /tmp/memoryquest-blended.json --result /tmp/memoryquest-neural.json{control_render_arg} --source-commit {publication["ivygrep_commit"]} --output-json docs/benchmarks/public-memory-retrieval-results.json --output-html docs/benchmarks/public-memory-retrieval.html</code></pre>
         </section>
     </main>
 </body>
@@ -423,6 +424,7 @@ def main() -> int:
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--result", action="append", type=Path, required=True)
     parser.add_argument("--control-result", type=Path)
+    parser.add_argument("--source-commit", default="HEAD")
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument("--output-html", type=Path, required=True)
     args = parser.parse_args()
@@ -431,6 +433,7 @@ def main() -> int:
         args.dataset,
         args.result,
         args.control_result,
+        args.source_commit,
     )
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_html.parent.mkdir(parents=True, exist_ok=True)

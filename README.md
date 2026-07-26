@@ -103,7 +103,7 @@ ig -n 20 "what did we decide about cache invalidation?" ~/notes
 
 Default daemon-backed queries across CLI, MCP, Web, and TUI blend semantic and lexical retrieval; no semantic opt-in flag is required. For implicit questions whose initial results are overwhelmingly note-like files, ivygrep automatically runs three generic local memory probes concurrently and fuses their ranks. The index stays live as notes change. Queries, note contents, embeddings, and results stay local.
 
-On the public [MemoryQuest benchmark](https://bvolpato.github.io/ivygrep/benchmarks/public-memory-retrieval.html), default CLI search retrieved 73.8% of required memories in the top 20 and retrieved every required memory for 43.2% of questions. Warm CLI p95 was 117.08 ms across 535 implicit questions and 3,878 preindexed sessions. Report documents protocol, single-query control, published reference points, and comparability limits.
+On the public [MemoryQuest benchmark](https://bvolpato.github.io/ivygrep/benchmarks/public-memory-retrieval.html), default CLI search retrieved 73.8% of required memories in the top 20 and retrieved every required memory for 43.2% of questions. Warm CLI p95 was 145.28 ms across 535 implicit questions and 3,878 preindexed sessions. Report documents protocol, single-query control, published reference points, and comparability limits.
 
 ## Connect coding agents
 
