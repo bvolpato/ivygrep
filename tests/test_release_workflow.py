@@ -144,6 +144,21 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("libcublas-dev", workflow)
         self.assertIn("libcurand-dev", workflow)
 
+    def test_cuda_raw_binary_has_dedicated_bounded_size_budget(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        binary_budget = workflow.split(
+            "- name: Enforce release size budget", maxsplit=1
+        )[1].split("- name: Build-output sanity check", maxsplit=1)[0]
+        archive_budget = workflow.split(
+            "- name: Enforce archive size budget", maxsplit=1
+        )[1].split("- name: Compute checksum and provenance", maxsplit=1)[0]
+
+        self.assertIn("MAX_BINARY_MIB=80", binary_budget)
+        self.assertIn('[[ "$EXTRA_FEATURES" == "cuda" ]]', binary_budget)
+        self.assertIn("MAX_BINARY_MIB=81", binary_budget)
+        self.assertIn('--max-mib "$MAX_BINARY_MIB"', binary_budget)
+        self.assertIn('--max-mib 80', archive_budget)
+
     def test_windows_release_includes_neural_offline_acceptance(self) -> None:
         workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
         windows_build = workflow.split(
