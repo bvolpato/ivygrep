@@ -315,36 +315,64 @@ def query_text(query: dict, max_query_chars: int | None) -> str:
     return text
 
 
-def expanded_query_texts(text: str, profile: str) -> list[str]:
+def expanded_query_texts(
+    text: str,
+    profile: str,
+    probe_query_chars: int | None = None,
+) -> list[str]:
     if profile == "none":
         return [text]
+    probe_text = text[:probe_query_chars] if probe_query_chars is not None else text
     facets = {
         "memory-context": (
-            f"Personal context, prior preferences, constraints, and commitments relevant to: {text}"
+            "Personal context, prior preferences, constraints, and commitments "
+            f"relevant to: {probe_text}"
         ),
         "memory-history": (
-            f"Past events, current plans, dependencies, and unresolved decisions relevant to: {text}"
+            "Past events, current plans, dependencies, and unresolved decisions "
+            f"relevant to: {probe_text}"
         ),
         "memory-action": (
-            f"Information needed before deciding, responding, or acting on: {text}"
+            f"Information needed before deciding, responding, or acting on: {probe_text}"
         ),
     }
     if profile in facets:
         return [text, facets[profile]]
-    if profile != "memory-facets":
-        raise ValueError(f"unsupported query expansion profile {profile}")
-    return [text, *facets.values()]
+    combinations = {
+        "memory-context-history": ("memory-context", "memory-history"),
+        "memory-context-action": ("memory-context", "memory-action"),
+        "memory-history-action": ("memory-history", "memory-action"),
+        "memory-facets": tuple(facets),
+    }
+    if profile in combinations:
+        return [text, *(facets[name] for name in combinations[profile])]
+    if profile == "retrieval-facets":
+        return [
+            text,
+            f"Relevant entities, facts, attributes, and relationships for: {probe_text}",
+            f"Chronology, causes, effects, changes, and dependencies for: {probe_text}",
+            f"Constraints, tradeoffs, decisions, and next actions for: {probe_text}",
+        ]
+    raise ValueError(f"unsupported query expansion profile {profile}")
 
 
-def fuse_search_outputs(outputs: list[list[dict]]) -> list[dict]:
+def fuse_search_outputs(
+    outputs: list[list[dict]],
+    *,
+    rrf_k: float = 60.0,
+    original_weight: float = 1.0,
+) -> list[dict]:
     scores: dict[str, float] = {}
     selected: dict[str, dict] = {}
-    for output in outputs:
+    for output_index, output in enumerate(outputs):
+        weight = original_weight if output_index == 0 else 1.0
         for rank, item in enumerate(output):
             path = str(item.get("file_path", ""))
             if not path:
                 continue
-            scores[path] = scores.get(path, 0.0) + 1.0 / (60.0 + rank + 1.0)
+            scores[path] = scores.get(path, 0.0) + weight / (
+                rrf_k + rank + 1.0
+            )
             selected.setdefault(path, item)
     ranked = sorted(scores, key=lambda path: (-scores[path], path))
     fused = []
@@ -519,11 +547,21 @@ def evaluate(args: argparse.Namespace) -> dict:
             query_id = str(query["_id"])
             text = query_text(query, args.max_query_chars)
             cold_ms = 0.0
-            for expanded_text in expanded_query_texts(text, args.query_expansion):
+            for expansion_index, expanded_text in enumerate(
+                expanded_query_texts(
+                    text,
+                    args.query_expansion,
+                    args.probe_query_chars,
+                )
+            ):
                 command = search_command(
                     binary,
                     args.mode,
-                    args.limit,
+                    (
+                        args.limit
+                        if expansion_index == 0
+                        else args.probe_limit or args.limit
+                    ),
                     expanded_text,
                     query_scope(query, repo),
                     query_exclude_globs(query, repo),
@@ -606,16 +644,23 @@ def evaluate(args: argparse.Namespace) -> dict:
                     search_command(
                         binary,
                         args.mode,
-                        args.limit,
+                        (
+                            args.limit
+                            if expansion_index == 0
+                            else args.probe_limit or args.limit
+                        ),
                         expanded_text,
                         query_scope(query, repo),
                         query_exclude_globs(query, repo),
                         args.disable_memory_expansion
                         or args.query_expansion != "none",
                     )
-                    for expanded_text in expanded_query_texts(
-                        text,
-                        args.query_expansion,
+                    for expansion_index, expanded_text in enumerate(
+                        expanded_query_texts(
+                            text,
+                            args.query_expansion,
+                            args.probe_query_chars,
+                        )
                     )
                 ]
                 warm_outputs, warm_ms = run_search_commands(
@@ -624,7 +669,11 @@ def evaluate(args: argparse.Namespace) -> dict:
                     daemon_env,
                     args.query_expansion_workers,
                 )
-                warm_output = fuse_search_outputs(warm_outputs)
+                warm_output = fuse_search_outputs(
+                    warm_outputs,
+                    rrf_k=args.rrf_k,
+                    original_weight=args.original_weight,
+                )
                 ranked = []
                 ranked_hits = []
                 seen: set[str] = set()
@@ -766,6 +815,10 @@ def evaluate(args: argparse.Namespace) -> dict:
                 "query_text_limit": args.max_query_chars,
                 "query_expansion": args.query_expansion,
                 "query_expansion_workers": args.query_expansion_workers,
+                "probe_limit": args.probe_limit or args.limit,
+                "probe_query_chars": args.probe_query_chars,
+                "rrf_k": args.rrf_k,
+                "original_weight": args.original_weight,
                 "memory_expansion_disabled": args.disable_memory_expansion,
                 "retrieval_provenance": {
                     "force_neural": args.mode == "neural",
@@ -817,11 +870,19 @@ def main() -> int:
             "memory-context",
             "memory-history",
             "memory-action",
+            "memory-context-history",
+            "memory-context-action",
+            "memory-history-action",
             "memory-facets",
+            "retrieval-facets",
         ],
         default="none",
     )
     parser.add_argument("--query-expansion-workers", type=int, default=4)
+    parser.add_argument("--probe-limit", type=int)
+    parser.add_argument("--probe-query-chars", type=int)
+    parser.add_argument("--rrf-k", type=float, default=60.0)
+    parser.add_argument("--original-weight", type=float, default=1.0)
     parser.add_argument("--disable-memory-expansion", action="store_true")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--min-ndcg-at-10", type=float, default=0.0)
@@ -831,6 +892,14 @@ def main() -> int:
     args = parser.parse_args()
     if args.query_expansion_workers < 1:
         parser.error("--query-expansion-workers must be positive")
+    if args.probe_limit is not None and args.probe_limit < args.limit:
+        parser.error("--probe-limit must be at least --limit")
+    if args.probe_query_chars is not None and args.probe_query_chars < 1:
+        parser.error("--probe-query-chars must be positive")
+    if args.rrf_k <= 0:
+        parser.error("--rrf-k must be positive")
+    if args.original_weight <= 0:
+        parser.error("--original-weight must be positive")
     if args.max_query_chars is not None and args.max_query_chars < 1:
         raise SystemExit("--max-query-chars must be positive")
 

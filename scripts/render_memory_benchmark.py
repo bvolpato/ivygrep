@@ -379,7 +379,7 @@ def render_html(publication: dict) -> str:
                 <thead><tr><th>Mode</th><th>Recall@10</th><th>Recall@20</th><th>Exact@20</th><th>nDCG@10</th><th>Warm p95</th></tr></thead>
                 <tbody>{rows}</tbody>
             </table></div>
-            <p><code>blended</code> is default daemon-backed semantic + lexical routing across CLI, MCP, Web, and TUI. When an implicit natural-language question initially returns overwhelmingly note-like files, default search runs three generic local memory probes concurrently and fuses file ranks. <code>forced neural</code> disables this adaptive path and runs neural retrieval for every query. <code>lexical</code> disables vectors.</p>
+            <p><code>blended</code> is default daemon-backed semantic + lexical routing across CLI, MCP, Web, and TUI. When an implicit natural-language question initially returns overwhelmingly note-like files, default search runs two generic local memory probes concurrently and fuses file ranks. <code>forced neural</code> disables this adaptive path and runs neural retrieval for every query. <code>lexical</code> disables vectors.</p>
         </section>
         <section class="report-card">
             <h2>Method</h2>

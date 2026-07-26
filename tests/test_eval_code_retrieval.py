@@ -107,6 +107,27 @@ class RetrievalMetricsTest(unittest.TestCase):
             [variants[0], variants[3]],
         )
 
+    def test_memory_query_expansion_supports_probe_pairs(self):
+        all_variants = eval_code_retrieval.expanded_query_texts(
+            "Plan a weekend away.",
+            "memory-facets",
+        )
+        paired = eval_code_retrieval.expanded_query_texts(
+            "Plan a weekend away.",
+            "memory-context-action",
+        )
+        self.assertEqual(paired, [all_variants[0], all_variants[1], all_variants[3]])
+
+    def test_memory_query_expansion_can_bound_probe_text(self):
+        query = "0123456789"
+        variants = eval_code_retrieval.expanded_query_texts(
+            query,
+            "memory-context",
+            5,
+        )
+        self.assertEqual(variants[0], query)
+        self.assertTrue(variants[1].endswith("01234"))
+
     def test_fuse_search_outputs_rewards_files_found_by_multiple_probes(self):
         fused = eval_code_retrieval.fuse_search_outputs(
             [
@@ -115,6 +136,20 @@ class RetrievalMetricsTest(unittest.TestCase):
             ]
         )
         self.assertEqual(fused[0]["file_path"], "b.md")
+
+    def test_fuse_search_outputs_can_anchor_original_ranking(self):
+        outputs = [
+            [{"file_path": "z-original.md"}],
+            [{"file_path": "a-probe.md"}],
+        ]
+        unweighted = eval_code_retrieval.fuse_search_outputs(outputs, rrf_k=20)
+        anchored = eval_code_retrieval.fuse_search_outputs(
+            outputs,
+            rrf_k=20,
+            original_weight=2,
+        )
+        self.assertEqual(unweighted[0]["file_path"], "a-probe.md")
+        self.assertEqual(anchored[0]["file_path"], "z-original.md")
 
     def test_parallel_search_commands_preserve_probe_order(self):
         commands = [["ig", "first"], ["ig", "second"], ["ig", "third"]]

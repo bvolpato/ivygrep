@@ -56,6 +56,9 @@ const MAX_IDLE_SEARCH_CONTEXTS: usize = 32;
 const MAX_RESOLVED_WORKSPACES: usize = 128;
 const MAX_NEURAL_STATUSES: usize = 128;
 const MAX_READY_WORKSPACES: usize = 256;
+const MAX_MEMORY_PROBE_LIMIT: usize = 80;
+const MAX_MEMORY_PROBE_QUERY_CHARS: usize = 512;
+const MEMORY_ORIGINAL_RRF_WEIGHT: f32 = 1.25;
 /// Don't cache result sets larger than this (each hit carries preview/reason
 /// strings; large `--no-limit` results would bloat the query cache).
 const MAX_CACHEABLE_HITS: usize = 2_000;
@@ -92,13 +95,14 @@ fn should_expand_memory_query(query: &str, hits: &[SearchHit], limit: Option<usi
             >= files.len() * 4
 }
 
-fn memory_query_variants(query: &str) -> [String; 3] {
+fn memory_query_variants(query: &str) -> [String; 2] {
+    let query = query
+        .char_indices()
+        .nth(MAX_MEMORY_PROBE_QUERY_CHARS)
+        .map_or(query, |(end, _)| &query[..end]);
     [
         format!(
             "Personal context, prior preferences, constraints, and commitments relevant to: {query}"
-        ),
-        format!(
-            "Past events, current plans, dependencies, and unresolved decisions relevant to: {query}"
         ),
         format!("Information needed before deciding, responding, or acting on: {query}"),
     ]
@@ -108,6 +112,7 @@ fn search_request_with_query(request: &DaemonRequest, query: String) -> DaemonRe
     let mut request = request.clone();
     let DaemonRequest::Search {
         query: request_query,
+        limit,
         disable_memory_expansion,
         ..
     } = &mut request
@@ -115,16 +120,35 @@ fn search_request_with_query(request: &DaemonRequest, query: String) -> DaemonRe
         unreachable!("memory expansion requires a hybrid search request");
     };
     *request_query = query;
+    if let Some(limit) = limit {
+        *limit = limit
+            .saturating_mul(4)
+            .min(MAX_MEMORY_PROBE_LIMIT)
+            .max(*limit);
+    }
     *disable_memory_expansion = true;
     request
 }
 
-fn fuse_memory_probe_hits(outputs: Vec<Vec<SearchHit>>) -> Vec<SearchHit> {
+fn fuse_memory_probe_hits(
+    original: Vec<SearchHit>,
+    probes: Vec<Vec<SearchHit>>,
+    limit: Option<usize>,
+) -> Vec<SearchHit> {
+    if probes.is_empty() {
+        return original;
+    }
+
     let mut scores = HashMap::<PathBuf, f32>::new();
     let mut selected = HashMap::<PathBuf, Vec<SearchHit>>::new();
-    for output in outputs {
+    for (output_index, output) in std::iter::once(original).chain(probes).enumerate() {
+        let weight = if output_index == 0 {
+            MEMORY_ORIGINAL_RRF_WEIGHT
+        } else {
+            1.0
+        };
         for (rank, file) in group_hits_by_file(&output, None).into_iter().enumerate() {
-            *scores.entry(file.file_path.clone()).or_default() += 1.0 / (61 + rank) as f32;
+            *scores.entry(file.file_path.clone()).or_default() += weight / (61 + rank) as f32;
             selected.entry(file.file_path).or_insert(file.hits);
         }
     }
@@ -134,6 +158,7 @@ fn fuse_memory_probe_hits(outputs: Vec<Vec<SearchHit>>) -> Vec<SearchHit> {
     });
     ranked
         .into_iter()
+        .take(limit.unwrap_or(usize::MAX))
         .flat_map(|(path, score)| {
             let mut hits = selected.remove(&path).unwrap_or_default();
             if let Some(first) = hits.first_mut() {
@@ -1571,17 +1596,17 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     let variants = memory_query_variants(&expansion_query);
                     let requests = variants
                         .map(|variant| search_request_with_query(&expansion_request, variant));
-                    let (first, second, third) = tokio::join!(
+                    let (first, second) = tokio::join!(
                         Box::pin(handle_request(state.clone(), requests[0].clone())),
                         Box::pin(handle_request(state.clone(), requests[1].clone())),
-                        Box::pin(handle_request(state.clone(), requests[2].clone())),
                     );
-                    let mut outputs = vec![hits];
-                    for response in [first, second, third] {
+                    let mut probe_outputs = Vec::new();
+                    for response in [first, second] {
                         match response {
                             DaemonResponse::SearchResults {
                                 hits: expanded_hits,
-                            } => outputs.push(expanded_hits),
+                            } if !expanded_hits.is_empty() => probe_outputs.push(expanded_hits),
+                            DaemonResponse::SearchResults { .. } => {}
                             DaemonResponse::Error { message } => {
                                 warn!("memory query expansion failed: {message}");
                             }
@@ -1590,7 +1615,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                             }
                         }
                     }
-                    hits = fuse_memory_probe_hits(outputs);
+                    hits = fuse_memory_probe_hits(hits, probe_outputs, limit);
                 }
                 DaemonResponse::SearchResults { hits }
             }
@@ -2776,12 +2801,82 @@ mod tests {
 
     #[test]
     fn memory_probe_fusion_rewards_files_found_by_multiple_probes() {
-        let fused = fuse_memory_probe_hits(vec![
+        let fused = fuse_memory_probe_hits(
             vec![test_hit("a.md", 2.0), test_hit("b.md", 1.0)],
-            vec![test_hit("b.md", 2.0), test_hit("c.md", 1.0)],
-        ]);
+            vec![vec![test_hit("b.md", 2.0), test_hit("c.md", 1.0)]],
+            Some(20),
+        );
         assert_eq!(fused[0].file_path, PathBuf::from("b.md"));
         assert!(fused[0].sources.iter().any(|source| source == "memory"));
+    }
+
+    #[test]
+    fn memory_probe_fusion_anchors_the_original_ranking() {
+        let fused = fuse_memory_probe_hits(
+            vec![test_hit("z-original.md", 1.0)],
+            vec![vec![test_hit("a-probe.md", 1.0)]],
+            Some(20),
+        );
+        assert_eq!(fused[0].file_path, PathBuf::from("z-original.md"));
+    }
+
+    #[test]
+    fn memory_probe_fusion_preserves_original_when_all_probes_fail() {
+        let original = vec![test_hit("a.md", 2.0), test_hit("b.md", 1.0)];
+        let fused = fuse_memory_probe_hits(original, Vec::new(), Some(20));
+        assert_eq!(fused.len(), 2);
+        assert_eq!(fused[0].score, 2.0);
+        assert_eq!(fused[0].sources, vec!["test"]);
+    }
+
+    #[test]
+    fn memory_probe_fusion_respects_requested_file_limit() {
+        let fused = fuse_memory_probe_hits(
+            vec![test_hit("a.md", 2.0), test_hit("b.md", 1.0)],
+            vec![vec![test_hit("c.md", 2.0), test_hit("d.md", 1.0)]],
+            Some(2),
+        );
+        assert_eq!(group_hits_by_file(&fused, None).len(), 2);
+    }
+
+    #[test]
+    fn memory_probes_overfetch_with_a_bounded_limit() {
+        let request = DaemonRequest::Search {
+            path: None,
+            query: "original".to_string(),
+            limit: Some(20),
+            context: 2,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_path: None,
+            scope_is_file: false,
+            skip_gitignore: false,
+            force_neural: false,
+            disable_memory_expansion: false,
+        };
+        let DaemonRequest::Search {
+            query,
+            limit,
+            disable_memory_expansion,
+            ..
+        } = search_request_with_query(&request, "expanded".to_string())
+        else {
+            unreachable!();
+        };
+        assert_eq!(query, "expanded");
+        assert_eq!(limit, Some(MAX_MEMORY_PROBE_LIMIT));
+        assert!(disable_memory_expansion);
+    }
+
+    #[test]
+    fn memory_probe_queries_have_a_unicode_safe_length_bound() {
+        let query = "é".repeat(MAX_MEMORY_PROBE_QUERY_CHARS + 1);
+        let variants = memory_query_variants(&query);
+        assert_eq!(
+            variants[0].matches('é').count(),
+            MAX_MEMORY_PROBE_QUERY_CHARS
+        );
     }
 
     #[tokio::test]
