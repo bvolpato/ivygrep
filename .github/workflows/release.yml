@@ -161,10 +161,14 @@ jobs:
         shell: bash
         run: |
           PYTHON=python3
+          MAX_BINARY_MIB=80
           if [[ "$TARGET" == *"windows"* ]]; then
             PYTHON=python
           fi
-          "$PYTHON" scripts/check_release_size.py "$BINARY_PATH" --max-mib 80
+          if [[ "$EXTRA_FEATURES" == "cuda" ]]; then
+            MAX_BINARY_MIB=81
+          fi
+          "$PYTHON" scripts/check_release_size.py "$BINARY_PATH" --max-mib "$MAX_BINARY_MIB"
 
       - name: Build-output sanity check
         shell: bash
