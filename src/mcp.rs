@@ -879,6 +879,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
             scope_is_file: scope_filter.as_ref().is_some_and(|scope| scope.is_file),
             skip_gitignore: args.skip_gitignore.unwrap_or(false),
             force_neural: false,
+            disable_memory_expansion: false,
         })
     };
     let daemon_hits = if let Some(daemon_request) = daemon_request {

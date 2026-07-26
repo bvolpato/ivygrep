@@ -3,14 +3,14 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ivygrep - Task-aware repository context for coding agents</title>
-    <meta name="description" content="Turn a coding task and current Git branch into one bounded implementation map with changed files, code relationships, tests, configuration, and docs.">
+    <title>ivygrep - Local semantic search for code, notes, and agent context</title>
+    <meta name="description" content="Preindex code and notes for fast local semantic retrieval, then build bounded, branch-aware implementation context for coding agents.">
     <meta name="theme-color" content="#06070a">
     <link rel="canonical" href="https://bvolpato.github.io/ivygrep/">
 
     <!-- Open Graph -->
-    <meta property="og:title" content="ivygrep - Task-aware repository context for coding agents">
-    <meta property="og:description" content="Turn a task and current branch into one bounded implementation map with evidence for every selection.">
+    <meta property="og:title" content="ivygrep - Local semantic search for code and notes">
+    <meta property="og:description" content="Preindex code, notes, and memories for fast local retrieval. Build branch-aware context packs for coding agents.">
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://bvolpato.github.io/ivygrep/">
     <meta property="og:site_name" content="ivygrep">
@@ -21,8 +21,8 @@
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="ivygrep - Task-aware repository context for coding agents">
-    <meta name="twitter:description" content="Turn a task and current branch into one bounded implementation map with evidence for every selection.">
+    <meta name="twitter:title" content="ivygrep - Local semantic search for code and notes">
+    <meta name="twitter:description" content="Preindex code, notes, and memories for fast local retrieval. Build branch-aware context packs for coding agents.">
     <meta name="twitter:image" content="https://bvolpato.github.io/ivygrep/assets/hero-banner-social.png">
     <meta name="twitter:image:alt" content="ivygrep search and bounded task-context workflow">
 
@@ -33,7 +33,7 @@
       "name": "ivygrep",
       "url": "https://bvolpato.github.io/ivygrep/",
       "codeRepository": "https://github.com/bvolpato/ivygrep",
-      "description": "Local code search and bounded, branch-aware context packs for coding agents.",
+      "description": "Local semantic search for code, notes, and memories plus bounded, branch-aware context packs for coding agents.",
       "applicationCategory": "DeveloperApplication",
       "operatingSystem": "Linux, macOS, Windows",
       "isAccessibleForFree": true,
@@ -69,6 +69,7 @@
             </a>
             <div class="nav-links">
                 <a href="#features">Features</a>
+                <a href="#memory">Notes & Memory</a>
                 <a href="#context-packs">Context Packs</a>
                 <a href="#how-it-works">Architecture</a>
                 <a href="#performance">Evidence</a>
@@ -98,8 +99,8 @@
             <div class="hero-logo-container slide-up delay-1" style="margin-bottom: 2rem;">
                 <img src="assets/logo.svg" alt="ivygrep logo" class="hero-logo" width="190" height="200" onerror="this.src='assets/logo.png'"/>
             </div>
-            <h1 class="slide-up delay-1">Turn coding tasks into<br/><span class="highlight-gradient">focused repository context.</span></h1>
-            <p class="subtitle slide-up delay-2">One search for discovery. One implementation map from the task, current Git changes, and linked code. Every selection is explained. Everything stays local.</p>
+            <h1 class="slide-up delay-1">Search local knowledge.<br/><span class="highlight-gradient">Build focused context.</span></h1>
+            <p class="subtitle slide-up delay-2">Preindex code, notes, and memories for fast semantic retrieval. Turn coding tasks and current Git changes into one explained implementation map. Everything stays local.</p>
 
             <div class="cta-row slide-up delay-3">
                 <a href="#install" class="btn btn-primary">
@@ -206,12 +207,49 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
         </div>
     </section>
 
+    <!-- Notes and memory -->
+    <section id="memory" class="container relative z-10 section-spacing">
+        <div class="section-header">
+            <span class="section-tag">Beyond code</span>
+            <h2 class="section-title text-center">Preindex notes once. Retrieve memories by meaning.</h2>
+            <p class="text-center subtitle-small">Use same local index for Markdown vaults, research logs, meeting notes, decisions, and agent memories.</p>
+        </div>
+
+        <div class="glass-panel fade-in-scroll mt-4">
+            <div class="grid grid-2 align-center">
+                <div>
+                    <h3>Semantic recall without hosted search</h3>
+                    <p>Index a notes directory once and wait for local vectors. Later daemon-backed questions across CLI, MCP, Web, and TUI use default semantic + lexical retrieval, while watcher keeps changed notes current. Implicit questions over note-like results automatically add concurrent local memory probes. No semantic opt-in flag required.</p>
+                    <p>On public MemoryQuest benchmark, default CLI search retrieved <strong>73.8%</strong> of required memories in top 20 and found every required memory for <strong>43.2%</strong> of questions. Warm CLI p95 was <strong>117.08 ms</strong> across 535 implicit questions and 3,878 preindexed sessions.</p>
+                    <p class="benchmark-note">MemoryQuest uses synthetic personal-assistant conversations and measures retrieval, not final-answer correctness.</p>
+                    <p class="benchmark-links"><a href="benchmarks/public-memory-retrieval.html">Methodology and results</a><a href="benchmarks/public-memory-retrieval-results.json">Raw JSON</a></p>
+                </div>
+                <div class="install-code relative">
+                    <pre class="code-block"><span class="comment"># Build local semantic index once.</span>
+<span class="prompt">$</span> ig --add ~/notes --wait-for-enhancement
+
+<span class="comment"># Reuse it for memory retrieval.</span>
+<span class="prompt">$</span> ig -n 20 \
+  "what did we decide about cache invalidation?" \
+  ~/notes</pre>
+                    <button class="copy-btn" onclick="copyInstallCmd(this)">Copy</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="grid grid-3 mt-4">
+            <div class="glass-card fade-in-scroll"><h3>Local vaults</h3><p>Search Markdown, text, JSON, and other supported documents without uploading notes or queries.</p></div>
+            <div class="glass-card fade-in-scroll"><h3>Live memory</h3><p>Filesystem watcher updates changed chunks and vectors instead of rebuilding whole collection.</p></div>
+            <div class="glass-card fade-in-scroll"><h3>Inspect evidence</h3><p>Results preserve exact file paths, lines, scores, and previews so retrieved memories stay auditable.</p></div>
+        </div>
+    </section>
+
     <!-- Features -->
     <section id="features" class="container relative z-10 section-spacing">
         <div class="section-header">
             <span class="section-tag">Capabilities</span>
-            <h2 class="section-title text-center">Built for live repositories, not one-off searches</h2>
-            <p class="text-center subtitle-small">Task state, repository relationships, and incremental indexes stay connected across CLI, MCP, and Web.</p>
+            <h2 class="section-title text-center">Built for live knowledge, not one-off searches</h2>
+            <p class="text-center subtitle-small">Task state, repository relationships, notes, and incremental indexes stay connected across CLI, MCP, and Web.</p>
         </div>
 
         <div class="grid grid-3 mt-4">
@@ -243,7 +281,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">🧭</span></div>
                 <h3>Exact and semantic</h3>
-                <p>Move between natural-language intent, literal text, symbols, references, callers, paths, and project-wide search in one engine.</p>
+                <p>Move between semantic notes, natural-language code intent, literal text, symbols, references, callers, paths, and project-wide search.</p>
             </div>
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">🔁</span></div>
@@ -253,7 +291,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
             <div class="glass-card fade-in-scroll">
                 <div class="card-icon-wrap"><span class="card-icon-emoji">🔒</span></div>
                 <h3>Local by design</h3>
-                <p>No hosted inference or telemetry. Source, queries, embeddings, and indexes stay on your machine.</p>
+                <p>No hosted inference or telemetry. Code, notes, queries, embeddings, and indexes stay on your machine.</p>
             </div>
         </div>
 
@@ -659,7 +697,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
             <div class="footer-content">
                 <div class="footer-brand">
                     <img src="assets/icon.svg" alt="ivygrep" width="31" height="28" onerror="this.style.display='none'"/>
-                    <span class="footer-tagline">Turn code tasks into focused local context packs.</span>
+                    <span class="footer-tagline">Search code and notes. Build focused local context.</span>
                 </div>
                 <div class="footer-links">
                     <a href="https://github.com/bvolpato/ivygrep" class="footer-link">GitHub</a>

@@ -197,6 +197,9 @@ pub struct Cli {
     )]
     pub force_neural: bool,
 
+    #[arg(long, hide = true)]
+    pub no_memory_expansion_internal: bool,
+
     #[arg(long, hide = true, value_name = "PATH")]
     pub enhance_internal: Option<PathBuf>,
 
@@ -1714,6 +1717,7 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             scope_is_file,
             skip_gitignore: cli.skip_gitignore,
             force_neural: cli.force_neural,
+            disable_memory_expansion: cli.no_memory_expansion_internal || cli.hash,
         };
         let local_options = SearchOptions {
             limit: backend_limit,

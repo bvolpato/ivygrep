@@ -9,6 +9,8 @@ on:
     paths:
       - "benchmarks/public/**"
       - "scripts/eval_code_retrieval.py"
+      - "scripts/export_memoryquest.py"
+      - "scripts/render_memory_benchmark.py"
       - "scripts/export_public_retrieval.py"
       - "scripts/run_public_benchmark_matrix.py"
       - "scripts/bench_million_chunks.py"
@@ -24,8 +26,10 @@ on:
       - "tests/test_public_benchmark.py"
       - "tests/test_million_benchmark.py"
       - "tests/test_evidence_dashboard.py"
+      - "tests/test_memory_benchmark.py"
       - "benchmarks/evidence/**"
       - "docs/benchmarks/public-million*"
+      - "docs/benchmarks/public-memory-retrieval*"
       - "docs/benchmarks/evidence-dashboard*"
       - "docs/benchmarks/release-artifact-history.json"
       - ".github/workflows/public-retrieval.yml"
@@ -81,6 +85,7 @@ jobs:
             tests.test_eval_code_retrieval \
             tests.test_million_benchmark \
             tests.test_evidence_dashboard \
+            tests.test_memory_benchmark \
             -v
 
       - name: Verify benchmark dashboard
@@ -114,6 +119,8 @@ jobs:
             docs/benchmarks/public-million-current.json \
             docs/benchmarks/public-million-results.json \
             docs/benchmarks/public-million.html \
+            docs/benchmarks/public-memory-retrieval-results.json \
+            docs/benchmarks/public-memory-retrieval.html \
             docs/benchmarks/evidence-dashboard.json \
             docs/benchmarks/evidence-dashboard.html \
             docs/benchmarks/release-artifact-history.json

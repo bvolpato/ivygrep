@@ -594,6 +594,7 @@ fn build_search_request_for_path(
             scope_is_file,
             skip_gitignore,
             force_neural: false,
+            disable_memory_expansion: false,
         },
     })
 }

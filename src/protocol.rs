@@ -67,6 +67,8 @@ pub enum DaemonRequest {
         skip_gitignore: bool,
         #[serde(default)]
         force_neural: bool,
+        #[serde(default)]
+        disable_memory_expansion: bool,
     },
     RegexSearch {
         path: Option<PathBuf>,

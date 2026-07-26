@@ -1,9 +1,14 @@
-#!/usr/bin/env python3
-"""Evaluate ivygrep on BEIR/CoIR-style code retrieval datasets."""
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = []
+# ///
+"""Evaluate ivygrep on BEIR/CoIR-style retrieval datasets."""
 
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import math
@@ -62,15 +67,25 @@ def score_query(ranked: list[str], judgments: dict[str, int]) -> dict[str, float
         ),
         None,
     )
+
+    def recall(cutoff: int) -> float:
+        if not relevant:
+            return 0.0
+        return sum(doc_id in relevant for doc_id in ranked[:cutoff]) / len(relevant)
+
+    def exact(cutoff: int) -> float:
+        return float(bool(relevant) and relevant.issubset(ranked[:cutoff]))
+
     return {
         "ndcg_at_10": dcg(ranked, 10) / ideal_dcg if ideal_dcg else 0.0,
         "mrr_at_10": 1.0 / first_relevant if first_relevant else 0.0,
         "precision_at_5": sum(doc_id in relevant for doc_id in ranked[:5]) / 5.0,
-        "recall_at_20": (
-            sum(doc_id in relevant for doc_id in ranked[:20]) / len(relevant)
-            if relevant
-            else 0.0
-        ),
+        "recall_at_5": recall(5),
+        "recall_at_10": recall(10),
+        "recall_at_20": recall(20),
+        "exact_at_5": exact(5),
+        "exact_at_10": exact(10),
+        "exact_at_20": exact(20),
     }
 
 
@@ -80,7 +95,12 @@ def aggregate(scores: list[dict[str, float]]) -> dict[str, float]:
             "ndcg_at_10": 0.0,
             "mrr_at_10": 0.0,
             "precision_at_5": 0.0,
+            "recall_at_5": 0.0,
+            "recall_at_10": 0.0,
             "recall_at_20": 0.0,
+            "exact_at_5": 0.0,
+            "exact_at_10": 0.0,
+            "exact_at_20": 0.0,
         }
     return {key: sum(score[key] for score in scores) / len(scores) for key in scores[0]}
 
@@ -241,10 +261,37 @@ def run_json(
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        check=True,
     )
     elapsed_ms = (time.perf_counter() - started) * 1000.0
+    if completed.returncode != 0:
+        stderr = completed.stderr.strip()
+        raise RuntimeError(
+            f"command failed ({completed.returncode}): {' '.join(command)}"
+            + (f"\n{stderr}" if stderr else "")
+        )
     return json.loads(completed.stdout), elapsed_ms
+
+
+def run_search_commands(
+    commands: list[list[str]],
+    cwd: Path,
+    env: dict[str, str],
+    max_workers: int,
+) -> tuple[list[object], float]:
+    started = time.perf_counter()
+    if len(commands) == 1 or max_workers == 1:
+        outputs = [run_json(command, cwd, env)[0] for command in commands]
+    else:
+        with ThreadPoolExecutor(
+            max_workers=min(max_workers, len(commands))
+        ) as executor:
+            outputs = list(
+                executor.map(
+                    lambda command: run_json(command, cwd, env)[0],
+                    commands,
+                )
+            )
+    return outputs, (time.perf_counter() - started) * 1000.0
 
 
 def query_args(mode: str) -> list[str]:
@@ -268,16 +315,96 @@ def query_text(query: dict, max_query_chars: int | None) -> str:
     return text
 
 
-def search_command(binary: Path, mode: str, limit: int, query: str) -> list[str]:
-    return [
+def expanded_query_texts(text: str, profile: str) -> list[str]:
+    if profile == "none":
+        return [text]
+    facets = {
+        "memory-context": (
+            f"Personal context, prior preferences, constraints, and commitments relevant to: {text}"
+        ),
+        "memory-history": (
+            f"Past events, current plans, dependencies, and unresolved decisions relevant to: {text}"
+        ),
+        "memory-action": (
+            f"Information needed before deciding, responding, or acting on: {text}"
+        ),
+    }
+    if profile in facets:
+        return [text, facets[profile]]
+    if profile != "memory-facets":
+        raise ValueError(f"unsupported query expansion profile {profile}")
+    return [text, *facets.values()]
+
+
+def fuse_search_outputs(outputs: list[list[dict]]) -> list[dict]:
+    scores: dict[str, float] = {}
+    selected: dict[str, dict] = {}
+    for output in outputs:
+        for rank, item in enumerate(output):
+            path = str(item.get("file_path", ""))
+            if not path:
+                continue
+            scores[path] = scores.get(path, 0.0) + 1.0 / (60.0 + rank + 1.0)
+            selected.setdefault(path, item)
+    ranked = sorted(scores, key=lambda path: (-scores[path], path))
+    fused = []
+    for path in ranked:
+        item = dict(selected[path])
+        item["total_score"] = scores[path]
+        fused.append(item)
+    return fused
+
+
+def query_scope(query: dict, repo: Path) -> str | None:
+    raw_scope = (query.get("metadata") or {}).get("scope")
+    if raw_scope is None:
+        return None
+    relative = Path(str(raw_scope))
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"unsafe query scope: {raw_scope}")
+    scope = repo / relative
+    if not scope.is_dir():
+        raise ValueError(f"query scope does not exist: {raw_scope}")
+    return f"{relative.as_posix().rstrip('/')}/**"
+
+
+def query_exclude_globs(query: dict, repo: Path) -> list[str]:
+    raw_globs = (query.get("metadata") or {}).get("exclude_globs") or []
+    excludes = []
+    for raw_glob in raw_globs:
+        relative = Path(str(raw_glob))
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError(f"unsafe query exclude glob: {raw_glob}")
+        if not (repo / relative).is_file():
+            raise ValueError(f"query exclude path does not exist: {raw_glob}")
+        excludes.append(relative.as_posix())
+    return excludes
+
+
+def search_command(
+    binary: Path,
+    mode: str,
+    limit: int,
+    query: str,
+    scope: str | None = None,
+    exclude_globs: list[str] | None = None,
+    disable_memory_expansion: bool = False,
+) -> list[str]:
+    command = [
         str(binary),
         "--json",
         "-n",
         str(limit),
         *query_args(mode),
-        "--",
-        query,
     ]
+    if scope is not None:
+        command.extend(["--include", scope])
+    for exclude_glob in exclude_globs or []:
+        command.extend(["--exclude", exclude_glob])
+    if disable_memory_expansion:
+        command.append("--no-memory-expansion-internal")
+    command.extend(["--", query])
+    return command
 
 
 def daemon_endpoint_path(home: Path) -> Path:
@@ -391,8 +518,21 @@ def evaluate(args: argparse.Namespace) -> dict:
         for query in process_cold_queries(args.mode, queries):
             query_id = str(query["_id"])
             text = query_text(query, args.max_query_chars)
-            command = search_command(binary, args.mode, args.limit, text)
-            _, cold_latencies[query_id] = run_json(command, repo, env)
+            cold_ms = 0.0
+            for expanded_text in expanded_query_texts(text, args.query_expansion):
+                command = search_command(
+                    binary,
+                    args.mode,
+                    args.limit,
+                    expanded_text,
+                    query_scope(query, repo),
+                    query_exclude_globs(query, repo),
+                    args.disable_memory_expansion
+                    or args.query_expansion != "none",
+                )
+                _, elapsed_ms = run_json(command, repo, env)
+                cold_ms += elapsed_ms
+            cold_latencies[query_id] = cold_ms
 
         daemon_env = env.copy()
         daemon_env.pop("IVYGREP_NO_AUTOSPAWN", None)
@@ -461,15 +601,38 @@ def evaluate(args: argparse.Namespace) -> dict:
             for query in queries:
                 query_id = str(query["_id"])
                 text = query_text(query, args.max_query_chars)
-                command = search_command(binary, args.mode, args.limit, text)
-
                 cold_ms = cold_latencies.get(query_id)
-                warm_output, warm_ms = run_json(command, repo, daemon_env)
+                commands = [
+                    search_command(
+                        binary,
+                        args.mode,
+                        args.limit,
+                        expanded_text,
+                        query_scope(query, repo),
+                        query_exclude_globs(query, repo),
+                        args.disable_memory_expansion
+                        or args.query_expansion != "none",
+                    )
+                    for expanded_text in expanded_query_texts(
+                        text,
+                        args.query_expansion,
+                    )
+                ]
+                warm_outputs, warm_ms = run_search_commands(
+                    commands,
+                    repo,
+                    daemon_env,
+                    args.query_expansion_workers,
+                )
+                warm_output = fuse_search_outputs(warm_outputs)
                 ranked = []
                 ranked_hits = []
                 seen: set[str] = set()
                 query_hits = [
-                    hit for item in warm_output for hit in item.get("hits", [])
+                    hit
+                    for output in warm_outputs
+                    for item in output
+                    for hit in item.get("hits", [])
                 ]
                 query_sources = {
                     str(source)
@@ -601,6 +764,9 @@ def evaluate(args: argparse.Namespace) -> dict:
                 "neural_model_ready_ms": neural_model_ready_ms,
                 "warm_query_path": warm_query_path(args.mode),
                 "query_text_limit": args.max_query_chars,
+                "query_expansion": args.query_expansion,
+                "query_expansion_workers": args.query_expansion_workers,
+                "memory_expansion_disabled": args.disable_memory_expansion,
                 "retrieval_provenance": {
                     "force_neural": args.mode == "neural",
                     "mode_semantics": (
@@ -644,12 +810,27 @@ def main() -> int:
     )
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--max-query-chars", type=int)
+    parser.add_argument(
+        "--query-expansion",
+        choices=[
+            "none",
+            "memory-context",
+            "memory-history",
+            "memory-action",
+            "memory-facets",
+        ],
+        default="none",
+    )
+    parser.add_argument("--query-expansion-workers", type=int, default=4)
+    parser.add_argument("--disable-memory-expansion", action="store_true")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--min-ndcg-at-10", type=float, default=0.0)
     parser.add_argument("--min-mrr-at-10", type=float, default=0.0)
     parser.add_argument("--min-precision-at-5", type=float, default=0.0)
     parser.add_argument("--min-recall-at-20", type=float, default=0.0)
     args = parser.parse_args()
+    if args.query_expansion_workers < 1:
+        parser.error("--query-expansion-workers must be positive")
     if args.max_query_chars is not None and args.max_query_chars < 1:
         raise SystemExit("--max-query-chars must be positive")
 

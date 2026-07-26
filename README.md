@@ -92,6 +92,19 @@ ig --web "auth flow" .                       # local Web UI
 
 Useful controls include `-n` for result files, `-C` for context lines, `--type` for language, `--include` and `--exclude` for path globs, plus `--lexical-only`, `--hash`, `--json`, and `--no-index`. Run `ig --help` for the full reference.
 
+## Search notes and memories
+
+ivygrep also indexes Markdown, text, JSON, and other document files. Precompute local vectors once, then search a notes directory by meaning:
+
+```bash
+ig --add ~/notes --wait-for-enhancement
+ig -n 20 "what did we decide about cache invalidation?" ~/notes
+```
+
+Default daemon-backed queries across CLI, MCP, Web, and TUI blend semantic and lexical retrieval; no semantic opt-in flag is required. For implicit questions whose initial results are overwhelmingly note-like files, ivygrep automatically runs three generic local memory probes concurrently and fuses their ranks. The index stays live as notes change. Queries, note contents, embeddings, and results stay local.
+
+On the public [MemoryQuest benchmark](https://bvolpato.github.io/ivygrep/benchmarks/public-memory-retrieval.html), default CLI search retrieved 73.8% of required memories in the top 20 and retrieved every required memory for 43.2% of questions. Warm CLI p95 was 117.08 ms across 535 implicit questions and 3,878 preindexed sessions. Report documents protocol, single-query control, published reference points, and comparability limits.
+
 ## Connect coding agents
 
 Codex and Claude Code packages install MCP configuration plus focused task-context skill:
