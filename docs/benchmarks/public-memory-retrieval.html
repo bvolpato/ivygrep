@@ -22,18 +22,18 @@
             <p>MemoryQuest sessions become 3,878 local Markdown notes across 50 users. 535 natural questions test retrieval of 2,029 required memories.</p>
         </section>
         <section class="report-grid">
-            <div class="report-stat"><strong>73.8%</strong><span>default recall@20</span></div>
-            <div class="report-stat"><strong>43.2%</strong><span>complete recall@20</span></div>
-            <div class="report-stat"><strong>145.28 ms</strong><span>warm default p95</span></div>
+            <div class="report-stat"><strong>74.9%</strong><span>default recall@20</span></div>
+            <div class="report-stat"><strong>44.9%</strong><span>complete recall@20</span></div>
+            <div class="report-stat"><strong>86.05 ms</strong><span>warm default p95</span></div>
             <div class="report-stat"><strong>3,878</strong><span>preindexed sessions</span></div>
         </section>
         <section class="report-card">
             <h2>Aggregate results</h2>
             <div class="report-table-wrap"><table class="report-table">
                 <thead><tr><th>Mode</th><th>Recall@10</th><th>Recall@20</th><th>Exact@20</th><th>nDCG@10</th><th>Warm p95</th></tr></thead>
-                <tbody><tr><td><code>lexical</code></td><td>52.9%</td><td>70.2%</td><td>35.1%</td><td>0.4145</td><td>49.06 ms</td></tr><tr><td><code>blended</code></td><td>54.6%</td><td>73.8%</td><td>43.2%</td><td>0.4239</td><td>145.28 ms</td></tr><tr><td><code>forced neural</code></td><td>52.1%</td><td>71.1%</td><td>35.9%</td><td>0.4129</td><td>55.05 ms</td></tr></tbody>
+                <tbody><tr><td><code>lexical</code></td><td>52.9%</td><td>70.2%</td><td>35.1%</td><td>0.4145</td><td>35.81 ms</td></tr><tr><td><code>blended</code></td><td>54.5%</td><td>74.9%</td><td>44.9%</td><td>0.4274</td><td>86.05 ms</td></tr><tr><td><code>forced neural</code></td><td>52.1%</td><td>71.0%</td><td>35.9%</td><td>0.4129</td><td>33.14 ms</td></tr></tbody>
             </table></div>
-            <p><code>blended</code> is default daemon-backed semantic + lexical routing across CLI, MCP, Web, and TUI. When an implicit natural-language question initially returns overwhelmingly note-like files, default search runs three generic local memory probes concurrently and fuses file ranks. <code>forced neural</code> disables this adaptive path and runs neural retrieval for every query. <code>lexical</code> disables vectors.</p>
+            <p><code>blended</code> is default daemon-backed semantic + lexical routing across CLI, MCP, Web, and TUI. When an implicit natural-language question initially returns overwhelmingly note-like files, default search runs two generic local memory probes concurrently and fuses file ranks. <code>forced neural</code> disables this adaptive path and runs neural retrieval for every query. <code>lexical</code> disables vectors.</p>
         </section>
         <section class="report-card">
             <h2>Method</h2>
@@ -48,9 +48,9 @@
         </section>
         <section class="report-card">
             <h2>Where recall is still lost</h2>
-            <p>Depth is largest measured ranking gap: default recall rises from 54.6% at 10 to 73.8% at 20. MemoryQuest intentionally makes required memories semantically distant from query and requires three or four sessions per question.</p>
-            <p>Forcing neural retrieval on every query reaches 71.1%, 2.7 percentage points below default. Default's gain comes from prospective rank fusion, not simply forcing existing vector pass. Remaining misses need better probe selection or structured fact memory.</p>
-            <p>Same-binary single-query control reaches 70.8% recall@20 and 36.3% complete recall@20 at 33.64 ms p95. Automatic local probes add 3.0 recall points and 6.9 complete-recall points.</p>
+            <p>Depth is largest measured ranking gap: default recall rises from 54.5% at 10 to 74.9% at 20. MemoryQuest intentionally makes required memories semantically distant from query and requires three or four sessions per question.</p>
+            <p>Forcing neural retrieval on every query reaches 71.0%, 3.9 percentage points below default. Default's gain comes from prospective rank fusion, not simply forcing existing vector pass. Remaining misses need better probe selection or structured fact memory.</p>
+            <p>Same-binary single-query control reaches 70.8% recall@20 and 36.3% complete recall@20 at 30.03 ms p95. Automatic local probes add 4.1 recall points and 8.6 complete-recall points.</p>
         </section>
         <section class="report-card">
             <h2>What this establishes</h2>
@@ -65,7 +65,7 @@ uv run scripts/eval_code_retrieval.py --dataset /tmp/ivygrep-memoryquest --binar
 uv run scripts/eval_code_retrieval.py --dataset /tmp/ivygrep-memoryquest --binary target/release/ig --mode neural --output /tmp/memoryquest-neural.json
 
 uv run scripts/eval_code_retrieval.py --dataset /tmp/ivygrep-memoryquest --binary target/release/ig --mode blended --disable-memory-expansion --output /tmp/memoryquest-blended-control.json
-uv run scripts/render_memory_benchmark.py --dataset /tmp/ivygrep-memoryquest --result /tmp/memoryquest-lexical.json --result /tmp/memoryquest-blended.json --result /tmp/memoryquest-neural.json --control-result /tmp/memoryquest-blended-control.json --source-commit 02f0fa13762e4f95c4b73bc7eaf2bfd0bf2b002f --output-json docs/benchmarks/public-memory-retrieval-results.json --output-html docs/benchmarks/public-memory-retrieval.html</code></pre>
+uv run scripts/render_memory_benchmark.py --dataset /tmp/ivygrep-memoryquest --result /tmp/memoryquest-lexical.json --result /tmp/memoryquest-blended.json --result /tmp/memoryquest-neural.json --control-result /tmp/memoryquest-blended-control.json --source-commit 3891ae4db35b6e52bd18f353a7b83c82f6394966 --output-json docs/benchmarks/public-memory-retrieval-results.json --output-html docs/benchmarks/public-memory-retrieval.html</code></pre>
         </section>
     </main>
 </body>
