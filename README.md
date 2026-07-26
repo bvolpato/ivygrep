@@ -178,7 +178,7 @@ ivygrep supports 45 language and file types. Twenty-four use Tree-sitter AST chu
 
 ## System performance
 
-On the deterministic one-million-chunk corpus, v1.2.6 median warm CLI p95 is 13.73 ms, controlled indexing reaches 159,649 chunks/s, and the final index is 0.42 GiB across three sequential trials. These are system measurements, not agent outcomes. Hardware, repository shape, model, index state, and load affect results.
+On the deterministic one-million-chunk corpus, v1.2.7 median warm CLI p95 is 6.19 ms, controlled indexing reaches 150,576 chunks/s, and the final index is 0.42 GiB across three sequential trials. These are system measurements, not agent outcomes. Hardware, repository shape, model, index state, and load affect results.
 
 [Current-release evidence](https://bvolpato.github.io/ivygrep/benchmarks/public-million-current.json) · [Million-chunk methodology and historical paired study](https://bvolpato.github.io/ivygrep/benchmarks/public-million.html) · [Full benchmark dashboard](https://bvolpato.github.io/ivygrep/benchmarks/evidence-dashboard.html)
 

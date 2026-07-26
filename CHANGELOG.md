@@ -22,7 +22,7 @@ All notable changes to ivygrep are documented in this file.
 ### Testing
 - Context relevance CI now gates test-file recall, and curated fixtures can label relevant unchanged paths against pinned base trees. Independent reports record retained and rejected context, indexing, neural, readiness, and agent-outcome experiments.
 - Context relevance runs against frozen tasks in clean pre-change worktrees and gates recall, primary recall, zero-recall rate, relationship-role coverage, and recall per 1,000 tokens.
-- Current-release million-chunk evidence publishes three complete v1.2.6 trials and checks package version plus every reported median.
+- Current-release million-chunk evidence publishes three complete v1.2.7 trials and checks package version plus every reported median.
 
 ### Documentation
 - README and site lead with code, notes, memory retrieval, and bounded context examples, current registry availability, a functional workflow hero, canonical integration pages, and current-release benchmark evidence.

@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-07-22T04:01:16.128275+00:00",
+  "generated_at": "2026-07-26T05:34:02.411665+00:00",
   "description": "Current-release confirmation. Values are medians from three sequential trials against the same deterministic CC0 corpus.",
   "binary": {
-    "version": "ivygrep 1.2.6",
-    "sha256": "6e34b19e5b1c54539e9baa2e76ded4a9f5de902510e5984e3c694b1d127994dd",
-    "commit": "6924491a999a4c3c6d052e4c63df5ebe7f173775"
+    "version": "ivygrep 1.2.7",
+    "sha256": "72c15459f0851ca7c7557c5abfe80e1ab42e8dfdf946902d923a98f376de7293",
+    "commit": "73d38ffd9e99de171dfb92ea4540fe0972e4efba"
   },
   "harness": {
     "command": "uv run scripts/bench_million_chunks.py --files 10000 --query-samples 100",
@@ -24,48 +24,48 @@
     "system": "Linux",
     "machine": "x86_64",
     "logical_cpus": 32,
-    "physical_memory_bytes": 134966108160
+    "physical_memory_bytes": 130150158336
   },
   "median": {
-    "index_wall_ms": 6263.751178000348,
-    "chunks_per_second": 159648.90232425265,
-    "index_size_bytes": 446936323,
-    "peak_rss_bytes": 296198144,
-    "warm_cli_p95_ms": 13.7253540005986,
-    "warm_engine_p95_ms": 0.6212179996509803,
-    "process_cold_p95_ms": 20.007065000754665,
-    "concurrent_queries_per_second": 2498.4978757966805
+    "index_wall_ms": 6641.185951011721,
+    "chunks_per_second": 150575.66636086427,
+    "index_size_bytes": 446602717,
+    "peak_rss_bytes": 306552832,
+    "warm_cli_p95_ms": 6.190246029291302,
+    "warm_engine_p95_ms": 0.31835504341870546,
+    "process_cold_p95_ms": 9.290598973166198,
+    "concurrent_queries_per_second": 5830.376308265339
   },
   "trials": [
     {
-      "index_wall_ms": 6456.3263480004025,
-      "chunks_per_second": 154886.99704743267,
-      "index_size_bytes": 447042168,
-      "peak_rss_bytes": 296534016,
-      "warm_cli_p95_ms": 15.42728200001875,
-      "warm_engine_p95_ms": 0.7904690000941628,
-      "process_cold_p95_ms": 20.007065000754665,
-      "concurrent_queries_per_second": 2498.4978757966805
+      "index_wall_ms": 6433.595579001121,
+      "chunks_per_second": 155434.23389308844,
+      "index_size_bytes": 446536460,
+      "peak_rss_bytes": 306044928,
+      "warm_cli_p95_ms": 6.058525003027171,
+      "warm_engine_p95_ms": 0.31835504341870546,
+      "process_cold_p95_ms": 9.525233006570488,
+      "concurrent_queries_per_second": 6251.463365822784
     },
     {
-      "index_wall_ms": 6263.751178000348,
-      "chunks_per_second": 159648.90232425265,
-      "index_size_bytes": 446936323,
-      "peak_rss_bytes": 296198144,
-      "warm_cli_p95_ms": 13.7253540005986,
-      "warm_engine_p95_ms": 0.6212179996509803,
-      "process_cold_p95_ms": 20.987830000194663,
-      "concurrent_queries_per_second": 2410.3366987852887
+      "index_wall_ms": 6641.185951011721,
+      "chunks_per_second": 150575.66636086427,
+      "index_size_bytes": 446602717,
+      "peak_rss_bytes": 306552832,
+      "warm_cli_p95_ms": 6.190246029291302,
+      "warm_engine_p95_ms": 0.41552598122507334,
+      "process_cold_p95_ms": 8.111622009892017,
+      "concurrent_queries_per_second": 5292.747213994963
     },
     {
-      "index_wall_ms": 5945.960330999696,
-      "chunks_per_second": 168181.57948118524,
-      "index_size_bytes": 446856780,
-      "peak_rss_bytes": 293470208,
-      "warm_cli_p95_ms": 12.602339999830292,
-      "warm_engine_p95_ms": 0.5863970000064,
-      "process_cold_p95_ms": 19.210739999834914,
-      "concurrent_queries_per_second": 2771.43427268241
+      "index_wall_ms": 6840.590286010411,
+      "chunks_per_second": 146186.36085325666,
+      "index_size_bytes": 446706821,
+      "peak_rss_bytes": 309780480,
+      "warm_cli_p95_ms": 6.692723021842539,
+      "warm_engine_p95_ms": 0.24715298786759377,
+      "process_cold_p95_ms": 9.290598973166198,
+      "concurrent_queries_per_second": 5830.376308265339
     }
   ]
 }
