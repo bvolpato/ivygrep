@@ -28,8 +28,9 @@ use crate::protocol::{
 };
 use crate::regex_search::regex_search;
 use crate::search::{
-    NeuralQueryVectorJob, SearchContext, SearchOptions, hybrid_search_with_context_and_neural_job,
-    literal_search_with_context, query_uses_neural, workspace_neural_model_identity,
+    DEFAULT_SEARCH_LIMIT, NeuralQueryVectorJob, SearchContext, SearchOptions,
+    hybrid_search_with_context_and_neural_job, literal_search_with_context, query_uses_neural,
+    workspace_neural_model_identity,
 };
 use crate::workspace::{Workspace, WorkspaceIndexState, WorkspaceScope, list_workspaces};
 
@@ -140,7 +141,7 @@ fn fuse_memory_probe_hits(
     }
 
     let mut scores = HashMap::<PathBuf, f32>::new();
-    let mut selected = HashMap::<PathBuf, Vec<SearchHit>>::new();
+    let mut selected = HashMap::<PathBuf, SearchHit>::new();
     for (output_index, output) in std::iter::once(original).chain(probes).enumerate() {
         let weight = if output_index == 0 {
             MEMORY_ORIGINAL_RRF_WEIGHT
@@ -149,7 +150,17 @@ fn fuse_memory_probe_hits(
         };
         for (rank, file) in group_hits_by_file(&output, None).into_iter().enumerate() {
             *scores.entry(file.file_path.clone()).or_default() += weight / (61 + rank) as f32;
-            selected.entry(file.file_path).or_insert(file.hits);
+            let Some(candidate) = file.hits.into_iter().next() else {
+                continue;
+            };
+            selected
+                .entry(file.file_path)
+                .and_modify(|current| {
+                    if candidate.score.total_cmp(&current.score).is_gt() {
+                        current.clone_from(&candidate);
+                    }
+                })
+                .or_insert(candidate);
         }
     }
     let mut ranked = scores.into_iter().collect::<Vec<_>>();
@@ -158,19 +169,14 @@ fn fuse_memory_probe_hits(
     });
     ranked
         .into_iter()
-        .take(limit.unwrap_or(usize::MAX))
-        .flat_map(|(path, score)| {
-            let mut hits = selected.remove(&path).unwrap_or_default();
-            if let Some(first) = hits.first_mut() {
-                first.score = score;
-                if !first.sources.iter().any(|source| source == "memory") {
-                    first.sources.push("memory".to_string());
-                }
+        .take(limit.unwrap_or(DEFAULT_SEARCH_LIMIT))
+        .filter_map(|(path, score)| {
+            let mut hit = selected.remove(&path)?;
+            hit.score = score;
+            if !hit.sources.iter().any(|source| source == "memory") {
+                hit.sources.push("memory".to_string());
             }
-            for hit in hits.iter_mut().skip(1) {
-                hit.score = 0.0;
-            }
-            hits
+            Some(hit)
         })
         .collect()
 }
@@ -2769,11 +2775,15 @@ mod tests {
     }
 
     fn test_hit(path: &str, score: f32) -> SearchHit {
+        test_hit_at(path, score, 1, path)
+    }
+
+    fn test_hit_at(path: &str, score: f32, start_line: usize, preview: &str) -> SearchHit {
         SearchHit {
             file_path: PathBuf::from(path),
-            start_line: 1,
-            end_line: 2,
-            preview: path.to_string(),
+            start_line,
+            end_line: start_line + 1,
+            preview: preview.to_string(),
             reason: String::new(),
             score,
             sources: vec!["test".to_string()],
@@ -2822,6 +2832,21 @@ mod tests {
     }
 
     #[test]
+    fn memory_probe_fusion_keeps_the_best_matching_snippet() {
+        let fused = fuse_memory_probe_hits(
+            vec![test_hit_at("a.md", 0.2, 1, "original passage")],
+            vec![
+                vec![test_hit_at("a.md", 0.9, 20, "matching memory")],
+                vec![test_hit_at("a.md", 0.7, 30, "other memory")],
+            ],
+            Some(20),
+        );
+        assert_eq!(fused.len(), 1);
+        assert_eq!(fused[0].start_line, 20);
+        assert_eq!(fused[0].preview, "matching memory");
+    }
+
+    #[test]
     fn memory_probe_fusion_anchors_the_original_ranking() {
         let fused = fuse_memory_probe_hits(
             vec![test_hit("z-original.md", 1.0)],
@@ -2848,6 +2873,19 @@ mod tests {
             Some(2),
         );
         assert_eq!(group_hits_by_file(&fused, None).len(), 2);
+    }
+
+    #[test]
+    fn memory_probe_fusion_respects_default_file_limit() {
+        let original = (0..60)
+            .map(|index| test_hit(&format!("original-{index}.md"), 100.0 - index as f32))
+            .collect();
+        let probe = (0..60)
+            .map(|index| test_hit(&format!("probe-{index}.md"), 100.0 - index as f32))
+            .collect();
+        let fused = fuse_memory_probe_hits(original, vec![probe], None);
+        assert_eq!(fused.len(), DEFAULT_SEARCH_LIMIT);
+        assert_eq!(group_hits_by_file(&fused, None).len(), DEFAULT_SEARCH_LIMIT);
     }
 
     #[test]
