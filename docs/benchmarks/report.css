@@ -99,6 +99,7 @@ body.report-page {
 }
 
 .report-card {
+  min-width: 0;
   padding: 1.25rem;
   margin: 1rem 0;
 }
@@ -112,6 +113,17 @@ body.report-page {
 .report-card li {
   color: var(--text-muted);
   line-height: 1.65;
+}
+
+.report-card pre {
+  max-width: 100%;
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.report-card pre code {
+  white-space: inherit;
 }
 
 .report-table-wrap {
