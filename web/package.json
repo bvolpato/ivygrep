@@ -9,9 +9,9 @@
   },
   "devDependencies": {
     "@types/markdown-it": "^14.1.2",
-    "typescript": "^5.9.3",
-    "vite": "^7.2.7",
-    "vitest": "^3.2.4"
+    "typescript": "^7.0.2",
+    "vite": "^8.1.5",
+    "vitest": "^4.1.10"
   },
   "dependencies": {
     "highlight.js": "^11.11.1",
