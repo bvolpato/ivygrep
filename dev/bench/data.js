@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785049176078,
+  "lastUpdate": 1785217325060,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -40939,6 +40939,185 @@ window.BENCHMARK_DATA = {
           {
             "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
             "value": 2621.98,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "49699333+dependabot[bot]@users.noreply.github.com",
+            "name": "dependabot[bot]",
+            "username": "dependabot[bot]"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "ce08e17c81a817aaa184e6b53ac8dc59bcca7116",
+          "message": "chore(deps): bump the cargo group with 7 updates (#199)\n\nBumps the cargo group with 7 updates:\n\n| Package | From | To |\n| --- | --- | --- |\n| [clap](https://github.com/clap-rs/clap) | `4.6.2` | `4.6.3` |\n| [ignore](https://github.com/BurntSushi/ripgrep) | `0.4.30` | `0.4.31` |\n| [serde_json](https://github.com/serde-rs/json) | `1.0.150` | `1.0.151` |\n| [tokio](https://github.com/tokio-rs/tokio) | `1.53.0` | `1.53.1` |\n| [libc](https://github.com/rust-lang/libc) | `0.2.186` | `0.2.189` |\n| [xxhash-rust](https://github.com/DoumanAsh/xxhash-rust) | `0.8.17` | `0.8.18` |\n| [serial_test](https://github.com/palfrey/serial_test) | `3.5.0` | `4.0.1` |\n\n\nUpdates `clap` from 4.6.2 to 4.6.3\n- [Release notes](https://github.com/clap-rs/clap/releases)\n- [Changelog](https://github.com/clap-rs/clap/blob/master/CHANGELOG.md)\n- [Commits](https://github.com/clap-rs/clap/compare/clap_complete-v4.6.2...clap_complete-v4.6.3)\n\nUpdates `ignore` from 0.4.30 to 0.4.31\n- [Release notes](https://github.com/BurntSushi/ripgrep/releases)\n- [Changelog](https://github.com/BurntSushi/ripgrep/blob/master/CHANGELOG.md)\n- [Commits](https://github.com/BurntSushi/ripgrep/compare/ignore-0.4.30...ignore-0.4.31)\n\nUpdates `serde_json` from 1.0.150 to 1.0.151\n- [Release notes](https://github.com/serde-rs/json/releases)\n- [Commits](https://github.com/serde-rs/json/compare/v1.0.150...v1.0.151)\n\nUpdates `tokio` from 1.53.0 to 1.53.1\n- [Release notes](https://github.com/tokio-rs/tokio/releases)\n- [Commits](https://github.com/tokio-rs/tokio/compare/tokio-1.53.0...tokio-1.53.1)\n\nUpdates `libc` from 0.2.186 to 0.2.189\n- [Release notes](https://github.com/rust-lang/libc/releases)\n- [Changelog](https://github.com/rust-lang/libc/blob/0.2.189/CHANGELOG.md)\n- [Commits](https://github.com/rust-lang/libc/compare/0.2.186...0.2.189)\n\nUpdates `xxhash-rust` from 0.8.17 to 0.8.18\n- [Commits](https://github.com/DoumanAsh/xxhash-rust/commits)\n\nUpdates `serial_test` from 3.5.0 to 4.0.1\n- [Release notes](https://github.com/palfrey/serial_test/releases)\n- [Commits](https://github.com/palfrey/serial_test/compare/v3.5.0...v4.0.1)\n\n---\nupdated-dependencies:\n- dependency-name: clap\n  dependency-version: 4.6.3\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: ignore\n  dependency-version: 0.4.31\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: serde_json\n  dependency-version: 1.0.151\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: tokio\n  dependency-version: 1.53.1\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: libc\n  dependency-version: 0.2.189\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: xxhash-rust\n  dependency-version: 0.8.18\n  dependency-type: direct:production\n  update-type: version-update:semver-patch\n  dependency-group: cargo\n- dependency-name: serial_test\n  dependency-version: 4.0.1\n  dependency-type: direct:production\n  update-type: version-update:semver-major\n  dependency-group: cargo\n...\n\nSigned-off-by: dependabot[bot] <support@github.com>\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>\nCo-authored-by: Bruno Volpato <brunocvcunha@gmail.com>",
+          "timestamp": "2026-07-28T00:47:17-04:00",
+          "tree_id": "2d68bdd964fc49b2d55f98e7b96701008b22cb80",
+          "url": "https://github.com/bvolpato/ivygrep/commit/ce08e17c81a817aaa184e6b53ac8dc59bcca7116"
+        },
+        "date": 1785217324548,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 44880.43,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 2739.19,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/worktree_overlay_one_file_delta",
+            "value": 41854.51,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer_bulk/fresh_index_30k_chunks",
+            "value": 196601.78,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_small_file",
+            "value": 11.78,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 1806.99,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 1444.58,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 5111.37,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 4824.63,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 1.92,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 130.86,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 4253.45,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 1247.51,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 1090.05,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_simple_symbol_1000_files",
+            "value": 2746.32,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_complex_phrase_1000_files",
+            "value": 2839.76,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/bounded_rerank_100_candidates_1000_files",
+            "value": 3132.45,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/literal_simple_symbol_1000_files",
+            "value": 559.36,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/regex_symbol_1000_files",
+            "value": 1875.42,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 471385.58,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 120.29,
+            "unit": "µs"
+          },
+          {
+            "name": "hash_vector_build/ingest_5k_hash_vectors",
+            "value": 103898.62,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_one_file_change_10k_chunks",
+            "value": 16380.28,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_100_file_burst_10k_chunks",
+            "value": 102337.94,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/quick_health_cached_10k_chunks",
+            "value": 234.99,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k",
+            "value": 750.64,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k_hot",
+            "value": 22.49,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_top_50_in_50k_hot",
+            "value": 5211.28,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/500",
+            "value": 105.26,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/5000",
+            "value": 586.8,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
+            "value": 2652.82,
             "unit": "µs"
           }
         ]
