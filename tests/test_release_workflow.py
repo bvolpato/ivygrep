@@ -178,6 +178,25 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("StaticEmbedding token mean via Rust", windows_acceptance)
         self.assertIn("HTTP_PROXY=http://127.0.0.1:9", windows_acceptance)
 
+    def test_release_accepts_exact_installer_inputs(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("IVYGREP_INSTALL_ARCHIVE", workflow)
+        self.assertIn("IVYGREP_INSTALL_CHECKSUM", workflow)
+        self.assertIn("Validate exact Unix installer artifact", workflow)
+        self.assertIn("Validate exact PowerShell installer artifact", workflow)
+        self.assertIn("echo \"archive=$ARCHIVE\"", workflow)
+        self.assertIn("echo \"checksum=$CHECKSUM\"", workflow)
+
+    def test_cuda_release_acceptance_checks_backend_or_explicit_cpu_fallback(self) -> None:
+        workflow = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+        cuda = workflow.split(
+            "- name: Validate Linux CUDA backend and semantic retrieval", maxsplit=1
+        )[1].split("- name: Run exact Linux aarch64 archive under QEMU", maxsplit=1)[0]
+        self.assertIn('if: matrix.cuda', cuda)
+        self.assertIn("BERT embedding via Candle CUDA", cuda)
+        self.assertIn("BERT embedding via Candle CPU", cuda)
+        self.assertIn('--expect-file "src/lib.rs"', cuda)
+
 
 if __name__ == "__main__":
     unittest.main()

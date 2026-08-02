@@ -112,16 +112,21 @@ class DistributionPackagesTest(unittest.TestCase):
             / "packaging"
             / "winget"
             / "BrunoVolpato.ivygrep"
-            / "1.2.5"
+            / "1.2.6"
             / "BrunoVolpato.ivygrep.installer.yaml"
         )
         manifest = path.read_text()
+        self.assertIn("PackageVersion: 1.2.6", manifest)
         self.assertIn("InstallerType: zip", manifest)
         self.assertIn("NestedInstallerType: portable", manifest)
         self.assertIn("PortableCommandAlias: ig", manifest)
         self.assertIn(
-            "InstallerSha256: 3AC86B349EDC45A2DD2361F9B7FB023E0A0CA4EED29989AA9C227C752FA92322",
+            "InstallerSha256: 3B83FAFAA40A5221C0140D2D6C041AA7DAD8BF3ACAE5D1C9F01006D6DF86FF8A",
             manifest,
+        )
+        self.assertFalse(
+            (ROOT / "packaging" / "winget" / "BrunoVolpato.ivygrep" / "1.2.7").exists(),
+            "do not advertise a WinGet version before registry publication",
         )
 
     def test_each_supported_agent_has_a_setup_page(self) -> None:
@@ -149,7 +154,7 @@ class DistributionPackagesTest(unittest.TestCase):
             "ivygrep-candle-embed",
             "ivygrep-usearch",
             "ivygrep-tree-sitter-haskell",
-            'publish Cargo.toml ivygrep "$VERSION"',
+            'publish Cargo.toml ivygrep "$MAIN_VERSION"',
         ]
         positions = [crates.index(package) for package in order]
         self.assertEqual(positions, sorted(positions))

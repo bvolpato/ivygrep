@@ -5,6 +5,8 @@ repository="bvolpato/ivygrep"
 install_dir="${IVYGREP_INSTALL_DIR:-$HOME/.local/bin}"
 version="${IVYGREP_VERSION:-latest}"
 accelerator="${IVYGREP_ACCELERATOR:-auto}"
+local_archive="${IVYGREP_INSTALL_ARCHIVE:-}"
+local_checksum="${IVYGREP_INSTALL_CHECKSUM:-}"
 
 for command_name in curl tar; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
@@ -52,7 +54,7 @@ case "$os-$arch" in
         ;;
 esac
 
-base_url="https://github.com/$repository/releases/download/$tag"
+base_url="${IVYGREP_BASE_URL:-https://github.com/$repository/releases/download/$tag}"
 
 has_library() {
     name=$1
@@ -119,6 +121,10 @@ asset_exists() {
 
 accelerator_target=""
 accelerator_label=""
+# Exact artifacts determine target without host probing.
+if [ -n "$local_archive" ]; then
+    accelerator=portable
+fi
 case "$accelerator" in
     cuda)
         if [ "$os-$arch" != "Linux-x86_64" ]; then
@@ -179,6 +185,33 @@ case "$accelerator" in
         ;;
 esac
 
+if [ -n "$local_archive" ]; then
+    [ -f "$local_archive" ] || {
+        echo "ivygrep installer: IVYGREP_INSTALL_ARCHIVE does not exist: $local_archive" >&2
+        exit 1
+    }
+    [ -n "$local_checksum" ] || local_checksum="$local_archive.sha256"
+    [ -f "$local_checksum" ] || {
+        echo "ivygrep installer: IVYGREP_INSTALL_CHECKSUM does not exist: $local_checksum" >&2
+        exit 1
+    }
+    local_name=$(basename "$local_archive")
+    local_prefix="ivygrep-$tag-"
+    case "$local_name" in
+        "$local_prefix"*.tar.gz)
+            target=${local_name#"$local_prefix"}
+            target=${target%.tar.gz}
+            ;;
+        *)
+            echo "ivygrep installer: local archive name must start with $local_prefix and end in .tar.gz" >&2
+            exit 1
+            ;;
+    esac
+    # Skip hardware and remote availability checks for exact artifacts.
+    accelerator_target=""
+    accelerator_label=""
+fi
+
 if [ -n "$accelerator_target" ]; then
     accelerator_archive="ivygrep-$tag-$accelerator_target.tar.gz"
     if asset_exists "$accelerator_archive"; then
@@ -207,8 +240,14 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-curl -fsSL "$base_url/$archive" -o "$tmp_dir/$archive"
-curl -fsSL "$base_url/$archive.sha256" -o "$tmp_dir/$archive.sha256"
+if [ -n "$local_archive" ]; then
+    archive=$(basename "$local_archive")
+    cp "$local_archive" "$tmp_dir/$archive"
+    cp "$local_checksum" "$tmp_dir/$archive.sha256"
+else
+    curl -fsSL "$base_url/$archive" -o "$tmp_dir/$archive"
+    curl -fsSL "$base_url/$archive.sha256" -o "$tmp_dir/$archive.sha256"
+fi
 
 (
     cd "$tmp_dir"

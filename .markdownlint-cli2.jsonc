@@ -1,0 +1,33 @@
+{
+  "config": {
+    "MD013": false,
+    "MD024": {
+      "siblings_only": true
+    },
+    "MD033": {
+      "allowed_elements": [
+        "a",
+        "br",
+        "img",
+        "p",
+        "strong"
+      ]
+    },
+    "MD041": false
+  },
+  "globs": [
+    "*.md",
+    ".github/**/*.md",
+    "docs/**/*.md",
+    "packaging/**/*.md",
+    "plugins/**/*.md"
+  ],
+  "ignores": [
+    // Legacy release history and dated benchmark reports retain their compact layout.
+    "CHANGELOG.md",
+    "docs/benchmarks/**/*.md",
+    "vendor/**",
+    "target/**",
+    "web/node_modules/**"
+  ]
+}

@@ -5,6 +5,12 @@ external probes against the same release binary and pinned MemoryQuest bytes.
 Final product comparison used three alternating runs per arm through default
 daemon-backed search. Discarded settings are not product defaults.
 
+This is a dated local A/B record. Raw alternating-arm outputs were not retained
+in the repository. The public MemoryQuest JSON and HTML contain a separate
+single-pass publication run, so they do not reproduce the previous-default arm
+or every aggregate below. Current release-facing evidence belongs to the
+[public report](public-memory-retrieval.html).
+
 ## Outcome
 
 Final default uses two local probes, fetches up to 80 candidates per probe,

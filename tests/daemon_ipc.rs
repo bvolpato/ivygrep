@@ -205,7 +205,10 @@ async fn daemon_ipc_index_and_search_roundtrip() {
                         &options,
                     )
                     .unwrap();
-                    DaemonResponse::SearchResults { hits }
+                    DaemonResponse::SearchResults {
+                        hits,
+                        warnings: Vec::new(),
+                    }
                 }
                 _ => DaemonResponse::Error {
                     message: "unexpected".into(),
@@ -252,7 +255,7 @@ async fn daemon_ipc_index_and_search_roundtrip() {
     .await;
 
     match &search_response {
-        DaemonResponse::SearchResults { hits } => {
+        DaemonResponse::SearchResults { hits, .. } => {
             assert!(!hits.is_empty(), "should find daemon_roundtrip_marker");
             assert!(
                 hits.iter()
@@ -471,7 +474,10 @@ async fn daemon_ipc_skip_gitignore() {
                         &options,
                     )
                     .unwrap();
-                    DaemonResponse::SearchResults { hits }
+                    DaemonResponse::SearchResults {
+                        hits,
+                        warnings: Vec::new(),
+                    }
                 }
                 _ => DaemonResponse::Error {
                     message: "unexpected".into(),
@@ -514,7 +520,7 @@ async fn daemon_ipc_skip_gitignore() {
     .await;
 
     match &search_all {
-        DaemonResponse::SearchResults { hits } => {
+        DaemonResponse::SearchResults { hits, .. } => {
             assert_eq!(
                 hits.len(),
                 2,
@@ -542,7 +548,7 @@ async fn daemon_ipc_skip_gitignore() {
     .await;
 
     match &search_tracked_only {
-        DaemonResponse::SearchResults { hits } => {
+        DaemonResponse::SearchResults { hits, .. } => {
             assert_eq!(
                 hits.len(),
                 1,

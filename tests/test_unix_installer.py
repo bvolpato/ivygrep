@@ -117,6 +117,7 @@ esac
         nvidia: bool = False,
         cuda_runtime: bool = False,
         nvidia_compute: str = "8.6",
+        local_archive: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
         if nvidia:
             self.write_executable(
@@ -148,6 +149,9 @@ esac
                 "IVYGREP_VERSION": TAG,
             }
         )
+        if local_archive is not None:
+            env["IVYGREP_INSTALL_ARCHIVE"] = str(local_archive)
+            env["IVYGREP_INSTALL_CHECKSUM"] = f"{local_archive}.sha256"
         return subprocess.run(
             ["sh", str(ROOT / "install.sh")],
             cwd=ROOT,
@@ -274,6 +278,20 @@ esac
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("compute capability 8.0 or newer", result.stderr)
         self.assertIn("detected 7.5", result.stderr)
+
+    def test_local_release_artifact_bypasses_hardware_detection(self) -> None:
+        self.make_archive("linux-x86_64-musl")
+        archive = self.release_dir / f"ivygrep-{TAG}-linux-x86_64-musl.tar.gz"
+
+        result = self.run_installer(
+            os_name="Linux",
+            arch="x86_64",
+            accelerator="cuda",
+            local_archive=archive,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ivygrep v9.9.9 linux-x86_64-musl", result.stdout)
 
 
 if __name__ == "__main__":

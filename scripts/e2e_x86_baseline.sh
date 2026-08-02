@@ -41,5 +41,8 @@ run_qemu --version
 run_qemu --add "$project" --force --no-watch --hash --json > "$tmp_root/add.json"
 run_qemu --literal --json "baseline_cpu_search" "$project" > "$tmp_root/search.json"
 grep -Fq "lib.rs" "$tmp_root/search.json"
+run_qemu --status --json > "$tmp_root/status.json"
+grep -Fq '"chunk_count":' "$tmp_root/status.json"
+grep -Fq '"file_count":' "$tmp_root/status.json"
 
 echo "baseline x86-64 artifact passed under QEMU qemu64"

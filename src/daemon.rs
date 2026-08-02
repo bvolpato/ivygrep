@@ -32,6 +32,9 @@ use crate::search::{
     hybrid_search_with_context_and_neural_job, literal_search_with_context, query_uses_neural,
     workspace_neural_model_identity,
 };
+use crate::search_service::{
+    HitOrdering, SearchBatch, SearchWorkspaceSet, select_all_indexed_workspaces,
+};
 use crate::workspace::{Workspace, WorkspaceIndexState, WorkspaceScope, list_workspaces};
 
 const WATCH_SINGLE_EVENT_QUIET_PERIOD: Duration = Duration::from_millis(250);
@@ -1316,9 +1319,12 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             let request_started = std::time::Instant::now();
             let state_clone = state.clone();
 
-            let workspaces = if let Some(ref p) = path {
+            let workspace_set = if let Some(ref p) = path {
                 match state_clone.resolve_workspace(p) {
-                    Ok(workspace) => vec![workspace],
+                    Ok(workspace) => crate::search_service::SearchWorkspaceSet {
+                        workspaces: vec![workspace],
+                        warnings: Vec::new(),
+                    },
                     Err(err) => {
                         return DaemonResponse::Error {
                             message: err.to_string(),
@@ -1326,12 +1332,8 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     }
                 }
             } else {
-                match list_workspaces() {
-                    Ok(ws) => ws
-                        .into_iter()
-                        .filter(|w| w.last_indexed_at_unix.is_some())
-                        .filter_map(|w| state_clone.resolve_workspace(&w.root).ok())
-                        .collect(),
+                match select_all_indexed_workspaces(|root| state_clone.resolve_workspace(root)) {
+                    Ok(workspaces) => workspaces,
                     Err(err) => {
                         return DaemonResponse::Error {
                             message: err.to_string(),
@@ -1339,6 +1341,8 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     }
                 }
             };
+            let workspaces = workspace_set.workspaces;
+            let workspace_warnings = workspace_set.warnings;
 
             let options = SearchOptions {
                 limit,
@@ -1392,13 +1396,15 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 let model = match state_clone.get_model_for_search(force_neural) {
                     Ok(model) => model,
                     Err(err) => {
-                        return (Vec::new(), vec![err.to_string()], query, options);
+                        let mut warnings = workspace_warnings;
+                        warnings.push(err.to_string());
+                        return (Vec::new(), warnings, 0, query, options);
                     }
                 };
                 tracing::trace!("daemon_search_model={:?}", task_started.elapsed());
                 let mut all_hits = Vec::new();
-                let mut all_errors: Vec<String> = Vec::new();
-                let mut skipped_workspace_errors = false;
+                let mut all_errors = workspace_warnings;
+                let mut successful_workspaces = 0usize;
                 let mut prepared_workspaces = Vec::with_capacity(workspaces.len());
                 for workspace in workspaces {
                     match state_clone
@@ -1412,11 +1418,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                                 "failed to prepare index for {}: {err:#}",
                                 workspace.root.display()
                             );
-                            if !all_indices {
-                                all_errors.push(format!("{}: {err:#}", workspace.root.display()));
-                            } else {
-                                skipped_workspace_errors = true;
-                            }
+                            all_errors.push(format!("{}: {err:#}", workspace.root.display()));
                         }
                     }
                 }
@@ -1463,7 +1465,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                             }
                         }
                     }
-                    return (cached_hits, all_errors, query, options);
+                    return (cached_hits, all_errors, workspaces.len(), query, options);
                 }
 
                 let mut neural_query_vector_job = if state_clone.can_precompute_neural_query(
@@ -1503,11 +1505,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                                 "failed to load search context for {}: {err:#}",
                                 workspace.root.display()
                             );
-                            if !all_indices {
-                                all_errors.push(format!("{}: {err:#}", workspace.root.display()));
-                            } else {
-                                skipped_workspace_errors = true;
-                            }
+                            all_errors.push(format!("{}: {err:#}", workspace.root.display()));
                             continue;
                         }
                     };
@@ -1521,6 +1519,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                         neural_query_vector_job.take(),
                     ) {
                         Ok(mut hits) => {
+                            successful_workspaces += 1;
                             if all_indices {
                                 for hit in &mut hits {
                                     hit.file_path = workspace.root.join(&hit.file_path);
@@ -1533,11 +1532,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                                 "hybrid_search failed for {}: {err:#}",
                                 workspace.root.display()
                             );
-                            if !all_indices {
-                                all_errors.push(format!("{}: {err:#}", workspace.root.display()));
-                            } else {
-                                skipped_workspace_errors = true;
-                            }
+                            all_errors.push(format!("{}: {err:#}", workspace.root.display()));
                         }
                     }
                     tracing::trace!("daemon_search_hybrid={:?}", task_started.elapsed());
@@ -1550,7 +1545,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 if let Some(l) = options.limit {
                     all_hits.truncate(l);
                 }
-                if all_errors.is_empty() && !skipped_workspace_errors {
+                if all_errors.is_empty() {
                     state_clone.store_query_results(cache_key, &all_hits);
                 }
                 // Spawn background hash and neural enhancement for workspaces that need it.
@@ -1562,7 +1557,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     }
                 }
                 tracing::trace!("daemon_search_task_total={:?}", task_started.elapsed());
-                (all_hits, all_errors, query, options)
+                (all_hits, all_errors, successful_workspaces, query, options)
             })
             .await;
             let result = match result {
@@ -1576,10 +1571,9 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             };
             tracing::trace!("daemon_search_total={:?}", request_started.elapsed());
 
-            let (mut hits, errors, expansion_query, expansion_options) = result;
-            // If ALL workspaces failed (no hits and at least one error),
-            // propagate as Error so the CLI can fall back to local search.
-            if hits.is_empty() && !errors.is_empty() {
+            let (mut hits, errors, successful_workspaces, expansion_query, expansion_options) =
+                result;
+            if successful_workspaces == 0 && !errors.is_empty() {
                 DaemonResponse::Error {
                     message: format!("search failed: {}", errors.join("; ")),
                 }
@@ -1618,6 +1612,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                         match response {
                             DaemonResponse::SearchResults {
                                 hits: expanded_hits,
+                                ..
                             } if !expanded_hits.is_empty() => probe_outputs.push(expanded_hits),
                             DaemonResponse::SearchResults { .. } => {}
                             DaemonResponse::Error { message } => {
@@ -1630,7 +1625,10 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     }
                     hits = fuse_memory_probe_hits(hits, probe_outputs, limit);
                 }
-                DaemonResponse::SearchResults { hits }
+                DaemonResponse::SearchResults {
+                    hits,
+                    warnings: errors,
+                }
             }
         }
         DaemonRequest::RegexSearch {
@@ -1643,9 +1641,12 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             scope_is_file,
             skip_gitignore,
         } => {
-            let workspaces = if let Some(ref p) = path {
+            let workspace_set = if let Some(ref p) = path {
                 match Workspace::resolve(p) {
-                    Ok(workspace) => vec![workspace],
+                    Ok(workspace) => SearchWorkspaceSet {
+                        workspaces: vec![workspace],
+                        warnings: Vec::new(),
+                    },
                     Err(err) => {
                         return DaemonResponse::Error {
                             message: err.to_string(),
@@ -1653,12 +1654,8 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     }
                 }
             } else {
-                match list_workspaces() {
-                    Ok(ws) => ws
-                        .into_iter()
-                        .filter(|w| w.last_indexed_at_unix.is_some())
-                        .filter_map(|w| Workspace::resolve(&w.root).ok())
-                        .collect(),
+                match select_all_indexed_workspaces(Workspace::resolve) {
+                    Ok(workspaces) => workspaces,
                     Err(err) => {
                         return DaemonResponse::Error {
                             message: err.to_string(),
@@ -1666,6 +1663,8 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     }
                 }
             };
+            let workspaces = workspace_set.workspaces;
+            let workspace_warnings = workspace_set.warnings;
 
             let scope_filter = scope_from_request(scope_path, scope_is_file);
             let all_indices = path.is_none();
@@ -1673,60 +1672,25 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             let permit = state.cpu_permits.clone().acquire_owned().await.ok();
             let result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                let mut all_hits = Vec::new();
-                let mut all_errors = Vec::new();
+                let mut batch = SearchBatch::new(workspace_warnings);
                 for workspace in &workspaces {
-                    match ensure_queryable_workspace(workspace, skip_gitignore) {
-                        Ok(false) => {}
-                        Ok(true) => {}
-                        Err(err) => {
-                            warn!(
-                                "failed to repair index for {}: {err:#}",
-                                workspace.root.display()
-                            );
-                            if !all_indices {
-                                all_errors.push(format!("{}: {err:#}", workspace.root.display()));
-                            }
-                            continue;
-                        }
-                    }
-                    match regex_search(
-                        workspace,
-                        &pattern,
-                        limit,
-                        scope_filter.as_ref(),
-                        &include_globs,
-                        &exclude_globs,
-                        skip_gitignore,
-                    ) {
-                        Ok(mut hits) => {
-                            if path.is_none() {
-                                for hit in &mut hits {
-                                    hit.file_path = workspace.root.join(&hit.file_path);
-                                }
-                            }
-                            all_hits.append(&mut hits);
-                        }
-                        Err(err) => {
-                            warn!(
-                                "regex_search failed for {}: {err:#}",
-                                workspace.root.display()
-                            );
-                            if !all_indices {
-                                all_errors.push(format!("{}: {err:#}", workspace.root.display()));
-                            }
-                        }
-                    }
+                    let result =
+                        ensure_queryable_workspace(workspace, skip_gitignore).and_then(|_| {
+                            regex_search(
+                                workspace,
+                                &pattern,
+                                limit,
+                                scope_filter.as_ref(),
+                                &include_globs,
+                                &exclude_globs,
+                                skip_gitignore,
+                            )
+                        });
+                    batch.record(&workspace.root, all_indices, result);
                 }
-
-                if !all_indices && all_hits.is_empty() && !all_errors.is_empty() {
-                    return Err(all_errors.join("; "));
-                }
-                if let Some(l) = limit {
-                    all_hits.truncate(l);
-                }
-
-                Ok(all_hits)
+                batch
+                    .finish(limit, HitOrdering::Preserve)
+                    .map_err(|err| err.to_string())
             })
             .await
             .unwrap_or_else(|join_err| {
@@ -1735,7 +1699,10 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             });
 
             match result {
-                Ok(hits) => DaemonResponse::SearchResults { hits },
+                Ok(outcome) => DaemonResponse::SearchResults {
+                    hits: outcome.hits,
+                    warnings: outcome.warnings,
+                },
                 Err(message) => DaemonResponse::Error { message },
             }
         }
@@ -1751,9 +1718,12 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             scope_is_file,
             skip_gitignore,
         } => {
-            let workspaces = if let Some(ref p) = path {
+            let workspace_set = if let Some(ref p) = path {
                 match Workspace::resolve(p) {
-                    Ok(workspace) => vec![workspace],
+                    Ok(workspace) => SearchWorkspaceSet {
+                        workspaces: vec![workspace],
+                        warnings: Vec::new(),
+                    },
                     Err(err) => {
                         return DaemonResponse::Error {
                             message: err.to_string(),
@@ -1761,12 +1731,8 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     }
                 }
             } else {
-                match list_workspaces() {
-                    Ok(ws) => ws
-                        .into_iter()
-                        .filter(|w| w.last_indexed_at_unix.is_some())
-                        .filter_map(|w| Workspace::resolve(&w.root).ok())
-                        .collect(),
+                match select_all_indexed_workspaces(Workspace::resolve) {
+                    Ok(workspaces) => workspaces,
                     Err(err) => {
                         return DaemonResponse::Error {
                             message: err.to_string(),
@@ -1774,6 +1740,8 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     }
                 }
             };
+            let workspaces = workspace_set.workspaces;
+            let workspace_warnings = workspace_set.warnings;
 
             let scope_filter = scope_from_request(scope_path, scope_is_file);
             let all_indices = path.is_none();
@@ -1795,65 +1763,20 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             let permit = state_clone.cpu_permits.clone().acquire_owned().await.ok();
             let result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                let mut all_hits = Vec::new();
-                let mut all_errors: Vec<String> = Vec::new();
+                let mut batch = SearchBatch::new(workspace_warnings);
                 for workspace in &workspaces {
-                    match ensure_queryable_workspace(workspace, options.skip_gitignore) {
-                        Ok(false) => {}
-                        Ok(true) => state_clone.clear_workspace_contexts(workspace),
-                        Err(err) => {
-                            warn!(
-                                "failed to repair index for {}: {err:#}",
-                                workspace.root.display()
-                            );
-                            if !all_indices {
-                                all_errors.push(format!("{}: {err:#}", workspace.root.display()));
-                            }
-                            continue;
+                    let result = (|| {
+                        if ensure_queryable_workspace(workspace, options.skip_gitignore)? {
+                            state_clone.clear_workspace_contexts(workspace);
                         }
-                    }
-                    let context = match state_clone.cached_search_context(workspace, None, false) {
-                        Ok(context) => context,
-                        Err(err) => {
-                            warn!(
-                                "failed to load literal search context for {}: {err:#}",
-                                workspace.root.display()
-                            );
-                            if !all_indices {
-                                all_errors.push(format!("{}: {err:#}", workspace.root.display()));
-                            }
-                            continue;
-                        }
-                    };
-                    match literal_search_with_context(&context, workspace, &query, &options) {
-                        Ok(mut hits) => {
-                            if path.is_none() {
-                                for hit in &mut hits {
-                                    hit.file_path = workspace.root.join(&hit.file_path);
-                                }
-                            }
-                            all_hits.append(&mut hits);
-                        }
-                        Err(err) => {
-                            warn!(
-                                "literal_search failed for {}: {err:#}",
-                                workspace.root.display()
-                            );
-                            if !all_indices {
-                                all_errors.push(format!("{}: {err:#}", workspace.root.display()));
-                            }
-                        }
-                    }
+                        let context = state_clone.cached_search_context(workspace, None, false)?;
+                        literal_search_with_context(&context, workspace, &query, &options)
+                    })();
+                    batch.record(&workspace.root, all_indices, result);
                 }
-
-                if !all_indices && all_hits.is_empty() && !all_errors.is_empty() {
-                    return Err(all_errors.join("; "));
-                }
-
-                if let Some(l) = options.limit {
-                    all_hits.truncate(l);
-                }
-                Ok(all_hits)
+                batch
+                    .finish(options.limit, HitOrdering::Preserve)
+                    .map_err(|err| err.to_string())
             })
             .await
             .unwrap_or_else(|join_err| {
@@ -1862,7 +1785,10 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             });
 
             match result {
-                Ok(hits) => DaemonResponse::SearchResults { hits },
+                Ok(outcome) => DaemonResponse::SearchResults {
+                    hits: outcome.hits,
+                    warnings: outcome.warnings,
+                },
                 Err(message) => DaemonResponse::Error { message },
             }
         }
@@ -2963,7 +2889,7 @@ mod tests {
             disable_memory_expansion: false,
         };
         let response = handle_request(test_state(), request).await;
-        let DaemonResponse::SearchResults { hits } = response else {
+        let DaemonResponse::SearchResults { hits, .. } = response else {
             panic!("expected search results");
         };
         assert!(
@@ -3846,7 +3772,7 @@ mod tests {
         .await;
 
         match response {
-            DaemonResponse::SearchResults { hits } => {
+            DaemonResponse::SearchResults { hits, .. } => {
                 assert!(!hits.is_empty());
                 assert!(
                     hits.iter()
@@ -3904,7 +3830,7 @@ mod tests {
 
         let first = handle_request(state.clone(), request.clone()).await;
         let first_count = match first {
-            DaemonResponse::SearchResults { hits } => hits.len(),
+            DaemonResponse::SearchResults { hits, .. } => hits.len(),
             other => panic!("expected SearchResults, got {other:?}"),
         };
         assert!(first_count > 0);
@@ -3934,7 +3860,7 @@ mod tests {
         query.push_str("  ");
         let second = handle_request(state.clone(), equivalent_request).await;
         let second_count = match second {
-            DaemonResponse::SearchResults { hits } => hits.len(),
+            DaemonResponse::SearchResults { hits, .. } => hits.len(),
             other => panic!("expected SearchResults, got {other:?}"),
         };
 
@@ -3991,7 +3917,7 @@ mod tests {
         .await;
 
         match response {
-            DaemonResponse::SearchResults { hits } => {
+            DaemonResponse::SearchResults { hits, .. } => {
                 assert!(
                     hits.iter()
                         .any(|hit| hit.file_path.to_string_lossy().ends_with("recover.rs")),
@@ -4051,7 +3977,7 @@ mod tests {
         .await;
 
         match response {
-            DaemonResponse::SearchResults { hits } => {
+            DaemonResponse::SearchResults { hits, .. } => {
                 assert!(
                     hits.iter().any(|hit| {
                         hit.file_path.is_absolute()
@@ -4143,7 +4069,7 @@ mod tests {
 
         let normal = handle_request(state.clone(), normal_request).await;
         match normal {
-            DaemonResponse::SearchResults { hits } => {
+            DaemonResponse::SearchResults { hits, .. } => {
                 assert!(!hits.is_empty());
                 assert!(
                     hits.iter().all(|hit| !hit.file_path.is_absolute()),
@@ -4157,7 +4083,7 @@ mod tests {
         state.search_contexts.lock().clear();
         let all = handle_request(state.clone(), all_request).await;
         match all {
-            DaemonResponse::SearchResults { hits } => {
+            DaemonResponse::SearchResults { hits, .. } => {
                 assert!(!hits.is_empty());
                 assert!(
                     hits.iter().all(|hit| hit.file_path.is_absolute()),

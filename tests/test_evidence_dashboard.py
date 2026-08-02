@@ -162,6 +162,156 @@ class EvidenceDashboardTest(unittest.TestCase):
         self.assertEqual(summary["mode"], "blended")
         self.assertEqual(summary["ndcg_at_10"], 0.31)
 
+    def test_current_million_summary_preserves_scope_and_release_binary(self) -> None:
+        document = {
+            "binary": {
+                "commit": "a" * 40,
+                "sha256": "b" * 64,
+                "version": "ivygrep 1.2.7",
+            },
+            "corpus": {"license": "CC0-1.0"},
+            "harness": {"trials": 3},
+            "median": {
+                "chunks_per_second": 123.0,
+                "index_size_bytes": 456.0,
+                "peak_rss_bytes": 789.0,
+                "warm_cli_p95_ms": 1.25,
+            },
+            "scope": "synthetic hash-only scale and footprint measurement",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "million.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            source, summary = renderer.summarize("million-scale-current", path)
+        self.assertEqual(source, "a" * 40)
+        self.assertEqual(summary["version"], "ivygrep 1.2.7")
+        self.assertEqual(summary["scope"], "synthetic hash-only scale and footprint measurement")
+        self.assertEqual(summary["harness"]["trials"], 3)
+
+    def test_explicit_publication_revision_stays_stable_across_artifact_commit(self) -> None:
+        document = {
+            "binary": {
+                "commit": "a" * 40,
+                "sha256": "b" * 64,
+                "version": "ivygrep 1.2.7",
+            },
+            "corpus": {"license": "CC0-1.0"},
+            "harness": {"trials": 3},
+            "median": {
+                "chunks_per_second": 123.0,
+                "index_size_bytes": 456.0,
+                "peak_rss_bytes": 789.0,
+                "warm_cli_p95_ms": 1.25,
+            },
+            "scope": "synthetic hash-only scale and footprint measurement",
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "docs").mkdir()
+            artifact = root / "docs" / "million.json"
+            release_history = root / "docs" / "history.json"
+            manifest = root / "manifest.json"
+            artifact.write_text(json.dumps(document) + "\n", encoding="utf-8")
+            release_history.write_text(
+                json.dumps({"schema_version": 1, "releases": []}) + "\n",
+                encoding="utf-8",
+            )
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "evidence": [
+                            {
+                                "id": "million-scale-current",
+                                "kind": "scale",
+                                "label": "Current",
+                                "path": "docs/million.json",
+                            }
+                        ],
+                        "release_history": "docs/history.json",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            git = renderer.subprocess
+            git.run(["git", "init", "-q"], cwd=root, check=True)
+            git.run(["git", "add", "."], cwd=root, check=True)
+            git.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "-qm",
+                    "baseline",
+                ],
+                cwd=root,
+                check=True,
+            )
+            baseline = git.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=root,
+                check=True,
+                text=True,
+                stdout=git.PIPE,
+            ).stdout.strip()
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    '"path": "docs/million.json"',
+                    f'"path": "docs/million.json", "publication_commit": "{baseline}"',
+                ),
+                encoding="utf-8",
+            )
+            git.run(["git", "add", "manifest.json"], cwd=root, check=True)
+            git.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "-qm",
+                    "pin baseline",
+                ],
+                cwd=root,
+                check=True,
+            )
+            document["description"] = "changed artifact"
+            artifact.write_text(json.dumps(document) + "\n", encoding="utf-8")
+            with mock.patch.object(renderer, "build_histories", return_value={}):
+                before = renderer.build_dashboard(root, manifest)
+            before_json = json.dumps(before, sort_keys=True)
+            git.run(["git", "add", "docs/million.json"], cwd=root, check=True)
+            git.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "-qm",
+                    "publish artifact",
+                ],
+                cwd=root,
+                check=True,
+            )
+            with mock.patch.object(renderer, "build_histories", return_value={}):
+                after = renderer.build_dashboard(root, manifest)
+            after_json = json.dumps(after, sort_keys=True)
+
+        self.assertEqual(before, after)
+        self.assertEqual(before_json, after_json)
+        current = before["evidence"][0]
+        self.assertEqual(
+            current["publication_status"], "not pinned to an immutable revision"
+        )
+        self.assertIsNone(current["immutable_url"])
+
     def test_dashboard_output_is_metrics_only(self) -> None:
         dashboard = json.loads(
             (ROOT / "docs" / "benchmarks" / "evidence-dashboard.json").read_text(
@@ -184,6 +334,7 @@ class EvidenceDashboardTest(unittest.TestCase):
         self.assertIn("Benchmark dashboard", html)
         self.assertIn("nDCG@10", html)
         self.assertIn("Index throughput", html)
+        self.assertIn("not pinned to an immutable revision", html)
         self.assertNotIn("policy", html.lower())
         current = next(
             item
@@ -196,7 +347,19 @@ class EvidenceDashboardTest(unittest.TestCase):
             if item["id"] == "release-workflow"
         )
         self.assertEqual(current["summary"]["mode"], "blended")
+        self.assertEqual(current["summary"]["binary_versions"], ["ivygrep 1.1.9"])
+        self.assertIn("Historical", current["label"])
         self.assertEqual(release["summary"]["release_archives"], 7)
+        current_scale = next(
+            item
+            for item in dashboard["evidence"]
+            if item["id"] == "million-scale-current"
+        )
+        self.assertEqual(current_scale["summary"]["version"], "ivygrep 1.2.7")
+        self.assertEqual(
+            dashboard["release_history"]["releases"][0]["tag"], "v1.2.7"
+        )
+        self.assertIn("Current-release scope", html)
 
 
 if __name__ == "__main__":

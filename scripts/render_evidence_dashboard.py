@@ -23,6 +23,20 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def sha256_at_commit(root: Path, path: Path, commit: str) -> str | None:
+    """Return committed file hash, or None when commit does not contain path."""
+    completed = subprocess.run(
+        ["git", "show", f"{commit}:{path.relative_to(root)}"],
+        cwd=root,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if completed.returncode != 0:
+        return None
+    return hashlib.sha256(completed.stdout).hexdigest()
+
+
 def publication_commit(
     root: Path, path: Path, published_commit: str | None = None
 ) -> str:
@@ -105,6 +119,11 @@ def summarize(evidence_id: str, path: Path) -> tuple[str | None, dict]:
     source_commit = document.get("ivygrep_commit")
     if evidence_id.startswith("public-retrieval"):
         summary = document.get("summary", {})
+        result_binaries = [
+            result.get("binary", {})
+            for result in document.get("results", [])
+            if isinstance(result, dict)
+        ]
         mode = next(
             (name for name in ("blended", "neural", "hybrid") if name in summary),
             next(iter(summary), "hybrid"),
@@ -132,6 +151,20 @@ def summarize(evidence_id: str, path: Path) -> tuple[str | None, dict]:
             "tasks": document.get("tasks"),
             "runtime": document.get("runtime"),
             "models": document.get("neural_models", []),
+            "binary_versions": sorted(
+                {
+                    binary.get("version")
+                    for binary in result_binaries
+                    if binary.get("version")
+                }
+            ),
+            "binary_sha256": sorted(
+                {
+                    binary.get("sha256")
+                    for binary in result_binaries
+                    if binary.get("sha256")
+                }
+            ),
             "ndcg_at_10": mean_metric(summary, mode, "ndcg_at_10"),
             "mrr_at_10": mean_metric(summary, mode, "mrr_at_10"),
             "warm_latency_p95_ms": mean_metric(
@@ -222,6 +255,21 @@ def summarize(evidence_id: str, path: Path) -> tuple[str | None, dict]:
             "manifest_sha256": quality.get("manifest_sha256"),
             "harness_sha256": quality.get("harness_sha256"),
         }
+    if evidence_id == "million-scale-current":
+        binary = document["binary"]
+        median = document["median"]
+        return binary["commit"], {
+            "version": binary["version"],
+            "binary_sha256": binary["sha256"],
+            "warm_p95_ms": median["warm_cli_p95_ms"],
+            "index_size_bytes": median["index_size_bytes"],
+            "peak_rss_bytes": median["peak_rss_bytes"],
+            "chunks_per_second": median["chunks_per_second"],
+            "runtime": document.get("runtime"),
+            "corpus": document.get("corpus"),
+            "harness": document.get("harness"),
+            "scope": document.get("scope"),
+        }
     return source_commit, {}
 
 
@@ -248,7 +296,7 @@ def evidence_point(
         "source_commit": source_commit or item.get("source_commit"),
         "publication_commit": item["publication_commit"],
         "evidence_id": item["id"],
-        "immutable_url": item["immutable_url"],
+        "immutable_url": item.get("immutable_url"),
     }
 
 
@@ -342,6 +390,37 @@ def build_histories(evidence: list[dict], release_history: dict) -> dict:
                 )
             )
 
+    current_item = by_id.get("million-scale-current")
+    if current_item is not None:
+        current = current_item["summary"]
+        current_context = {
+            "hardware": current.get("runtime"),
+            "corpus": current.get("corpus"),
+            "harness": current.get("harness"),
+            "scope": current.get("scope"),
+        }
+        current_points = (
+            ("million-chunk/current-release/warm-cli-p95", "warm_p95_ms", "ms", "latency"),
+            ("million-chunk/current-release/chunks-per-second", "chunks_per_second", "chunks/s", "indexing"),
+            ("million-chunk/current-release/peak-rss", "peak_rss_bytes", "bytes", "memory"),
+            ("million-chunk/current-release/final-index", "index_size_bytes", "bytes", "index_size"),
+        )
+        for series, key, unit, history_name in current_points:
+            histories[history_name].append(
+                evidence_point(
+                    current_item,
+                    series=series,
+                    value=current[key],
+                    unit=unit,
+                    variance={
+                        "status": "three sequential trial medians",
+                        "trials": current.get("harness", {}).get("trials"),
+                    },
+                    context=current_context,
+                    source_commit=current_item.get("source_commit"),
+                )
+            )
+
     for release in release_history["releases"]:
         for archive in release["archives"]:
             context = {
@@ -387,13 +466,24 @@ def build_dashboard(root: Path, manifest_path: Path) -> dict:
         published = publication_commit(
             root, path, item.get("publication_commit")
         )
+        local_sha = sha256_file(path)
+        pinned = published is not None and sha256_at_commit(root, path, published) == local_sha
         evidence.append(
             {
                 **item,
-                "sha256": sha256_file(path),
+                "sha256": local_sha,
                 "source_commit": source_commit,
-                "publication_commit": published,
-                "immutable_url": f"{REPOSITORY}/blob/{published}/{item['path']}",
+                "publication_commit": published if pinned else None,
+                "publication_status": (
+                    "pinned"
+                    if pinned
+                    else "not pinned to an immutable revision"
+                ),
+                "immutable_url": (
+                    f"{REPOSITORY}/blob/{published}/{item['path']}"
+                    if pinned
+                    else None
+                ),
                 "summary": summary,
             }
         )
@@ -407,17 +497,30 @@ def build_dashboard(root: Path, manifest_path: Path) -> dict:
         release_history_path,
         manifest.get("release_history_publication_commit"),
     )
+    release_history_sha = sha256_file(release_history_path)
+    release_history_pinned = (
+        release_history_commit is not None
+        and sha256_at_commit(root, release_history_path, release_history_commit)
+        == release_history_sha
+    )
     return {
         "schema_version": 1,
         "evidence": evidence,
         "release_history": release_history,
         "release_history_artifact": {
             "path": manifest["release_history"],
-            "sha256": sha256_file(release_history_path),
-            "publication_commit": release_history_commit,
+            "sha256": release_history_sha,
+            "publication_commit": release_history_commit if release_history_pinned else None,
+            "publication_status": (
+                "pinned"
+                if release_history_pinned
+                else "not pinned to an immutable revision"
+            ),
             "immutable_url": (
                 f"{REPOSITORY}/blob/{release_history_commit}/"
                 f"{manifest['release_history']}"
+                if release_history_pinned
+                else None
             ),
         },
         "histories": build_histories(evidence, release_history),
@@ -453,10 +556,48 @@ def format_variance(variance: dict) -> str:
     return "recorded"
 
 
+def publication_cell(item: dict) -> str:
+    """Render publication provenance without linking unpinned bytes."""
+    immutable_url = item.get("immutable_url")
+    publication_commit = item.get("publication_commit")
+    if not immutable_url or not publication_commit:
+        return "not pinned to an immutable revision"
+    return (
+        f'<a href="{escape(immutable_url)}">'
+        f"{escape(publication_commit[:12])}</a>"
+    )
+
+
+def source_cell(point: dict) -> str:
+    """Render history source only when it is immutable."""
+    immutable_url = point.get("immutable_url")
+    if not immutable_url:
+        return "not pinned to an immutable revision"
+    return f'<a href="{escape(immutable_url)}">source</a>'
+
+
+def publication_note(dashboard: dict) -> str:
+    """Explain artifacts that are not pinned to an immutable revision."""
+    artifacts = list(dashboard["evidence"])
+    artifacts.append(dashboard["release_history_artifact"])
+    pending = sum(
+        artifact.get("publication_status") != "pinned" for artifact in artifacts
+    )
+    if not pending:
+        return ""
+    noun = "artifact" if pending == 1 else "artifacts"
+    return (
+        f"<p>{pending} {noun} are not pinned to an immutable revision. They are "
+        "shown without immutable links until a deliberate publication pin matches "
+        "the exact bytes.</p>"
+    )
+
+
 def render_markdown(dashboard: dict) -> str:
     by_id = {item["id"]: item for item in dashboard["evidence"]}
     retrieval = by_id["public-retrieval-current"]["summary"]
     million = by_id["million-scale"]["summary"]
+    current_million = by_id.get("million-scale-current", {}).get("summary")
     reranker = by_id["learned-reranker"]["summary"]
     releases = dashboard["release_history"]["releases"]
     latest_release = releases[0] if releases else None
@@ -472,16 +613,20 @@ def render_markdown(dashboard: dict) -> str:
         for name, points in dashboard["histories"].items()
     )
     evidence_links = "\n".join(
-        f"- [{item['label']}]({item['immutable_url']}) "
-        f"(`{item['sha256'][:16]}...`)"
+        (
+            f"- [{item['label']}]({item['immutable_url']}) "
+            if item.get("immutable_url")
+            else f"- {item['label']} (not pinned to an immutable revision) "
+        )
+        + f"(`{item['sha256'][:16]}...`)"
         for item in dashboard["evidence"]
     )
     release_history_artifact = dashboard["release_history_artifact"]
-    evidence_links += (
-        "\n- [Release artifact history]"
-        f"({release_history_artifact['immutable_url']}) "
-        f"(`{release_history_artifact['sha256'][:16]}...`)"
-    )
+    evidence_links += "\n- " + (
+        f"[Release artifact history]({release_history_artifact['immutable_url']})"
+        if release_history_artifact.get("immutable_url")
+        else "Release artifact history (not pinned to an immutable revision)"
+    ) + f" (`{release_history_artifact['sha256'][:16]}...`)"
     point_rows = []
     for family, points in dashboard["histories"].items():
         for point in points:
@@ -494,26 +639,65 @@ def render_markdown(dashboard: dict) -> str:
                 f"| {family.replace('_', ' ')} | {point['series']} | "
                 f"{revision[:12]} | {format_history_value(point)} | "
                 f"{format_variance(point['variance'])} | "
-                f"[source]({point['immutable_url']}) |"
+                + (
+                    f"[source]({point['immutable_url']})"
+                    if point.get("immutable_url")
+                    else "not pinned to an immutable revision"
+                )
+                + " |"
             )
     rendered_points = "\n".join(point_rows)
-    retrieval_label = {
-        "blended": "Public blended retrieval",
-        "neural": "Public forced-neural retrieval",
-    }.get(retrieval["mode"], f"Public {retrieval['mode']} retrieval")
+    retrieval_item = by_id["public-retrieval-current"]
+    retrieval_version = ", ".join(retrieval.get("binary_versions", []))
+    retrieval_label = retrieval_item["label"]
+    if retrieval_version:
+        retrieval_label += f" ({retrieval_version})"
+    current_release_rows = ""
+    if current_million is not None:
+        current_million_text = (
+            f"{current_million['version']} ({current_million['binary_sha256'][:16]}...)"
+        )
+        million_latency = (
+            f"{format_number(current_million['warm_p95_ms'])} ms warm CLI p95"
+        )
+        million_footprint = (
+            f"{current_million['index_size_bytes']} bytes"
+        )
+        million_throughput = (
+            f"{format_number(current_million['chunks_per_second'])} chunks/s"
+        )
+    else:
+        current_million_text = "historical paired study"
+        million_latency = (
+            f"{format_number(million['warm_p95_ms'])} ms warm p95, "
+            f"{format_number(million['warm_speedup'])}x baseline"
+        )
+        million_footprint = (
+            f"{million['index_size_bytes']} bytes, "
+            f"ratio {format_number(million['index_size_ratio'], 3)}"
+        )
+        million_throughput = f"{format_number(million['current']['chunks_per_second'])} chunks/s"
+    if current_million is not None:
+        current_release_rows = f"""
+## Current-release scale confirmation
+
+{current_million_text} measures hash-only indexing and warm CLI latency on a deterministic synthetic CC0 corpus across three sequential trials. It is a scale and footprint measurement, not semantic quality or agent-task performance.
+"""
     return f"""# Benchmark dashboard
 
-This page is generated from published benchmark and release artifacts. Every
-artifact link is pinned to the commit that published its bytes.
+This page is generated from benchmark and release artifacts. Links are pinned
+when local bytes match the configured publication revision; other artifacts are
+marked as not pinned to an immutable revision instead of receiving a false link.
 
-| Area | Current published result |
+| Area | Evidence summary |
 |---|---|
 | {retrieval_label} | nDCG@10 {format_number(retrieval['ndcg_at_10'], 4)}, MRR@10 {format_number(retrieval['mrr_at_10'], 4)}, {retrieval['queries']} queries x {retrieval['repetitions']} runs |
 | Learned reranker | gate {"passed" if reranker["passed"] else "failed"}, nDCG@10 delta {format_number(reranker["ndcg_at_10_delta"], 4)} |
-| Million-chunk latency | {format_number(million["warm_p95_ms"])} ms warm p95, {format_number(million["warm_speedup"])}x baseline |
-| Million-chunk footprint | {million["index_size_bytes"]} bytes, ratio {format_number(million["index_size_ratio"], 3)} |
-| Million-chunk indexing | {format_number(million["current"]["chunks_per_second"])} chunks/s |
+| Million-chunk latency | {million_latency} |
+| Million-chunk footprint | {million_footprint} |
+| Million-chunk indexing | {million_throughput} |
 | Release archive history | {release_text} |
+{current_release_rows}
 
 ## Versioned histories
 
@@ -539,11 +723,12 @@ Raw machine-readable dashboard:
 
 
 def render_html(dashboard: dict) -> str:
+    publication_status_note = publication_note(dashboard)
     evidence_rows = "".join(
         "<tr>"
         f"<td>{escape(item['label'])}</td>"
         f"<td>{escape(item['kind'])}</td>"
-        f"<td><a href=\"{escape(item['immutable_url'])}\">{escape(item['publication_commit'][:12])}</a></td>"
+        f"<td>{publication_cell(item)}</td>"
         f"<td><code>{escape(item['sha256'][:16])}</code></td>"
         "</tr>"
         for item in dashboard["evidence"]
@@ -551,8 +736,7 @@ def render_html(dashboard: dict) -> str:
     release_history_artifact = dashboard["release_history_artifact"]
     evidence_rows += (
         "<tr><td>Release artifact history</td><td>release</td>"
-        f"<td><a href=\"{escape(release_history_artifact['immutable_url'])}\">"
-        f"{escape(release_history_artifact['publication_commit'][:12])}</a></td>"
+        f"<td>{publication_cell(release_history_artifact)}</td>"
         f"<td><code>{escape(release_history_artifact['sha256'][:16])}</code></td>"
         "</tr>"
     )
@@ -579,20 +763,43 @@ def render_html(dashboard: dict) -> str:
                 f"<td>{escape(revision[:12])}</td>"
                 f"<td>{escape(format_history_value(point))}</td>"
                 f"<td>{escape(format_variance(point['variance']))}</td>"
-                f"<td><a href=\"{escape(point['immutable_url'])}\">source</a></td>"
+                f"<td>{source_cell(point)}</td>"
                 "</tr>"
             )
     rendered_points = "".join(point_rows)
-    retrieval = next(
-        item["summary"]
+    retrieval_item = next(
+        item
         for item in dashboard["evidence"]
         if item["id"] == "public-retrieval-current"
     )
+    retrieval = retrieval_item["summary"]
     million = next(
         item["summary"]
         for item in dashboard["evidence"]
         if item["id"] == "million-scale"
     )
+    current_million_item = next(
+        (item for item in dashboard["evidence"] if item["id"] == "million-scale-current"),
+        None,
+    )
+    current_million = current_million_item["summary"] if current_million_item else None
+    current_scope = ""
+    if current_million is not None:
+        current_scope = (
+            "<section class=\"report-card\"><h2>Current-release scope</h2>"
+            f"<p><code>{escape(current_million['version'])}</code> binary "
+            f"<code>{escape(current_million['binary_sha256'])}</code> was measured "
+            "in hash-only mode on deterministic synthetic CC0 data across three "
+            "sequential trials. This is scale and footprint evidence, not semantic "
+            "quality or agent-task performance.</p></section>"
+        )
+        warm_card = f"{current_million['warm_p95_ms']:.2f} ms"
+        footprint_card = f"{current_million['index_size_bytes'] / (1024 * 1024):.2f} MiB"
+        throughput_card = f"{current_million['chunks_per_second']:,.0f} chunks/s"
+    else:
+        warm_card = f"{million['warm_p95_ms']:.2f} ms"
+        footprint_card = f"{(1.0 - million['index_size_ratio']) * 100:.1f}% smaller"
+        throughput_card = f"{million['current']['chunks_per_second']:,.0f} chunks/s"
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -607,15 +814,16 @@ def render_html(dashboard: dict) -> str:
 <body class="report-page">
   <main class="report-shell relative z-10">
     <nav class="report-nav"><a class="report-brand" href="index.html">ivygrep benchmarks</a><div class="report-links"><a href="evidence-dashboard.json">Raw JSON</a></div></nav>
-    <section class="report-hero"><div class="report-eyebrow">Published evidence</div><h1>Benchmark dashboard</h1><p>Quality, latency, indexing, memory, footprint, and release metrics.</p></section>
+    <section class="report-hero"><div class="report-eyebrow">Benchmark evidence</div><h1>Benchmark dashboard</h1><p>Quality, latency, indexing, memory, footprint, and release metrics.</p>{publication_status_note}</section>
+    {current_scope}
     <section class="report-grid">
-      <article class="report-card"><h2>nDCG@10</h2><div class="metric-value">{retrieval['ndcg_at_10']:.4f}</div></article>
-      <article class="report-card"><h2>Warm p95</h2><div class="metric-value">{million['warm_p95_ms']:.2f} ms</div></article>
-      <article class="report-card"><h2>Index footprint</h2><div class="metric-value">{(1.0 - million['index_size_ratio']) * 100:.1f}% smaller</div></article>
-      <article class="report-card"><h2>Index throughput</h2><div class="metric-value">{million['current']['chunks_per_second']:,.0f} chunks/s</div></article>
+      <article class="report-card"><h2>nDCG@10</h2><div class="metric-value">{retrieval['ndcg_at_10']:.4f}</div><p>{escape(retrieval_item['label'])}</p></article>
+      <article class="report-card"><h2>Warm p95</h2><div class="metric-value">{warm_card}</div></article>
+      <article class="report-card"><h2>Index footprint</h2><div class="metric-value">{footprint_card}</div></article>
+      <article class="report-card"><h2>Index throughput</h2><div class="metric-value">{throughput_card}</div></article>
     </section>
     <section class="report-card"><h2>Benchmark artifacts</h2><div class="table-wrap"><table><thead><tr><th>Artifact</th><th>Kind</th><th>Publication</th><th>SHA-256</th></tr></thead><tbody>{evidence_rows}</tbody></table></div></section>
-    <section class="report-card"><h2>Versioned histories</h2><p>Every point carries unit, context, variance status, and immutable source metadata in the raw JSON.</p><div class="table-wrap"><table><thead><tr><th>Metric family</th><th>Points</th><th>Unavailable</th></tr></thead><tbody>{history_rows}</tbody></table></div></section>
+    <section class="report-card"><h2>Versioned histories</h2><p>Every point carries unit, context, variance status, and source metadata. Immutable links appear only for pinned bytes.</p><div class="table-wrap"><table><thead><tr><th>Metric family</th><th>Points</th><th>Unavailable</th></tr></thead><tbody>{history_rows}</tbody></table></div></section>
     <section class="report-card"><h2>History points</h2><div class="table-wrap"><table><thead><tr><th>Family</th><th>Comparable series</th><th>Revision/tag</th><th>Value</th><th>Variance</th><th>Artifact</th></tr></thead><tbody>{rendered_points}</tbody></table></div></section>
   </main>
 </body>

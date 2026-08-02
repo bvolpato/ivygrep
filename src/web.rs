@@ -602,19 +602,20 @@ fn build_search_request_for_path(
 async fn execute_search(
     state: DaemonState,
     request: DaemonRequest,
-) -> Result<Vec<SearchHit>, String> {
+) -> Result<(Vec<SearchHit>, Vec<String>), String> {
     match crate::daemon::handle_web_request(state, request).await {
-        DaemonResponse::SearchResults { hits } => Ok(hits),
+        DaemonResponse::SearchResults { hits, warnings } => Ok((hits, warnings)),
         DaemonResponse::Error { message } => Err(message),
         other => Err(format!("unexpected daemon response: {other:?}")),
     }
 }
 
-fn search_value(hits: &[SearchHit], started: Instant) -> Value {
+fn search_value(hits: &[SearchHit], warnings: &[String], started: Instant) -> Value {
     let groups = group_hits_by_file(hits, None);
     json!({
         "hits": hits,
         "groups": groups,
+        "warnings": warnings,
         "elapsed_ms": started.elapsed().as_secs_f64() * 1000.0
     })
 }
@@ -643,7 +644,7 @@ async fn run_search(state: DaemonState, params: &HashMap<String, Vec<String>>) -
         Err(err) => return json!({"error": err.to_string(), "hits": [], "groups": []}),
     };
     match execute_search(state, request).await {
-        Ok(hits) => search_value(&hits, started),
+        Ok((hits, warnings)) => search_value(&hits, &warnings, started),
         Err(message) => json!({"error": message, "hits": [], "groups": []}),
     }
 }
@@ -781,7 +782,7 @@ async fn write_all_workspace_search_stream(
     )
     .await?;
     if total == 0 {
-        write_sse(stream, "results", &search_value(&[], started)).await?;
+        write_sse(stream, "results", &search_value(&[], &[], started)).await?;
         return write_sse(
             stream,
             "done",
@@ -797,27 +798,37 @@ async fn write_all_workspace_search_stream(
         tasks.spawn(async move {
             let request = build_search_request_for_path(&params, Some(root.clone()))
                 .map_err(|err| (root.clone(), err.to_string()))?;
-            let hits = execute_search(state, request)
+            let (hits, warnings) = execute_search(state, request)
                 .await
                 .map_err(|err| (root.clone(), err))?;
-            Ok::<_, (PathBuf, String)>((root, hits))
+            Ok::<_, (PathBuf, String)>((root, hits, warnings))
         });
     }
 
     let mut finished = 0usize;
     let mut all_hits = Vec::<SearchHit>::new();
     let mut errors = Vec::<String>::new();
+    let mut warnings = Vec::<String>::new();
     while let Some(result) = tasks.join_next().await {
         finished += 1;
         match result {
-            Ok(Ok((root, mut hits))) => {
+            Ok(Ok((root, mut hits, workspace_warnings))) => {
                 for hit in &mut hits {
                     hit.file_path = root.join(&hit.file_path);
                 }
                 all_hits.append(&mut hits);
+                warnings.extend(workspace_warnings);
             }
-            Ok(Err((root, err))) => errors.push(format!("{}: {err}", root.display())),
-            Err(err) => errors.push(err.to_string()),
+            Ok(Err((root, err))) => {
+                let message = format!("{}: {err}", root.display());
+                errors.push(message.clone());
+                warnings.push(message);
+            }
+            Err(err) => {
+                let message = err.to_string();
+                errors.push(message.clone());
+                warnings.push(message);
+            }
         }
         all_hits.sort_by(|left, right| {
             right
@@ -829,7 +840,7 @@ async fn write_all_workspace_search_stream(
         if all_hits.len() > limit {
             all_hits.truncate(limit);
         }
-        let mut value = search_value(&all_hits, started);
+        let mut value = search_value(&all_hits, &warnings, started);
         if let Some(object) = value.as_object_mut() {
             object.insert("finished".to_string(), json!(finished));
             object.insert("total".to_string(), json!(total));
@@ -1318,6 +1329,16 @@ mod tests {
     #[test]
     fn bind_addr_accepts_localhost() {
         assert_eq!(bind_addr("localhost", 4747).unwrap().port(), 4747);
+    }
+
+    #[test]
+    fn search_payload_reports_partial_workspace_warnings() {
+        let value = search_value(
+            &[],
+            &["search failed for /tmp/stale".to_string()],
+            Instant::now(),
+        );
+        assert_eq!(value["warnings"], json!(["search failed for /tmp/stale"]));
     }
 
     #[tokio::test]

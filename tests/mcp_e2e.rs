@@ -197,6 +197,29 @@ fn e2e_mcp_full_session() {
     assert!(tools.iter().any(|t| t["name"] == "ig_search"));
     assert!(tools.iter().any(|t| t["name"] == "ig_status"));
 
+    // Unknown tools return a recoverable error without dropping the session.
+    send_request(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 20,
+            "method": "tools/call",
+            "params": {
+                "name": "ig_missing",
+                "arguments": {}
+            }
+        }),
+    );
+    let unknown_tool = read_response(&mut reader);
+    assert_eq!(unknown_tool["id"], 20);
+    assert_eq!(unknown_tool["error"]["code"], -32602);
+    assert!(
+        unknown_tool["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown tool")
+    );
+
     // 3. tools/call ig_status
     send_request(
         &mut stdin,

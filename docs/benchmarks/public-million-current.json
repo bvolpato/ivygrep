@@ -1,7 +1,8 @@
 {
   "schema_version": 1,
   "generated_at": "2026-07-26T05:34:02.411665+00:00",
-  "description": "Current-release confirmation. Values are medians from three sequential trials against the same deterministic CC0 corpus.",
+  "description": "Current-release confirmation. Values are medians from three sequential hash-only trials against the same deterministic synthetic CC0 corpus; this artifact measures scale and footprint, not semantic quality or agent outcomes.",
+  "scope": "synthetic hash-only scale and footprint measurement",
   "binary": {
     "version": "ivygrep 1.2.7",
     "sha256": "72c15459f0851ca7c7557c5abfe80e1ab42e8dfdf946902d923a98f376de7293",

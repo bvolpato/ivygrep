@@ -17,6 +17,7 @@ include = [
     "build.rs",
     "Cargo.lock",
     "Cargo.toml",
+    "docs/architecture.md",
     "LICENSE",
     "README.md",
     "src/**",

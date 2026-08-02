@@ -113,6 +113,17 @@ class CommunityHealthTest(unittest.TestCase):
         self.assertRegex(website, rf">\s*v{re.escape(version)}\s*<")
         self.assertRegex(changelog, rf"(?m)^## \[{re.escape(version)}\] - \d{{4}}-\d{{2}}-\d{{2}}$")
 
+    def test_public_launch_claims_match_published_evidence(self) -> None:
+        readme = self.read("README.md")
+        website = self.read("docs/index.html")
+
+        self.assertIn("WinGet lists v1.2.6", readme)
+        self.assertNotIn("awaiting registry approval", readme.lower())
+        self.assertIn("Warm CLI p95 was 87.63 ms", readme)
+        self.assertIn("synthetic personal-assistant data", readme)
+        self.assertIn("Median of three sequential v1.2.7 trials", website)
+        self.assertIn("not semantic quality or agent outcomes", website)
+
 
 if __name__ == "__main__":
     unittest.main()
