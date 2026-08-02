@@ -57,6 +57,15 @@ def run_scripts(workflow: str) -> dict[str, str]:
 
 
 class WorkflowHardeningTest(unittest.TestCase):
+    def test_dashboard_validation_fetches_publication_history(self) -> None:
+        for workflow_name, job_name in (
+            ("ci.yml", "check"),
+            ("public-retrieval.yml", "validate"),
+        ):
+            job = job_block(workflow_text(workflow_name), job_name)
+            self.assertIn("fetch-depth: 0", job, workflow_name)
+            self.assertIn("scripts/render_evidence_dashboard.py", job, workflow_name)
+
     def test_benchmark_publication_permissions_are_split(self) -> None:
         workflow = workflow_text("benchmarks.yml")
         top_level = workflow.split("jobs:\n", maxsplit=1)[0]
