@@ -129,8 +129,8 @@
                     <div class="line output"><span class="path">notes/decisions/cache.md:42</span></div>
                     <div class="line output">Invalidate on writes; keep reads cache-first.</div>
                     <div class="line"><span class="prompt">$</span> ig context "fix refresh-token races" --since main --budget 8000</div>
-                    <div class="line output success">Context: 14 snippets, 7,642 tokens, 3 changed files</div>
-                    <div class="line output"><span class="path">Coverage:</span> definitions, callers, dependents, tests</div>
+                    <div class="line output success">Selected: 14 snippets within 8,000-token budget</div>
+                    <div class="line output"><span class="path">Roles:</span> primary, definitions, callers, dependents, tests</div>
                 </div>
             </div>
         </div>
@@ -186,13 +186,15 @@
                     <pre class="code-block"><span class="prompt">$</span> ig context "fix refresh-token races" --since main --budget 8000
 
 # ivygrep context
+...
 Budget: 3842 / 8000 estimated tokens
-Changes: 4 files from main...HEAD plus dirty worktree
-Coverage: 7 files | primary | dependencies | dependents | definitions | tests
+Coverage: 7 files | 2 primary | 1 definitions | 1 dependencies | 1 dependents | 1 callers | 0 references | 1 tests | 0 config | 0 docs
+Candidates: 31 retrieved | 14 selected
 
-1. src/auth/refresh.rs:42-88 [primary, definition]
-2. src/http/session.rs:117-145 [dependent, caller]
-3. tests/refresh_token.rs:20-61 [test]</pre>
+## Evidence
+### 1. src/auth/refresh.rs:42-88 [primary, definition]
+Why: task anchor; changed implementation.
+Signals: lexical, symbol, git change.</pre>
                 </div>
             </div>
         </div>
@@ -217,7 +219,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
                 <div>
                     <h3>Semantic recall without hosted search</h3>
                     <p>Index a notes directory once and wait for local vectors. Later daemon-backed questions across CLI, MCP, Web, and TUI use default semantic + lexical retrieval, while watcher keeps changed notes current. Implicit questions over note-like results automatically add concurrent local memory probes. No semantic opt-in flag required.</p>
-                    <p>On public MemoryQuest benchmark, default CLI search retrieved <strong>74.9%</strong> of required memories in top 20 and found every required memory for <strong>44.9%</strong> of questions. Warm CLI p95 was <strong>86.05 ms</strong> across 535 implicit questions and 3,878 preindexed sessions.</p>
+                    <p>On public MemoryQuest benchmark, default CLI search retrieved <strong>74.9%</strong> of required memories in top 20 and found every required memory for <strong>44.9%</strong> of questions. Warm CLI p95 was <strong>87.63 ms</strong> across 535 implicit questions and 3,878 preindexed sessions.</p>
                     <p class="benchmark-note">MemoryQuest uses synthetic personal-assistant conversations and measures retrieval, not final-answer correctness.</p>
                     <p class="benchmark-links"><a href="benchmarks/public-memory-retrieval.html">Methodology and results</a><a href="benchmarks/public-memory-retrieval-results.json">Raw JSON</a></p>
                 </div>
@@ -370,7 +372,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
         <div class="section-header">
             <span class="section-tag">System evidence</span>
             <h2 class="section-title text-center">Context stays practical at repository scale</h2>
-            <p class="text-center subtitle-small">Absolute measurements from a deterministic one-million-chunk corpus show local indexing and query paths at scale.</p>
+            <p class="text-center subtitle-small">Three hash-only trials on deterministic synthetic CC0 data measure local indexing, query latency, and footprint at scale.</p>
         </div>
 
         <div class="glass-panel fade-in-scroll benchmark-panel mt-4">
@@ -388,7 +390,7 @@ Coverage: 7 files | primary | dependencies | dependents | definitions | tests
                     <p>Final index size</p>
                 </div>
             </div>
-            <p class="benchmark-note">Median of three sequential v1.2.7 trials. These are system measurements, not agent outcomes. Hardware, repository shape, model, index state, and load affect absolute results.</p>
+            <p class="benchmark-note">Median of three sequential v1.2.7 trials on deterministic synthetic CC0 data in hash-only mode. These are scale and footprint measurements, not semantic quality or agent outcomes. Hardware, repository shape, index state, and load affect absolute results.</p>
             <p class="benchmark-links" aria-label="Benchmark links">
                 <a href="benchmarks/public-million-current.json">Current-release evidence</a>
                 <a href="benchmarks/public-million.html">Public million-chunk benchmark</a>

@@ -64,6 +64,40 @@ def default_output_name(matrix: dict) -> str:
     return f"{report_slug(matrix)}-results.json"
 
 
+def dataset_scope_note(matrix: dict) -> str:
+    """Describe sampling and licensing without implying redistribution rights."""
+    records = {}
+    for result in matrix.get("results", []):
+        task = result.get("dataset")
+        provenance = result.get("dataset_provenance")
+        if task and isinstance(provenance, dict):
+            records.setdefault(task, provenance)
+    sampled = []
+    undeclared = []
+    for task in matrix.get("tasks", []):
+        provenance = records.get(task, {})
+        sample = provenance.get("sample") or {}
+        if sample.get("query_limit") or sample.get("corpus_limit"):
+            sampled.append(
+                f"{task} ({sample.get('query_limit', '?')} queries, "
+                f"{sample.get('corpus_limit', '?')} documents)"
+            )
+        if provenance.get("license") == "not-declared-in-dataset-card":
+            undeclared.append(task)
+    notes = [
+        "Artifacts use pinned public datasets and retain source revisions and checksums in raw JSON.",
+    ]
+    if sampled:
+        notes.append("Deterministic samples: " + ", ".join(sampled) + ".")
+    if undeclared:
+        notes.append(
+            "Dataset cards do not declare licenses for: "
+            + ", ".join(undeclared)
+            + ". Treat downloaded corpora as evaluation inputs; do not redistribute them without checking upstream terms."
+        )
+    return " ".join(notes)
+
+
 def markdown(matrix: dict, baseline: dict | None = None) -> str:
     lines = [
         "# Public code-retrieval benchmark",
@@ -77,6 +111,7 @@ def markdown(matrix: dict, baseline: dict | None = None) -> str:
         f"- Languages: {len(matrix.get('languages', []))}",
         f"- Held-out queries: {matrix['queries']}",
         f"- Repetitions: {matrix['repetitions']}",
+        f"- Dataset scope: {dataset_scope_note(matrix)}",
     ]
     if matrix.get("query_text_limit") is not None:
         lines.append(f"- Query text limit: {matrix['query_text_limit']} characters")
@@ -352,6 +387,7 @@ def html(matrix: dict, baseline: dict | None = None) -> str:
         <section class="report-card">
             <h2>Scope</h2>
             <p>Matrix covers held-out natural-language and code-to-code retrieval. Exact-search tools require a separate exact-query workload.</p>
+            <p>{escape(dataset_scope_note(matrix))}</p>
         </section>
     </main>
 </body>

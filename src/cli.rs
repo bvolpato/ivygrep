@@ -20,6 +20,7 @@ use crate::regex_search::regex_search;
 use crate::search::{
     SearchOptions, hybrid_search, literal_search, validate_forced_neural_workspaces,
 };
+use crate::search_service::{HitOrdering, SearchBatch, select_search_workspaces};
 use crate::workspace::{
     Workspace, WorkspaceIndexState, list_workspace_roots, list_workspaces,
     resolve_workspace_and_scope,
@@ -1649,7 +1650,10 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
 
         if search_via_daemon {
             match daemon::request::<fn(String, usize, usize)>(&request, false, None).await? {
-                Some(DaemonResponse::SearchResults { hits }) => hits,
+                Some(DaemonResponse::SearchResults { hits, warnings }) => {
+                    report_search_warnings(&warnings);
+                    hits
+                }
                 Some(DaemonResponse::Error { message }) => {
                     tracing::warn!(
                         "daemon literal search failed ({message}), falling back to local"
@@ -1692,7 +1696,10 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
 
         if search_via_daemon {
             match daemon::request::<fn(String, usize, usize)>(&request, false, None).await? {
-                Some(DaemonResponse::SearchResults { hits }) => hits,
+                Some(DaemonResponse::SearchResults { hits, warnings }) => {
+                    report_search_warnings(&warnings);
+                    hits
+                }
                 Some(DaemonResponse::Error { message }) => bail!(message),
                 other => {
                     tracing::warn!(
@@ -1759,7 +1766,10 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             };
 
             match daemon_result {
-                Some(DaemonResponse::SearchResults { hits }) => hits,
+                Some(DaemonResponse::SearchResults { hits, warnings }) => {
+                    report_search_warnings(&warnings);
+                    hits
+                }
                 Some(DaemonResponse::Error { message }) if cli.force_neural => {
                     bail!(message)
                 }
@@ -1787,16 +1797,8 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
                 }
             }
         } else {
-            let mut all_hits = Vec::new();
-            let workspaces = if cli.all_indices {
-                list_workspaces()?
-                    .into_iter()
-                    .filter(|w| w.last_indexed_at_unix.is_some())
-                    .filter_map(|w| Workspace::resolve(&w.root).ok())
-                    .collect()
-            } else {
-                vec![workspace.clone()]
-            };
+            let workspace_set = select_search_workspaces(&workspace, cli.all_indices)?;
+            let workspaces = workspace_set.workspaces;
             let search_model = local_hybrid_search_model(
                 &workspaces,
                 query,
@@ -1804,60 +1806,19 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
                 cli.lexical_only,
                 cli.force_neural,
             )?;
+            let mut batch = SearchBatch::new(workspace_set.warnings);
             for ws in workspaces {
                 let _ = ws.cleanup_stale_legacy_runtime_files();
                 let _t_search = std::time::Instant::now();
-                match hybrid_search(&ws, query, search_model.as_deref(), &local_options) {
-                    Ok(mut hits) => {
-                        if hits.is_empty()
-                            && !cli.all_indices
-                            && let Some(retry_hits) =
-                                retry_after_query_repair(&ws, cli.skip_gitignore, || {
-                                    hybrid_search(
-                                        &ws,
-                                        query,
-                                        search_model.as_deref(),
-                                        &local_options,
-                                    )
-                                })?
-                        {
-                            hits = retry_hits;
-                        }
-                        if cli.all_indices {
-                            for hit in &mut hits {
-                                hit.file_path = ws.root.join(&hit.file_path);
-                            }
-                        }
-                        all_hits.append(&mut hits);
-                    }
-                    Err(err) => {
-                        if !cli.all_indices
-                            && let Some(mut hits) =
-                                retry_after_query_repair(&ws, cli.skip_gitignore, || {
-                                    hybrid_search(
-                                        &ws,
-                                        query,
-                                        search_model.as_deref(),
-                                        &local_options,
-                                    )
-                                })?
-                        {
-                            all_hits.append(&mut hits);
-                            continue;
-                        }
-                        tracing::warn!("hybrid_search failed for {}: {err:#}", ws.root.display());
-                    }
-                }
+                let result = search_workspace_with_optional_repair(
+                    &ws,
+                    cli.skip_gitignore,
+                    !cli.all_indices,
+                    || hybrid_search(&ws, query, search_model.as_deref(), &local_options),
+                );
+                batch.record(&ws.root, cli.all_indices, result);
             }
-            all_hits.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            if let Some(l) = backend_limit {
-                all_hits.truncate(l);
-            }
-            all_hits
+            finish_local_search(batch, backend_limit, HitOrdering::Score)?
         }
     };
 
@@ -1982,6 +1943,12 @@ fn render_hits(
     Ok(())
 }
 
+fn report_search_warnings(warnings: &[String]) {
+    for warning in warnings {
+        eprintln!("warning: partial search: {warning}");
+    }
+}
+
 fn print_daemon_response(response: DaemonResponse, json: bool) -> Result<()> {
     match response {
         DaemonResponse::Ack { message } => {
@@ -1993,7 +1960,8 @@ fn print_daemon_response(response: DaemonResponse, json: bool) -> Result<()> {
             Ok(())
         }
         DaemonResponse::Error { message } => bail!(message),
-        DaemonResponse::SearchResults { hits } => {
+        DaemonResponse::SearchResults { hits, warnings } => {
+            report_search_warnings(&warnings);
             render_hits(&hits, json, None, false, false, false)
         }
         DaemonResponse::Status { workspaces, .. } => {
@@ -2128,68 +2096,23 @@ fn local_fallback_search(
     options: &SearchOptions,
     use_hash: bool,
 ) -> Result<Vec<SearchHit>> {
-    let mut all_hits = Vec::new();
-    let workspaces = if all_indices {
-        crate::workspace::list_workspaces()
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|w| w.last_indexed_at_unix.is_some())
-            .filter_map(|w| Workspace::resolve(&w.root).ok())
-            .collect()
-    } else {
-        vec![workspace.clone()]
-    };
+    let workspace_set = select_search_workspaces(workspace, all_indices)?;
+    let workspaces = workspace_set.workspaces;
 
     let model =
         local_hybrid_search_model(&workspaces, query, use_hash, false, options.force_neural)?;
+    let mut batch = SearchBatch::new(workspace_set.warnings);
 
     for ws in workspaces {
-        match hybrid_search(&ws, query, model.as_deref(), options) {
-            Ok(mut hits) => {
-                if hits.is_empty()
-                    && !all_indices
-                    && let Some(retry_hits) =
-                        retry_after_query_repair(&ws, options.skip_gitignore, || {
-                            hybrid_search(&ws, query, model.as_deref(), options)
-                        })?
-                {
-                    hits = retry_hits;
-                }
-                if all_indices {
-                    for hit in &mut hits {
-                        hit.file_path = ws.root.join(&hit.file_path);
-                    }
-                }
-                all_hits.append(&mut hits);
-            }
-            Err(err) => {
-                if !all_indices
-                    && let Some(mut hits) =
-                        retry_after_query_repair(&ws, options.skip_gitignore, || {
-                            hybrid_search(&ws, query, model.as_deref(), options)
-                        })?
-                {
-                    all_hits.append(&mut hits);
-                    continue;
-                }
-                tracing::warn!(
-                    "local fallback search failed for {}: {err:#}",
-                    ws.root.display()
-                );
-            }
-        }
+        let result = search_workspace_with_optional_repair(
+            &ws,
+            options.skip_gitignore,
+            !all_indices,
+            || hybrid_search(&ws, query, model.as_deref(), options),
+        );
+        batch.record(&ws.root, all_indices, result);
     }
-
-    all_hits.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    if let Some(l) = options.limit {
-        all_hits.truncate(l);
-    }
-    Ok(all_hits)
+    finish_local_search(batch, options.limit, HitOrdering::Score)
 }
 
 fn local_symbol_search_hits(
@@ -2199,66 +2122,48 @@ fn local_symbol_search_hits(
     mode: crate::symbols::SymbolSearchMode,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
-    let workspaces = if all_indices {
-        list_workspaces()?
-            .into_iter()
-            .filter(|status| status.last_indexed_at_unix.is_some())
-            .filter_map(|status| Workspace::resolve(&status.root).ok())
-            .collect()
-    } else {
-        vec![workspace.clone()]
-    };
-
-    let mut all_hits = Vec::new();
-    for ws in workspaces {
+    let workspace_set = select_search_workspaces(workspace, all_indices)?;
+    let mut batch = SearchBatch::new(workspace_set.warnings);
+    for ws in workspace_set.workspaces {
         let mut workspace_options = options.clone();
         if all_indices {
             workspace_options.scope_filter = None;
         }
-        match crate::symbols::search_symbols_with_options(&ws, query, mode, &workspace_options) {
-            Ok(mut hits) => {
-                if all_indices {
-                    for hit in &mut hits {
-                        hit.file_path = ws.root.join(&hit.file_path);
-                    }
-                }
-                all_hits.append(&mut hits);
-            }
-            Err(err) => {
-                if !all_indices {
-                    return Err(err);
-                }
-                tracing::warn!("symbol search failed for {}: {err:#}", ws.root.display());
-            }
-        }
+        let result =
+            crate::symbols::search_symbols_with_options(&ws, query, mode, &workspace_options);
+        batch.record(&ws.root, all_indices, result);
     }
-
-    all_hits.sort_by(|left, right| {
-        right
-            .score
-            .total_cmp(&left.score)
-            .then_with(|| left.file_path.cmp(&right.file_path))
-            .then_with(|| left.start_line.cmp(&right.start_line))
-    });
-    if let Some(limit) = options.limit {
-        all_hits.truncate(limit);
-    }
-    Ok(all_hits)
+    finish_local_search(batch, options.limit, HitOrdering::Score)
 }
 
-fn retry_after_query_repair<F>(
+fn search_workspace_with_optional_repair<F>(
     workspace: &Workspace,
     skip_gitignore: bool,
-    retry: F,
-) -> Result<Option<Vec<SearchHit>>>
+    repair: bool,
+    mut search: F,
+) -> Result<Vec<SearchHit>>
 where
-    F: FnOnce() -> Result<Vec<SearchHit>>,
+    F: FnMut() -> Result<Vec<SearchHit>>,
 {
-    if repair_unhealthy_index_for_query(workspace, skip_gitignore)? {
-        retry().map(Some)
-    } else {
-        Ok(None)
+    let first = search();
+    if !repair || first.as_ref().is_ok_and(|hits| !hits.is_empty()) {
+        return first;
     }
+    if repair_unhealthy_index_for_query(workspace, skip_gitignore)? {
+        search()
+    } else {
+        first
+    }
+}
+
+fn finish_local_search(
+    batch: SearchBatch,
+    limit: Option<usize>,
+    ordering: HitOrdering,
+) -> Result<Vec<SearchHit>> {
+    let outcome = batch.finish(limit, ordering)?;
+    report_search_warnings(&outcome.warnings);
+    Ok(outcome.hits)
 }
 
 fn repair_unhealthy_index_for_query(workspace: &Workspace, skip_gitignore: bool) -> Result<bool> {
@@ -2300,55 +2205,19 @@ fn local_literal_search_hits(
     query: &str,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
-    let mut all_hits = Vec::new();
-    let workspaces = if all_indices {
-        list_workspaces()?
-            .into_iter()
-            .filter(|w| w.last_indexed_at_unix.is_some())
-            .filter_map(|w| Workspace::resolve(&w.root).ok())
-            .collect()
-    } else {
-        vec![workspace.clone()]
-    };
+    let workspace_set = select_search_workspaces(workspace, all_indices)?;
+    let mut batch = SearchBatch::new(workspace_set.warnings);
 
-    for ws in workspaces {
-        match literal_search(&ws, query, options) {
-            Ok(mut hits) => {
-                if hits.is_empty()
-                    && !all_indices
-                    && let Some(retry_hits) =
-                        retry_after_query_repair(&ws, options.skip_gitignore, || {
-                            literal_search(&ws, query, options)
-                        })?
-                {
-                    hits = retry_hits;
-                }
-                if all_indices {
-                    for hit in &mut hits {
-                        hit.file_path = ws.root.join(&hit.file_path);
-                    }
-                }
-                all_hits.append(&mut hits);
-            }
-            Err(err) => {
-                if !all_indices
-                    && let Some(mut hits) =
-                        retry_after_query_repair(&ws, options.skip_gitignore, || {
-                            literal_search(&ws, query, options)
-                        })?
-                {
-                    all_hits.append(&mut hits);
-                    continue;
-                }
-                tracing::warn!("literal_search failed for {}: {err:#}", ws.root.display());
-            }
-        }
+    for ws in workspace_set.workspaces {
+        let result = search_workspace_with_optional_repair(
+            &ws,
+            options.skip_gitignore,
+            !all_indices,
+            || literal_search(&ws, query, options),
+        );
+        batch.record(&ws.root, all_indices, result);
     }
-
-    if let Some(l) = options.limit {
-        all_hits.truncate(l);
-    }
-    Ok(all_hits)
+    finish_local_search(batch, options.limit, HitOrdering::Preserve)
 }
 
 fn local_regex_search_hits(
@@ -2357,79 +2226,29 @@ fn local_regex_search_hits(
     query: &str,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
-    let mut all_hits = Vec::new();
-    let workspaces = if all_indices {
-        list_workspaces()?
-            .into_iter()
-            .filter(|w| w.last_indexed_at_unix.is_some())
-            .filter_map(|w| Workspace::resolve(&w.root).ok())
-            .collect()
-    } else {
-        vec![workspace.clone()]
-    };
+    let workspace_set = select_search_workspaces(workspace, all_indices)?;
+    let mut batch = SearchBatch::new(workspace_set.warnings);
 
-    for ws in workspaces {
-        match regex_search(
+    for ws in workspace_set.workspaces {
+        let result = search_workspace_with_optional_repair(
             &ws,
-            query,
-            options.limit,
-            options.scope_filter.as_ref(),
-            &options.include_globs,
-            &options.exclude_globs,
             options.skip_gitignore,
-        ) {
-            Ok(mut hits) => {
-                if hits.is_empty()
-                    && !all_indices
-                    && let Some(retry_hits) =
-                        retry_after_query_repair(&ws, options.skip_gitignore, || {
-                            regex_search(
-                                &ws,
-                                query,
-                                options.limit,
-                                options.scope_filter.as_ref(),
-                                &options.include_globs,
-                                &options.exclude_globs,
-                                options.skip_gitignore,
-                            )
-                        })?
-                {
-                    hits = retry_hits;
-                }
-                if all_indices {
-                    for hit in &mut hits {
-                        hit.file_path = ws.root.join(&hit.file_path);
-                    }
-                }
-                all_hits.append(&mut hits);
-            }
-            Err(err) => {
-                if !all_indices
-                    && let Some(mut hits) =
-                        retry_after_query_repair(&ws, options.skip_gitignore, || {
-                            regex_search(
-                                &ws,
-                                query,
-                                options.limit,
-                                options.scope_filter.as_ref(),
-                                &options.include_globs,
-                                &options.exclude_globs,
-                                options.skip_gitignore,
-                            )
-                        })?
-                {
-                    all_hits.append(&mut hits);
-                    continue;
-                }
-                tracing::warn!("regex_search failed for {}: {err:#}", ws.root.display());
-            }
-        }
+            !all_indices,
+            || {
+                regex_search(
+                    &ws,
+                    query,
+                    options.limit,
+                    options.scope_filter.as_ref(),
+                    &options.include_globs,
+                    &options.exclude_globs,
+                    options.skip_gitignore,
+                )
+            },
+        );
+        batch.record(&ws.root, all_indices, result);
     }
-
-    if let Some(l) = options.limit {
-        all_hits.truncate(l);
-    }
-    Ok(all_hits)
+    finish_local_search(batch, options.limit, HitOrdering::Preserve)
 }
 
 fn is_single_word_symbol_query(query: &str) -> bool {

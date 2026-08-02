@@ -366,6 +366,8 @@ jobs:
             --expected-target "${{ matrix.target }}" \
             --expected-commit "$GITHUB_SHA" \
             --github-output "$GITHUB_OUTPUT"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "checksum=$CHECKSUM" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         if: matrix.target == 'aarch64-unknown-linux-musl'
@@ -391,18 +393,47 @@ jobs:
             --skip-build \
             --binary "$BINARY"
 
+      - name: Validate exact Unix installer artifact
+        if: >-
+          matrix.target == 'x86_64-unknown-linux-musl' ||
+          matrix.target == 'x86_64-unknown-linux-gnu' ||
+          matrix.target == 'x86_64-apple-darwin' ||
+          matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        env:
+          IVYGREP_INSTALL_ARCHIVE: ${{ steps.artifact.outputs.archive }}
+          IVYGREP_INSTALL_CHECKSUM: ${{ steps.artifact.outputs.checksum }}
+          IVYGREP_INSTALL_DIR: ${{ runner.temp }}/ivygrep-exact-installer
+          IVYGREP_VERSION: ${{ github.ref_name }}
+          IVYGREP_ACCELERATOR: portable
+        run: |
+          ./install.sh
+          "$IVYGREP_INSTALL_DIR/ig" --version
+
+      - name: Validate exact PowerShell installer artifact
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        env:
+          IVYGREP_INSTALL_ARCHIVE: ${{ steps.artifact.outputs.archive }}
+          IVYGREP_INSTALL_CHECKSUM: ${{ steps.artifact.outputs.checksum }}
+          IVYGREP_INSTALL_DIR: ${{ runner.temp }}/ivygrep-exact-installer
+          IVYGREP_VERSION: ${{ github.ref_name }}
+        run: |
+          & ./install.ps1
+          & (Join-Path $env:IVYGREP_INSTALL_DIR "ig.exe") --version
+
       - name: Install uv for neural model caching
-        if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.archive_name == 'macos-aarch64-metal' || matrix.target == 'x86_64-pc-windows-msvc'
+        if: matrix.cuda || matrix.target == 'x86_64-unknown-linux-musl' || matrix.archive_name == 'macos-aarch64-metal' || matrix.target == 'x86_64-pc-windows-msvc'
         uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           enable-cache: false
 
       - name: Cache pinned neural model through Xet
-        if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.archive_name == 'macos-aarch64-metal' || matrix.target == 'x86_64-pc-windows-msvc'
+        if: matrix.cuda || matrix.target == 'x86_64-unknown-linux-musl' || matrix.archive_name == 'macos-aarch64-metal' || matrix.target == 'x86_64-pc-windows-msvc'
         shell: bash
         run: |
           PROFILE=static
-          if [[ "${{ matrix.archive_name }}" == "macos-aarch64-metal" ]]; then
+          if [[ "${{ matrix.archive_name }}" == "macos-aarch64-metal" || "${{ matrix.archive_name }}" == "linux-x86_64-cuda" ]]; then
             PROFILE=general
           fi
           CACHE="$RUNNER_TEMP/ivygrep-release-hf-cache"
@@ -423,7 +454,31 @@ jobs:
             ./scripts/e2e_neural_backend.sh \
               --binary "$BINARY" \
               --model-profile general \
-              --expect-backend "Candle Metal"
+              --expect-backend "Candle Metal" \
+              --expect-file "src/lib.rs"
+
+      - name: Validate Linux CUDA backend and semantic retrieval
+        if: matrix.cuda
+        shell: bash
+        env:
+          BINARY: ${{ steps.artifact.outputs.binary }}
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+          ALL_PROXY: http://127.0.0.1:9
+          NO_PROXY: ''
+        run: |
+          args=(
+            --binary "$BINARY"
+            --model-profile general
+            --expect-backend "BERT embedding via Candle CUDA"
+            --expect-file "src/lib.rs"
+          )
+          if ! command -v nvidia-smi >/dev/null 2>&1 || ! nvidia-smi -L >/dev/null 2>&1; then
+            args+=(--allow-backend "BERT embedding via Candle CPU")
+            echo "No NVIDIA GPU on release runner; accepting validated Candle CPU fallback for CUDA artifact"
+          fi
+          HF_HOME="$IVYGREP_RELEASE_HF_CACHE" \
+            ./scripts/e2e_neural_backend.sh "${args[@]}"
 
       - name: Run exact Linux aarch64 archive under QEMU
         if: matrix.target == 'aarch64-unknown-linux-musl'
@@ -478,7 +533,7 @@ jobs:
           HTTPS_PROXY=http://127.0.0.1:9 \
           ALL_PROXY=http://127.0.0.1:9 \
           NO_PROXY='' \
-            ./scripts/e2e_cached_model.sh --binary "$BINARY" --cache "$CACHE"
+            ./scripts/e2e_cached_model.sh --binary "$BINARY" --cache "$CACHE" --expect-file "lib.rs"
           BINARY_REL="${BINARY#"$PWD/"}"
           docker run --rm \
             --network none \
@@ -486,7 +541,7 @@ jobs:
             -v "$CACHE:/hf-cache" \
             -w /workspace \
             alpine:latest sh -c \
-              "sh scripts/e2e_cached_model.sh --binary /workspace/${BINARY_REL} --cache /hf-cache"
+              "sh scripts/e2e_cached_model.sh --binary /workspace/${BINARY_REL} --cache /hf-cache --expect-file lib.rs"
 
       - name: Validate Windows neural backend and cached offline reuse
         if: matrix.target == 'x86_64-pc-windows-msvc'
@@ -502,7 +557,8 @@ jobs:
             ./scripts/e2e_cached_model.sh \
               --binary "$BINARY" \
               --cache "$CACHE" \
-              --expect-backend "StaticEmbedding token mean via Rust"
+              --expect-backend "StaticEmbedding token mean via Rust" \
+              --expect-file "lib.rs"
           HTTP_PROXY=http://127.0.0.1:9 \
           HTTPS_PROXY=http://127.0.0.1:9 \
           ALL_PROXY=http://127.0.0.1:9 \
@@ -510,7 +566,8 @@ jobs:
             ./scripts/e2e_cached_model.sh \
               --binary "$BINARY" \
               --cache "$CACHE" \
-              --expect-backend "StaticEmbedding token mean via Rust"
+              --expect-backend "StaticEmbedding token mean via Rust" \
+              --expect-file "lib.rs"
 
   release:
     name: Create GitHub Release

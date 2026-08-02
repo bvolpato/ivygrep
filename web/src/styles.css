@@ -367,6 +367,22 @@ select {
   min-width: 0;
 }
 
+.search-warnings {
+  border: 1px solid #e6c978;
+  border-radius: 8px;
+  background: #fff8df;
+  color: #6f5311;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.search-warnings ul {
+  margin: 5px 0 0;
+  padding-left: 18px;
+}
+
 .copy-tools {
   display: flex;
   gap: 6px;

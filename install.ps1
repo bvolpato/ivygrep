@@ -65,7 +65,13 @@ if ($version -eq "latest") {
 }
 
 $asset = "ivygrep-$tag-windows-x86_64.zip"
-$baseUrl = "https://github.com/$repository/releases/download/$tag"
+$baseUrl = if ($env:IVYGREP_BASE_URL) {
+    $env:IVYGREP_BASE_URL.TrimEnd('/')
+} else {
+    "https://github.com/$repository/releases/download/$tag"
+}
+$localArchive = [Environment]::GetEnvironmentVariable("IVYGREP_INSTALL_ARCHIVE")
+$localChecksum = [Environment]::GetEnvironmentVariable("IVYGREP_INSTALL_CHECKSUM")
 $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) "ivygrep-$([guid]::NewGuid())"
 
 try {
@@ -73,12 +79,26 @@ try {
     New-Item $tempDir -ItemType Directory -Force | Out-Null
     $archivePath = Join-Path $tempDir $asset
     $checksumPath = "$archivePath.sha256"
-    Invoke-WithRetry -Description "Archive download" -Operation {
-        Invoke-WebRequest "$baseUrl/$asset" -OutFile $archivePath
-    } | Out-Null
-    Invoke-WithRetry -Description "Checksum download" -Operation {
-        Invoke-WebRequest "$baseUrl/$asset.sha256" -OutFile $checksumPath
-    } | Out-Null
+    if ($localArchive) {
+        if (-not (Test-Path -LiteralPath $localArchive -PathType Leaf)) {
+            throw "IVYGREP_INSTALL_ARCHIVE does not exist: $localArchive"
+        }
+        if (-not $localChecksum) {
+            $localChecksum = "$localArchive.sha256"
+        }
+        if (-not (Test-Path -LiteralPath $localChecksum -PathType Leaf)) {
+            throw "IVYGREP_INSTALL_CHECKSUM does not exist: $localChecksum"
+        }
+        Copy-Item -LiteralPath $localArchive -Destination $archivePath -Force
+        Copy-Item -LiteralPath $localChecksum -Destination $checksumPath -Force
+    } else {
+        Invoke-WithRetry -Description "Archive download" -Operation {
+            Invoke-WebRequest "$baseUrl/$asset" -OutFile $archivePath
+        } | Out-Null
+        Invoke-WithRetry -Description "Checksum download" -Operation {
+            Invoke-WebRequest "$baseUrl/$asset.sha256" -OutFile $checksumPath
+        } | Out-Null
+    }
 
     $expected = (Get-Content $checksumPath -Raw).Split()[0].ToLowerInvariant()
     $actual = (Get-FileHash $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()

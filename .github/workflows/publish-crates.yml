@@ -3,6 +3,10 @@ name: Publish crates.io packages
 on:
   workflow_dispatch:
     inputs:
+      release_tag:
+        description: Existing release tag to publish (for example v1.2.7)
+        required: true
+        type: string
       bootstrap:
         description: Use CRATES_IO_TOKEN for first publication
         required: true
@@ -21,10 +25,74 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - name: Validate release identity and package manifests
+        id: release
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          WORKFLOW_REF: ${{ github.ref }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "release_tag must be a semantic version tag such as v1.2.7" >&2
+            exit 1
+          fi
+          if [[ "$WORKFLOW_REF" != "refs/heads/main" && "$WORKFLOW_REF" != "refs/tags/$RELEASE_TAG" ]]; then
+            echo "Dispatch this workflow from main or exact release tag $RELEASE_TAG (got $WORKFLOW_REF)" >&2
+            exit 1
+          fi
+
+          tag_commit="$(git rev-parse --verify --quiet "refs/tags/$RELEASE_TAG^{commit}")"
+          head_commit="$(git rev-parse HEAD)"
+          if [[ "$tag_commit" != "$head_commit" ]]; then
+            echo "release tag does not resolve to checked-out workflow commit" >&2
+            echo "tag=$tag_commit checkout=$head_commit workflow=$WORKFLOW_SHA" >&2
+            exit 1
+          fi
+          if [[ "$WORKFLOW_REF" == "refs/tags/$RELEASE_TAG" && "$tag_commit" != "$WORKFLOW_SHA" ]]; then
+            echo "workflow SHA does not match release tag commit" >&2
+            echo "tag=$tag_commit workflow=$WORKFLOW_SHA" >&2
+            exit 1
+          fi
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo "release checkout is not clean" >&2
+            exit 1
+          fi
+
+          package_version() {
+            local manifest=$1
+            cargo metadata --locked --no-deps --format-version 1 --manifest-path "$manifest" |
+              jq -er --arg package "$2" '.packages[] | select(.name == $package) | .version'
+          }
+
+          expected_version="${RELEASE_TAG#v}"
+          main_version="$(package_version Cargo.toml ivygrep)"
+          if [[ "$main_version" != "$expected_version" ]]; then
+            echo "Cargo.toml version $main_version does not match $RELEASE_TAG" >&2
+            exit 1
+          fi
+          for package in \
+            "vendor/hf-hub/Cargo.toml|ivygrep-hf-hub|0.3.2-ivygrep.1" \
+            "vendor/candle_embed/Cargo.toml|ivygrep-candle-embed|0.1.4-ivygrep.1" \
+            "vendor/usearch/Cargo.toml|ivygrep-usearch|2.24.0-ivygrep.1" \
+            "vendor/tree-sitter-haskell/Cargo.toml|ivygrep-tree-sitter-haskell|0.23.1-ivygrep.1"; do
+            IFS='|' read -r manifest name version <<< "$package"
+            actual="$(package_version "$manifest" "$name")"
+            if [[ "$actual" != "$version" ]]; then
+              echo "$manifest declares $actual, expected $version" >&2
+              exit 1
+            fi
+          done
+          echo "version=$main_version" >> "$GITHUB_OUTPUT"
+          echo "source_commit=$tag_commit" >> "$GITHUB_OUTPUT"
 
       - name: Authenticate to crates.io
         if: ${{ !inputs.bootstrap }}
@@ -40,31 +108,105 @@ jobs:
       - name: Publish packages in dependency order
         env:
           CARGO_REGISTRY_TOKEN: ${{ inputs.bootstrap && secrets.CRATES_IO_TOKEN || steps.auth.outputs.token }}
+          MAIN_VERSION: ${{ steps.release.outputs.version }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/cargo-publish-target
         run: |
+          set -Eeuo pipefail
+
+          check_remote_artifact() {
+            local package=$1
+            local version=$2
+            local local_artifact=$3
+            local metadata="$RUNNER_TEMP/${package}-${version}.json"
+            local remote_artifact="$RUNNER_TEMP/${package}-${version}.remote.crate"
+            local http_code remote_checksum local_checksum remote_checksum_actual
+
+            http_code="$(curl -sS -L -A "ivygrep-release/${GITHUB_RUN_ID}" -o "$metadata" -w '%{http_code}' \
+              "https://crates.io/api/v1/crates/${package}/${version}")"
+            case "$http_code" in
+              404)
+                return 1
+                ;;
+              200)
+                ;;
+              *)
+                echo "crates.io metadata request returned HTTP $http_code for $package $version" >&2
+                cat "$metadata" >&2 || true
+                return 2
+                ;;
+            esac
+
+            remote_checksum="$(jq -er '.version.checksum' "$metadata")"
+            curl -fsSL -A "ivygrep-release/${GITHUB_RUN_ID}" -o "$remote_artifact" \
+              "https://crates.io/api/v1/crates/${package}/${version}/download"
+            local_checksum="$(sha256sum "$local_artifact" | awk '{print $1}')"
+            remote_checksum_actual="$(sha256sum "$remote_artifact" | awk '{print $1}')"
+            if [[ "$remote_checksum" == "$local_checksum" && "$remote_checksum" == "$remote_checksum_actual" ]]; then
+              return 0
+            fi
+            if [[ "$remote_checksum" != "$local_checksum" ]]; then
+              echo "published $package $version checksum differs from release checkout" >&2
+              echo "expected=$local_checksum metadata=$remote_checksum" >&2
+            else
+              echo "crates.io download checksum differs from metadata for $package $version" >&2
+              echo "metadata=$remote_checksum downloaded=$remote_checksum_actual" >&2
+            fi
+            return 3
+          }
+
           publish() {
             local manifest=$1
             local package=$2
             local version=$3
-            if curl -fsS -A "ivygrep-release/${GITHUB_RUN_ID}" \
-              "https://crates.io/api/v1/crates/${package}/${version}" >/dev/null 2>&1; then
-              echo "${package} ${version} already published"
-              return
+            local artifact_root artifact_manifest artifact
+
+            cargo package --locked --no-verify --manifest-path "$manifest"
+            artifact="$CARGO_TARGET_DIR/package/${package}-${version}.crate"
+            if [[ ! -s "$artifact" ]]; then
+              echo "cargo package did not produce expected artifact $artifact" >&2
+              exit 1
             fi
+            artifact_root="$(tar -tzf "$artifact" | awk -F/ 'NF { print $1; exit }')"
+            if [[ "$artifact_root" != "${package}-${version}" ]]; then
+              echo "package root $artifact_root does not match ${package}-${version}" >&2
+              exit 1
+            fi
+            artifact_manifest="$(tar -xOf "$artifact" "${artifact_root}/Cargo.toml")"
+            if ! grep -Fq "name = \"${package}\"" <<< "$artifact_manifest" ||
+              ! grep -Fq "version = \"${version}\"" <<< "$artifact_manifest"; then
+              echo "packaged Cargo.toml identity mismatch for $package $version" >&2
+              exit 1
+            fi
+
+            if check_remote_artifact "$package" "$version" "$artifact"; then
+              echo "$package $version already published with matching artifact checksum"
+              return
+            else
+              local check_status=$?
+              if [[ "$check_status" -ne 1 ]]; then
+                exit "$check_status"
+              fi
+            fi
+
             cargo publish --locked --manifest-path "$manifest"
-            for _ in $(seq 1 30); do
-              if curl -fsS -A "ivygrep-release/${GITHUB_RUN_ID}" \
-                "https://crates.io/api/v1/crates/${package}/${version}" >/dev/null 2>&1; then
+            for _ in $(seq 1 60); do
+              if check_remote_artifact "$package" "$version" "$artifact"; then
                 return
+              else
+                local check_status=$?
+                if [[ "$check_status" -ne 1 ]]; then
+                  exit "$check_status"
+                fi
               fi
               sleep 10
             done
-            echo "${package} ${version} did not become visible" >&2
+            echo "$package $version did not become visible with expected checksum" >&2
             exit 1
           }
 
+          : "${CARGO_REGISTRY_TOKEN:?crates.io authentication token is required}"
           publish vendor/hf-hub/Cargo.toml ivygrep-hf-hub 0.3.2-ivygrep.1
           publish vendor/candle_embed/Cargo.toml ivygrep-candle-embed 0.1.4-ivygrep.1
           publish vendor/usearch/Cargo.toml ivygrep-usearch 2.24.0-ivygrep.1
           publish vendor/tree-sitter-haskell/Cargo.toml ivygrep-tree-sitter-haskell 0.23.1-ivygrep.1
-          VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
-          publish Cargo.toml ivygrep "$VERSION"
+          publish Cargo.toml ivygrep "$MAIN_VERSION"

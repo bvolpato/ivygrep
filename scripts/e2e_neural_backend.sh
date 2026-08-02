@@ -7,19 +7,23 @@ ig_bin="$root/target/release/ig"
 expected_backend=""
 allowed_backend=""
 model_profile=""
+expected_file=""
+semantic_query="where is the routine that matches user intent to source after a warm model load"
 
 usage() {
   cat <<'EOF'
 Validate neural embedding execution through an expected local backend.
 
 Usage:
-  ./scripts/e2e_neural_backend.sh --expect-backend TEXT [--binary PATH]
+  ./scripts/e2e_neural_backend.sh --expect-backend TEXT [options]
 
 Options:
   --binary PATH          Use this ig binary (default: ./target/release/ig)
   --expect-backend TEXT  Status substring required after neural enhancement
   --allow-backend TEXT   Alternate accepted status substring
   --model-profile NAME   Set IVYGREP_MODEL_PROFILE for this backend check
+  --expect-file PATH     Require a semantic query to return PATH
+  --semantic-query TEXT  Natural-language query used with --expect-file
   -h, --help             Show help
 EOF
 }
@@ -51,6 +55,16 @@ while [ "$#" -gt 0 ]; do
       model_profile=$2
       shift 2
       ;;
+    --expect-file)
+      [ "$#" -ge 2 ] || fail "--expect-file needs path"
+      expected_file=$2
+      shift 2
+      ;;
+    --semantic-query)
+      [ "$#" -ge 2 ] || fail "--semantic-query needs text"
+      semantic_query=$2
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -73,9 +87,15 @@ trap cleanup EXIT INT TERM
 project="$tmp_root/project"
 mkdir -p "$project/src"
 cat > "$project/src/lib.rs" <<'EOF'
+/// Reuses persisted model output to match user intent to source code.
 pub fn retrieve_local_semantic_result(query: &str) -> String {
-    format!("local result for {query}")
+    format!("local semantic retrieval result for {query}")
 }
+EOF
+cat > "$project/README.md" <<'EOF'
+# Release notes
+
+This decoy documents packaging and command-line flags. It does not implement source retrieval.
 EOF
 
 export IVYGREP_HOME="$tmp_root/home"
@@ -119,6 +139,11 @@ while ! "$ig_bin" --enhance-internal "$project" >"$enhance_log" 2>&1; do
 done
 
 "$ig_bin" --status > "$tmp_root/status.txt"
+"$ig_bin" --status --json > "$tmp_root/status.json"
+grep -Eq '"has_neural_vectors"[[:space:]]*:[[:space:]]*true' "$tmp_root/status.json" || {
+  cat "$tmp_root/status.json" >&2
+  fail "neural enhancement completed without persisted neural vectors"
+}
 
 reported_backend=""
 if grep -Fq "$expected_backend" "$tmp_root/status.txt"; then
@@ -127,6 +152,24 @@ elif [ -n "$allowed_backend" ] && grep -Fq "$allowed_backend" "$tmp_root/status.
   reported_backend=$allowed_backend
 else
   fail "expected backend '$expected_backend' not reported; status follows: $(cat "$tmp_root/status.txt")"
+fi
+
+if [ -n "$expected_file" ]; then
+  semantic_json="$tmp_root/semantic-search.json"
+  if ! "$ig_bin" --json --force-neural --limit 1 "$semantic_query" "$project" >"$semantic_json" 2>"$tmp_root/semantic-search.err"; then
+    cat "$tmp_root/semantic-search.err" >&2
+    fail "semantic query failed"
+  fi
+  grep -Fq -- "$expected_file" "$semantic_json" || {
+    echo "semantic query did not return expected file '$expected_file'" >&2
+    cat "$semantic_json" >&2
+    fail "semantic retrieval assertion failed"
+  }
+  grep -Eq '"neural_executed"[[:space:]]*:[[:space:]]*true' "$semantic_json" || {
+    cat "$semantic_json" >&2
+    fail "forced semantic query did not execute neural retrieval"
+  }
+  echo "Semantic retrieval procedure passed: $expected_file"
 fi
 
 echo "Neural backend procedure passed: $reported_backend"

@@ -73,7 +73,7 @@ class NeuralBackendE2ETest(unittest.TestCase):
                 exit 0
                 ;;
               --status)
-                echo "StaticEmbedding token mean via Rust"
+                echo '{"has_neural_vectors":true,"neural_backend":"StaticEmbedding token mean via Rust"}'
                 exit 0
                 ;;
             esac
@@ -100,7 +100,7 @@ class NeuralBackendE2ETest(unittest.TestCase):
                 exit 0
                 ;;
               --status)
-                echo "StaticEmbedding token mean via Rust"
+                echo '{"has_neural_vectors":true,"neural_backend":"StaticEmbedding token mean via Rust"}'
                 exit 0
                 ;;
             esac
@@ -132,7 +132,7 @@ class NeuralBackendE2ETest(unittest.TestCase):
                 exit 0
                 ;;
               --status)
-                echo "StaticEmbedding token mean via Rust"
+                echo '{"has_neural_vectors":true,"neural_backend":"StaticEmbedding token mean via Rust"}'
                 exit 0
                 ;;
             esac
@@ -190,6 +190,68 @@ class NeuralBackendE2ETest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(attempts, 1)
         self.assertIn("neural enhancement failed on attempt 1", result.stderr)
+
+    def test_semantic_query_assertion_requires_expected_file(self) -> None:
+        result, attempts = self.run_helper(
+            """
+            case "$1" in
+              --add)
+                exit 0
+                ;;
+              --enhance-internal)
+                echo 1 > "$state"
+                exit 0
+                ;;
+              --status)
+                echo '{"has_neural_vectors":true,"neural_backend":"StaticEmbedding token mean via Rust"}'
+                exit 0
+                ;;
+              --json)
+                [ "$2" = "--force-neural" ] || exit 7
+                echo '{"hits":[{"file_path":"src/lib.rs","neural_executed":true}]}'
+                exit 0
+                ;;
+            esac
+            exit 2
+            """,
+            attempts=1,
+            extra_args=["--expect-file", "src/lib.rs"],
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(attempts, 1)
+        self.assertIn("Semantic retrieval procedure passed", result.stdout)
+
+    def test_semantic_query_requires_neural_execution(self) -> None:
+        result, attempts = self.run_helper(
+            """
+            case "$1" in
+              --add)
+                exit 0
+                ;;
+              --enhance-internal)
+                echo 1 > "$state"
+                exit 0
+                ;;
+              --status)
+                echo '{"has_neural_vectors":true,"neural_backend":"StaticEmbedding token mean via Rust"}'
+                exit 0
+                ;;
+              --json)
+                [ "$2" = "--force-neural" ] || exit 7
+                echo '{"hits":[{"file_path":"src/lib.rs"}]}'
+                exit 0
+                ;;
+            esac
+            exit 2
+            """,
+            attempts=1,
+            extra_args=["--expect-file", "src/lib.rs"],
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(attempts, 1)
+        self.assertIn("did not execute neural retrieval", result.stderr)
 
 
 if __name__ == "__main__":

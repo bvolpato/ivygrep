@@ -16,6 +16,7 @@ Options:
   --quick               Run only library tests, skip fmt/clippy
   --all-targets         Compile/test all Cargo targets
   --stress              Run ignored stress tests (requires fixtures)
+  --e2e                 Run local CLI, daemon, and browser E2E after checks
   --release             Compile Clippy/tests with the release profile
   --hash-only           Test without default neural feature
   --features FEATURES   Pass explicit Cargo features
@@ -34,6 +35,7 @@ Examples:
   ./test.sh --quick
   ./test.sh --release
   ./test.sh --hash-only
+  ./test.sh --e2e
   ./test.sh --features cuda
   ./test.sh --filter query_aliases --nocapture
   ./scripts/bootstrap_stress_fixtures.sh && ./test.sh --stress
@@ -59,6 +61,13 @@ run() {
   "$@"
 }
 
+web_dist_fingerprint() {
+  find web/dist -type f -print0 | LC_ALL=C sort -z |
+    while IFS= read -r -d '' path; do
+      printf '%s  %s\n' "$(git hash-object -- "$path")" "$path"
+    done
+}
+
 mode="ci"
 do_fmt=1
 do_shellcheck=1
@@ -74,6 +83,7 @@ extra_args=()
 wants_cuda=0
 hash_only=0
 force_release=0
+run_e2e=0
 
 features_include_cuda() {
   local features=$1
@@ -179,6 +189,9 @@ while (($#)); do
       do_web=0
       do_python_tests=0
       ;;
+    --e2e)
+      run_e2e=1
+      ;;
     --release)
       force_release=1
       ;;
@@ -256,7 +269,7 @@ if ((do_shellcheck)); then
     echo "shellcheck not found; install it or pass --no-shellcheck" >&2
     exit 127
   fi
-  run shellcheck install.sh build.sh test.sh bench.sh scripts/bootstrap_stress_fixtures.sh scripts/e2e_procedures.sh scripts/e2e_neural_backend.sh scripts/e2e_x86_baseline.sh scripts/e2e_cached_model.sh scripts/stress_large_repo.sh
+  run shellcheck install.sh build.sh test.sh bench.sh scripts/bootstrap_stress_fixtures.sh scripts/e2e_all.sh scripts/e2e_web_ui.sh scripts/e2e_procedures.sh scripts/e2e_neural_backend.sh scripts/e2e_x86_baseline.sh scripts/e2e_cached_model.sh scripts/stress_large_repo.sh
 fi
 
 if ((do_clippy)); then
@@ -270,8 +283,14 @@ if ((do_web)); then
   fi
   run pnpm -C web install --frozen-lockfile
   run pnpm -C web check
+  web_dist_before="$(web_dist_fingerprint)"
   run pnpm -C web build
-  run git diff --exit-code -- web/dist
+  web_dist_after="$(web_dist_fingerprint)"
+  if [[ "$web_dist_before" != "$web_dist_after" ]]; then
+    echo "pnpm build changed web/dist; commit regenerated assets" >&2
+    diff -u <(printf '%s\n' "$web_dist_before") <(printf '%s\n' "$web_dist_after") || true
+    exit 1
+  fi
 fi
 
 if [[ "$mode" == "stress" ]]; then
@@ -287,4 +306,12 @@ run "${cmd[@]}"
 
 if ((do_python_tests)); then
   run python3 -m unittest discover -s tests -p 'test_*.py' -v
+fi
+
+if ((run_e2e)); then
+  e2e_binary="$ROOT/target/debug/ig"
+  if ((${#profile_flags[@]})) && [[ "${profile_flags[*]}" == *--release* ]]; then
+    e2e_binary="$ROOT/target/release/ig"
+  fi
+  run scripts/e2e_all.sh --binary "$e2e_binary"
 fi

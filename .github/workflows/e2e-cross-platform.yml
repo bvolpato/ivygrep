@@ -296,7 +296,7 @@ jobs:
 
       - name: E2E neural backend
         shell: bash
-        run: ./scripts/e2e_neural_backend.sh --binary "$PWD/target/release/ig.exe" --expect-backend "StaticEmbedding token mean via Rust"
+        run: ./scripts/e2e_neural_backend.sh --binary "$PWD/target/release/ig.exe" --expect-backend "StaticEmbedding token mean via Rust" --expect-file "src/lib.rs"
 
       - name: E2E Unicode workspace and index paths
         shell: bash

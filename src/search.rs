@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rayon::prelude::*;
 use rusqlite::Connection;
 use tantivy::TantivyDocument;
@@ -26,11 +26,29 @@ use crate::indexer::{
 };
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
+#[path = "search_execution.rs"]
+mod execution;
+#[path = "search_fusion.rs"]
+mod fusion;
+#[path = "search_presentation.rs"]
+mod presentation;
+
+use crate::search_routing::{
+    QueryIntent, QueryRouting, corpus_candidate_multiplier, neural_fallback_needed, raw_query_terms,
+};
 use crate::text::{build_code_analyzer, singularize_token, split_identifier_segments};
 use crate::vector_store::{
     HASH_VECTOR_QUANTIZATION, NEURAL_VECTOR_QUANTIZATION, VectorMatch, VectorStore,
 };
 use crate::workspace::{Workspace, WorkspaceScope, index_path_string};
+pub(crate) use execution::hybrid_search_with_context_and_neural_job;
+use fusion::fuse_rrf_with_context;
+use presentation::{
+    HitPresentation, LineSpan, PresentationQuery, line_spans,
+    should_use_compact_identifier_matching, snippet_bounds, to_hit,
+};
+#[cfg(test)]
+use presentation::{find_focus_line, line_at};
 
 pub(crate) const DEFAULT_SEARCH_LIMIT: usize = 50;
 
@@ -46,24 +64,6 @@ pub struct RawIndexedChunk {
     pub content_hash: String,
     pub vector_key: u64,
     pub is_ignored: bool,
-}
-
-impl RawIndexedChunk {
-    #[allow(dead_code)]
-    fn decompress(self) -> IndexedChunk {
-        IndexedChunk {
-            chunk_id: self.chunk_id,
-            file_path: self.file_path,
-            start_line: self.start_line,
-            end_line: self.end_line,
-            language: self.language,
-            kind: self.kind,
-            text: crate::indexer::decompress_text(self.raw_text),
-            content_hash: self.content_hash,
-            vector_key: self.vector_key,
-            is_ignored: self.is_ignored,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -141,188 +141,6 @@ fn neural_model_identity_from_index_dir(
     (store.size() > 0).then_some(identity)
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum QueryIntent {
-    ExactIdentifier,
-    Path,
-    LiteralOrError,
-    NaturalLanguage,
-    DocsTestsExamples,
-    Mixed,
-}
-
-impl QueryIntent {
-    fn name(self) -> &'static str {
-        match self {
-            Self::ExactIdentifier => "exact-identifier",
-            Self::Path => "path-file",
-            Self::LiteralOrError => "literal-error",
-            Self::NaturalLanguage => "natural-language-implementation",
-            Self::DocsTestsExamples => "docs-tests-examples",
-            Self::Mixed => "mixed",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct QueryRouting {
-    intent: QueryIntent,
-    use_neural: bool,
-    lexical_multiplier: usize,
-    literal_multiplier: usize,
-    semantic_multiplier: usize,
-    symbol_limit: usize,
-}
-
-impl QueryRouting {
-    fn classify(query: &str) -> Self {
-        let trimmed = query.trim();
-        let terms = raw_query_terms(trimmed);
-        let lower = trimmed.to_ascii_lowercase();
-        let concise_path_query = !trimmed.contains('\n') && terms.len() <= 8;
-        let has_path_shape = concise_path_query
-            && (trimmed.contains('/')
-                || trimmed.contains('\\')
-                || trimmed.split_whitespace().any(|term| {
-                    Path::new(term.trim_matches(|ch: char| {
-                        matches!(ch, '"' | '\'' | '(' | ')' | '[' | ']' | ',' | ';')
-                    }))
-                    .extension()
-                    .is_some_and(|extension| {
-                        let length = extension.to_string_lossy().len();
-                        (1..=8).contains(&length)
-                    })
-                }));
-        let has_literal_shape = trimmed.contains('\n')
-            || trimmed.contains('"')
-            || trimmed.contains('\'')
-            || lower.contains("error:")
-            || lower.contains("exception")
-            || lower.contains("traceback")
-            || lower.contains("failed to");
-        let targets_support = terms.iter().any(|term| {
-            matches!(
-                term.as_str(),
-                "doc"
-                    | "docs"
-                    | "documentation"
-                    | "readme"
-                    | "test"
-                    | "tests"
-                    | "testing"
-                    | "example"
-                    | "examples"
-                    | "sample"
-                    | "samples"
-            )
-        });
-        let exact_identifier = !trimmed.is_empty()
-            && !trimmed.contains(char::is_whitespace)
-            && trimmed
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | ':' | '.' | '$'));
-
-        let intent = if has_path_shape {
-            QueryIntent::Path
-        } else if has_literal_shape {
-            QueryIntent::LiteralOrError
-        } else if exact_identifier {
-            QueryIntent::ExactIdentifier
-        } else if targets_support {
-            QueryIntent::DocsTestsExamples
-        } else if terms.len() >= 13 {
-            QueryIntent::NaturalLanguage
-        } else {
-            QueryIntent::Mixed
-        };
-        match intent {
-            QueryIntent::ExactIdentifier => Self {
-                intent,
-                use_neural: false,
-                lexical_multiplier: 8,
-                literal_multiplier: 6,
-                semantic_multiplier: 1,
-                symbol_limit: 100,
-            },
-            QueryIntent::Path => Self {
-                intent,
-                use_neural: false,
-                lexical_multiplier: 8,
-                literal_multiplier: 5,
-                semantic_multiplier: 1,
-                symbol_limit: 50,
-            },
-            QueryIntent::LiteralOrError => Self {
-                intent,
-                // Long literals are usually pasted code or detailed prompts.
-                // Keep exact retrieval dominant, but let semantic retrieval
-                // contribute instead of treating every quote/newline as a
-                // short error lookup.
-                use_neural: terms.len() >= 13,
-                lexical_multiplier: 10,
-                literal_multiplier: 8,
-                semantic_multiplier: 1,
-                symbol_limit: 50,
-            },
-            QueryIntent::NaturalLanguage => Self {
-                intent,
-                use_neural: true,
-                lexical_multiplier: 5,
-                literal_multiplier: 4,
-                semantic_multiplier: 1,
-                symbol_limit: 50,
-            },
-            QueryIntent::DocsTestsExamples => Self {
-                intent,
-                use_neural: true,
-                lexical_multiplier: 5,
-                literal_multiplier: 5,
-                semantic_multiplier: 1,
-                symbol_limit: 50,
-            },
-            QueryIntent::Mixed => Self {
-                intent,
-                use_neural: true,
-                lexical_multiplier: 5,
-                literal_multiplier: 5,
-                semantic_multiplier: 1,
-                symbol_limit: 100,
-            },
-        }
-    }
-}
-
-fn corpus_candidate_multiplier(document_count: u64) -> usize {
-    match document_count {
-        0..=50_000 => 1,
-        50_001..=500_000 => 2,
-        _ => 3,
-    }
-}
-
-fn neural_fallback_needed(
-    routing: QueryRouting,
-    force_neural: bool,
-    top_score: Option<f32>,
-    runner_up_score: Option<f32>,
-) -> bool {
-    const SCORE_THRESHOLD: f32 = 2.0;
-    const SCORE_GAP_THRESHOLD: f32 = 0.25;
-
-    if force_neural {
-        return true;
-    }
-    if !routing.use_neural {
-        return false;
-    }
-
-    let Some(top_score) = top_score else {
-        return true;
-    };
-    let score_gap = runner_up_score.map_or(top_score, |score| top_score - score);
-    top_score < SCORE_THRESHOLD || score_gap < SCORE_GAP_THRESHOLD
-}
-
 impl Default for SearchOptions {
     fn default() -> Self {
         Self {
@@ -389,10 +207,40 @@ pub(crate) enum NeuralQueryVectorJob {
     Pending(std::thread::JoinHandle<Vec<f32>>),
 }
 
-#[derive(Clone, Copy)]
-struct LineSpan {
-    start: usize,
-    end: usize,
+fn open_optional_vector_store(
+    enabled: bool,
+    path: &Path,
+    dimensions: usize,
+    quantization: crate::vector_store::ScalarKind,
+) -> Result<Option<VectorStore>> {
+    if !enabled || !path.exists() {
+        return Ok(None);
+    }
+    VectorStore::open_readonly(path, dimensions, quantization)
+        .with_context(|| format!("open vector store {}", path.display()))
+        .map(Some)
+}
+
+fn read_optional_neural_identity(
+    path: &Path,
+) -> Result<Option<crate::embedding::NeuralModelIdentity>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let contents = fs::read_to_string(path)
+        .with_context(|| format!("read neural model metadata {}", path.display()))?;
+    serde_json::from_str(&contents)
+        .with_context(|| format!("parse neural model metadata {}", path.display()))
+        .map(Some)
+}
+
+fn read_optional_profile(path: &Path) -> Result<Option<String>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let profile = fs::read_to_string(path)
+        .with_context(|| format!("read neural profile {}", path.display()))?;
+    Ok((!profile.trim().is_empty()).then(|| profile.trim().to_string()))
 }
 
 impl SearchContext {
@@ -413,16 +261,12 @@ impl SearchContext {
             let (overlay_idx, fields) = open_tantivy_index(&workspace.overlay_tantivy_dir())?;
             let overlay_reader = overlay_idx.reader()?;
             let overlay_searcher = overlay_reader.searcher();
-            let overlay_hash_vec = wants_hash_vectors
-                .then(|| {
-                    VectorStore::open_readonly(
-                        &workspace.overlay_vector_path(),
-                        256,
-                        HASH_VECTOR_QUANTIZATION,
-                    )
-                    .ok()
-                })
-                .flatten();
+            let overlay_hash_vec = open_optional_vector_store(
+                wants_hash_vectors,
+                &workspace.overlay_vector_path(),
+                256,
+                HASH_VECTOR_QUANTIZATION,
+            )?;
 
             let base_dir = workspace
                 .base_index_dir
@@ -432,38 +276,26 @@ impl SearchContext {
             let (base_idx, _) = open_tantivy_index(&base_dir.join("tantivy"))?;
             let base_reader = base_idx.reader()?;
             let base_searcher = base_reader.searcher();
-            let base_hash_vec = wants_hash_vectors
-                .then(|| {
-                    VectorStore::open_readonly(
-                        &base_dir.join("vectors.usearch"),
-                        256,
-                        HASH_VECTOR_QUANTIZATION,
-                    )
-                    .ok()
-                })
-                .flatten();
-            let base_neural_model = fs::read_to_string(base_dir.join("neural_model.json"))
-                .ok()
-                .and_then(|value| serde_json::from_str(&value).ok());
+            let base_hash_vec = open_optional_vector_store(
+                wants_hash_vectors,
+                &base_dir.join("vectors.usearch"),
+                256,
+                HASH_VECTOR_QUANTIZATION,
+            )?;
+            let base_neural_model =
+                read_optional_neural_identity(&base_dir.join("neural_model.json"))?;
             let base_neural_dimensions = base_neural_model
                 .as_ref()
                 .map_or(384, |identity: &crate::embedding::NeuralModelIdentity| {
                     identity.dimensions
                 });
-            let base_neural_vec = wants_neural_vectors
-                .then(|| {
-                    VectorStore::open_readonly(
-                        &base_dir.join("vectors_neural.usearch"),
-                        base_neural_dimensions,
-                        NEURAL_VECTOR_QUANTIZATION,
-                    )
-                    .ok()
-                })
-                .flatten();
-            let base_neural_profile = fs::read_to_string(base_dir.join("neural_profile"))
-                .ok()
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty());
+            let base_neural_vec = open_optional_vector_store(
+                wants_neural_vectors,
+                &base_dir.join("vectors_neural.usearch"),
+                base_neural_dimensions,
+                NEURAL_VECTOR_QUANTIZATION,
+            )?;
+            let base_neural_profile = read_optional_profile(&base_dir.join("neural_profile"))?;
 
             let mut tombstones = HashSet::new();
             let mut overlay_files = HashSet::new();
@@ -505,31 +337,23 @@ impl SearchContext {
             let (idx, fields) = open_tantivy_index(&workspace.tantivy_dir())?;
             let reader = idx.reader()?;
             let searcher = reader.searcher();
-            let hash_vec = wants_hash_vectors
-                .then(|| {
-                    VectorStore::open_readonly(
-                        &workspace.vector_path(),
-                        256,
-                        HASH_VECTOR_QUANTIZATION,
-                    )
-                    .ok()
-                })
-                .flatten();
-            let neural_model = workspace.neural_model_identity();
+            let hash_vec = open_optional_vector_store(
+                wants_hash_vectors,
+                &workspace.vector_path(),
+                256,
+                HASH_VECTOR_QUANTIZATION,
+            )?;
+            let neural_model = read_optional_neural_identity(&workspace.neural_model_path())?;
             let neural_dimensions = neural_model
                 .as_ref()
                 .map_or(384, |identity| identity.dimensions);
-            let neural_vec = wants_neural_vectors
-                .then(|| {
-                    VectorStore::open_readonly(
-                        &workspace.vector_neural_path(),
-                        neural_dimensions,
-                        NEURAL_VECTOR_QUANTIZATION,
-                    )
-                    .ok()
-                })
-                .flatten();
-            let neural_profile = workspace.neural_profile_name();
+            let neural_vec = open_optional_vector_store(
+                wants_neural_vectors,
+                &workspace.vector_neural_path(),
+                neural_dimensions,
+                NEURAL_VECTOR_QUANTIZATION,
+            )?;
+            let neural_profile = read_optional_profile(&workspace.neural_profile_path())?;
 
             Ok(Self {
                 sqlite,
@@ -561,11 +385,11 @@ impl SearchContext {
     }
 
     pub fn fetch_chunk_by_vector_key(&self, vector_key: u64) -> Result<Option<IndexedChunk>> {
-        if let Ok(Some(chunk)) = fetch_chunk_by_vector_key(&self.sqlite, vector_key) {
+        if let Some(chunk) = fetch_chunk_by_vector_key(&self.sqlite, vector_key)? {
             return Ok(Some(chunk));
         }
         if let Some(base_sqlite) = &self.base_sqlite
-            && let Ok(Some(chunk)) = fetch_chunk_by_vector_key(base_sqlite, vector_key)
+            && let Some(chunk) = fetch_chunk_by_vector_key(base_sqlite, vector_key)?
             && !self.is_shadowed_base_file(1, &chunk.file_path)
         {
             return Ok(Some(chunk));
@@ -744,22 +568,43 @@ fn query_chunks_for_file(
          ORDER BY start_line LIMIT 96",
     )?;
     let rows = statement.query_map(rusqlite::params![path, skip_gitignore], |row| {
-        let raw: Vec<u8> = row.get(5)?;
-        Ok(IndexedChunk {
-            chunk_id: String::new(),
-            file_path: PathBuf::from(row.get::<_, String>(0)?),
-            start_line: row.get::<_, i64>(1)? as usize,
-            end_line: row.get::<_, i64>(2)? as usize,
-            language: row.get(3)?,
-            kind: row.get(4)?,
-            text: crate::indexer::decompress_text(raw),
-            content_hash: String::new(),
-            vector_key: row.get::<_, i64>(6)? as u64,
-            is_ignored: row.get(7)?,
-        })
+        Ok((
+            PathBuf::from(row.get::<_, String>(0)?),
+            row.get::<_, i64>(1)? as usize,
+            row.get::<_, i64>(2)? as usize,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, Vec<u8>>(5)?,
+            row.get::<_, i64>(6)? as u64,
+            row.get::<_, bool>(7)?,
+        ))
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(Into::into)
+    let mut chunks = Vec::new();
+    for row in rows {
+        let (file_path, start_line, end_line, language, kind, raw_text, vector_key, is_ignored) =
+            row?;
+        let text = crate::indexer::try_decompress_text(raw_text).with_context(|| {
+            format!(
+                "decompress indexed chunk {}:{}-{}",
+                file_path.display(),
+                start_line,
+                end_line
+            )
+        })?;
+        chunks.push(IndexedChunk {
+            chunk_id: String::new(),
+            file_path,
+            start_line,
+            end_line,
+            language,
+            kind,
+            text,
+            content_hash: String::new(),
+            vector_key,
+            is_ignored,
+        });
+    }
+    Ok(chunks)
 }
 
 fn representative_chunk_score(chunk: &IndexedChunk, task_terms: &HashSet<String>) -> usize {
@@ -1169,9 +1014,8 @@ fn collect_literal_candidate_chunks(
         .filter(|c| c.text.is_empty())
         .map(|c| c.vector_key)
         .collect();
-    if !empty_keys.is_empty()
-        && let Ok(mut batch) = ctx.fetch_chunks_by_vector_keys_batch(&empty_keys)
-    {
+    if !empty_keys.is_empty() {
+        let mut batch = ctx.fetch_chunks_by_vector_keys_batch(&empty_keys)?;
         for c in &mut candidates {
             if c.text.is_empty()
                 && let Some(full) = batch.remove(&c.vector_key)
@@ -1428,11 +1272,22 @@ impl LexicalQueryExecutor<'_> {
         lexical_query: &str,
         query_candidate_limit: usize,
     ) -> Result<Vec<(usize, f32, TantivyDocument)>> {
-        let Some(mut parsed_query) =
+        let mut parsed_query = if let Some(query) =
             simple_lexical_query(self.fields, lexical_query, self.conjunctive_numeric_query)
-                .or_else(|| self.parser.parse_query(lexical_query).ok())
-        else {
-            return Ok(Vec::new());
+        {
+            query
+        } else {
+            match self.parser.parse_query(lexical_query) {
+                Ok(query) => query,
+                Err(err) => {
+                    tracing::debug!(
+                        query_variant = lexical_query,
+                        error = %err,
+                        "skipping lexical expansion rejected by Tantivy parser"
+                    );
+                    return Ok(Vec::new());
+                }
+            }
         };
         parsed_query = constrain_query_to_scope(parsed_query, self.fields, self.scope_filter)?;
         parsed_query =
@@ -1696,706 +1551,6 @@ pub fn hybrid_search_with_context(
     )
 }
 
-pub(crate) fn hybrid_search_with_context_and_neural_job(
-    ctx: &SearchContext,
-    workspace: &Workspace,
-    query_text: &str,
-    embedding_model: Option<&dyn EmbeddingModel>,
-    options: &SearchOptions,
-    mut neural_query_vector_job: Option<NeuralQueryVectorJob>,
-) -> Result<Vec<SearchHit>> {
-    let query_text = query_text.trim();
-    // An empty/whitespace query has no lexical or literal terms; without this
-    // guard the semantic pass would still embed "" and return arbitrary
-    // nearest-neighbour noise. Match literal_search and return nothing.
-    if query_text.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let t0 = std::time::Instant::now();
-    let output_limit = options.limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
-    let mut routing = QueryRouting::classify(query_text);
-    if options.force_neural {
-        routing.use_neural = true;
-    }
-    let corpus_multiplier =
-        corpus_candidate_multiplier(ctx.searchers.iter().map(tantivy::Searcher::num_docs).sum());
-    // Tantivy lexical candidates: enough headroom for post-hoc filters
-    // (gitignore, scope, globs) without blowing up on huge repos.
-    // Default natural-language query: 50 → 250, --limit 500 → 2.5K.
-    let candidate_limit = if output_limit == usize::MAX {
-        50_000
-    } else {
-        (output_limit * routing.lexical_multiplier).clamp(150, 50_000)
-    };
-    // Literal pass needs exact substring verification via SQLite (text not
-    // stored in Tantivy), so cap tighter: default → 250, scales up with limit.
-    let literal_limit = if output_limit == usize::MAX {
-        25_000
-    } else {
-        (output_limit * routing.literal_multiplier * corpus_multiplier).clamp(250, 25_000)
-    };
-    // Semantic (vector ANN) search: keep proportional but bounded.
-    // Default ~50 → 50, --limit 500 → 500, --limit 5000 → 2000.
-    // k=200 is ~30ms on 3M vectors; k=2000 is ~200ms. Both acceptable.
-    let semantic_limit = if output_limit == usize::MAX {
-        2_000
-    } else {
-        (output_limit * routing.semantic_multiplier * corpus_multiplier).clamp(50, 2_000)
-    };
-    let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
-    let glob_path_filter = build_glob_path_query_filter(ctx, &path_matcher, options)?;
-
-    tracing::trace!("open_tantivy={:?}", t0.elapsed());
-
-    if options.is_cancelled() {
-        return Ok(Vec::new());
-    }
-
-    // ── Literal pass ────────────────────────────────────────────────────
-    // Always run a fast index-backed literal substring scan so exact matches
-    // surface even when tokenization splits them differently.
-    // Build a regex alternation of the original query plus snake_case/camelCase
-    // variants so "hybrid search" also matches "hybrid_search" and "hybridSearch".
-    let trimmed = query_text;
-    // Compute once — used by literal pass, lexical pass, and path-match pass.
-    let lexical_queries = build_lexical_queries(trimmed);
-    let literal_queries = build_literal_queries(trimmed, &lexical_queries);
-    let symbol_candidate_limit = output_limit.clamp(20, routing.symbol_limit);
-    let literal_matcher = if !literal_queries.is_empty() {
-        LiteralMatcher::from_queries(literal_queries.iter().map(String::as_str), true).ok()
-    } else {
-        None
-    };
-    let literal_chunks: Vec<(IndexedChunk, f32)> = if let Some(ref matcher) = literal_matcher {
-        let target_hits = options
-            .limit
-            .unwrap_or(100)
-            .saturating_mul(literal_queries.len())
-            .min(literal_limit);
-        let all_candidates = collect_literal_candidates_for_queries(
-            ctx,
-            &literal_queries,
-            matcher,
-            &path_matcher,
-            &glob_path_filter,
-            options,
-            (literal_limit, target_hits),
-        )
-        .unwrap_or_default();
-        tracing::trace!(
-            "literal_pass={:?} found={}",
-            t0.elapsed(),
-            all_candidates.len()
-        );
-        all_candidates
-            .into_iter()
-            .map(|c| {
-                let count = matcher.match_count(&c.text).max(1) as f32;
-                let score = 1.0 + (count - 1.0).min(4.0) * 0.15; // 1.0 → 1.6 for 5+ matches
-                (c, score)
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    if options.is_cancelled() {
-        return Ok(Vec::new());
-    }
-
-    // ── Lexical (BM25) pass ─────────────────────────────────────────────
-    // BM25F: search across text, tokenized file path, and definition signature.
-    // Boosts on path/signature fields implement Sourcegraph-style BM25F where
-    // matches on filenames and symbol definitions count 5× more than body text.
-    let mut search_fields = vec![ctx.fields.text, ctx.fields.file_path];
-    if let Some(f) = ctx.fields.file_path_text {
-        search_fields.push(f);
-    }
-    if let Some(f) = ctx.fields.signature {
-        search_fields.push(f);
-    }
-    let mut parser = QueryParser::for_index(&ctx.indexes[0], search_fields);
-    parser.set_field_boost(ctx.fields.file_path, 2.0);
-    if let Some(f) = ctx.fields.file_path_text {
-        parser.set_field_boost(f, 5.0);
-    }
-    if let Some(f) = ctx.fields.signature {
-        parser.set_field_boost(f, 5.0);
-    }
-    let conjunctive_numeric_query = should_use_conjunctive_numeric_query(trimmed);
-    if conjunctive_numeric_query {
-        parser.set_conjunction_by_default();
-    }
-
-    let mut allowed_languages = Vec::new();
-    let mut can_pushdown_languages = options.include_globs.is_empty();
-    if let Some(tf) = &options.type_filter {
-        let resolved = crate::chunking::resolve_type_alias(tf)
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| tf.to_string());
-        allowed_languages.push(resolved);
-        can_pushdown_languages = true;
-    } else if !options.include_globs.is_empty() {
-        can_pushdown_languages = true;
-        for glob in &options.include_globs {
-            let trimmed = glob.trim();
-            if trimmed.starts_with("*.") && !trimmed.contains('/') && !trimmed.contains('?') {
-                let ext = &trimmed[1..];
-                if let Some(lang) =
-                    crate::chunking::language_for_path(&PathBuf::from(format!("dummy{}", ext)))
-                {
-                    allowed_languages.push(lang.to_string());
-                } else {
-                    can_pushdown_languages = false;
-                    break;
-                }
-            } else {
-                can_pushdown_languages = false;
-                break;
-            }
-        }
-    }
-
-    let mut lexical_by_id = HashMap::<u64, (IndexedChunk, f32)>::new();
-    let lexical_search_queries =
-        lexical_search_queries_for_routing(&lexical_queries, routing, conjunctive_numeric_query);
-    let lexical_query_limits =
-        lexical_query_candidate_limits(candidate_limit, lexical_search_queries.len());
-    let executor = LexicalQueryExecutor {
-        fields: &ctx.fields,
-        parser: &parser,
-        conjunctive_numeric_query,
-        scope_filter: options.scope_filter.as_ref(),
-        glob_path_filter: &glob_path_filter,
-        can_pushdown_languages,
-        allowed_languages: &allowed_languages,
-        searchers: &ctx.searchers,
-    };
-    let collect_docs = |(lexical_query, query_candidate_limit): (&String, usize)| {
-        executor.collect_docs(lexical_query, query_candidate_limit)
-    };
-    let lexical_doc_batches =
-        if lexical_search_queries.len() > 1 && rayon::current_num_threads() > 1 {
-            lexical_search_queries
-                .par_iter()
-                .zip(lexical_query_limits)
-                .map(collect_docs)
-                .collect::<Result<Vec<_>>>()?
-        } else {
-            lexical_search_queries
-                .iter()
-                .zip(lexical_query_limits)
-                .map(collect_docs)
-                .collect::<Result<Vec<_>>>()?
-        };
-    for docs in lexical_doc_batches {
-        for (i, score, doc) in docs {
-            if let Some(chunk) = fetch_chunk_by_id(doc, &ctx.fields)
-                .filter(|c| !ctx.is_shadowed_base_file(i, &c.file_path))
-                .filter(|chunk| type_matches(chunk, options.type_filter.as_deref()))
-                .filter(|chunk| scope_matches(chunk, options.scope_filter.as_ref()))
-                .filter(|chunk| path_matches(chunk, &path_matcher))
-                .filter(|chunk| options.skip_gitignore || !chunk.is_ignored)
-            {
-                let boosted = if is_definition_kind(&chunk.kind) {
-                    score * 2.0
-                } else {
-                    score
-                };
-                lexical_by_id
-                    .entry(chunk.vector_key)
-                    .and_modify(|(_, best)| *best = best.max(boosted))
-                    .or_insert((chunk, boosted));
-            }
-        }
-    }
-    // Sort by BM25 score and truncate to candidate_limit BEFORE populating
-    // text from SQLite. This avoids O(all_results) individual SQLite lookups
-    // — we only fetch text for the top-scoring candidates that will survive
-    // RRF fusion.
-    let mut lexical_chunks = lexical_by_id.into_values().collect::<Vec<_>>();
-    lexical_chunks.sort_by(|left, right| {
-        right
-            .1
-            .total_cmp(&left.1)
-            .then_with(|| left.0.vector_key.cmp(&right.0.vector_key))
-    });
-    lexical_chunks.truncate(candidate_limit);
-    tracing::trace!(
-        "lexical_bm25={:?} candidates={} expansions={}",
-        t0.elapsed(),
-        lexical_chunks.len(),
-        lexical_search_queries.len()
-    );
-
-    // Exact persisted symbol definitions provide a separate bounded rank
-    // signal. This avoids inferring every definition solely from text while
-    // keeping symbol lookup independent from the main candidate volume.
-    let exact_symbol_names = exact_symbol_query_names(trimmed);
-    let mut exact_symbol_chunks = crate::symbols::definition_candidates(
-        &ctx.sqlite,
-        &exact_symbol_names,
-        symbol_candidate_limit,
-    )?;
-    if let Some(base_sqlite) = &ctx.base_sqlite {
-        let remaining = symbol_candidate_limit.saturating_sub(exact_symbol_chunks.len());
-        if remaining > 0 {
-            exact_symbol_chunks.extend(
-                crate::symbols::definition_candidates(base_sqlite, &exact_symbol_names, remaining)?
-                    .into_iter()
-                    .filter(|chunk| !ctx.is_shadowed_base_file(1, &chunk.file_path)),
-            );
-        }
-    }
-    exact_symbol_chunks.retain(|chunk| {
-        type_matches(chunk, options.type_filter.as_deref())
-            && scope_matches(chunk, options.scope_filter.as_ref())
-            && path_matches(chunk, &path_matcher)
-            && (options.skip_gitignore || !chunk.is_ignored)
-    });
-    exact_symbol_chunks.truncate(symbol_candidate_limit);
-    let exact_symbol_ids = exact_symbol_chunks
-        .iter()
-        .map(|chunk| chunk.vector_key)
-        .collect::<HashSet<_>>();
-
-    let remaining = symbol_candidate_limit.saturating_sub(exact_symbol_chunks.len());
-    let inferred_symbol_names = natural_language_symbol_queries(trimmed);
-    let mut inferred_symbol_chunks = if remaining > 0 && !inferred_symbol_names.is_empty() {
-        crate::symbols::definition_candidates(&ctx.sqlite, &inferred_symbol_names, remaining)?
-    } else {
-        Vec::new()
-    };
-    if let Some(base_sqlite) = &ctx.base_sqlite {
-        let base_remaining = remaining.saturating_sub(inferred_symbol_chunks.len());
-        if base_remaining > 0 {
-            inferred_symbol_chunks.extend(
-                crate::symbols::definition_candidates(
-                    base_sqlite,
-                    &inferred_symbol_names,
-                    base_remaining,
-                )?
-                .into_iter()
-                .filter(|chunk| !ctx.is_shadowed_base_file(1, &chunk.file_path)),
-            );
-        }
-    }
-    inferred_symbol_chunks.retain(|chunk| {
-        !exact_symbol_ids.contains(&chunk.vector_key)
-            && type_matches(chunk, options.type_filter.as_deref())
-            && scope_matches(chunk, options.scope_filter.as_ref())
-            && path_matches(chunk, &path_matcher)
-            && (options.skip_gitignore || !chunk.is_ignored)
-    });
-    inferred_symbol_chunks.truncate(remaining);
-    let inferred_symbol_ids = inferred_symbol_chunks
-        .iter()
-        .map(|chunk| chunk.vector_key)
-        .collect::<HashSet<_>>();
-
-    let remaining = remaining.saturating_sub(inferred_symbol_chunks.len());
-    let mut alias_symbol_chunks = if remaining > 0 {
-        crate::symbols::definition_candidates(&ctx.sqlite, &lexical_queries, remaining)?
-    } else {
-        Vec::new()
-    };
-    if let Some(base_sqlite) = &ctx.base_sqlite {
-        let base_remaining = remaining.saturating_sub(alias_symbol_chunks.len());
-        if base_remaining > 0 {
-            alias_symbol_chunks.extend(
-                crate::symbols::definition_candidates(
-                    base_sqlite,
-                    &lexical_queries,
-                    base_remaining,
-                )?
-                .into_iter()
-                .filter(|chunk| !ctx.is_shadowed_base_file(1, &chunk.file_path)),
-            );
-        }
-    }
-    alias_symbol_chunks.retain(|chunk| {
-        !exact_symbol_ids.contains(&chunk.vector_key)
-            && !inferred_symbol_ids.contains(&chunk.vector_key)
-            && type_matches(chunk, options.type_filter.as_deref())
-            && scope_matches(chunk, options.scope_filter.as_ref())
-            && path_matches(chunk, &path_matcher)
-            && (options.skip_gitignore || !chunk.is_ignored)
-    });
-    alias_symbol_chunks.truncate(remaining);
-
-    let symbol_chunks = exact_symbol_chunks
-        .into_iter()
-        .map(|chunk| (chunk, SymbolCandidateKind::Exact))
-        .chain(
-            inferred_symbol_chunks
-                .into_iter()
-                .map(|chunk| (chunk, SymbolCandidateKind::Inferred)),
-        )
-        .chain(
-            alias_symbol_chunks
-                .into_iter()
-                .map(|chunk| (chunk, SymbolCandidateKind::Alias)),
-        )
-        .collect::<Vec<_>>();
-    tracing::trace!(
-        "lexical_symbols={:?} candidates={}",
-        t0.elapsed(),
-        symbol_chunks.len()
-    );
-
-    // ── Path-match pass ──────────────────────────────────────────────────
-    // Collect chunks whose file_path contains the query as a directory/file
-    // name. This ensures "my-service" finds files under
-    // apps/my-service/ even when the code-content BM25 candidates are
-    // dominated by generic single-token matches like "service". These feed
-    // their own ranked list in fusion (see fuse_rrf) rather than being
-    // injected into the lexical pool with a fake score.
-    let mut path_chunks: Vec<(IndexedChunk, f32)> = Vec::new();
-    let exact_path_pass = matches!(
-        routing.intent,
-        QueryIntent::ExactIdentifier | QueryIntent::Path
-    ) || raw_query_terms(trimmed).len() <= 3;
-    let path_query_variants = if exact_path_pass {
-        lexical_queries.clone()
-    } else {
-        natural_language_path_recall_query(trimmed)
-            .into_iter()
-            .collect()
-    };
-    if !path_query_variants.is_empty()
-        && let Some(fpt_field) = ctx.fields.file_path_text
-    {
-        let mut path_parser = QueryParser::for_index(&ctx.indexes[0], vec![fpt_field]);
-        let path_candidate_limit = if exact_path_pass {
-            100
-        } else {
-            NATURAL_LANGUAGE_PATH_FILE_LIMIT * NATURAL_LANGUAGE_PATH_DOCUMENT_OVERFETCH
-        };
-        if exact_path_pass {
-            path_parser.set_conjunction_by_default();
-        }
-        let lexical_ids: HashSet<u64> = lexical_chunks.iter().map(|(c, _)| c.vector_key).collect();
-        let mut path_by_id: HashMap<u64, (IndexedChunk, f32)> = HashMap::new();
-        let mut path_by_file: HashMap<PathBuf, (IndexedChunk, f32)> = HashMap::new();
-        for pq in &path_query_variants {
-            if let Ok(parsed) = path_parser.parse_query(pq)
-                && let Ok(parsed) =
-                    constrain_query_to_scope(parsed, &ctx.fields, options.scope_filter.as_ref())
-            {
-                let parsed = constrain_query_to_glob_paths(parsed, &ctx.fields, &glob_path_filter);
-                for (i, searcher) in ctx.searchers.iter().enumerate() {
-                    if let Ok(docs) = searcher.search(
-                        &parsed,
-                        &TopDocs::with_limit(path_candidate_limit).order_by_score(),
-                    ) {
-                        for (score, addr) in docs {
-                            if let Ok(doc) = searcher.doc::<TantivyDocument>(addr)
-                                && let Some(chunk) = fetch_chunk_by_id(doc, &ctx.fields)
-                                    .filter(|c| !ctx.is_shadowed_base_file(i, &c.file_path))
-                                    .filter(|c| type_matches(c, options.type_filter.as_deref()))
-                                    .filter(|c| scope_matches(c, options.scope_filter.as_ref()))
-                                    .filter(|c| path_matches(c, &path_matcher))
-                                    .filter(|c| options.skip_gitignore || !c.is_ignored)
-                            {
-                                if exact_path_pass {
-                                    if !lexical_ids.contains(&chunk.vector_key) {
-                                        path_by_id
-                                            .entry(chunk.vector_key)
-                                            .and_modify(|(_, best)| *best = best.max(score))
-                                            .or_insert((chunk, score));
-                                    }
-                                } else {
-                                    path_by_file
-                                        .entry(chunk.file_path.clone())
-                                        .and_modify(|(_, best)| *best = best.max(score))
-                                        .or_insert((chunk, score));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if exact_path_pass {
-            path_chunks = path_by_id.into_values().collect();
-        } else {
-            path_chunks = path_by_file
-                .into_iter()
-                .map(|(file_path, (fallback, score))| {
-                    lexical_chunks
-                        .iter()
-                        .find(|(chunk, _)| chunk.file_path == file_path)
-                        .map(|(chunk, _)| (chunk.clone(), score))
-                        .unwrap_or((fallback, score))
-                })
-                .collect();
-        }
-        path_chunks.sort_by(|left, right| {
-            right
-                .1
-                .total_cmp(&left.1)
-                .then_with(|| left.0.vector_key.cmp(&right.0.vector_key))
-        });
-        if !exact_path_pass {
-            path_chunks.truncate(NATURAL_LANGUAGE_PATH_FILE_LIMIT);
-        }
-    }
-    tracing::trace!(
-        "lexical_path={:?} candidates={}",
-        t0.elapsed(),
-        path_chunks.len()
-    );
-    tracing::trace!("lexical={:?} found={}", t0.elapsed(), lexical_chunks.len());
-
-    tracing::trace!("open_vector={:?}", t0.elapsed());
-
-    if options.is_cancelled() {
-        return Ok(Vec::new());
-    }
-
-    let mut semantic_chunks = Vec::new();
-    let mut neural_executed = false;
-    let has_hash_vectors = ctx.hash_vectors.as_ref().map_or(0, |v| v.size()) > 0
-        || ctx.base_hash_vectors.as_ref().map_or(0, |v| v.size()) > 0;
-    let has_neural_vectors = ctx.neural_vectors.as_ref().map_or(0, |v| v.size()) > 0
-        || ctx.base_neural_vectors.as_ref().map_or(0, |v| v.size()) > 0;
-
-    // Treat neural retrieval as fallback for weak or ambiguous lexical evidence.
-    // When it runs, retain hash candidates because the tiers have complementary recall.
-    let neural_profile_matches = embedding_model.is_none_or(|model| {
-        let Some(active_identity) = model.model_identity() else {
-            let Some(active_profile) = model.profile_info() else {
-                return true;
-            };
-            return ctx
-                .neural_profile
-                .as_deref()
-                .or(ctx.base_neural_profile.as_deref())
-                .unwrap_or("general")
-                == active_profile;
-        };
-        let Some(persisted_identity) = ctx.neural_model.as_ref().or(ctx.base_neural_model.as_ref())
-        else {
-            // Identity-less neural vectors predate complete model metadata and
-            // must not be queried with a potentially incompatible revision.
-            return false;
-        };
-        persisted_identity == active_identity
-    });
-    let execute_neural = neural_fallback_needed(
-        routing,
-        options.force_neural,
-        lexical_chunks.first().map(|(_, score)| *score),
-        lexical_chunks.get(1).map(|(_, score)| *score),
-    );
-    let neural_available = execute_neural
-        && embedding_model.is_some_and(|model| model.model_identity().is_some())
-        && has_neural_vectors
-        && neural_profile_matches;
-    let hash_vector_count = ctx.hash_vectors.as_ref().map_or(0, VectorStore::size)
-        + ctx.base_hash_vectors.as_ref().map_or(0, VectorStore::size);
-    let neural_vector_count = ctx.neural_vectors.as_ref().map_or(0, VectorStore::size)
-        + ctx
-            .base_neural_vectors
-            .as_ref()
-            .map_or(0, VectorStore::size);
-    let hash_weight =
-        semantic_hash_weight(neural_available, neural_vector_count, hash_vector_count);
-    let neural_model = embedding_model.filter(|model| {
-        execute_neural
-            && model.model_identity().is_some()
-            && has_neural_vectors
-            && neural_profile_matches
-    });
-    let direct_ids = lexical_chunks
-        .iter()
-        .map(|(chunk, _)| chunk.vector_key)
-        .chain(literal_chunks.iter().map(|(chunk, _)| chunk.vector_key))
-        .chain(path_chunks.iter().map(|(chunk, _)| chunk.vector_key))
-        .chain(symbol_chunks.iter().map(|(chunk, _)| chunk.vector_key))
-        .collect::<HashSet<_>>();
-
-    if embedding_model.is_some() && (has_hash_vectors || neural_model.is_some()) {
-        let semantic_started = std::time::Instant::now();
-        let mut semantic_by_id = SemanticCandidatesById::new();
-        let semantic_filters_active = has_semantic_filters(options);
-
-        if !semantic_filters_active {
-            let mut sources = Vec::with_capacity(2);
-            let neural_matches = if let Some(model) = neural_model {
-                neural_executed = true;
-                let neural_query_vector =
-                    neural_query_vector(model, query_text, &mut neural_query_vector_job);
-                tracing::trace!("semantic_neural_embed={:?}", semantic_started.elapsed());
-                let matches = collect_semantic_vector_matches(
-                    &neural_query_vector,
-                    semantic_limit,
-                    ctx.neural_vectors.as_ref(),
-                    ctx.base_neural_vectors.as_ref(),
-                );
-                tracing::trace!("semantic_neural_ann={:?}", semantic_started.elapsed());
-                Some(matches)
-            } else {
-                None
-            };
-
-            if has_hash_vectors {
-                let hash_query_vector = embed_hash_query(trimmed);
-                tracing::trace!("semantic_hash_embed={:?}", semantic_started.elapsed());
-                sources.push((
-                    collect_semantic_vector_matches(
-                        &hash_query_vector,
-                        semantic_limit,
-                        ctx.hash_vectors.as_ref(),
-                        ctx.base_hash_vectors.as_ref(),
-                    ),
-                    hash_weight,
-                    "hash",
-                ));
-                tracing::trace!("semantic_hash_ann={:?}", semantic_started.elapsed());
-            }
-            if let Some(neural_matches) = neural_matches {
-                sources.push((neural_matches, 1.08, "neural"));
-            }
-            semantic_by_id = collect_unfiltered_semantic_candidates(ctx, options, sources)?;
-            tracing::trace!("semantic_hydrate={:?}", semantic_started.elapsed());
-        } else {
-            let filter_plan = build_semantic_filter_plan(ctx, &path_matcher, options);
-            if has_hash_vectors {
-                let hash_query_vector = embed_hash_query(trimmed);
-                tracing::trace!("semantic_hash_embed={:?}", semantic_started.elapsed());
-                let hash_hits = collect_semantic_candidates(
-                    ctx,
-                    &path_matcher,
-                    options,
-                    &hash_query_vector,
-                    semantic_limit,
-                    (ctx.hash_vectors.as_ref(), ctx.base_hash_vectors.as_ref()),
-                    Some(&filter_plan),
-                )?;
-                merge_semantic_candidates(&mut semantic_by_id, hash_hits, hash_weight, "hash");
-            }
-
-            if let Some(model) = neural_model {
-                neural_executed = true;
-                let neural_query_vector =
-                    neural_query_vector(model, query_text, &mut neural_query_vector_job);
-                let neural_hits = collect_semantic_candidates(
-                    ctx,
-                    &path_matcher,
-                    options,
-                    &neural_query_vector,
-                    semantic_limit,
-                    (
-                        ctx.neural_vectors.as_ref(),
-                        ctx.base_neural_vectors.as_ref(),
-                    ),
-                    Some(&filter_plan),
-                )?;
-                merge_semantic_candidates(&mut semantic_by_id, neural_hits, 1.08, "neural");
-            }
-        }
-
-        semantic_chunks = semantic_by_id.into_values().collect::<Vec<_>>();
-        semantic_chunks.sort_by(|left, right| {
-            right
-                .1
-                .total_cmp(&left.1)
-                .then_with(|| left.0.vector_key.cmp(&right.0.vector_key))
-        });
-    }
-    tracing::trace!(
-        "semantic={:?} found={}",
-        t0.elapsed(),
-        semantic_chunks.len()
-    );
-
-    if options.is_cancelled() {
-        return Ok(Vec::new());
-    }
-
-    let fusion_query = FusionQuery::new(query_text);
-    let merged = fuse_rrf_with_context(
-        Some(ctx),
-        FusionCandidates {
-            lexical: lexical_chunks,
-            semantic: semantic_chunks,
-            literal: literal_chunks,
-            path: path_chunks,
-            path_weight: if exact_path_pass { 1.5 } else { 3.0 },
-            symbols: symbol_chunks,
-        },
-        Some(direct_ids),
-        if neural_available || query_targets_secondary_sources(query_text) {
-            1.0
-        } else {
-            0.25
-        },
-        &fusion_query,
-        routing,
-        options.limit,
-    );
-    tracing::trace!("fuse_rrf={:?} merged={}", t0.elapsed(), merged.len());
-
-    let presentation_query = PresentationQuery::from_fusion(&fusion_query);
-
-    // Group hits by file path so we read and index each source file only once.
-    let merged_len = merged.len();
-    let mut hits_by_file: HashMap<PathBuf, Vec<(IndexedChunk, f32, Vec<String>)>> = HashMap::new();
-    for (chunk, score, sources) in merged {
-        hits_by_file
-            .entry(workspace.root.join(&chunk.file_path))
-            .or_default()
-            .push((chunk, score, sources));
-    }
-
-    let file_count = hits_by_file.len();
-    let mut hits = Vec::with_capacity(merged_len);
-    for (file_path, file_hits) in hits_by_file {
-        let file_content = ctx.read_file_content(&file_path);
-        for (chunk, score, sources) in file_hits {
-            hits.push(to_hit(
-                workspace,
-                chunk,
-                score,
-                sources,
-                file_content.as_ref(),
-                HitPresentation {
-                    context_lines: options.context,
-                    query: &presentation_query,
-                    routing,
-                    neural_executed,
-                },
-            )?);
-        }
-    }
-    // Re-sort since grouping by file changed the order
-    hits.sort_by(|left, right| {
-        right
-            .score
-            .total_cmp(&left.score)
-            .then_with(|| left.file_path.cmp(&right.file_path))
-            .then_with(|| left.start_line.cmp(&right.start_line))
-            .then_with(|| left.end_line.cmp(&right.end_line))
-    });
-    if matches!(routing.intent, QueryIntent::LiteralOrError) {
-        let accepted_len = hits
-            .iter()
-            .position(|hit| hit.sources.iter().any(|source| source == "backfill"))
-            .unwrap_or(hits.len());
-        crate::reranker::rerank_hits(query_text, &mut hits[..accepted_len]);
-    }
-    tracing::trace!(
-        "to_hit={:?} hits={} files_read={}",
-        t0.elapsed(),
-        hits.len(),
-        file_count
-    );
-
-    Ok(hits)
-}
-
 fn natural_language_path_recall_query(query_text: &str) -> Option<String> {
     natural_language_path_recall_terms(query_text).map(|terms| terms.join(" "))
 }
@@ -2449,328 +1604,6 @@ fn embed_hash_query(query_text: &str) -> Vec<f32> {
     let hash_model =
         SEARCH_HASH_MODEL.get_or_init(|| crate::embedding::HashEmbeddingModel::new(256));
     hash_model.embed(&build_semantic_query_text(query_text))
-}
-
-fn to_hit(
-    workspace: &Workspace,
-    chunk: IndexedChunk,
-    score: f32,
-    sources: Vec<String>,
-    pre_read_file: Option<&CachedFileContent>,
-    presentation: HitPresentation<'_>,
-) -> Result<SearchHit> {
-    if let Some(file) = pre_read_file {
-        return Ok(to_hit_from_file(
-            chunk,
-            score,
-            sources,
-            &file.content,
-            &file.lines,
-            presentation,
-        ));
-    }
-
-    let file_path = workspace.root.join(&chunk.file_path);
-    match fs::read_to_string(&file_path) {
-        Ok(content) => {
-            let lines = line_spans(&content);
-            Ok(to_hit_from_file(
-                chunk,
-                score,
-                sources,
-                &content,
-                &lines,
-                presentation,
-            ))
-        }
-        Err(_) => Ok(SearchHit {
-            file_path: chunk.file_path,
-            start_line: chunk.start_line,
-            end_line: chunk.end_line,
-            preview: chunk.text,
-            reason: format!(
-                "route={} neural_requested={} neural_executed={}; file no longer on disk",
-                presentation.routing.intent.name(),
-                presentation.routing.use_neural,
-                presentation.neural_executed
-            ),
-            score,
-            sources,
-            neural_requested: presentation.routing.use_neural,
-            neural_executed: presentation.neural_executed,
-        }),
-    }
-}
-
-struct HitPresentation<'a> {
-    context_lines: usize,
-    query: &'a PresentationQuery,
-    routing: QueryRouting,
-    neural_executed: bool,
-}
-
-struct PresentationQuery {
-    text: String,
-    lower: String,
-    compact: String,
-    compact_matching: bool,
-    tokens: Vec<String>,
-}
-
-impl PresentationQuery {
-    #[cfg(test)]
-    fn new(query_text: &str) -> Self {
-        let query = FusionQuery::new(query_text);
-        Self::from_fusion(&query)
-    }
-
-    fn from_fusion(query: &FusionQuery<'_>) -> Self {
-        Self {
-            text: query.text.to_string(),
-            lower: query.lower.clone(),
-            compact: singularize_token(&query.compact),
-            compact_matching: query.compact_candidate_text,
-            tokens: query.tokens.clone(),
-        }
-    }
-}
-
-fn to_hit_from_file(
-    chunk: IndexedChunk,
-    score: f32,
-    sources: Vec<String>,
-    content: &str,
-    lines: &[LineSpan],
-    presentation: HitPresentation<'_>,
-) -> SearchHit {
-    let HitPresentation {
-        context_lines,
-        query,
-        routing,
-        neural_executed,
-    } = presentation;
-    if lines.is_empty() {
-        return SearchHit {
-            file_path: chunk.file_path,
-            start_line: chunk.start_line,
-            end_line: chunk.start_line,
-            preview: String::new(),
-            reason: format!(
-                "route={} neural_requested={} neural_executed={}; empty file",
-                routing.intent.name(),
-                routing.use_neural,
-                neural_executed
-            ),
-            score,
-            sources,
-            neural_requested: routing.use_neural,
-            neural_executed,
-        };
-    }
-
-    let focus_line = find_focus_line(&chunk, query, content, lines);
-    let (snippet_start, snippet_end) = snippet_bounds(focus_line, context_lines, lines.len());
-    let preview = preview_from_lines(content, lines, snippet_start, snippet_end);
-    let ranking_reason = summarize_reason(query, line_at(content, lines, focus_line));
-    let reason = format!(
-        "route={} neural_requested={} neural_executed={}; {ranking_reason}",
-        routing.intent.name(),
-        routing.use_neural,
-        neural_executed
-    );
-
-    SearchHit {
-        file_path: chunk.file_path,
-        start_line: snippet_start,
-        end_line: snippet_end,
-        preview,
-        reason,
-        score,
-        sources,
-        neural_requested: routing.use_neural,
-        neural_executed,
-    }
-}
-
-fn line_spans(content: &str) -> Vec<LineSpan> {
-    let bytes = content.as_bytes();
-    let mut spans = Vec::new();
-    let mut start = 0;
-    for (index, byte) in bytes.iter().enumerate() {
-        if *byte != b'\n' {
-            continue;
-        }
-        let end = if index > start && bytes[index - 1] == b'\r' {
-            index - 1
-        } else {
-            index
-        };
-        spans.push(LineSpan { start, end });
-        start = index + 1;
-    }
-    if start < bytes.len() {
-        spans.push(LineSpan {
-            start,
-            end: bytes.len(),
-        });
-    }
-    spans
-}
-
-fn line_at<'a>(content: &'a str, lines: &[LineSpan], line_number: usize) -> &'a str {
-    let span = lines
-        .get(line_number.saturating_sub(1))
-        .expect("line number must be in bounds");
-    &content[span.start..span.end]
-}
-
-fn preview_from_lines(
-    content: &str,
-    lines: &[LineSpan],
-    snippet_start: usize,
-    snippet_end: usize,
-) -> String {
-    lines[snippet_start.saturating_sub(1)..snippet_end]
-        .iter()
-        .map(|span| &content[span.start..span.end])
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn find_focus_line(
-    chunk: &IndexedChunk,
-    query: &PresentationQuery,
-    content: &str,
-    lines: &[LineSpan],
-) -> usize {
-    let line_count = lines.len();
-    let window_start = chunk.start_line.max(1).min(line_count);
-    let window_end = chunk.end_line.max(window_start).min(line_count);
-    if query.text.is_empty() {
-        return window_start;
-    }
-
-    let symbol_name = query
-        .text
-        .rsplit([':', '\\', '.', '/', '#'])
-        .find(|part| !part.is_empty())
-        .unwrap_or(query.text.as_str());
-    if is_definition_kind(&chunk.kind)
-        && (crate::symbols::chunk_defines_exact_name(chunk, &query.text)
-            || crate::symbols::chunk_defines_exact_name(chunk, symbol_name))
-        && let Some(line) = first_source_definition_line(content, lines, window_start, window_end)
-    {
-        return line;
-    }
-
-    let mut best_line = window_start;
-    let mut best_score = 0.0f32;
-    for line_no in window_start..=window_end {
-        let line = line_at(content, lines, line_no);
-        let line_lower = line.to_ascii_lowercase();
-        let mut line_score = 0.0f32;
-
-        if line.contains(&query.text) {
-            line_score += 8.0;
-        } else if line_lower.contains(&query.lower) {
-            line_score += 5.0;
-        }
-
-        for token in &query.tokens {
-            if line_lower.contains(token) {
-                line_score += 1.5;
-            }
-        }
-
-        if query.compact_matching && !query.compact.is_empty() {
-            let line_compact = compact_identifier(line);
-            if line_compact.contains(&query.compact) {
-                line_score += 3.0;
-            }
-        }
-
-        if line_score > best_score {
-            best_score = line_score;
-            best_line = line_no;
-        }
-    }
-
-    best_line
-}
-
-fn first_source_definition_line(
-    content: &str,
-    lines: &[LineSpan],
-    window_start: usize,
-    window_end: usize,
-) -> Option<usize> {
-    let mut in_block_comment = false;
-    for line_no in window_start..=window_end {
-        let line = line_at(content, lines, line_no).trim();
-        if in_block_comment {
-            if line.contains("*/") {
-                in_block_comment = false;
-            }
-            continue;
-        }
-        if line.starts_with("/*") {
-            if !line.contains("*/") {
-                in_block_comment = true;
-            }
-            continue;
-        }
-        if line.is_empty()
-            || line.starts_with("//")
-            || line.starts_with('#')
-            || line.starts_with('@')
-            || line.starts_with('*')
-            || line.starts_with('[') && line.ends_with(']')
-        {
-            continue;
-        }
-        return Some(line_no);
-    }
-    None
-}
-
-fn should_use_compact_identifier_matching(query_text: &str, primary_tokens: &[String]) -> bool {
-    primary_tokens.len() <= 2
-        || query_text
-            .chars()
-            .any(|ch| ch == '_' || ch == '-' || ch == '/' || ch == ':' || ch.is_ascii_uppercase())
-}
-
-fn snippet_bounds(focus_line: usize, context_lines: usize, line_count: usize) -> (usize, usize) {
-    let start = focus_line.saturating_sub(context_lines).max(1);
-    let end = (focus_line + context_lines).min(line_count);
-    (start, end)
-}
-
-fn summarize_reason(query: &PresentationQuery, focus_line: &str) -> String {
-    let focus = focus_line.trim();
-    if focus.is_empty() {
-        return "top hybrid relevance in this file".to_string();
-    }
-
-    if !query.text.is_empty() {
-        let focus_lower = focus.to_ascii_lowercase();
-
-        if focus.contains(&query.text) || focus_lower.contains(&query.lower) {
-            return format!("line contains query terms: {}", truncate_for_reason(focus));
-        }
-
-        for token in &query.tokens {
-            if focus_lower.contains(token) {
-                return format!(
-                    "line matches token `{}`: {}",
-                    token,
-                    truncate_for_reason(focus)
-                );
-            }
-        }
-    }
-
-    format!("top-ranked pointer: {}", truncate_for_reason(focus))
 }
 
 fn build_lexical_queries(query_text: &str) -> Vec<String> {
@@ -3315,14 +2148,6 @@ fn is_query_stopword(token: &str) -> bool {
     )
 }
 
-fn raw_query_terms(query: &str) -> Vec<String> {
-    query
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .map(|token| token.to_ascii_lowercase())
-        .collect()
-}
-
 fn has_location_intent(query_text: &str) -> bool {
     raw_query_terms(query_text).into_iter().any(|term| {
         matches!(
@@ -3637,7 +2462,7 @@ fn collect_filtered_chunks(
     include_globs: &[String],
     skip_gitignore: bool,
     max_results: usize,
-) -> Vec<RawIndexedChunk> {
+) -> Result<Vec<RawIndexedChunk>> {
     let query = FilteredChunkQuery {
         path_matcher,
         scope_filter,
@@ -3646,7 +2471,7 @@ fn collect_filtered_chunks(
         skip_gitignore,
         max_results,
     };
-    let mut chunks = query_filtered_chunks(&ctx.sqlite, query, |_| true);
+    let mut chunks = query_filtered_chunks(&ctx.sqlite, query, |_| true)?;
     if chunks.len() < max_results
         && let Some(base_sqlite) = &ctx.base_sqlite
     {
@@ -3658,17 +2483,17 @@ fn collect_filtered_chunks(
                 ..query
             },
             |chunk| !ctx.is_shadowed_base_file(1, &chunk.file_path),
-        );
+        )?;
         chunks.extend(base_chunks);
     }
-    chunks
+    Ok(chunks)
 }
 
 fn query_filtered_chunks(
     conn: &Connection,
     query: FilteredChunkQuery<'_>,
     include_chunk: impl Fn(&RawIndexedChunk) -> bool,
-) -> Vec<RawIndexedChunk> {
+) -> Result<Vec<RawIndexedChunk>> {
     // Build a SQL query that pushes as much filtering as possible into SQLite.
     let mut sql = String::from(
         "SELECT file_path, start_line, end_line,
@@ -3748,13 +2573,11 @@ fn query_filtered_chunks(
         sql.push_str(&format!(" AND ({})", sql_ext_filters.join(" OR ")));
     }
 
-    let Ok(mut stmt) = conn.prepare(&sql) else {
-        return Vec::new();
-    };
+    let mut stmt = conn.prepare(&sql)?;
 
     let params_refs: Vec<&dyn rusqlite::types::ToSql> =
         params_vec.iter().map(|p| p.as_ref()).collect();
-    let Ok(rows) = stmt.query_map(params_refs.as_slice(), |row| {
+    let rows = stmt.query_map(params_refs.as_slice(), |row| {
         let file_path = PathBuf::from(row.get::<_, String>(0)?);
         let start_line = row.get::<_, i64>(1)? as usize;
         let end_line = row.get::<_, i64>(2)? as usize;
@@ -3774,17 +2597,23 @@ fn query_filtered_chunks(
             vector_key,
             is_ignored: row.get::<_, bool>(8)?,
         })
-    }) else {
-        return Vec::new();
-    };
+    })?;
 
     // Apply full glob filtering in Rust for complex patterns
-    rows.flatten()
-        .filter(|chunk| scope_path_matches(&chunk.file_path, query.scope_filter))
-        .filter(|chunk| query.path_matcher.matches(&chunk.file_path))
-        .filter(include_chunk)
-        .take(query.max_results)
-        .collect()
+    let mut chunks = Vec::new();
+    for row in rows {
+        let chunk = row?;
+        if scope_path_matches(&chunk.file_path, query.scope_filter)
+            && query.path_matcher.matches(&chunk.file_path)
+            && include_chunk(&chunk)
+        {
+            chunks.push(chunk);
+            if chunks.len() == query.max_results {
+                break;
+            }
+        }
+    }
+    Ok(chunks)
 }
 
 enum IndexedIncludePath {
@@ -3842,7 +2671,7 @@ fn collect_semantic_candidates(
         let plan = if let Some(plan) = filter_plan {
             plan
         } else {
-            owned_plan = build_semantic_filter_plan(ctx, path_matcher, options);
+            owned_plan = build_semantic_filter_plan(ctx, path_matcher, options)?;
             &owned_plan
         };
         if let SemanticFilterPlan::Exact(filtered) = plan {
@@ -3950,12 +2779,12 @@ fn indexed_filter_exceeds_exact_limit(
     ctx: &SearchContext,
     options: &SearchOptions,
     limit: usize,
-) -> bool {
+) -> Result<bool> {
     if ctx.base_sqlite.is_some()
         || !options.include_globs.is_empty()
         || !options.exclude_globs.is_empty()
     {
-        return false;
+        return Ok(false);
     }
 
     let mut sql = String::from("SELECT 1 FROM chunks WHERE 1=1");
@@ -3984,9 +2813,14 @@ fn indexed_filter_exceeds_exact_limit(
         .iter()
         .map(|value| value.as_ref())
         .collect::<Vec<&dyn rusqlite::types::ToSql>>();
-    ctx.sqlite
+    match ctx
+        .sqlite
         .query_row(&sql, params_refs.as_slice(), |_| Ok(()))
-        .is_ok()
+    {
+        Ok(()) => Ok(true),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(false),
+        Err(err) => Err(err.into()),
+    }
 }
 
 enum SemanticFilterPlan {
@@ -3998,9 +2832,9 @@ fn build_semantic_filter_plan(
     ctx: &SearchContext,
     path_matcher: &PathGlobMatcher,
     options: &SearchOptions,
-) -> SemanticFilterPlan {
-    if indexed_filter_exceeds_exact_limit(ctx, options, MAX_EXACT_FILTERED_CANDIDATES) {
-        return SemanticFilterPlan::Broad;
+) -> Result<SemanticFilterPlan> {
+    if indexed_filter_exceeds_exact_limit(ctx, options, MAX_EXACT_FILTERED_CANDIDATES)? {
+        return Ok(SemanticFilterPlan::Broad);
     }
     let filtered = collect_filtered_chunks(
         ctx,
@@ -4010,11 +2844,11 @@ fn build_semantic_filter_plan(
         &options.include_globs,
         options.skip_gitignore,
         MAX_EXACT_FILTERED_CANDIDATES + 1,
-    );
+    )?;
     if filtered.len() <= MAX_EXACT_FILTERED_CANDIDATES {
-        SemanticFilterPlan::Exact(filtered)
+        Ok(SemanticFilterPlan::Exact(filtered))
     } else {
-        SemanticFilterPlan::Broad
+        Ok(SemanticFilterPlan::Broad)
     }
 }
 
@@ -4496,500 +3330,7 @@ fn fuse_rrf(
         routing,
         limit,
     )
-}
-
-fn fuse_rrf_with_context(
-    ctx: Option<&SearchContext>,
-    candidates: FusionCandidates,
-    direct_ids: Option<HashSet<u64>>,
-    semantic_direct_weight: f32,
-    query: &FusionQuery<'_>,
-    routing: QueryRouting,
-    limit: Option<usize>,
-) -> Vec<(IndexedChunk, f32, Vec<String>)> {
-    let fuse_started = std::time::Instant::now();
-    const K: f32 = 60.0;
-    const SEMANTIC_WEIGHT: f32 = 1.0;
-    const LITERAL_WEIGHT: f32 = 4.0;
-    // Path matches (file_path contains the query) are a useful but bounded
-    // signal. They get a moderate rank-based weight — enough to surface a
-    // file whose path matches the query when content candidates are weak,
-    // without overriding strong content matches. The path-aware boosts below
-    // (path_exact_match/path_segment/file_stem) still apply on top.
-    const SYMBOL_WEIGHT: f32 = 10.0;
-    const LEXICAL_SCORE_WEIGHT: f32 = 0.05;
-    const SEMANTIC_SCORE_WEIGHT: f32 = 0.08;
-    const SEMANTIC_ONLY_PENALTY: f32 = 0.60;
-    const TERM_COVERAGE_WEIGHT: f32 = 0.35;
-    const PATH_SEGMENT_WEIGHT: f32 = 0.40;
-    const FILE_STEM_WEIGHT: f32 = 0.50;
-    const DEFINITION_NAME_BONUS: f32 = 0.25;
-    const LOCATION_INTENT_WEIGHT: f32 = 0.20;
-    // Path-exact matches now also feed their own ranked RRF list (see the
-    // `path` pass above), so this additive boost no longer needs to be large
-    // enough to single-handedly win — it was 3.0, ~60x the base RRF score.
-    const PATH_EXACT_MATCH_WEIGHT: f32 = 0.8;
-    const FILE_COVERAGE_WEIGHT: f32 = 3.0;
-    const EXACT_LITERAL_MULTIPLIER: f32 = 1.8;
-    const ALIAS_LITERAL_MULTIPLIER: f32 = 1.35;
-    // Bound the total additive boost relative to the fused base score so
-    // boosts perturb the RRF ranking rather than replace it.
-    const MAX_BOOST_RATIO: f32 = 3.0;
-    const MAX_BOOST_FLOOR: f32 = 0.25;
-
-    let FusionCandidates {
-        lexical,
-        semantic,
-        literal,
-        path,
-        path_weight,
-        symbols,
-    } = candidates;
-
-    const LEXICAL_WEIGHT: f32 = 3.2;
-    let query_tokens = query.tokens.as_slice();
-    let location_intent = query.location_intent;
-    let secondary_intent = query.secondary_intent;
-    let direct_ids = direct_ids.unwrap_or_else(|| {
-        lexical
-            .iter()
-            .map(|(chunk, _)| chunk.vector_key)
-            .chain(literal.iter().map(|(chunk, _)| chunk.vector_key))
-            .chain(path.iter().map(|(chunk, _)| chunk.vector_key))
-            .chain(symbols.iter().map(|(chunk, _)| chunk.vector_key))
-            .collect()
-    });
-
-    struct RrfEntry {
-        score: f32,
-        chunk: IndexedChunk,
-        sources: SourceMask,
-    }
-
-    let mut entries: HashMap<u64, RrfEntry> = HashMap::new();
-    let mut add_entry = |chunk: IndexedChunk, score: f32, sources: SourceMask| {
-        let vector_key = chunk.vector_key;
-        let entry = entries.entry(vector_key).or_insert_with(|| RrfEntry {
-            score: 0.0,
-            chunk,
-            sources: 0,
-        });
-        entry.score += score;
-        entry.sources |= sources;
-    };
-
-    for (rank, (chunk, lexical_score)) in lexical.into_iter().enumerate() {
-        add_entry(
-            chunk,
-            LEXICAL_WEIGHT / (K + rank as f32 + 1.0)
-                + normalize_lexical_score(lexical_score) * LEXICAL_SCORE_WEIGHT,
-            source_bit("lexical"),
-        );
-    }
-
-    for (rank, (chunk, semantic_score, semantic_sources)) in semantic.into_iter().enumerate() {
-        // Hash vectors are a cheap provisional recall tier. Keep full strength
-        // for semantic-only discovery, but do not let hash collisions overrule
-        // direct evidence. Neural vectors use semantic_direct_weight=1.0.
-        let direct_weight = if direct_ids.contains(&chunk.vector_key) {
-            semantic_direct_weight
-        } else {
-            1.0
-        };
-        let semantic_source_mask = semantic_sources
-            .into_iter()
-            .fold(source_bit("semantic"), |mask, source| {
-                mask | source_bit(source)
-            });
-        add_entry(
-            chunk,
-            direct_weight * SEMANTIC_WEIGHT / (K + rank as f32 + 1.0)
-                + direct_weight * normalize_semantic_score(semantic_score) * SEMANTIC_SCORE_WEIGHT,
-            semantic_source_mask,
-        );
-    }
-
-    // Literal pass: verified exact substring matches get a strong boost
-    for (rank, (chunk, _)) in literal.into_iter().enumerate() {
-        add_entry(
-            chunk,
-            LITERAL_WEIGHT / (K + rank as f32 + 1.0),
-            source_bit("literal"),
-        );
-    }
-
-    // Path pass: chunks whose file path matches the query, ranked by their
-    // path-field BM25 score. Rank-based only — no raw-score magnitude term —
-    // so a path match can't dominate via an out-of-scale score.
-    for (rank, (chunk, _)) in path.into_iter().enumerate() {
-        add_entry(
-            chunk,
-            path_weight / (K + rank as f32 + 1.0),
-            source_bit("path"),
-        );
-    }
-
-    for (rank, (chunk, kind)) in symbols.into_iter().enumerate() {
-        let weight = match kind {
-            SymbolCandidateKind::Exact => SYMBOL_WEIGHT * 20.0,
-            SymbolCandidateKind::Inferred => SYMBOL_WEIGHT * 5.0,
-            SymbolCandidateKind::Alias => SYMBOL_WEIGHT,
-        };
-        add_entry(
-            chunk,
-            weight / (K + rank as f32 + 1.0),
-            source_bit(match kind {
-                SymbolCandidateKind::Exact => "exact-symbol",
-                SymbolCandidateKind::Inferred => "inferred-symbol",
-                SymbolCandidateKind::Alias => "symbol",
-            }),
-        );
-    }
-
-    tracing::trace!(
-        "fuse_collect={:?} entries={}",
-        fuse_started.elapsed(),
-        entries.len()
-    );
-
-    let rerank_limit = rerank_candidate_limit_for_routing(routing);
-    let mut rerank_order = entries
-        .iter()
-        .map(|(vector_key, entry)| (*vector_key, entry.score))
-        .collect::<Vec<_>>();
-    rerank_order.sort_by(|left, right| {
-        right
-            .1
-            .total_cmp(&left.1)
-            .then_with(|| left.0.cmp(&right.0))
-    });
-    let rerank_ids = rerank_order
-        .into_iter()
-        .take(rerank_limit)
-        .map(|(chunk_id, _)| chunk_id)
-        .collect::<HashSet<_>>();
-
-    let hydrate_started = std::time::Instant::now();
-    let mut empty_text_candidates = 0;
-    let mut hydrated_candidates = 0;
-    if let Some(ctx) = ctx {
-        let empty_text_keys = rerank_ids
-            .iter()
-            .filter_map(|vector_key| entries.get(vector_key))
-            .filter(|entry| entry.chunk.text.is_empty())
-            .map(|entry| entry.chunk.vector_key)
-            .collect::<Vec<_>>();
-        empty_text_candidates = empty_text_keys.len();
-        if !empty_text_keys.is_empty()
-            && let Ok(batch) = ctx.fetch_chunk_texts_by_vector_keys_batch(&empty_text_keys)
-        {
-            for vector_key in &rerank_ids {
-                if let Some(entry) = entries.get_mut(vector_key)
-                    && entry.chunk.text.is_empty()
-                    && let Some(text) = batch.get(&entry.chunk.vector_key)
-                {
-                    entry.chunk.text.clone_from(text);
-                    hydrated_candidates += 1;
-                }
-            }
-        }
-    }
-    tracing::trace!(
-        "fuse_hydrate={:?} hydrate_io={:?} rerank_candidates={} empty_text_candidates={} hydrated_candidates={}",
-        fuse_started.elapsed(),
-        hydrate_started.elapsed(),
-        rerank_ids.len(),
-        empty_text_candidates,
-        hydrated_candidates
-    );
-
-    let primary_query_tokens = query.primary_tokens.as_slice();
-    let mut file_query_matches: HashMap<u64, HashSet<usize>> = HashMap::new();
-    let mut boost_contexts = HashMap::with_capacity(entries.len());
-    for (vector_key, entry) in &entries {
-        if !rerank_ids.contains(vector_key) {
-            continue;
-        }
-        let bctx = ChunkBoostContext::new_with_compact(&entry.chunk, query.compact_candidate_text);
-        if primary_query_tokens.len() >= 3 {
-            let matches = file_query_matches
-                .entry(path_key(&entry.chunk.file_path))
-                .or_default();
-            for (idx, token) in primary_query_tokens.iter().enumerate() {
-                if bctx.text_lower.contains(token.as_str())
-                    || bctx.path_lower.contains(token.as_str())
-                {
-                    matches.insert(idx);
-                }
-            }
-        }
-        boost_contexts.insert(*vector_key, bctx);
-    }
-
-    // Count how many candidate chunks each file contributes. Secondary-source
-    // files with many chunks get a density penalty so they cannot dominate by
-    // contributing more candidates; primary implementation files are exempt.
-    let mut file_chunk_counts: HashMap<u64, usize> = HashMap::new();
-    for e in entries.values() {
-        *file_chunk_counts
-            .entry(path_key(&e.chunk.file_path))
-            .or_insert(0) += 1;
-    }
-    tracing::trace!("fuse_context={:?}", fuse_started.elapsed());
-
-    let mut ranked = entries
-        .into_values()
-        .map(|e| {
-            let RrfEntry {
-                score: base_score,
-                chunk,
-                sources: source_set,
-            } = e;
-            if !rerank_ids.contains(&chunk.vector_key) {
-                return RankedCandidate {
-                    chunk,
-                    score: base_score,
-                    sources: source_set,
-                };
-            }
-
-            // Precompute lowercased text/path once per candidate instead of
-            // redundantly in every boost function.
-            let bctx = boost_contexts
-                .remove(&chunk.vector_key)
-                .unwrap_or_else(|| ChunkBoostContext::new(&chunk));
-
-            // Accumulate signal boosts separately from the RRF base so they can
-            // be bounded. Previously these were added directly and several were
-            // 10-60x the base RRF score (~0.05), so a single boost could
-            // override the fused rank signal entirely.
-            let mut additive_boost = literal_match_boost_with_query(query, &bctx);
-
-            let coverage = if !query_tokens.is_empty() {
-                term_coverage_boost(query_tokens, &bctx)
-            } else {
-                0.0
-            };
-            additive_boost += coverage * TERM_COVERAGE_WEIGHT;
-
-            if !query_tokens.is_empty() {
-                additive_boost += path_segment_boost(query_tokens, &bctx) * PATH_SEGMENT_WEIGHT;
-            }
-
-            additive_boost +=
-                path_exact_match_boost_with_query(query, &bctx) * PATH_EXACT_MATCH_WEIGHT;
-
-            let (file_stem_score, primary_file_stem_derivation) = file_stem_signals(
-                query_tokens,
-                &query.token_compacts,
-                primary_query_tokens,
-                &query.primary_token_compacts,
-                &bctx,
-            );
-            additive_boost += file_stem_score * FILE_STEM_WEIGHT;
-
-            if !query_tokens.is_empty() {
-                additive_boost +=
-                    definition_name_boost(query_tokens, &bctx) * DEFINITION_NAME_BONUS;
-            }
-
-            if location_intent {
-                additive_boost += location_intent_boost(&chunk, &bctx) * LOCATION_INTENT_WEIGHT;
-            }
-
-            // Keep RRF as the primary ranking signal: cap the total additive
-            // boost so it perturbs the fused base score rather than dominating
-            // it. The cap scales with the base (with a small floor so even
-            // weak-base candidates get a meaningful, bounded lift).
-            let boost_cap = (base_score * MAX_BOOST_RATIO).max(MAX_BOOST_FLOOR);
-            let mut score = base_score + additive_boost.min(boost_cap);
-
-            if let Some(matches) = file_query_matches.get(&path_key(&chunk.file_path))
-                && matches.len() >= 2
-            {
-                let file_coverage = matches.len() as f32 / primary_query_tokens.len() as f32;
-                score *= 1.0 + file_coverage * file_coverage * FILE_COVERAGE_WEIGHT;
-            }
-
-            if source_set & source_bit("literal") != 0 {
-                score *= if should_run_literal_pass(query.text) {
-                    EXACT_LITERAL_MULTIPLIER
-                } else {
-                    ALIAS_LITERAL_MULTIPLIER
-                };
-            }
-
-            if source_set
-                & (source_bit("lexical")
-                    | source_bit("literal")
-                    | source_bit("path")
-                    | source_bit("inferred-symbol"))
-                == 0
-            {
-                score *= SEMANTIC_ONLY_PENALTY;
-            }
-
-            // Chunks with zero query term overlap despite having text are noise
-            if !query_tokens.is_empty()
-                && coverage < f32::EPSILON
-                && source_set & (source_bit("literal") | source_bit("path")) == 0
-            {
-                score *= 0.5;
-            }
-
-            score *= chunk_kind_boost(&chunk);
-            score *= effective_authority_score_with_intent(query_tokens, &bctx, secondary_intent);
-            score *= primary_file_stem_multiplier(
-                primary_query_tokens,
-                primary_file_stem_derivation,
-                &bctx,
-            );
-            score *= alias_file_stem_multiplier(&query.alias_token_compacts, &bctx);
-
-            // Apply chunk-density normalization: 1/n^x where n is the number
-            // of chunks this file has in the candidate set. Primary
-            // implementation files use x=0 and are unaffected.
-            let n_file_chunks = file_chunk_counts
-                .get(&path_key(&chunk.file_path))
-                .copied()
-                .unwrap_or(1) as f32;
-            score /= n_file_chunks.powf(chunk_density_exponent(&bctx));
-
-            RankedCandidate {
-                chunk,
-                score,
-                sources: source_set,
-            }
-        })
-        .collect::<Vec<_>>();
-    tracing::trace!("fuse_score={:?}", fuse_started.elapsed());
-
-    if is_precise_lookup_query_with_tokens(query.text, &query.primary_tokens)
-        && let Some(max_score) = ranked.iter().map(|item| item.score).reduce(f32::max)
-    {
-        let exact_depths = ranked
-            .iter()
-            .filter(|item| item.sources & SOURCE_EXACT_SYMBOL != 0)
-            .map(|item| {
-                (
-                    item.chunk.vector_key,
-                    crate::symbols::exact_name_namespace_depth(&item.chunk, query.text),
-                )
-            })
-            .collect::<HashMap<_, _>>();
-        if let Some(exact) = ranked
-            .iter_mut()
-            .filter(|item| item.sources & SOURCE_EXACT_SYMBOL != 0)
-            .max_by(|left, right| {
-                let left_depth = exact_depths
-                    .get(&left.chunk.vector_key)
-                    .copied()
-                    .flatten()
-                    .unwrap_or(usize::MAX);
-                let right_depth = exact_depths
-                    .get(&right.chunk.vector_key)
-                    .copied()
-                    .flatten()
-                    .unwrap_or(usize::MAX);
-                (left_depth != usize::MAX)
-                    .cmp(&(right_depth != usize::MAX))
-                    .then_with(|| right_depth.cmp(&left_depth))
-                    .then_with(|| {
-                        is_definition_kind(&left.chunk.kind)
-                            .cmp(&is_definition_kind(&right.chunk.kind))
-                    })
-                    .then_with(|| left.score.total_cmp(&right.score))
-                    .then_with(|| right.chunk.vector_key.cmp(&left.chunk.vector_key))
-            })
-        {
-            exact.score = max_score + (max_score * 0.01).max(0.01);
-        }
-    }
-
-    ranked.sort_by(|left, right| {
-        right
-            .score
-            .total_cmp(&left.score)
-            .then_with(|| left.chunk.vector_key.cmp(&right.chunk.vector_key))
-    });
-    if query.primary_tokens.len() >= 4 {
-        apply_file_coherence_boost(&mut ranked, FILE_COHERENCE_WEIGHT, query.secondary_intent);
-        ranked.sort_by(|left, right| {
-            right
-                .score
-                .total_cmp(&left.score)
-                .then_with(|| left.chunk.vector_key.cmp(&right.chunk.vector_key))
-        });
-    }
-    // A qualified member in prose is an explicit request for that definition.
-    // Keep the winning file and score, but center its preview on the exact
-    // member instead of a nearby helper with stronger prose overlap.
-    promote_qualified_symbol_span(&mut ranked, query.text);
-    // "How" queries are architecture-oriented; term-dense prose can be less
-    // useful than the implementation span already selected by the ranker.
-    if matches!(
-        routing.intent,
-        QueryIntent::NaturalLanguage | QueryIntent::DocsTestsExamples | QueryIntent::Mixed
-    ) && !query.lower.starts_with("how ")
-    {
-        // File-level evidence determines rank. For descriptive queries, show
-        // the strongest local evidence from the top file without changing its
-        // score, source signals, or position.
-        promote_representative_span(
-            &mut ranked,
-            &query.primary_tokens,
-            REPRESENTATIVE_SPAN_MIN_COVERAGE,
-        );
-    }
-
-    // Per-file hit diversity cap: keep the best chunk per file at full score,
-    // then aggressively decay. This mirrors web-search result diversity: a
-    // second snippet from the same file can still show up, but should not crowd
-    // out another authoritative file.
-    let mut file_hit_counts: HashMap<u64, usize> = HashMap::new();
-    for item in &mut ranked {
-        let count = file_hit_counts
-            .entry(path_key(&item.chunk.file_path))
-            .or_insert(0);
-        *count += 1;
-        match *count {
-            1 => {}
-            2 => item.score *= 0.35,
-            3..=4 => item.score *= 0.15,
-            _ => item.score *= 0.05,
-        }
-    }
-    ranked.sort_by(|left, right| {
-        right
-            .score
-            .total_cmp(&left.score)
-            .then_with(|| left.chunk.vector_key.cmp(&right.chunk.vector_key))
-    });
-    let enable_backfill = backfill_enabled(&ranked);
-
-    if matches!(
-        routing.intent,
-        QueryIntent::NaturalLanguage | QueryIntent::DocsTestsExamples | QueryIntent::Mixed
-    ) {
-        let mut seen_files = HashSet::new();
-        ranked.retain(|item| seen_files.insert(path_key(&item.chunk.file_path)));
-    }
-
-    let mut filtered = filter_meaningful_scores_with_query(ranked, query, enable_backfill);
-
-    if let Some(limit) = limit {
-        filtered.truncate(limit);
-    }
-    tracing::trace!(
-        "fuse_filter={:?} results={}",
-        fuse_started.elapsed(),
-        filtered.len()
-    );
-
-    filtered
-        .into_iter()
-        .map(RankedCandidate::into_tuple)
-        .collect()
+    .expect("fusion without a search context cannot perform fallible I/O")
 }
 
 pub fn rerank_candidate_limit() -> usize {
@@ -6221,6 +4562,52 @@ mod tests {
         assert_eq!(vector, vec![1.0, 1.0, 1.0]);
         assert_eq!(model.calls.load(Ordering::Relaxed), 1);
         assert!(job.is_none());
+    }
+
+    #[test]
+    fn requested_corrupt_vector_store_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.usearch");
+        std::fs::write(&path, b"not a vector store").unwrap();
+
+        let err = open_optional_vector_store(true, &path, 256, HASH_VECTOR_QUANTIZATION)
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("open vector store"));
+    }
+
+    #[test]
+    fn unused_vector_store_is_not_opened() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors.usearch");
+        std::fs::write(&path, b"not a vector store").unwrap();
+
+        assert!(
+            open_optional_vector_store(false, &path, 256, HASH_VECTOR_QUANTIZATION)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn filtered_candidate_storage_errors_are_not_empty_results() {
+        let connection = Connection::open_in_memory().unwrap();
+        let matcher = PathGlobMatcher::new(&[], &[]).unwrap();
+        let error = query_filtered_chunks(
+            &connection,
+            FilteredChunkQuery {
+                path_matcher: &matcher,
+                scope_filter: None,
+                type_filter: None,
+                include_globs: &[],
+                skip_gitignore: false,
+                max_results: 10,
+            },
+            |_| true,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("no such table"));
     }
 
     struct TestEmbeddingModel384;

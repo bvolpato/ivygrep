@@ -1,47 +1,56 @@
-use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::{IsTerminal, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 use rusqlite::{Connection, OptionalExtension, Statement, ToSql, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 
-use tantivy::directory::error::{DeleteError, LockError, OpenReadError, OpenWriteError};
-use tantivy::directory::{
-    Directory, DirectoryLock, FileHandle, Lock, MmapDirectory, WatchCallback, WatchHandle, WritePtr,
-};
-use tantivy::schema::{
-    Field, IndexRecordOption, STORED, STRING, Schema, TextFieldIndexing, TextOptions, Value,
-};
-use tantivy::{Index as TantivyIndex, TantivyDocument, Term};
+use tantivy::directory::error::OpenWriteError;
+use tantivy::schema::Value;
+use tantivy::{TantivyDocument, Term};
 
-use crate::text::{
-    CODE_TOKENIZER_NAME, TRIGRAM_TOKENIZER_NAME, build_code_analyzer, build_trigram_analyzer,
-    first_code_line_range,
-};
+use crate::text::first_code_line_range;
 
 use crate::chunking::{
     Chunk, RustDocInclude, chunk_rust_doc_include, chunk_source_with_metadata, is_indexable_file,
 };
 use crate::embedding::EmbeddingModel;
 use crate::jobs::{self, JobKind, JobUpdate};
-use crate::merkle::{MerkleDiff, MerkleSnapshot, normalized_indexable_content};
-use crate::system_resources::available_memory_bytes;
-use crate::vector_store::{
-    HASH_VECTOR_QUANTIZATION, NEURAL_VECTOR_QUANTIZATION, ScalarKind, VectorStore,
-};
+use crate::merkle::{MerkleDiff, MerkleSnapshot};
+use crate::vector_store::{HASH_VECTOR_QUANTIZATION, NEURAL_VECTOR_QUANTIZATION, VectorStore};
 use crate::workspace::{Workspace, WorkspaceMetadata, index_path_string};
 
-const ZSTD_MAGIC: &[u8] = &[0x28, 0xB5, 0x2F, 0xFD];
-const MIN_COMPRESSED_TEXT_BYTES: usize = 512;
-const TANTIVY_WRITE_RETRY_ATTEMPTS: u32 = 16;
-const TANTIVY_WRITE_RETRY_MAX_DELAY_MS: u64 = 800;
+mod compression;
+mod git_state;
+mod resources;
+mod staging;
+mod storage;
+
+use compression::compress_text;
+pub use compression::{decompress_text, try_decompress_text};
+use git_state::{
+    clean_git_checkout_state, files_have_same_contents, indexed_git_state_path,
+    record_indexed_git_state, refresh_clean_base_metadata,
+};
+use resources::{
+    NEURAL_BATCH_SIZE_REFRESH_INTERVAL, check_memory_before_index, check_system_constraints,
+    indexing_pool, neural_enhance_batch_size,
+};
+use staging::FreshIndexStaging;
+pub use storage::{
+    StorageHandles, TantivyFields, open_sqlite, open_sqlite_readonly, open_storage,
+    open_tantivy_index,
+};
+use storage::{
+    apply_bulk_write_pragmas, apply_default_write_pragmas, apply_fresh_staging_pragmas,
+    create_secondary_indexes, create_tables, create_tables_schema, ensure_hash_vector_store,
+    finalize_graph_indexes, open_storage_with_options,
+};
 const TANTIVY_INDEX_RETRY_ATTEMPTS: u32 = 3;
 const TANTIVY_INDEX_RETRY_BASE_DELAY_MS: u64 = 250;
 const MIB: u64 = 1024 * 1024;
@@ -49,279 +58,11 @@ const MAX_RUST_DOC_INCLUDES_PER_SOURCE: usize = 16;
 const MAX_RUST_DOC_INCLUDE_BYTES: u64 = MIB;
 const MAX_RUST_DOC_INCLUDE_TOTAL_BYTES: u64 = 2 * MIB;
 const MAX_RUST_DOC_INCLUDE_CHUNKS_PER_SOURCE: usize = 128;
-const NEURAL_CPU_BATCH_SIZE: usize = 64;
-const NEURAL_STATIC_BATCH_SIZE: usize = 1024;
-const NEURAL_CUDA_BATCH_SIZE: usize = 8;
-const NEURAL_METAL_BATCH_SIZE: usize = 256;
-const NEURAL_CUDA_HIGH_PRESSURE_FREE_BYTES: u64 = 2 * 1024 * MIB;
-const NEURAL_CUDA_MEDIUM_PRESSURE_FREE_BYTES: u64 = 4 * 1024 * MIB;
-const NEURAL_CUDA_SHARED_FREE_BYTES: u64 = 8 * 1024 * MIB;
-const NEURAL_CUDA_HIGH_PRESSURE_FREE_PERCENT: u64 = 20;
-const NEURAL_CUDA_MEDIUM_PRESSURE_FREE_PERCENT: u64 = 35;
-const NEURAL_CUDA_SHARED_FREE_PERCENT: u64 = 50;
-const NEURAL_CUDA_HIGH_UTILIZATION_PERCENT: u32 = 70;
-const NEURAL_CUDA_BUSY_UTILIZATION_PERCENT: u32 = 35;
-const NEURAL_CUDA_ACTIVE_UTILIZATION_PERCENT: u32 = 25;
-const NEURAL_BATCH_SIZE_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
-const MAX_CONFIGURED_NEURAL_BATCH_SIZE: usize = 4096;
 const SYMBOL_INSERT_BATCH_ROWS: usize = 256;
 const INDEX_FILE_BATCH_SIZE: usize = 64;
 // Soft per-transaction target, checked after each file. One file's bounded
 // chunk-key batch may exceed it before the journal and SQLite commit checkpoint.
 const MAX_VECTOR_TOMBSTONE_TRANSACTION_BYTES: usize = 1024 * 1024;
-
-fn indexing_worker_count() -> usize {
-    let logical = num_cpus::get().max(1);
-    configured_indexing_worker_count(
-        logical,
-        num_cpus::get_physical(),
-        std::env::var("IVYGREP_INDEX_THREADS").ok().as_deref(),
-    )
-}
-
-fn configured_indexing_worker_count(
-    logical: usize,
-    physical: usize,
-    configured: Option<&str>,
-) -> usize {
-    configured
-        .and_then(|value| value.parse::<usize>().ok())
-        .filter(|count| *count > 0)
-        .unwrap_or(physical)
-        .clamp(1, logical)
-}
-
-fn indexing_pool() -> &'static rayon::ThreadPool {
-    static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
-    POOL.get_or_init(|| {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(indexing_worker_count())
-            .thread_name(|index| format!("ivygrep-index-{index}"))
-            .build()
-            .expect("indexing thread pool must build")
-    })
-}
-
-thread_local! {
-    static TEXT_COMPRESSOR: RefCell<Option<zstd::bulk::Compressor<'static>>> =
-        RefCell::new(zstd::bulk::Compressor::new(1).ok());
-}
-
-#[derive(Clone, Debug)]
-struct RetryingDirectory<D> {
-    inner: D,
-}
-
-impl<D> RetryingDirectory<D> {
-    fn new(inner: D) -> Self {
-        Self { inner }
-    }
-}
-
-fn open_write_with_retry<F>(mut open: F) -> Result<WritePtr, OpenWriteError>
-where
-    F: FnMut() -> Result<WritePtr, OpenWriteError>,
-{
-    for attempt in 0..TANTIVY_WRITE_RETRY_ATTEMPTS {
-        match open() {
-            Ok(writer) => return Ok(writer),
-            Err(OpenWriteError::IoError { io_error, .. })
-                if io_error.kind() == std::io::ErrorKind::PermissionDenied
-                    && attempt + 1 < TANTIVY_WRITE_RETRY_ATTEMPTS =>
-            {
-                let delay_ms = (25_u64 << attempt).min(TANTIVY_WRITE_RETRY_MAX_DELAY_MS);
-                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
-            }
-            Err(err) => return Err(err),
-        }
-    }
-    unreachable!("the retry loop always returns on its final attempt")
-}
-
-fn configured_neural_batch_size() -> Option<usize> {
-    std::env::var("IVYGREP_NEURAL_BATCH_SIZE")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .map(|value| value.min(MAX_CONFIGURED_NEURAL_BATCH_SIZE))
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-struct CudaResourceSnapshot {
-    free_bytes: u64,
-    total_bytes: u64,
-    utilization_percent: u32,
-}
-
-impl CudaResourceSnapshot {
-    fn free_percent(self) -> u64 {
-        if self.total_bytes == 0 {
-            return 0;
-        }
-        ((self.free_bytes as u128 * 100) / self.total_bytes as u128) as u64
-    }
-}
-
-fn parse_cuda_resource_snapshot(line: &str) -> Option<CudaResourceSnapshot> {
-    let mut parts = line.split(',').map(str::trim);
-    let free_mib = parts.next()?.parse::<u64>().ok()?;
-    let total_mib = parts.next()?.parse::<u64>().ok()?;
-    let utilization_percent = parts.next()?.parse::<u32>().ok()?;
-    Some(CudaResourceSnapshot {
-        free_bytes: free_mib.checked_mul(MIB)?,
-        total_bytes: total_mib.checked_mul(MIB)?,
-        utilization_percent,
-    })
-}
-
-fn cuda_resource_snapshot() -> Option<CudaResourceSnapshot> {
-    let output = Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=memory.free,memory.total,utilization.gpu",
-            "--format=csv,noheader,nounits",
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    stdout.lines().next().and_then(parse_cuda_resource_snapshot)
-}
-
-fn cuda_neural_enhance_batch_size(resources: Option<CudaResourceSnapshot>) -> usize {
-    let Some(resources) = resources else {
-        return NEURAL_CUDA_BATCH_SIZE;
-    };
-    let free_percent = resources.free_percent();
-    if resources.utilization_percent >= NEURAL_CUDA_HIGH_UTILIZATION_PERCENT
-        || resources.free_bytes < NEURAL_CUDA_HIGH_PRESSURE_FREE_BYTES
-        || free_percent <= NEURAL_CUDA_HIGH_PRESSURE_FREE_PERCENT
-    {
-        return 1;
-    }
-    if resources.utilization_percent >= NEURAL_CUDA_BUSY_UTILIZATION_PERCENT
-        || resources.free_bytes < NEURAL_CUDA_MEDIUM_PRESSURE_FREE_BYTES
-        || free_percent <= NEURAL_CUDA_MEDIUM_PRESSURE_FREE_PERCENT
-    {
-        return (NEURAL_CUDA_BATCH_SIZE / 4).max(1);
-    }
-    if resources.utilization_percent >= NEURAL_CUDA_ACTIVE_UTILIZATION_PERCENT
-        || resources.free_bytes < NEURAL_CUDA_SHARED_FREE_BYTES
-        || free_percent <= NEURAL_CUDA_SHARED_FREE_PERCENT
-    {
-        return (NEURAL_CUDA_BATCH_SIZE / 2).max(1);
-    }
-    NEURAL_CUDA_BATCH_SIZE
-}
-
-fn neural_enhance_batch_size_for(
-    backend: Option<&str>,
-    cuda_resources: Option<CudaResourceSnapshot>,
-    configured: Option<usize>,
-) -> usize {
-    if let Some(configured) = configured {
-        return configured;
-    }
-
-    let Some(backend) = backend else {
-        return NEURAL_CPU_BATCH_SIZE;
-    };
-    let default_batch_size = if backend.contains("StaticEmbedding") || backend.contains("Model2Vec")
-    {
-        NEURAL_STATIC_BATCH_SIZE
-    } else if backend.contains("Candle CUDA") {
-        cuda_neural_enhance_batch_size(cuda_resources)
-    } else if backend.contains("Candle Metal") {
-        NEURAL_METAL_BATCH_SIZE
-    } else {
-        NEURAL_CPU_BATCH_SIZE
-    };
-    if default_batch_size == NEURAL_CPU_BATCH_SIZE {
-        return NEURAL_CPU_BATCH_SIZE;
-    }
-    default_batch_size
-}
-
-fn neural_enhance_batch_size(neural_model: &dyn EmbeddingModel) -> usize {
-    let backend = neural_model.backend_info();
-    let cuda_resources = backend
-        .filter(|backend| backend.contains("Candle CUDA"))
-        .and_then(|_| cuda_resource_snapshot());
-    neural_enhance_batch_size_for(backend, cuda_resources, configured_neural_batch_size())
-}
-
-impl<D> Directory for RetryingDirectory<D>
-where
-    D: Directory + Clone + std::fmt::Debug,
-{
-    fn get_file_handle(
-        &self,
-        path: &Path,
-    ) -> Result<std::sync::Arc<dyn FileHandle>, OpenReadError> {
-        self.inner.get_file_handle(path)
-    }
-
-    fn delete(&self, path: &Path) -> Result<(), DeleteError> {
-        self.inner.delete(path)
-    }
-
-    fn exists(&self, path: &Path) -> Result<bool, OpenReadError> {
-        self.inner.exists(path)
-    }
-
-    fn open_write(&self, path: &Path) -> Result<WritePtr, OpenWriteError> {
-        open_write_with_retry(|| self.inner.open_write(path))
-    }
-
-    fn atomic_read(&self, path: &Path) -> Result<Vec<u8>, OpenReadError> {
-        self.inner.atomic_read(path)
-    }
-
-    fn atomic_write(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
-        self.inner.atomic_write(path, data)
-    }
-
-    fn sync_directory(&self) -> std::io::Result<()> {
-        self.inner.sync_directory()
-    }
-
-    fn acquire_lock(&self, lock: &Lock) -> Result<DirectoryLock, LockError> {
-        self.inner.acquire_lock(lock)
-    }
-
-    fn watch(&self, watch_callback: WatchCallback) -> tantivy::Result<WatchHandle> {
-        self.inner.watch(watch_callback)
-    }
-}
-
-fn compress_text(text: &str) -> Vec<u8> {
-    let raw = text.as_bytes();
-    if raw.len() < MIN_COMPRESSED_TEXT_BYTES {
-        return raw.to_vec();
-    }
-
-    TEXT_COMPRESSOR
-        .with_borrow_mut(|compressor| {
-            compressor
-                .as_mut()
-                .and_then(|value| value.compress(raw).ok())
-        })
-        .filter(|compressed| compressed.len() < raw.len())
-        .unwrap_or_else(|| raw.to_vec())
-}
-
-pub fn decompress_text(raw: Vec<u8>) -> String {
-    if raw.starts_with(ZSTD_MAGIC) {
-        zstd::decode_all(&raw[..])
-            .ok()
-            .and_then(|b| String::from_utf8(b).ok())
-            .unwrap_or_else(|| String::from_utf8_lossy(&raw).into_owned())
-    } else {
-        String::from_utf8(raw)
-            .unwrap_or_else(|e| String::from_utf8_lossy(&e.into_bytes()).into_owned())
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexingSummary {
@@ -427,131 +168,124 @@ impl Drop for IndexBatchProducer {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct TantivyFields {
-    pub vector_key: Field,
-    pub file_path: Field,
-    pub start_line: Field,
-    pub end_line: Field,
-    pub language: Field,
-    pub kind: Field,
-    pub text: Field,
-    pub text_trigrams: Option<Field>,
-    pub is_ignored: Option<Field>,
-    pub file_path_text: Option<Field>,
-    pub signature: Option<Field>,
-}
+fn spawn_index_batch_producer(
+    workspace: &Workspace,
+    diff: &MerkleDiff,
+    current_snapshot: Option<Arc<MerkleSnapshot>>,
+    fields: &TantivyFields,
+    is_fresh_index: bool,
+    show_progress: bool,
+) -> IndexBatchProducer {
+    let total = diff.added_or_modified.len();
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<IndexedFileBatch>(2);
+    let progress_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let root = workspace.root.clone();
+    let progress_path = workspace.indexing_progress_path();
+    let diff_paths = diff.added_or_modified.clone();
+    let fields = fields.clone();
 
-#[derive(Debug, Clone)]
-pub struct StorageHandles {
-    pub sqlite_path: PathBuf,
-    pub tantivy_dir: PathBuf,
-    pub vector_path: PathBuf,
-}
+    let _ = fs::write(&progress_path, format!("0/{total}"));
+    let handle = std::thread::spawn(move || {
+        for batch_paths in diff_paths.chunks(INDEX_FILE_BATCH_SIZE) {
+            let file_chunks: Vec<_> = indexing_pool().install(|| {
+                batch_paths
+                    .par_iter()
+                    .filter_map(|(rel_path, is_ignored)| {
+                        let empty_incremental_file = |rel: &Path| {
+                            (!is_fresh_index).then(|| IndexedFile {
+                                rel_path: rel.to_path_buf(),
+                                chunks: Vec::new(),
+                                included_paths: Vec::new(),
+                                file_edges: Vec::new(),
+                                unresolved_dependencies: Vec::new(),
+                                manifest_resolution_signature: None,
+                            })
+                        };
 
-struct FreshIndexStaging {
-    dir: PathBuf,
-    sqlite_path: PathBuf,
-    tantivy_dir: PathBuf,
-    vector_path: PathBuf,
-    active: bool,
-}
+                        let abs_path = root.join(rel_path);
+                        if !abs_path.exists() {
+                            progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            return empty_incremental_file(rel_path);
+                        }
 
-impl FreshIndexStaging {
-    fn create(workspace: &Workspace) -> Result<Self> {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let dir = workspace.index_dir.join(format!(
-            ".fresh-index-staging-{}-{unique}",
-            std::process::id()
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir)?;
-        Ok(Self {
-            sqlite_path: dir.join("metadata.sqlite3"),
-            tantivy_dir: dir.join("tantivy"),
-            vector_path: dir.join("vectors.usearch"),
-            dir,
-            active: true,
-        })
-    }
+                        let content_bytes = match fs::read(&abs_path) {
+                            Ok(bytes) => bytes,
+                            Err(_) => return empty_incremental_file(rel_path),
+                        };
+                        if !is_indexable_file(rel_path, &content_bytes) {
+                            progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            return empty_incremental_file(rel_path);
+                        }
 
-    fn promote(mut self, workspace: &Workspace) -> Result<()> {
-        anyhow::ensure!(self.sqlite_path.is_file(), "staged SQLite index is missing");
-        anyhow::ensure!(self.tantivy_dir.is_dir(), "staged Tantivy index is missing");
-        anyhow::ensure!(self.vector_path.is_file(), "staged vector index is missing");
+                        let content = String::from_utf8(content_bytes).unwrap_or_else(|error| {
+                            String::from_utf8_lossy(&error.into_bytes()).into_owned()
+                        });
+                        let mut chunked = chunk_source_with_metadata(rel_path, &content);
+                        let file_graph = crate::context_graph::extract_file_graph(
+                            &root,
+                            current_snapshot.as_deref(),
+                            rel_path,
+                            &content,
+                        );
+                        let (included_chunks, included_paths) = load_rust_doc_includes(
+                            &root,
+                            rel_path,
+                            &chunked.rust_doc_includes,
+                            current_snapshot.as_deref(),
+                        );
+                        chunked.chunks.extend(included_chunks);
+                        let mut seen_vector_keys = HashSet::new();
+                        let mut indexed: Vec<_> = chunked
+                            .chunks
+                            .into_iter()
+                            .map(|chunk| build_indexed_chunk(chunk, *is_ignored))
+                            .filter(|chunk| seen_vector_keys.insert(chunk.vector_key))
+                            .map(|chunk| prepare_indexed_chunk(chunk, &fields))
+                            .collect();
+                        if let (Some(field), Some(first)) =
+                            (fields.text_trigrams, indexed.first_mut())
+                        {
+                            first.tantivy_doc.add_text(field, &content);
+                        }
 
-        let backup_dir = workspace
-            .index_dir
-            .join(format!(".fresh-index-backup-{}", uuid::Uuid::new_v4()));
-        fs::create_dir(&backup_dir)?;
-        let mut backups = Vec::new();
-        for (index, live_path) in main_store_artifacts(workspace).into_iter().enumerate() {
-            if !live_path.exists() {
-                continue;
+                        let completed =
+                            progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                        if show_progress && completed.is_multiple_of(500) {
+                            eprint!("\r\x1b[K  ⠋ indexing {completed}/{total} files...");
+                        }
+                        if completed.is_multiple_of(2000) {
+                            let _ = fs::write(&progress_path, format!("{completed}/{total}"));
+                        }
+
+                        if indexed.is_empty()
+                            && included_paths.is_empty()
+                            && file_graph.edges.is_empty()
+                            && file_graph.unresolved_dependencies.is_empty()
+                        {
+                            return empty_incremental_file(rel_path);
+                        }
+                        Some(IndexedFile {
+                            rel_path: rel_path.clone(),
+                            chunks: indexed,
+                            included_paths,
+                            file_edges: file_graph.edges,
+                            unresolved_dependencies: file_graph.unresolved_dependencies,
+                            manifest_resolution_signature:
+                                crate::context_graph::manifest_resolution_signature(
+                                    rel_path, &content,
+                                ),
+                        })
+                    })
+                    .collect()
+            });
+
+            if !file_chunks.is_empty() && sender.send(file_chunks).is_err() {
+                break;
             }
-            let backup_path = backup_dir.join(index.to_string());
-            if let Err(error) = fs::rename(&live_path, &backup_path) {
-                if let Err(rollback_error) = restore_main_store_backups(&backups) {
-                    anyhow::bail!(
-                        "failed to preserve live index {}: {error}; rollback failed: \
-                         {rollback_error:#}; backups retained at {}",
-                        live_path.display(),
-                        backup_dir.display()
-                    );
-                }
-                let _ = fs::remove_dir_all(&backup_dir);
-                return Err(error).with_context(|| {
-                    format!("failed to preserve live index {}", live_path.display())
-                });
-            }
-            backups.push((live_path, backup_path));
         }
+    });
 
-        let promotions = [
-            (self.sqlite_path.clone(), workspace.sqlite_path()),
-            (self.tantivy_dir.clone(), workspace.tantivy_dir()),
-            (self.vector_path.clone(), workspace.vector_path()),
-        ];
-        let mut promoted = Vec::<PathBuf>::new();
-        for (staged_path, live_path) in promotions {
-            if let Err(error) = fs::rename(&staged_path, &live_path) {
-                if let Err(rollback_error) = rollback_main_store(&promoted, &backups) {
-                    anyhow::bail!(
-                        "failed to promote staged index {} -> {}: {error}; rollback failed: \
-                         {rollback_error:#}; backups retained at {}",
-                        staged_path.display(),
-                        live_path.display(),
-                        backup_dir.display()
-                    );
-                }
-                let _ = fs::remove_dir_all(&backup_dir);
-                return Err(error).with_context(|| {
-                    format!(
-                        "failed to promote staged index {} -> {}",
-                        staged_path.display(),
-                        live_path.display()
-                    )
-                });
-            }
-            promoted.push(live_path);
-        }
-
-        self.active = false;
-        let _ = fs::remove_dir_all(backup_dir);
-        let _ = fs::remove_dir_all(&self.dir);
-        Ok(())
-    }
-}
-
-impl Drop for FreshIndexStaging {
-    fn drop(&mut self) {
-        if self.active {
-            let _ = fs::remove_dir_all(&self.dir);
-        }
-    }
+    IndexBatchProducer::new(receiver, handle)
 }
 
 pub fn workspace_is_indexed(workspace: &Workspace) -> bool {
@@ -584,93 +318,6 @@ fn remove_workspace_index_contents(workspace: &Workspace) -> Result<()> {
         } else {
             fs::remove_file(&path)?;
         }
-    }
-    Ok(())
-}
-
-fn sqlite_sidecar_path(path: &Path, suffix: &str) -> PathBuf {
-    let mut sidecar = path.as_os_str().to_owned();
-    sidecar.push(suffix);
-    PathBuf::from(sidecar)
-}
-
-fn remove_path_if_exists(path: &Path) -> Result<()> {
-    if path.is_dir() {
-        fs::remove_dir_all(path)?;
-    } else if path.exists() {
-        fs::remove_file(path)?;
-    }
-    Ok(())
-}
-
-fn main_store_artifacts(workspace: &Workspace) -> [PathBuf; 6] {
-    let sqlite_path = workspace.sqlite_path();
-    [
-        sqlite_path.clone(),
-        sqlite_sidecar_path(&sqlite_path, "-wal"),
-        sqlite_sidecar_path(&sqlite_path, "-shm"),
-        workspace.tantivy_dir(),
-        workspace.vector_path(),
-        workspace.vector_path().with_extension("usearch.bak"),
-    ]
-}
-
-fn restore_main_store_backups(backups: &[(PathBuf, PathBuf)]) -> Result<()> {
-    for (live_path, backup_path) in backups.iter().rev() {
-        fs::rename(backup_path, live_path).with_context(|| {
-            format!(
-                "failed to restore live index {} from {}",
-                live_path.display(),
-                backup_path.display()
-            )
-        })?;
-    }
-    Ok(())
-}
-
-fn rollback_main_store(promoted: &[PathBuf], backups: &[(PathBuf, PathBuf)]) -> Result<()> {
-    for path in promoted.iter().rev() {
-        remove_path_if_exists(path)
-            .with_context(|| format!("failed to remove partial index {}", path.display()))?;
-    }
-    restore_main_store_backups(backups)
-}
-
-pub fn open_storage(workspace: &Workspace, embedding_dimensions: usize) -> Result<StorageHandles> {
-    open_storage_with_options(workspace, embedding_dimensions, true)
-}
-
-fn open_storage_with_options(
-    workspace: &Workspace,
-    embedding_dimensions: usize,
-    create_secondary_indexes: bool,
-) -> Result<StorageHandles> {
-    workspace.ensure_dirs()?;
-    fs::create_dir_all(workspace.tantivy_dir())?;
-
-    let sqlite_path = workspace.sqlite_path();
-    let conn = Connection::open(&sqlite_path)?;
-    create_tables_with_options(&conn, create_secondary_indexes)?;
-    drop(conn);
-
-    let tantivy_dir = workspace.tantivy_dir();
-    let _ = open_tantivy_index(&tantivy_dir)?;
-
-    let vector_path = workspace.vector_path();
-    ensure_hash_vector_store(&vector_path, embedding_dimensions)?;
-
-    Ok(StorageHandles {
-        sqlite_path,
-        tantivy_dir,
-        vector_path,
-    })
-}
-
-fn ensure_hash_vector_store(path: &Path, embedding_dimensions: usize) -> Result<()> {
-    if path.exists() {
-        let _ = VectorStore::open_readonly(path, embedding_dimensions, ScalarKind::F16)?;
-    } else {
-        VectorStore::open(path, embedding_dimensions, ScalarKind::F16)?.save()?;
     }
     Ok(())
 }
@@ -1481,7 +1128,6 @@ fn index_workspace_inner(
 
     let total = diff.added_or_modified.len();
     let show_progress = total > 0 && std::io::stderr().is_terminal();
-    let progress_counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
     let t0 = std::time::Instant::now();
     let mut total_chunks_processed = 0;
@@ -1489,133 +1135,15 @@ fn index_workspace_inner(
     let mut touched_files = HashSet::new();
     let mut chunks_since_commit = 0;
 
-    // Stream through batches to rigidly bound memory footprints.
-    let (tx_batch, rx_batch) = std::sync::mpsc::sync_channel::<IndexedFileBatch>(2);
-
-    let progress_counter_clone = progress_counter.clone();
-    let root_clone = workspace.root.clone();
-    let current_snapshot_clone = current_snapshot.clone();
-    let progress_path_clone = workspace.indexing_progress_path();
-    let diff_paths: Vec<_> = diff.added_or_modified.clone();
-    let producer_fields = fields.clone();
-
-    let _ = fs::write(&progress_path_clone, format!("0/{total}"));
-
-    let producer_handle = std::thread::spawn(move || {
-        for batch_paths in diff_paths.chunks(INDEX_FILE_BATCH_SIZE) {
-            let file_chunks: Vec<_> = indexing_pool().install(|| {
-                batch_paths
-                    .par_iter()
-                    .filter_map(|(rel_path, is_ignored)| {
-                        // For a modified file that now yields no chunks (vanished,
-                        // unreadable, empty, binary/non-text, or chunks to nothing)
-                        // emit an empty entry on an incremental index so the
-                        // consumer still runs remove_file_chunks and clears the
-                        // stale chunks + orphaned vectors. On a fresh index there is
-                        // nothing to remove, so skip the file entirely.
-                        let nothing = |rel: &std::path::Path| {
-                            if is_fresh_index {
-                                None
-                            } else {
-                                Some(IndexedFile {
-                                    rel_path: rel.to_path_buf(),
-                                    chunks: Vec::new(),
-                                    included_paths: Vec::new(),
-                                    file_edges: Vec::new(),
-                                    unresolved_dependencies: Vec::new(),
-                                    manifest_resolution_signature: None,
-                                })
-                            }
-                        };
-
-                        let abs_path = root_clone.join(rel_path);
-                        if !abs_path.exists() {
-                            progress_counter_clone
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            return nothing(rel_path);
-                        }
-
-                        let content_bytes = match fs::read(&abs_path) {
-                            Ok(b) => b,
-                            Err(_) => return nothing(rel_path),
-                        };
-                        if !is_indexable_file(rel_path, &content_bytes) {
-                            progress_counter_clone
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            return nothing(rel_path);
-                        }
-
-                        let content = match String::from_utf8(content_bytes) {
-                            Ok(text) => text,
-                            Err(err) => String::from_utf8_lossy(&err.into_bytes()).into_owned(),
-                        };
-
-                        let mut chunked = chunk_source_with_metadata(rel_path, &content);
-                        let file_graph = crate::context_graph::extract_file_graph(
-                            &root_clone,
-                            current_snapshot_clone.as_deref(),
-                            rel_path,
-                            &content,
-                        );
-                        let (included_chunks, included_paths) = load_rust_doc_includes(
-                            &root_clone,
-                            rel_path,
-                            &chunked.rust_doc_includes,
-                            current_snapshot_clone.as_deref(),
-                        );
-                        chunked.chunks.extend(included_chunks);
-                        let mut seen_vector_keys = HashSet::new();
-                        let mut indexed: Vec<_> = chunked
-                            .chunks
-                            .into_iter()
-                            .map(|c| build_indexed_chunk(c, *is_ignored))
-                            .filter(|chunk| seen_vector_keys.insert(chunk.vector_key))
-                            .map(|chunk| prepare_indexed_chunk(chunk, &producer_fields))
-                            .collect();
-                        if let (Some(field), Some(first)) =
-                            (producer_fields.text_trigrams, indexed.first_mut())
-                        {
-                            first.tantivy_doc.add_text(field, &content);
-                        }
-
-                        let n = progress_counter_clone
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                            + 1;
-                        if show_progress && n.is_multiple_of(500) {
-                            eprint!("\r\x1b[K  ⠋ indexing {n}/{total} files...");
-                        }
-                        if n.is_multiple_of(2000) {
-                            let _ = fs::write(&progress_path_clone, format!("{n}/{total}"));
-                        }
-
-                        if indexed.is_empty()
-                            && included_paths.is_empty()
-                            && file_graph.edges.is_empty()
-                            && file_graph.unresolved_dependencies.is_empty()
-                        {
-                            return nothing(rel_path);
-                        }
-                        Some(IndexedFile {
-                            rel_path: rel_path.clone(),
-                            chunks: indexed,
-                            included_paths,
-                            file_edges: file_graph.edges,
-                            unresolved_dependencies: file_graph.unresolved_dependencies,
-                            manifest_resolution_signature:
-                                crate::context_graph::manifest_resolution_signature(
-                                    rel_path, &content,
-                                ),
-                        })
-                    })
-                    .collect()
-            });
-
-            if !file_chunks.is_empty() && tx_batch.send(file_chunks).is_err() {
-                break;
-            }
-        }
-    });
-    let mut producer = IndexBatchProducer::new(rx_batch, producer_handle);
+    // Scanner and chunker run ahead by at most two batches, bounding memory.
+    let mut producer = spawn_index_batch_producer(
+        workspace,
+        &diff,
+        current_snapshot.clone(),
+        &fields,
+        is_fresh_index,
+        show_progress,
+    );
 
     macro_rules! persist_or_stop {
         ($result:expr) => {
@@ -1789,43 +1317,7 @@ fn index_workspace_inner(
         staging.promote(workspace)?;
     }
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let existing_meta = workspace
-        .read_metadata()?
-        .unwrap_or_else(|| WorkspaceMetadata {
-            id: workspace.id.clone(),
-            root: workspace.root.clone(),
-            created_at_unix: now,
-            last_indexed_at_unix: None,
-            watch_enabled: false,
-            skip_gitignore: false,
-            index_generation: 0,
-        });
-    let metadata = WorkspaceMetadata {
-        id: workspace.id.clone(),
-        root: workspace.root.clone(),
-        created_at_unix: existing_meta.created_at_unix,
-        last_indexed_at_unix: Some(now),
-        watch_enabled: existing_meta.watch_enabled,
-        skip_gitignore: existing_meta.skip_gitignore,
-        // Tracks lexical commits so background vector enhancement can detect
-        // concurrent edits and resume from the latest generation.
-        index_generation: existing_meta.index_generation + 1,
-    };
-    workspace.write_metadata(&metadata)?;
-    // Mark the index as written in the current on-disk format so an upgrade
-    // that changes the layout forces a rebuild (see INDEX_FORMAT_VERSION).
-    workspace.write_index_format_version()?;
-
-    // The snapshot records persisted state. If indexing stops before this
-    // point, the next run sees a diff and repairs partial file data.
-    if let Some(snapshot) = pending_snapshot {
-        snapshot.save(&workspace.merkle_snapshot_path())?;
-    }
+    finalize_workspace_index_state(workspace, pending_snapshot)?;
 
     Ok(IndexingSummary {
         workspace_id: workspace.id.clone(),
@@ -1838,6 +1330,45 @@ fn index_workspace_inner(
             finalize_ms: finalize_started.elapsed().as_secs_f64() * 1_000.0,
         },
     })
+}
+
+fn finalize_workspace_index_state(
+    workspace: &Workspace,
+    pending_snapshot: Option<Arc<MerkleSnapshot>>,
+) -> Result<()> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let existing = workspace
+        .read_metadata()?
+        .unwrap_or_else(|| WorkspaceMetadata {
+            id: workspace.id.clone(),
+            root: workspace.root.clone(),
+            created_at_unix: now,
+            last_indexed_at_unix: None,
+            watch_enabled: false,
+            skip_gitignore: false,
+            index_generation: 0,
+        });
+    workspace.write_metadata(&WorkspaceMetadata {
+        id: workspace.id.clone(),
+        root: workspace.root.clone(),
+        created_at_unix: existing.created_at_unix,
+        last_indexed_at_unix: Some(now),
+        watch_enabled: existing.watch_enabled,
+        skip_gitignore: existing.skip_gitignore,
+        // Background vector enhancement uses this lexical generation to
+        // detect concurrent edits and resume against the latest commit.
+        index_generation: existing.index_generation + 1,
+    })?;
+    workspace.write_index_format_version()?;
+
+    // Snapshot becomes authoritative only after all stores and metadata commit.
+    if let Some(snapshot) = pending_snapshot {
+        snapshot.save(&workspace.merkle_snapshot_path())?;
+    }
+    Ok(())
 }
 
 fn add_included_file_dependents(
@@ -2332,270 +1863,6 @@ fn normalize_workspace_relative_include(owner_rel_path: &Path, include: &Path) -
     (!normalized.as_os_str().is_empty()).then_some(normalized)
 }
 
-fn files_have_same_contents(left: &Path, right: &Path) -> bool {
-    match (fs::read(left), fs::read(right)) {
-        (Ok(left_bytes), Ok(right_bytes)) => {
-            left_bytes == right_bytes
-                || normalized_indexable_content(left, &left_bytes)
-                    == normalized_indexable_content(right, &right_bytes)
-        }
-        _ => false,
-    }
-}
-
-fn git_head(root: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--verify", "HEAD"])
-        .current_dir(root)
-        .output()
-        .ok()?;
-    output
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .filter(|head| !head.is_empty())
-}
-
-fn git_index_hash(root: &Path) -> Option<String> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--git-path", "index"])
-        .current_dir(root)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if raw.is_empty() {
-        return None;
-    }
-    let path = PathBuf::from(raw);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        root.join(path)
-    };
-    let bytes = fs::read(path).ok()?;
-    Some(hex::encode(
-        xxhash_rust::xxh3::xxh3_128(&bytes).to_le_bytes(),
-    ))
-}
-
-fn git_worktree_is_clean(root: &Path) -> bool {
-    std::process::Command::new("git")
-        .args(["status", "--porcelain=v1", "--untracked-files=normal"])
-        .current_dir(root)
-        .output()
-        .is_ok_and(|output| output.status.success() && output.stdout.is_empty())
-}
-
-fn git_path(root: &Path, args: &[&str]) -> Option<PathBuf> {
-    let output = std::process::Command::new("git")
-        .args(args)
-        .current_dir(root)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if raw.is_empty() {
-        return None;
-    }
-    let path = PathBuf::from(raw);
-    Some(if path.is_absolute() {
-        path
-    } else {
-        root.join(path)
-    })
-}
-
-fn git_ignore_state(root: &Path) -> Option<String> {
-    let mut state = Vec::new();
-    let configured_global_ignore =
-        git_path(root, &["config", "--path", "--get", "core.excludesFile"]);
-    let default_global_ignore = configured_global_ignore.is_none().then(|| {
-        std::env::var_os("XDG_CONFIG_HOME")
-            .map(PathBuf::from)
-            .or_else(|| dirs::home_dir().map(|home| home.join(".config")))
-            .map(|config| config.join("git/ignore"))
-    });
-    for path in [
-        git_path(root, &["rev-parse", "--git-path", "info/exclude"]),
-        configured_global_ignore,
-        default_global_ignore.flatten(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        state.extend_from_slice(path.to_string_lossy().as_bytes());
-        state.push(0);
-        state.extend_from_slice(&fs::read(path).unwrap_or_default());
-        state.push(0);
-    }
-
-    let ignored_controls = std::process::Command::new("git")
-        .args([
-            "ls-files",
-            "-z",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "--",
-            ":(glob)**/.gitignore",
-            ":(glob)**/.ignore",
-        ])
-        .current_dir(root)
-        .output()
-        .ok()?;
-    if !ignored_controls.status.success() {
-        return None;
-    }
-    for raw_path in ignored_controls.stdout.split(|byte| *byte == 0) {
-        if raw_path.is_empty() {
-            continue;
-        }
-        state.extend_from_slice(raw_path);
-        state.push(0);
-        state.extend_from_slice(
-            &fs::read(root.join(String::from_utf8_lossy(raw_path).as_ref())).ok()?,
-        );
-        state.push(0);
-    }
-
-    Some(hex::encode(
-        xxhash_rust::xxh3::xxh3_128(&state).to_le_bytes(),
-    ))
-}
-
-fn git_checkout_state(root: &Path) -> Option<String> {
-    Some(format!(
-        "{}\n{}\n{}\n{}",
-        git_head(root)?,
-        git_index_hash(root)?,
-        git_sparse_checkout_state(root),
-        git_ignore_state(root)?,
-    ))
-}
-
-fn clean_git_checkout_state(root: &Path) -> Option<String> {
-    git_worktree_is_clean(root).then(|| git_checkout_state(root))?
-}
-
-fn git_sparse_checkout_state(root: &Path) -> String {
-    let list = std::process::Command::new("git")
-        .args(["sparse-checkout", "list"])
-        .current_dir(root)
-        .output();
-    let Ok(list) = list else {
-        return "disabled".to_string();
-    };
-    if !list.status.success() {
-        return "disabled".to_string();
-    }
-
-    let cone = std::process::Command::new("git")
-        .args(["config", "--bool", "core.sparseCheckoutCone"])
-        .current_dir(root)
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| output.stdout)
-        .unwrap_or_default();
-    let mut state = list.stdout;
-    state.extend_from_slice(&cone);
-    format!(
-        "enabled:{}",
-        hex::encode(xxhash_rust::xxh3::xxh3_128(&state).to_le_bytes())
-    )
-}
-
-fn indexed_git_state_path(workspace: &Workspace) -> PathBuf {
-    workspace.index_dir.join("indexed_git_state")
-}
-
-fn record_indexed_git_state(workspace: &Workspace, expected_state: Option<&str>) -> bool {
-    let current_state = clean_git_checkout_state(&workspace.root);
-    if current_state.as_deref() == expected_state
-        && let Some(state) = current_state
-        && fs::write(indexed_git_state_path(workspace), state).is_ok()
-    {
-        return true;
-    }
-    let _ = fs::remove_file(indexed_git_state_path(workspace));
-    false
-}
-
-enum BaseIndexCheckoutState {
-    Current,
-    MetadataChanged,
-    Stale,
-}
-
-fn base_index_checkout_state(workspace: &Workspace) -> BaseIndexCheckoutState {
-    let indexes_ignored_files = workspace
-        .read_metadata()
-        .ok()
-        .flatten()
-        .is_some_and(|metadata| metadata.skip_gitignore);
-    if indexes_ignored_files
-        || !workspace.quick_index_health().is_queryable()
-        || !git_worktree_is_clean(&workspace.root)
-    {
-        return BaseIndexCheckoutState::Stale;
-    }
-    let Some(current_state) = git_checkout_state(&workspace.root) else {
-        return BaseIndexCheckoutState::Stale;
-    };
-    let Some(indexed_state) = fs::read_to_string(indexed_git_state_path(workspace)).ok() else {
-        return BaseIndexCheckoutState::Stale;
-    };
-    if indexed_state == current_state {
-        return BaseIndexCheckoutState::Current;
-    }
-
-    let same_head = indexed_state.lines().next() == current_state.lines().next();
-    let same_sparse_checkout = indexed_state.lines().nth(2) == current_state.lines().nth(2);
-    let same_ignore_state = indexed_state.lines().nth(3) == current_state.lines().nth(3);
-    if same_head && same_sparse_checkout && same_ignore_state {
-        BaseIndexCheckoutState::MetadataChanged
-    } else {
-        BaseIndexCheckoutState::Stale
-    }
-}
-
-fn refresh_clean_base_metadata(workspace: &Workspace) -> Result<bool> {
-    match base_index_checkout_state(workspace) {
-        BaseIndexCheckoutState::Current => return Ok(true),
-        BaseIndexCheckoutState::Stale => return Ok(false),
-        BaseIndexCheckoutState::MetadataChanged => {}
-    }
-
-    let lock_file = fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(false)
-        .open(workspace.lock_path())?;
-    fs2::FileExt::lock_exclusive(&lock_file)?;
-
-    match base_index_checkout_state(workspace) {
-        BaseIndexCheckoutState::Current => Ok(true),
-        BaseIndexCheckoutState::Stale => Ok(false),
-        BaseIndexCheckoutState::MetadataChanged => {
-            let skip_gitignore = workspace
-                .read_metadata()?
-                .is_some_and(|metadata| metadata.skip_gitignore);
-            let expected_state = clean_git_checkout_state(&workspace.root);
-            MerkleSnapshot::build(&workspace.root, skip_gitignore)?
-                .save(&workspace.merkle_snapshot_path())?;
-            Ok(record_indexed_git_state(
-                workspace,
-                expected_state.as_deref(),
-            ))
-        }
-    }
-}
-
 fn rebuild_index_storage(
     workspace: &Workspace,
     preserved_metadata: Option<&WorkspaceMetadata>,
@@ -2609,151 +1876,6 @@ fn rebuild_index_storage(
         workspace.write_metadata(&metadata)?;
     }
     Ok(())
-}
-
-#[cfg(target_os = "macos")]
-fn parse_pmset_batt(stdout: &str) -> Option<String> {
-    if stdout.contains("Battery Power") {
-        Some("Battery Power".to_string())
-    } else {
-        None
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn parse_pmset_therm(stdout: &str) -> Option<String> {
-    if stdout.contains("warning level")
-        && !stdout.contains("No thermal warning level")
-        && !stdout.contains("No performance warning level")
-    {
-        Some("Thermal Throttling".to_string())
-    } else {
-        None
-    }
-}
-
-/// Load-average multiple of CPU count that pauses background neural work.
-/// `IVYGREP_ENHANCE_MAX_LOAD_RATIO` overrides the 2.0 default; values at or
-/// below zero disable the check. The worker already runs at `nice(10)` with a
-/// limited core budget, so lower thresholds can prevent it from completing on
-/// routinely busy hosts.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn enhance_max_load_ratio() -> f64 {
-    std::env::var("IVYGREP_ENHANCE_MAX_LOAD_RATIO")
-        .ok()
-        .and_then(|v| v.trim().parse::<f64>().ok())
-        .filter(|v| v.is_finite())
-        .unwrap_or(2.0)
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn parse_system_load(load1: f64, cpus: f64) -> Option<String> {
-    let ratio = enhance_max_load_ratio();
-    if ratio <= 0.0 {
-        return None; // load check disabled
-    }
-    let max_load = cpus * ratio;
-    if load1 > max_load {
-        Some(format!("High System Load ({load1:.1} > {max_load:.1} max)"))
-    } else {
-        None
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn check_system_constraints() -> Option<String> {
-    // Never pause in test or CI environments to avoid breaking benchmarks randomly
-    if cfg!(test) || std::env::var("CI").is_ok() {
-        return None;
-    }
-
-    use std::process::Command;
-
-    if let Some(reason) = low_available_memory_reason(1024 * MIB) {
-        return Some(reason);
-    }
-
-    // 1. Check battery power
-    if let Ok(output) = Command::new("pmset").arg("-g").arg("batt").output() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if let Some(reason) = parse_pmset_batt(&stdout) {
-            return Some(reason);
-        }
-    }
-
-    // 2. Check thermal limit
-    if let Ok(output) = Command::new("pmset").arg("-g").arg("therm").output() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if let Some(reason) = parse_pmset_therm(&stdout) {
-            return Some(reason);
-        }
-    }
-
-    // 3. High load
-    let mut loadavg = [0.0f64; 3];
-    let has_load = unsafe { libc::getloadavg(loadavg.as_mut_ptr(), 3) };
-    if has_load > 0 {
-        let load1 = loadavg[0];
-        let cpus = num_cpus::get() as f64;
-        if let Some(reason) = parse_system_load(load1, cpus) {
-            return Some(reason);
-        }
-    }
-    None
-}
-
-#[cfg(target_os = "linux")]
-fn check_system_constraints() -> Option<String> {
-    if cfg!(test) || std::env::var("CI").is_ok() {
-        return None;
-    }
-
-    let mut loadavg = [0.0f64; 3];
-    let has_load = unsafe { libc::getloadavg(loadavg.as_mut_ptr(), 3) };
-    if has_load > 0 {
-        let load1 = loadavg[0];
-        let cpus = num_cpus::get() as f64;
-        if let Some(reason) = parse_system_load(load1, cpus) {
-            return Some(reason);
-        }
-    }
-
-    if let Some(reason) = low_available_memory_reason(1024 * MIB) {
-        return Some(reason);
-    }
-
-    None
-}
-
-/// Guard for the indexer: refuse to start indexing when available memory
-/// is dangerously low.
-fn check_memory_before_index() -> Result<()> {
-    if cfg!(test) || std::env::var("CI").is_ok() {
-        return Ok(());
-    }
-
-    if let Some(bytes) = available_memory_bytes()
-        && bytes < 512 * MIB
-    {
-        anyhow::bail!(
-            "refusing to index: only {} MiB of memory available (need at least 512 MiB). \
-             Close other applications or free memory before re-indexing.",
-            bytes / MIB
-        );
-    }
-
-    Ok(())
-}
-
-#[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
-fn check_system_constraints() -> Option<String> {
-    low_available_memory_reason(1024 * MIB)
-}
-
-fn low_available_memory_reason(minimum_bytes: u64) -> Option<String> {
-    available_memory_bytes()
-        .filter(|available| *available < minimum_bytes)
-        .map(|available| format!("Low Available Memory ({} MiB)", available / MIB))
 }
 
 fn vector_store_covers_all_keys(
@@ -2873,7 +1995,9 @@ pub fn enhance_workspace_hash(
             continue;
         }
 
-        batch.push((key, decompress_text(raw)));
+        let text = try_decompress_text(raw)
+            .with_context(|| format!("failed to read stored text for vector key {key}"))?;
+        batch.push((key, text));
         if batch.len() >= BATCH_SIZE {
             while let Some(reason) = check_system_constraints() {
                 let _ = fs::write(&paused_path, &reason);
@@ -3076,7 +2200,8 @@ pub fn enhance_workspace_neural(
                 return Ok(());
             }
 
-            let text = decompress_text(raw);
+            let text = try_decompress_text(raw)
+                .with_context(|| format!("failed to read stored text for vector key {key}"))?;
             batch.push((key, text));
 
             if batch.len() >= current_batch_size {
@@ -3788,267 +2913,6 @@ fn count_workspace_chunks(workspace: &Workspace) -> Result<usize> {
     Ok(count)
 }
 
-pub fn open_sqlite(sqlite_path: &Path) -> Result<Connection> {
-    let conn = Connection::open(sqlite_path)?;
-    create_tables(&conn)?;
-    Ok(conn)
-}
-
-/// Open SQLite in read-only mode for search and status queries.
-/// Skips CREATE TABLE / PRAGMA writes for maximum speed.
-pub fn open_sqlite_readonly(sqlite_path: &Path) -> Result<Connection> {
-    let conn = Connection::open_with_flags(
-        sqlite_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-
-    // Performance PRAGMAs for read-heavy workloads on large databases.
-    // On multi-GB databases (large repos with millions of chunks), the default
-    // 2 MB page cache causes constant disk re-reads.
-    conn.execute_batch(
-        "PRAGMA mmap_size = 2147483648;
-         PRAGMA cache_size = -65536;
-         PRAGMA temp_store = MEMORY;",
-    )?;
-
-    Ok(conn)
-}
-
-fn create_tables(conn: &Connection) -> Result<()> {
-    create_tables_with_options(conn, true)
-}
-
-fn create_tables_with_options(conn: &Connection, create_indexes: bool) -> Result<()> {
-    apply_default_write_pragmas(conn)?;
-    create_tables_schema(conn, create_indexes)
-}
-
-fn apply_default_write_pragmas(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        r#"
-        PRAGMA journal_mode = WAL;
-        PRAGMA synchronous = NORMAL;
-        "#,
-    )?;
-    Ok(())
-}
-
-fn apply_bulk_write_pragmas(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "PRAGMA journal_mode = WAL;
-         PRAGMA synchronous = NORMAL;
-         PRAGMA cache_size = -16000;
-         PRAGMA temp_store = MEMORY;",
-    )?;
-    Ok(())
-}
-
-fn apply_fresh_staging_pragmas(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "PRAGMA journal_mode = OFF;
-         PRAGMA synchronous = OFF;
-         PRAGMA locking_mode = EXCLUSIVE;
-         PRAGMA cache_size = -64000;
-         PRAGMA temp_store = MEMORY;",
-    )?;
-    Ok(())
-}
-
-fn create_tables_schema(conn: &Connection, create_indexes: bool) -> Result<()> {
-    conn.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS chunks (
-            chunk_key INTEGER PRIMARY KEY,
-            file_path TEXT NOT NULL,
-            start_line INTEGER NOT NULL,
-            end_line INTEGER NOT NULL,
-            language TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            text TEXT NOT NULL,
-            vector_key INTEGER NOT NULL,
-            modified_unix INTEGER NOT NULL,
-            is_ignored INTEGER NOT NULL DEFAULT 0
-        );
-
-        CREATE TABLE IF NOT EXISTS _stats (
-            key TEXT PRIMARY KEY,
-            value INTEGER NOT NULL
-        );
-
-        CREATE TABLE IF NOT EXISTS symbols (
-            normalized_name TEXT NOT NULL,
-            chunk_key INTEGER NOT NULL,
-            PRIMARY KEY (normalized_name, chunk_key)
-        ) WITHOUT ROWID;
-
-        CREATE TABLE IF NOT EXISTS included_file_dependencies (
-            owner_path TEXT NOT NULL,
-            included_path TEXT NOT NULL,
-            PRIMARY KEY (owner_path, included_path)
-        ) WITHOUT ROWID;
-
-        CREATE TABLE IF NOT EXISTS file_edges (
-            source_path TEXT NOT NULL,
-            target_path TEXT NOT NULL,
-            kind INTEGER NOT NULL,
-            PRIMARY KEY (source_path, target_path, kind)
-        ) WITHOUT ROWID;
-
-        CREATE TABLE IF NOT EXISTS unresolved_file_dependencies (
-            source_path TEXT NOT NULL,
-            language TEXT NOT NULL,
-            spec TEXT NOT NULL,
-            lookup_key TEXT NOT NULL,
-            PRIMARY KEY (source_path, language, spec, lookup_key)
-        ) WITHOUT ROWID;
-
-        CREATE TABLE IF NOT EXISTS manifest_resolution_signatures (
-            file_path TEXT PRIMARY KEY,
-            signature TEXT NOT NULL
-        ) WITHOUT ROWID;
-
-        "#,
-    )?;
-    if create_indexes {
-        create_secondary_indexes(conn)?;
-    }
-
-    // Migration: Add is_ignored column to older tables
-    let _ = conn.execute(
-        "ALTER TABLE chunks ADD COLUMN is_ignored INTEGER NOT NULL DEFAULT 0;",
-        [],
-    );
-
-    let mut table_info = conn.prepare("PRAGMA table_info(symbols)")?;
-    let columns = table_info
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    let legacy_single_symbol_schema = columns
-        .iter()
-        .any(|(name, primary_key)| name == "chunk_key" && *primary_key == 1)
-        && columns
-            .iter()
-            .any(|(name, primary_key)| name == "normalized_name" && *primary_key == 0);
-    drop(table_info);
-
-    if legacy_single_symbol_schema {
-        conn.execute_batch(
-            r#"
-            BEGIN IMMEDIATE;
-            DROP TABLE IF EXISTS symbols_legacy;
-            ALTER TABLE symbols RENAME TO symbols_legacy;
-            CREATE TABLE symbols (
-                normalized_name TEXT NOT NULL,
-                chunk_key INTEGER NOT NULL,
-                PRIMARY KEY (normalized_name, chunk_key)
-            ) WITHOUT ROWID;
-            INSERT OR IGNORE INTO symbols (normalized_name, chunk_key)
-                SELECT normalized_name, chunk_key FROM symbols_legacy;
-            DROP TABLE symbols_legacy;
-            COMMIT;
-            "#,
-        )?;
-    }
-
-    Ok(())
-}
-
-fn create_secondary_indexes(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        r#"
-        CREATE INDEX IF NOT EXISTS idx_chunks_file_path ON chunks(file_path);
-        CREATE INDEX IF NOT EXISTS idx_chunks_vector_key ON chunks(vector_key);
-        CREATE INDEX IF NOT EXISTS idx_chunks_language ON chunks(language);
-        CREATE INDEX IF NOT EXISTS idx_included_file_dependencies_path
-            ON included_file_dependencies(included_path);
-        CREATE INDEX IF NOT EXISTS idx_file_edges_target
-            ON file_edges(target_path, source_path);
-        CREATE INDEX IF NOT EXISTS idx_unresolved_file_dependencies_lookup
-            ON unresolved_file_dependencies(lookup_key, source_path);
-        "#,
-    )?;
-    Ok(())
-}
-
-fn finalize_graph_indexes(conn: &Connection) -> Result<()> {
-    // `symbols` is WITHOUT ROWID with PRIMARY KEY (normalized_name, chunk_key),
-    // so its table B-tree already serves normalized-name prefix lookups.
-    // Remove the legacy duplicate index to avoid extra finalization I/O and
-    // nearly doubling symbol graph storage.
-    conn.execute_batch("DROP INDEX IF EXISTS idx_symbols_name;")?;
-    Ok(())
-}
-
-fn build_schema() -> Schema {
-    let code_indexing = TextFieldIndexing::default()
-        .set_tokenizer(CODE_TOKENIZER_NAME)
-        .set_index_option(IndexRecordOption::WithFreqs);
-    let code_text_opts = TextOptions::default().set_indexing_options(code_indexing.clone());
-    let trigram_indexing = TextFieldIndexing::default()
-        .set_tokenizer(TRIGRAM_TOKENIZER_NAME)
-        .set_index_option(IndexRecordOption::Basic);
-    let trigram_text_opts = TextOptions::default().set_indexing_options(trigram_indexing);
-    let boosted_aux_indexing = TextFieldIndexing::default()
-        .set_tokenizer(CODE_TOKENIZER_NAME)
-        .set_index_option(IndexRecordOption::Basic);
-    let boosted_aux_text_opts = TextOptions::default().set_indexing_options(boosted_aux_indexing);
-
-    let mut schema = Schema::builder();
-    schema.add_u64_field("vector_key", STORED);
-    schema.add_text_field("file_path", STRING | STORED);
-    schema.add_u64_field("start_line", STORED);
-    schema.add_u64_field("end_line", STORED);
-    schema.add_text_field("language", STRING | STORED);
-    schema.add_text_field("kind", STRING | STORED);
-    // Full text indexed with code-aware tokenizer (not STORED — lives in SQLite)
-    schema.add_text_field("text", code_text_opts.clone());
-    schema.add_text_field("text_trigrams", trigram_text_opts);
-    schema.add_u64_field("is_ignored", STORED);
-    // BM25F fields: tokenized path + definition signature with code tokenizer
-    schema.add_text_field("file_path_text", boosted_aux_text_opts.clone());
-    schema.add_text_field("signature", boosted_aux_text_opts);
-    schema.build()
-}
-
-pub fn open_tantivy_index(path: &Path) -> Result<(TantivyIndex, TantivyFields)> {
-    fs::create_dir_all(path)?;
-
-    let schema = build_schema();
-    let directory = RetryingDirectory::new(MmapDirectory::open(path)?);
-    let index = if path.join("meta.json").exists() {
-        TantivyIndex::open(directory)?
-    } else {
-        TantivyIndex::open_or_create(directory, schema)?
-    };
-
-    // Register the code-aware tokenizer so both indexing and querying use it.
-    index
-        .tokenizers()
-        .register(CODE_TOKENIZER_NAME, build_code_analyzer());
-    index
-        .tokenizers()
-        .register(TRIGRAM_TOKENIZER_NAME, build_trigram_analyzer());
-
-    let schema = index.schema();
-    let fields = TantivyFields {
-        vector_key: schema.get_field("vector_key")?,
-        file_path: schema.get_field("file_path")?,
-        start_line: schema.get_field("start_line")?,
-        end_line: schema.get_field("end_line")?,
-        language: schema.get_field("language")?,
-        kind: schema.get_field("kind")?,
-        text: schema.get_field("text")?,
-        text_trigrams: schema.get_field("text_trigrams").ok(),
-        is_ignored: schema.get_field("is_ignored").ok(),
-        file_path_text: schema.get_field("file_path_text").ok(),
-        signature: schema.get_field("signature").ok(),
-    };
-
-    Ok((index, fields))
-}
-
 pub fn fetch_chunk_by_vector_key(
     conn: &Connection,
     vector_key: u64,
@@ -4077,7 +2941,9 @@ pub fn fetch_chunk_by_vector_key(
             end_line,
             language,
             kind,
-            text: decompress_text(raw_text),
+            text: try_decompress_text(raw_text).with_context(|| {
+                format!("failed to read stored text for vector key {vector_key}")
+            })?,
             content_hash: String::new(),
             vector_key,
             is_ignored: row.get::<_, bool>(7)?,
@@ -4126,7 +2992,10 @@ pub fn fetch_chunk_texts_by_vector_keys_batch(
         while let Some(row) = rows.next()? {
             let vector_key = row.get::<_, i64>(0)? as u64;
             let raw_text: Vec<u8> = row.get(1)?;
-            result.insert(vector_key, decompress_text(raw_text));
+            let text = try_decompress_text(raw_text).with_context(|| {
+                format!("failed to read stored text for vector key {vector_key}")
+            })?;
+            result.insert(vector_key, text);
         }
     }
 
@@ -4192,7 +3061,9 @@ fn fetch_chunks_by_vector_keys_batch_impl(
                 language,
                 kind,
                 text: if include_text {
-                    decompress_text(raw_text)
+                    try_decompress_text(raw_text).with_context(|| {
+                        format!("failed to read stored text for vector key {vector_key}")
+                    })?
                 } else {
                     String::new()
                 },
@@ -4297,21 +3168,10 @@ mod tests {
     use crate::EMBEDDING_DIMENSIONS;
     use crate::chunking::{Chunk, ChunkKind};
     use crate::embedding::{EmbeddingModel, HashEmbeddingModel};
+    use crate::vector_store::ScalarKind;
     use crate::workspace::Workspace;
 
     use super::*;
-
-    #[test]
-    fn indexing_workers_default_to_physical_cores_and_respect_bounds() {
-        assert_eq!(configured_indexing_worker_count(32, 16, None), 16);
-        assert_eq!(configured_indexing_worker_count(32, 16, Some("64")), 32);
-        assert_eq!(configured_indexing_worker_count(32, 16, Some("8")), 8);
-        assert_eq!(
-            configured_indexing_worker_count(32, 16, Some("invalid")),
-            16
-        );
-        assert_eq!(configured_indexing_worker_count(32, 16, Some("0")), 16);
-    }
 
     fn indexed_texts_for_file(workspace: &Workspace, file_path: &str) -> Vec<String> {
         let conn = open_sqlite(&workspace.sqlite_path()).unwrap();
@@ -4391,150 +3251,6 @@ mod tests {
         fn model_identity(&self) -> Option<&crate::embedding::NeuralModelIdentity> {
             Some(&self.identity)
         }
-    }
-
-    #[test]
-    fn create_tables_migrates_symbols_to_many_names_per_chunk() {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE symbols (
-                normalized_name TEXT NOT NULL,
-                chunk_key INTEGER PRIMARY KEY
-             ) WITHOUT ROWID;
-             INSERT INTO symbols (normalized_name, chunk_key) VALUES ('router', 7);",
-        )
-        .unwrap();
-
-        create_tables(&conn).unwrap();
-        conn.execute(
-            "INSERT INTO symbols (normalized_name, chunk_key) VALUES (?1, ?2)",
-            params!["routekind", 7],
-        )
-        .unwrap();
-
-        let count = conn
-            .query_row(
-                "SELECT COUNT(*) FROM symbols WHERE chunk_key = 7",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap();
-        assert_eq!(count, 2);
-    }
-
-    #[test]
-    fn graph_finalization_removes_redundant_symbol_name_index() {
-        let conn = Connection::open_in_memory().unwrap();
-        create_tables(&conn).unwrap();
-        conn.execute_batch("CREATE INDEX idx_symbols_name ON symbols(normalized_name);")
-            .unwrap();
-
-        finalize_graph_indexes(&conn).unwrap();
-
-        let count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type = 'index' AND name = 'idx_symbols_name'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(count, 0);
-    }
-
-    #[test]
-    fn fresh_index_staging_promotes_main_artifacts_and_preserves_lock() {
-        let root = tempdir().unwrap();
-        let index_root = tempdir().unwrap();
-        let workspace = Workspace {
-            id: "staging-test".to_string(),
-            root: root.path().to_path_buf(),
-            index_dir: index_root.path().join("index"),
-            repo_id: None,
-            base_index_dir: None,
-        };
-        fs::create_dir_all(&workspace.index_dir).unwrap();
-        fs::write(workspace.lock_path(), "locked").unwrap();
-        fs::write(workspace.sqlite_path(), "old sqlite").unwrap();
-        fs::write(
-            sqlite_sidecar_path(&workspace.sqlite_path(), "-wal"),
-            "old wal",
-        )
-        .unwrap();
-        fs::create_dir_all(workspace.tantivy_dir()).unwrap();
-        fs::write(workspace.tantivy_dir().join("old"), "old tantivy").unwrap();
-        fs::write(workspace.vector_path(), "old vector").unwrap();
-        fs::write(
-            workspace.vector_path().with_extension("usearch.bak"),
-            "old vector backup",
-        )
-        .unwrap();
-
-        let staging = FreshIndexStaging::create(&workspace).unwrap();
-        let staging_dir = staging.dir.clone();
-        fs::write(&staging.sqlite_path, "new sqlite").unwrap();
-        fs::create_dir_all(&staging.tantivy_dir).unwrap();
-        fs::write(staging.tantivy_dir.join("new"), "new tantivy").unwrap();
-        fs::write(&staging.vector_path, "new vector").unwrap();
-
-        staging.promote(&workspace).unwrap();
-
-        assert_eq!(fs::read_to_string(workspace.lock_path()).unwrap(), "locked");
-        assert_eq!(
-            fs::read_to_string(workspace.sqlite_path()).unwrap(),
-            "new sqlite"
-        );
-        assert!(!sqlite_sidecar_path(&workspace.sqlite_path(), "-wal").exists());
-        assert!(workspace.tantivy_dir().join("new").exists());
-        assert!(!workspace.tantivy_dir().join("old").exists());
-        assert_eq!(
-            fs::read_to_string(workspace.vector_path()).unwrap(),
-            "new vector"
-        );
-        assert!(
-            !workspace
-                .vector_path()
-                .with_extension("usearch.bak")
-                .exists()
-        );
-        assert!(!staging_dir.exists());
-    }
-
-    #[test]
-    fn fresh_index_staging_failure_preserves_main_artifacts() {
-        let root = tempdir().unwrap();
-        let index_root = tempdir().unwrap();
-        let workspace = Workspace {
-            id: "staging-rollback-test".to_string(),
-            root: root.path().to_path_buf(),
-            index_dir: index_root.path().join("index"),
-            repo_id: None,
-            base_index_dir: None,
-        };
-        fs::create_dir_all(&workspace.index_dir).unwrap();
-        fs::write(workspace.lock_path(), "locked").unwrap();
-        fs::write(workspace.sqlite_path(), "old sqlite").unwrap();
-        fs::create_dir_all(workspace.tantivy_dir()).unwrap();
-        fs::write(workspace.tantivy_dir().join("old"), "old tantivy").unwrap();
-        fs::write(workspace.vector_path(), "old vector").unwrap();
-
-        let staging = FreshIndexStaging::create(&workspace).unwrap();
-        fs::write(&staging.sqlite_path, "new sqlite").unwrap();
-        fs::create_dir_all(&staging.tantivy_dir).unwrap();
-        fs::write(staging.tantivy_dir.join("new"), "new tantivy").unwrap();
-        // Missing staging vector simulates an incomplete build or promotion failure.
-
-        assert!(staging.promote(&workspace).is_err());
-        assert_eq!(fs::read_to_string(workspace.lock_path()).unwrap(), "locked");
-        assert_eq!(
-            fs::read_to_string(workspace.sqlite_path()).unwrap(),
-            "old sqlite"
-        );
-        assert!(workspace.tantivy_dir().join("old").exists());
-        assert_eq!(
-            fs::read_to_string(workspace.vector_path()).unwrap(),
-            "old vector"
-        );
     }
 
     #[test]
@@ -4817,166 +3533,6 @@ mod tests {
         let error = commit_with_vector_tombstones(tx, &mut journals).unwrap_err();
         assert!(error.to_string().contains("FOREIGN KEY constraint failed"));
         assert_eq!(fs::read_to_string(hash_path).unwrap(), "42\n");
-    }
-
-    #[test]
-    fn create_tables_can_defer_secondary_indexes() {
-        let conn = Connection::open_in_memory().unwrap();
-        create_tables_with_options(&conn, false).unwrap();
-
-        let count_indexes = |conn: &Connection| -> i64 {
-            conn.query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type = 'index'
-                   AND name IN (
-                     'idx_chunks_file_path',
-                     'idx_chunks_vector_key',
-                     'idx_chunks_language',
-                     'idx_included_file_dependencies_path'
-                   )",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap()
-        };
-        assert_eq!(count_indexes(&conn), 0);
-
-        create_secondary_indexes(&conn).unwrap();
-
-        assert_eq!(count_indexes(&conn), 4);
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    #[test]
-    #[serial]
-    fn enhance_load_throttle_is_lenient_and_configurable() {
-        // #62: the load throttle was too aggressive (paused enhancement at
-        // ~0.75-0.8x CPUs despite nice(10)+25%-core capping), so neural never
-        // built on busy machines. Default is now 2.0x and env-configurable.
-        // SAFETY: test is #[serial]; no other thread mutates this env var.
-        unsafe { std::env::remove_var("IVYGREP_ENHANCE_MAX_LOAD_RATIO") };
-        // A fully-loaded machine (load == cpus) does NOT pause at the default.
-        assert!(parse_system_load(8.0, 8.0).is_none());
-        // Genuine sustained oversubscription (load > 2x cpus) does pause.
-        assert!(parse_system_load(20.0, 8.0).is_some());
-        // Configurable: a stricter ratio pauses earlier.
-        unsafe { std::env::set_var("IVYGREP_ENHANCE_MAX_LOAD_RATIO", "0.5") };
-        assert!(parse_system_load(8.0, 8.0).is_some());
-        // A non-positive ratio disables the load check entirely.
-        unsafe { std::env::set_var("IVYGREP_ENHANCE_MAX_LOAD_RATIO", "0") };
-        assert!(parse_system_load(100.0, 8.0).is_none());
-        unsafe { std::env::remove_var("IVYGREP_ENHANCE_MAX_LOAD_RATIO") };
-    }
-
-    #[test]
-    fn neural_enhance_batch_size_scales_for_accelerators() {
-        let cuda_resources =
-            |free_gib: u64, total_gib: u64, utilization_percent: u32| CudaResourceSnapshot {
-                free_bytes: free_gib * 1024 * MIB,
-                total_bytes: total_gib * 1024 * MIB,
-                utilization_percent,
-            };
-
-        assert_eq!(
-            neural_enhance_batch_size_for(None, None, None),
-            NEURAL_CPU_BATCH_SIZE
-        );
-        assert_eq!(
-            neural_enhance_batch_size_for(Some("BERT embedding via Candle CPU"), None, None),
-            NEURAL_CPU_BATCH_SIZE
-        );
-        assert_eq!(
-            neural_enhance_batch_size_for(Some("StaticEmbedding token mean via Rust"), None, None,),
-            NEURAL_STATIC_BATCH_SIZE
-        );
-        assert_eq!(
-            neural_enhance_batch_size_for(
-                Some("Model2Vec weighted token mean via Rust"),
-                None,
-                None,
-            ),
-            NEURAL_STATIC_BATCH_SIZE
-        );
-        assert_eq!(
-            neural_enhance_batch_size_for(
-                Some("BERT embedding via Candle CUDA"),
-                Some(cuda_resources(14, 16, 0)),
-                None,
-            ),
-            NEURAL_CUDA_BATCH_SIZE
-        );
-        assert_eq!(
-            neural_enhance_batch_size_for(
-                Some("BERT embedding via Candle CUDA"),
-                Some(cuda_resources(6, 16, 0)),
-                None,
-            ),
-            NEURAL_CUDA_BATCH_SIZE / 2
-        );
-        assert_eq!(
-            neural_enhance_batch_size_for(
-                Some("BERT embedding via Candle CUDA"),
-                Some(cuda_resources(5, 16, 0)),
-                None,
-            ),
-            NEURAL_CUDA_BATCH_SIZE / 4
-        );
-        assert_eq!(
-            neural_enhance_batch_size_for(
-                Some("BERT embedding via Candle CUDA"),
-                Some(cuda_resources(14, 16, 75)),
-                None,
-            ),
-            1
-        );
-        assert_eq!(
-            neural_enhance_batch_size_for(
-                Some("BERT embedding via Candle CUDA"),
-                Some(cuda_resources(1, 16, 0)),
-                None,
-            ),
-            1
-        );
-        assert_eq!(
-            neural_enhance_batch_size_for(Some("BERT embedding via Candle CUDA"), None, None),
-            NEURAL_CUDA_BATCH_SIZE
-        );
-        assert_eq!(
-            neural_enhance_batch_size_for(
-                Some("BERT embedding via Candle CUDA"),
-                Some(cuda_resources(1, 16, 90)),
-                Some(32),
-            ),
-            32
-        );
-        assert_eq!(
-            neural_enhance_batch_size_for(Some("BERT embedding via Candle Metal"), None, None),
-            NEURAL_METAL_BATCH_SIZE
-        );
-    }
-
-    #[test]
-    fn parses_cuda_resource_snapshot_from_nvidia_smi() {
-        let snapshot = parse_cuda_resource_snapshot("13988, 16303, 7").unwrap();
-        assert_eq!(snapshot.free_bytes, 13_988 * MIB);
-        assert_eq!(snapshot.total_bytes, 16_303 * MIB);
-        assert_eq!(snapshot.utilization_percent, 7);
-        assert_eq!(snapshot.free_percent(), 85);
-    }
-
-    #[test]
-    #[serial]
-    fn neural_batch_size_env_override_is_bounded() {
-        unsafe { std::env::set_var("IVYGREP_NEURAL_BATCH_SIZE", "128") };
-        assert_eq!(configured_neural_batch_size(), Some(128));
-        unsafe { std::env::set_var("IVYGREP_NEURAL_BATCH_SIZE", "999999") };
-        assert_eq!(
-            configured_neural_batch_size(),
-            Some(MAX_CONFIGURED_NEURAL_BATCH_SIZE)
-        );
-        unsafe { std::env::set_var("IVYGREP_NEURAL_BATCH_SIZE", "0") };
-        assert_eq!(configured_neural_batch_size(), None);
-        unsafe { std::env::remove_var("IVYGREP_NEURAL_BATCH_SIZE") };
     }
 
     #[test]
@@ -6249,63 +4805,6 @@ mod tests {
     }
 
     #[test]
-    fn compress_text_keeps_small_chunks_plain() {
-        let original = "pub fn hello() -> &str { \"world\" }\n";
-        let compressed = super::compress_text(original);
-        assert!(!compressed.starts_with(ZSTD_MAGIC));
-        let decompressed = super::decompress_text(compressed);
-        assert_eq!(decompressed, original);
-    }
-
-    #[test]
-    fn compress_text_roundtrips_large_chunks_with_zstd() {
-        let original = "pub fn hello() -> &str { \"world\" }\n".repeat(64);
-        let compressed = super::compress_text(&original);
-        assert!(compressed.starts_with(ZSTD_MAGIC));
-        assert!(compressed.len() < original.len());
-        assert_eq!(super::decompress_text(compressed), original);
-    }
-
-    #[test]
-    fn tantivy_segment_writes_retry_transient_permission_denials() {
-        use tantivy::directory::{Directory, RamDirectory, TerminatingWrite};
-
-        let directory = RamDirectory::create();
-        let attempts = std::cell::Cell::new(0);
-        let path = PathBuf::from("segment.term");
-
-        let writer = open_write_with_retry(|| {
-            let attempt = attempts.get();
-            attempts.set(attempt + 1);
-            if attempt < 2 {
-                return Err(OpenWriteError::wrap_io_error(
-                    std::io::Error::from(std::io::ErrorKind::PermissionDenied),
-                    path.clone(),
-                ));
-            }
-            directory.open_write(&path)
-        })
-        .unwrap();
-
-        writer.terminate().unwrap();
-        assert_eq!(attempts.get(), 3);
-    }
-
-    #[test]
-    fn tantivy_segment_writes_do_not_retry_non_permission_errors() {
-        let attempts = std::cell::Cell::new(0);
-        let path = PathBuf::from("segment.term");
-
-        let result = open_write_with_retry(|| {
-            attempts.set(attempts.get() + 1);
-            Err(OpenWriteError::FileAlreadyExists(path.clone()))
-        });
-
-        assert!(matches!(result, Err(OpenWriteError::FileAlreadyExists(_))));
-        assert_eq!(attempts.get(), 1);
-    }
-
-    #[test]
     fn retryable_tantivy_write_errors_are_classified() {
         let denied = anyhow::Error::from(tantivy::TantivyError::OpenWriteError(
             OpenWriteError::wrap_io_error(
@@ -6386,13 +4885,6 @@ mod tests {
     }
 
     #[test]
-    fn decompress_text_handles_plain_utf8() {
-        let plain = b"plain text, not zstd";
-        let decompressed = super::decompress_text(plain.to_vec());
-        assert_eq!(decompressed, "plain text, not zstd");
-    }
-
-    #[test]
     fn batch_text_fetch_reads_only_requested_chunk_text() {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -6417,6 +4909,33 @@ mod tests {
 
         assert_eq!(texts.len(), 1);
         assert_eq!(texts.get(&7).map(String::as_str), Some("requested chunk"));
+    }
+
+    #[test]
+    fn batch_text_fetch_rejects_corrupted_compressed_chunks() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chunks (
+                vector_key INTEGER PRIMARY KEY,
+                text BLOB NOT NULL
+            );",
+        )
+        .unwrap();
+        let mut corrupted = zstd::encode_all(&b"stored chunk"[..], 1).unwrap();
+        corrupted.truncate(corrupted.len() - 3);
+        conn.execute(
+            "INSERT INTO chunks (vector_key, text) VALUES (?1, ?2)",
+            params![7_i64, corrupted],
+        )
+        .unwrap();
+
+        let error = fetch_chunk_texts_by_vector_keys_batch(&conn, &[7]).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to read stored text for vector key 7")
+        );
     }
 
     #[test]
@@ -6496,31 +5015,5 @@ mod tests {
         assert_eq!(id1, id2, "same path should produce same id");
         assert_ne!(id1, id3, "different paths should produce different ids");
         assert!(!id1.is_empty());
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_parse_pmset_batt() {
-        let ac_output = "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22741091)\t96%; AC attached; not charging present: true";
-        let batt_output = "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=22741091)\t96%; discharging; (no estimate) present: true";
-
-        assert_eq!(super::parse_pmset_batt(ac_output), None);
-        assert_eq!(
-            super::parse_pmset_batt(batt_output),
-            Some("Battery Power".to_string())
-        );
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn test_parse_pmset_therm() {
-        let normal = "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded";
-        let throttled = "Note: Thermal warning level CPU_Speed_Limit = 50";
-
-        assert_eq!(super::parse_pmset_therm(normal), None);
-        assert_eq!(
-            super::parse_pmset_therm(throttled),
-            Some("Thermal Throttling".to_string())
-        );
     }
 }

@@ -46,6 +46,13 @@ class CIWorkflowTest(unittest.TestCase):
         self.assertIn('test "$TEST_RESULT" = success', gate)
         self.assertIn('test "$BUILD_RESULT" = success', gate)
 
+    def test_linux_release_build_runs_browser_e2e(self) -> None:
+        workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("Install Playwright Chromium for Web UI E2E", workflow)
+        self.assertIn("playwright install --with-deps chromium", workflow)
+        self.assertIn("./scripts/e2e_web_ui.sh --binary", workflow)
+        self.assertIn('--expect-file "src/lib.rs"', workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

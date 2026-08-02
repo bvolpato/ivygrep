@@ -18,9 +18,10 @@ Required:
 
 - Git
 - stable Rust through [rustup](https://rustup.rs/)
-- Python 3 for repository harnesses
+- Python 3.12 or newer for repository harnesses
+- [uv](https://docs.astral.sh/uv/) for scripts with embedded dependencies
 - ShellCheck for full script validation
-- Node.js and pnpm 10 only when changing `web/`
+- Node.js and pnpm 10 when changing `web/` or validating Markdown
 
 Repository toolchain configuration installs `rustfmt` and Clippy automatically.
 
@@ -50,14 +51,18 @@ Useful environment variables:
 Start with primary files and strongest behavior-level checks for changed area.
 
 | Area | Primary files | Strong validation |
-|---|---|---|
-| Indexing and storage | `src/indexer.rs`, `src/workspace.rs`, `src/merkle.rs` | incremental CRUD, worktree, benchmark tests |
-| Search and relevance | `src/search.rs`, `src/reranker.rs`, `src/embedding.rs` | relevance fixture and public benchmark harnesses |
+| --- | --- | --- |
+| Indexing and storage | `src/indexer.rs`, `src/indexer/`, `src/workspace.rs`, `src/merkle.rs` | incremental CRUD, worktree, migration, benchmark tests |
+| Search and relevance | `src/search.rs`, `src/search_*.rs`, `src/reranker.rs`, `src/embedding.rs` | relevance fixture, daemon/MCP E2E, public benchmarks |
 | Context graph | `src/context.rs`, `src/context_graph.rs` | CLI, incremental, worktree, MCP tests |
 | CLI and daemon | `src/cli.rs`, `src/daemon.rs`, `src/protocol.rs` | CLI snapshots, IPC, recovery tests |
 | MCP and agents | `src/mcp.rs`, `src/agent.rs` | MCP unit/E2E and agent setup tests |
-| Web UI | `src/web.rs`, `web/` | Vitest, TypeScript, web server tests |
+| Web UI | `src/web.rs`, `web/` | TypeScript, Vitest, Web server, Playwright E2E |
+| Architecture | `docs/architecture.md` | source review plus storage, protocol, and E2E contracts |
 | Documentation | `README.md`, `CONTRIBUTING.md`, `docs/` | documentation contract tests and local browser check |
+
+Read [architecture](docs/architecture.md) before changing storage commit order,
+worktree overlays, retrieval fusion, daemon protocol, or cross-surface behavior.
 
 ## Change workflow
 
@@ -69,21 +74,30 @@ Start with primary files and strongest behavior-level checks for changed area.
 6. Update user-facing docs and changelog for observable behavior changes.
 7. Open focused pull request using repository template.
 
-Keep commits reviewable. Use conventional commit subjects such as
-`fix(search): preserve filtered candidate recall`.
+Keep commits reviewable and match nearby history. Common subjects use prefixes
+such as `[fix]`, `[perf]`, `[docs]`, and `[test]` followed by a concrete outcome.
 
 ## Validation
 
-Before every pull request:
+During iteration:
 
 ```bash
 ./test.sh --quick
 ```
 
-Before requesting merge for Rust, scripts, workflows, or cross-cutting changes:
+`--quick` runs library tests only. It skips formatting, Clippy, Web, Python,
+shell, and integration checks.
+
+Before every pull request that changes executable behavior, scripts, workflows,
+or generated Web assets:
 
 ```bash
 ./test.sh
+```
+
+Run performance and relevance guards when those contracts can change:
+
+```bash
 ./bench.sh
 ```
 
@@ -93,12 +107,31 @@ Web changes:
 pnpm -C web install --frozen-lockfile
 pnpm -C web check
 pnpm -C web build
-git diff --exit-code -- web/dist
 ```
+
+Commit matching `web/dist` changes. `./test.sh` fingerprints generated assets
+before and after its production build, so stale output fails without rejecting
+already-regenerated local changes.
+
+Run full local E2E, including daemon equivalence and the bundled Web UI in
+headless Chromium, with:
+
+```bash
+pnpm -C web exec playwright install chromium
+./scripts/e2e_all.sh --binary target/release/ig
+# or after ./test.sh --quick:
+./test.sh --e2e
+```
+
+`./test.sh` never installs browsers or downloads models. Install Chromium once
+with the command above. `--e2e` adds local CLI, daemon, and browser procedures.
+Neural backend acceptance remains separate in
+`scripts/e2e_neural_backend.sh`; pre-populate `HF_HOME` for offline checks.
 
 Docs or website changes:
 
 ```bash
+pnpm dlx markdownlint-cli2@0.23.2
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 python3 -m http.server 8765 --directory docs
 ```
@@ -109,6 +142,12 @@ and changed links. Stop server afterward.
 Release workflow validates archive bytes on each supported platform. Before a
 tag, run full checks above and inspect `.github/workflows/release.yml` for
 current target matrix and artifact acceptance gates.
+
+Release CI can install an exact local artifact without contacting GitHub. Set
+`IVYGREP_INSTALL_ARCHIVE` and `IVYGREP_INSTALL_CHECKSUM` to matching archive and
+sidecar paths, and set `IVYGREP_VERSION` to its tag. `IVYGREP_INSTALL_DIR`
+controls the disposable destination; the shell installer also accepts
+`IVYGREP_ACCELERATOR=portable` for deterministic artifact checks.
 
 ## Tests
 

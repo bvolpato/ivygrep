@@ -337,6 +337,7 @@ fn search_output_schema() -> Value {
             "result_count": {"type": "integer", "minimum": 0},
             "include": {"type": "array", "items": {"type": "string"}},
             "exclude": {"type": "array", "items": {"type": "string"}},
+            "warnings": {"type": "array", "items": {"type": "string"}},
             "results": {"type": "array", "items": {"type": "object"}},
             "file_paths": {"type": "array", "items": {"type": "string"}},
             "context_pack": context_pack_output_schema()
@@ -785,6 +786,18 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
 
     let include_globs = parse_glob_csv(args.include.as_deref());
     let exclude_globs = parse_glob_csv(args.exclude.as_deref());
+    let search_options = SearchOptions {
+        limit: args.limit,
+        context: args.context.unwrap_or(2),
+        type_filter: args.type_filter.clone(),
+        include_globs: include_globs.clone(),
+        exclude_globs: exclude_globs.clone(),
+        scope_filter: scope_filter.clone(),
+        skip_gitignore: args.skip_gitignore.unwrap_or(false),
+        force_neural: false,
+        progress_tx: None,
+        cancel_token: None,
+    };
 
     if wants_context_pack {
         let model = mcp_search_model(&workspace);
@@ -794,15 +807,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
             Some(model.as_ref()),
             &SearchOptions {
                 limit: None,
-                context: args.context.unwrap_or(2),
-                type_filter: args.type_filter.clone(),
-                include_globs: include_globs.clone(),
-                exclude_globs: exclude_globs.clone(),
-                scope_filter: scope_filter.clone(),
-                skip_gitignore: args.skip_gitignore.unwrap_or(false),
-                force_neural: false,
-                progress_tx: None,
-                cancel_token: None,
+                ..search_options.clone()
             },
             args.budget_tokens.unwrap_or(8_000),
             &crate::context::ContextBuildOptions {
@@ -882,9 +887,13 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
             disable_memory_expansion: false,
         })
     };
+    let mut search_warnings = Vec::new();
     let daemon_hits = if let Some(daemon_request) = daemon_request {
         match crate::daemon::request_blocking(&daemon_request, false)? {
-            Some(DaemonResponse::SearchResults { hits }) => Some(hits),
+            Some(DaemonResponse::SearchResults { hits, warnings }) => {
+                search_warnings = warnings;
+                Some(hits)
+            }
             Some(DaemonResponse::Error { message }) => {
                 tracing::warn!("MCP daemon search unavailable, searching locally: {message}");
                 None
@@ -902,40 +911,9 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
     let mut hits = if let Some(hits) = daemon_hits {
         hits
     } else if let Some(mode) = symbol_mode {
-        search_symbols_with_options(
-            &workspace,
-            query,
-            mode,
-            &SearchOptions {
-                limit: args.limit,
-                context: args.context.unwrap_or(2),
-                type_filter: args.type_filter.clone(),
-                include_globs: include_globs.clone(),
-                exclude_globs: exclude_globs.clone(),
-                scope_filter: scope_filter.clone(),
-                skip_gitignore: args.skip_gitignore.unwrap_or(false),
-                force_neural: false,
-                progress_tx: None,
-                cancel_token: None,
-            },
-        )?
+        search_symbols_with_options(&workspace, query, mode, &search_options)?
     } else if literal {
-        literal_search(
-            &workspace,
-            query,
-            &SearchOptions {
-                limit: args.limit,
-                context: args.context.unwrap_or(2),
-                type_filter: args.type_filter.clone(),
-                include_globs: include_globs.clone(),
-                exclude_globs: exclude_globs.clone(),
-                scope_filter: scope_filter.clone(),
-                skip_gitignore: args.skip_gitignore.unwrap_or(false),
-                force_neural: false,
-                progress_tx: None,
-                cancel_token: None,
-            },
-        )?
+        literal_search(&workspace, query, &search_options)?
     } else if regex {
         regex_search(
             &workspace,
@@ -950,23 +928,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
         // Load a neural query model only after neural vectors exist; a new
         // index returns hash results without downloading/loading model assets.
         let model = mcp_search_model(&workspace);
-        let hits = hybrid_search(
-            &workspace,
-            query,
-            Some(model.as_ref()),
-            &SearchOptions {
-                limit: args.limit,
-                context: args.context.unwrap_or(2),
-                type_filter: args.type_filter.clone(),
-                include_globs: include_globs.clone(),
-                exclude_globs: exclude_globs.clone(),
-                scope_filter: scope_filter.clone(),
-                skip_gitignore: args.skip_gitignore.unwrap_or(false),
-                force_neural: false,
-                progress_tx: None,
-                cancel_token: None,
-            },
-        )?;
+        let hits = hybrid_search(&workspace, query, Some(model.as_ref()), &search_options)?;
         // Exact queries build hash vectors; natural-language queries also build neural vectors.
         let query_uses_neural = crate::search::query_uses_neural(query, false);
         if std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
@@ -1037,6 +999,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
             "result_count": grouped.len(),
             "include": include_globs,
             "exclude": exclude_globs,
+            "warnings": search_warnings,
             "file_paths": grouped.iter().map(|file| file.file_path.clone()).collect::<Vec<_>>(),
         })
     } else {
@@ -1049,6 +1012,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
             "result_count": grouped.len(),
             "include": include_globs,
             "exclude": exclude_globs,
+            "warnings": search_warnings,
             "results": grouped,
         })
     };

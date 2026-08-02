@@ -1,17 +1,19 @@
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
-SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "export_memoryquest.py"
+
+ROOT = Path(__file__).resolve().parents[1]
+
+SCRIPT = ROOT / "scripts" / "export_memoryquest.py"
 SPEC = importlib.util.spec_from_file_location("export_memoryquest", SCRIPT)
 export_memoryquest = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
 SPEC.loader.exec_module(export_memoryquest)
 
-RENDER_SCRIPT = (
-    Path(__file__).resolve().parents[1] / "scripts" / "render_memory_benchmark.py"
-)
+RENDER_SCRIPT = ROOT / "scripts" / "render_memory_benchmark.py"
 RENDER_SPEC = importlib.util.spec_from_file_location(
     "render_memory_benchmark", RENDER_SCRIPT
 )
@@ -101,10 +103,77 @@ class MemoryQuestExporterTest(unittest.TestCase):
             render_memory_benchmark.validate_published_mode("blended", result)
 
     def test_renderer_resolves_explicit_source_commit(self):
-        root = Path(__file__).resolve().parents[1]
-        current = render_memory_benchmark.git_revision(root)
-        resolved = render_memory_benchmark.git_revision(root, current)
+        current = render_memory_benchmark.git_revision(ROOT)
+        resolved = render_memory_benchmark.git_revision(ROOT, current)
         self.assertEqual(resolved, current)
+
+
+class MemoryBenchmarkProvenanceTest(unittest.TestCase):
+    def test_release_equivalence_rejects_changed_benchmark_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subprocess = render_memory_benchmark.subprocess
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "src").mkdir()
+            (root / "src" / "lib.rs").write_text("before\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "-qm",
+                    "before",
+                ],
+                cwd=root,
+                check=True,
+            )
+            build_commit = render_memory_benchmark.git_revision(root)
+            (root / "src" / "lib.rs").write_text("after\n", encoding="utf-8")
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(
+                [
+                    "git",
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "commit",
+                    "-qm",
+                    "after",
+                ],
+                cwd=root,
+                check=True,
+            )
+            subprocess.run(
+                ["git", "tag", "-m", "test", "v-test"], cwd=root, check=True
+            )
+            result = render_memory_benchmark.release_equivalence(
+                root, build_commit, "v-test"
+            )
+        self.assertFalse(result["benchmark_inputs_unchanged"])
+        self.assertEqual(result["changed_benchmark_inputs"], ["src/lib.rs"])
+
+    def test_published_memory_report_has_release_provenance(self) -> None:
+        report = json.loads(
+            (ROOT / "docs/benchmarks/public-memory-retrieval-results.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(
+            report["modes"]["blended"]["binary"]["version"], "ivygrep 1.2.7"
+        )
+        self.assertEqual(report["release_equivalence"]["tag"], "v1.2.7")
+        self.assertTrue(
+            report["release_equivalence"]["benchmark_inputs_unchanged"]
+        )
+        self.assertIn(
+            "Binary provenance",
+            (ROOT / "docs/benchmarks/public-memory-retrieval.html").read_text(),
+        )
 
 
 if __name__ == "__main__":

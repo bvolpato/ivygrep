@@ -46,6 +46,12 @@ class E2EWorkflowTest(unittest.TestCase):
         self.assertIn("ivygrep-数据-é", windows)
         self.assertIn("segment_08_abcdefghijklmnopqrstuvwxyz", windows)
 
+    def test_ci_gates_semantic_neural_and_browser_acceptance(self) -> None:
+        ci = (E2E_WORKFLOW.parent / "ci.yml").read_text(encoding="utf-8")
+        self.assertIn("--expect-file \"src/lib.rs\"", ci)
+        self.assertIn("Install Playwright Chromium for Web UI E2E", ci)
+        self.assertIn("scripts/e2e_web_ui.sh --binary", ci)
+
 
 if __name__ == "__main__":
     unittest.main()

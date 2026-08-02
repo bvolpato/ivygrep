@@ -148,6 +148,9 @@ pub enum DaemonResponse {
     },
     SearchResults {
         hits: Vec<SearchHit>,
+        /// Non-fatal workspace failures; default and omission preserve v5 compatibility.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        warnings: Vec<String>,
     },
     SearchProgress {
         stage: String,
@@ -276,6 +279,48 @@ mod tests {
         assert!(!workspaces[0].compaction.healthy);
         assert_eq!(workspaces[0].hash_vector_count, 0);
         assert_eq!(workspaces[0].hash_coverage_percent, 0.0);
+    }
+
+    #[test]
+    fn search_results_accept_v5_payload_without_warnings() {
+        let response: DaemonResponse = serde_json::from_value(serde_json::json!({
+            "type": "search_results",
+            "hits": []
+        }))
+        .unwrap();
+
+        let DaemonResponse::SearchResults { hits, warnings } = response else {
+            panic!("expected search results");
+        };
+        assert!(hits.is_empty());
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn search_result_warnings_are_additive_on_wire() {
+        #[derive(Deserialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum LegacyResponse {
+            SearchResults { hits: Vec<SearchHit> },
+        }
+
+        let clean = serde_json::to_value(DaemonResponse::SearchResults {
+            hits: Vec::new(),
+            warnings: Vec::new(),
+        })
+        .unwrap();
+        assert!(clean.get("warnings").is_none());
+
+        let partial = serde_json::to_value(DaemonResponse::SearchResults {
+            hits: Vec::new(),
+            warnings: vec!["one workspace failed".to_string()],
+        })
+        .unwrap();
+        assert_eq!(partial["warnings"][0], "one workspace failed");
+
+        let LegacyResponse::SearchResults { hits } =
+            serde_json::from_value::<LegacyResponse>(partial).unwrap();
+        assert!(hits.is_empty());
     }
 
     #[test]

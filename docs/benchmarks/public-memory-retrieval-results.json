@@ -32,8 +32,8 @@
         "relative_percent": 0.8340152795780487
       },
       "ndcg_at_10": {
-        "absolute": -0.0016211249156319885,
-        "relative_percent": -0.39108326696112305
+        "absolute": -0.0016531023325354055,
+        "relative_percent": -0.39879756001218736
       },
       "recall_at_10": {
         "absolute": -0.0076323987538940985,
@@ -126,24 +126,24 @@
   "gap_analysis": {
     "automatic_expansion_exact_at_20_gain": 0.08598130841121493,
     "automatic_expansion_recall_at_20_gain": 0.04127725856697817,
-    "default_queries_with_neural_execution": 78,
+    "default_queries_with_neural_execution": 139,
     "default_recall_gain_from_10_to_20": 0.20389408099688466,
     "forced_neural_recall_at_20_gain_over_default": -0.038785046728971984,
     "incomplete_query_rate_at_20": 0.5514018691588785,
     "queries": 535
   },
-  "generated_at": "2026-07-26T02:44:04.591470+00:00",
+  "generated_at": "2026-08-02T01:53:58.745193+00:00",
   "harness_sha256": {
     "eval_code_retrieval.py": "d2445823940705aac3610bfe5be38018463f8139597114ffd475655820c7c465",
     "export_memoryquest.py": "6f2689ec17167571ffb4c519bf85c8926b4d50daf311f65ba7b745fb78c48fa1",
-    "render_memory_benchmark.py": "4ecb1774267b597d27541136910bc67db48b4c82914e4266d454768288165291"
+    "render_memory_benchmark.py": "0946e6ec9245597cdab70fcdd7d0c042a760c3bcc076ea257fdae34eb733e0eb"
   },
-  "ivygrep_commit": "3891ae4db35b6e52bd18f353a7b83c82f6394966",
+  "ivygrep_commit": "73d38ffd9e99de171dfb92ea4540fe0972e4efba",
   "modes": {
     "blended": {
       "binary": {
-        "sha256": "10b6f4ae2080f0cb7d367fffe2cbd2c63af3f7ac32199088276282f14f96193e",
-        "version": "ivygrep 1.2.6"
+        "sha256": "72c15459f0851ca7c7557c5abfe80e1ab42e8dfdf946902d923a98f376de7293",
+        "version": "ivygrep 1.2.7"
       },
       "index_configuration": {
         "chunk_count": 6900,
@@ -152,7 +152,7 @@
         "index_components": {
           "graph_bytes": 20480,
           "hash_vectors_bytes": 3837664,
-          "lexical_bytes": 5598604,
+          "lexical_bytes": 5587078,
           "metadata_bytes": 14217216,
           "neural_vectors_bytes": 3837664,
           "other_bytes": 260863,
@@ -818,22 +818,22 @@
       "query_expansion": "none",
       "query_expansion_workers": 4,
       "resources": {
-        "daemon_startup_ms": 50.34628603607416,
-        "hash_enhancement_ms": 169.1402989672497,
-        "index_ms": 340.626330988016,
-        "index_size_bytes": 27752011,
-        "neural_enhancement_ms": 364.41928398562595,
-        "neural_model_ready_ms": 111.46197200287133,
-        "peak_child_rss_bytes": 354250752,
-        "warm_latency_p50_ms": 16.254950023721904,
-        "warm_latency_p95_ms": 86.0549520002678
+        "daemon_startup_ms": 50.360110006295145,
+        "hash_enhancement_ms": 172.00319305993617,
+        "index_ms": 331.6616259980947,
+        "index_size_bytes": 27740485,
+        "neural_enhancement_ms": 404.68088490888476,
+        "neural_model_ready_ms": 111.72379099298269,
+        "peak_child_rss_bytes": 353579008,
+        "warm_latency_p50_ms": 16.82663895189762,
+        "warm_latency_p95_ms": 87.62794092763215
       },
       "retrieval_provenance": {
         "force_neural": false,
         "mode_semantics": "blended-routing",
         "queries_with_hash_results": 535,
-        "queries_with_neural_execution": 78,
-        "queries_with_neural_results": 77,
+        "queries_with_neural_execution": 139,
+        "queries_with_neural_results": 138,
         "queries_with_unobservable_neural_execution": 0
       },
       "runtime": {
@@ -849,8 +849,8 @@
     },
     "lexical": {
       "binary": {
-        "sha256": "10b6f4ae2080f0cb7d367fffe2cbd2c63af3f7ac32199088276282f14f96193e",
-        "version": "ivygrep 1.2.6"
+        "sha256": "72c15459f0851ca7c7557c5abfe80e1ab42e8dfdf946902d923a98f376de7293",
+        "version": "ivygrep 1.2.7"
       },
       "index_configuration": {
         "chunk_count": 6900,
@@ -859,7 +859,7 @@
         "index_components": {
           "graph_bytes": 20480,
           "hash_vectors_bytes": 112,
-          "lexical_bytes": 5575278,
+          "lexical_bytes": 5601423,
           "metadata_bytes": 14217216,
           "neural_vectors_bytes": 0,
           "other_bytes": 260863,
@@ -1506,15 +1506,15 @@
       "query_expansion": "none",
       "query_expansion_workers": 4,
       "resources": {
-        "daemon_startup_ms": 50.5906009930186,
+        "daemon_startup_ms": 50.35953503102064,
         "hash_enhancement_ms": 0.0,
-        "index_ms": 402.89630100596696,
-        "index_size_bytes": 20053469,
+        "index_ms": 274.4758139597252,
+        "index_size_bytes": 20079614,
         "neural_enhancement_ms": 0.0,
         "neural_model_ready_ms": 0.0,
-        "peak_child_rss_bytes": 111665152,
-        "warm_latency_p50_ms": 11.284908978268504,
-        "warm_latency_p95_ms": 35.80579097615555
+        "peak_child_rss_bytes": 113377280,
+        "warm_latency_p50_ms": 11.216032900847495,
+        "warm_latency_p95_ms": 34.700723947025836
       },
       "retrieval_provenance": {
         "force_neural": false,
@@ -1537,8 +1537,8 @@
     },
     "neural": {
       "binary": {
-        "sha256": "10b6f4ae2080f0cb7d367fffe2cbd2c63af3f7ac32199088276282f14f96193e",
-        "version": "ivygrep 1.2.6"
+        "sha256": "72c15459f0851ca7c7557c5abfe80e1ab42e8dfdf946902d923a98f376de7293",
+        "version": "ivygrep 1.2.7"
       },
       "index_configuration": {
         "chunk_count": 6900,
@@ -1547,7 +1547,7 @@
         "index_components": {
           "graph_bytes": 20480,
           "hash_vectors_bytes": 3837664,
-          "lexical_bytes": 5589439,
+          "lexical_bytes": 5589551,
           "metadata_bytes": 14217216,
           "neural_vectors_bytes": 3837664,
           "other_bytes": 260863,
@@ -1866,7 +1866,7 @@
           "exact_at_20": 0.5,
           "exact_at_5": 0.0,
           "mrr_at_10": 0.6083333333333333,
-          "ndcg_at_10": 0.4995219919162494,
+          "ndcg_at_10": 0.49781120011191826,
           "precision_at_5": 0.32,
           "queries": 10,
           "recall_at_10": 0.575,
@@ -2191,7 +2191,7 @@
         "exact_at_20": 0.3944438339438339,
         "exact_at_5": 0.017007437007437006,
         "mrr_at_10": 0.5090439773189773,
-        "ndcg_at_10": 0.4306758152665712,
+        "ndcg_at_10": 0.4306415994304846,
         "precision_at_5": 0.2692139194139194,
         "recall_at_10": 0.5498200965700966,
         "recall_at_20": 0.7337352231102231,
@@ -2202,7 +2202,7 @@
         "exact_at_20": 0.35887850467289717,
         "exact_at_5": 0.016822429906542057,
         "mrr_at_10": 0.5008433466844682,
-        "ndcg_at_10": 0.41290055181802243,
+        "ndcg_at_10": 0.412868574401119,
         "no_hit_rate": 0.0,
         "precision_at_5": 0.2613084112149533,
         "recall_at_10": 0.5213395638629283,
@@ -2213,15 +2213,15 @@
       "query_expansion": "none",
       "query_expansion_workers": 4,
       "resources": {
-        "daemon_startup_ms": 50.310074002482,
-        "hash_enhancement_ms": 165.6766239902936,
-        "index_ms": 436.947654990945,
-        "index_size_bytes": 27742846,
-        "neural_enhancement_ms": 362.8485650406219,
-        "neural_model_ready_ms": 66.37150497408584,
-        "peak_child_rss_bytes": 337018880,
-        "warm_latency_p50_ms": 9.839820966590196,
-        "warm_latency_p95_ms": 33.13752799294889
+        "daemon_startup_ms": 50.404290086589754,
+        "hash_enhancement_ms": 172.3547070287168,
+        "index_ms": 331.2432620441541,
+        "index_size_bytes": 27742958,
+        "neural_enhancement_ms": 399.3988960282877,
+        "neural_model_ready_ms": 71.27848104573786,
+        "peak_child_rss_bytes": 337391616,
+        "warm_latency_p50_ms": 10.574067011475563,
+        "warm_latency_p95_ms": 33.196973032318056
       },
       "retrieval_provenance": {
         "force_neural": true,
@@ -2259,6 +2259,23 @@
     "query_only_fact_recall": 0.58,
     "source": "https://arxiv.org/pdf/2605.14177"
   },
+  "release_equivalence": {
+    "benchmark_inputs_unchanged": true,
+    "binary_build_commit": "73d38ffd9e99de171dfb92ea4540fe0972e4efba",
+    "changed_benchmark_inputs": [],
+    "changed_paths": [
+      ".github/workflows/release.yml",
+      "CHANGELOG.md",
+      "README.md",
+      "docs/benchmarks/evidence-dashboard.html",
+      "docs/benchmarks/evidence-dashboard.json",
+      "docs/benchmarks/public-million-current.json",
+      "docs/index.html",
+      "tests/test_release_workflow.py"
+    ],
+    "tag": "v1.2.7",
+    "tag_commit": "77944c9fbd6b2d590e79d593a2e97a738ca4003b"
+  },
   "research_experiments": {
     "single_query_control": {
       "default": false,
@@ -2276,15 +2293,15 @@
         "recall_at_5": 0.344392523364486
       },
       "resources": {
-        "daemon_startup_ms": 50.37070903927088,
-        "hash_enhancement_ms": 164.0941679943353,
-        "index_ms": 459.26188403973356,
-        "index_size_bytes": 27744008,
-        "neural_enhancement_ms": 348.0084940092638,
-        "neural_model_ready_ms": 113.853360991925,
-        "peak_child_rss_bytes": 353427456,
-        "warm_latency_p50_ms": 9.071108011994511,
-        "warm_latency_p95_ms": 30.03403003094718
+        "daemon_startup_ms": 50.359928980469704,
+        "hash_enhancement_ms": 171.43107496667653,
+        "index_ms": 335.6978790834546,
+        "index_size_bytes": 27753800,
+        "neural_enhancement_ms": 392.2345821047202,
+        "neural_model_ready_ms": 112.18906403519213,
+        "peak_child_rss_bytes": 353636352,
+        "warm_latency_p50_ms": 10.128071997314692,
+        "warm_latency_p95_ms": 33.9866210706532
       }
     }
   },

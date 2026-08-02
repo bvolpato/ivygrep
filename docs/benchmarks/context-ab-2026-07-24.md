@@ -25,6 +25,8 @@ uv run scripts/bench_context_retrieval.py \
 | Raise post-role target from 12 to 14 | .81944 | .81944 | 1.000 | 3,744.8 | .21275 | 7.25 | 146 ms | Keep. Debug and release repeats restored primary non-inferiority. |
 
 Latency is diagnostic only. These short end-to-end runs include temporary worktree creation, indexing, process startup, and filesystem noise.
+`Recall / 1K tokens` is the mean of per-task recall-to-token ratios, not aggregate
+mean recall divided by aggregate mean tokens.
 
 ## Test-aware retrieval
 

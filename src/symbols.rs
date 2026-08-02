@@ -2,11 +2,11 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::{Connection, params, types::ToSql};
 
 use crate::indexer::{
-    IndexedChunk, decompress_text, open_sqlite_readonly, reconcile_worktree_overlay,
+    IndexedChunk, open_sqlite_readonly, reconcile_worktree_overlay, try_decompress_text,
 };
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
@@ -62,22 +62,36 @@ pub fn remove_file_graph(conn: &Connection, file_path: &str) -> Result<()> {
             let raw: Vec<u8> = row.get(5)?;
             Ok((
                 row.get::<_, i64>(0)?,
-                IndexedChunk {
-                    chunk_id: String::new(),
-                    file_path: PathBuf::from(file_path),
-                    start_line: row.get::<_, i64>(1)? as usize,
-                    end_line: row.get::<_, i64>(2)? as usize,
-                    language: row.get(3)?,
-                    kind: row.get(4)?,
-                    text: decompress_text(raw),
-                    content_hash: String::new(),
-                    vector_key: row.get::<_, i64>(6)? as u64,
-                    is_ignored: row.get(7)?,
-                },
+                row.get::<_, i64>(1)? as usize,
+                row.get::<_, i64>(2)? as usize,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                raw,
+                row.get::<_, i64>(6)? as u64,
+                row.get::<_, bool>(7)?,
             ))
         })?;
         for row in rows {
-            chunks.push(row?);
+            let (chunk_key, start_line, end_line, language, kind, raw, vector_key, is_ignored) =
+                row?;
+            let text = try_decompress_text(raw).with_context(|| {
+                format!("failed to read stored symbol text for {file_path}:{start_line}-{end_line}")
+            })?;
+            chunks.push((
+                chunk_key,
+                IndexedChunk {
+                    chunk_id: String::new(),
+                    file_path: PathBuf::from(file_path),
+                    start_line,
+                    end_line,
+                    language,
+                    kind,
+                    text,
+                    content_hash: String::new(),
+                    vector_key,
+                    is_ignored,
+                },
+            ));
         }
     }
 
@@ -252,32 +266,49 @@ pub fn definition_candidates(
 
         let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params.as_slice(), |row| {
-            let raw: Vec<u8> = row.get(6)?;
-            let file_path = PathBuf::from(row.get::<_, String>(1)?);
-            let start_line = row.get::<_, i64>(2)? as usize;
-            let end_line = row.get::<_, i64>(3)? as usize;
-            let language = row.get::<_, String>(4)?;
-            let kind = row.get::<_, String>(5)?;
-            let vector_key = row.get::<_, i64>(7)? as u64;
             Ok((
                 base_ordinal + row.get::<_, i64>(0)? as usize,
-                IndexedChunk {
-                    chunk_id: String::new(),
-                    file_path,
-                    start_line,
-                    end_line,
-                    language,
-                    kind,
-                    text: decompress_text(raw),
-                    content_hash: String::new(),
-                    vector_key,
-                    is_ignored: row.get(8)?,
-                },
+                PathBuf::from(row.get::<_, String>(1)?),
+                row.get::<_, i64>(2)? as usize,
+                row.get::<_, i64>(3)? as usize,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Vec<u8>>(6)?,
+                row.get::<_, i64>(7)? as u64,
+                row.get::<_, bool>(8)?,
             ))
         })?;
 
         for row in rows {
-            let (ordinal, chunk) = row?;
+            let (
+                ordinal,
+                file_path,
+                start_line,
+                end_line,
+                language,
+                kind,
+                raw,
+                vector_key,
+                is_ignored,
+            ) = row?;
+            let text = try_decompress_text(raw).with_context(|| {
+                format!(
+                    "failed to read stored symbol text for {}:{start_line}-{end_line}",
+                    file_path.display()
+                )
+            })?;
+            let chunk = IndexedChunk {
+                chunk_id: String::new(),
+                file_path,
+                start_line,
+                end_line,
+                language,
+                kind,
+                text,
+                content_hash: String::new(),
+                vector_key,
+                is_ignored,
+            };
             if ordinal >= by_name.len() {
                 continue;
             }
@@ -329,19 +360,11 @@ fn query_workspace_db(
 
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map([normalized], |row| {
-        let raw: Vec<u8> = row.get(3)?;
         Ok((
-            SearchHit {
-                file_path: PathBuf::from(row.get::<_, String>(0)?),
-                start_line: row.get::<_, i64>(1)? as usize,
-                end_line: row.get::<_, i64>(2)? as usize,
-                preview: decompress_text(raw),
-                reason: "exact symbol match".to_string(),
-                score: 10.0,
-                sources: vec!["symbol".to_string()],
-                neural_requested: false,
-                neural_executed: false,
-            },
+            PathBuf::from(row.get::<_, String>(0)?),
+            row.get::<_, i64>(1)? as usize,
+            row.get::<_, i64>(2)? as usize,
+            row.get::<_, Vec<u8>>(3)?,
             row.get::<_, String>(4)?,
             row.get::<_, bool>(5)?,
         ))
@@ -349,7 +372,24 @@ fn query_workspace_db(
 
     let mut hits = Vec::new();
     for row in rows {
-        let (hit, language, is_ignored) = row?;
+        let (file_path, start_line, end_line, raw, language, is_ignored) = row?;
+        let preview = try_decompress_text(raw).with_context(|| {
+            format!(
+                "failed to read stored symbol text for {}:{start_line}-{end_line}",
+                file_path.display()
+            )
+        })?;
+        let hit = SearchHit {
+            file_path,
+            start_line,
+            end_line,
+            preview,
+            reason: "exact symbol match".to_string(),
+            score: 10.0,
+            sources: vec!["symbol".to_string()],
+            neural_requested: false,
+            neural_executed: false,
+        };
         if options
             .scope_filter
             .as_ref()
@@ -1510,6 +1550,59 @@ mod tests {
             candidates[0].file_path,
             PathBuf::from("src/batch_target.rs")
         );
+    }
+
+    #[test]
+    fn persisted_symbol_reads_reject_corrupt_compressed_text() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chunks (
+                chunk_key INTEGER PRIMARY KEY,
+                file_path TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                language TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                text BLOB NOT NULL,
+                vector_key INTEGER NOT NULL,
+                is_ignored INTEGER NOT NULL
+             );
+             CREATE TABLE symbols (
+                normalized_name TEXT NOT NULL,
+                chunk_key INTEGER NOT NULL,
+                PRIMARY KEY (normalized_name, chunk_key)
+             ) WITHOUT ROWID;",
+        )
+        .unwrap();
+
+        let mut corrupt = zstd::stream::encode_all(&b"pub fn broken() {}"[..], 1).unwrap();
+        corrupt.truncate(corrupt.len() - 2);
+        conn.execute(
+            "INSERT INTO chunks (
+                chunk_key, file_path, start_line, end_line, language, kind,
+                text, vector_key, is_ignored
+             ) VALUES (1, 'src/broken.rs', 4, 4, 'rust', 'Function', ?1, 7, 0)",
+            [&corrupt],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO symbols VALUES ('broken', 1)", [])
+            .unwrap();
+
+        let candidate_error = definition_candidates(&conn, &["broken".to_string()], 1)
+            .unwrap_err()
+            .to_string();
+        assert!(candidate_error.contains("failed to read stored symbol text"));
+
+        let matcher = PathGlobMatcher::new(&[], &[]).unwrap();
+        let search_error = query_workspace_db(&conn, "broken", &SearchOptions::default(), &matcher)
+            .unwrap_err()
+            .to_string();
+        assert!(search_error.contains("failed to read stored symbol text"));
+
+        let removal_error = remove_file_graph(&conn, "src/broken.rs")
+            .unwrap_err()
+            .to_string();
+        assert!(removal_error.contains("failed to read stored symbol text"));
     }
 
     #[test]

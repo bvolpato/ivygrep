@@ -4,28 +4,42 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- Multi-workspace search now returns valid hits with explicit warnings when one workspace fails, and returns an error when every selected workspace fails.
+- Corrupt, truncated, or oversized compressed chunk text now returns a contextual error instead of being rendered as source.
+
+### Testing
+- Local E2E now covers CLI procedures, daemon equivalence, MCP errors, and a Playwright search-to-file-viewer flow. Neural and cached-model acceptance force neural retrieval and require `neural_executed: true`.
+- Release acceptance checks exact installer inputs and exercises CUDA archives through their neural backend or an explicit CPU fallback when no GPU is present.
+
+### Maintenance
+- Search execution, fusion, routing, presentation, and workspace aggregation now have focused modules. Index compression, Git state, resource policy, staging, and storage are separated behind the existing indexer API; Web API, rendering, viewer, and UI helpers are split from the application entry point.
+
+### Documentation
+- Added a source-oriented architecture guide covering index commit order, storage, retrieval, context packs, worktree overlays, protocols, security boundaries, and module ownership.
+- Public benchmark pages now pin current-release binary provenance, distinguish historical retrieval matrices, and state synthetic-corpus and dataset-license limits. WinGet v1.2.6 is live; v1.2.7 and crates.io publication remain unavailable.
+
 ## [1.2.7] - 2026-07-26
 
 ### Added
 - Notes and memories are now a first-class retrieval use case. Default daemon-backed search blends semantic and lexical retrieval across CLI, MCP, Web, and TUI, then adds two bounded local memory probes when initial results are overwhelmingly note-like.
-- Public MemoryQuest evidence covers 535 implicit questions over 3,878 preindexed sessions. Default search retrieves 74.9% of required memories in the top 20 with 86.05 ms warm p95.
+- Public MemoryQuest evidence covers 535 implicit questions over 3,878 preindexed sessions. Default search retrieves 74.9% of required memories in the top 20. The final-default A/B median was 86.05 ms warm p95; the published v1.2.7 artifact rerun is 87.63 ms.
 
 ### Performance
 - Incremental indexing now maintains exact distinct-vector counts from up to 512 changed keys, falls back to a full count for larger transactions, streams Merkle root hashing without a corpus-sized buffer, and fetches only missing text blobs when neural enhancement is at least 75% complete. A one-million-entry Merkle A/B fell from 45.01 ms and 128 MB temporary memory to 14.85 ms and constant extra memory; a 90%-complete 200,000-row neural resume improved 33.6%.
 - Daemon query caches now invalidate only affected workspaces, survive no-op indexing, and use a 250 ms single-event or 750 ms burst watcher debounce. Measured single-event watcher latency fell from 2.009 s to 251.4 ms.
-- Context packs retrieve tests through direct graph ownership and bounded anchor queries, then allow 14 items after required roles are covered. Frozen-task recall rose from `.75000` to `.81944`, test recall from `.000` to `1.000`, and a preliminary three-task real-agent screen recovered all eight expected files with substantially less agent input than native discovery.
+- Context packs retrieve tests through direct graph ownership and bounded anchor queries, then allow 14 items after required roles are covered. Frozen-task recall rose from `.75000` to `.81944` and test recall from `.000` to `1.000`. A paired three-task screen recovered all eight expected files versus seven with native discovery and reduced aggregate agent input 61.0% (`645,778` to `251,827`); this is one benchmark signal, not a universal token-savings claim.
 - Context token estimates are calibrated against current `o200k_base` and `cl100k_base` tokenizers. Thirty packs moved median estimate/actual ratios from about `1.82` to `1.09` with no underestimates.
 - Context packs use 34.1% fewer tokens on the frozen 12-task benchmark with unchanged `.7500` recall. A 400-token snippet cap and role-aware 12-item target preserve required relationship roles.
 - Automatic neural retrieval now follows lexical confidence and retains complementary hash candidates. On the 1,000-query public-core benchmark, neural executions fell 52.4% while nDCG@10 rose 2.10%, MRR@10 rose 3.21%, and recall@20 rose from `.469` to `.472`.
 - Repeated clean Git indexing reuses an exact repository-state marker. A 100,000-file no-op improved from 616 ms to 494 ms and reduced peak RSS by about 56%, with ignore, index, sparse-checkout, and worktree changes forcing full reconciliation.
 
 ### Testing
-- Context relevance CI now gates test-file recall, and curated fixtures can label relevant unchanged paths against pinned base trees. Independent reports record retained and rejected context, indexing, neural, readiness, and agent-outcome experiments.
-- Context relevance runs against frozen tasks in clean pre-change worktrees and gates recall, primary recall, zero-recall rate, relationship-role coverage, and recall per 1,000 tokens.
+- Context relevance CI runs frozen tasks in clean pre-change worktrees and gates recall, primary recall, test-file recall, zero-recall rate, relationship-role coverage, and recall per 1,000 tokens. Curated fixtures can label relevant unchanged paths against pinned base trees; independent reports record retained and rejected experiments.
 - Current-release million-chunk evidence publishes three complete v1.2.7 trials and checks package version plus every reported median.
 
 ### Documentation
-- README and site lead with code, notes, memory retrieval, and bounded context examples, current registry availability, a functional workflow hero, canonical integration pages, and current-release benchmark evidence.
+- README and site lead with code, notes, memory retrieval, and bounded context examples, explicit WinGet and crates.io status, a functional workflow hero, canonical integration pages, and current-release benchmark evidence.
 
 ## [1.2.6] - 2026-07-19
 
@@ -841,7 +855,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Added
 - **Starlark/Bazel coverage.** `BUILD`, `BUILD.bazel`, `WORKSPACE`, `MODULE.bazel`, `.bzl`, `.bazel`, and `.star` files are first-class `starlark` sources; Tree-sitter splits macro definitions in `.bzl`/`.star` files and target calls in very large BUILD-like sources into retrievable units while ordinary BUILD files retain bounded text chunks.
-- **Skip minified bundles / single-line blobs when indexing.** A file with a 50 KB+ run and no line break (minified JS/CSS, packed data) is skipped during indexing — it would otherwise become one enormous, low-value chunk that dilutes relevance on large monorepos. Complements the existing 16 MB file-size cap, catching minified files that fall under it. Large hand-written docs (normal line lengths) are unaffected.
+- **Skip minified bundles / single-line blobs when indexing.** A file with a 50 KB+ run and no line break (minified JS/CSS, packed data) is skipped during indexing because it would otherwise become one low-value chunk that dilutes relevance on large monorepos. Complements the existing 16 MB file-size cap, catching minified files that fall under it. Large hand-written docs (normal line lengths) are unaffected.
 
 ### Fixed
 - **Cancelled Tree-sitter parses no longer persist partial chunks.** When structural parsing exceeds its time budget, indexing follows the normal fallback chunking path instead of using an incomplete partial syntax tree.
@@ -993,7 +1007,7 @@ All notable changes to ivygrep are documented in this file.
 - **Removed unnecessary 10ms sleep in neural enhancer:** Background embedding now runs at full speed when the system is not constrained.
 
 ### Added
-- **Path-based score boosting:** Files whose path contains the query term (e.g., searching for "my-service" surfaces `apps/my-service/` at the top) now receive a significant ranking boost, ensuring directory/filename matches outrank generic code hits.
+- **Path-based score boosting:** Files whose path contains the query term (e.g., searching for "my-service" surfaces `apps/my-service/` at the top) now receive a path boost so directory and filename matches outrank generic code hits.
 
 ### Fixed
 - Dependency bumps: `openssl` 0.10.78, `rand` 0.8.6, `rustls-webpki` 0.103.13.
@@ -1165,7 +1179,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Added
 - **Code-aware tokenizer:** Custom BM25 tokenizer splits camelCase, snake_case, dots, colons, and path separators so that natural-language queries like "handle error" natively match `handleError`, `handle_error`, and `HandleError` at the BM25 scoring level
-- **BM25F multi-field scoring:** New `file_path_text` (5× boost) and `signature` (10× boost) fields bring Sourcegraph/Zoekt-style field-level relevance — function definitions and filename matches rank significantly higher than body text
+- **BM25F multi-field scoring:** New `file_path_text` (5× boost) and `signature` (10× boost) fields bring Sourcegraph/Zoekt-style field-level relevance — function definitions and filename matches rank above body text
 - **Literal variant expansion:** The literal pass now tries snake_case, camelCase, and compact variants of the query, so "hybrid search" also matches `hybrid_search` and `hybridSearch` as exact substrings
 - **Definition-kind boost:** 2× post-BM25 multiplier for Function, Class, Struct, Trait, Interface, Impl, Enum, and Module chunks counteracts BM25's document-length normalization penalty on large definitions
 - Tests for code-aware tokenizer covering camelCase, snake_case, path separators, function signatures, and natural-language queries
@@ -1190,7 +1204,7 @@ All notable changes to ivygrep are documented in this file.
 ## [0.5.41] — 2026-04-10
 
 ### Improved
-- **Search relevance overhaul:** Rebalanced hybrid RRF scoring weights for significantly better result quality
+- **Search relevance overhaul:** Rebalanced hybrid RRF scoring weights and result ordering
 - **Definition-site ranking:** New `definition_name_boost` signal strongly prefers function/class definitions over usage sites
 - **Query expansion:** Automatically generates `snake_case` and `camelCase` variants (e.g., "error handling" → `error_handling`, `errorHandling`)
 - **Density-aware literal scoring:** Exact-match pass now scores by occurrence count instead of flat 1.0
@@ -1209,25 +1223,25 @@ All notable changes to ivygrep are documented in this file.
 ## [0.5.13] — 2026-04-07
 
 ### Performance
-- **32x larger enhancement batches:** Increased ONNX inference batch size from 16 to 512 chunks, dramatically reducing session overhead during background neural enhancement
+- **32x larger enhancement batches:** Increased ONNX inference batch size from 16 to 512 chunks, reducing session overhead during background neural enhancement
 - **Skip decompression for completed keys:** Enhancement loop now checks vector store before decompressing text, avoiding ~1M redundant zstd decompressions on resume
 - **CPU affinity limiting (Linux):** Background enhancement now uses `sched_setaffinity` to pin ONNX threads to 25% of available cores (capped at 4), keeping the system responsive during long-running enhancement
 - **Instant initial indexing:** `ig --add` now always uses the lightweight hash model for initial indexing; neural enhancement runs exclusively in the background daemon
 
 ### Fixed
-- **Backward compatibility for `is_ignored` field:** Tantivy field is now optional, allowing v0.5.13 to seamlessly read indexes created by older versions without crashing
+- **Backward compatibility for `is_ignored` field:** Tantivy field is now optional, allowing v0.5.13 to read indexes created by older versions without crashing
 - **Honest CUDA detection:** Added cuDNN probe to verify CUDA is actually functional before reporting GPU acceleration in `ig --status`
 
 ## [0.5.12] — 2026-04-06
 
 ### Performance
-- Bounded ONNX/GPU allocations by enforcing maximum chunk counts for embeddings, capping VRAM well below 8GB during massive batches
+- Bounded ONNX/GPU allocations by enforcing maximum chunk counts for embeddings, capping VRAM well below 8GB during large batches
 - Fixed a bug where initial indexing incorrectly instantiated the background neural model even when `--hash` was passed
 
 ## [0.5.11] — 2026-04-06
 
 ### Added
-- Optional hardware acceleration for Linux users with CUDA/GPU installed (significantly speeds up neural embedding generation)
+- Optional hardware acceleration for Linux users with CUDA/GPU installed (speeds up neural embedding generation)
 
 ### Performance
 - **Faster initial indexing:** Eliminated redundant per-file SQLite lookups and Tantivy deletes on fresh indexes (pure INSERT vs INSERT OR REPLACE)
@@ -1250,7 +1264,7 @@ All notable changes to ivygrep are documented in this file.
 - **RAII PID file cleanup:** `.indexing.pid` and `.enhancing.pid` lockfiles are now guaranteed to be removed via RAII guards, even when indexer or enhancer threads panic. Prevents stale PID files from blocking subsequent daemon runs.
 
 ### Performance
-- **Batched SQLite transaction commits:** The indexer now dynamically batches SQLite transaction commits by chunk count instead of per-file, significantly improving indexing throughput on Linux.
+- **Batched SQLite transaction commits:** The indexer now batches SQLite transaction commits by chunk count instead of per file, improving indexing throughput on Linux.
 
 ### CI
 - Added `github-action-benchmark` with Criterion tracking to monitor indexer performance across commits with automatic PR comments.
@@ -1271,14 +1285,14 @@ Fully **statically linked** Linux binaries — zero shared library dependencies.
 
 ## [0.5.4] — 2026-04-04
 
-A milestone architecture release introducing **Worktree-Aware Zero-Copy Overlay Indexing**.
+Introduced **Worktree-Aware Thin Overlay Indexing**.
 
 ### Feature: Shared Base + Thin Overlays
-- **Worktree Indexing:** When indexing a `git worktree`, `ivygrep` no longer copies the enormous parent repository. Instead, it reads the `.cache/ivygrep/{base}` index and dynamically constructs a lightning-fast "overlay index" (`metadata.sqlite3`, `vectors...`) containing exclusively the chunks that were added, modified, or deleted in the worktree.
-- **Microsecond Tombstoning:** If a file is deleted or modified in your worktree, ivygrep registers robust SQLite tombstones in the overlay. The `SearchContext` seamlessly merges base and overlay indices mid-query, ensuring ultra-accurate search results.
-- **Base Auto-Indexing Cascade:** If you attempt to index a worktree before your `ivygrep` daemon has naturally indexed the base checkout, ivygrep gracefully intercepts the request, recursively locks and builds the full base index, and rapidly evaluates your overlay delta afterwards.
+- **Worktree Indexing:** When indexing a `git worktree`, ivygrep reads the base index and constructs an overlay (`metadata.sqlite3`, `vectors...`) containing only added, modified, or deleted worktree chunks.
+- **Overlay Tombstones:** Deleted or modified worktree files create SQLite tombstones. `SearchContext` merges base and overlay indexes while excluding tombstoned base content.
+- **Base Auto-Indexing Cascade:** If a worktree is indexed before its base checkout, ivygrep locks and builds the base index before evaluating the overlay delta.
 - **Background Upgrade Cascading:** Background neural enhancement operations automatically cascade into parent base indices when triggered from a dependent worktree.
-- **UI Tracking Hierarchy:** `ig --status` has been revamped to visualize base repositories alongside a dedicated, indented visual tree representing its corresponding worktree overlays. Index file footprints precisely isolate the delta byte counts compared to the main checkout.
+- **UI Tracking Hierarchy:** `ig --status` displays base repositories and their worktree overlays as an indented tree. Index footprints report overlay delta bytes separately from the main checkout.
 
 ## [0.5.3] — 2026-04-03
 
@@ -1287,35 +1301,35 @@ Minor patch addressing Clippy CI constraints.
 
 ## [0.5.2] — 2026-04-03
 
-- **CoreML Thermal/Cache Tuning:** Reduced the ONNX background execution batch size from 64 down to 16. While 64 scaled optimally on pure high-VRAM GPU setups, it caused severe thermal throttling and L2 cache thrashing on Apple Silicon / CoreML execution providers, slowing down the background indexer. The new limit still benefits from 2× batch throughput over v0.5.0 but maintains crisp desktop responsiveness.
+- **CoreML Thermal/Cache Tuning:** Reduced the ONNX background execution batch size from 64 to 16. Batch size 64 caused thermal throttling and L2 cache thrashing on Apple Silicon / CoreML execution providers. The new limit retains 2× batch throughput over v0.5.0 while keeping the desktop responsive.
 
 ## [0.5.1] — 2026-04-03
 
-- **ONNX Throughput Boost:** Increased the background neural enhancement batch size by 8× (from 8 to 64). To strictly prevent out-of-memory CoreML/ONNX Tensor attention matrix expansion bloat, chunk text is now deterministically bounded and truncated at ~1024 bytes directly before tokenization.
+- **ONNX Throughput Boost:** Increased the background neural enhancement batch size by 8× (from 8 to 64). To limit CoreML/ONNX tensor allocation, chunk text is bounded and truncated at ~1024 bytes before tokenization.
 
 ## [0.5.0] — 2026-04-03
 
-A massive storage efficiency and stability release. The index-to-source ratio has been reduced from **~6.5× to ~2.3×**.
+Storage efficiency and stability release. Index-to-source ratio fell from **~6.5× to ~2.3×**.
 
-> [!WARNING]  
+> [!WARNING]
 > **Breaking Change:** Due to the migration of neural and hash vectors to FP16 quantization, and the addition of `zstd` compression for SQLite, existing indices are incompatible. Please wipe your local `~/.local/share/ivygrep/` directory or run `ig --add . --force` before performing new searches to avoid mismatched chunks.
 
 ### Storage & Performance
-- **F16 Vector Quantization:** `USearch` indices are now quantized down to `ScalarKind::F16` for hash embeddings, strictly halving the footprint of `.usearch` stores.
-- **SQLite zstd Compression:** Reduced `chunks.text` storage massively by compressing raw text chunks using `zstd`. Legacy uncompressed rows are auto-detected and correctly decoded.
-- **Tantivy Store Truncation:** Extracted `STORED` flag from Tantivy's text index. Full lexical matches now rely seamlessly on SQLite, removing ~500MB+ per index.
+- **F16 Vector Quantization:** `USearch` indexes now use `ScalarKind::F16` for hash embeddings, halving the footprint of `.usearch` stores.
+- **SQLite zstd Compression:** Compressed raw `chunks.text` values with `zstd`. Legacy uncompressed rows are auto-detected and decoded.
+- **Tantivy Store Truncation:** Removed the `STORED` flag from Tantivy's text index. Full lexical matches now read text from SQLite, removing more than 500 MB per index.
 
 ### Stability & Indexing Pipeline
-- **Tree-sitter Timeout Engine:** Refactored tree-sitter bindings to invoke modern `ParseOptions` with `progress_callback`, imposing a mandatory 100ms parser completion limit. This entirely eliminates deadlocking on obfuscated, heavily-minified JavaScript or deeply nested data.
-- **Robust Enhancement Trigger:** Fixed a bug where indexer interruption permanently halted neural enhancement background processing. Background tasks now correctly calculate differential completion metrics to resume reliably via `.needs_neural_enhancement()`.
-- **First-run Spinner Resolution:** Initial daemon chunking progress now writes and parses `.indexing.progress`. "Stuck at 0 chunks" spinners are now perfectly responsive.
+- **Tree-sitter Timeout Engine:** Tree-sitter bindings now use `ParseOptions` with `progress_callback` and a 100 ms parser limit, preventing deadlocks on obfuscated, minified, or deeply nested input.
+- **Enhancement Restart:** Fixed an interruption bug that permanently halted neural enhancement. Background tasks calculate remaining work through `.needs_neural_enhancement()` and resume processing.
+- **First-run Spinner Resolution:** Initial daemon chunking progress now writes and parses `.indexing.progress`, so progress no longer remains at zero.
 
 ## [0.4.7] — 2026-04-03
 
-Introducing the new fast literal search path. This completes the performance push by optimizing the final bottleneck: exact string match queries.
+Introduced an indexed literal-search path for exact string queries.
 
 ### Performance
-- **Index-Backed Literal Search (`--literal` / `-l`):** 5.6× faster than the old `--regex` mode on massive repos. Bypasses BM25 and neural enhancement entirely, utilizing Tantivy phrase queries to rapidly isolate relevant chunks before performing an exact case-insensitive scan.
+- **Index-Backed Literal Search (`--literal` / `-l`):** 5.6× faster than the old `--regex` mode on large repositories. Skips BM25 and neural enhancement, using Tantivy phrase queries to narrow candidates before an exact case-insensitive scan.
 - **Daemon-Routed Exact Matches:** The new literal fast-path runs through the daemon by default (`DaemonRequest::LiteralSearch`), meaning if the daemon hasn't finished loading the 134MB neural model, exact text searches still complete in milliseconds.
 - **MCP Literal Parameter:** `ig_search` now supports `literal: true` directly to provide agents with a high-speed search alternative when semantic search isn't needed.
 
@@ -1324,20 +1338,20 @@ Introducing the new fast literal search path. This completes the performance pus
 
 ## [0.4.6] — 2026-04-03
 
-A state-of-the-art query latency release that makes ivygrep as fast as traditional string matchers like `grep` and `ripgrep` while maintaining intelligent retrieval. Un-cached searches of 90,000+ files take around ~15-40ms.
+Query latency release. Uncached searches over more than 90,000 files measured about 15–40 ms.
 
 ### Performance
-- **Identifier Fast-Path:** Queries consisting of single word identifiers (like "kfree" or "malloc") bypass the ONNX memory-mapped vector semantic step entirely, searching strictly via BM25 SQL. Speed increased by over 10x (`~40ms` query latency on Linux).
-- **No-Rescan Penalty:** Local `ig` searches heavily bypass duplicate workspace Merkle re-indexes. If the workspace is already indexed, the CLI relies heavily on the background daemon and triggers instant search mode to save ~2 seconds of latency.
+- **Identifier Fast-Path:** Single-word identifier queries such as `kfree` or `malloc` skip the ONNX vector step and use BM25 SQL. Speed increased by over 10× (`~40 ms` query latency on Linux).
+- **No-Rescan Penalty:** Local searches skip duplicate workspace Merkle re-indexing. When the workspace is indexed, CLI uses daemon search and avoids about two seconds of indexing latency.
 - **Daemon Speedups:** Fixed IPC RPC errors caused by old daemon sockets surviving binary restarts and enhanced search options.
-- **Lazy Models:** Reduced memory usage by making Embedding models dynamically lazy.
+- **Lazy Models:** Reduced memory use by loading embedding models on demand.
 
 ## [0.4.1] — 2026-04-02
 
-A performance-focused release that makes ivygrep viable on massive monorepos
+A performance-focused release for large monorepos
 (tested on a 269K-file, 2.3M-chunk, 17 GB production codebase). Indexing is up to 35%
 faster, `ig --status` dropped from 20 s to 24 ms, and filtered queries now
-bypass full-corpus vector scans entirely.
+bypass full-corpus vector scans.
 
 ### Added
 
@@ -1377,7 +1391,7 @@ bypass full-corpus vector scans entirely.
 - **Watcher-alive shortcut** — when a live daemon watcher is confirmed, skip
   the full Merkle rebuild entirely (`0787e13`).
 - **OOM prevention** — bounded vector allocations prevent memory spikes during
-  massive indexing runs (`3c94545`).
+  large indexing runs (`3c94545`).
 - **Apple CoreML acceleration** — ONNX embedding model offloads to the Neural
   Engine / GPU on macOS automatically (`8332268`).
 

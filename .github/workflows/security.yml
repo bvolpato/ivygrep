@@ -28,7 +28,27 @@ jobs:
         run: cargo install cargo-audit --version 0.22.1 --locked
 
       - name: Audit locked dependencies
-        run: cargo audit --deny yanked --deny unsound
+        run: |
+          set -Eeuo pipefail
+          audit_report="$RUNNER_TEMP/cargo-audit.json"
+          audit_status=0
+          cargo audit --deny yanked --deny unsound --json > "$audit_report" || audit_status=$?
+          if [[ -s "$audit_report" ]]; then
+            unmaintained_count="$(jq '.warnings.unmaintained | length' "$audit_report")"
+            {
+              echo "### Rust dependency audit"
+              echo
+              echo "Denied classes: yanked and unsound. Unmaintained dependencies remain informational until a safe replacement exists."
+              echo
+              echo "Unmaintained warnings: $unmaintained_count"
+              if ((unmaintained_count > 0)); then
+                jq -r '.warnings.unmaintained[] | "- `\(.package.name) \(.package.version)` (\(.advisory.id)): \(.advisory.title)"' "$audit_report"
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "cargo audit did not produce JSON output" >&2
+          fi
+          exit "$audit_status"
 
   secrets:
     name: Secret scan

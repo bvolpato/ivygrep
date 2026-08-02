@@ -67,6 +67,10 @@ class MillionBenchmarkTest(unittest.TestCase):
             snapshot["binary"]["version"],
             f"ivygrep {package['package']['version']}",
         )
+        self.assertEqual(snapshot["scope"], "synthetic hash-only scale and footprint measurement")
+        self.assertIn("synthetic", snapshot["description"])
+        self.assertIn("hash-only", snapshot["description"])
+        self.assertEqual(snapshot["corpus"]["license"], "CC0-1.0")
         self.assertEqual(snapshot["harness"]["trials"], len(snapshot["trials"]))
         self.assertGreaterEqual(len(snapshot["trials"]), 3)
         for metric in (

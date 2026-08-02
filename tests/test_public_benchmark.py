@@ -311,6 +311,27 @@ class PublicBenchmarkTest(unittest.TestCase):
         self.assertIn("sota-challenge", html)
         self.assertIn("query char limit", html)
 
+    def test_dataset_scope_note_discloses_sampling_and_license_limits(self):
+        matrix = {
+            "tasks": ["codefeedback-st"],
+            "results": [
+                {
+                    "dataset": "codefeedback-st",
+                    "dataset_provenance": {
+                        "license": "not-declared-in-dataset-card",
+                        "sample": {
+                            "query_limit": 99,
+                            "corpus_limit": 5000,
+                        },
+                    },
+                }
+            ],
+        }
+        note = renderer.dataset_scope_note(matrix)
+        self.assertIn("99 queries, 5000 documents", note)
+        self.assertIn("license", note.lower())
+        self.assertIn("do not redistribute", note)
+
     def test_renderer_compares_matching_frozen_baseline(self):
         def matrix(commit: str, ndcg: float) -> dict:
             metrics = {

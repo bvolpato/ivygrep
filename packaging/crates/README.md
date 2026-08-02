@@ -14,7 +14,10 @@ Publication order:
 
 First publication requires crates.io token because trusted publishing cannot
 create a crate. Add token as repository Actions secret `CRATES_IO_TOKEN`, then
-run `Publish crates.io packages` with `bootstrap=true`.
+run `Publish crates.io packages` from `main` or the exact release tag. Set
+`release_tag` to the existing tag to publish and `bootstrap=true`. The workflow
+checks out that tag and verifies its commit, package versions, and crate
+artifacts before publishing.
 
 After bootstrap, configure trusted publisher for each crate with:
 
@@ -24,4 +27,4 @@ After bootstrap, configure trusted publisher for each crate with:
 - environment: `release`
 
 Delete bootstrap secret after trusted publishing works. Future runs use GitHub
-OIDC with `bootstrap=false`.
+OIDC with `bootstrap=false`; they still require an explicit `release_tag`.

@@ -31,7 +31,8 @@ use crate::protocol::{
     DaemonRequest, DaemonResponse, FileSearchResult, SearchHit, group_hits_by_file,
 };
 use crate::search::{SearchOptions, validate_forced_neural_workspaces};
-use crate::workspace::{Workspace, WorkspaceScope, list_workspaces, resolve_workspace_and_scope};
+use crate::search_service::{HitOrdering, SearchBatch, SearchOutcome, select_search_workspaces};
+use crate::workspace::{Workspace, WorkspaceScope, resolve_workspace_and_scope};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -113,7 +114,7 @@ fn open_in_editor(
 // ---------------------------------------------------------------------------
 enum TuiSearchProgress {
     Searching(String, usize, usize),
-    Done(Result<Vec<SearchHit>>),
+    Done(Result<SearchOutcome>),
 }
 
 struct App {
@@ -397,7 +398,9 @@ impl App {
 
             let daemon_result = daemon::request(&request, watch, progress_cb).await;
             let result = match daemon_result {
-                Ok(Some(DaemonResponse::SearchResults { hits })) => Ok(hits),
+                Ok(Some(DaemonResponse::SearchResults { hits, warnings })) => {
+                    Ok(SearchOutcome { hits, warnings })
+                }
                 Ok(Some(DaemonResponse::Error { message })) if cli.force_neural => {
                     Err(anyhow::anyhow!(message))
                 }
@@ -446,20 +449,12 @@ fn local_search_detached(
     query: &str,
     progress_tx: &std::sync::mpsc::Sender<TuiSearchProgress>,
     cancel_token: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> Result<Vec<SearchHit>> {
+) -> Result<SearchOutcome> {
     let options = build_search_options(cli, scope_filter);
-    let mut all_hits = Vec::new();
-
-    let workspaces = if cli.all_indices {
-        list_workspaces()?
-            .into_iter()
-            .filter(|ws| ws.last_indexed_at_unix.is_some())
-            .filter_map(|ws| Workspace::resolve(&ws.root).ok())
-            .collect::<Vec<_>>()
-    } else {
-        vec![workspace.clone()]
-    };
+    let workspace_set = select_search_workspaces(workspace, cli.all_indices)?;
+    let workspaces = workspace_set.workspaces;
     let model = local_search_model(cli, &workspaces)?;
+    let mut batch = SearchBatch::new(workspace_set.warnings);
 
     let (std_tx, std_rx) = std::sync::mpsc::channel();
     let ui_tx = progress_tx.clone();
@@ -474,18 +469,10 @@ fn local_search_detached(
         let mut ws_opts = options.clone();
         ws_opts.progress_tx = Some(std_tx.clone());
         ws_opts.cancel_token = Some(cancel_token.clone());
-        let mut hits = crate::search::hybrid_search(&ws, query, Some(model.as_ref()), &ws_opts)?;
-        if cli.all_indices {
-            for hit in &mut hits {
-                hit.file_path = ws.root.join(&hit.file_path);
-            }
-        }
-        all_hits.append(&mut hits);
+        let result = crate::search::hybrid_search(&ws, query, Some(model.as_ref()), &ws_opts);
+        batch.record(&ws.root, cli.all_indices, result);
     }
-
-    if let Some(limit) = tui_limit(cli) {
-        all_hits.truncate(limit);
-    }
+    let outcome = batch.finish(tui_limit(cli), HitOrdering::Score)?;
 
     let query_uses_neural = crate::search::query_uses_neural(query, cli.force_neural);
     if !cli.all_indices
@@ -496,7 +483,7 @@ fn local_search_detached(
         let _ = workspace.trigger_background_search_enhancement(query_uses_neural);
     }
 
-    Ok(all_hits)
+    Ok(outcome)
 }
 
 fn local_search_model(
@@ -517,9 +504,7 @@ fn local_search_model(
     )
 }
 
-// ---------------------------------------------------------------------------
-// Workspace / search helpers (unchanged)
-// ---------------------------------------------------------------------------
+// Workspace preparation
 
 /// Kick off indexing if needed, but **never** block the TUI launch.
 ///
@@ -954,20 +939,33 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         app.search_rx = None;
                         app.is_searching = false;
                         match result {
-                            Ok(mut hits) => {
-                                hits.sort_by(|a, b| {
+                            Ok(mut outcome) => {
+                                outcome.hits.sort_by(|a, b| {
                                     b.score
                                         .partial_cmp(&a.score)
                                         .unwrap_or(std::cmp::Ordering::Equal)
                                 });
-                                app.hits = hits;
+                                app.hits = outcome.hits;
                                 app.grouped_files = group_hits_by_file(&app.hits, None);
                                 if app.grouped_files.is_empty() {
                                     app.file_list_state.select(None);
-                                    app.status_message = Some("No results".to_string());
-                                } else {
+                                    app.status_message = Some(if outcome.warnings.is_empty() {
+                                        "No results".to_string()
+                                    } else {
+                                        format!(
+                                            "No results; partial search: {}",
+                                            outcome.warnings.join("; ")
+                                        )
+                                    });
+                                } else if outcome.warnings.is_empty() {
                                     app.file_list_state.select(Some(0));
                                     app.status_message = None;
+                                } else {
+                                    app.file_list_state.select(Some(0));
+                                    app.status_message = Some(format!(
+                                        "Partial results: {}",
+                                        outcome.warnings.join("; ")
+                                    ));
                                 }
                                 app.snippet_index = 0;
                                 app.file_view_cache = None;

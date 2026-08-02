@@ -20,6 +20,8 @@ pub(crate) mod query_aliases;
 pub mod regex_search;
 pub(crate) mod reranker;
 pub mod search;
+pub(crate) mod search_routing;
+pub(crate) mod search_service;
 pub mod symbols;
 pub(crate) mod system_resources;
 pub mod text;

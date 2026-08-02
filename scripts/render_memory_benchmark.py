@@ -29,6 +29,15 @@ QUALITY_METRICS = (
     "exact_at_20",
     "no_hit_rate",
 )
+
+RELEASE_EQUIVALENCE_INPUTS = (
+    "Cargo.toml",
+    "Cargo.lock",
+    "src/",
+    "scripts/export_memoryquest.py",
+    "scripts/eval_code_retrieval.py",
+    "scripts/render_memory_benchmark.py",
+)
 RESOURCE_METRICS = (
     "index_ms",
     "hash_enhancement_ms",
@@ -75,6 +84,35 @@ def git_revision(root: Path, revision: str = "HEAD") -> str:
         stdout=subprocess.PIPE,
     )
     return completed.stdout.strip()
+
+
+def release_equivalence(
+    root: Path, build_commit: str, release_tag: str | None
+) -> dict | None:
+    """Record whether benchmark inputs changed before the release tag."""
+    if not release_tag:
+        return None
+    tag_commit = git_revision(root, release_tag)
+    changed = subprocess.run(
+        ["git", "diff", "--name-only", f"{build_commit}..{tag_commit}"],
+        cwd=root,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    ).stdout.splitlines()
+    relevant = [
+        path
+        for path in changed
+        if any(path == prefix or path.startswith(prefix) for prefix in RELEASE_EQUIVALENCE_INPUTS)
+    ]
+    return {
+        "tag": release_tag,
+        "tag_commit": tag_commit,
+        "binary_build_commit": build_commit,
+        "changed_paths": changed,
+        "benchmark_inputs_unchanged": not relevant,
+        "changed_benchmark_inputs": relevant,
+    }
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -162,6 +200,7 @@ def build_publication(
     result_paths: list[Path],
     control_path: Path | None = None,
     source_commit: str = "HEAD",
+    release_tag: str | None = None,
 ) -> dict:
     provenance = json.loads((dataset / "provenance.json").read_text(encoding="utf-8"))
     query_users = {
@@ -262,7 +301,7 @@ def build_publication(
             public_modes["blended"]["quality"]["exact_at_20"]
             - control["quality"]["exact_at_20"]
         )
-    return {
+    publication = {
         "schema_version": 1,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "ivygrep_commit": git_revision(root, source_commit),
@@ -290,6 +329,12 @@ def build_publication(
             "reader_or_llm_judge": False,
         },
     }
+    equivalence = release_equivalence(
+        root, publication["ivygrep_commit"], release_tag
+    )
+    if equivalence is not None:
+        publication["release_equivalence"] = equivalence
+    return publication
 
 
 def percent(value: float) -> str:
@@ -320,6 +365,24 @@ def render_html(publication: dict) -> str:
     source_link = escape(dataset["source_repository"], quote=True)
     paper_link = escape(dataset["paper"], quote=True)
     license_link = escape(dataset["license_source"], quote=True)
+    release_equivalence_text = ""
+    equivalence = publication.get("release_equivalence")
+    release_tag_arg = ""
+    if equivalence is not None:
+        status = (
+            "benchmark inputs are unchanged"
+            if equivalence["benchmark_inputs_unchanged"]
+            else "benchmark inputs changed"
+        )
+        release_equivalence_text = (
+            f"<p>Binary provenance: <code>{escape(default['binary']['version'])}</code> "
+            f"SHA-256 <code>{escape(default['binary']['sha256'])}</code>, built at "
+            f"<code>{escape(equivalence['binary_build_commit'])}</code>. The "
+            f"<code>{escape(equivalence['tag'])}</code> tag resolves to "
+            f"<code>{escape(equivalence['tag_commit'])}</code>; {status} between "
+            "those commits.</p>"
+        )
+        release_tag_arg = f" --release-tag {equivalence['tag']}"
     expansion_finding = ""
     control_reproduce = ""
     control_render_arg = ""
@@ -383,6 +446,7 @@ def render_html(publication: dict) -> str:
         </section>
         <section class="report-card">
             <h2>Method</h2>
+            {release_equivalence_text}
             <p><a href="{source_link}">MemoryQuest</a> is a <a href="{paper_link}">Microsoft Research and University of Washington</a> benchmark for implicit, context-dependent personal-memory retrieval. Exporter creates one Markdown note per session and indexes all notes once. Each historical question searches only its user's sessions dated at or before query date, matching official temporal protocol.</p>
             <p>Only session date and raw conversation turns enter index. Topics, domains, required-memory flags, demographics, timelines, reasoning, and references stay outside indexed tree. All {counts["required_references"]:,} references resolve to labeled sessions.</p>
             <p>Dataset uses <a href="{license_link}">CC BY 4.0</a>; generated corpus is not redistributed.</p>
@@ -410,7 +474,7 @@ uv run scripts/eval_code_retrieval.py --dataset /tmp/ivygrep-memoryquest --binar
 uv run scripts/eval_code_retrieval.py --dataset /tmp/ivygrep-memoryquest --binary target/release/ig --mode blended --output /tmp/memoryquest-blended.json
 uv run scripts/eval_code_retrieval.py --dataset /tmp/ivygrep-memoryquest --binary target/release/ig --mode neural --output /tmp/memoryquest-neural.json
 {control_reproduce}
-uv run scripts/render_memory_benchmark.py --dataset /tmp/ivygrep-memoryquest --result /tmp/memoryquest-lexical.json --result /tmp/memoryquest-blended.json --result /tmp/memoryquest-neural.json{control_render_arg} --source-commit {publication["ivygrep_commit"]} --output-json docs/benchmarks/public-memory-retrieval-results.json --output-html docs/benchmarks/public-memory-retrieval.html</code></pre>
+uv run scripts/render_memory_benchmark.py --dataset /tmp/ivygrep-memoryquest --result /tmp/memoryquest-lexical.json --result /tmp/memoryquest-blended.json --result /tmp/memoryquest-neural.json{control_render_arg} --source-commit {publication["ivygrep_commit"]}{release_tag_arg} --output-json docs/benchmarks/public-memory-retrieval-results.json --output-html docs/benchmarks/public-memory-retrieval.html</code></pre>
         </section>
     </main>
 </body>
@@ -425,6 +489,10 @@ def main() -> int:
     parser.add_argument("--result", action="append", type=Path, required=True)
     parser.add_argument("--control-result", type=Path)
     parser.add_argument("--source-commit", default="HEAD")
+    parser.add_argument(
+        "--release-tag",
+        help="Optional release tag to prove benchmark-input equivalence.",
+    )
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument("--output-html", type=Path, required=True)
     args = parser.parse_args()
@@ -434,6 +502,7 @@ def main() -> int:
         args.result,
         args.control_result,
         args.source_commit,
+        args.release_tag,
     )
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_html.parent.mkdir(parents=True, exist_ok=True)
