@@ -149,7 +149,19 @@ class MemoryBenchmarkProvenanceTest(unittest.TestCase):
                 check=True,
             )
             subprocess.run(
-                ["git", "tag", "-m", "test", "v-test"], cwd=root, check=True
+                [
+                    "git",
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.com",
+                    "tag",
+                    "-m",
+                    "test",
+                    "v-test",
+                ],
+                cwd=root,
+                check=True,
             )
             result = render_memory_benchmark.release_equivalence(
                 root, build_commit, "v-test"
