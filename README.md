@@ -58,39 +58,23 @@ role, reason, and retrieval signals. `--since` requires a Git worktree; omit it 
 
 ## Install
 
-Homebrew on macOS or Linux:
-
 ```bash
+# Homebrew on macOS or Linux
 brew install bvolpato/tap/ivygrep
-```
 
-Installer on macOS or Linux:
-
-```bash
+# Release installer on macOS or Linux
 curl -fsSL https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.sh | sh
 ```
 
-WinGet on Windows:
-
 ```powershell
+# WinGet on Windows
 winget install --id BrunoVolpato.ivygrep --exact
-```
 
-PowerShell installer on Windows:
-
-```powershell
+# Release installer on Windows
 irm https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.ps1 | iex
 ```
 
 Installers select a compatible archive, verify its SHA-256 checksum, install `ig`, and report the selected backend. Apple Silicon uses Metal. NVIDIA Linux hosts use the Linux x86_64 CUDA build when CUDA 13 and compute capability 8.0 or newer are available. Other systems use portable local inference. Run `ig hardware` to see detected hardware, compatibility limits, and the matching reinstall command.
-
-Verify the installation and search a project:
-
-```bash
-ig --version
-cd path/to/project
-ig "where is authentication handled?"
-```
 
 Build from source on macOS or Linux:
 
