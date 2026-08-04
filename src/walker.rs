@@ -19,6 +19,14 @@ pub fn source_walker(root: &Path, skip_gitignore: bool) -> WalkBuilder {
     walker.require_git(false);
     walker.follow_links(false);
     walker.filter_entry(|entry| entry.file_name() != ".git");
+    if !skip_gitignore && let Some(common_dir) = crate::workspace::git_common_dir(root) {
+        let exclude = common_dir.join("info/exclude");
+        let checkout_local_exclude = root.join(".git/info/exclude");
+        if exclude != checkout_local_exclude && exclude.is_file() {
+            walker.current_dir(root);
+            let _ = walker.add_ignore(exclude);
+        }
+    }
     walker
 }
 
