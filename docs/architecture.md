@@ -278,13 +278,19 @@ active jobs, stalled work, watcher health, and compaction recommendations.
 
 ### Daemon IPC
 
-Daemon uses a versioned JSON-line request envelope. Protocol version 5 supports
-version/status, indexing, hybrid search, literal and regex search, Web startup,
-workspace removal, restart, progress, and structured errors.
+Daemon uses a versioned JSON-line request envelope. Protocol version 6 adds
+request IDs and explicit cancellation for hybrid, literal, and regex searches.
+Cancellation also removes queued searches from daemon CPU backpressure. Existing
+requests cover version/status, indexing, Web startup, workspace removal, restart,
+progress, and structured errors.
+
+Cancellation acknowledgements for active searches are sent after registered work
+has stopped. Pre-registration cancellations use bounded tombstones so reordered
+IPC connections cannot revive stale searches.
 
 `warnings` on search results is additive and omitted when empty, preserving
-version-5 compatibility. Unsupported protocol versions and stale daemon build
-versions fail explicitly.
+compatibility with older response readers. Unsupported protocol versions and
+stale daemon build versions fail explicitly.
 
 Unix uses a mode-`0600` local socket plus peer-UID checks. Windows uses a
 loopback TCP endpoint protected by a per-daemon token. Request sizes and active
