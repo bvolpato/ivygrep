@@ -40,6 +40,8 @@ use crate::workspace::{Workspace, WorkspaceIndexState, WorkspaceScope, list_work
 const WATCH_SINGLE_EVENT_QUIET_PERIOD: Duration = Duration::from_millis(250);
 const WATCH_BURST_QUIET_PERIOD: Duration = Duration::from_millis(750);
 const WATCH_MAX_DEBOUNCE: Duration = Duration::from_secs(30);
+const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const DAEMON_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_DAEMON_LOG_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_DAEMON_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_QUERY_CACHE_ENTRIES: usize = 128;
@@ -2736,13 +2738,19 @@ async fn ensure_compatible_daemon() {
         return;
     }
 
-    let compatible = matches!(
-        request_unchecked::<fn(String, usize, usize)>(&DaemonRequest::Version, false, None).await,
+    match request_unchecked::<fn(String, usize, usize)>(&DaemonRequest::Version, false, None).await
+    {
         Ok(Some(DaemonResponse::Version { version }))
-            if version.as_deref() == Some(BUILD_VERSION)
-    );
-    if !compatible {
-        restart_daemon_process().await;
+            if version.as_deref() == Some(BUILD_VERSION) => {}
+        Ok(Some(_)) => restart_daemon_process().await,
+        // A bounded transport probe can fail while a live daemon is overloaded.
+        // A response decoding failure means the endpoint speaks an incompatible
+        // protocol and must follow the existing restart path.
+        Ok(None) => {}
+        Err(err) => {
+            warn!("daemon compatibility response was invalid: {err:#}");
+            restart_daemon_process().await;
+        }
     }
 }
 
@@ -2754,9 +2762,132 @@ pub(crate) async fn restart_daemon_process() {
         let _ = crate::ipc::terminate_recorded_daemon(std::time::Duration::from_secs(2));
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    if crate::ipc::socket_exists() {
-        crate::ipc::cleanup_socket();
+    if crate::ipc::socket_exists()
+        && let Err(err) = crate::ipc::cleanup_stale_socket()
+    {
+        warn!("failed to inspect stale daemon endpoint after restart: {err:#}");
     }
+}
+
+enum DaemonConnectFailure {
+    TimedOut,
+    Io(std::io::Error),
+}
+
+async fn connect_with_timeout<F>(
+    connect: F,
+    timeout: Duration,
+) -> std::result::Result<crate::ipc::IpcStream, DaemonConnectFailure>
+where
+    F: std::future::Future<Output = std::io::Result<crate::ipc::IpcStream>>,
+{
+    match tokio::time::timeout(timeout, connect).await {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(err)) => Err(DaemonConnectFailure::Io(err)),
+        Err(_) => Err(DaemonConnectFailure::TimedOut),
+    }
+}
+
+fn recover_stale_daemon_endpoint() -> bool {
+    match crate::ipc::cleanup_stale_socket() {
+        Ok(cleaned) => cleaned,
+        Err(err) => {
+            warn!("failed to inspect stale daemon endpoint: {err:#}");
+            false
+        }
+    }
+}
+
+async fn spawn_daemon_if_missing(request: &DaemonRequest, autospawn: bool) {
+    if !autospawn
+        || crate::ipc::socket_exists()
+        || std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_some()
+    {
+        return;
+    }
+
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    if !is_ig_executable(&exe) {
+        return;
+    }
+
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--daemon");
+    if matches!(request, DaemonRequest::ServeWeb { .. }) {
+        cmd.env("IVYGREP_SKIP_WATCHER_RESTORE", "1");
+    }
+
+    // Redirect daemon I/O to a log file to keep the CLI terminal clean.
+    if let Ok(mut log_file) = open_daemon_log_file() {
+        let _ = writeln!(log_file, "{} spawning daemon", daemon_timestamp());
+        let log_stderr = log_file.try_clone();
+        cmd.stdout(std::process::Stdio::from(log_file));
+        if let Ok(stderr_file) = log_stderr {
+            cmd.stderr(std::process::Stdio::from(stderr_file));
+        } else {
+            cmd.stderr(std::process::Stdio::null());
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::nice(5);
+                Ok(())
+            });
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let _ = cmd.spawn();
+    // Poll for socket readiness (up to 2s).
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if crate::ipc::socket_exists() {
+            break;
+        }
+    }
+}
+
+async fn connect_to_daemon(
+    request: &DaemonRequest,
+    autospawn: bool,
+) -> Option<crate::ipc::IpcStream> {
+    // At most one stale-endpoint recovery and one retry. Every connection
+    // attempt has the same bound, including the first probe.
+    for attempt in 0..2 {
+        spawn_daemon_if_missing(request, autospawn).await;
+        if !crate::ipc::socket_exists() {
+            return None;
+        }
+
+        match connect_with_timeout(crate::ipc::connect(), DAEMON_CONNECT_TIMEOUT).await {
+            Ok(stream) => return Some(stream),
+            Err(DaemonConnectFailure::Io(err)) => {
+                warn!("daemon connection failed: {err}");
+            }
+            Err(DaemonConnectFailure::TimedOut) => {
+                warn!("daemon connection timed out");
+            }
+        }
+
+        if attempt > 0 || !recover_stale_daemon_endpoint() {
+            return None;
+        }
+    }
+
+    None
 }
 
 async fn request_unchecked<F>(
@@ -2767,84 +2898,8 @@ async fn request_unchecked<F>(
 where
     F: FnMut(String, usize, usize) + Send,
 {
-    if crate::ipc::socket_exists() && crate::ipc::connect().await.is_err() {
-        crate::ipc::cleanup_socket();
-    }
-
-    // Auto-spawn the daemon if it isn't running.
-    // Skip when IVYGREP_NO_AUTOSPAWN is set (for tests and CI).
-    if autospawn
-        && !crate::ipc::socket_exists()
-        && std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
-        && let Ok(exe) = std::env::current_exe()
-        && is_ig_executable(&exe)
-    {
-        let mut cmd = std::process::Command::new(exe);
-        cmd.arg("--daemon");
-        if matches!(request, DaemonRequest::ServeWeb { .. }) {
-            cmd.env("IVYGREP_SKIP_WATCHER_RESTORE", "1");
-        }
-
-        // Redirect daemon I/O to a log file to keep the CLI terminal clean.
-        if let Ok(mut log_file) = open_daemon_log_file() {
-            let _ = writeln!(log_file, "{} spawning daemon", daemon_timestamp());
-            let log_stderr = log_file.try_clone();
-            cmd.stdout(std::process::Stdio::from(log_file));
-            if let Ok(stderr_file) = log_stderr {
-                cmd.stderr(std::process::Stdio::from(stderr_file));
-            } else {
-                cmd.stderr(std::process::Stdio::null());
-            }
-        }
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
-            unsafe {
-                cmd.pre_exec(|| {
-                    libc::nice(5);
-                    Ok(())
-                });
-            }
-        }
-
-        #[cfg(not(unix))]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-
-        let _ = cmd.spawn();
-        // Poll for socket readiness (up to 2s)
-        for _ in 0..20 {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            if crate::ipc::socket_exists() {
-                break;
-            }
-        }
-    }
-
-    if !crate::ipc::socket_exists() {
+    let Some(mut stream) = connect_to_daemon(request, autospawn).await else {
         return Ok(None);
-    }
-
-    // Timeout on connect — if the daemon is a zombie stuck in kernel sleep,
-    // the connect() will hang. Don't let the CLI join the zombie pile.
-    let mut stream = match tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        crate::ipc::connect(),
-    )
-    .await
-    {
-        Ok(Ok(stream)) => stream,
-        _ => {
-            // Connect timed out or failed — daemon is dead or zombie.
-            // Remove the stale socket so we don't try again.
-            crate::ipc::cleanup_socket();
-            return Ok(None);
-        }
     };
 
     let payload = serde_json::to_vec(&DaemonRequestEnvelope::new(request.clone()))?;
@@ -2853,16 +2908,24 @@ where
     }
     // Timeout writes too — a zombie daemon may accept the connection
     // but never read from it, causing writes to eventually block.
-    if tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    match tokio::time::timeout(DAEMON_WRITE_TIMEOUT, async {
         stream.write_all(&payload).await?;
         stream.write_all(b"\n").await?;
         Ok::<_, anyhow::Error>(())
     })
     .await
-    .is_err()
     {
-        crate::ipc::cleanup_socket();
-        return Ok(None);
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            warn!("daemon request write failed: {err:#}");
+            recover_stale_daemon_endpoint();
+            return Ok(None);
+        }
+        Err(_) => {
+            warn!("daemon request write timed out");
+            recover_stale_daemon_endpoint();
+            return Ok(None);
+        }
     }
 
     let mut reader = BufReader::new(stream);
@@ -3625,6 +3688,50 @@ mod tests {
         assert!(!is_ig_executable(Path::new("/usr/local/bin/ivygrep")));
     }
 
+    #[tokio::test]
+    #[serial]
+    async fn daemon_connection_failure_preserves_endpoint_owned_by_live_daemon() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        crate::config::ensure_app_dirs().unwrap();
+
+        let daemon_lock = crate::ipc::acquire_daemon_lock()
+            .unwrap()
+            .expect("test should acquire daemon lock");
+        let endpoint = crate::ipc::socket_path().unwrap();
+        std::fs::write(&endpoint, b"not a daemon endpoint").unwrap();
+
+        let response =
+            request_unchecked::<fn(String, usize, usize)>(&DaemonRequest::Status, false, None)
+                .await
+                .unwrap();
+
+        assert!(response.is_none());
+        assert!(
+            endpoint.exists(),
+            "client must not unlink an endpoint while daemon lock is held"
+        );
+
+        drop(daemon_lock);
+        crate::ipc::cleanup_socket();
+    }
+
+    #[tokio::test]
+    async fn daemon_connect_attempt_is_bounded() {
+        let started = std::time::Instant::now();
+        let result = connect_with_timeout(
+            std::future::pending::<std::io::Result<crate::ipc::IpcStream>>(),
+            Duration::from_millis(20),
+        )
+        .await;
+
+        assert!(matches!(result, Err(DaemonConnectFailure::TimedOut)));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "stalled connection must respect timeout"
+        );
+    }
+
     #[test]
     fn daemon_rejects_malformed_and_mismatched_protocol_requests() {
         let malformed = parse_daemon_request(b"{not-json}\n").unwrap_err();
@@ -3773,6 +3880,58 @@ mod tests {
                 reader
                     .get_mut()
                     .write_all(format!("{}\n", responses[request_types.len() - 1]).as_bytes())
+                    .await
+                    .unwrap();
+            }
+            crate::ipc::cleanup_socket();
+            request_types
+        });
+
+        let response = request::<fn(String, usize, usize)>(
+            &DaemonRequest::Remove {
+                path: home.path().join("workspace"),
+            },
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(response.is_none());
+        assert_eq!(server.await.unwrap(), ["version", "restart"]);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn non_status_request_restarts_daemon_after_invalid_version_response() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        crate::config::ensure_app_dirs().unwrap();
+
+        let (listener, _) = crate::ipc::bind().await.unwrap();
+        let server = tokio::spawn(async move {
+            let mut request_types = Vec::new();
+            let responses = [
+                "{\"type\":\"version\",\"version\":42}\n",
+                "{\"type\":\"ack\",\"message\":\"restarting\"}\n",
+            ];
+            while request_types.len() < responses.len() {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                if line.is_empty() {
+                    continue;
+                }
+                request_types.push(
+                    serde_json::from_str::<serde_json::Value>(&line).unwrap()["type"]
+                        .as_str()
+                        .unwrap()
+                        .to_string(),
+                );
+                reader
+                    .get_mut()
+                    .write_all(responses[request_types.len() - 1].as_bytes())
                     .await
                     .unwrap();
             }

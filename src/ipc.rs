@@ -4,6 +4,23 @@ pub use unix::*;
 #[cfg(not(unix))]
 pub use windows::*;
 
+fn open_daemon_lock() -> anyhow::Result<std::fs::File> {
+    let path = crate::config::app_home()?.join("daemon.lock");
+    Ok(std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        // The lock file is a pure flock anchor; never truncate its contents.
+        .truncate(false)
+        .open(&path)?)
+}
+
+fn is_lock_contended(error: &std::io::Error) -> bool {
+    let fs2_raw_error = fs2::lock_contended_error().raw_os_error();
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || (fs2_raw_error.is_some() && error.raw_os_error() == fs2_raw_error)
+}
+
 /// Acquire the daemon single-instance lock for this app home.
 ///
 /// Returns `Some(file)` when the lock is acquired — the caller must hold the
@@ -17,24 +34,36 @@ pub use windows::*;
 /// the restart handover (while the outgoing daemon is still exiting) can take
 /// over instead of giving up.
 pub fn acquire_daemon_lock() -> anyhow::Result<Option<std::fs::File>> {
-    let path = crate::config::app_home()?.join("daemon.lock");
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        // The lock file is a pure flock anchor; never truncate its contents.
-        .truncate(false)
-        .open(&path)?;
+    let file = open_daemon_lock()?;
     for _ in 0..20 {
         match fs2::FileExt::try_lock_exclusive(&file) {
             Ok(()) => return Ok(Some(file)),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(e) if is_lock_contended(&e) => {
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
             Err(e) => return Err(e.into()),
         }
     }
     Ok(None)
+}
+
+/// Remove a stale daemon endpoint only after proving no daemon owns the
+/// single-instance lock. Returns `false` when a live daemon still owns it.
+pub fn cleanup_stale_socket() -> anyhow::Result<bool> {
+    let file = open_daemon_lock()?;
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => {
+            let path = socket_path()?;
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(err.into()),
+            }
+            Ok(true)
+        }
+        Err(err) if is_lock_contended(&err) => Ok(false),
+        Err(err) => Err(err.into()),
+    }
 }
 
 pub struct DaemonPidGuard {
@@ -298,6 +327,12 @@ mod windows {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn platform_lock_contention_error_is_recognized() {
+        assert!(is_lock_contended(&fs2::lock_contended_error()));
+        assert!(!is_lock_contended(&std::io::Error::other("unrelated")));
+    }
     use serial_test::serial;
 
     #[tokio::test]
@@ -357,5 +392,29 @@ mod tests {
         }
 
         assert!(!daemon_pid_path().unwrap().exists());
+    }
+
+    #[test]
+    #[serial]
+    fn stale_socket_cleanup_requires_daemon_lock_ownership() {
+        let tmp = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", tmp.path()) };
+        crate::config::ensure_app_dirs().unwrap();
+
+        let daemon_lock = acquire_daemon_lock()
+            .unwrap()
+            .expect("test should acquire daemon lock");
+        let endpoint = socket_path().unwrap();
+        std::fs::write(&endpoint, b"stale endpoint").unwrap();
+
+        assert!(!cleanup_stale_socket().unwrap());
+        assert!(endpoint.exists(), "held daemon endpoint must be preserved");
+
+        drop(daemon_lock);
+        assert!(cleanup_stale_socket().unwrap());
+        assert!(
+            !endpoint.exists(),
+            "unowned stale endpoint should be removed"
+        );
     }
 }
