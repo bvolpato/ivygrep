@@ -4,20 +4,32 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.2.8] - 2026-08-04
+
 ### Fixed
 - Multi-workspace search now returns valid hits with explicit warnings when one workspace fails, and returns an error when every selected workspace fails.
 - Corrupt, truncated, or oversized compressed chunk text now returns a contextual error instead of being rendered as source.
+- Index repair now holds the workspace lock, preserves bare-worktree scope, aborts snapshot publication after ingestion failures, and removes stale vectors and tombstones when an index becomes empty.
+- Watchers now reconcile repository exclude changes, retain tracked files under ignored directory names, and surface backend failures.
+- Search options now preserve all-index scope from subdirectories, apply type and context filters to regex results, reject overflowing limits, and honor local ignore-policy resets.
+- External URL and editor launches now preserve arguments without shell interpretation on every platform.
+- Daemon recovery now bounds every connection attempt and handles incompatible responses without waiting for the full recovery timeout.
+- Learned reranker previews now truncate long Unicode text only at valid UTF-8 boundaries.
+- TUI search cancellation now propagates through daemon queues and active retrieval work, prevents stale result publication, and drains superseded searches without holding the terminal.
 
 ### Testing
 - Local E2E now covers CLI procedures, daemon equivalence, MCP errors, and a Playwright search-to-file-viewer flow. Neural and cached-model acceptance force neural retrieval and require `neural_executed: true`.
 - Release acceptance checks exact installer inputs and exercises CUDA archives through their neural backend or an explicit CPU fallback when no GPU is present.
+
+### Security
+- Patched PostCSS and nanoid in the Web lockfile and added weekly npm dependency monitoring.
 
 ### Maintenance
 - Search execution, fusion, routing, presentation, and workspace aggregation now have focused modules. Index compression, Git state, resource policy, staging, and storage are separated behind the existing indexer API; Web API, rendering, viewer, and UI helpers are split from the application entry point.
 
 ### Documentation
 - Added a source-oriented architecture guide covering index commit order, storage, retrieval, context packs, worktree overlays, protocols, security boundaries, and module ownership.
-- Public benchmark pages now pin current-release binary provenance, distinguish historical retrieval matrices, and state synthetic-corpus and dataset-license limits. WinGet v1.2.6 is live; v1.2.7 and crates.io publication remain unavailable.
+- Public benchmark pages now pin latest-measured-release binary provenance, distinguish historical retrieval matrices, and state synthetic-corpus and dataset-license limits. WinGet v1.2.6 is live; v1.2.7 and crates.io publication remain unavailable.
 
 ## [1.2.7] - 2026-07-26
 

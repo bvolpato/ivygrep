@@ -53,7 +53,7 @@
     {
       "id": "million-scale-current",
       "kind": "scale",
-      "label": "Current-release million-chunk confirmation",
+      "label": "Latest measured release million-chunk confirmation",
       "path": "docs/benchmarks/public-million-current.json",
       "publication_commit": "c9397f620e4fc9eaa8fd557e71b0df69ba8975fe"
     },
