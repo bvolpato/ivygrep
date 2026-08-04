@@ -51,6 +51,8 @@ use presentation::{
 use presentation::{find_focus_line, line_at};
 
 pub(crate) const DEFAULT_SEARCH_LIMIT: usize = 50;
+pub const MAX_SEARCH_CONTEXT_LINES: usize = 100;
+pub const MAX_SEARCH_RESULT_LIMIT: usize = 1_000;
 
 #[derive(Debug, Clone)]
 pub struct RawIndexedChunk {
@@ -159,6 +161,20 @@ impl Default for SearchOptions {
 }
 
 impl SearchOptions {
+    pub fn bounded_limit(&self) -> Option<usize> {
+        self.limit.map(|limit| {
+            if limit == usize::MAX {
+                usize::MAX
+            } else {
+                limit.min(MAX_SEARCH_RESULT_LIMIT)
+            }
+        })
+    }
+
+    pub fn bounded_context(&self) -> usize {
+        self.context.min(MAX_SEARCH_CONTEXT_LINES)
+    }
+
     /// Returns `true` when the caller has requested cancellation.
     pub fn is_cancelled(&self) -> bool {
         self.cancel_token
@@ -612,13 +628,20 @@ fn representative_chunk_score(chunk: &IndexedChunk, task_terms: &HashSet<String>
     let path = chunk.file_path.to_string_lossy().to_ascii_lowercase();
     let term_score = task_terms
         .iter()
-        .map(|term| usize::from(text.contains(term)) * 8 + usize::from(path.contains(term)) * 5)
-        .sum::<usize>();
+        .map(|term| {
+            usize::from(text.contains(term))
+                .saturating_mul(8)
+                .saturating_add(usize::from(path.contains(term)).saturating_mul(5))
+        })
+        .fold(0usize, usize::saturating_add);
     let kind_score = usize::from(matches!(
         chunk.kind.as_str(),
         "Function" | "Class" | "Module" | "Struct" | "Trait" | "Interface" | "Enum"
-    )) * 3;
-    term_score + kind_score + usize::from(chunk.start_line <= 20)
+    ))
+    .saturating_mul(3);
+    term_score
+        .saturating_add(kind_score)
+        .saturating_add(usize::from(chunk.start_line <= 20))
 }
 
 /// Fast index-backed literal text search.
@@ -648,12 +671,13 @@ pub fn literal_search_with_context(
     if query.is_empty() {
         return Ok(vec![]);
     }
-    if options.limit == Some(0) {
+    if options.bounded_limit() == Some(0) {
         return Ok(vec![]);
     }
 
     let query_lower = query.to_ascii_lowercase();
-    let max_hits = options.limit.unwrap_or(500);
+    let max_hits = options.bounded_limit().unwrap_or(500);
+    let context = options.bounded_context();
     let runs = substring_candidate_runs(query);
     let hits = if runs.is_empty() {
         literal_search_walk(workspace, &query_lower, options, max_hits)?
@@ -661,7 +685,7 @@ pub fn literal_search_with_context(
         let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
         match substring_candidate_files(workspace, ctx, &runs, options, &path_matcher)? {
             Some(candidate_paths) => {
-                literal_search_paths(&query_lower, options.context, max_hits, &candidate_paths)?
+                literal_search_paths(&query_lower, context, max_hits, &candidate_paths)?
             }
             None => literal_search_walk(workspace, &query_lower, options, max_hits)?,
         }
@@ -704,7 +728,7 @@ fn literal_search_walk(
         paths.push((rel_path.to_path_buf(), path.to_path_buf()));
     }
 
-    literal_search_paths(query_lower, options.context, max_hits, &paths)
+    literal_search_paths(query_lower, options.bounded_context(), max_hits, &paths)
 }
 
 fn literal_search_paths(
@@ -725,7 +749,7 @@ fn literal_search_paths(
                 .enumerate()
                 .filter(|(_, line)| line.to_ascii_lowercase().contains(query_lower))
                 .map(|(index, line)| {
-                    let line_number = index + 1;
+                    let line_number = index.saturating_add(1);
                     let (start_line, end_line) = snippet_bounds(line_number, context, lines.len());
                     SearchHit {
                         file_path: rel_path.clone(),
@@ -868,11 +892,11 @@ fn collect_literal_candidates(
             .map(|searcher| searcher.num_docs() as usize)
             .sum::<usize>()
             .max(1)
-    } else if let Some(limit) = options.limit {
+    } else if let Some(limit) = options.bounded_limit() {
         if limit == usize::MAX {
             50_000
         } else {
-            (limit * 5).clamp(200, 25_000)
+            limit.saturating_mul(5).clamp(200, 25_000)
         }
     } else {
         250
@@ -880,7 +904,7 @@ fn collect_literal_candidates(
     let target_hits = if unbounded {
         candidate_limit
     } else {
-        options.limit.unwrap_or(100).min(candidate_limit)
+        options.bounded_limit().unwrap_or(100).min(candidate_limit)
     };
     let candidate_queries = build_lexical_queries(query);
     let matcher = LiteralMatcher::from_queries(
@@ -1107,7 +1131,7 @@ fn literal_candidate_query(
         indexed_fields.push((field, IndexRecordOption::Basic));
     }
 
-    let mut variants = Vec::with_capacity(terms.len() + 1);
+    let mut variants = Vec::with_capacity(terms.len().saturating_add(1));
     variants.push((0..terms.len()).collect::<Vec<_>>());
     if relaxed {
         if terms.len() == 2 {
@@ -1155,7 +1179,7 @@ pub(crate) fn substring_candidate_query(
                 continue;
             }
             previous = Some(offset);
-            let trigram = run.get(offset..offset + 3)?;
+            let trigram = run.get(offset..offset.saturating_add(3))?;
             clauses.push((
                 Occur::Must,
                 Box::new(TermQuery::new(
@@ -1877,7 +1901,10 @@ fn lexical_query_candidate_limits(total: usize, query_count: usize) -> Vec<usize
             let remainder = expansion_total % expansion_count;
 
             std::iter::once(primary)
-                .chain((0..expansion_count).map(|index| base + usize::from(index < remainder)))
+                .chain(
+                    (0..expansion_count)
+                        .map(|index| base.saturating_add(usize::from(index < remainder))),
+                )
                 .collect()
         }
     }
@@ -2701,7 +2728,7 @@ fn collect_semantic_candidates(
             .map(tantivy::Searcher::num_docs)
             .sum::<u64>();
         let multiplier = broad_filter_ann_multiplier(total_docs);
-        (candidate_limit * multiplier).min(20_000)
+        candidate_limit.saturating_mul(multiplier).min(20_000)
     } else {
         candidate_limit
     };
@@ -2737,8 +2764,9 @@ fn collect_semantic_candidates(
     }
 
     if has_filters && semantic_chunks.len() < candidate_limit && ann_limit < 20_000 {
-        let fallback_limit = (candidate_limit * MAX_FILTERED_ANN_MULTIPLIER)
-            .max(ann_limit * 2)
+        let fallback_limit = candidate_limit
+            .saturating_mul(MAX_FILTERED_ANN_MULTIPLIER)
+            .max(ann_limit.saturating_mul(2))
             .min(20_000);
         if fallback_limit > ann_limit {
             let fallback_matches = collect_semantic_vector_matches(
@@ -2954,7 +2982,7 @@ fn score_filtered_semantic_candidates(
         .iter()
         .map(|chunk| chunk.vector_key)
         .collect::<Vec<_>>();
-    let mut scores = HashMap::<u64, f32>::with_capacity(candidate_limit * 2);
+    let mut scores = HashMap::<u64, f32>::with_capacity(candidate_limit.saturating_mul(2));
     for store in [primary_store, base_store].into_iter().flatten() {
         for vector_match in store.score_many_top_k(&keys, query_vector, candidate_limit) {
             scores
@@ -3759,7 +3787,7 @@ impl ChunkBoostContext {
             .and_then(|s| s.to_str())
             .map(|s| s.to_ascii_lowercase());
 
-        let mut offset = 0;
+        let mut offset = 0usize;
         let first_line_range = text_lower.split_inclusive('\n').find_map(|line| {
             let line_without_newline = line.strip_suffix('\n').unwrap_or(line);
             let line_without_newline = line_without_newline
@@ -3768,8 +3796,8 @@ impl ChunkBoostContext {
             let trimmed = line_without_newline.trim();
             let range =
                 (!trimmed.is_empty() && !trimmed.starts_with("//") && !trimmed.starts_with('#'))
-                    .then_some(offset..offset + line_without_newline.len());
-            offset += line.len();
+                    .then_some(offset..offset.saturating_add(line_without_newline.len()));
+            offset = offset.saturating_add(line.len());
             range
         });
 
@@ -3838,7 +3866,7 @@ fn code_term_matches(left: &str, right: &str) -> bool {
         .take_while(|(left, right)| left == right)
         .count();
     let shorter = left.len().min(right.len());
-    common >= 5 && common * 3 >= shorter * 2
+    common >= 5 && common.saturating_mul(3) >= shorter.saturating_mul(2)
 }
 
 /// Massive boost when the full query appears as a path segment (directory or
@@ -4379,6 +4407,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn snippet_bounds_saturate_extreme_context() {
+        assert_eq!(snippet_bounds(1, usize::MAX, 3), (1, 3));
+        assert_eq!(snippet_bounds(usize::MAX, usize::MAX, 3), (1, 3));
+    }
+
+    #[test]
+    fn explicit_limits_are_bounded_without_changing_no_limit_sentinel() {
+        let mut options = SearchOptions {
+            limit: Some(MAX_SEARCH_RESULT_LIMIT + 1),
+            ..Default::default()
+        };
+        assert_eq!(options.bounded_limit(), Some(MAX_SEARCH_RESULT_LIMIT));
+        options.limit = Some(usize::MAX);
+        assert_eq!(options.bounded_limit(), Some(usize::MAX));
+    }
+
+    #[test]
     fn query_routing_covers_search_intents_without_corpus_rules() {
         let cases = [
             ("parse_request", QueryIntent::ExactIdentifier, false),
@@ -4913,6 +4958,34 @@ mod tests {
                 .any(|hit| hit.sources.iter().any(|source| source == "semantic")),
             "hash vector search should contribute before neural vectors exist"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn hybrid_search_bounds_near_maximum_explicit_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            tmp.path().join("limits.rs"),
+            "pub fn overflow_boundary_marker() {}\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = hybrid_search(
+            &workspace,
+            "overflow_boundary_marker",
+            Some(&model),
+            &SearchOptions {
+                limit: Some(usize::MAX - 1),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!hits.is_empty());
     }
 
     #[test]

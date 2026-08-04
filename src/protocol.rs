@@ -75,6 +75,10 @@ pub enum DaemonRequest {
         pattern: String,
         limit: Option<usize>,
         #[serde(default)]
+        context: usize,
+        #[serde(default)]
+        type_filter: Option<String>,
+        #[serde(default)]
         include_globs: Vec<String>,
         #[serde(default)]
         exclude_globs: Vec<String>,
@@ -219,6 +223,30 @@ pub fn group_hits_by_file(hits: &[SearchHit], limit: Option<usize>) -> Vec<FileS
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_regex_request_defaults_new_search_options() {
+        let request: DaemonRequest = serde_json::from_value(serde_json::json!({
+            "type": "regex_search",
+            "path": null,
+            "pattern": "marker",
+            "limit": 10,
+            "include_globs": [],
+            "exclude_globs": [],
+            "scope_path": null
+        }))
+        .unwrap();
+        let DaemonRequest::RegexSearch {
+            context,
+            type_filter,
+            ..
+        } = request
+        else {
+            panic!("expected regex request");
+        };
+        assert_eq!(context, 0);
+        assert!(type_filter.is_none());
+    }
 
     fn hit(file: &str, score: f32, line: usize) -> SearchHit {
         SearchHit {

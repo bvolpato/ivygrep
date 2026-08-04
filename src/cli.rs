@@ -16,15 +16,40 @@ use crate::mcp;
 use crate::protocol::{
     BUILD_VERSION, DaemonRequest, DaemonResponse, SearchHit, group_hits_by_file,
 };
-use crate::regex_search::regex_search;
+use crate::regex_search::{expand_regex_context_absolute, regex_search_with_options};
 use crate::search::{
-    SearchOptions, hybrid_search, literal_search, validate_forced_neural_workspaces,
+    MAX_SEARCH_CONTEXT_LINES, MAX_SEARCH_RESULT_LIMIT, SearchOptions, hybrid_search,
+    literal_search, validate_forced_neural_workspaces,
 };
 use crate::search_service::{HitOrdering, SearchBatch, select_search_workspaces};
 use crate::workspace::{
     Workspace, WorkspaceIndexState, list_workspace_roots, list_workspaces,
     resolve_workspace_and_scope,
 };
+
+fn parse_context_lines(value: &str) -> std::result::Result<usize, String> {
+    let value = value
+        .parse::<usize>()
+        .map_err(|_| "context must be an integer".to_string())?;
+    if value > MAX_SEARCH_CONTEXT_LINES {
+        return Err(format!(
+            "context must be between 0 and {MAX_SEARCH_CONTEXT_LINES}"
+        ));
+    }
+    Ok(value)
+}
+
+fn parse_result_limit(value: &str) -> std::result::Result<usize, String> {
+    let value = value
+        .parse::<usize>()
+        .map_err(|_| "limit must be an integer".to_string())?;
+    if !(1..=MAX_SEARCH_RESULT_LIMIT).contains(&value) {
+        return Err(format!(
+            "limit must be between 1 and {MAX_SEARCH_RESULT_LIMIT}"
+        ));
+    }
+    Ok(value)
+}
 
 #[derive(Parser, Debug, Clone)]
 #[command(
@@ -129,7 +154,13 @@ pub struct Cli {
 
     /// Lines before and after the focused match to include in each snippet.
     /// This changes output size, not retrieval ranking.
-    #[arg(short = 'C', long, value_name = "LINES", default_value_t = 2)]
+    #[arg(
+        short = 'C',
+        long,
+        value_name = "LINES",
+        default_value_t = 2,
+        value_parser = parse_context_lines
+    )]
     pub context: usize,
 
     #[arg(
@@ -152,7 +183,12 @@ pub struct Cli {
 
     /// Retrieval breadth and maximum ranked result files, not a token, line, or
     /// confidence limit. Larger values search deeper and may improve recall.
-    #[arg(short = 'n', long, value_name = "FILES")]
+    #[arg(
+        short = 'n',
+        long,
+        value_name = "FILES",
+        value_parser = parse_result_limit
+    )]
     pub limit: Option<usize>,
 
     /// Use maximum candidate budgets and return all surviving results. This can
@@ -1032,9 +1068,7 @@ async fn run_add(
                 index_generation: 0,
             });
     meta.watch_enabled = watch;
-    if skip_gitignore {
-        meta.skip_gitignore = true;
-    }
+    meta.skip_gitignore = skip_gitignore;
     workspace.ensure_dirs()?;
     workspace.write_metadata(&meta)?;
 
@@ -1239,7 +1273,10 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         Some(path) => path.clone(),
         None => env::current_dir()?,
     };
-    let (workspace, scope_filter) = resolve_workspace_and_scope(&query_path)?;
+    let (workspace, resolved_scope_filter) = resolve_workspace_and_scope(&query_path)?;
+    let scope_filter = (!cli.all_indices)
+        .then_some(resolved_scope_filter)
+        .flatten();
     let _ = workspace.cleanup_stale_legacy_runtime_files();
     let local_only_mode = cli.lexical_only || cli.symbol || cli.refs || cli.callers;
     let watch_configured =
@@ -1675,6 +1712,8 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             path: query_path_opt.clone(),
             pattern: query.to_string(),
             limit: backend_limit,
+            context: cli.context,
+            type_filter: cli.type_filter.clone(),
             include_globs: cli.include.clone(),
             exclude_globs: cli.exclude.clone(),
             scope_path: scope_path.clone(),
@@ -1810,11 +1849,15 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
             for ws in workspaces {
                 let _ = ws.cleanup_stale_legacy_runtime_files();
                 let _t_search = std::time::Instant::now();
+                let mut workspace_options = local_options.clone();
+                if cli.all_indices {
+                    workspace_options.scope_filter = None;
+                }
                 let result = search_workspace_with_optional_repair(
                     &ws,
                     cli.skip_gitignore,
                     !cli.all_indices,
-                    || hybrid_search(&ws, query, search_model.as_deref(), &local_options),
+                    || hybrid_search(&ws, query, search_model.as_deref(), &workspace_options),
                 );
                 batch.record(&ws.root, cli.all_indices, result);
             }
@@ -2104,11 +2147,15 @@ fn local_fallback_search(
     let mut batch = SearchBatch::new(workspace_set.warnings);
 
     for ws in workspaces {
+        let mut workspace_options = options.clone();
+        if all_indices {
+            workspace_options.scope_filter = None;
+        }
         let result = search_workspace_with_optional_repair(
             &ws,
             options.skip_gitignore,
             !all_indices,
-            || hybrid_search(&ws, query, model.as_deref(), options),
+            || hybrid_search(&ws, query, model.as_deref(), &workspace_options),
         );
         batch.record(&ws.root, all_indices, result);
     }
@@ -2209,11 +2256,15 @@ fn local_literal_search_hits(
     let mut batch = SearchBatch::new(workspace_set.warnings);
 
     for ws in workspace_set.workspaces {
+        let mut workspace_options = options.clone();
+        if all_indices {
+            workspace_options.scope_filter = None;
+        }
         let result = search_workspace_with_optional_repair(
             &ws,
             options.skip_gitignore,
             !all_indices,
-            || literal_search(&ws, query, options),
+            || literal_search(&ws, query, &workspace_options),
         );
         batch.record(&ws.root, all_indices, result);
     }
@@ -2230,25 +2281,24 @@ fn local_regex_search_hits(
     let mut batch = SearchBatch::new(workspace_set.warnings);
 
     for ws in workspace_set.workspaces {
+        let mut workspace_options = options.clone();
+        if all_indices {
+            workspace_options.scope_filter = None;
+            workspace_options.context = 0;
+        }
         let result = search_workspace_with_optional_repair(
             &ws,
             options.skip_gitignore,
             !all_indices,
-            || {
-                regex_search(
-                    &ws,
-                    query,
-                    options.limit,
-                    options.scope_filter.as_ref(),
-                    &options.include_globs,
-                    &options.exclude_globs,
-                    options.skip_gitignore,
-                )
-            },
+            || regex_search_with_options(&ws, query, &workspace_options),
         );
         batch.record(&ws.root, all_indices, result);
     }
-    finish_local_search(batch, options.limit, HitOrdering::Preserve)
+    let mut hits = finish_local_search(batch, options.limit, HitOrdering::Preserve)?;
+    if all_indices {
+        expand_regex_context_absolute(&mut hits, options.bounded_context());
+    }
+    Ok(hits)
 }
 
 fn is_single_word_symbol_query(query: &str) -> bool {
@@ -2333,7 +2383,7 @@ mod tests {
 
     use crate::embedding::create_hash_model;
     use crate::indexer::index_workspace;
-    use crate::workspace::WorkspaceMetadata;
+    use crate::workspace::{WorkspaceMetadata, WorkspaceScope};
 
     #[test]
     fn context_inherits_parent_lexical_only_flag() {
@@ -2495,5 +2545,140 @@ mod tests {
         assert!(should_route_hybrid_query_via_daemon(true, false));
         assert!(!should_route_hybrid_query_via_daemon(true, true));
         assert!(!should_route_hybrid_query_via_daemon(false, false));
+    }
+
+    #[test]
+    fn cli_rejects_unbounded_search_size_options() {
+        assert!(Cli::try_parse_from(["ig", "--context", "100", "needle"]).is_ok());
+        assert!(Cli::try_parse_from(["ig", "--context", "101", "needle"]).is_err());
+        assert!(Cli::try_parse_from(["ig", "--limit", "1", "needle"]).is_ok());
+        assert!(Cli::try_parse_from(["ig", "--limit", "0", "needle"]).is_err());
+        assert!(Cli::try_parse_from(["ig", "--limit", "1001", "needle"]).is_err());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn local_reindex_persists_skip_gitignore_false() {
+        let home = tempdir().unwrap();
+        unsafe {
+            std::env::set_var("IVYGREP_HOME", home.path());
+            std::env::set_var("IVYGREP_NO_AUTOSPAWN", "1");
+        }
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join(".gitignore"), "ignored.rs\n").unwrap();
+        std::fs::write(repo.path().join("ignored.rs"), "ignored_reindex_marker\n").unwrap();
+        std::fs::write(repo.path().join("visible.rs"), "visible_reindex_marker\n").unwrap();
+
+        run_add(repo.path(), false, true, true, true, true, false)
+            .await
+            .unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        assert!(workspace.read_metadata().unwrap().unwrap().skip_gitignore);
+        assert!(
+            !literal_search(
+                &workspace,
+                "ignored_reindex_marker",
+                &SearchOptions {
+                    skip_gitignore: true,
+                    ..Default::default()
+                }
+            )
+            .unwrap()
+            .is_empty()
+        );
+
+        run_add(repo.path(), false, true, false, true, true, false)
+            .await
+            .unwrap();
+        assert!(!workspace.read_metadata().unwrap().unwrap().skip_gitignore);
+        assert!(
+            literal_search(
+                &workspace,
+                "ignored_reindex_marker",
+                &SearchOptions::default()
+            )
+            .unwrap()
+            .is_empty()
+        );
+        assert!(
+            !literal_search(
+                &workspace,
+                "visible_reindex_marker",
+                &SearchOptions::default()
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn local_all_indices_clears_nested_scope_for_every_search_mode() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let first = tempdir().unwrap();
+        let second = tempdir().unwrap();
+        std::fs::create_dir_all(first.path().join("src")).unwrap();
+        std::fs::create_dir_all(second.path().join("other")).unwrap();
+        std::fs::write(
+            first.path().join("src/first.rs"),
+            "pub fn cross_workspace_marker() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            second.path().join("other/second.rs"),
+            "pub fn cross_workspace_marker() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            second.path().join("other/decoy.md"),
+            "cross_workspace_marker\n",
+        )
+        .unwrap();
+
+        let first_workspace = Workspace::resolve(first.path()).unwrap();
+        let second_workspace = Workspace::resolve(second.path()).unwrap();
+        let model = create_hash_model();
+        index_workspace(&first_workspace, model.as_ref()).unwrap();
+        index_workspace(&second_workspace, model.as_ref()).unwrap();
+        let options = SearchOptions {
+            include_globs: vec!["**/*.rs".to_string()],
+            scope_filter: Some(WorkspaceScope {
+                rel_path: PathBuf::from("src"),
+                is_file: false,
+            }),
+            ..Default::default()
+        };
+
+        let modes = [
+            local_literal_search_hits(&first_workspace, true, "cross_workspace_marker", &options)
+                .unwrap(),
+            local_regex_search_hits(&first_workspace, true, "cross_workspace_marker", &options)
+                .unwrap(),
+            local_fallback_search(
+                &first_workspace,
+                true,
+                "cross_workspace_marker",
+                &options,
+                true,
+            )
+            .unwrap(),
+        ];
+        for hits in modes {
+            let paths = hits
+                .iter()
+                .map(|hit| hit.file_path.clone())
+                .collect::<std::collections::HashSet<_>>();
+            let first_path = first.path().join("src/first.rs").canonicalize().unwrap();
+            let second_path = second
+                .path()
+                .join("other/second.rs")
+                .canonicalize()
+                .unwrap();
+            let decoy_path = second.path().join("other/decoy.md").canonicalize().unwrap();
+            assert!(paths.contains(&first_path), "{paths:?}");
+            assert!(paths.contains(&second_path), "{paths:?}");
+            assert!(!paths.contains(&decoy_path));
+        }
     }
 }

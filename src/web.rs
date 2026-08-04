@@ -576,6 +576,8 @@ fn build_search_request_for_path(
             path,
             pattern: query,
             limit,
+            context,
+            type_filter,
             include_globs,
             exclude_globs,
             scope_path,
@@ -1458,6 +1460,23 @@ mod tests {
         };
         assert_eq!(path, Some(PathBuf::from("/tmp/repo")));
         assert_eq!(query, "needle");
+    }
+
+    #[test]
+    fn regex_search_request_forwards_type_and_context() {
+        let (_, params) =
+            parse_target("/api/search?q=marker&mode=regex&type=markdown&context=7").unwrap();
+        let request = build_search_request(&params).unwrap();
+        let DaemonRequest::RegexSearch {
+            context,
+            type_filter,
+            ..
+        } = request
+        else {
+            panic!("expected regex search request");
+        };
+        assert_eq!(context, 7);
+        assert_eq!(type_filter.as_deref(), Some("markdown"));
     }
 
     #[test]
