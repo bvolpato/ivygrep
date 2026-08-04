@@ -78,34 +78,53 @@ fn syn_to_ratatui(style: SynStyle) -> Style {
     ))
 }
 
-fn resolve_editor() -> String {
-    std::env::var("EDITOR")
-        .or_else(|_| std::env::var("VISUAL"))
-        .unwrap_or_else(|_| "vim".to_string())
-}
-
 fn open_in_editor(
     file: &std::path::Path,
     line: usize,
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
 ) -> Result<()> {
-    let editor = resolve_editor();
+    let launch = crate::launcher::tui_editor_launch(file, line, None)?;
+    let program = launch.program.to_string_lossy().into_owned();
     disable_raw_mode()?;
-    stdout().execute(LeaveAlternateScreen)?;
+    if let Err(error) = stdout().execute(LeaveAlternateScreen) {
+        let restore = restore_terminal(terminal);
+        return match restore {
+            Ok(()) => Err(error.into()),
+            Err(restore) => bail!("failed to suspend terminal: {error}; {restore:#}"),
+        };
+    }
 
-    let result = std::process::Command::new(&editor)
-        .arg(format!("+{}", line))
-        .arg(file)
-        .status();
+    let launch_result = launch.status();
+    let restore_result = restore_terminal(terminal);
+    match (launch_result, restore_result) {
+        (Ok(status), Ok(())) if status.success() => Ok(()),
+        (Ok(status), Ok(())) => bail!("editor exited with {status}"),
+        (Err(error), Ok(())) => bail!("failed to launch {program}: {error}"),
+        (Ok(status), Err(restore)) if status.success() => Err(restore),
+        (Ok(status), Err(restore)) => {
+            bail!("editor exited with {status}; terminal restoration also failed: {restore:#}")
+        }
+        (Err(error), Err(restore)) => bail!(
+            "failed to launch {program}: {error}; terminal restoration also failed: {restore:#}"
+        ),
+    }
+}
 
-    stdout().execute(EnterAlternateScreen)?;
-    enable_raw_mode()?;
-    terminal.clear()?;
-
-    match result {
-        Ok(s) if !s.success() => bail!("editor exited with {s}"),
-        Err(e) => bail!("failed to launch {editor}: {e}"),
-        _ => Ok(()),
+fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
+    let mut errors = Vec::new();
+    if let Err(error) = stdout().execute(EnterAlternateScreen) {
+        errors.push(format!("alternate screen: {error}"));
+    }
+    if let Err(error) = enable_raw_mode() {
+        errors.push(format!("raw mode: {error}"));
+    }
+    if let Err(error) = terminal.clear() {
+        errors.push(format!("clear: {error}"));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        bail!("failed to restore terminal ({})", errors.join("; "))
     }
 }
 
@@ -1968,17 +1987,6 @@ mod tests {
             .filter(|(_, t)| t.elapsed() < FLASH_DURATION)
             .map(|(msg, _)| msg.as_str());
         assert_eq!(active, Some("hello"));
-    }
-
-    #[test]
-    fn resolve_editor_reads_env() {
-        let original = std::env::var("EDITOR").ok();
-        unsafe { std::env::set_var("EDITOR", "nano") };
-        assert_eq!(resolve_editor(), "nano");
-        match original {
-            Some(val) => unsafe { std::env::set_var("EDITOR", val) },
-            None => unsafe { std::env::remove_var("EDITOR") },
-        }
     }
 
     // ── Rendering Tests ─────────────────────────────────────────────────

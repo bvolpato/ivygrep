@@ -64,9 +64,8 @@ fn create_repo(root: &Path) {
 fn create_editor_stub(root: &Path) -> PathBuf {
     #[cfg(windows)]
     {
-        let path = root.join("editor.cmd");
-        std::fs::write(&path, "@echo off\r\nexit /b 0\r\n").unwrap();
-        path
+        let _ = root;
+        PathBuf::from(env!("CARGO_BIN_EXE_ig"))
     }
 
     #[cfg(not(windows))]
