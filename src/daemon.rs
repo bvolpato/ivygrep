@@ -26,7 +26,7 @@ use crate::protocol::{
     BUILD_VERSION, DAEMON_PROTOCOL_VERSION, DaemonRequest, DaemonRequestEnvelope, DaemonResponse,
     SearchHit, WorkspaceRuntimeStatus, group_hits_by_file,
 };
-use crate::regex_search::regex_search;
+use crate::regex_search::{expand_regex_context_absolute, regex_search_with_options};
 use crate::search::{
     DEFAULT_SEARCH_LIMIT, NeuralQueryVectorJob, SearchContext, SearchOptions,
     hybrid_search_with_context_and_neural_job, literal_search_with_context, query_uses_neural,
@@ -1456,6 +1456,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
         } => {
             let request_started = std::time::Instant::now();
             let state_clone = state.clone();
+            let all_indices = path.is_none();
 
             let workspace_set = if let Some(ref p) = path {
                 match state_clone.resolve_workspace(p) {
@@ -1484,17 +1485,18 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
 
             let options = SearchOptions {
                 limit,
-                context,
+                context: context.min(crate::search::MAX_SEARCH_CONTEXT_LINES),
                 type_filter,
                 include_globs,
                 exclude_globs,
-                scope_filter: scope_from_request(scope_path, scope_is_file),
+                scope_filter: (!all_indices)
+                    .then(|| scope_from_request(scope_path, scope_is_file))
+                    .flatten(),
                 skip_gitignore,
                 force_neural,
                 progress_tx: None,
                 cancel_token: None,
             };
-            let all_indices = path.is_none();
             tracing::trace!(
                 "daemon_search_resolve={:?} workspaces={}",
                 request_started.elapsed(),
@@ -1773,6 +1775,8 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             path,
             pattern,
             limit,
+            context,
+            type_filter,
             include_globs,
             exclude_globs,
             scope_path,
@@ -1804,31 +1808,44 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             let workspaces = workspace_set.workspaces;
             let workspace_warnings = workspace_set.warnings;
 
-            let scope_filter = scope_from_request(scope_path, scope_is_file);
             let all_indices = path.is_none();
+            let options = SearchOptions {
+                limit,
+                context: context.min(crate::search::MAX_SEARCH_CONTEXT_LINES),
+                type_filter,
+                include_globs,
+                exclude_globs,
+                scope_filter: (!all_indices)
+                    .then(|| scope_from_request(scope_path, scope_is_file))
+                    .flatten(),
+                skip_gitignore,
+                force_neural: false,
+                progress_tx: None,
+                cancel_token: None,
+            };
             // Bound concurrent heavy regex work (see #58).
             let permit = state.cpu_permits.clone().acquire_owned().await.ok();
             let result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
                 let mut batch = SearchBatch::new(workspace_warnings);
+                let mut workspace_options = options.clone();
+                if all_indices {
+                    workspace_options.context = 0;
+                }
                 for workspace in &workspaces {
                     let result =
                         ensure_queryable_workspace(workspace, skip_gitignore).and_then(|_| {
-                            regex_search(
-                                workspace,
-                                &pattern,
-                                limit,
-                                scope_filter.as_ref(),
-                                &include_globs,
-                                &exclude_globs,
-                                skip_gitignore,
-                            )
+                            regex_search_with_options(workspace, &pattern, &workspace_options)
                         });
                     batch.record(&workspace.root, all_indices, result);
                 }
-                batch
-                    .finish(limit, HitOrdering::Preserve)
-                    .map_err(|err| err.to_string())
+                let mut outcome = batch
+                    .finish(options.limit, HitOrdering::Preserve)
+                    .map_err(|err| err.to_string())?;
+                if all_indices {
+                    expand_regex_context_absolute(&mut outcome.hits, options.bounded_context());
+                }
+                Ok(outcome)
             })
             .await
             .unwrap_or_else(|join_err| {
@@ -1881,15 +1898,16 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             let workspaces = workspace_set.workspaces;
             let workspace_warnings = workspace_set.warnings;
 
-            let scope_filter = scope_from_request(scope_path, scope_is_file);
             let all_indices = path.is_none();
             let options = SearchOptions {
                 limit,
-                context,
+                context: context.min(crate::search::MAX_SEARCH_CONTEXT_LINES),
                 type_filter,
                 include_globs,
                 exclude_globs,
-                scope_filter,
+                scope_filter: (!all_indices)
+                    .then(|| scope_from_request(scope_path, scope_is_file))
+                    .flatten(),
                 skip_gitignore,
                 force_neural: false,
                 progress_tx: None,
@@ -4269,6 +4287,104 @@ mod tests {
             other => panic!("expected SearchResults, got {other:?}"),
         }
         assert!(broken_workspace.index_health().is_queryable());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn daemon_all_indices_clears_scope_for_every_search_mode() {
+        let home = tempdir().unwrap();
+        unsafe {
+            std::env::set_var("IVYGREP_HOME", home.path());
+            std::env::set_var("IVYGREP_NO_AUTOSPAWN", "1");
+        }
+        let first = tempdir().unwrap();
+        let second = tempdir().unwrap();
+        std::fs::create_dir_all(first.path().join("src")).unwrap();
+        std::fs::create_dir_all(second.path().join("other")).unwrap();
+        std::fs::write(
+            first.path().join("src/first.rs"),
+            "before\npub fn daemon_cross_workspace_marker() {}\nafter\n",
+        )
+        .unwrap();
+        std::fs::write(
+            second.path().join("other/second.rs"),
+            "before\npub fn daemon_cross_workspace_marker() {}\nafter\n",
+        )
+        .unwrap();
+        std::fs::write(
+            second.path().join("other/decoy.md"),
+            "before\ndaemon_cross_workspace_marker\nafter\n",
+        )
+        .unwrap();
+
+        let first_workspace = Workspace::resolve(first.path()).unwrap();
+        let second_workspace = Workspace::resolve(second.path()).unwrap();
+        let model = create_hash_model();
+        index_workspace(&first_workspace, model.as_ref()).unwrap();
+        index_workspace(&second_workspace, model.as_ref()).unwrap();
+
+        let common_scope = Some(PathBuf::from("src"));
+        let include = vec!["**/*.rs".to_string()];
+        let requests = [
+            DaemonRequest::LiteralSearch {
+                path: None,
+                query: "daemon_cross_workspace_marker".to_string(),
+                limit: Some(10),
+                context: 1,
+                type_filter: Some("rust".to_string()),
+                include_globs: include.clone(),
+                exclude_globs: Vec::new(),
+                scope_path: common_scope.clone(),
+                scope_is_file: false,
+                skip_gitignore: false,
+            },
+            DaemonRequest::RegexSearch {
+                path: None,
+                pattern: "daemon_cross_workspace_marker".to_string(),
+                limit: Some(10),
+                context: 1,
+                type_filter: Some("rust".to_string()),
+                include_globs: include.clone(),
+                exclude_globs: Vec::new(),
+                scope_path: common_scope.clone(),
+                scope_is_file: false,
+                skip_gitignore: false,
+            },
+            DaemonRequest::Search {
+                path: None,
+                query: "daemon_cross_workspace_marker".to_string(),
+                limit: Some(10),
+                context: 1,
+                type_filter: Some("rust".to_string()),
+                include_globs: include,
+                exclude_globs: Vec::new(),
+                scope_path: common_scope,
+                scope_is_file: false,
+                skip_gitignore: false,
+                force_neural: false,
+                disable_memory_expansion: true,
+            },
+        ];
+
+        for request in requests {
+            let response = handle_request(test_state(), request).await;
+            let DaemonResponse::SearchResults { hits, .. } = response else {
+                panic!("expected search results, got {response:?}");
+            };
+            let paths = hits
+                .iter()
+                .map(|hit| hit.file_path.clone())
+                .collect::<std::collections::HashSet<_>>();
+            assert!(
+                paths.contains(&first.path().join("src/first.rs")),
+                "{paths:?}"
+            );
+            assert!(
+                paths.contains(&second.path().join("other/second.rs")),
+                "{paths:?}"
+            );
+            assert!(!paths.contains(&second.path().join("other/decoy.md")));
+        }
     }
 
     #[test]

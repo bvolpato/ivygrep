@@ -270,7 +270,10 @@ pub fn build_context_bundle_with_options(
                 &mut candidates,
                 hit,
                 role,
-                format!("rank {} for {retrieval_label} retrieval", rank + 1),
+                format!(
+                    "rank {} for {retrieval_label} retrieval",
+                    rank.saturating_add(1)
+                ),
                 weight / (RRF_K + rank as f64 + 1.0),
             );
         }
@@ -355,7 +358,7 @@ pub fn build_context_bundle_with_options(
                         &mut candidates,
                         hit,
                         ContextRole::Test,
-                        format!("rank {} for anchor test retrieval", rank + 1),
+                        format!("rank {} for anchor test retrieval", rank.saturating_add(1)),
                         0.78 / (RRF_K + rank as f64 + 1.0),
                     );
                 }
@@ -737,9 +740,14 @@ fn focus_hit_on_symbol(
         return hit;
     };
     let start = focus.saturating_sub(context_lines);
-    let end = (focus + context_lines + 1).min(lines.len());
+    let end = focus
+        .saturating_add(context_lines)
+        .saturating_add(1)
+        .min(lines.len());
     hit.start_line = hit.start_line.saturating_add(start);
-    hit.end_line = hit.start_line.saturating_add(end.saturating_sub(start + 1));
+    hit.end_line = hit
+        .start_line
+        .saturating_add(end.saturating_sub(start.saturating_add(1)));
     hit.preview = lines[start..end].join("\n");
     hit
 }
@@ -791,8 +799,11 @@ fn ranges_substantially_overlap(
     if overlap_end < overlap_start {
         return false;
     }
-    let overlap = overlap_end - overlap_start + 1;
-    let shorter = (left_end - left_start + 1).min(right_end - right_start + 1);
+    let overlap = overlap_end.saturating_sub(overlap_start).saturating_add(1);
+    let shorter = left_end
+        .saturating_sub(left_start)
+        .saturating_add(1)
+        .min(right_end.saturating_sub(right_start).saturating_add(1));
     overlap.saturating_mul(2) >= shorter
 }
 
@@ -907,7 +918,7 @@ fn assemble_bundle(
         };
         let item_number = items.len() + 1;
         let wrapper_tokens = estimate_tokens(&render_markdown_item(item_number, &item));
-        let remaining = budget_tokens.saturating_sub(used_tokens + wrapper_tokens);
+        let remaining = budget_tokens.saturating_sub(used_tokens.saturating_add(wrapper_tokens));
         if remaining < 64 {
             truncated = true;
             break;
@@ -931,8 +942,9 @@ fn assemble_bundle(
             continue;
         }
         truncated |= preview_truncated;
-        used_tokens += item.estimated_tokens;
-        *file_counts.entry(item.file_path.clone()).or_default() += 1;
+        used_tokens = used_tokens.saturating_add(item.estimated_tokens);
+        let count = file_counts.entry(item.file_path.clone()).or_default();
+        *count = count.saturating_add(1);
         items.push(item);
     }
     let mut bundle = ContextBundle {
@@ -975,7 +987,7 @@ fn bound_change_scope(mut scope: ContextChangeScope, budget_tokens: usize) -> Co
             .map(|serialized| estimate_tokens(&serialized))
             .unwrap_or(token_limit.saturating_add(1));
         if tokens <= token_limit.saturating_sub(used_tokens) {
-            used_tokens += tokens;
+            used_tokens = used_tokens.saturating_add(tokens);
             changes.push(change);
         }
     }
@@ -1017,7 +1029,7 @@ fn estimated_header_tokens(
         },
         items: Vec::new(),
     };
-    estimate_tokens(&render_markdown(&bundle)) + 8
+    estimate_tokens(&render_markdown(&bundle)).saturating_add(8)
 }
 
 fn finalize_bundle_metrics(bundle: &mut ContextBundle) {
@@ -1773,7 +1785,7 @@ fn truncate_to_token_budget(text: &str, budget: usize, task: &str) -> (String, b
         .map(|(index, _)| index)
         .unwrap_or(lines.len() / 2);
     let mut start = focus;
-    let mut end = (focus + 1).min(lines.len());
+    let mut end = focus.saturating_add(1).min(lines.len());
     if estimate_tokens(lines[focus]) > budget {
         let mut output = String::new();
         for character in lines[focus].chars() {
@@ -1909,7 +1921,7 @@ pub fn render_markdown(bundle: &ContextBundle) -> String {
     ));
     output.push_str("\n## Evidence\n");
     for (index, item) in bundle.items.iter().enumerate() {
-        output.push_str(&render_markdown_item(index + 1, item));
+        output.push_str(&render_markdown_item(index.saturating_add(1), item));
     }
     output
 }
@@ -2161,7 +2173,7 @@ mod tests {
     #[test]
     fn rendered_pack_never_exceeds_requested_budget() {
         for budget in [256, 384, 800, 4_000] {
-            let candidates = (0..30)
+            let candidates = (0usize..30)
                 .map(|index| {
                     candidate(
                         &format!("src/module_{index}.rs"),
@@ -2171,7 +2183,7 @@ mod tests {
                             "pub fn implementation_{index}() {{\n{}\n}}",
                             "    execute_work();\n".repeat(80)
                         ),
-                        1.0 / (index + 1) as f64,
+                        1.0 / index.saturating_add(1) as f64,
                     )
                 })
                 .collect();
