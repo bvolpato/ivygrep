@@ -91,6 +91,8 @@ const NATURAL_LANGUAGE_TERMS: &[&str] = &[
     "with",
 ];
 
+const MAX_RERANK_PREVIEW_BYTES: usize = 12_000;
+
 #[derive(Debug, Deserialize)]
 struct LearnedModel {
     schema_version: u32,
@@ -249,10 +251,9 @@ fn rerank_hits_with_model(query: &str, hits: &mut [SearchHit], model: &LearnedMo
         entry.sources.extend(hit.sources.iter().cloned());
         if entry.hit_indices.len() <= 3 {
             if !entry.preview.is_empty() {
-                entry.preview.push('\n');
+                push_str_bounded(&mut entry.preview, "\n", MAX_RERANK_PREVIEW_BYTES);
             }
-            entry.preview.push_str(&hit.preview);
-            entry.preview.truncate(12_000);
+            push_str_bounded(&mut entry.preview, &hit.preview, MAX_RERANK_PREVIEW_BYTES);
         }
     }
 
@@ -311,6 +312,15 @@ fn rerank_hits_with_model(query: &str, hits: &mut [SearchHit], model: &LearnedMo
             .then_with(|| left.file_path.cmp(&right.file_path))
             .then_with(|| left.start_line.cmp(&right.start_line))
     });
+}
+
+fn push_str_bounded(target: &mut String, value: &str, max_bytes: usize) {
+    let remaining = max_bytes.saturating_sub(target.len());
+    let mut end = remaining.min(value.len());
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    target.push_str(&value[..end]);
 }
 
 fn feature_vector(query: &str, candidate: &FileCandidate) -> Vec<f32> {
@@ -659,6 +669,29 @@ mod tests {
             hits.iter()
                 .all(|hit| hit.score.is_finite() && hit.score > 0.0)
         );
+    }
+
+    #[test]
+    fn learned_reranker_handles_unicode_across_preview_byte_limit() {
+        let mut preview = "a".repeat(MAX_RERANK_PREVIEW_BYTES - 1);
+        preview.push('é');
+        assert!(!preview.is_char_boundary(MAX_RERANK_PREVIEW_BYTES));
+
+        let mut hits = vec![hit("src/unicode.rs", 1.0, &preview, &["lexical"])];
+        let model = load_model().as_ref().expect("model should load");
+        rerank_hits_with_model("unicode", &mut hits, model);
+
+        assert!(hits[0].score.is_finite() && hits[0].score > 0.0);
+    }
+
+    #[test]
+    fn bounded_preview_append_preserves_ascii_byte_limit() {
+        let value = "a".repeat(MAX_RERANK_PREVIEW_BYTES + 1);
+        let mut preview = String::new();
+        push_str_bounded(&mut preview, &value, MAX_RERANK_PREVIEW_BYTES);
+
+        assert_eq!(preview.len(), MAX_RERANK_PREVIEW_BYTES);
+        assert_eq!(preview, value[..MAX_RERANK_PREVIEW_BYTES]);
     }
 
     #[test]
