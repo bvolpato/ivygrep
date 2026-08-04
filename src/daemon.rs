@@ -75,6 +75,12 @@ fn finish_daemon_search_batch(
     batch.finish(options.bounded_limit(), ordering)
 }
 
+fn truncate_daemon_search_hits(hits: &mut Vec<SearchHit>, options: &SearchOptions) {
+    if let Some(limit) = options.bounded_limit() {
+        hits.truncate(limit);
+    }
+}
+
 fn should_start_model_load(has_neural_vectors: bool, query: &str, force_neural: bool) -> bool {
     has_neural_vectors && query_uses_neural(query, force_neural)
 }
@@ -1690,9 +1696,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                         .partial_cmp(&a.score)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
-                if let Some(l) = options.limit {
-                    all_hits.truncate(l);
-                }
+                truncate_daemon_search_hits(&mut all_hits, &options);
                 if all_errors.is_empty() {
                     state_clone.store_query_results(cache_key, &all_hits);
                 }
@@ -3024,7 +3028,7 @@ mod tests {
     }
 
     #[test]
-    fn daemon_search_batch_applies_result_cap_after_aggregation() {
+    fn daemon_search_aggregation_applies_global_result_cap() {
         let mut batch = SearchBatch::new(Vec::new());
         for workspace in ["/one", "/two"] {
             let hits = (0..600)
@@ -3040,6 +3044,12 @@ mod tests {
         let outcome = finish_daemon_search_batch(batch, &options, HitOrdering::Preserve).unwrap();
 
         assert_eq!(outcome.hits.len(), crate::search::MAX_SEARCH_RESULT_LIMIT);
+
+        let mut hybrid_hits = (0..1_200)
+            .map(|index| test_hit(&format!("src/{index}.rs"), 1.0))
+            .collect();
+        truncate_daemon_search_hits(&mut hybrid_hits, &options);
+        assert_eq!(hybrid_hits.len(), crate::search::MAX_SEARCH_RESULT_LIMIT);
     }
 
     #[test]
