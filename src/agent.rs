@@ -76,12 +76,16 @@ impl Drop for ChildGuard {
 }
 
 struct SmokeWorkspace {
+    base: PathBuf,
     root: PathBuf,
+    home: PathBuf,
 }
 
 impl SmokeWorkspace {
     fn create() -> Result<(Self, String)> {
-        let root = env::temp_dir().join(format!("ivygrep-agent-smoke-{}", Uuid::new_v4()));
+        let base = env::temp_dir().join(format!("ivygrep-agent-smoke-{}", Uuid::new_v4()));
+        let root = base.join("project");
+        let home = base.join("ivygrep-home");
         fs::create_dir_all(root.join(".git"))?;
         fs::create_dir_all(root.join("src"))?;
         let probe = format!("ivygrep_agent_probe_{}", Uuid::new_v4().simple());
@@ -89,13 +93,13 @@ impl SmokeWorkspace {
             root.join("src").join("probe.rs"),
             format!("pub fn {probe}() -> bool {{ true }}\n"),
         )?;
-        Ok((Self { root }, probe))
+        Ok((Self { base, root, home }, probe))
     }
 }
 
 impl Drop for SmokeWorkspace {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.root);
+        let _ = fs::remove_dir_all(&self.base);
     }
 }
 
@@ -207,7 +211,7 @@ fn verify_mcp(executable: &Path) -> Result<SmokeResult> {
         Command::new(executable)
             .arg("--mcp")
             .current_dir(&workspace.root)
-            .env("IVYGREP_HOME", workspace.root.join("ivygrep-home"))
+            .env("IVYGREP_HOME", &workspace.home)
             .env("IVYGREP_NO_AUTOSPAWN", "1")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
