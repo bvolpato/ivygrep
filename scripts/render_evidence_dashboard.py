@@ -400,10 +400,10 @@ def build_histories(evidence: list[dict], release_history: dict) -> dict:
             "scope": current.get("scope"),
         }
         current_points = (
-            ("million-chunk/current-release/warm-cli-p95", "warm_p95_ms", "ms", "latency"),
-            ("million-chunk/current-release/chunks-per-second", "chunks_per_second", "chunks/s", "indexing"),
-            ("million-chunk/current-release/peak-rss", "peak_rss_bytes", "bytes", "memory"),
-            ("million-chunk/current-release/final-index", "index_size_bytes", "bytes", "index_size"),
+            ("million-chunk/latest-measured-release/warm-cli-p95", "warm_p95_ms", "ms", "latency"),
+            ("million-chunk/latest-measured-release/chunks-per-second", "chunks_per_second", "chunks/s", "indexing"),
+            ("million-chunk/latest-measured-release/peak-rss", "peak_rss_bytes", "bytes", "memory"),
+            ("million-chunk/latest-measured-release/final-index", "index_size_bytes", "bytes", "index_size"),
         )
         for series, key, unit, history_name in current_points:
             histories[history_name].append(

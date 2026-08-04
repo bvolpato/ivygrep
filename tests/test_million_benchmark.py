@@ -5,7 +5,6 @@ import statistics
 import subprocess
 import sys
 import tempfile
-import tomllib
 import unittest
 from unittest import mock
 
@@ -55,18 +54,16 @@ def artifact(
 
 
 class MillionBenchmarkTest(unittest.TestCase):
-    def test_current_release_snapshot_matches_package_and_trial_medians(self):
-        package = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))
+    def test_latest_measured_release_snapshot_matches_trial_medians(self):
         snapshot = json.loads(
             (ROOT / "docs/benchmarks/public-million-current.json").read_text(
                 encoding="utf-8"
             )
         )
 
-        self.assertEqual(
-            snapshot["binary"]["version"],
-            f"ivygrep {package['package']['version']}",
-        )
+        self.assertRegex(snapshot["binary"]["version"], r"^ivygrep \d+\.\d+\.\d+$")
+        measured_version = snapshot["binary"]["version"].removeprefix("ivygrep ")
+        self.assertIn(f"{measured_version} release confirmation", snapshot["description"])
         self.assertEqual(snapshot["scope"], "synthetic hash-only scale and footprint measurement")
         self.assertIn("synthetic", snapshot["description"])
         self.assertIn("hash-only", snapshot["description"])
