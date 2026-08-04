@@ -26,7 +26,7 @@ use crate::protocol::{
     BUILD_VERSION, DAEMON_PROTOCOL_VERSION, DaemonRequest, DaemonRequestEnvelope, DaemonResponse,
     SearchHit, WorkspaceRuntimeStatus, group_hits_by_file,
 };
-use crate::regex_search::{expand_regex_context_absolute, regex_search_with_options};
+use crate::regex_search::regex_search_with_options;
 use crate::search::{
     DEFAULT_SEARCH_LIMIT, NeuralQueryVectorJob, SearchContext, SearchOptions,
     hybrid_search_with_context_and_neural_job, literal_search_with_context, query_uses_neural,
@@ -62,6 +62,7 @@ const MAX_IDLE_SEARCH_CONTEXTS: usize = 32;
 const MAX_RESOLVED_WORKSPACES: usize = 128;
 const MAX_NEURAL_STATUSES: usize = 128;
 const MAX_READY_WORKSPACES: usize = 256;
+const MAX_SEARCH_CANCELLATION_TOMBSTONES: usize = 256;
 const MAX_MEMORY_PROBE_LIMIT: usize = 80;
 const MAX_MEMORY_PROBE_QUERY_CHARS: usize = 512;
 const MEMORY_ORIGINAL_RRF_WEIGHT: f32 = 1.25;
@@ -80,6 +81,12 @@ fn finish_daemon_search_batch(
 fn truncate_daemon_search_hits(hits: &mut Vec<SearchHit>, options: &SearchOptions) {
     if let Some(limit) = options.bounded_limit() {
         hits.truncate(limit);
+    }
+}
+
+fn cancelled_search_response() -> DaemonResponse {
+    DaemonResponse::Error {
+        message: "search cancelled".to_string(),
     }
 }
 
@@ -705,6 +712,89 @@ fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
 }
 
 #[derive(Clone)]
+struct SearchCancellation {
+    flag: Arc<AtomicBool>,
+    signal: tokio::sync::watch::Sender<bool>,
+    finished_signal: tokio::sync::watch::Sender<bool>,
+}
+
+impl SearchCancellation {
+    fn new(cancelled: bool) -> Self {
+        let (signal, _) = tokio::sync::watch::channel(cancelled);
+        let (finished_signal, _) = tokio::sync::watch::channel(false);
+        Self {
+            flag: Arc::new(AtomicBool::new(cancelled)),
+            signal,
+            finished_signal,
+        }
+    }
+
+    fn cancel(&self) {
+        self.flag.store(true, Ordering::Relaxed);
+        self.signal.send_replace(true);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.flag.load(Ordering::Relaxed)
+    }
+
+    async fn cancelled(&self) {
+        let mut receiver = self.signal.subscribe();
+        while !*receiver.borrow() {
+            if receiver.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+
+    fn finish(&self) {
+        self.finished_signal.send_replace(true);
+    }
+
+    async fn finished(&self) {
+        let mut receiver = self.finished_signal.subscribe();
+        while !*receiver.borrow() {
+            if receiver.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+}
+
+enum SearchCancellationEntry {
+    Active(SearchCancellation),
+    Tombstone(SearchCancellation),
+}
+
+#[derive(Default)]
+struct SearchCancellationRegistry {
+    entries: HashMap<uuid::Uuid, SearchCancellationEntry>,
+    tombstones: VecDeque<uuid::Uuid>,
+}
+
+struct ActiveSearchRegistration {
+    request_id: uuid::Uuid,
+    cancellation: SearchCancellation,
+    registry: Arc<Mutex<SearchCancellationRegistry>>,
+}
+
+impl Drop for ActiveSearchRegistration {
+    fn drop(&mut self) {
+        let mut registry = self.registry.lock();
+        let owns_entry = matches!(
+            registry.entries.get(&self.request_id),
+            Some(SearchCancellationEntry::Active(cancellation))
+                if Arc::ptr_eq(&cancellation.flag, &self.cancellation.flag)
+        );
+        if owns_entry {
+            registry.entries.remove(&self.request_id);
+        }
+        drop(registry);
+        self.cancellation.finish();
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct DaemonState {
     lazy_model: Arc<std::sync::OnceLock<Arc<dyn EmbeddingModel>>>,
     model_loading: Arc<AtomicBool>,
@@ -716,6 +806,7 @@ pub(crate) struct DaemonState {
     idle_search_context_count: Arc<AtomicUsize>,
     query_results: Arc<Mutex<QueryResultCache>>,
     neural_queries: Arc<Mutex<NeuralQueryCache>>,
+    search_cancellations: Arc<Mutex<SearchCancellationRegistry>>,
     query_result_cache_enabled: bool,
     /// Bounds concurrent CPU-heavy work (hybrid/literal/regex search + index).
     /// Without this, a burst of clients each spawn a `spawn_blocking` task on
@@ -744,6 +835,89 @@ fn create_search_model() -> Arc<dyn EmbeddingModel> {
 impl DaemonState {
     pub(crate) async fn acquire_cpu_permit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
         self.cpu_permits.clone().acquire_owned().await.ok()
+    }
+
+    async fn acquire_search_permit(
+        &self,
+        cancellation: Option<&SearchCancellation>,
+    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let Some(cancellation) = cancellation else {
+            return self.acquire_cpu_permit().await;
+        };
+        if cancellation.is_cancelled() {
+            return None;
+        }
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => None,
+            permit = self.cpu_permits.clone().acquire_owned() => permit.ok(),
+        }
+    }
+
+    fn register_search(
+        &self,
+        request_id: Option<uuid::Uuid>,
+    ) -> Result<Option<ActiveSearchRegistration>> {
+        let Some(request_id) = request_id else {
+            return Ok(None);
+        };
+        let mut registry = self.search_cancellations.lock();
+        if matches!(
+            registry.entries.get(&request_id),
+            Some(SearchCancellationEntry::Active(_))
+        ) {
+            anyhow::bail!("search request {request_id} is already active");
+        }
+        let cancellation = match registry.entries.remove(&request_id) {
+            Some(SearchCancellationEntry::Tombstone(cancellation)) => {
+                registry.tombstones.retain(|id| id != &request_id);
+                cancellation
+            }
+            None => SearchCancellation::new(false),
+            Some(SearchCancellationEntry::Active(_)) => unreachable!(),
+        };
+        registry.entries.insert(
+            request_id,
+            SearchCancellationEntry::Active(cancellation.clone()),
+        );
+        drop(registry);
+        Ok(Some(ActiveSearchRegistration {
+            request_id,
+            cancellation,
+            registry: self.search_cancellations.clone(),
+        }))
+    }
+
+    fn cancel_search(&self, request_id: uuid::Uuid) -> Option<SearchCancellation> {
+        let mut registry = self.search_cancellations.lock();
+        if let Some(entry) = registry.entries.get(&request_id) {
+            match entry {
+                SearchCancellationEntry::Active(cancellation) => {
+                    cancellation.cancel();
+                    return Some(cancellation.clone());
+                }
+                SearchCancellationEntry::Tombstone(cancellation) => cancellation.cancel(),
+            }
+            return None;
+        }
+
+        let cancellation = SearchCancellation::new(true);
+        registry
+            .entries
+            .insert(request_id, SearchCancellationEntry::Tombstone(cancellation));
+        registry.tombstones.push_back(request_id);
+        while registry.tombstones.len() > MAX_SEARCH_CANCELLATION_TOMBSTONES {
+            let Some(expired) = registry.tombstones.pop_front() else {
+                break;
+            };
+            if matches!(
+                registry.entries.get(&expired),
+                Some(SearchCancellationEntry::Tombstone(_))
+            ) {
+                registry.entries.remove(&expired);
+            }
+        }
+        None
     }
 
     pub(crate) fn prepare_context_model(
@@ -1052,6 +1226,20 @@ impl DaemonState {
     fn store_neural_query(&self, query: String, vector: Vec<f32>) {
         self.neural_queries.lock().insert(query, vector);
     }
+
+    fn store_completed_neural_query(
+        &self,
+        query: String,
+        completed: &std::sync::OnceLock<Vec<f32>>,
+        options: &SearchOptions,
+    ) {
+        if options.is_cancelled() {
+            return;
+        }
+        if let Some(vector) = completed.get() {
+            self.store_neural_query(query, vector.clone());
+        }
+    }
 }
 
 fn create_daemon_state() -> DaemonState {
@@ -1070,6 +1258,7 @@ fn create_daemon_state() -> DaemonState {
         idle_search_context_count: Arc::new(AtomicUsize::new(0)),
         query_results: Arc::new(Mutex::new(QueryResultCache::default())),
         neural_queries: Arc::new(Mutex::new(NeuralQueryCache::default())),
+        search_cancellations: Arc::new(Mutex::new(SearchCancellationRegistry::default())),
         query_result_cache_enabled: config::query_result_cache_enabled(),
         cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
         web_server: Arc::new(Mutex::new(None)),
@@ -1256,7 +1445,10 @@ async fn handle_connection(stream: crate::ipc::IpcStream, state: DaemonState) ->
     let mut reader = BufReader::new(stream);
     loop {
         let (response, keep_alive) = match read_daemon_request(&mut reader).await {
-            Ok(Some(request)) => (handle_request(state.clone(), request).await, true),
+            Ok(Some(envelope)) => (
+                handle_enveloped_request(state.clone(), envelope).await,
+                true,
+            ),
             Ok(None) => return Ok(()),
             Err(response) => (response, false),
         };
@@ -1272,7 +1464,7 @@ async fn handle_connection(stream: crate::ipc::IpcStream, state: DaemonState) ->
 
 async fn read_daemon_request<R>(
     reader: &mut R,
-) -> std::result::Result<Option<DaemonRequest>, DaemonResponse>
+) -> std::result::Result<Option<DaemonRequestEnvelope>, DaemonResponse>
 where
     R: AsyncBufRead + Unpin,
 {
@@ -1301,7 +1493,7 @@ where
     parse_daemon_request(&line).map(Some)
 }
 
-fn parse_daemon_request(line: &[u8]) -> std::result::Result<DaemonRequest, DaemonResponse> {
+fn parse_daemon_request(line: &[u8]) -> std::result::Result<DaemonRequestEnvelope, DaemonResponse> {
     let envelope: DaemonRequestEnvelope =
         serde_json::from_slice(line).map_err(|err| DaemonResponse::Error {
             message: format!("invalid daemon request: {err}"),
@@ -1314,10 +1506,45 @@ fn parse_daemon_request(line: &[u8]) -> std::result::Result<DaemonRequest, Daemo
             ),
         });
     }
-    Ok(envelope.request)
+    Ok(envelope)
 }
 
 async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonResponse {
+    handle_request_with_cancellation(state, request, None).await
+}
+
+async fn handle_enveloped_request(
+    state: DaemonState,
+    envelope: DaemonRequestEnvelope,
+) -> DaemonResponse {
+    let registration = if matches!(
+        envelope.request,
+        DaemonRequest::Search { .. }
+            | DaemonRequest::RegexSearch { .. }
+            | DaemonRequest::LiteralSearch { .. }
+    ) {
+        match state.register_search(envelope.request_id) {
+            Ok(registration) => registration,
+            Err(error) => {
+                return DaemonResponse::Error {
+                    message: error.to_string(),
+                };
+            }
+        }
+    } else {
+        None
+    };
+    let cancellation = registration
+        .as_ref()
+        .map(|registration| registration.cancellation.clone());
+    handle_request_with_cancellation(state, envelope.request, cancellation).await
+}
+
+async fn handle_request_with_cancellation(
+    state: DaemonState,
+    request: DaemonRequest,
+    cancellation: Option<SearchCancellation>,
+) -> DaemonResponse {
     match request {
         DaemonRequest::Version => DaemonResponse::Version {
             version: Some(BUILD_VERSION.to_string()),
@@ -1470,6 +1697,12 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             force_neural,
             disable_memory_expansion,
         } => {
+            if cancellation
+                .as_ref()
+                .is_some_and(SearchCancellation::is_cancelled)
+            {
+                return cancelled_search_response();
+            }
             let request_started = std::time::Instant::now();
             let state_clone = state.clone();
             let all_indices = path.is_none();
@@ -1511,7 +1744,9 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 skip_gitignore,
                 force_neural,
                 progress_tx: None,
-                cancel_token: None,
+                cancel_token: cancellation
+                    .as_ref()
+                    .map(|cancellation| cancellation.flag.clone()),
             };
             tracing::trace!(
                 "daemon_search_resolve={:?} workspaces={}",
@@ -1533,7 +1768,9 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 };
             }
             let has_neural_vectors = neural_identities.iter().any(Option::is_some);
-            if should_start_model_load(has_neural_vectors, &query, force_neural) {
+            if !options.is_cancelled()
+                && should_start_model_load(has_neural_vectors, &query, force_neural)
+            {
                 state_clone.maybe_start_model_load();
             }
             tracing::trace!(
@@ -1544,17 +1781,25 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
 
             // Bound concurrent heavy search work (see #58). The permit is held
             // for the whole blocking task and released when it completes.
-            let permit = state_clone.cpu_permits.clone().acquire_owned().await.ok();
+            let Some(permit) = state_clone
+                .acquire_search_permit(cancellation.as_ref())
+                .await
+            else {
+                return cancelled_search_response();
+            };
             tracing::trace!("daemon_search_permit={:?}", request_started.elapsed());
             let result = tokio::task::spawn_blocking(move || {
                 let task_started = std::time::Instant::now();
                 let _permit = permit;
+                if options.is_cancelled() {
+                    return (Vec::new(), workspace_warnings, 0, query, options, true);
+                }
                 let model = match state_clone.get_model_for_search(force_neural) {
                     Ok(model) => model,
                     Err(err) => {
                         let mut warnings = workspace_warnings;
                         warnings.push(err.to_string());
-                        return (Vec::new(), warnings, 0, query, options);
+                        return (Vec::new(), warnings, 0, query, options, false);
                     }
                 };
                 tracing::trace!("daemon_search_model={:?}", task_started.elapsed());
@@ -1563,6 +1808,9 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 let mut successful_workspaces = 0usize;
                 let mut prepared_workspaces = Vec::with_capacity(workspaces.len());
                 for workspace in workspaces {
+                    if options.is_cancelled() {
+                        break;
+                    }
                     match state_clone
                         .prepare_workspace_for_hybrid_query(&workspace, options.skip_gitignore)
                     {
@@ -1580,6 +1828,9 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 }
                 let workspaces = prepared_workspaces;
                 tracing::trace!("daemon_search_prepare={:?}", task_started.elapsed());
+                if options.is_cancelled() {
+                    return (Vec::new(), all_errors, 0, query, options, true);
+                }
                 let background_enhancement_enabled =
                     crate::config::background_enhancement_enabled();
                 let query_uses_neural = query_uses_neural(&query, options.force_neural);
@@ -1614,32 +1865,44 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     all_indices,
                 );
                 if let Some(cached_hits) = state_clone.cached_query_results(&cache_key) {
-                    if background_enhancement_enabled {
+                    let cancelled = options.is_cancelled();
+                    if background_enhancement_enabled && !cancelled {
                         for root in workspaces_needing_enhancement {
                             if let Ok(ws) = Workspace::resolve(&root) {
                                 let _ = ws.trigger_background_search_enhancement(query_uses_neural);
                             }
                         }
                     }
-                    return (cached_hits, all_errors, workspaces.len(), query, options);
+                    return (
+                        cached_hits,
+                        all_errors,
+                        workspaces.len(),
+                        query,
+                        options,
+                        cancelled,
+                    );
                 }
 
-                let mut neural_query_vector_job = if state_clone.can_precompute_neural_query(
-                    &workspaces,
-                    model.as_ref(),
-                    &query,
-                    options.force_neural,
-                ) {
+                let mut neural_query_cache_write = None;
+                let mut neural_query_vector_job = if !options.is_cancelled()
+                    && state_clone.can_precompute_neural_query(
+                        &workspaces,
+                        model.as_ref(),
+                        &query,
+                        options.force_neural,
+                    ) {
                     let neural_query = query.trim().to_string();
                     if let Some(vector) = state_clone.cached_neural_query(&neural_query) {
                         Some(NeuralQueryVectorJob::Ready(vector))
                     } else {
                         let model = model.clone();
-                        let state = state_clone.clone();
-                        Some(NeuralQueryVectorJob::Pending(std::thread::spawn(
+                        let completed = Arc::new(std::sync::OnceLock::new());
+                        let worker_completed = completed.clone();
+                        neural_query_cache_write = Some((neural_query.clone(), completed));
+                        Some(NeuralQueryVectorJob::pending(std::thread::spawn(
                             move || {
                                 let vector = model.embed(&neural_query);
-                                state.store_neural_query(neural_query, vector.clone());
+                                let _ = worker_completed.set(vector.clone());
                                 vector
                             },
                         )))
@@ -1649,6 +1912,9 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 };
 
                 for (workspace, signature) in workspaces.iter().zip(workspace_signatures) {
+                    if options.is_cancelled() {
+                        break;
+                    }
                     let context = match state_clone.cached_search_context_for_signature(
                         workspace,
                         Some(model.dimensions()),
@@ -1665,6 +1931,9 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                             continue;
                         }
                     };
+                    if options.is_cancelled() {
+                        break;
+                    }
                     tracing::trace!("daemon_search_context={:?}", task_started.elapsed());
                     match hybrid_search_with_context_and_neural_job(
                         &context,
@@ -1699,11 +1968,16 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
                 truncate_daemon_search_hits(&mut all_hits, &options);
-                if all_errors.is_empty() {
+                drop(neural_query_vector_job.take());
+                let cancelled = options.is_cancelled();
+                if !cancelled && let Some((query, completed)) = neural_query_cache_write {
+                    state_clone.store_completed_neural_query(query, &completed, &options);
+                }
+                if !cancelled && all_errors.is_empty() {
                     state_clone.store_query_results(cache_key, &all_hits);
                 }
                 // Spawn background hash and neural enhancement for workspaces that need it.
-                if background_enhancement_enabled {
+                if background_enhancement_enabled && !cancelled {
                     for root in workspaces_needing_enhancement {
                         if let Ok(ws) = Workspace::resolve(&root) {
                             let _ = ws.trigger_background_search_enhancement(query_uses_neural);
@@ -1711,7 +1985,14 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     }
                 }
                 tracing::trace!("daemon_search_task_total={:?}", task_started.elapsed());
-                (all_hits, all_errors, successful_workspaces, query, options)
+                (
+                    all_hits,
+                    all_errors,
+                    successful_workspaces,
+                    query,
+                    options,
+                    cancelled,
+                )
             })
             .await;
             let result = match result {
@@ -1725,8 +2006,21 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             };
             tracing::trace!("daemon_search_total={:?}", request_started.elapsed());
 
-            let (mut hits, errors, successful_workspaces, expansion_query, expansion_options) =
-                result;
+            let (
+                mut hits,
+                errors,
+                successful_workspaces,
+                expansion_query,
+                expansion_options,
+                cancelled,
+            ) = result;
+            if cancelled
+                || cancellation
+                    .as_ref()
+                    .is_some_and(SearchCancellation::is_cancelled)
+            {
+                return cancelled_search_response();
+            }
             if successful_workspaces == 0 && !errors.is_empty() {
                 DaemonResponse::Error {
                     message: format!("search failed: {}", errors.join("; ")),
@@ -1758,9 +2052,23 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     let requests = variants
                         .map(|variant| search_request_with_query(&expansion_request, variant));
                     let (first, second) = tokio::join!(
-                        Box::pin(handle_request(state.clone(), requests[0].clone())),
-                        Box::pin(handle_request(state.clone(), requests[1].clone())),
+                        Box::pin(handle_request_with_cancellation(
+                            state.clone(),
+                            requests[0].clone(),
+                            cancellation.clone(),
+                        )),
+                        Box::pin(handle_request_with_cancellation(
+                            state.clone(),
+                            requests[1].clone(),
+                            cancellation.clone(),
+                        )),
                     );
+                    if cancellation
+                        .as_ref()
+                        .is_some_and(SearchCancellation::is_cancelled)
+                    {
+                        return cancelled_search_response();
+                    }
                     let mut probe_outputs = Vec::new();
                     for response in [first, second] {
                         match response {
@@ -1797,6 +2105,12 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             scope_is_file,
             skip_gitignore,
         } => {
+            if cancellation
+                .as_ref()
+                .is_some_and(SearchCancellation::is_cancelled)
+            {
+                return cancelled_search_response();
+            }
             let workspace_set = if let Some(ref p) = path {
                 match Workspace::resolve(p) {
                     Ok(workspace) => SearchWorkspaceSet {
@@ -1835,18 +2149,28 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 skip_gitignore,
                 force_neural: false,
                 progress_tx: None,
-                cancel_token: None,
+                cancel_token: cancellation
+                    .as_ref()
+                    .map(|cancellation| cancellation.flag.clone()),
             };
             // Bound concurrent heavy regex work (see #58).
-            let permit = state.cpu_permits.clone().acquire_owned().await.ok();
+            let Some(permit) = state.acquire_search_permit(cancellation.as_ref()).await else {
+                return cancelled_search_response();
+            };
             let result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
+                if options.is_cancelled() {
+                    return Err("search cancelled".to_string());
+                }
                 let mut batch = SearchBatch::new(workspace_warnings);
                 let mut workspace_options = options.clone();
                 if all_indices {
                     workspace_options.context = 0;
                 }
                 for workspace in &workspaces {
+                    if options.is_cancelled() {
+                        return Err("search cancelled".to_string());
+                    }
                     let result =
                         ensure_queryable_workspace(workspace, skip_gitignore).and_then(|_| {
                             regex_search_with_options(workspace, &pattern, &workspace_options)
@@ -1856,8 +2180,18 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 let mut outcome =
                     finish_daemon_search_batch(batch, &options, HitOrdering::Preserve)
                         .map_err(|err| err.to_string())?;
+                if options.is_cancelled() {
+                    return Err("search cancelled".to_string());
+                }
                 if all_indices {
-                    expand_regex_context_absolute(&mut outcome.hits, options.bounded_context());
+                    crate::regex_search::expand_regex_context_absolute_with_options(
+                        &mut outcome.hits,
+                        options.bounded_context(),
+                        &options,
+                    );
+                }
+                if options.is_cancelled() {
+                    return Err("search cancelled".to_string());
                 }
                 Ok(outcome)
             })
@@ -1887,6 +2221,12 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             scope_is_file,
             skip_gitignore,
         } => {
+            if cancellation
+                .as_ref()
+                .is_some_and(SearchCancellation::is_cancelled)
+            {
+                return cancelled_search_response();
+            }
             let workspace_set = if let Some(ref p) = path {
                 match Workspace::resolve(p) {
                     Ok(workspace) => SearchWorkspaceSet {
@@ -1925,16 +2265,29 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 skip_gitignore,
                 force_neural: false,
                 progress_tx: None,
-                cancel_token: None,
+                cancel_token: cancellation
+                    .as_ref()
+                    .map(|cancellation| cancellation.flag.clone()),
             };
 
             let state_clone = state.clone();
             // Bound concurrent heavy literal work (see #58).
-            let permit = state_clone.cpu_permits.clone().acquire_owned().await.ok();
+            let Some(permit) = state_clone
+                .acquire_search_permit(cancellation.as_ref())
+                .await
+            else {
+                return cancelled_search_response();
+            };
             let result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
+                if options.is_cancelled() {
+                    return Err("search cancelled".to_string());
+                }
                 let mut batch = SearchBatch::new(workspace_warnings);
                 for workspace in &workspaces {
+                    if options.is_cancelled() {
+                        return Err("search cancelled".to_string());
+                    }
                     let result = (|| {
                         if ensure_queryable_workspace(workspace, options.skip_gitignore)? {
                             state_clone.clear_workspace_contexts(workspace);
@@ -1944,8 +2297,12 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     })();
                     batch.record(&workspace.root, all_indices, result);
                 }
-                finish_daemon_search_batch(batch, &options, HitOrdering::Preserve)
-                    .map_err(|err| err.to_string())
+                let outcome = finish_daemon_search_batch(batch, &options, HitOrdering::Preserve)
+                    .map_err(|err| err.to_string())?;
+                if options.is_cancelled() {
+                    return Err("search cancelled".to_string());
+                }
+                Ok(outcome)
             })
             .await
             .unwrap_or_else(|join_err| {
@@ -1959,6 +2316,14 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     warnings: outcome.warnings,
                 },
                 Err(message) => DaemonResponse::Error { message },
+            }
+        }
+        DaemonRequest::CancelSearch { search_id } => {
+            if let Some(cancellation) = state.cancel_search(search_id) {
+                cancellation.finished().await;
+            }
+            DaemonResponse::Ack {
+                message: format!("cancellation requested for search {search_id}"),
             }
         }
         DaemonRequest::Remove { path } => match Workspace::resolve(&path) {
@@ -2733,6 +3098,19 @@ where
     request_unchecked(request, autospawn, progress_cb).await
 }
 
+pub async fn request_with_id<F>(
+    request: &DaemonRequest,
+    request_id: uuid::Uuid,
+    autospawn: bool,
+    progress_cb: Option<F>,
+) -> Result<Option<DaemonResponse>>
+where
+    F: FnMut(String, usize, usize) + Send,
+{
+    ensure_compatible_daemon().await;
+    request_unchecked_with_id(request, Some(request_id), autospawn, progress_cb).await
+}
+
 async fn ensure_compatible_daemon() {
     if !crate::ipc::socket_exists() {
         return;
@@ -2893,6 +3271,18 @@ async fn connect_to_daemon(
 async fn request_unchecked<F>(
     request: &DaemonRequest,
     autospawn: bool,
+    progress_cb: Option<F>,
+) -> Result<Option<DaemonResponse>>
+where
+    F: FnMut(String, usize, usize) + Send,
+{
+    request_unchecked_with_id(request, None, autospawn, progress_cb).await
+}
+
+async fn request_unchecked_with_id<F>(
+    request: &DaemonRequest,
+    request_id: Option<uuid::Uuid>,
+    autospawn: bool,
     mut progress_cb: Option<F>,
 ) -> Result<Option<DaemonResponse>>
 where
@@ -2902,7 +3292,11 @@ where
         return Ok(None);
     };
 
-    let payload = serde_json::to_vec(&DaemonRequestEnvelope::new(request.clone()))?;
+    let envelope = request_id.map_or_else(
+        || DaemonRequestEnvelope::new(request.clone()),
+        |request_id| DaemonRequestEnvelope::with_request_id(request.clone(), request_id),
+    );
+    let payload = serde_json::to_vec(&envelope)?;
     if payload.len() > MAX_DAEMON_REQUEST_BYTES {
         anyhow::bail!("daemon request exceeds maximum of {MAX_DAEMON_REQUEST_BYTES} bytes");
     }
@@ -2942,7 +3336,8 @@ where
         | DaemonRequest::Restart => 5, // quick
         DaemonRequest::Search { .. }
         | DaemonRequest::RegexSearch { .. }
-        | DaemonRequest::LiteralSearch { .. } => 120, // 2 min for search
+        | DaemonRequest::LiteralSearch { .. }
+        | DaemonRequest::CancelSearch { .. } => 120, // wait for active search shutdown
         DaemonRequest::Remove { .. } => 30,  // cleanup
     };
 
@@ -3009,10 +3404,203 @@ mod tests {
             idle_search_context_count: Arc::new(AtomicUsize::new(0)),
             query_results: Arc::new(Mutex::new(QueryResultCache::default())),
             neural_queries: Arc::new(Mutex::new(NeuralQueryCache::default())),
+            search_cancellations: Arc::new(Mutex::new(SearchCancellationRegistry::default())),
             query_result_cache_enabled: true,
             cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
             web_server: Arc::new(Mutex::new(None)),
         }
+    }
+
+    #[test]
+    fn search_cancellation_tombstone_closes_registration_race() {
+        let state = test_state();
+        let request_id = uuid::Uuid::new_v4();
+
+        let _ = state.cancel_search(request_id);
+        let registration = state.register_search(Some(request_id)).unwrap().unwrap();
+
+        assert!(registration.cancellation.is_cancelled());
+        assert!(state.search_cancellations.lock().tombstones.is_empty());
+        drop(registration);
+        assert!(state.search_cancellations.lock().entries.is_empty());
+    }
+
+    #[test]
+    fn search_cancellation_registry_rejects_duplicates_and_bounds_tombstones() {
+        let state = test_state();
+        let active_id = uuid::Uuid::from_u128(1);
+        let registration = state.register_search(Some(active_id)).unwrap().unwrap();
+        assert!(state.register_search(Some(active_id)).is_err());
+
+        let _ = state.cancel_search(active_id);
+        assert!(registration.cancellation.is_cancelled());
+        drop(registration);
+
+        for value in 2..=(MAX_SEARCH_CANCELLATION_TOMBSTONES as u128 + 2) {
+            let _ = state.cancel_search(uuid::Uuid::from_u128(value));
+        }
+        let registry = state.search_cancellations.lock();
+        assert_eq!(
+            registry.tombstones.len(),
+            MAX_SEARCH_CANCELLATION_TOMBSTONES
+        );
+        assert_eq!(registry.entries.len(), MAX_SEARCH_CANCELLATION_TOMBSTONES);
+        assert!(!registry.entries.contains_key(&uuid::Uuid::from_u128(2)));
+    }
+
+    #[tokio::test]
+    async fn pre_cancelled_search_envelope_does_not_search_or_cache() {
+        let state = test_state();
+        let request_id = uuid::Uuid::new_v4();
+        let _ = state.cancel_search(request_id);
+        let request = DaemonRequest::Search {
+            path: Some(PathBuf::from("/path/that/must/not/be-resolved")),
+            query: "needle".to_string(),
+            limit: Some(10),
+            context: 0,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_path: None,
+            scope_is_file: false,
+            skip_gitignore: false,
+            force_neural: false,
+            disable_memory_expansion: true,
+        };
+
+        let response = handle_enveloped_request(
+            state.clone(),
+            DaemonRequestEnvelope::with_request_id(request, request_id),
+        )
+        .await;
+
+        assert!(matches!(
+            response,
+            DaemonResponse::Error { message } if message == "search cancelled"
+        ));
+        assert!(state.query_results.lock().results.is_empty());
+        assert!(state.search_cancellations.lock().entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelled_searches_leave_semaphore_queue_for_latest_request() {
+        let mut state = test_state();
+        state.cpu_permits = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut registrations = Vec::new();
+        let mut waiters = Vec::new();
+
+        for value in 1..=8 {
+            let request_id = uuid::Uuid::from_u128(value);
+            let registration = state.register_search(Some(request_id)).unwrap().unwrap();
+            let cancellation = registration.cancellation.clone();
+            let waiter_state = state.clone();
+            waiters.push(tokio::spawn(async move {
+                waiter_state
+                    .acquire_search_permit(Some(&cancellation))
+                    .await
+                    .is_none()
+            }));
+            registrations.push(registration);
+            let _ = state.cancel_search(request_id);
+        }
+
+        for waiter in waiters {
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), waiter)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            );
+        }
+
+        let latest_id = uuid::Uuid::from_u128(9);
+        let latest = state.register_search(Some(latest_id)).unwrap().unwrap();
+        let latest_cancellation = latest.cancellation.clone();
+        let latest_state = state.clone();
+        let latest_waiter = tokio::spawn(async move {
+            latest_state
+                .acquire_search_permit(Some(&latest_cancellation))
+                .await
+        });
+        state.cpu_permits.add_permits(1);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), latest_waiter)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_some()
+        );
+
+        drop(latest);
+        drop(registrations);
+        assert!(state.search_cancellations.lock().entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_request_stops_enveloped_search_waiting_for_cpu() {
+        let mut state = test_state();
+        state.cpu_permits = Arc::new(tokio::sync::Semaphore::new(0));
+        let root = tempdir().unwrap();
+        let request_id = uuid::Uuid::new_v4();
+        let request = DaemonRequest::Search {
+            path: Some(root.path().to_path_buf()),
+            query: "needle".to_string(),
+            limit: Some(10),
+            context: 0,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_path: None,
+            scope_is_file: false,
+            skip_gitignore: false,
+            force_neural: false,
+            disable_memory_expansion: true,
+        };
+        let search_state = state.clone();
+        let search = tokio::spawn(async move {
+            handle_enveloped_request(
+                search_state,
+                DaemonRequestEnvelope::with_request_id(request, request_id),
+            )
+            .await
+        });
+
+        for _ in 0..100 {
+            if state
+                .search_cancellations
+                .lock()
+                .entries
+                .contains_key(&request_id)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            state
+                .search_cancellations
+                .lock()
+                .entries
+                .contains_key(&request_id)
+        );
+
+        let cancel = handle_request(
+            state.clone(),
+            DaemonRequest::CancelSearch {
+                search_id: request_id,
+            },
+        )
+        .await;
+        assert!(matches!(cancel, DaemonResponse::Ack { .. }));
+        let response = tokio::time::timeout(Duration::from_secs(1), search)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            response,
+            DaemonResponse::Error { message } if message == "search cancelled"
+        ));
+        assert!(state.search_cancellations.lock().entries.is_empty());
     }
 
     fn git(root: &Path, args: &[&str]) {
@@ -3455,6 +4043,145 @@ mod tests {
         }
     }
 
+    struct BlockingNeuralModel {
+        active: Arc<AtomicUsize>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl EmbeddingModel for BlockingNeuralModel {
+        fn dimensions(&self) -> usize {
+            384
+        }
+
+        fn embed(&self, _text: &str) -> Vec<f32> {
+            self.active.fetch_add(1, Ordering::SeqCst);
+            self.release.lock().recv().unwrap();
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            let mut vector = vec![0.0; self.dimensions()];
+            vector[0] = 1.0;
+            vector
+        }
+
+        fn model_identity(&self) -> Option<&crate::embedding::NeuralModelIdentity> {
+            TestNeuralModel.model_identity()
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn forced_neural_cancellation_keeps_precompute_bounded_and_uncached() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        std::fs::write(
+            repo.path().join("search.rs"),
+            "pub fn forced_neural_cancellation() {}\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let hash_model = create_hash_model();
+        index_workspace(&workspace, hash_model.as_ref()).unwrap();
+        crate::indexer::enhance_workspace_neural(&workspace, &TestNeuralModel).unwrap();
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let model: Arc<dyn EmbeddingModel> = Arc::new(BlockingNeuralModel {
+            active: active.clone(),
+            release: Mutex::new(release_rx),
+        });
+        let lazy_model = std::sync::OnceLock::new();
+        assert!(lazy_model.set(model).is_ok());
+        let mut state = test_state();
+        state.lazy_model = Arc::new(lazy_model);
+        state.cpu_permits = Arc::new(tokio::sync::Semaphore::new(1));
+
+        let request_id = uuid::Uuid::new_v4();
+        let query = "forced neural cancellation".to_string();
+        let request = DaemonRequest::Search {
+            path: Some(workspace.root.clone()),
+            query: query.clone(),
+            limit: Some(10),
+            context: 0,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_path: None,
+            scope_is_file: false,
+            skip_gitignore: false,
+            force_neural: true,
+            disable_memory_expansion: true,
+        };
+        let search_state = state.clone();
+        let search = tokio::spawn(async move {
+            handle_enveloped_request(
+                search_state,
+                DaemonRequestEnvelope::with_request_id(request, request_id),
+            )
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while active.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let cancel_state = state.clone();
+        let cancel = tokio::spawn(async move {
+            handle_request(
+                cancel_state,
+                DaemonRequest::CancelSearch {
+                    search_id: request_id,
+                },
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let cancelled = state
+                    .search_cancellations
+                    .lock()
+                    .entries
+                    .get(&request_id)
+                    .is_some_and(|entry| match entry {
+                        SearchCancellationEntry::Active(cancellation)
+                        | SearchCancellationEntry::Tombstone(cancellation) => {
+                            cancellation.is_cancelled()
+                        }
+                    });
+                if cancelled {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!cancel.is_finished());
+        assert_eq!(active.load(Ordering::SeqCst), 1);
+        assert_eq!(state.cpu_permits.available_permits(), 0);
+        assert!(state.cached_neural_query(&query).is_none());
+
+        release_tx.send(()).unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(5), search)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            response,
+            DaemonResponse::Error { message } if message == "search cancelled"
+        ));
+        let cancel = tokio::time::timeout(Duration::from_secs(5), cancel)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(cancel, DaemonResponse::Ack { .. }));
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(state.cpu_permits.available_permits(), 1);
+        assert!(state.cached_neural_query(&query).is_none());
+    }
+
     #[test]
     #[serial]
     fn daemon_caches_only_exact_absolute_workspace_roots() {
@@ -3538,6 +4265,40 @@ mod tests {
             "cached neural search",
             true,
         ));
+    }
+
+    #[test]
+    fn cancelled_neural_precompute_joins_without_populating_cache() {
+        let state = test_state();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let options = SearchOptions {
+            cancel_token: Some(cancellation.clone()),
+            ..SearchOptions::default()
+        };
+        let completed = Arc::new(std::sync::OnceLock::new());
+        let worker_completed = completed.clone();
+        let active = Arc::new(AtomicUsize::new(0));
+        let worker_active = active.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let job = NeuralQueryVectorJob::pending(std::thread::spawn(move || {
+            worker_active.fetch_add(1, Ordering::SeqCst);
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            let vector = vec![1.0; 3];
+            let _ = worker_completed.set(vector.clone());
+            worker_active.fetch_sub(1, Ordering::SeqCst);
+            vector
+        }));
+        started_rx.recv().unwrap();
+
+        cancellation.store(true, Ordering::SeqCst);
+        release_tx.send(()).unwrap();
+        drop(job);
+        state.store_completed_neural_query("cancelled".to_string(), &completed, &options);
+
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert!(state.cached_neural_query("cancelled").is_none());
     }
 
     #[test]
@@ -3834,11 +4595,17 @@ mod tests {
 
         assert!(matches!(
             read_daemon_request(&mut reader).await.unwrap(),
-            Some(DaemonRequest::Status)
+            Some(DaemonRequestEnvelope {
+                request: DaemonRequest::Status,
+                ..
+            })
         ));
         assert!(matches!(
             read_daemon_request(&mut reader).await.unwrap(),
-            Some(DaemonRequest::Status)
+            Some(DaemonRequestEnvelope {
+                request: DaemonRequest::Status,
+                ..
+            })
         ));
         assert!(read_daemon_request(&mut reader).await.unwrap().is_none());
     }

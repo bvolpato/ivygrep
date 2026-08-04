@@ -220,7 +220,40 @@ type SemanticCandidatesById = HashMap<u64, (IndexedChunk, f32, HashSet<&'static 
 
 pub(crate) enum NeuralQueryVectorJob {
     Ready(Vec<f32>),
-    Pending(std::thread::JoinHandle<Vec<f32>>),
+    Pending(Option<std::thread::JoinHandle<Vec<f32>>>),
+}
+
+impl NeuralQueryVectorJob {
+    pub(crate) fn pending(handle: std::thread::JoinHandle<Vec<f32>>) -> Self {
+        Self::Pending(Some(handle))
+    }
+
+    fn finish(&mut self) -> Option<Vec<f32>> {
+        match self {
+            Self::Ready(vector) => Some(std::mem::take(vector)),
+            Self::Pending(handle) => match handle.take()?.join() {
+                Ok(vector) => Some(vector),
+                Err(_) => {
+                    tracing::warn!("precomputed neural query vector task panicked");
+                    None
+                }
+            },
+        }
+    }
+}
+
+impl Drop for NeuralQueryVectorJob {
+    fn drop(&mut self) {
+        let Self::Pending(handle) = self else {
+            return;
+        };
+        let Some(handle) = handle.take() else {
+            return;
+        };
+        if handle.join().is_err() {
+            tracing::warn!("precomputed neural query vector task panicked");
+        }
+    }
 }
 
 fn open_optional_vector_store(
@@ -654,6 +687,9 @@ pub fn literal_search(
     query_text: &str,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
+    if options.is_cancelled() {
+        return Ok(Vec::new());
+    }
     let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
     reconcile_worktree_overlay(workspace, &model)?;
     let ctx = SearchContext::load(workspace, None, false)?;
@@ -667,6 +703,9 @@ pub fn literal_search_with_context(
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
     let t0 = std::time::Instant::now();
+    if options.is_cancelled() {
+        return Ok(Vec::new());
+    }
     let query = query_text.trim();
     if query.is_empty() {
         return Ok(vec![]);
@@ -685,12 +724,15 @@ pub fn literal_search_with_context(
         let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
         match substring_candidate_files(workspace, ctx, &runs, options, &path_matcher)? {
             Some(candidate_paths) => {
-                literal_search_paths(&query_lower, context, max_hits, &candidate_paths)?
+                literal_search_paths(&query_lower, context, max_hits, &candidate_paths, options)?
             }
             None => literal_search_walk(workspace, &query_lower, options, max_hits)?,
         }
     };
 
+    if options.is_cancelled() {
+        return Ok(Vec::new());
+    }
     tracing::trace!("literal_total={:?} hits={}", t0.elapsed(), hits.len());
     Ok(hits)
 }
@@ -704,6 +746,9 @@ fn literal_search_walk(
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
     let mut paths = Vec::new();
     for entry in crate::walker::source_walker(&workspace.root, options.skip_gitignore).build() {
+        if options.is_cancelled() {
+            return Ok(Vec::new());
+        }
         let entry = entry?;
         if !entry
             .file_type()
@@ -728,7 +773,13 @@ fn literal_search_walk(
         paths.push((rel_path.to_path_buf(), path.to_path_buf()));
     }
 
-    literal_search_paths(query_lower, options.bounded_context(), max_hits, &paths)
+    literal_search_paths(
+        query_lower,
+        options.bounded_context(),
+        max_hits,
+        &paths,
+        options,
+    )
 }
 
 fn literal_search_paths(
@@ -736,10 +787,14 @@ fn literal_search_paths(
     context: usize,
     max_hits: usize,
     paths: &[(PathBuf, PathBuf)],
+    options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
     let mut hits = paths
         .par_iter()
         .flat_map_iter(|(rel_path, path)| {
+            if options.is_cancelled() {
+                return Vec::new();
+            }
             let Ok(content) = fs::read_to_string(path) else {
                 return Vec::new();
             };
@@ -747,7 +802,9 @@ fn literal_search_paths(
             lines
                 .iter()
                 .enumerate()
-                .filter(|(_, line)| line.to_ascii_lowercase().contains(query_lower))
+                .filter(|(_, line)| {
+                    !options.is_cancelled() && line.to_ascii_lowercase().contains(query_lower)
+                })
                 .map(|(index, line)| {
                     let line_number = index.saturating_add(1);
                     let (start_line, end_line) = snippet_bounds(line_number, context, lines.len());
@@ -766,6 +823,9 @@ fn literal_search_paths(
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
+    if options.is_cancelled() {
+        return Ok(Vec::new());
+    }
     hits.sort_by(|left, right| {
         left.file_path
             .cmp(&right.file_path)
@@ -792,11 +852,17 @@ fn substring_candidate_files(
     let query = constrain_query_to_scope(query, &ctx.fields, options.scope_filter.as_ref())?;
     let mut paths = HashSet::new();
     for (index, searcher) in ctx.searchers.iter().enumerate() {
+        if options.is_cancelled() {
+            return Ok(Some(Vec::new()));
+        }
         let docs = searcher.search(&query, &TopDocs::with_limit(10_000).order_by_score())?;
         if docs.len() == 10_000 {
             return Ok(None);
         }
         for (_score, address) in docs {
+            if options.is_cancelled() {
+                return Ok(Some(Vec::new()));
+            }
             let doc: TantivyDocument = searcher.doc(address)?;
             let Some(path) = doc
                 .get_first(ctx.fields.file_path)
@@ -2917,17 +2983,8 @@ fn neural_query_vector(
     query_text: &str,
     job: &mut Option<NeuralQueryVectorJob>,
 ) -> Vec<f32> {
-    if let Some(job) = job.take() {
-        let vector = match job {
-            NeuralQueryVectorJob::Ready(vector) => Some(vector),
-            NeuralQueryVectorJob::Pending(job) => match job.join() {
-                Ok(vector) => Some(vector),
-                Err(_) => {
-                    tracing::warn!("precomputed neural query vector task panicked");
-                    None
-                }
-            },
-        };
+    if let Some(mut job) = job.take() {
+        let vector = job.finish();
         if let Some(vector) = vector {
             if vector.len() == model.dimensions() {
                 return vector;
@@ -4572,7 +4629,7 @@ mod tests {
     #[test]
     fn neural_query_vector_uses_precomputed_job() {
         let model = CountingEmbeddingModel::new(3);
-        let mut job = Some(NeuralQueryVectorJob::Pending(std::thread::spawn(|| {
+        let mut job = Some(NeuralQueryVectorJob::pending(std::thread::spawn(|| {
             vec![0.25, 0.5, 0.75]
         })));
 
@@ -4581,6 +4638,27 @@ mod tests {
         assert_eq!(vector, vec![0.25, 0.5, 0.75]);
         assert_eq!(model.calls.load(Ordering::Relaxed), 0);
         assert!(job.is_none());
+    }
+
+    #[test]
+    fn dropping_rapid_neural_precompute_jobs_leaves_no_detached_workers() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..32 {
+            let worker_active = active.clone();
+            let worker_max = max_active.clone();
+            let job = NeuralQueryVectorJob::pending(std::thread::spawn(move || {
+                let current = worker_active.fetch_add(1, Ordering::SeqCst) + 1;
+                worker_max.fetch_max(current, Ordering::SeqCst);
+                worker_active.fetch_sub(1, Ordering::SeqCst);
+                vec![1.0; 3]
+            }));
+            drop(job);
+            assert_eq!(active.load(Ordering::SeqCst), 0);
+        }
+
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -4598,7 +4676,7 @@ mod tests {
     #[test]
     fn neural_query_vector_falls_back_on_wrong_dimensions() {
         let model = CountingEmbeddingModel::new(3);
-        let mut job = Some(NeuralQueryVectorJob::Pending(std::thread::spawn(|| {
+        let mut job = Some(NeuralQueryVectorJob::pending(std::thread::spawn(|| {
             vec![0.25, 0.5]
         })));
 
@@ -5399,6 +5477,28 @@ mod tests {
             literal_search(&workspace, "calculate_sales_tax", &SearchOptions::default()).unwrap();
         assert!(!hits.is_empty());
         assert!(hits[0].preview.contains("calculate_sales_tax"));
+    }
+
+    #[test]
+    #[serial]
+    fn literal_search_discards_results_when_pre_cancelled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(tmp.path().join("match.rs"), "fn cancelled_match() {}\n").unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        let options = SearchOptions {
+            cancel_token: Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                true,
+            ))),
+            ..SearchOptions::default()
+        };
+
+        let hits = literal_search(&workspace, "cancelled_match", &options).unwrap();
+        assert!(hits.is_empty());
     }
 
     #[test]

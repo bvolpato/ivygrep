@@ -64,6 +64,9 @@ pub fn regex_search_with_options(
     pattern: &str,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
+    if options.is_cancelled() {
+        return Ok(Vec::new());
+    }
     let max_hits = options.bounded_limit().unwrap_or(usize::MAX);
     if max_hits == 0 {
         return Ok(Vec::new());
@@ -84,7 +87,7 @@ pub fn regex_search_with_options(
             "regex index prefilter: {} candidate files from index",
             paths.len()
         );
-        regex_search_parallel(workspace, pattern, &paths, max_hits)
+        regex_search_parallel(workspace, pattern, &paths, max_hits, options)
     } else {
         regex_search_walk(
             workspace,
@@ -95,7 +98,13 @@ pub fn regex_search_with_options(
             options,
         )
     }?;
-    expand_regex_context(workspace, &mut hits, options.bounded_context());
+    if options.is_cancelled() {
+        return Ok(Vec::new());
+    }
+    expand_regex_context(workspace, &mut hits, options.bounded_context(), options);
+    if options.is_cancelled() {
+        return Ok(Vec::new());
+    }
     Ok(hits)
 }
 
@@ -170,6 +179,9 @@ fn index_prefilter_files(
 
     let mut candidate_files = HashSet::new();
     for (_score, addr) in docs {
+        if options.is_cancelled() {
+            return Some(Vec::new());
+        }
         if let Ok(doc) = searcher.doc::<TantivyDocument>(addr)
             && (options.skip_gitignore
                 || fields
@@ -231,6 +243,7 @@ fn regex_search_parallel(
     pattern: &str,
     file_paths: &[PathBuf],
     max_hits: usize,
+    options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
     let hit_count = AtomicUsize::new(0);
     let done = AtomicBool::new(false);
@@ -241,7 +254,7 @@ fn regex_search_parallel(
         .build(pattern)?;
 
     file_paths.par_iter().for_each(|rel_path| {
-        if done.load(Ordering::Relaxed) {
+        if done.load(Ordering::Relaxed) || options.is_cancelled() {
             return;
         }
 
@@ -257,6 +270,9 @@ fn regex_search_parallel(
             &matcher,
             &full_path,
             UTF8(|line_num, line| {
+                if options.is_cancelled() {
+                    return Ok(false);
+                }
                 let line_num = usize::try_from(line_num).unwrap_or(usize::MAX);
                 local_hits.push(SearchHit {
                     file_path: rel_path.clone(),
@@ -269,11 +285,13 @@ fn regex_search_parallel(
                     neural_requested: false,
                     neural_executed: false,
                 });
-                Ok(local_hits.len() < max_hits && !done.load(Ordering::Relaxed))
+                Ok(local_hits.len() < max_hits
+                    && !done.load(Ordering::Relaxed)
+                    && !options.is_cancelled())
             }),
         );
 
-        if !local_hits.is_empty() {
+        if !options.is_cancelled() && !local_hits.is_empty() {
             let n = local_hits.len();
             let mut guard = results.lock().unwrap();
             guard.extend(local_hits);
@@ -289,6 +307,9 @@ fn regex_search_parallel(
         }
     });
 
+    if options.is_cancelled() {
+        return Ok(Vec::new());
+    }
     let mut hits = results.into_inner().unwrap();
     // Parallel collection order is nondeterministic; sort by (path, line) so a
     // limited result set is stable across runs rather than an arbitrary subset.
@@ -320,6 +341,9 @@ fn regex_search_walk(
     let walk = crate::walker::source_walker(&workspace.root, options.skip_gitignore);
 
     'walk: for entry in walk.build() {
+        if options.is_cancelled() {
+            return Ok(Vec::new());
+        }
         let entry = entry?;
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
@@ -351,6 +375,9 @@ fn regex_search_walk(
             &matcher,
             &full_path,
             UTF8(|line_num, line| {
+                if options.is_cancelled() {
+                    return Ok(false);
+                }
                 let line_num = usize::try_from(line_num).unwrap_or(usize::MAX);
                 local_hits.push(SearchHit {
                     file_path: rel_path.clone(),
@@ -363,9 +390,13 @@ fn regex_search_walk(
                     neural_requested: false,
                     neural_executed: false,
                 });
-                Ok(local_hits.len() < remaining)
+                Ok(local_hits.len() < remaining && !options.is_cancelled())
             }),
         )?;
+
+        if options.is_cancelled() {
+            return Ok(Vec::new());
+        }
 
         if type_filter_match == PathTypeFilterMatch::ValidateText
             && !local_hits.is_empty()
@@ -420,17 +451,33 @@ fn unknown_file_is_indexable_text(path: &std::path::Path) -> bool {
     crate::chunking::is_indexable_file_reader(path, &mut file).unwrap_or(false)
 }
 
-fn expand_regex_context(workspace: &Workspace, hits: &mut [SearchHit], context: usize) {
-    expand_regex_context_with_paths(hits, context, |path| workspace.root.join(path));
+fn expand_regex_context(
+    workspace: &Workspace,
+    hits: &mut [SearchHit],
+    context: usize,
+    options: &SearchOptions,
+) {
+    expand_regex_context_with_paths(hits, context, Some(options), |path| {
+        workspace.root.join(path)
+    });
 }
 
 pub(crate) fn expand_regex_context_absolute(hits: &mut [SearchHit], context: usize) {
-    expand_regex_context_with_paths(hits, context, |path| path.to_path_buf());
+    expand_regex_context_with_paths(hits, context, None, |path| path.to_path_buf());
+}
+
+pub(crate) fn expand_regex_context_absolute_with_options(
+    hits: &mut [SearchHit],
+    context: usize,
+    options: &SearchOptions,
+) {
+    expand_regex_context_with_paths(hits, context, Some(options), |path| path.to_path_buf());
 }
 
 fn expand_regex_context_with_paths(
     hits: &mut [SearchHit],
     context: usize,
+    options: Option<&SearchOptions>,
     resolve_path: impl Fn(&std::path::Path) -> PathBuf,
 ) {
     if context == 0 || hits.is_empty() {
@@ -446,6 +493,9 @@ fn expand_regex_context_with_paths(
     }
 
     for (rel_path, hit_indices) in hits_by_path {
+        if options.is_some_and(SearchOptions::is_cancelled) {
+            return;
+        }
         let path = resolve_path(&rel_path);
         if path
             .metadata()
@@ -472,6 +522,9 @@ fn expand_regex_context_with_paths(
             continue;
         }
         for hit_index in hit_indices {
+            if options.is_some_and(SearchOptions::is_cancelled) {
+                return;
+            }
             let hit = &mut hits[hit_index];
             let focus = hit.start_line.clamp(1, lines.len());
             let start = focus.saturating_sub(context).max(1);
@@ -543,6 +596,23 @@ mod tests {
         );
         assert!(required_literal_runs("error|warning").is_none());
         assert!(required_literal_runs("[abcdef]{200}").is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn regex_search_discards_results_when_pre_cancelled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(tmp.path().join("match.rs"), "fn cancelled_match() {}\n").unwrap();
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let options = SearchOptions {
+            cancel_token: Some(std::sync::Arc::new(AtomicBool::new(true))),
+            ..SearchOptions::default()
+        };
+
+        let hits = regex_search_with_options(&workspace, "cancelled_match", &options).unwrap();
+        assert!(hits.is_empty());
     }
 
     #[test]
