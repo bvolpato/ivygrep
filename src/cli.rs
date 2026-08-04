@@ -2669,15 +2669,16 @@ mod tests {
                 .iter()
                 .map(|hit| hit.file_path.clone())
                 .collect::<std::collections::HashSet<_>>();
-            assert!(
-                paths.contains(&first.path().join("src/first.rs")),
-                "{paths:?}"
-            );
-            assert!(
-                paths.contains(&second.path().join("other/second.rs")),
-                "{paths:?}"
-            );
-            assert!(!paths.contains(&second.path().join("other/decoy.md")));
+            let first_path = first.path().join("src/first.rs").canonicalize().unwrap();
+            let second_path = second
+                .path()
+                .join("other/second.rs")
+                .canonicalize()
+                .unwrap();
+            let decoy_path = second.path().join("other/decoy.md").canonicalize().unwrap();
+            assert!(paths.contains(&first_path), "{paths:?}");
+            assert!(paths.contains(&second_path), "{paths:?}");
+            assert!(!paths.contains(&decoy_path));
         }
     }
 }
