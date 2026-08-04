@@ -679,7 +679,7 @@ def render_markdown(dashboard: dict) -> str:
         million_throughput = f"{format_number(million['current']['chunks_per_second'])} chunks/s"
     if current_million is not None:
         current_release_rows = f"""
-## Current-release scale confirmation
+## Latest measured release scale confirmation
 
 {current_million_text} measures hash-only indexing and warm CLI latency on a deterministic synthetic CC0 corpus across three sequential trials. It is a scale and footprint measurement, not semantic quality or agent-task performance.
 """
@@ -786,7 +786,7 @@ def render_html(dashboard: dict) -> str:
     current_scope = ""
     if current_million is not None:
         current_scope = (
-            "<section class=\"report-card\"><h2>Current-release scope</h2>"
+            "<section class=\"report-card\"><h2>Latest measured release scope</h2>"
             f"<p><code>{escape(current_million['version'])}</code> binary "
             f"<code>{escape(current_million['binary_sha256'])}</code> was measured "
             "in hash-only mode on deterministic synthetic CC0 data across three "

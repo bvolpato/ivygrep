@@ -1032,7 +1032,7 @@
       "id": "million-scale-current",
       "immutable_url": null,
       "kind": "scale",
-      "label": "Current-release million-chunk confirmation",
+      "label": "Latest measured release million-chunk confirmation",
       "path": "docs/benchmarks/public-million-current.json",
       "publication_commit": null,
       "publication_status": "not pinned to an immutable revision",
