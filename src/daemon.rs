@@ -639,6 +639,7 @@ fn handle_watch_result(
 ) {
     match result {
         Ok(event) if event.need_rescan() => {
+            event_filter.lock().refresh();
             warn!(
                 "watch backend requested a full rescan for {}",
                 control.workspace.root.display()
@@ -655,6 +656,7 @@ fn handle_watch_result(
             WatchChange::FullReconciliation => control.mark_full_reconciliation(None),
         },
         Err(err) => {
+            event_filter.lock().refresh();
             let error = format!("{err:#}");
             warn!(
                 "watch backend error for {}: {error}",
@@ -4557,7 +4559,14 @@ mod tests {
         let control = WatchControl::new(workspace.clone());
         let filter = Mutex::new(WatchEventFilter::new(&workspace));
 
+        let source = repo.path().join("recovered.rs");
+        std::fs::write(&source, "pub fn recovered() {}\n").unwrap();
+        std::fs::write(repo.path().join(".gitignore"), "recovered.rs\n").unwrap();
+        filter.lock().refresh();
+        assert!(!filter.lock().path_should_reindex(&source));
+
         control.mark_paths_dirty([PathBuf::from("before.rs")]);
+        std::fs::write(repo.path().join(".gitignore"), "").unwrap();
         handle_watch_result(
             &control,
             &filter,
@@ -4573,8 +4582,10 @@ mod tests {
                 .as_deref()
                 .is_some_and(|error| error.contains("injected watcher overflow"))
         );
+        assert!(filter.lock().path_should_reindex(&source));
         assert!(control.take_pending_work().is_none());
 
+        std::fs::write(repo.path().join(".gitignore"), "recovered.rs\n").unwrap();
         handle_watch_result(
             &control,
             &filter,
@@ -4584,6 +4595,7 @@ mod tests {
             control.take_pending_work().unwrap().change,
             WatchChange::FullReconciliation
         ));
+        assert!(!filter.lock().path_should_reindex(&source));
     }
 
     #[tokio::test]
