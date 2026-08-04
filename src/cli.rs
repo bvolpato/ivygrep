@@ -507,7 +507,9 @@ pub async fn run() -> Result<()> {
         };
         println!("ivygrep web listening at {url}");
         std::io::stdout().flush().ok();
-        open_browser(&url);
+        if let Err(error) = crate::launcher::open_browser(&url) {
+            eprintln!("Could not open browser: {error:#}");
+        }
         return Ok(());
     }
 
@@ -690,39 +692,6 @@ pub async fn run() -> Result<()> {
     }
 
     run_query(cli, context_args).await
-}
-
-fn open_browser(url: &str) {
-    if std::env::var_os("IVYGREP_NO_BROWSER").is_some() {
-        return;
-    }
-
-    #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut command = std::process::Command::new("open");
-        command.arg(url);
-        command
-    };
-
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut command = std::process::Command::new("cmd");
-        command.args(["/C", "start", "", url]);
-        command
-    };
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut command = {
-        let mut command = std::process::Command::new("xdg-open");
-        command.arg(url);
-        command
-    };
-
-    let _ = command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn();
 }
 
 async fn run_status(json: bool) -> Result<()> {
