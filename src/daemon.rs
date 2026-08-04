@@ -185,16 +185,33 @@ fn fuse_memory_probe_hits(
 }
 
 struct WatchRegistration {
-    _watcher: RecommendedWatcher,
+    watcher: RecommendedWatcher,
     control: Arc<WatchControl>,
     job_nonce: Option<String>,
+    external_git_common_dir: Option<PathBuf>,
+    external_git_watch: Option<PathBuf>,
 }
 
 #[derive(Clone)]
 struct WatchEventFilter {
-    root: PathBuf,
+    workspace: Workspace,
     skip_gitignore: bool,
+    git_exclude_path: Option<PathBuf>,
     root_gitignore: Option<ignore::gitignore::Gitignore>,
+}
+
+#[derive(Debug, Default)]
+enum WatchChange {
+    #[default]
+    None,
+    Paths(HashSet<PathBuf>),
+    FullReconciliation,
+}
+
+#[derive(Debug, Default)]
+struct PendingWatchWork {
+    change: WatchChange,
+    backend_error: Option<String>,
 }
 
 struct WatchControl {
@@ -205,7 +222,7 @@ struct WatchControl {
     active: AtomicBool,
     pending_events: AtomicU64,
     coalesced_events: AtomicU64,
-    dirty_paths: Mutex<HashSet<PathBuf>>,
+    pending_work: Mutex<PendingWatchWork>,
 }
 
 impl WatchControl {
@@ -218,19 +235,48 @@ impl WatchControl {
             active: AtomicBool::new(true),
             pending_events: AtomicU64::new(0),
             coalesced_events: AtomicU64::new(0),
-            dirty_paths: Mutex::new(HashSet::new()),
+            pending_work: Mutex::new(PendingWatchWork::default()),
         }
     }
 
-    fn mark_dirty(&self, paths: impl IntoIterator<Item = PathBuf>) {
-        self.dirty_paths.lock().extend(paths);
+    fn mark_paths_dirty(&self, paths: impl IntoIterator<Item = PathBuf>) {
+        let paths = paths.into_iter().collect::<HashSet<_>>();
+        if paths.is_empty() {
+            return;
+        }
+
+        let mut pending = self.pending_work.lock();
+        match &mut pending.change {
+            WatchChange::None => pending.change = WatchChange::Paths(paths),
+            WatchChange::Paths(existing) => existing.extend(paths),
+            WatchChange::FullReconciliation => {}
+        }
         self.dirty.store(true, Ordering::Relaxed);
         self.pending_events.fetch_add(1, Ordering::Relaxed);
+        drop(pending);
         self.notify.notify_one();
     }
 
-    fn take_dirty_paths(&self) -> Vec<PathBuf> {
-        self.dirty_paths.lock().drain().collect()
+    fn mark_full_reconciliation(&self, backend_error: Option<String>) {
+        let mut pending = self.pending_work.lock();
+        pending.change = WatchChange::FullReconciliation;
+        if backend_error.is_some() {
+            pending.backend_error = backend_error;
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+        self.pending_events.fetch_add(1, Ordering::Relaxed);
+        drop(pending);
+        self.notify.notify_one();
+    }
+
+    fn take_pending_work(&self) -> Option<PendingWatchWork> {
+        let mut pending = self.pending_work.lock();
+        if matches!(pending.change, WatchChange::None) {
+            return None;
+        }
+        let work = std::mem::take(&mut *pending);
+        self.dirty.store(false, Ordering::Relaxed);
+        Some(work)
     }
 
     fn snapshot_phase(&self) -> (&'static str, bool, bool, u64, u64) {
@@ -466,19 +512,51 @@ impl QueryResultCache {
 
 impl WatchEventFilter {
     fn new(workspace: &Workspace) -> Self {
-        let skip_gitignore = workspace
+        let mut filter = Self {
+            workspace: workspace.clone(),
+            skip_gitignore: false,
+            git_exclude_path: None,
+            root_gitignore: None,
+        };
+        filter.refresh();
+        filter
+    }
+
+    fn refresh(&mut self) {
+        self.skip_gitignore = self
+            .workspace
             .read_metadata()
             .ok()
             .flatten()
             .is_some_and(|metadata| metadata.skip_gitignore);
-        let root_gitignore = (!skip_gitignore)
-            .then(|| build_root_gitignore(&workspace.root))
+        self.git_exclude_path = crate::workspace::git_common_dir(&self.workspace.root)
+            .map(|common_dir| common_dir.join("info/exclude"));
+        self.root_gitignore = (!self.skip_gitignore)
+            .then(|| build_root_gitignore(&self.workspace.root, self.git_exclude_path.as_deref()))
             .flatten();
+    }
 
-        Self {
-            root: workspace.root.clone(),
-            skip_gitignore,
-            root_gitignore,
+    fn change_for_event(&mut self, event: &notify::Event) -> WatchChange {
+        if matches!(event.kind, notify::EventKind::Access(_)) {
+            return WatchChange::None;
+        }
+        if event
+            .paths
+            .iter()
+            .any(|path| self.is_ignore_configuration_path(path))
+        {
+            self.refresh();
+            return WatchChange::FullReconciliation;
+        }
+
+        let paths = self
+            .paths_to_reindex(event)
+            .into_iter()
+            .collect::<HashSet<_>>();
+        if paths.is_empty() {
+            WatchChange::None
+        } else {
+            WatchChange::Paths(paths)
         }
     }
 
@@ -499,18 +577,13 @@ impl WatchEventFilter {
             return false;
         }
 
-        if !self.skip_gitignore {
-            if is_common_build_output_path(&rel) {
-                return false;
-            }
-
-            if let Some(gitignore) = &self.root_gitignore
-                && gitignore
-                    .matched_path_or_any_parents(&normalized_path, normalized_path.is_dir())
-                    .is_ignore()
-            {
-                return false;
-            }
+        if !self.skip_gitignore
+            && let Some(gitignore) = &self.root_gitignore
+            && gitignore
+                .matched_path_or_any_parents(&normalized_path, normalized_path.is_dir())
+                .is_ignore()
+        {
+            return false;
         }
 
         true
@@ -520,16 +593,81 @@ impl WatchEventFilter {
         let absolute = if path.is_absolute() {
             path.to_path_buf()
         } else {
-            self.root.join(path)
+            self.workspace.root.join(path)
         };
 
-        if let Ok(rel) = absolute.strip_prefix(&self.root) {
+        if let Ok(rel) = absolute.strip_prefix(&self.workspace.root) {
             return Some((absolute.clone(), rel.to_path_buf()));
         }
 
         let normalized = canonicalize_existing_prefix(&absolute)?;
-        let rel = normalized.strip_prefix(&self.root).ok()?.to_path_buf();
+        let rel = normalized
+            .strip_prefix(&self.workspace.root)
+            .ok()?
+            .to_path_buf();
         Some((normalized, rel))
+    }
+
+    fn is_ignore_configuration_path(&self, path: &Path) -> bool {
+        if self.git_exclude_path.as_deref().is_some_and(|exclude| {
+            watch_paths_match(path, exclude)
+                || exclude
+                    .parent()
+                    .is_some_and(|parent| watch_paths_match(path, parent))
+        }) {
+            return true;
+        }
+
+        self.normalize_watch_path(path).is_some_and(|(_, rel)| {
+            rel.file_name()
+                .is_some_and(|name| name == ".gitignore" || name == ".ignore")
+        })
+    }
+}
+
+fn watch_paths_match(left: &Path, right: &Path) -> bool {
+    left == right
+        || canonicalize_existing_prefix(left)
+            .zip(canonicalize_existing_prefix(right))
+            .is_some_and(|(left, right)| left == right)
+}
+
+fn handle_watch_result(
+    control: &WatchControl,
+    event_filter: &Mutex<WatchEventFilter>,
+    result: notify::Result<notify::Event>,
+) {
+    match result {
+        Ok(event) if event.need_rescan() => {
+            event_filter.lock().refresh();
+            warn!(
+                "watch backend requested a full rescan for {}",
+                control.workspace.root.display()
+            );
+            daemon_log(&format!(
+                "watch backend requested a full rescan for {}; scheduling full reconciliation",
+                control.workspace.root.display()
+            ));
+            control.mark_full_reconciliation(None);
+        }
+        Ok(event) => match event_filter.lock().change_for_event(&event) {
+            WatchChange::None => {}
+            WatchChange::Paths(paths) => control.mark_paths_dirty(paths),
+            WatchChange::FullReconciliation => control.mark_full_reconciliation(None),
+        },
+        Err(err) => {
+            event_filter.lock().refresh();
+            let error = format!("{err:#}");
+            warn!(
+                "watch backend error for {}: {error}",
+                control.workspace.root.display()
+            );
+            daemon_log(&format!(
+                "watch backend error for {}: {error}; scheduling full reconciliation",
+                control.workspace.root.display()
+            ));
+            control.mark_full_reconciliation(Some(error));
+        }
     }
 }
 
@@ -1851,15 +1989,28 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
 
     let control = Arc::new(WatchControl::new(workspace.clone()));
     let callback_control = control.clone();
-    let event_filter = WatchEventFilter::new(&workspace);
+    let event_filter = Arc::new(Mutex::new(WatchEventFilter::new(&workspace)));
+    let callback_filter = event_filter.clone();
+    let external_git_common_dir = {
+        let filter = event_filter.lock();
+        (!filter.skip_gitignore)
+            .then(|| {
+                filter
+                    .git_exclude_path
+                    .as_deref()
+                    .and_then(Path::parent)
+                    .and_then(Path::parent)
+                    .filter(|path| !path.starts_with(&workspace.root))
+                    .map(Path::to_path_buf)
+            })
+            .flatten()
+    };
+    let external_git_watch = external_git_common_dir
+        .as_deref()
+        .and_then(external_git_watch_target);
 
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        if let Ok(event) = event {
-            let paths = event_filter.paths_to_reindex(&event);
-            if !paths.is_empty() {
-                callback_control.mark_dirty(paths);
-            }
-        }
+        handle_watch_result(&callback_control, &callback_filter, event);
     })?;
 
     match watcher.watch(&workspace.root, RecursiveMode::Recursive) {
@@ -1885,15 +2036,27 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
             return Err(err.into());
         }
     }
+    if let Some(git_watch) = &external_git_watch {
+        watcher
+            .watch(git_watch, RecursiveMode::NonRecursive)
+            .map_err(|err| {
+                anyhow::anyhow!(
+                    "failed watching external Git metadata directory {}: {err:#}",
+                    git_watch.display()
+                )
+            })?;
+    }
     let job_nonce = jobs::start_job(&workspace, JobKind::Watcher, "idle", 1)
         .ok()
         .and_then(|record| record.nonce);
     watchers.insert(
         workspace.id.clone(),
         WatchRegistration {
-            _watcher: watcher,
+            watcher,
             control: control.clone(),
             job_nonce: job_nonce.clone(),
+            external_git_common_dir,
+            external_git_watch,
         },
     );
     drop(watchers);
@@ -1915,6 +2078,92 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
     daemon_log(&format!("watching {}", workspace.root.display()));
 
     Ok(())
+}
+
+fn external_git_watch_target(common_dir: &Path) -> Option<PathBuf> {
+    let info = common_dir.join("info");
+    if info.is_dir() {
+        Some(info)
+    } else if common_dir.is_dir() {
+        Some(common_dir.to_path_buf())
+    } else {
+        None
+    }
+}
+
+fn is_missing_watch_error(error: &notify::Error) -> bool {
+    matches!(
+        error.kind,
+        notify::ErrorKind::PathNotFound | notify::ErrorKind::WatchNotFound
+    )
+}
+
+fn log_external_git_watch_error(
+    workspace: &Workspace,
+    action: &str,
+    path: &Path,
+    error: &notify::Error,
+) {
+    warn!(
+        "failed {action} external Git metadata watch {} for {}: {error:#}",
+        path.display(),
+        workspace.root.display()
+    );
+    daemon_log(&format!(
+        "failed {action} external Git metadata watch {} for {}: {error:#}",
+        path.display(),
+        workspace.root.display()
+    ));
+}
+
+fn reconcile_external_git_watch(state: &DaemonState, workspace: &Workspace) {
+    let mut watchers = state.watchers.lock();
+    let Some(registration) = watchers.get_mut(&workspace.id) else {
+        return;
+    };
+    let Some(common_dir) = registration.external_git_common_dir.clone() else {
+        return;
+    };
+    let desired = external_git_watch_target(&common_dir);
+    if registration.external_git_watch == desired {
+        return;
+    }
+
+    let Some(target) = desired else {
+        if let Some(current) = registration.external_git_watch.as_ref()
+            && let Err(error) = registration.watcher.unwatch(current)
+            && !is_missing_watch_error(&error)
+        {
+            log_external_git_watch_error(workspace, "removing", current, &error);
+            return;
+        }
+        registration.external_git_watch = None;
+        return;
+    };
+    if let Err(error) = registration
+        .watcher
+        .watch(&target, RecursiveMode::NonRecursive)
+    {
+        log_external_git_watch_error(workspace, "adding", &target, &error);
+        return;
+    }
+
+    let Some(current) = registration.external_git_watch.as_ref() else {
+        registration.external_git_watch = Some(target);
+        return;
+    };
+    if let Err(error) = registration.watcher.unwatch(current)
+        && !is_missing_watch_error(&error)
+    {
+        log_external_git_watch_error(workspace, "removing", current, &error);
+        if let Err(rollback_error) = registration.watcher.unwatch(&target)
+            && !is_missing_watch_error(&rollback_error)
+        {
+            log_external_git_watch_error(workspace, "rolling back", &target, &rollback_error);
+        }
+        return;
+    }
+    registration.external_git_watch = Some(target);
 }
 
 fn update_watcher_job(control: &WatchControl, job_nonce: Option<&str>, update: JobUpdate) {
@@ -1969,11 +2218,7 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>, job_nonce:
                 continue;
             }
 
-            loop {
-                if !control.dirty.swap(false, Ordering::Relaxed) {
-                    break;
-                }
-
+            while let Some(pending_work) = control.take_pending_work() {
                 let pending = control.pending_events.swap(0, Ordering::Relaxed);
                 control
                     .coalesced_events
@@ -1987,10 +2232,20 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>, job_nonce:
                 update
                     .details
                     .insert("pending_events".to_string(), pending.to_string());
+                if let Some(error) = &pending_work.backend_error {
+                    update.last_error = Some(Some(error.clone()));
+                }
                 update_watcher_job(&control, job_nonce.as_deref(), update);
 
                 let workspace = control.workspace.clone();
-                let changed_paths = control.take_dirty_paths();
+                if matches!(&pending_work.change, WatchChange::FullReconciliation) {
+                    reconcile_external_git_watch(&state, &workspace);
+                }
+                let changed_paths = match pending_work.change {
+                    WatchChange::Paths(paths) => paths.into_iter().collect(),
+                    WatchChange::FullReconciliation => Vec::new(),
+                    WatchChange::None => unreachable!("pending watcher work cannot be empty"),
+                };
                 // Gate watcher-triggered indexing behind the same CPU semaphore
                 // as client requests (#58). A multi-repo branch switch / build
                 // can dirty many watched workspaces at once; without this, each
@@ -2343,15 +2598,17 @@ fn modified_nanos(metadata: &std::fs::Metadata) -> u128 {
         .unwrap_or(0)
 }
 
-fn build_root_gitignore(root: &Path) -> Option<ignore::gitignore::Gitignore> {
+fn build_root_gitignore(
+    root: &Path,
+    git_exclude_path: Option<&Path>,
+) -> Option<ignore::gitignore::Gitignore> {
     let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
+    if let Some(git_exclude) = git_exclude_path.filter(|path| path.exists()) {
+        let _ = builder.add(git_exclude);
+    }
     let gitignore = root.join(".gitignore");
     if gitignore.exists() {
         let _ = builder.add(&gitignore);
-    }
-    let git_exclude = root.join(".git/info/exclude");
-    if git_exclude.exists() {
-        let _ = builder.add(&git_exclude);
     }
     builder.build().ok()
 }
@@ -2360,27 +2617,6 @@ fn is_always_ignored_watch_path(rel: &Path) -> bool {
     rel.components().any(|component| {
         let part = component.as_os_str();
         part == ".git" || part == ".ivygrep"
-    })
-}
-
-fn is_common_build_output_path(rel: &Path) -> bool {
-    rel.components().any(|component| {
-        matches!(
-            component.as_os_str().to_str(),
-            Some(
-                "target"
-                    | "node_modules"
-                    | ".next"
-                    | ".nuxt"
-                    | ".svelte-kit"
-                    | ".turbo"
-                    | ".cache"
-                    | ".direnv"
-                    | "dist"
-                    | "build"
-                    | "coverage"
-            )
-        )
     })
 }
 
@@ -2659,8 +2895,14 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::embedding::create_hash_model;
-    use crate::indexer::index_workspace;
-    use crate::search::{SearchOptions, hybrid_search, validate_forced_neural_workspaces};
+    use crate::indexer::{
+        index_workspace, index_workspace_for_watcher, index_workspace_paths_for_watcher,
+        open_sqlite_readonly,
+    };
+    use crate::search::{
+        SearchOptions, hybrid_search, literal_search_with_context,
+        validate_forced_neural_workspaces,
+    };
     use crate::workspace::WorkspaceMetadata;
 
     fn test_state() -> DaemonState {
@@ -2679,6 +2921,63 @@ mod tests {
             cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
             web_server: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn git(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(["-c", "commit.gpgSign=false"])
+            .args(args)
+            .current_dir(root)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn indexed_file_contains(workspace: &Workspace, path: &str, needle: &str) -> bool {
+        let conn = open_sqlite_readonly(&workspace.sqlite_path()).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT text FROM chunks WHERE file_path = ?1")
+            .unwrap();
+        stmt.query_map([path], |row| row.get::<_, Vec<u8>>(0))
+            .unwrap()
+            .any(|row| crate::indexer::decompress_text(row.unwrap()).contains(needle))
+    }
+
+    fn indexed_literal_visible(workspace: &Workspace, needle: &str) -> Option<bool> {
+        let context = SearchContext::load(workspace, None, false).ok()?;
+        let hits = literal_search_with_context(
+            &context,
+            workspace,
+            needle,
+            &SearchOptions {
+                limit: Some(5),
+                ..Default::default()
+            },
+        )
+        .ok()?;
+        Some(!hits.is_empty())
+    }
+
+    async fn wait_for_literal_visibility(
+        workspace: &Workspace,
+        needle: &str,
+        expected: bool,
+    ) -> bool {
+        for _ in 0..60 {
+            if indexed_literal_visible(workspace, needle) == Some(expected) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
     }
 
     fn test_hit(path: &str, score: f32) -> SearchHit {
@@ -4118,6 +4417,342 @@ mod tests {
         assert!(filter.path_should_reindex(&repo.path().join("target/debug/build.o")));
         assert!(filter.path_should_reindex(&repo.path().join("secret.txt")));
         assert!(!filter.path_should_reindex(&repo.path().join(".git/index")));
+    }
+
+    #[test]
+    #[serial]
+    fn watcher_updates_tracked_and_unignored_sources_in_build_named_directories() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        git(repo.path(), &["init", "-b", "main"]);
+        std::fs::create_dir_all(repo.path().join("target")).unwrap();
+        std::fs::create_dir_all(repo.path().join("dist")).unwrap();
+        std::fs::write(
+            repo.path().join("target/generated.rs"),
+            "pub fn tracked_build_old_marker() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.path().join("dist/kept.rs"),
+            "pub fn unignored_build_old_marker() {}\n",
+        )
+        .unwrap();
+        std::fs::write(repo.path().join(".gitignore"), "dist/*\n!dist/kept.rs\n").unwrap();
+        git(repo.path(), &["add", ".gitignore", "target/generated.rs"]);
+        git(repo.path(), &["commit", "-m", "seed build paths"]);
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+        assert!(indexed_file_contains(
+            &workspace,
+            "target/generated.rs",
+            "tracked_build_old_marker"
+        ));
+        assert!(indexed_file_contains(
+            &workspace,
+            "dist/kept.rs",
+            "unignored_build_old_marker"
+        ));
+
+        std::fs::write(
+            repo.path().join("target/generated.rs"),
+            "pub fn tracked_build_new_marker() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.path().join("dist/kept.rs"),
+            "pub fn unignored_build_new_marker() {}\n",
+        )
+        .unwrap();
+        let mut filter = WatchEventFilter::new(&workspace);
+        let change = filter.change_for_event(
+            &notify::Event::new(notify::EventKind::Any)
+                .add_path(repo.path().join("target/generated.rs"))
+                .add_path(repo.path().join("dist/kept.rs")),
+        );
+        let WatchChange::Paths(paths) = change else {
+            panic!("valid build paths should produce a targeted watcher change");
+        };
+        assert_eq!(paths.len(), 2);
+        let paths = paths.into_iter().collect::<Vec<_>>();
+        index_workspace_paths_for_watcher(&workspace, model.as_ref(), &paths).unwrap();
+
+        assert!(indexed_file_contains(
+            &workspace,
+            "target/generated.rs",
+            "tracked_build_new_marker"
+        ));
+        assert!(indexed_file_contains(
+            &workspace,
+            "dist/kept.rs",
+            "unignored_build_new_marker"
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn repository_exclude_events_refresh_filter_and_force_complete_reconciliation() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        git(repo.path(), &["init", "-b", "main"]);
+        std::fs::write(
+            repo.path().join("visible.rs"),
+            "pub fn repository_exclude_marker() {}\n",
+        )
+        .unwrap();
+        git(repo.path(), &["add", "visible.rs"]);
+        git(repo.path(), &["commit", "-m", "seed visible source"]);
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+        let source = repo.path().join("visible.rs");
+        let exclude = crate::workspace::git_common_dir(repo.path())
+            .unwrap()
+            .join("info/exclude");
+        let mut filter = WatchEventFilter::new(&workspace);
+        assert!(filter.path_should_reindex(&source));
+
+        std::fs::write(&exclude, "visible.rs\n").unwrap();
+        assert!(matches!(
+            filter.change_for_event(
+                &notify::Event::new(notify::EventKind::Any).add_path(exclude.clone())
+            ),
+            WatchChange::FullReconciliation
+        ));
+        assert!(!filter.path_should_reindex(&source));
+        index_workspace_for_watcher(&workspace, model.as_ref()).unwrap();
+        assert!(!indexed_file_contains(
+            &workspace,
+            "visible.rs",
+            "repository_exclude_marker"
+        ));
+
+        std::fs::write(&exclude, "").unwrap();
+        assert!(matches!(
+            filter.change_for_event(
+                &notify::Event::new(notify::EventKind::Any).add_path(exclude.clone())
+            ),
+            WatchChange::FullReconciliation
+        ));
+        assert!(filter.path_should_reindex(&source));
+        index_workspace_for_watcher(&workspace, model.as_ref()).unwrap();
+        assert!(indexed_file_contains(
+            &workspace,
+            "visible.rs",
+            "repository_exclude_marker"
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn watcher_backend_error_supersedes_coalesced_paths_with_full_reconciliation() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let control = WatchControl::new(workspace.clone());
+        let filter = Mutex::new(WatchEventFilter::new(&workspace));
+
+        let source = repo.path().join("recovered.rs");
+        std::fs::write(&source, "pub fn recovered() {}\n").unwrap();
+        std::fs::write(repo.path().join(".gitignore"), "recovered.rs\n").unwrap();
+        filter.lock().refresh();
+        assert!(!filter.lock().path_should_reindex(&source));
+
+        control.mark_paths_dirty([PathBuf::from("before.rs")]);
+        std::fs::write(repo.path().join(".gitignore"), "").unwrap();
+        handle_watch_result(
+            &control,
+            &filter,
+            Err(notify::Error::generic("injected watcher overflow")),
+        );
+        control.mark_paths_dirty([PathBuf::from("after.rs")]);
+
+        let pending = control.take_pending_work().unwrap();
+        assert!(matches!(pending.change, WatchChange::FullReconciliation));
+        assert!(
+            pending
+                .backend_error
+                .as_deref()
+                .is_some_and(|error| error.contains("injected watcher overflow"))
+        );
+        assert!(filter.lock().path_should_reindex(&source));
+        assert!(control.take_pending_work().is_none());
+
+        std::fs::write(repo.path().join(".gitignore"), "recovered.rs\n").unwrap();
+        handle_watch_result(
+            &control,
+            &filter,
+            Ok(notify::Event::new(notify::EventKind::Other).set_flag(notify::event::Flag::Rescan)),
+        );
+        assert!(matches!(
+            control.take_pending_work().unwrap().change,
+            WatchChange::FullReconciliation
+        ));
+        assert!(!filter.lock().path_should_reindex(&source));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn linked_worktree_watcher_reconciles_external_common_git_exclude_toggles() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repositories = tempdir().unwrap();
+        let main = repositories.path().join("main");
+        let linked = repositories.path().join("linked");
+        std::fs::create_dir(&main).unwrap();
+        git(&main, &["init", "-b", "main"]);
+        std::fs::write(
+            main.join("shared.rs"),
+            "pub fn external_common_git_marker() {}\n",
+        )
+        .unwrap();
+        git(&main, &["add", "shared.rs"]);
+        git(&main, &["commit", "-m", "seed linked source"]);
+        git(
+            &main,
+            &["worktree", "add", "--detach", linked.to_str().unwrap()],
+        );
+
+        let workspace = Workspace::resolve(&linked).unwrap();
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+        assert_eq!(
+            indexed_literal_visible(&workspace, "external_common_git_marker"),
+            Some(true)
+        );
+
+        let exclude = crate::workspace::git_common_dir(&linked)
+            .unwrap()
+            .join("info/exclude");
+        assert!(!exclude.starts_with(&linked));
+        let state = test_state();
+        register_watcher(&state, &linked).unwrap();
+
+        std::fs::write(&exclude, "shared.rs\n").unwrap();
+        let disappeared =
+            wait_for_literal_visibility(&workspace, "external_common_git_marker", false).await;
+        std::fs::write(&exclude, "").unwrap();
+        let reappeared =
+            wait_for_literal_visibility(&workspace, "external_common_git_marker", true).await;
+        stop_all_watchers(&state);
+
+        assert!(
+            disappeared,
+            "external common-dir exclude update did not remove linked-worktree result"
+        );
+        assert!(
+            reappeared,
+            "external common-dir exclude update did not restore linked-worktree result"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn linked_worktree_watcher_bootstraps_missing_external_git_info_directory() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repositories = tempdir().unwrap();
+        let main = repositories.path().join("main");
+        let linked = repositories.path().join("linked");
+        std::fs::create_dir(&main).unwrap();
+        git(&main, &["init", "-b", "main"]);
+        std::fs::write(
+            main.join("shared.rs"),
+            "pub fn missing_external_git_info_marker() {}\n",
+        )
+        .unwrap();
+        git(&main, &["add", "shared.rs"]);
+        git(&main, &["commit", "-m", "seed linked source"]);
+        git(
+            &main,
+            &["worktree", "add", "--detach", linked.to_str().unwrap()],
+        );
+
+        let common_dir = crate::workspace::git_common_dir(&linked).unwrap();
+        let info = common_dir.join("info");
+        std::fs::remove_dir_all(&info).unwrap();
+        assert!(!info.exists());
+
+        let workspace = Workspace::resolve(&linked).unwrap();
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+        assert_eq!(
+            indexed_literal_visible(&workspace, "missing_external_git_info_marker"),
+            Some(true)
+        );
+
+        let state = test_state();
+        register_watcher(&state, &linked).unwrap();
+        assert_eq!(
+            state
+                .watchers
+                .lock()
+                .get(&workspace.id)
+                .and_then(|registration| registration.external_git_watch.as_deref()),
+            Some(common_dir.as_path())
+        );
+
+        std::fs::create_dir(&info).unwrap();
+        let exclude = info.join("exclude");
+        std::fs::write(&exclude, "shared.rs\n").unwrap();
+        assert!(
+            wait_for_literal_visibility(&workspace, "missing_external_git_info_marker", false)
+                .await,
+            "creating external info/exclude did not remove linked-worktree result"
+        );
+        assert_eq!(
+            state
+                .watchers
+                .lock()
+                .get(&workspace.id)
+                .and_then(|registration| registration.external_git_watch.as_deref()),
+            Some(info.as_path())
+        );
+
+        std::fs::remove_dir_all(&info).unwrap();
+        assert!(
+            wait_for_literal_visibility(&workspace, "missing_external_git_info_marker", true).await,
+            "removing external info directory did not restore linked-worktree result"
+        );
+        assert_eq!(
+            state
+                .watchers
+                .lock()
+                .get(&workspace.id)
+                .and_then(|registration| registration.external_git_watch.as_deref()),
+            Some(common_dir.as_path())
+        );
+
+        std::fs::create_dir(&info).unwrap();
+        std::fs::write(&exclude, "shared.rs\n").unwrap();
+        assert!(
+            wait_for_literal_visibility(&workspace, "missing_external_git_info_marker", false)
+                .await,
+            "recreating external info/exclude did not remove linked-worktree result"
+        );
+        assert_eq!(
+            state
+                .watchers
+                .lock()
+                .get(&workspace.id)
+                .and_then(|registration| registration.external_git_watch.as_deref()),
+            Some(info.as_path())
+        );
+        std::fs::write(&exclude, "").unwrap();
+        assert!(
+            wait_for_literal_visibility(&workspace, "missing_external_git_info_marker", true).await,
+            "toggling recreated external info/exclude did not restore linked-worktree result"
+        );
+        stop_all_watchers(&state);
     }
 
     #[test]
