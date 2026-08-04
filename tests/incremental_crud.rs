@@ -375,6 +375,10 @@ fn unreadable_changed_file_aborts_without_publishing_snapshot() {
 
     fs::write(&file, "pub fn new_marker() -> u32 { 200 }\n").unwrap();
     fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&file).is_ok() {
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        return;
+    }
     let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
     let result = index_workspace(&workspace, &model);
     fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();

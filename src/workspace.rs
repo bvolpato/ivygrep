@@ -1380,6 +1380,12 @@ fn git_main_worktree_root(root: &Path) -> Option<PathBuf> {
         }
     }
 
+    #[cfg(unix)]
+    let main_root = {
+        use std::os::unix::ffi::OsStringExt;
+        PathBuf::from(std::ffi::OsString::from_vec(main_path.to_vec()))
+    };
+    #[cfg(not(unix))]
     let main_root = PathBuf::from(String::from_utf8(main_path.to_vec()).ok()?);
     main_root.canonicalize().ok().or(Some(main_root))
 }
@@ -2333,6 +2339,74 @@ mod tests {
         assert!(workspace.repo_id.is_some());
         assert!(workspace.base_index_dir.is_none());
         assert!(workspace.main_worktree_root().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[serial]
+    fn linked_worktree_preserves_non_utf8_main_checkout_path() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let main_name = std::ffi::OsString::from_vec(b"main-\xff".to_vec());
+        let main = tmp.path().join(main_name);
+        let worktree = tmp.path().join("linked");
+        std::fs::create_dir(&main).unwrap();
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.email", "test@example.com"][..],
+            &["config", "user.name", "Test User"][..],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(&main)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        std::fs::write(main.join("lib.rs"), "pub fn indexed() {}\n").unwrap();
+        assert!(
+            Command::new("git")
+                .args(["add", "lib.rs"])
+                .current_dir(&main)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["commit", "-qm", "initial"])
+                .current_dir(&main)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["worktree", "add", "--detach"])
+                .arg(&worktree)
+                .current_dir(&main)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let workspace = Workspace::resolve(&worktree).unwrap();
+        let canonical_main = main.canonicalize().unwrap();
+        assert_eq!(workspace.main_worktree_root(), Some(canonical_main.clone()));
+        assert_eq!(
+            workspace.base_index_dir,
+            Some(
+                config::indexes_root()
+                    .unwrap()
+                    .join(workspace_id(&canonical_main))
+            )
+        );
     }
 
     #[test]

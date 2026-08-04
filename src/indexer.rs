@@ -3679,6 +3679,33 @@ mod tests {
 
     #[test]
     #[serial]
+    fn index_batch_producer_reports_source_read_failure() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        workspace.ensure_dirs().unwrap();
+        let (_index, fields) = open_tantivy_index(&workspace.tantivy_dir()).unwrap();
+        let diff = MerkleDiff {
+            added_or_modified: vec![(PathBuf::from("disappeared.rs"), false)],
+            deleted: Vec::new(),
+        };
+        let producer = spawn_index_batch_producer(&workspace, &diff, None, &fields, false, false);
+
+        let error = match producer.recv().unwrap() {
+            Ok(_) => panic!("missing source should fail the producer"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("disappeared.rs"),
+            "unexpected producer error: {error:#}"
+        );
+        producer.finish().unwrap();
+    }
+
+    #[test]
+    #[serial]
     fn indexes_simple_repo() {
         let root = tempdir().unwrap();
         let home = tempdir().unwrap();
