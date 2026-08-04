@@ -4,6 +4,11 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.2.9] - 2026-08-04
+
+### Maintenance
+- Updated release attestations to `actions/attest` v4.2.1 and regenerated evidence dashboard provenance for the pinned workflow.
+
 ## [1.2.8] - 2026-08-04
 
 ### Fixed
