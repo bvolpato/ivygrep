@@ -220,6 +220,11 @@ impl VectorStore {
         }
     }
 
+    /// Atomically replace an existing store with a freshly allocated empty index.
+    pub(crate) fn reset(path: &Path, dimensions: usize, quantization: ScalarKind) -> Result<()> {
+        Self::new(path, create_index(dimensions, quantization)?, quantization).save()
+    }
+
     /// Open for read-only search using memory-mapping on Unix and a retained
     /// serialized buffer on Windows. The Windows path avoids USearch's narrow
     /// native path APIs and keeps the index file replaceable by another process.

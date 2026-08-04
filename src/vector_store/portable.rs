@@ -26,6 +26,16 @@ impl VectorStore {
         Self::load(path, dimensions, quantization)
     }
 
+    pub(crate) fn reset(path: &Path, dimensions: usize, quantization: ScalarKind) -> Result<()> {
+        Self {
+            path: path.to_path_buf(),
+            dimensions,
+            quantization,
+            vectors: BTreeMap::new(),
+        }
+        .save()
+    }
+
     fn load(path: &Path, dimensions: usize, quantization: ScalarKind) -> Result<Self> {
         let mut store = Self {
             path: path.to_path_buf(),

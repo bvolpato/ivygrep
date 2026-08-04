@@ -1804,28 +1804,9 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     let _ = workspace.write_metadata(&metadata);
                 }
 
-                // Acquire the same fs2 lock that index_workspace holds to
-                // wait for any in-progress indexing before deleting.
-                match tokio::task::spawn_blocking(move || {
-                    workspace.ensure_dirs().ok();
-                    let lock_path = workspace.lock_path();
-                    if let Ok(lock_file) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .write(true)
-                        .truncate(false)
-                        .open(&lock_path)
-                    {
-                        // Blocking: waits for any running indexer to release.
-                        let _ = fs2::FileExt::lock_exclusive(&lock_file);
-                        let result = remove_workspace_index(&workspace);
-                        let _ = fs2::FileExt::unlock(&lock_file);
-                        result
-                    } else {
-                        remove_workspace_index(&workspace)
-                    }
-                })
-                .await
-                .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())))
+                match tokio::task::spawn_blocking(move || remove_workspace_index(&workspace))
+                    .await
+                    .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())))
                 {
                     Ok(_) => {
                         state.clear_workspace_contexts(&workspace_for_cache);
