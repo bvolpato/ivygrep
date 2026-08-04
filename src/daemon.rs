@@ -33,7 +33,7 @@ use crate::search::{
     workspace_neural_model_identity,
 };
 use crate::search_service::{
-    HitOrdering, SearchBatch, SearchWorkspaceSet, select_all_indexed_workspaces,
+    HitOrdering, SearchBatch, SearchOutcome, SearchWorkspaceSet, select_all_indexed_workspaces,
 };
 use crate::workspace::{Workspace, WorkspaceIndexState, WorkspaceScope, list_workspaces};
 
@@ -66,6 +66,14 @@ const MEMORY_ORIGINAL_RRF_WEIGHT: f32 = 1.25;
 /// Don't cache result sets larger than this (each hit carries preview/reason
 /// strings; large `--no-limit` results would bloat the query cache).
 const MAX_CACHEABLE_HITS: usize = 2_000;
+
+fn finish_daemon_search_batch(
+    batch: SearchBatch,
+    options: &SearchOptions,
+    ordering: HitOrdering,
+) -> Result<SearchOutcome> {
+    batch.finish(options.bounded_limit(), ordering)
+}
 
 fn should_start_model_load(has_neural_vectors: bool, query: &str, force_neural: bool) -> bool {
     has_neural_vectors && query_uses_neural(query, force_neural)
@@ -1839,9 +1847,9 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                         });
                     batch.record(&workspace.root, all_indices, result);
                 }
-                let mut outcome = batch
-                    .finish(options.limit, HitOrdering::Preserve)
-                    .map_err(|err| err.to_string())?;
+                let mut outcome =
+                    finish_daemon_search_batch(batch, &options, HitOrdering::Preserve)
+                        .map_err(|err| err.to_string())?;
                 if all_indices {
                     expand_regex_context_absolute(&mut outcome.hits, options.bounded_context());
                 }
@@ -1930,8 +1938,7 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     })();
                     batch.record(&workspace.root, all_indices, result);
                 }
-                batch
-                    .finish(options.limit, HitOrdering::Preserve)
+                finish_daemon_search_batch(batch, &options, HitOrdering::Preserve)
                     .map_err(|err| err.to_string())
             })
             .await
@@ -3014,6 +3021,25 @@ mod tests {
             neural_requested: false,
             neural_executed: false,
         }
+    }
+
+    #[test]
+    fn daemon_search_batch_applies_result_cap_after_aggregation() {
+        let mut batch = SearchBatch::new(Vec::new());
+        for workspace in ["/one", "/two"] {
+            let hits = (0..600)
+                .map(|index| test_hit(&format!("src/{index}.rs"), 1.0))
+                .collect();
+            batch.record(Path::new(workspace), true, Ok(hits));
+        }
+        let options = SearchOptions {
+            limit: Some(crate::search::MAX_SEARCH_RESULT_LIMIT + 500),
+            ..Default::default()
+        };
+
+        let outcome = finish_daemon_search_batch(batch, &options, HitOrdering::Preserve).unwrap();
+
+        assert_eq!(outcome.hits.len(), crate::search::MAX_SEARCH_RESULT_LIMIT);
     }
 
     #[test]
