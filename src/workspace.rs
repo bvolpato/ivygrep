@@ -607,7 +607,7 @@ impl Workspace {
             self.hash_tombstones_path().exists() || self.hash_tombstones_processing_path().exists();
         let (chunk_count, _) = read_sqlite_counts(&self.index_dir);
         if chunk_count == 0 {
-            return false;
+            return hash_tombstones_pending;
         }
         if hash_enhanced_generation != Some(index_generation) || hash_tombstones_pending {
             return true;
@@ -674,7 +674,9 @@ impl Workspace {
 
         let (chunk_count, _) = read_sqlite_counts(&self.index_dir);
         if chunk_count == 0 {
-            return false;
+            return hash_tombstones_pending
+                || self.neural_tombstones_path().exists()
+                || self.neural_tombstones_processing_path().exists();
         }
         let vector_key_count = read_sqlite_vector_key_count(&self.index_dir);
 
@@ -1349,13 +1351,48 @@ pub fn git_common_dir(root: &Path) -> Option<PathBuf> {
 /// Returns the main checkout root for a checkout or linked worktree.
 fn git_main_worktree_root(root: &Path) -> Option<PathBuf> {
     let git_entry = root.join(".git");
-    if git_entry.is_file() {
-        git_common_dir(root)?.parent().map(Path::to_path_buf)
-    } else if git_entry.is_dir() {
-        Some(root.to_path_buf())
-    } else {
-        None
+    if git_entry.is_dir() {
+        return Some(root.to_path_buf());
     }
+    if !git_entry.is_file() {
+        return None;
+    }
+
+    let output = Command::new("git")
+        .args(["worktree", "list", "--porcelain", "-z"])
+        .current_dir(root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let mut fields = output.stdout.split(|byte| *byte == b'\0');
+    let main_path = fields.next()?.strip_prefix(b"worktree ")?;
+    for field in fields {
+        if field.is_empty() {
+            break;
+        }
+        if field == b"bare" {
+            return None;
+        }
+    }
+
+    let main_root = path_from_git_output(main_path)?;
+    main_root.canonicalize().ok().or(Some(main_root))
+}
+
+#[cfg(unix)]
+fn path_from_git_output(path: &[u8]) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    Some(PathBuf::from(std::ffi::OsString::from_vec(path.to_vec())))
+}
+
+#[cfg(not(unix))]
+fn path_from_git_output(path: &[u8]) -> Option<PathBuf> {
+    Some(PathBuf::from(String::from_utf8(path.to_vec()).ok()?))
 }
 
 pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
@@ -2238,6 +2275,151 @@ mod tests {
         assert_eq!(
             git_common_dir(tmp.path()),
             Some(common_dir.canonicalize().unwrap())
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn bare_repository_worktree_has_no_main_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let source = tmp.path().join("source");
+        let bare = tmp.path().join("project.git");
+        let worktree = tmp.path().join("worktree");
+        std::fs::create_dir(&source).unwrap();
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.email", "test@example.com"][..],
+            &["config", "user.name", "Test User"][..],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(&source)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        std::fs::write(source.join("lib.rs"), "pub fn indexed() {}\n").unwrap();
+        assert!(
+            Command::new("git")
+                .args(["add", "lib.rs"])
+                .current_dir(&source)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["commit", "-qm", "initial"])
+                .current_dir(&source)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["clone", "--bare"])
+                .arg(&source)
+                .arg(&bare)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["--git-dir"])
+                .arg(&bare)
+                .args(["worktree", "add", "--detach"])
+                .arg(&worktree)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let workspace = Workspace::resolve(&worktree).unwrap();
+        assert!(workspace.repo_id.is_some());
+        assert!(workspace.base_index_dir.is_none());
+        assert!(workspace.main_worktree_root().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_output_path_preserves_non_utf8_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = path_from_git_output(b"main-\xff").unwrap();
+        assert_eq!(path.as_os_str().as_bytes(), b"main-\xff");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[serial]
+    fn linked_worktree_preserves_non_utf8_main_checkout_path() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let main_name = std::ffi::OsString::from_vec(b"main-\xff".to_vec());
+        let main = tmp.path().join(main_name);
+        let worktree = tmp.path().join("linked");
+        std::fs::create_dir(&main).unwrap();
+        for args in [
+            &["init", "-q"][..],
+            &["config", "user.email", "test@example.com"][..],
+            &["config", "user.name", "Test User"][..],
+        ] {
+            assert!(
+                Command::new("git")
+                    .args(args)
+                    .current_dir(&main)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        std::fs::write(main.join("lib.rs"), "pub fn indexed() {}\n").unwrap();
+        assert!(
+            Command::new("git")
+                .args(["add", "lib.rs"])
+                .current_dir(&main)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["commit", "-qm", "initial"])
+                .current_dir(&main)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            Command::new("git")
+                .args(["worktree", "add", "--detach"])
+                .arg(&worktree)
+                .current_dir(&main)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let workspace = Workspace::resolve(&worktree).unwrap();
+        let canonical_main = main.canonicalize().unwrap();
+        assert_eq!(workspace.main_worktree_root(), Some(canonical_main.clone()));
+        assert_eq!(
+            workspace.base_index_dir,
+            Some(
+                config::indexes_root()
+                    .unwrap()
+                    .join(workspace_id(&canonical_main))
+            )
         );
     }
 

@@ -19,7 +19,8 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     }
 
     let t0 = std::time::Instant::now();
-    let output_limit = options.limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
+    let bounded_limit = options.bounded_limit();
+    let output_limit = bounded_limit.unwrap_or(DEFAULT_SEARCH_LIMIT);
     let mut routing = QueryRouting::classify(query_text);
     if options.force_neural {
         routing.use_neural = true;
@@ -32,14 +33,19 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     let candidate_limit = if output_limit == usize::MAX {
         50_000
     } else {
-        (output_limit * routing.lexical_multiplier).clamp(150, 50_000)
+        output_limit
+            .saturating_mul(routing.lexical_multiplier)
+            .clamp(150, 50_000)
     };
     // Literal pass needs exact substring verification via SQLite (text not
     // stored in Tantivy), so cap tighter: default → 250, scales up with limit.
     let literal_limit = if output_limit == usize::MAX {
         25_000
     } else {
-        (output_limit * routing.literal_multiplier * corpus_multiplier).clamp(250, 25_000)
+        output_limit
+            .saturating_mul(routing.literal_multiplier)
+            .saturating_mul(corpus_multiplier)
+            .clamp(250, 25_000)
     };
     // Semantic (vector ANN) search: keep proportional but bounded.
     // Default ~50 → 50, --limit 500 → 500, --limit 5000 → 2000.
@@ -47,7 +53,10 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     let semantic_limit = if output_limit == usize::MAX {
         2_000
     } else {
-        (output_limit * routing.semantic_multiplier * corpus_multiplier).clamp(50, 2_000)
+        output_limit
+            .saturating_mul(routing.semantic_multiplier)
+            .saturating_mul(corpus_multiplier)
+            .clamp(50, 2_000)
     };
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
     let glob_path_filter = build_glob_path_query_filter(ctx, &path_matcher, options)?;
@@ -77,8 +86,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
         None
     };
     let literal_chunks: Vec<(IndexedChunk, f32)> = if let Some(ref matcher) = literal_matcher {
-        let target_hits = options
-            .limit
+        let target_hits = bounded_limit
             .unwrap_or(100)
             .saturating_mul(literal_queries.len())
             .min(literal_limit);
@@ -508,13 +516,20 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
         && embedding_model.is_some_and(|model| model.model_identity().is_some())
         && has_neural_vectors
         && neural_profile_matches;
-    let hash_vector_count = ctx.hash_vectors.as_ref().map_or(0, VectorStore::size)
-        + ctx.base_hash_vectors.as_ref().map_or(0, VectorStore::size);
-    let neural_vector_count = ctx.neural_vectors.as_ref().map_or(0, VectorStore::size)
-        + ctx
-            .base_neural_vectors
-            .as_ref()
-            .map_or(0, VectorStore::size);
+    let hash_vector_count = ctx
+        .hash_vectors
+        .as_ref()
+        .map_or(0, VectorStore::size)
+        .saturating_add(ctx.base_hash_vectors.as_ref().map_or(0, VectorStore::size));
+    let neural_vector_count = ctx
+        .neural_vectors
+        .as_ref()
+        .map_or(0, VectorStore::size)
+        .saturating_add(
+            ctx.base_neural_vectors
+                .as_ref()
+                .map_or(0, VectorStore::size),
+        );
     let hash_weight =
         semantic_hash_weight(neural_available, neural_vector_count, hash_vector_count);
     let neural_model = embedding_model.filter(|model| {
@@ -649,7 +664,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
         },
         &fusion_query,
         routing,
-        options.limit,
+        bounded_limit,
     )?;
     tracing::trace!("fuse_rrf={:?} merged={}", t0.elapsed(), merged.len());
 
@@ -677,7 +692,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
                 sources,
                 file_content.as_ref(),
                 HitPresentation {
-                    context_lines: options.context,
+                    context_lines: options.bounded_context(),
                     query: &presentation_query,
                     routing,
                     neural_executed,

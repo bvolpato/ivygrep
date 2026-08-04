@@ -359,7 +359,7 @@ class EvidenceDashboardTest(unittest.TestCase):
         self.assertEqual(
             dashboard["release_history"]["releases"][0]["tag"], "v1.2.7"
         )
-        self.assertIn("Current-release scope", html)
+        self.assertIn("Latest measured release scope", html)
 
 
 if __name__ == "__main__":

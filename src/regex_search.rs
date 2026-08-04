@@ -1,4 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -18,7 +20,10 @@ use tantivy::schema::Value;
 use crate::indexer::open_tantivy_index;
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
+use crate::search::SearchOptions;
 use crate::workspace::{Workspace, WorkspaceScope, index_path_string};
+
+const MAX_CONTEXT_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Index-backed regex search.
 ///
@@ -38,37 +43,69 @@ pub fn regex_search(
     exclude_globs: &[String],
     skip_gitignore: bool,
 ) -> Result<Vec<SearchHit>> {
-    let max_hits = limit.unwrap_or(usize::MAX);
+    regex_search_with_options(
+        workspace,
+        pattern,
+        &SearchOptions {
+            limit,
+            context: 0,
+            scope_filter: scope_filter.cloned(),
+            include_globs: include_globs.to_vec(),
+            exclude_globs: exclude_globs.to_vec(),
+            skip_gitignore,
+            ..Default::default()
+        },
+    )
+}
+
+/// Regex search with language filtering, context expansion, and shared search options.
+pub fn regex_search_with_options(
+    workspace: &Workspace,
+    pattern: &str,
+    options: &SearchOptions,
+) -> Result<Vec<SearchHit>> {
+    if options.is_cancelled() {
+        return Ok(Vec::new());
+    }
+    let max_hits = options.bounded_limit().unwrap_or(usize::MAX);
     if max_hits == 0 {
         return Ok(Vec::new());
     }
-    let path_matcher = PathGlobMatcher::new(include_globs, exclude_globs)?;
+    let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
 
     // Try to use index-backed pre-filtering via literal extraction.
     let candidate_files = index_prefilter_files(
         workspace,
         pattern,
-        scope_filter,
+        options.scope_filter.as_ref(),
         &path_matcher,
-        skip_gitignore,
+        options,
     );
 
-    if let Some(paths) = candidate_files {
+    let mut hits = if let Some(paths) = candidate_files {
         tracing::trace!(
             "regex index prefilter: {} candidate files from index",
             paths.len()
         );
-        regex_search_parallel(workspace, pattern, &paths, max_hits)
+        regex_search_parallel(workspace, pattern, &paths, max_hits, options)
     } else {
         regex_search_walk(
             workspace,
             pattern,
             max_hits,
-            scope_filter,
+            options.scope_filter.as_ref(),
             &path_matcher,
-            skip_gitignore,
+            options,
         )
+    }?;
+    if options.is_cancelled() {
+        return Ok(Vec::new());
     }
+    expand_regex_context(workspace, &mut hits, options.bounded_context(), options);
+    if options.is_cancelled() {
+        return Ok(Vec::new());
+    }
+    Ok(hits)
 }
 
 fn required_literal_runs(pattern: &str) -> Option<Vec<String>> {
@@ -116,7 +153,7 @@ fn index_prefilter_files(
     pattern: &str,
     scope_filter: Option<&WorkspaceScope>,
     path_matcher: &PathGlobMatcher,
-    skip_gitignore: bool,
+    options: &SearchOptions,
 ) -> Option<Vec<PathBuf>> {
     let required_runs = required_literal_runs(pattern)?;
 
@@ -142,8 +179,11 @@ fn index_prefilter_files(
 
     let mut candidate_files = HashSet::new();
     for (_score, addr) in docs {
+        if options.is_cancelled() {
+            return Some(Vec::new());
+        }
         if let Ok(doc) = searcher.doc::<TantivyDocument>(addr)
-            && (skip_gitignore
+            && (options.skip_gitignore
                 || fields
                     .is_ignored
                     .and_then(|field| doc.get_first(field))
@@ -153,7 +193,14 @@ fn index_prefilter_files(
             && let Some(path_str) = path_val.as_str()
         {
             let rel = PathBuf::from(path_str);
-            if scope_filter.is_none_or(|s| s.matches(&rel)) && path_matcher.matches(&rel) {
+            if scope_filter.is_none_or(|s| s.matches(&rel))
+                && path_matcher.matches(&rel)
+                && options.type_filter.as_deref().is_none_or(|filter| {
+                    doc.get_first(fields.language)
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|language| type_filter_matches_language(language, filter))
+                })
+            {
                 candidate_files.insert(rel);
             }
         }
@@ -196,6 +243,7 @@ fn regex_search_parallel(
     pattern: &str,
     file_paths: &[PathBuf],
     max_hits: usize,
+    options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
     let hit_count = AtomicUsize::new(0);
     let done = AtomicBool::new(false);
@@ -206,7 +254,7 @@ fn regex_search_parallel(
         .build(pattern)?;
 
     file_paths.par_iter().for_each(|rel_path| {
-        if done.load(Ordering::Relaxed) {
+        if done.load(Ordering::Relaxed) || options.is_cancelled() {
             return;
         }
 
@@ -222,10 +270,14 @@ fn regex_search_parallel(
             &matcher,
             &full_path,
             UTF8(|line_num, line| {
+                if options.is_cancelled() {
+                    return Ok(false);
+                }
+                let line_num = usize::try_from(line_num).unwrap_or(usize::MAX);
                 local_hits.push(SearchHit {
                     file_path: rel_path.clone(),
-                    start_line: line_num as usize,
-                    end_line: line_num as usize,
+                    start_line: line_num,
+                    end_line: line_num,
                     preview: line.trim().to_string(),
                     reason: "regex line match".to_string(),
                     score: 1.0,
@@ -233,21 +285,31 @@ fn regex_search_parallel(
                     neural_requested: false,
                     neural_executed: false,
                 });
-                Ok(!done.load(Ordering::Relaxed))
+                Ok(local_hits.len() < max_hits
+                    && !done.load(Ordering::Relaxed)
+                    && !options.is_cancelled())
             }),
         );
 
-        if !local_hits.is_empty() {
+        if !options.is_cancelled() && !local_hits.is_empty() {
             let n = local_hits.len();
             let mut guard = results.lock().unwrap();
             guard.extend(local_hits);
-            let total = hit_count.fetch_add(n, Ordering::Relaxed) + n;
+            let previous = hit_count
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                    Some(count.saturating_add(n))
+                })
+                .unwrap_or_else(|count| count);
+            let total = previous.saturating_add(n);
             if total >= max_hits {
                 done.store(true, Ordering::Relaxed);
             }
         }
     });
 
+    if options.is_cancelled() {
+        return Ok(Vec::new());
+    }
     let mut hits = results.into_inner().unwrap();
     // Parallel collection order is nondeterministic; sort by (path, line) so a
     // limited result set is stable across runs rather than an arbitrary subset.
@@ -267,7 +329,7 @@ fn regex_search_walk(
     max_hits: usize,
     scope_filter: Option<&WorkspaceScope>,
     path_matcher: &PathGlobMatcher,
-    skip_gitignore: bool,
+    options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
     let matcher = RegexMatcherBuilder::new()
         .case_insensitive(true)
@@ -276,9 +338,12 @@ fn regex_search_walk(
 
     let mut hits = Vec::new();
 
-    let walk = crate::walker::source_walker(&workspace.root, skip_gitignore);
+    let walk = crate::walker::source_walker(&workspace.root, options.skip_gitignore);
 
     'walk: for entry in walk.build() {
+        if options.is_cancelled() {
+            return Ok(Vec::new());
+        }
         let entry = entry?;
         if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
@@ -295,16 +360,29 @@ fn regex_search_walk(
         if !path_matcher.matches(&rel_path) {
             continue;
         }
+        let type_filter_match =
+            type_filter_match_for_path(&rel_path, options.type_filter.as_deref());
+        if type_filter_match == PathTypeFilterMatch::Reject {
+            continue;
+        }
 
+        let remaining = max_hits.saturating_sub(hits.len());
+        if remaining == 0 {
+            break;
+        }
         let mut local_hits = Vec::new();
         searcher.search_path(
             &matcher,
             &full_path,
             UTF8(|line_num, line| {
+                if options.is_cancelled() {
+                    return Ok(false);
+                }
+                let line_num = usize::try_from(line_num).unwrap_or(usize::MAX);
                 local_hits.push(SearchHit {
                     file_path: rel_path.clone(),
-                    start_line: line_num as usize,
-                    end_line: line_num as usize,
+                    start_line: line_num,
+                    end_line: line_num,
                     preview: line.trim().to_string(),
                     reason: "regex line match".to_string(),
                     score: 1.0,
@@ -312,9 +390,20 @@ fn regex_search_walk(
                     neural_requested: false,
                     neural_executed: false,
                 });
-                Ok(true)
+                Ok(local_hits.len() < remaining && !options.is_cancelled())
             }),
         )?;
+
+        if options.is_cancelled() {
+            return Ok(Vec::new());
+        }
+
+        if type_filter_match == PathTypeFilterMatch::ValidateText
+            && !local_hits.is_empty()
+            && !unknown_file_is_indexable_text(&full_path)
+        {
+            continue;
+        }
 
         for hit in local_hits {
             hits.push(hit);
@@ -325,6 +414,126 @@ fn regex_search_walk(
     }
 
     Ok(hits)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PathTypeFilterMatch {
+    Match,
+    ValidateText,
+    Reject,
+}
+
+fn type_filter_matches_language(language: &str, filter: &str) -> bool {
+    let expected = crate::chunking::resolve_type_alias(filter).unwrap_or(filter);
+    language.eq_ignore_ascii_case(expected)
+}
+
+fn type_filter_match_for_path(
+    path: &std::path::Path,
+    type_filter: Option<&str>,
+) -> PathTypeFilterMatch {
+    let Some(filter) = type_filter else {
+        return PathTypeFilterMatch::Match;
+    };
+    let expected = crate::chunking::resolve_type_alias(filter).unwrap_or(filter);
+    match crate::chunking::language_for_path(path) {
+        Some(language) if language.eq_ignore_ascii_case(expected) => PathTypeFilterMatch::Match,
+        Some(_) => PathTypeFilterMatch::Reject,
+        None if expected.eq_ignore_ascii_case("text") => PathTypeFilterMatch::ValidateText,
+        None => PathTypeFilterMatch::Reject,
+    }
+}
+
+fn unknown_file_is_indexable_text(path: &std::path::Path) -> bool {
+    let Ok(mut file) = fs::File::open(path) else {
+        return false;
+    };
+    crate::chunking::is_indexable_file_reader(path, &mut file).unwrap_or(false)
+}
+
+fn expand_regex_context(
+    workspace: &Workspace,
+    hits: &mut [SearchHit],
+    context: usize,
+    options: &SearchOptions,
+) {
+    expand_regex_context_with_paths(hits, context, Some(options), |path| {
+        workspace.root.join(path)
+    });
+}
+
+pub(crate) fn expand_regex_context_absolute(hits: &mut [SearchHit], context: usize) {
+    expand_regex_context_with_paths(hits, context, None, |path| path.to_path_buf());
+}
+
+pub(crate) fn expand_regex_context_absolute_with_options(
+    hits: &mut [SearchHit],
+    context: usize,
+    options: &SearchOptions,
+) {
+    expand_regex_context_with_paths(hits, context, Some(options), |path| path.to_path_buf());
+}
+
+fn expand_regex_context_with_paths(
+    hits: &mut [SearchHit],
+    context: usize,
+    options: Option<&SearchOptions>,
+    resolve_path: impl Fn(&std::path::Path) -> PathBuf,
+) {
+    if context == 0 || hits.is_empty() {
+        return;
+    }
+
+    let mut hits_by_path = BTreeMap::<PathBuf, Vec<usize>>::new();
+    for (index, hit) in hits.iter().enumerate() {
+        hits_by_path
+            .entry(hit.file_path.clone())
+            .or_default()
+            .push(index);
+    }
+
+    for (rel_path, hit_indices) in hits_by_path {
+        if options.is_some_and(SearchOptions::is_cancelled) {
+            return;
+        }
+        let path = resolve_path(&rel_path);
+        if path
+            .metadata()
+            .ok()
+            .is_none_or(|metadata| metadata.len() > MAX_CONTEXT_FILE_BYTES)
+        {
+            continue;
+        }
+        let Ok(file) = fs::File::open(path) else {
+            continue;
+        };
+        let mut content = String::new();
+        let Ok(bytes_read) = file
+            .take(MAX_CONTEXT_FILE_BYTES.saturating_add(1))
+            .read_to_string(&mut content)
+        else {
+            continue;
+        };
+        if bytes_read as u64 > MAX_CONTEXT_FILE_BYTES {
+            continue;
+        }
+        let lines = content.lines().collect::<Vec<_>>();
+        if lines.is_empty() {
+            continue;
+        }
+        for hit_index in hit_indices {
+            if options.is_some_and(SearchOptions::is_cancelled) {
+                return;
+            }
+            let hit = &mut hits[hit_index];
+            let focus = hit.start_line.clamp(1, lines.len());
+            let start = focus.saturating_sub(context).max(1);
+            let end = focus.saturating_add(context).min(lines.len());
+            hit.start_line = start;
+            hit.end_line = end;
+            hit.preview = lines[start.saturating_sub(1)..end].join("\n");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -338,6 +547,30 @@ mod tests {
     use crate::embedding::HashEmbeddingModel;
     use crate::indexer::index_workspace;
     use crate::workspace::{Workspace, WorkspaceScope};
+
+    fn test_regex_search(
+        workspace: &Workspace,
+        pattern: &str,
+        limit: Option<usize>,
+        scope_filter: Option<&WorkspaceScope>,
+        include_globs: &[String],
+        exclude_globs: &[String],
+        skip_gitignore: bool,
+    ) -> Result<Vec<SearchHit>> {
+        regex_search_with_options(
+            workspace,
+            pattern,
+            &SearchOptions {
+                limit,
+                context: 0,
+                scope_filter: scope_filter.cloned(),
+                include_globs: include_globs.to_vec(),
+                exclude_globs: exclude_globs.to_vec(),
+                skip_gitignore,
+                ..Default::default()
+            },
+        )
+    }
 
     #[test]
     fn required_literal_runs_ignore_optional_and_alternative_text() {
@@ -367,6 +600,23 @@ mod tests {
 
     #[test]
     #[serial]
+    fn regex_search_discards_results_when_pre_cancelled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(tmp.path().join("match.rs"), "fn cancelled_match() {}\n").unwrap();
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let options = SearchOptions {
+            cancel_token: Some(std::sync::Arc::new(AtomicBool::new(true))),
+            ..SearchOptions::default()
+        };
+
+        let hits = regex_search_with_options(&workspace, "cancelled_match", &options).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    #[serial]
     fn regex_search_respects_scope_filter() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("scoped")).unwrap();
@@ -388,7 +638,7 @@ mod tests {
             is_file: false,
         };
 
-        let hits = regex_search(
+        let hits = test_regex_search(
             &workspace,
             "applyFilter",
             None,
@@ -425,7 +675,7 @@ mod tests {
         let exclude = vec!["match.md".to_string()];
 
         let include_only =
-            regex_search(&workspace, "applyFilter", None, None, &include, &[], false).unwrap();
+            test_regex_search(&workspace, "applyFilter", None, None, &include, &[], false).unwrap();
         assert_eq!(
             include_only
                 .iter()
@@ -436,7 +686,7 @@ mod tests {
                 .collect::<std::collections::HashSet<_>>()
         );
 
-        let include_and_exclude = regex_search(
+        let include_and_exclude = test_regex_search(
             &workspace,
             "applyFilter",
             None,
@@ -468,7 +718,7 @@ mod tests {
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         index_workspace(&workspace, &model).unwrap();
 
-        let hits = regex_search(
+        let hits = test_regex_search(
             &workspace,
             r"applyFilter_\d+",
             Some(3),
@@ -503,7 +753,7 @@ mod tests {
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         index_workspace(&workspace, &model).unwrap();
 
-        let hits = regex_search(
+        let hits = test_regex_search(
             &workspace,
             "targettoken",
             Some(1),
@@ -549,7 +799,7 @@ mod tests {
         index_workspace(&workspace, &model).unwrap();
 
         // The index prefilter must not drop files matching only one branch.
-        let hits = regex_search(
+        let hits = test_regex_search(
             &workspace,
             "error_branch|warning_branch|critical_branch",
             None,
@@ -595,7 +845,7 @@ mod tests {
         index_workspace(&workspace, &model).unwrap();
 
         let hits =
-            regex_search(&workspace, r"cache(_token)?", None, None, &[], &[], false).unwrap();
+            test_regex_search(&workspace, r"cache(_token)?", None, None, &[], &[], false).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].file_path, PathBuf::from("cache.rs"));
     }
@@ -616,7 +866,7 @@ mod tests {
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         index_workspace(&workspace, &model).unwrap();
 
-        let hits = regex_search(&workspace, "ppl", None, None, &[], &[], false).unwrap();
+        let hits = test_regex_search(&workspace, "ppl", None, None, &[], &[], false).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].file_path, PathBuf::from("filter.rs"));
     }
@@ -647,11 +897,129 @@ mod tests {
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         index_workspace(&workspace, &model).unwrap();
 
-        let default_hits = regex_search(&workspace, "marker", None, None, &[], &[], false).unwrap();
+        let default_hits =
+            test_regex_search(&workspace, "marker", None, None, &[], &[], false).unwrap();
         assert_eq!(default_hits.len(), 1);
         assert_eq!(default_hits[0].file_path, PathBuf::from("visible.rs"));
 
-        let all_hits = regex_search(&workspace, "marker", None, None, &[], &[], true).unwrap();
+        let all_hits = test_regex_search(&workspace, "marker", None, None, &[], &[], true).unwrap();
         assert_eq!(all_hits.len(), 2);
+    }
+
+    #[test]
+    #[serial]
+    fn indexed_regex_applies_type_filter_and_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            tmp.path().join("match.md"),
+            "before\nrelease_marker = true\nafter\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("match.rs"),
+            "before\nconst RELEASE_MARKER: bool = true;\nafter\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let hits = regex_search_with_options(
+            &workspace,
+            "release_marker",
+            &SearchOptions {
+                context: 1,
+                type_filter: Some("md".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].file_path, PathBuf::from("match.md"));
+        assert_eq!((hits[0].start_line, hits[0].end_line), (1, 3));
+        assert_eq!(hits[0].preview, "before\nrelease_marker = true\nafter");
+    }
+
+    #[test]
+    #[serial]
+    fn regex_walk_applies_type_filter_and_bounds_extreme_context() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("match.md"),
+            "before\nwalk_marker = true\nafter\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("match.rs"),
+            "before\nconst WALK_MARKER: bool = true;\nafter\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+
+        let hits = regex_search_with_options(
+            &workspace,
+            "walk_marker|other_branch",
+            &SearchOptions {
+                context: usize::MAX,
+                type_filter: Some("markdown".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].file_path, PathBuf::from("match.md"));
+        assert_eq!((hits[0].start_line, hits[0].end_line), (1, 3));
+        assert_eq!(hits[0].preview, "before\nwalk_marker = true\nafter");
+    }
+
+    #[test]
+    #[serial]
+    fn regex_text_filter_includes_unknown_text_extensions_with_and_without_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            tmp.path().join("notes.memo"),
+            "before\nunknown_extension_marker\nafter\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("binary.memo"),
+            b"unknown_extension_marker\0binary",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let options = SearchOptions {
+            context: 1,
+            type_filter: Some("text".to_string()),
+            ..Default::default()
+        };
+
+        let walk_hits = regex_search_with_options(
+            &workspace,
+            "unknown_extension_marker|other_branch",
+            &options,
+        )
+        .unwrap();
+        assert_eq!(walk_hits.len(), 1);
+        assert_eq!(walk_hits[0].file_path, PathBuf::from("notes.memo"));
+        assert_eq!(
+            walk_hits[0].preview,
+            "before\nunknown_extension_marker\nafter"
+        );
+
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        let indexed_hits =
+            regex_search_with_options(&workspace, "unknown_extension_marker", &options).unwrap();
+        assert_eq!(indexed_hits.len(), 1);
+        assert_eq!(indexed_hits[0].file_path, PathBuf::from("notes.memo"));
+        assert_eq!(
+            indexed_hits[0].preview,
+            "before\nunknown_extension_marker\nafter"
+        );
     }
 }

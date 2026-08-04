@@ -172,7 +172,7 @@ pub(super) fn line_spans(content: &str) -> Vec<LineSpan> {
             index
         };
         spans.push(LineSpan { start, end });
-        start = index + 1;
+        start = index.saturating_add(1);
     }
     if start < bytes.len() {
         spans.push(LineSpan {
@@ -311,7 +311,7 @@ pub(super) fn snippet_bounds(
     line_count: usize,
 ) -> (usize, usize) {
     let start = focus_line.saturating_sub(context_lines).max(1);
-    let end = (focus_line + context_lines).min(line_count);
+    let end = focus_line.saturating_add(context_lines).min(line_count);
     (start, end)
 }
 

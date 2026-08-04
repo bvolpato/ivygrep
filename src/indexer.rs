@@ -125,13 +125,13 @@ struct IndexedFile {
 type IndexedFileBatch = Vec<IndexedFile>;
 
 struct IndexBatchProducer {
-    receiver: Option<std::sync::mpsc::Receiver<IndexedFileBatch>>,
+    receiver: Option<std::sync::mpsc::Receiver<Result<IndexedFileBatch>>>,
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
 impl IndexBatchProducer {
     fn new(
-        receiver: std::sync::mpsc::Receiver<IndexedFileBatch>,
+        receiver: std::sync::mpsc::Receiver<Result<IndexedFileBatch>>,
         handle: std::thread::JoinHandle<()>,
     ) -> Self {
         Self {
@@ -140,7 +140,7 @@ impl IndexBatchProducer {
         }
     }
 
-    fn recv(&self) -> Option<IndexedFileBatch> {
+    fn recv(&self) -> Option<Result<IndexedFileBatch>> {
         self.receiver.as_ref()?.recv().ok()
     }
 
@@ -177,7 +177,7 @@ fn spawn_index_batch_producer(
     show_progress: bool,
 ) -> IndexBatchProducer {
     let total = diff.added_or_modified.len();
-    let (sender, receiver) = std::sync::mpsc::sync_channel::<IndexedFileBatch>(2);
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<Result<IndexedFileBatch>>(2);
     let progress_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let root = workspace.root.clone();
     let progress_path = workspace.indexing_progress_path();
@@ -187,10 +187,10 @@ fn spawn_index_batch_producer(
     let _ = fs::write(&progress_path, format!("0/{total}"));
     let handle = std::thread::spawn(move || {
         for batch_paths in diff_paths.chunks(INDEX_FILE_BATCH_SIZE) {
-            let file_chunks: Vec<_> = indexing_pool().install(|| {
+            let file_chunks: Result<Vec<_>> = indexing_pool().install(|| {
                 batch_paths
                     .par_iter()
-                    .filter_map(|(rel_path, is_ignored)| {
+                    .map(|(rel_path, is_ignored)| {
                         let empty_incremental_file = |rel: &Path| {
                             (!is_fresh_index).then(|| IndexedFile {
                                 rel_path: rel.to_path_buf(),
@@ -203,18 +203,12 @@ fn spawn_index_batch_producer(
                         };
 
                         let abs_path = root.join(rel_path);
-                        if !abs_path.exists() {
-                            progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            return empty_incremental_file(rel_path);
-                        }
-
-                        let content_bytes = match fs::read(&abs_path) {
-                            Ok(bytes) => bytes,
-                            Err(_) => return empty_incremental_file(rel_path),
-                        };
+                        let content_bytes = fs::read(&abs_path).with_context(|| {
+                            format!("failed reading source file {}", abs_path.display())
+                        })?;
                         if !is_indexable_file(rel_path, &content_bytes) {
                             progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            return empty_incremental_file(rel_path);
+                            return Ok(empty_incremental_file(rel_path));
                         }
 
                         let content = String::from_utf8(content_bytes).unwrap_or_else(|error| {
@@ -262,9 +256,9 @@ fn spawn_index_batch_producer(
                             && file_graph.edges.is_empty()
                             && file_graph.unresolved_dependencies.is_empty()
                         {
-                            return empty_incremental_file(rel_path);
+                            return Ok(empty_incremental_file(rel_path));
                         }
-                        Some(IndexedFile {
+                        Ok(Some(IndexedFile {
                             rel_path: rel_path.clone(),
                             chunks: indexed,
                             included_paths,
@@ -274,13 +268,22 @@ fn spawn_index_batch_producer(
                                 crate::context_graph::manifest_resolution_signature(
                                     rel_path, &content,
                                 ),
-                        })
+                        }))
                     })
-                    .collect()
+                    .collect::<Result<Vec<_>>>()
+                    .map(|files| files.into_iter().flatten().collect())
             });
 
-            if !file_chunks.is_empty() && sender.send(file_chunks).is_err() {
-                break;
+            match file_chunks {
+                Ok(file_chunks) => {
+                    if !file_chunks.is_empty() && sender.send(Ok(file_chunks)).is_err() {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    let _ = sender.send(Err(err));
+                    break;
+                }
             }
         }
     });
@@ -293,10 +296,25 @@ pub fn workspace_is_indexed(workspace: &Workspace) -> bool {
 }
 
 pub fn remove_workspace_index(workspace: &Workspace) -> Result<()> {
-    if workspace.index_dir.exists() {
-        fs::remove_dir_all(&workspace.index_dir)?;
+    if !workspace.index_dir.exists() {
+        return Ok(());
     }
-    Ok(())
+    workspace.ensure_dirs()?;
+    let lock_path = workspace.lock_path();
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open index lock {}", lock_path.display()))?;
+    fs2::FileExt::lock_exclusive(&lock_file)
+        .with_context(|| format!("failed to acquire index lock {}", lock_path.display()))?;
+
+    let remove_result = remove_workspace_index_contents(workspace);
+    let unlock_result = fs2::FileExt::unlock(&lock_file)
+        .with_context(|| format!("failed to release index lock {}", lock_path.display()));
+    remove_result?;
+    unlock_result
 }
 
 /// Remove all index contents EXCEPT `index.lock`. This is safe to call while
@@ -1163,6 +1181,7 @@ fn index_workspace_inner(
     let mut persist_statements = persist_or_stop!(PersistStatements::prepare(&tx));
 
     while let Some(file_chunks) = producer.recv() {
+        let file_chunks = persist_or_stop!(file_chunks);
         // Persist lexical metadata first. Hash ANN construction is intentionally
         // deferred to background enhancement: on multi-million chunk repos the
         // provisional graph dominated first-index latency and delayed usable
@@ -2026,7 +2045,13 @@ pub fn enhance_workspace_hash(
     process_batch(&mut batch, &mut newly_processed, &mut vector_index)?;
     progress_count += tail_len;
     let _ = fs::write(&progress_path, progress_count.to_string());
-    if newly_processed > 0 || removed_tombstones {
+    if total_chunks == 0 && removed_tombstones {
+        VectorStore::reset(
+            &vector_path,
+            hash_model.dimensions(),
+            HASH_VECTOR_QUANTIZATION,
+        )?;
+    } else if newly_processed > 0 || removed_tombstones {
         vector_index.save()?;
     }
     if let Some((path, _)) = claimed_tombstones {
@@ -2265,7 +2290,13 @@ pub fn enhance_workspace_neural(
     progress_count += tail_len;
 
     let _ = std::fs::write(&progress_path, progress_count.to_string());
-    if newly_processed > 0 || removed_tombstones || !vector_store_existed {
+    if total_chunks == 0 && removed_tombstones {
+        VectorStore::reset(
+            &vector_path,
+            neural_model.dimensions(),
+            NEURAL_VECTOR_QUANTIZATION,
+        )?;
+    } else if newly_processed > 0 || removed_tombstones || !vector_store_existed {
         vector_index.save()?;
     }
     if let Some((path, _)) = claimed_tombstones {
@@ -3621,10 +3652,10 @@ mod tests {
 
     #[test]
     fn dropping_index_batch_producer_cancels_blocked_sender() {
-        let (sender, receiver) = std::sync::mpsc::sync_channel::<IndexedFileBatch>(0);
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<Result<IndexedFileBatch>>(0);
         let handle = std::thread::spawn(move || {
             assert!(
-                sender.send(Vec::new()).is_err(),
+                sender.send(Ok(Vec::new())).is_err(),
                 "receiver drop must cancel blocked producer send"
             );
         });
@@ -3634,7 +3665,7 @@ mod tests {
 
     #[test]
     fn index_batch_producer_propagates_worker_panic() {
-        let (_sender, receiver) = std::sync::mpsc::sync_channel::<IndexedFileBatch>(0);
+        let (_sender, receiver) = std::sync::mpsc::sync_channel::<Result<IndexedFileBatch>>(0);
         let handle = std::thread::spawn(|| panic!("test producer panic"));
 
         let err = IndexBatchProducer::new(receiver, handle)
@@ -3644,6 +3675,33 @@ mod tests {
             err.to_string().contains("producer thread panicked"),
             "unexpected producer error: {err:#}"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn index_batch_producer_reports_source_read_failure() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        workspace.ensure_dirs().unwrap();
+        let (_index, fields) = open_tantivy_index(&workspace.tantivy_dir()).unwrap();
+        let diff = MerkleDiff {
+            added_or_modified: vec![(PathBuf::from("disappeared.rs"), false)],
+            deleted: Vec::new(),
+        };
+        let producer = spawn_index_batch_producer(&workspace, &diff, None, &fields, false, false);
+
+        let error = match producer.recv().unwrap() {
+            Ok(_) => panic!("missing source should fail the producer"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("disappeared.rs"),
+            "unexpected producer error: {error:#}"
+        );
+        producer.finish().unwrap();
     }
 
     #[test]
@@ -4790,6 +4848,125 @@ mod tests {
 
     #[test]
     #[serial]
+    fn deleting_last_file_drains_vector_tombstones() {
+        const VECTOR_COUNT: usize = 5_000;
+        const EMPTY_STORE_MAX_BYTES: u64 = 16 * 1024;
+
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let source = root.path().join("mod.rs");
+        fs::write(&source, "pub fn removed() -> i32 { 1 }\n").unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let hash_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        let neural_model = RecordedTestEmbedding {
+            model: HashEmbeddingModel::new(EMBEDDING_DIMENSIONS),
+            backend: "test local neural backend",
+            identity: crate::embedding::configured_neural_model_identity(),
+        };
+        index_workspace(&workspace, &hash_model).unwrap();
+        enhance_workspace_hash(&workspace, &hash_model).unwrap();
+        enhance_workspace_neural(&workspace, &neural_model).unwrap();
+
+        let sqlite = open_sqlite_readonly(&workspace.sqlite_path()).unwrap();
+        let indexed_key = sqlite
+            .query_row("SELECT vector_key FROM chunks LIMIT 1", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap() as u64;
+        drop(sqlite);
+        let mut vector_keys = vec![indexed_key];
+        let mut next_key = 10_000_000_u64;
+        while vector_keys.len() < VECTOR_COUNT {
+            if next_key != indexed_key {
+                vector_keys.push(next_key);
+            }
+            next_key += 1;
+        }
+
+        for (path, dimensions, quantization) in [
+            (
+                workspace.vector_path(),
+                hash_model.dimensions(),
+                HASH_VECTOR_QUANTIZATION,
+            ),
+            (
+                workspace.vector_neural_path(),
+                neural_model.dimensions(),
+                NEURAL_VECTOR_QUANTIZATION,
+            ),
+        ] {
+            let mut store = VectorStore::open(&path, dimensions, quantization).unwrap();
+            store
+                .reserve_additional(VECTOR_COUNT.saturating_sub(store.size()))
+                .unwrap();
+            for key in vector_keys.iter().copied().skip(1) {
+                store.add_unchecked(key, vec![1.0; dimensions]).unwrap();
+            }
+            store.save().unwrap();
+            assert_eq!(store.size(), VECTOR_COUNT);
+            assert!(fs::metadata(path).unwrap().len() > EMPTY_STORE_MAX_BYTES);
+        }
+
+        fs::remove_file(source).unwrap();
+        let summary = index_workspace(&workspace, &hash_model).unwrap();
+        assert_eq!(summary.total_chunks, 0);
+        let tombstones = vector_keys
+            .iter()
+            .map(|key| format!("{key}\n"))
+            .collect::<String>();
+        fs::write(workspace.hash_tombstones_path(), &tombstones).unwrap();
+        fs::write(workspace.neural_tombstones_path(), tombstones).unwrap();
+        assert!(workspace.hash_tombstones_path().exists());
+        assert!(workspace.neural_tombstones_path().exists());
+        assert!(workspace.needs_hash_enhancement());
+        assert!(workspace.needs_neural_enhancement());
+
+        assert_eq!(enhance_workspace_hash(&workspace, &hash_model).unwrap(), 0);
+        assert!(!workspace.hash_tombstones_path().exists());
+        assert!(!workspace.hash_tombstones_processing_path().exists());
+        assert!(workspace.needs_neural_enhancement());
+
+        assert_eq!(
+            enhance_workspace_neural(&workspace, &neural_model).unwrap(),
+            0
+        );
+        for path in [
+            workspace.neural_tombstones_path(),
+            workspace.neural_tombstones_processing_path(),
+        ] {
+            assert!(!path.exists(), "{} should be removed", path.display());
+        }
+        assert!(!workspace.needs_hash_enhancement());
+        assert!(!workspace.needs_neural_enhancement());
+
+        let hash_store = VectorStore::open_readonly(
+            &workspace.vector_path(),
+            EMBEDDING_DIMENSIONS,
+            HASH_VECTOR_QUANTIZATION,
+        )
+        .unwrap();
+        assert_eq!(hash_store.size(), 0);
+        assert!(
+            fs::metadata(workspace.vector_path()).unwrap().len() <= EMPTY_STORE_MAX_BYTES,
+            "empty hash store retained allocated graph capacity"
+        );
+        let neural_store = VectorStore::open_readonly(
+            &workspace.vector_neural_path(),
+            neural_model.dimensions(),
+            NEURAL_VECTOR_QUANTIZATION,
+        )
+        .unwrap();
+        assert_eq!(neural_store.size(), 0);
+        assert!(
+            fs::metadata(workspace.vector_neural_path()).unwrap().len() <= EMPTY_STORE_MAX_BYTES,
+            "empty neural store retained allocated graph capacity"
+        );
+    }
+
+    #[test]
+    #[serial]
     fn enhance_neural_returns_zero_for_empty_index() {
         let root = tempdir().unwrap();
         let home = tempdir().unwrap();
@@ -5000,6 +5177,65 @@ mod tests {
 
         remove_workspace_index(&workspace).unwrap();
 
+        let entries = fs::read_dir(&workspace.index_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert_eq!(entries, vec![std::ffi::OsString::from("index.lock")]);
+    }
+
+    #[test]
+    #[serial]
+    fn remove_workspace_index_waits_for_existing_lock() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        workspace.ensure_dirs().unwrap();
+        fs::write(workspace.index_dir.join("stale"), "data").unwrap();
+        let lock_file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(workspace.lock_path())
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&lock_file).unwrap();
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let workspace_to_remove = workspace.clone();
+        let handle = std::thread::spawn(move || {
+            sender
+                .send(remove_workspace_index(&workspace_to_remove))
+                .unwrap();
+        });
+
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "removal must wait for current lock holder"
+        );
+        fs2::FileExt::unlock(&lock_file).unwrap();
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .unwrap();
+        handle.join().unwrap();
+        assert!(!workspace.index_dir.join("stale").exists());
+        assert!(workspace.lock_path().exists());
+    }
+
+    #[test]
+    #[serial]
+    fn remove_workspace_index_keeps_missing_index_absent() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        assert!(!workspace.index_dir.exists());
+        remove_workspace_index(&workspace).unwrap();
         assert!(!workspace.index_dir.exists());
     }
 

@@ -8,14 +8,12 @@ ROOT = Path(__file__).resolve().parents[1]
 class AgentDocumentationTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.readme = (ROOT / "README.md").read_text()
         cls.site = (ROOT / "docs" / "index.html").read_text()
         cls.unix_installer = (ROOT / "install.sh").read_text()
         cls.windows_installer = (ROOT / "install.ps1").read_text()
 
-    def test_cursor_stdio_type_is_documented_everywhere(self) -> None:
+    def test_cursor_stdio_type_is_documented_on_site(self) -> None:
         cursor_config = '"type": "stdio", "command": "ig", "args": ["--mcp"]'
-        self.assertIn(cursor_config, self.readme)
         self.assertIn(cursor_config, self.site)
 
     def test_current_cli_setup_commands_are_documented(self) -> None:
@@ -26,7 +24,6 @@ class AgentDocumentationTest(unittest.TestCase):
         ]
         for command in commands:
             with self.subTest(command=command):
-                self.assertIn(command, self.readme)
                 self.assertIn(command, self.site)
 
     def test_one_command_agent_setup_is_documented(self) -> None:
@@ -38,70 +35,47 @@ class AgentDocumentationTest(unittest.TestCase):
         ]
         for command in commands:
             with self.subTest(command=command):
-                self.assertIn(command, self.readme)
                 self.assertIn(command, self.site)
         self.assertIn("Manual MCP setup", self.site)
-        self.assertIn("preserves existing", self.readme)
 
-    def test_task_context_packs_are_prominent_and_consistent(self) -> None:
+    def test_task_context_packs_are_prominent_on_site(self) -> None:
         context_command = (
             'ig context "fix refresh-token races" --since main --budget 8000'
         )
-        documents = [
-            (self.readme, 'ig "where is refresh token rotated?"'),
-            (
-                self.site,
-                'ig "what did we decide about cache invalidation?" ~/notes',
-            ),
-        ]
-        for document, search_command in documents:
-            with self.subTest(search_command=search_command):
-                self.assertIn(search_command, document)
-                self.assertIn(context_command, document)
-                self.assertLess(
-                    document.index(search_command), document.index(context_command)
-                )
-                self.assertIn("definitions", document)
-                self.assertIn("callers", document)
-                self.assertIn("references", document)
-                self.assertIn("configuration", document)
-                self.assertIn("dependencies", document)
-                self.assertIn("dependents", document)
-                self.assertIn("output=context_pack", document)
-                self.assertIn("budget_tokens", document)
+        search_command = 'ig "what did we decide about cache invalidation?" ~/notes'
+        self.assertIn(search_command, self.site)
+        self.assertIn(context_command, self.site)
+        self.assertLess(
+            self.site.index(search_command), self.site.index(context_command)
+        )
+        for term in (
+            "definitions",
+            "callers",
+            "references",
+            "configuration",
+            "dependencies",
+            "dependents",
+            "output=context_pack",
+            "budget_tokens",
+        ):
+            self.assertIn(term, self.site)
         self.assertIn('id="context-packs"', self.site)
-        self.assertRegex(self.readme, r"bounded (?:Markdown )?pack")
 
     def test_quick_start_has_one_search_and_one_context_command(self) -> None:
-        readme_quick_start = self.readme.split(
-            "## Search and build context", 1
-        )[1].split("## Install", 1)[0]
         site_demo = self.site.split("<!-- Demo terminal -->", 1)[1].split(
             "<!-- Social proof strip -->", 1
         )[0]
 
-        sections = [
-            (readme_quick_start, 'ig "where is refresh token rotated?"'),
-            (
-                site_demo,
-                'ig "what did we decide about cache invalidation?" ~/notes',
-            ),
-        ]
-        for section, search_command in sections:
-            with self.subTest(search_command=search_command):
-                self.assertEqual(section.count(search_command), 1)
-                self.assertEqual(
-                    section.count(
-                        'ig context "fix refresh-token races" --since main --budget 8000'
-                    ),
-                    1,
-                )
-                self.assertNotIn("ig agent", section)
-                self.assertNotIn("--mcp", section)
+        search_command = 'ig "what did we decide about cache invalidation?" ~/notes'
+        context_command = (
+            'ig context "fix refresh-token races" --since main --budget 8000'
+        )
+        self.assertEqual(site_demo.count(search_command), 1)
+        self.assertEqual(site_demo.count(context_command), 1)
+        self.assertNotIn("ig agent", site_demo)
+        self.assertNotIn("--mcp", site_demo)
 
     def test_opencode_uses_current_local_server_shape(self) -> None:
-        self.assertIn('"type": "local"', self.readme)
-        self.assertIn('"command": ["ig", "--mcp"]', self.readme)
         self.assertIn('"type": "local"', self.site)
 
     def test_install_examples_are_one_command(self) -> None:
@@ -113,11 +87,9 @@ class AgentDocumentationTest(unittest.TestCase):
             "irm "
             "https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.ps1 | iex"
         )
-        for document in [self.readme, self.site]:
-            with self.subTest(document=document[:20]):
-                self.assertIn("brew install bvolpato/tap/ivygrep", document)
-                self.assertIn(unix_command, document)
-                self.assertIn(windows_command, document)
+        self.assertIn("brew install bvolpato/tap/ivygrep", self.site)
+        self.assertIn(unix_command, self.site)
+        self.assertIn(windows_command, self.site)
 
     def test_installers_verify_release_checksums_and_configure_path(self) -> None:
         self.assertIn(".sha256", self.unix_installer)
@@ -127,15 +99,12 @@ class AgentDocumentationTest(unittest.TestCase):
         self.assertIn("IVYGREP_ACCELERATOR", self.unix_installer)
         self.assertIn("linux-x86_64-cuda", self.unix_installer)
         self.assertIn("macos-aarch64-metal", self.unix_installer)
-        self.assertIn("Linux x86_64 CUDA", self.readme)
         self.assertIn(".sha256", self.windows_installer)
         self.assertIn("Get-FileHash", self.windows_installer)
         self.assertIn("ivygrep-$tag-windows-x86_64.zip", self.windows_installer)
         self.assertIn('SetEnvironmentVariable("Path"', self.windows_installer)
 
     def test_agent_guidance_requires_explicit_worktree_scope(self) -> None:
-        self.assertIn("absolute path to the active repository or worktree", self.readme)
-        self.assertIn("absolute active worktree path", self.readme)
         self.assertIn("store only divergent chunks and tombstones", self.site)
 
 

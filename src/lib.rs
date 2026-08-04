@@ -12,6 +12,7 @@ pub mod hardware;
 pub mod indexer;
 pub mod ipc;
 pub mod jobs;
+pub(crate) mod launcher;
 pub mod mcp;
 pub mod merkle;
 pub mod path_glob;

@@ -59,26 +59,24 @@ role, reason, and retrieval signals. `--since` requires a Git worktree; omit it 
 ## Install
 
 ```bash
+# Homebrew on macOS or Linux
 brew install bvolpato/tap/ivygrep
-```
 
-```bash
+# Release installer on macOS or Linux
 curl -fsSL https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.sh | sh
 ```
 
 ```powershell
+# WinGet on Windows
+winget install --id BrunoVolpato.ivygrep --exact
+
+# Release installer on Windows
 irm https://raw.githubusercontent.com/bvolpato/ivygrep/main/install.ps1 | iex
 ```
 
-```powershell
-winget install --id BrunoVolpato.ivygrep --exact
-```
-
-[WinGet lists v1.2.6](https://github.com/microsoft/winget-pkgs/tree/master/manifests/b/BrunoVolpato/ivygrep/1.2.6); v1.2.7 is not published there yet. crates.io publishing is prepared but not live yet.
-
 Installers select a compatible archive, verify its SHA-256 checksum, install `ig`, and report the selected backend. Apple Silicon uses Metal. NVIDIA Linux hosts use the Linux x86_64 CUDA build when CUDA 13 and compute capability 8.0 or newer are available. Other systems use portable local inference. Run `ig hardware` to see detected hardware, compatibility limits, and the matching reinstall command.
 
-Build from source:
+Build from source on macOS or Linux:
 
 ```bash
 git clone https://github.com/bvolpato/ivygrep.git && cd ivygrep

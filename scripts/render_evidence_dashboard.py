@@ -400,10 +400,10 @@ def build_histories(evidence: list[dict], release_history: dict) -> dict:
             "scope": current.get("scope"),
         }
         current_points = (
-            ("million-chunk/current-release/warm-cli-p95", "warm_p95_ms", "ms", "latency"),
-            ("million-chunk/current-release/chunks-per-second", "chunks_per_second", "chunks/s", "indexing"),
-            ("million-chunk/current-release/peak-rss", "peak_rss_bytes", "bytes", "memory"),
-            ("million-chunk/current-release/final-index", "index_size_bytes", "bytes", "index_size"),
+            ("million-chunk/latest-measured-release/warm-cli-p95", "warm_p95_ms", "ms", "latency"),
+            ("million-chunk/latest-measured-release/chunks-per-second", "chunks_per_second", "chunks/s", "indexing"),
+            ("million-chunk/latest-measured-release/peak-rss", "peak_rss_bytes", "bytes", "memory"),
+            ("million-chunk/latest-measured-release/final-index", "index_size_bytes", "bytes", "index_size"),
         )
         for series, key, unit, history_name in current_points:
             histories[history_name].append(
@@ -679,7 +679,7 @@ def render_markdown(dashboard: dict) -> str:
         million_throughput = f"{format_number(million['current']['chunks_per_second'])} chunks/s"
     if current_million is not None:
         current_release_rows = f"""
-## Current-release scale confirmation
+## Latest measured release scale confirmation
 
 {current_million_text} measures hash-only indexing and warm CLI latency on a deterministic synthetic CC0 corpus across three sequential trials. It is a scale and footprint measurement, not semantic quality or agent-task performance.
 """
@@ -786,7 +786,7 @@ def render_html(dashboard: dict) -> str:
     current_scope = ""
     if current_million is not None:
         current_scope = (
-            "<section class=\"report-card\"><h2>Current-release scope</h2>"
+            "<section class=\"report-card\"><h2>Latest measured release scope</h2>"
             f"<p><code>{escape(current_million['version'])}</code> binary "
             f"<code>{escape(current_million['binary_sha256'])}</code> was measured "
             "in hash-only mode on deterministic synthetic CC0 data across three "

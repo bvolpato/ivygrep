@@ -26,20 +26,22 @@ use crate::protocol::{
     BUILD_VERSION, DAEMON_PROTOCOL_VERSION, DaemonRequest, DaemonRequestEnvelope, DaemonResponse,
     SearchHit, WorkspaceRuntimeStatus, group_hits_by_file,
 };
-use crate::regex_search::regex_search;
+use crate::regex_search::regex_search_with_options;
 use crate::search::{
     DEFAULT_SEARCH_LIMIT, NeuralQueryVectorJob, SearchContext, SearchOptions,
     hybrid_search_with_context_and_neural_job, literal_search_with_context, query_uses_neural,
     workspace_neural_model_identity,
 };
 use crate::search_service::{
-    HitOrdering, SearchBatch, SearchWorkspaceSet, select_all_indexed_workspaces,
+    HitOrdering, SearchBatch, SearchOutcome, SearchWorkspaceSet, select_all_indexed_workspaces,
 };
 use crate::workspace::{Workspace, WorkspaceIndexState, WorkspaceScope, list_workspaces};
 
 const WATCH_SINGLE_EVENT_QUIET_PERIOD: Duration = Duration::from_millis(250);
 const WATCH_BURST_QUIET_PERIOD: Duration = Duration::from_millis(750);
 const WATCH_MAX_DEBOUNCE: Duration = Duration::from_secs(30);
+const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+const DAEMON_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_DAEMON_LOG_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_DAEMON_REQUEST_BYTES: usize = 1024 * 1024;
 const MAX_QUERY_CACHE_ENTRIES: usize = 128;
@@ -60,12 +62,33 @@ const MAX_IDLE_SEARCH_CONTEXTS: usize = 32;
 const MAX_RESOLVED_WORKSPACES: usize = 128;
 const MAX_NEURAL_STATUSES: usize = 128;
 const MAX_READY_WORKSPACES: usize = 256;
+const MAX_SEARCH_CANCELLATION_TOMBSTONES: usize = 256;
 const MAX_MEMORY_PROBE_LIMIT: usize = 80;
 const MAX_MEMORY_PROBE_QUERY_CHARS: usize = 512;
 const MEMORY_ORIGINAL_RRF_WEIGHT: f32 = 1.25;
 /// Don't cache result sets larger than this (each hit carries preview/reason
 /// strings; large `--no-limit` results would bloat the query cache).
 const MAX_CACHEABLE_HITS: usize = 2_000;
+
+fn finish_daemon_search_batch(
+    batch: SearchBatch,
+    options: &SearchOptions,
+    ordering: HitOrdering,
+) -> Result<SearchOutcome> {
+    batch.finish(options.bounded_limit(), ordering)
+}
+
+fn truncate_daemon_search_hits(hits: &mut Vec<SearchHit>, options: &SearchOptions) {
+    if let Some(limit) = options.bounded_limit() {
+        hits.truncate(limit);
+    }
+}
+
+fn cancelled_search_response() -> DaemonResponse {
+    DaemonResponse::Error {
+        message: "search cancelled".to_string(),
+    }
+}
 
 fn should_start_model_load(has_neural_vectors: bool, query: &str, force_neural: bool) -> bool {
     has_neural_vectors && query_uses_neural(query, force_neural)
@@ -185,16 +208,33 @@ fn fuse_memory_probe_hits(
 }
 
 struct WatchRegistration {
-    _watcher: RecommendedWatcher,
+    watcher: RecommendedWatcher,
     control: Arc<WatchControl>,
     job_nonce: Option<String>,
+    external_git_common_dir: Option<PathBuf>,
+    external_git_watch: Option<PathBuf>,
 }
 
 #[derive(Clone)]
 struct WatchEventFilter {
-    root: PathBuf,
+    workspace: Workspace,
     skip_gitignore: bool,
+    git_exclude_path: Option<PathBuf>,
     root_gitignore: Option<ignore::gitignore::Gitignore>,
+}
+
+#[derive(Debug, Default)]
+enum WatchChange {
+    #[default]
+    None,
+    Paths(HashSet<PathBuf>),
+    FullReconciliation,
+}
+
+#[derive(Debug, Default)]
+struct PendingWatchWork {
+    change: WatchChange,
+    backend_error: Option<String>,
 }
 
 struct WatchControl {
@@ -205,7 +245,7 @@ struct WatchControl {
     active: AtomicBool,
     pending_events: AtomicU64,
     coalesced_events: AtomicU64,
-    dirty_paths: Mutex<HashSet<PathBuf>>,
+    pending_work: Mutex<PendingWatchWork>,
 }
 
 impl WatchControl {
@@ -218,19 +258,48 @@ impl WatchControl {
             active: AtomicBool::new(true),
             pending_events: AtomicU64::new(0),
             coalesced_events: AtomicU64::new(0),
-            dirty_paths: Mutex::new(HashSet::new()),
+            pending_work: Mutex::new(PendingWatchWork::default()),
         }
     }
 
-    fn mark_dirty(&self, paths: impl IntoIterator<Item = PathBuf>) {
-        self.dirty_paths.lock().extend(paths);
+    fn mark_paths_dirty(&self, paths: impl IntoIterator<Item = PathBuf>) {
+        let paths = paths.into_iter().collect::<HashSet<_>>();
+        if paths.is_empty() {
+            return;
+        }
+
+        let mut pending = self.pending_work.lock();
+        match &mut pending.change {
+            WatchChange::None => pending.change = WatchChange::Paths(paths),
+            WatchChange::Paths(existing) => existing.extend(paths),
+            WatchChange::FullReconciliation => {}
+        }
         self.dirty.store(true, Ordering::Relaxed);
         self.pending_events.fetch_add(1, Ordering::Relaxed);
+        drop(pending);
         self.notify.notify_one();
     }
 
-    fn take_dirty_paths(&self) -> Vec<PathBuf> {
-        self.dirty_paths.lock().drain().collect()
+    fn mark_full_reconciliation(&self, backend_error: Option<String>) {
+        let mut pending = self.pending_work.lock();
+        pending.change = WatchChange::FullReconciliation;
+        if backend_error.is_some() {
+            pending.backend_error = backend_error;
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+        self.pending_events.fetch_add(1, Ordering::Relaxed);
+        drop(pending);
+        self.notify.notify_one();
+    }
+
+    fn take_pending_work(&self) -> Option<PendingWatchWork> {
+        let mut pending = self.pending_work.lock();
+        if matches!(pending.change, WatchChange::None) {
+            return None;
+        }
+        let work = std::mem::take(&mut *pending);
+        self.dirty.store(false, Ordering::Relaxed);
+        Some(work)
     }
 
     fn snapshot_phase(&self) -> (&'static str, bool, bool, u64, u64) {
@@ -466,19 +535,51 @@ impl QueryResultCache {
 
 impl WatchEventFilter {
     fn new(workspace: &Workspace) -> Self {
-        let skip_gitignore = workspace
+        let mut filter = Self {
+            workspace: workspace.clone(),
+            skip_gitignore: false,
+            git_exclude_path: None,
+            root_gitignore: None,
+        };
+        filter.refresh();
+        filter
+    }
+
+    fn refresh(&mut self) {
+        self.skip_gitignore = self
+            .workspace
             .read_metadata()
             .ok()
             .flatten()
             .is_some_and(|metadata| metadata.skip_gitignore);
-        let root_gitignore = (!skip_gitignore)
-            .then(|| build_root_gitignore(&workspace.root))
+        self.git_exclude_path = crate::workspace::git_common_dir(&self.workspace.root)
+            .map(|common_dir| common_dir.join("info/exclude"));
+        self.root_gitignore = (!self.skip_gitignore)
+            .then(|| build_root_gitignore(&self.workspace.root, self.git_exclude_path.as_deref()))
             .flatten();
+    }
 
-        Self {
-            root: workspace.root.clone(),
-            skip_gitignore,
-            root_gitignore,
+    fn change_for_event(&mut self, event: &notify::Event) -> WatchChange {
+        if matches!(event.kind, notify::EventKind::Access(_)) {
+            return WatchChange::None;
+        }
+        if event
+            .paths
+            .iter()
+            .any(|path| self.is_ignore_configuration_path(path))
+        {
+            self.refresh();
+            return WatchChange::FullReconciliation;
+        }
+
+        let paths = self
+            .paths_to_reindex(event)
+            .into_iter()
+            .collect::<HashSet<_>>();
+        if paths.is_empty() {
+            WatchChange::None
+        } else {
+            WatchChange::Paths(paths)
         }
     }
 
@@ -499,18 +600,13 @@ impl WatchEventFilter {
             return false;
         }
 
-        if !self.skip_gitignore {
-            if is_common_build_output_path(&rel) {
-                return false;
-            }
-
-            if let Some(gitignore) = &self.root_gitignore
-                && gitignore
-                    .matched_path_or_any_parents(&normalized_path, normalized_path.is_dir())
-                    .is_ignore()
-            {
-                return false;
-            }
+        if !self.skip_gitignore
+            && let Some(gitignore) = &self.root_gitignore
+            && gitignore
+                .matched_path_or_any_parents(&normalized_path, normalized_path.is_dir())
+                .is_ignore()
+        {
+            return false;
         }
 
         true
@@ -520,16 +616,81 @@ impl WatchEventFilter {
         let absolute = if path.is_absolute() {
             path.to_path_buf()
         } else {
-            self.root.join(path)
+            self.workspace.root.join(path)
         };
 
-        if let Ok(rel) = absolute.strip_prefix(&self.root) {
+        if let Ok(rel) = absolute.strip_prefix(&self.workspace.root) {
             return Some((absolute.clone(), rel.to_path_buf()));
         }
 
         let normalized = canonicalize_existing_prefix(&absolute)?;
-        let rel = normalized.strip_prefix(&self.root).ok()?.to_path_buf();
+        let rel = normalized
+            .strip_prefix(&self.workspace.root)
+            .ok()?
+            .to_path_buf();
         Some((normalized, rel))
+    }
+
+    fn is_ignore_configuration_path(&self, path: &Path) -> bool {
+        if self.git_exclude_path.as_deref().is_some_and(|exclude| {
+            watch_paths_match(path, exclude)
+                || exclude
+                    .parent()
+                    .is_some_and(|parent| watch_paths_match(path, parent))
+        }) {
+            return true;
+        }
+
+        self.normalize_watch_path(path).is_some_and(|(_, rel)| {
+            rel.file_name()
+                .is_some_and(|name| name == ".gitignore" || name == ".ignore")
+        })
+    }
+}
+
+fn watch_paths_match(left: &Path, right: &Path) -> bool {
+    left == right
+        || canonicalize_existing_prefix(left)
+            .zip(canonicalize_existing_prefix(right))
+            .is_some_and(|(left, right)| left == right)
+}
+
+fn handle_watch_result(
+    control: &WatchControl,
+    event_filter: &Mutex<WatchEventFilter>,
+    result: notify::Result<notify::Event>,
+) {
+    match result {
+        Ok(event) if event.need_rescan() => {
+            event_filter.lock().refresh();
+            warn!(
+                "watch backend requested a full rescan for {}",
+                control.workspace.root.display()
+            );
+            daemon_log(&format!(
+                "watch backend requested a full rescan for {}; scheduling full reconciliation",
+                control.workspace.root.display()
+            ));
+            control.mark_full_reconciliation(None);
+        }
+        Ok(event) => match event_filter.lock().change_for_event(&event) {
+            WatchChange::None => {}
+            WatchChange::Paths(paths) => control.mark_paths_dirty(paths),
+            WatchChange::FullReconciliation => control.mark_full_reconciliation(None),
+        },
+        Err(err) => {
+            event_filter.lock().refresh();
+            let error = format!("{err:#}");
+            warn!(
+                "watch backend error for {}: {error}",
+                control.workspace.root.display()
+            );
+            daemon_log(&format!(
+                "watch backend error for {}: {error}; scheduling full reconciliation",
+                control.workspace.root.display()
+            ));
+            control.mark_full_reconciliation(Some(error));
+        }
     }
 }
 
@@ -551,6 +712,89 @@ fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
 }
 
 #[derive(Clone)]
+struct SearchCancellation {
+    flag: Arc<AtomicBool>,
+    signal: tokio::sync::watch::Sender<bool>,
+    finished_signal: tokio::sync::watch::Sender<bool>,
+}
+
+impl SearchCancellation {
+    fn new(cancelled: bool) -> Self {
+        let (signal, _) = tokio::sync::watch::channel(cancelled);
+        let (finished_signal, _) = tokio::sync::watch::channel(false);
+        Self {
+            flag: Arc::new(AtomicBool::new(cancelled)),
+            signal,
+            finished_signal,
+        }
+    }
+
+    fn cancel(&self) {
+        self.flag.store(true, Ordering::Relaxed);
+        self.signal.send_replace(true);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.flag.load(Ordering::Relaxed)
+    }
+
+    async fn cancelled(&self) {
+        let mut receiver = self.signal.subscribe();
+        while !*receiver.borrow() {
+            if receiver.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+
+    fn finish(&self) {
+        self.finished_signal.send_replace(true);
+    }
+
+    async fn finished(&self) {
+        let mut receiver = self.finished_signal.subscribe();
+        while !*receiver.borrow() {
+            if receiver.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+}
+
+enum SearchCancellationEntry {
+    Active(SearchCancellation),
+    Tombstone(SearchCancellation),
+}
+
+#[derive(Default)]
+struct SearchCancellationRegistry {
+    entries: HashMap<uuid::Uuid, SearchCancellationEntry>,
+    tombstones: VecDeque<uuid::Uuid>,
+}
+
+struct ActiveSearchRegistration {
+    request_id: uuid::Uuid,
+    cancellation: SearchCancellation,
+    registry: Arc<Mutex<SearchCancellationRegistry>>,
+}
+
+impl Drop for ActiveSearchRegistration {
+    fn drop(&mut self) {
+        let mut registry = self.registry.lock();
+        let owns_entry = matches!(
+            registry.entries.get(&self.request_id),
+            Some(SearchCancellationEntry::Active(cancellation))
+                if Arc::ptr_eq(&cancellation.flag, &self.cancellation.flag)
+        );
+        if owns_entry {
+            registry.entries.remove(&self.request_id);
+        }
+        drop(registry);
+        self.cancellation.finish();
+    }
+}
+
+#[derive(Clone)]
 pub(crate) struct DaemonState {
     lazy_model: Arc<std::sync::OnceLock<Arc<dyn EmbeddingModel>>>,
     model_loading: Arc<AtomicBool>,
@@ -562,6 +806,7 @@ pub(crate) struct DaemonState {
     idle_search_context_count: Arc<AtomicUsize>,
     query_results: Arc<Mutex<QueryResultCache>>,
     neural_queries: Arc<Mutex<NeuralQueryCache>>,
+    search_cancellations: Arc<Mutex<SearchCancellationRegistry>>,
     query_result_cache_enabled: bool,
     /// Bounds concurrent CPU-heavy work (hybrid/literal/regex search + index).
     /// Without this, a burst of clients each spawn a `spawn_blocking` task on
@@ -590,6 +835,89 @@ fn create_search_model() -> Arc<dyn EmbeddingModel> {
 impl DaemonState {
     pub(crate) async fn acquire_cpu_permit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
         self.cpu_permits.clone().acquire_owned().await.ok()
+    }
+
+    async fn acquire_search_permit(
+        &self,
+        cancellation: Option<&SearchCancellation>,
+    ) -> Option<tokio::sync::OwnedSemaphorePermit> {
+        let Some(cancellation) = cancellation else {
+            return self.acquire_cpu_permit().await;
+        };
+        if cancellation.is_cancelled() {
+            return None;
+        }
+        tokio::select! {
+            biased;
+            () = cancellation.cancelled() => None,
+            permit = self.cpu_permits.clone().acquire_owned() => permit.ok(),
+        }
+    }
+
+    fn register_search(
+        &self,
+        request_id: Option<uuid::Uuid>,
+    ) -> Result<Option<ActiveSearchRegistration>> {
+        let Some(request_id) = request_id else {
+            return Ok(None);
+        };
+        let mut registry = self.search_cancellations.lock();
+        if matches!(
+            registry.entries.get(&request_id),
+            Some(SearchCancellationEntry::Active(_))
+        ) {
+            anyhow::bail!("search request {request_id} is already active");
+        }
+        let cancellation = match registry.entries.remove(&request_id) {
+            Some(SearchCancellationEntry::Tombstone(cancellation)) => {
+                registry.tombstones.retain(|id| id != &request_id);
+                cancellation
+            }
+            None => SearchCancellation::new(false),
+            Some(SearchCancellationEntry::Active(_)) => unreachable!(),
+        };
+        registry.entries.insert(
+            request_id,
+            SearchCancellationEntry::Active(cancellation.clone()),
+        );
+        drop(registry);
+        Ok(Some(ActiveSearchRegistration {
+            request_id,
+            cancellation,
+            registry: self.search_cancellations.clone(),
+        }))
+    }
+
+    fn cancel_search(&self, request_id: uuid::Uuid) -> Option<SearchCancellation> {
+        let mut registry = self.search_cancellations.lock();
+        if let Some(entry) = registry.entries.get(&request_id) {
+            match entry {
+                SearchCancellationEntry::Active(cancellation) => {
+                    cancellation.cancel();
+                    return Some(cancellation.clone());
+                }
+                SearchCancellationEntry::Tombstone(cancellation) => cancellation.cancel(),
+            }
+            return None;
+        }
+
+        let cancellation = SearchCancellation::new(true);
+        registry
+            .entries
+            .insert(request_id, SearchCancellationEntry::Tombstone(cancellation));
+        registry.tombstones.push_back(request_id);
+        while registry.tombstones.len() > MAX_SEARCH_CANCELLATION_TOMBSTONES {
+            let Some(expired) = registry.tombstones.pop_front() else {
+                break;
+            };
+            if matches!(
+                registry.entries.get(&expired),
+                Some(SearchCancellationEntry::Tombstone(_))
+            ) {
+                registry.entries.remove(&expired);
+            }
+        }
+        None
     }
 
     pub(crate) fn prepare_context_model(
@@ -898,6 +1226,20 @@ impl DaemonState {
     fn store_neural_query(&self, query: String, vector: Vec<f32>) {
         self.neural_queries.lock().insert(query, vector);
     }
+
+    fn store_completed_neural_query(
+        &self,
+        query: String,
+        completed: &std::sync::OnceLock<Vec<f32>>,
+        options: &SearchOptions,
+    ) {
+        if options.is_cancelled() {
+            return;
+        }
+        if let Some(vector) = completed.get() {
+            self.store_neural_query(query, vector.clone());
+        }
+    }
 }
 
 fn create_daemon_state() -> DaemonState {
@@ -916,6 +1258,7 @@ fn create_daemon_state() -> DaemonState {
         idle_search_context_count: Arc::new(AtomicUsize::new(0)),
         query_results: Arc::new(Mutex::new(QueryResultCache::default())),
         neural_queries: Arc::new(Mutex::new(NeuralQueryCache::default())),
+        search_cancellations: Arc::new(Mutex::new(SearchCancellationRegistry::default())),
         query_result_cache_enabled: config::query_result_cache_enabled(),
         cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
         web_server: Arc::new(Mutex::new(None)),
@@ -1102,7 +1445,10 @@ async fn handle_connection(stream: crate::ipc::IpcStream, state: DaemonState) ->
     let mut reader = BufReader::new(stream);
     loop {
         let (response, keep_alive) = match read_daemon_request(&mut reader).await {
-            Ok(Some(request)) => (handle_request(state.clone(), request).await, true),
+            Ok(Some(envelope)) => (
+                handle_enveloped_request(state.clone(), envelope).await,
+                true,
+            ),
             Ok(None) => return Ok(()),
             Err(response) => (response, false),
         };
@@ -1118,7 +1464,7 @@ async fn handle_connection(stream: crate::ipc::IpcStream, state: DaemonState) ->
 
 async fn read_daemon_request<R>(
     reader: &mut R,
-) -> std::result::Result<Option<DaemonRequest>, DaemonResponse>
+) -> std::result::Result<Option<DaemonRequestEnvelope>, DaemonResponse>
 where
     R: AsyncBufRead + Unpin,
 {
@@ -1147,7 +1493,7 @@ where
     parse_daemon_request(&line).map(Some)
 }
 
-fn parse_daemon_request(line: &[u8]) -> std::result::Result<DaemonRequest, DaemonResponse> {
+fn parse_daemon_request(line: &[u8]) -> std::result::Result<DaemonRequestEnvelope, DaemonResponse> {
     let envelope: DaemonRequestEnvelope =
         serde_json::from_slice(line).map_err(|err| DaemonResponse::Error {
             message: format!("invalid daemon request: {err}"),
@@ -1160,10 +1506,45 @@ fn parse_daemon_request(line: &[u8]) -> std::result::Result<DaemonRequest, Daemo
             ),
         });
     }
-    Ok(envelope.request)
+    Ok(envelope)
 }
 
 async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonResponse {
+    handle_request_with_cancellation(state, request, None).await
+}
+
+async fn handle_enveloped_request(
+    state: DaemonState,
+    envelope: DaemonRequestEnvelope,
+) -> DaemonResponse {
+    let registration = if matches!(
+        envelope.request,
+        DaemonRequest::Search { .. }
+            | DaemonRequest::RegexSearch { .. }
+            | DaemonRequest::LiteralSearch { .. }
+    ) {
+        match state.register_search(envelope.request_id) {
+            Ok(registration) => registration,
+            Err(error) => {
+                return DaemonResponse::Error {
+                    message: error.to_string(),
+                };
+            }
+        }
+    } else {
+        None
+    };
+    let cancellation = registration
+        .as_ref()
+        .map(|registration| registration.cancellation.clone());
+    handle_request_with_cancellation(state, envelope.request, cancellation).await
+}
+
+async fn handle_request_with_cancellation(
+    state: DaemonState,
+    request: DaemonRequest,
+    cancellation: Option<SearchCancellation>,
+) -> DaemonResponse {
     match request {
         DaemonRequest::Version => DaemonResponse::Version {
             version: Some(BUILD_VERSION.to_string()),
@@ -1316,8 +1697,15 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             force_neural,
             disable_memory_expansion,
         } => {
+            if cancellation
+                .as_ref()
+                .is_some_and(SearchCancellation::is_cancelled)
+            {
+                return cancelled_search_response();
+            }
             let request_started = std::time::Instant::now();
             let state_clone = state.clone();
+            let all_indices = path.is_none();
 
             let workspace_set = if let Some(ref p) = path {
                 match state_clone.resolve_workspace(p) {
@@ -1346,17 +1734,20 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
 
             let options = SearchOptions {
                 limit,
-                context,
+                context: context.min(crate::search::MAX_SEARCH_CONTEXT_LINES),
                 type_filter,
                 include_globs,
                 exclude_globs,
-                scope_filter: scope_from_request(scope_path, scope_is_file),
+                scope_filter: (!all_indices)
+                    .then(|| scope_from_request(scope_path, scope_is_file))
+                    .flatten(),
                 skip_gitignore,
                 force_neural,
                 progress_tx: None,
-                cancel_token: None,
+                cancel_token: cancellation
+                    .as_ref()
+                    .map(|cancellation| cancellation.flag.clone()),
             };
-            let all_indices = path.is_none();
             tracing::trace!(
                 "daemon_search_resolve={:?} workspaces={}",
                 request_started.elapsed(),
@@ -1377,7 +1768,9 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 };
             }
             let has_neural_vectors = neural_identities.iter().any(Option::is_some);
-            if should_start_model_load(has_neural_vectors, &query, force_neural) {
+            if !options.is_cancelled()
+                && should_start_model_load(has_neural_vectors, &query, force_neural)
+            {
                 state_clone.maybe_start_model_load();
             }
             tracing::trace!(
@@ -1388,17 +1781,25 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
 
             // Bound concurrent heavy search work (see #58). The permit is held
             // for the whole blocking task and released when it completes.
-            let permit = state_clone.cpu_permits.clone().acquire_owned().await.ok();
+            let Some(permit) = state_clone
+                .acquire_search_permit(cancellation.as_ref())
+                .await
+            else {
+                return cancelled_search_response();
+            };
             tracing::trace!("daemon_search_permit={:?}", request_started.elapsed());
             let result = tokio::task::spawn_blocking(move || {
                 let task_started = std::time::Instant::now();
                 let _permit = permit;
+                if options.is_cancelled() {
+                    return (Vec::new(), workspace_warnings, 0, query, options, true);
+                }
                 let model = match state_clone.get_model_for_search(force_neural) {
                     Ok(model) => model,
                     Err(err) => {
                         let mut warnings = workspace_warnings;
                         warnings.push(err.to_string());
-                        return (Vec::new(), warnings, 0, query, options);
+                        return (Vec::new(), warnings, 0, query, options, false);
                     }
                 };
                 tracing::trace!("daemon_search_model={:?}", task_started.elapsed());
@@ -1407,6 +1808,9 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 let mut successful_workspaces = 0usize;
                 let mut prepared_workspaces = Vec::with_capacity(workspaces.len());
                 for workspace in workspaces {
+                    if options.is_cancelled() {
+                        break;
+                    }
                     match state_clone
                         .prepare_workspace_for_hybrid_query(&workspace, options.skip_gitignore)
                     {
@@ -1424,6 +1828,9 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 }
                 let workspaces = prepared_workspaces;
                 tracing::trace!("daemon_search_prepare={:?}", task_started.elapsed());
+                if options.is_cancelled() {
+                    return (Vec::new(), all_errors, 0, query, options, true);
+                }
                 let background_enhancement_enabled =
                     crate::config::background_enhancement_enabled();
                 let query_uses_neural = query_uses_neural(&query, options.force_neural);
@@ -1458,32 +1865,44 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     all_indices,
                 );
                 if let Some(cached_hits) = state_clone.cached_query_results(&cache_key) {
-                    if background_enhancement_enabled {
+                    let cancelled = options.is_cancelled();
+                    if background_enhancement_enabled && !cancelled {
                         for root in workspaces_needing_enhancement {
                             if let Ok(ws) = Workspace::resolve(&root) {
                                 let _ = ws.trigger_background_search_enhancement(query_uses_neural);
                             }
                         }
                     }
-                    return (cached_hits, all_errors, workspaces.len(), query, options);
+                    return (
+                        cached_hits,
+                        all_errors,
+                        workspaces.len(),
+                        query,
+                        options,
+                        cancelled,
+                    );
                 }
 
-                let mut neural_query_vector_job = if state_clone.can_precompute_neural_query(
-                    &workspaces,
-                    model.as_ref(),
-                    &query,
-                    options.force_neural,
-                ) {
+                let mut neural_query_cache_write = None;
+                let mut neural_query_vector_job = if !options.is_cancelled()
+                    && state_clone.can_precompute_neural_query(
+                        &workspaces,
+                        model.as_ref(),
+                        &query,
+                        options.force_neural,
+                    ) {
                     let neural_query = query.trim().to_string();
                     if let Some(vector) = state_clone.cached_neural_query(&neural_query) {
                         Some(NeuralQueryVectorJob::Ready(vector))
                     } else {
                         let model = model.clone();
-                        let state = state_clone.clone();
-                        Some(NeuralQueryVectorJob::Pending(std::thread::spawn(
+                        let completed = Arc::new(std::sync::OnceLock::new());
+                        let worker_completed = completed.clone();
+                        neural_query_cache_write = Some((neural_query.clone(), completed));
+                        Some(NeuralQueryVectorJob::pending(std::thread::spawn(
                             move || {
                                 let vector = model.embed(&neural_query);
-                                state.store_neural_query(neural_query, vector.clone());
+                                let _ = worker_completed.set(vector.clone());
                                 vector
                             },
                         )))
@@ -1493,6 +1912,9 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 };
 
                 for (workspace, signature) in workspaces.iter().zip(workspace_signatures) {
+                    if options.is_cancelled() {
+                        break;
+                    }
                     let context = match state_clone.cached_search_context_for_signature(
                         workspace,
                         Some(model.dimensions()),
@@ -1509,6 +1931,9 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                             continue;
                         }
                     };
+                    if options.is_cancelled() {
+                        break;
+                    }
                     tracing::trace!("daemon_search_context={:?}", task_started.elapsed());
                     match hybrid_search_with_context_and_neural_job(
                         &context,
@@ -1542,14 +1967,17 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                         .partial_cmp(&a.score)
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
-                if let Some(l) = options.limit {
-                    all_hits.truncate(l);
+                truncate_daemon_search_hits(&mut all_hits, &options);
+                drop(neural_query_vector_job.take());
+                let cancelled = options.is_cancelled();
+                if !cancelled && let Some((query, completed)) = neural_query_cache_write {
+                    state_clone.store_completed_neural_query(query, &completed, &options);
                 }
-                if all_errors.is_empty() {
+                if !cancelled && all_errors.is_empty() {
                     state_clone.store_query_results(cache_key, &all_hits);
                 }
                 // Spawn background hash and neural enhancement for workspaces that need it.
-                if background_enhancement_enabled {
+                if background_enhancement_enabled && !cancelled {
                     for root in workspaces_needing_enhancement {
                         if let Ok(ws) = Workspace::resolve(&root) {
                             let _ = ws.trigger_background_search_enhancement(query_uses_neural);
@@ -1557,7 +1985,14 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     }
                 }
                 tracing::trace!("daemon_search_task_total={:?}", task_started.elapsed());
-                (all_hits, all_errors, successful_workspaces, query, options)
+                (
+                    all_hits,
+                    all_errors,
+                    successful_workspaces,
+                    query,
+                    options,
+                    cancelled,
+                )
             })
             .await;
             let result = match result {
@@ -1571,8 +2006,21 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             };
             tracing::trace!("daemon_search_total={:?}", request_started.elapsed());
 
-            let (mut hits, errors, successful_workspaces, expansion_query, expansion_options) =
-                result;
+            let (
+                mut hits,
+                errors,
+                successful_workspaces,
+                expansion_query,
+                expansion_options,
+                cancelled,
+            ) = result;
+            if cancelled
+                || cancellation
+                    .as_ref()
+                    .is_some_and(SearchCancellation::is_cancelled)
+            {
+                return cancelled_search_response();
+            }
             if successful_workspaces == 0 && !errors.is_empty() {
                 DaemonResponse::Error {
                     message: format!("search failed: {}", errors.join("; ")),
@@ -1604,9 +2052,23 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     let requests = variants
                         .map(|variant| search_request_with_query(&expansion_request, variant));
                     let (first, second) = tokio::join!(
-                        Box::pin(handle_request(state.clone(), requests[0].clone())),
-                        Box::pin(handle_request(state.clone(), requests[1].clone())),
+                        Box::pin(handle_request_with_cancellation(
+                            state.clone(),
+                            requests[0].clone(),
+                            cancellation.clone(),
+                        )),
+                        Box::pin(handle_request_with_cancellation(
+                            state.clone(),
+                            requests[1].clone(),
+                            cancellation.clone(),
+                        )),
                     );
+                    if cancellation
+                        .as_ref()
+                        .is_some_and(SearchCancellation::is_cancelled)
+                    {
+                        return cancelled_search_response();
+                    }
                     let mut probe_outputs = Vec::new();
                     for response in [first, second] {
                         match response {
@@ -1635,12 +2097,20 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             path,
             pattern,
             limit,
+            context,
+            type_filter,
             include_globs,
             exclude_globs,
             scope_path,
             scope_is_file,
             skip_gitignore,
         } => {
+            if cancellation
+                .as_ref()
+                .is_some_and(SearchCancellation::is_cancelled)
+            {
+                return cancelled_search_response();
+            }
             let workspace_set = if let Some(ref p) = path {
                 match Workspace::resolve(p) {
                     Ok(workspace) => SearchWorkspaceSet {
@@ -1666,31 +2136,64 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             let workspaces = workspace_set.workspaces;
             let workspace_warnings = workspace_set.warnings;
 
-            let scope_filter = scope_from_request(scope_path, scope_is_file);
             let all_indices = path.is_none();
+            let options = SearchOptions {
+                limit,
+                context: context.min(crate::search::MAX_SEARCH_CONTEXT_LINES),
+                type_filter,
+                include_globs,
+                exclude_globs,
+                scope_filter: (!all_indices)
+                    .then(|| scope_from_request(scope_path, scope_is_file))
+                    .flatten(),
+                skip_gitignore,
+                force_neural: false,
+                progress_tx: None,
+                cancel_token: cancellation
+                    .as_ref()
+                    .map(|cancellation| cancellation.flag.clone()),
+            };
             // Bound concurrent heavy regex work (see #58).
-            let permit = state.cpu_permits.clone().acquire_owned().await.ok();
+            let Some(permit) = state.acquire_search_permit(cancellation.as_ref()).await else {
+                return cancelled_search_response();
+            };
             let result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
+                if options.is_cancelled() {
+                    return Err("search cancelled".to_string());
+                }
                 let mut batch = SearchBatch::new(workspace_warnings);
+                let mut workspace_options = options.clone();
+                if all_indices {
+                    workspace_options.context = 0;
+                }
                 for workspace in &workspaces {
+                    if options.is_cancelled() {
+                        return Err("search cancelled".to_string());
+                    }
                     let result =
                         ensure_queryable_workspace(workspace, skip_gitignore).and_then(|_| {
-                            regex_search(
-                                workspace,
-                                &pattern,
-                                limit,
-                                scope_filter.as_ref(),
-                                &include_globs,
-                                &exclude_globs,
-                                skip_gitignore,
-                            )
+                            regex_search_with_options(workspace, &pattern, &workspace_options)
                         });
                     batch.record(&workspace.root, all_indices, result);
                 }
-                batch
-                    .finish(limit, HitOrdering::Preserve)
-                    .map_err(|err| err.to_string())
+                let mut outcome =
+                    finish_daemon_search_batch(batch, &options, HitOrdering::Preserve)
+                        .map_err(|err| err.to_string())?;
+                if options.is_cancelled() {
+                    return Err("search cancelled".to_string());
+                }
+                if all_indices {
+                    crate::regex_search::expand_regex_context_absolute_with_options(
+                        &mut outcome.hits,
+                        options.bounded_context(),
+                        &options,
+                    );
+                }
+                if options.is_cancelled() {
+                    return Err("search cancelled".to_string());
+                }
+                Ok(outcome)
             })
             .await
             .unwrap_or_else(|join_err| {
@@ -1718,6 +2221,12 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             scope_is_file,
             skip_gitignore,
         } => {
+            if cancellation
+                .as_ref()
+                .is_some_and(SearchCancellation::is_cancelled)
+            {
+                return cancelled_search_response();
+            }
             let workspace_set = if let Some(ref p) = path {
                 match Workspace::resolve(p) {
                     Ok(workspace) => SearchWorkspaceSet {
@@ -1743,28 +2252,42 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
             let workspaces = workspace_set.workspaces;
             let workspace_warnings = workspace_set.warnings;
 
-            let scope_filter = scope_from_request(scope_path, scope_is_file);
             let all_indices = path.is_none();
             let options = SearchOptions {
                 limit,
-                context,
+                context: context.min(crate::search::MAX_SEARCH_CONTEXT_LINES),
                 type_filter,
                 include_globs,
                 exclude_globs,
-                scope_filter,
+                scope_filter: (!all_indices)
+                    .then(|| scope_from_request(scope_path, scope_is_file))
+                    .flatten(),
                 skip_gitignore,
                 force_neural: false,
                 progress_tx: None,
-                cancel_token: None,
+                cancel_token: cancellation
+                    .as_ref()
+                    .map(|cancellation| cancellation.flag.clone()),
             };
 
             let state_clone = state.clone();
             // Bound concurrent heavy literal work (see #58).
-            let permit = state_clone.cpu_permits.clone().acquire_owned().await.ok();
+            let Some(permit) = state_clone
+                .acquire_search_permit(cancellation.as_ref())
+                .await
+            else {
+                return cancelled_search_response();
+            };
             let result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
+                if options.is_cancelled() {
+                    return Err("search cancelled".to_string());
+                }
                 let mut batch = SearchBatch::new(workspace_warnings);
                 for workspace in &workspaces {
+                    if options.is_cancelled() {
+                        return Err("search cancelled".to_string());
+                    }
                     let result = (|| {
                         if ensure_queryable_workspace(workspace, options.skip_gitignore)? {
                             state_clone.clear_workspace_contexts(workspace);
@@ -1774,9 +2297,12 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     })();
                     batch.record(&workspace.root, all_indices, result);
                 }
-                batch
-                    .finish(options.limit, HitOrdering::Preserve)
-                    .map_err(|err| err.to_string())
+                let outcome = finish_daemon_search_batch(batch, &options, HitOrdering::Preserve)
+                    .map_err(|err| err.to_string())?;
+                if options.is_cancelled() {
+                    return Err("search cancelled".to_string());
+                }
+                Ok(outcome)
             })
             .await
             .unwrap_or_else(|join_err| {
@@ -1792,6 +2318,14 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                 Err(message) => DaemonResponse::Error { message },
             }
         }
+        DaemonRequest::CancelSearch { search_id } => {
+            if let Some(cancellation) = state.cancel_search(search_id) {
+                cancellation.finished().await;
+            }
+            DaemonResponse::Ack {
+                message: format!("cancellation requested for search {search_id}"),
+            }
+        }
         DaemonRequest::Remove { path } => match Workspace::resolve(&path) {
             Ok(workspace) => {
                 let workspace_for_cache = workspace.clone();
@@ -1804,28 +2338,9 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
                     let _ = workspace.write_metadata(&metadata);
                 }
 
-                // Acquire the same fs2 lock that index_workspace holds to
-                // wait for any in-progress indexing before deleting.
-                match tokio::task::spawn_blocking(move || {
-                    workspace.ensure_dirs().ok();
-                    let lock_path = workspace.lock_path();
-                    if let Ok(lock_file) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .write(true)
-                        .truncate(false)
-                        .open(&lock_path)
-                    {
-                        // Blocking: waits for any running indexer to release.
-                        let _ = fs2::FileExt::lock_exclusive(&lock_file);
-                        let result = remove_workspace_index(&workspace);
-                        let _ = fs2::FileExt::unlock(&lock_file);
-                        result
-                    } else {
-                        remove_workspace_index(&workspace)
-                    }
-                })
-                .await
-                .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())))
+                match tokio::task::spawn_blocking(move || remove_workspace_index(&workspace))
+                    .await
+                    .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())))
                 {
                     Ok(_) => {
                         state.clear_workspace_contexts(&workspace_for_cache);
@@ -1870,15 +2385,28 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
 
     let control = Arc::new(WatchControl::new(workspace.clone()));
     let callback_control = control.clone();
-    let event_filter = WatchEventFilter::new(&workspace);
+    let event_filter = Arc::new(Mutex::new(WatchEventFilter::new(&workspace)));
+    let callback_filter = event_filter.clone();
+    let external_git_common_dir = {
+        let filter = event_filter.lock();
+        (!filter.skip_gitignore)
+            .then(|| {
+                filter
+                    .git_exclude_path
+                    .as_deref()
+                    .and_then(Path::parent)
+                    .and_then(Path::parent)
+                    .filter(|path| !path.starts_with(&workspace.root))
+                    .map(Path::to_path_buf)
+            })
+            .flatten()
+    };
+    let external_git_watch = external_git_common_dir
+        .as_deref()
+        .and_then(external_git_watch_target);
 
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        if let Ok(event) = event {
-            let paths = event_filter.paths_to_reindex(&event);
-            if !paths.is_empty() {
-                callback_control.mark_dirty(paths);
-            }
-        }
+        handle_watch_result(&callback_control, &callback_filter, event);
     })?;
 
     match watcher.watch(&workspace.root, RecursiveMode::Recursive) {
@@ -1904,15 +2432,27 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
             return Err(err.into());
         }
     }
+    if let Some(git_watch) = &external_git_watch {
+        watcher
+            .watch(git_watch, RecursiveMode::NonRecursive)
+            .map_err(|err| {
+                anyhow::anyhow!(
+                    "failed watching external Git metadata directory {}: {err:#}",
+                    git_watch.display()
+                )
+            })?;
+    }
     let job_nonce = jobs::start_job(&workspace, JobKind::Watcher, "idle", 1)
         .ok()
         .and_then(|record| record.nonce);
     watchers.insert(
         workspace.id.clone(),
         WatchRegistration {
-            _watcher: watcher,
+            watcher,
             control: control.clone(),
             job_nonce: job_nonce.clone(),
+            external_git_common_dir,
+            external_git_watch,
         },
     );
     drop(watchers);
@@ -1934,6 +2474,92 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
     daemon_log(&format!("watching {}", workspace.root.display()));
 
     Ok(())
+}
+
+fn external_git_watch_target(common_dir: &Path) -> Option<PathBuf> {
+    let info = common_dir.join("info");
+    if info.is_dir() {
+        Some(info)
+    } else if common_dir.is_dir() {
+        Some(common_dir.to_path_buf())
+    } else {
+        None
+    }
+}
+
+fn is_missing_watch_error(error: &notify::Error) -> bool {
+    matches!(
+        error.kind,
+        notify::ErrorKind::PathNotFound | notify::ErrorKind::WatchNotFound
+    )
+}
+
+fn log_external_git_watch_error(
+    workspace: &Workspace,
+    action: &str,
+    path: &Path,
+    error: &notify::Error,
+) {
+    warn!(
+        "failed {action} external Git metadata watch {} for {}: {error:#}",
+        path.display(),
+        workspace.root.display()
+    );
+    daemon_log(&format!(
+        "failed {action} external Git metadata watch {} for {}: {error:#}",
+        path.display(),
+        workspace.root.display()
+    ));
+}
+
+fn reconcile_external_git_watch(state: &DaemonState, workspace: &Workspace) {
+    let mut watchers = state.watchers.lock();
+    let Some(registration) = watchers.get_mut(&workspace.id) else {
+        return;
+    };
+    let Some(common_dir) = registration.external_git_common_dir.clone() else {
+        return;
+    };
+    let desired = external_git_watch_target(&common_dir);
+    if registration.external_git_watch == desired {
+        return;
+    }
+
+    let Some(target) = desired else {
+        if let Some(current) = registration.external_git_watch.as_ref()
+            && let Err(error) = registration.watcher.unwatch(current)
+            && !is_missing_watch_error(&error)
+        {
+            log_external_git_watch_error(workspace, "removing", current, &error);
+            return;
+        }
+        registration.external_git_watch = None;
+        return;
+    };
+    if let Err(error) = registration
+        .watcher
+        .watch(&target, RecursiveMode::NonRecursive)
+    {
+        log_external_git_watch_error(workspace, "adding", &target, &error);
+        return;
+    }
+
+    let Some(current) = registration.external_git_watch.as_ref() else {
+        registration.external_git_watch = Some(target);
+        return;
+    };
+    if let Err(error) = registration.watcher.unwatch(current)
+        && !is_missing_watch_error(&error)
+    {
+        log_external_git_watch_error(workspace, "removing", current, &error);
+        if let Err(rollback_error) = registration.watcher.unwatch(&target)
+            && !is_missing_watch_error(&rollback_error)
+        {
+            log_external_git_watch_error(workspace, "rolling back", &target, &rollback_error);
+        }
+        return;
+    }
+    registration.external_git_watch = Some(target);
 }
 
 fn update_watcher_job(control: &WatchControl, job_nonce: Option<&str>, update: JobUpdate) {
@@ -1988,11 +2614,7 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>, job_nonce:
                 continue;
             }
 
-            loop {
-                if !control.dirty.swap(false, Ordering::Relaxed) {
-                    break;
-                }
-
+            while let Some(pending_work) = control.take_pending_work() {
                 let pending = control.pending_events.swap(0, Ordering::Relaxed);
                 control
                     .coalesced_events
@@ -2006,10 +2628,20 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>, job_nonce:
                 update
                     .details
                     .insert("pending_events".to_string(), pending.to_string());
+                if let Some(error) = &pending_work.backend_error {
+                    update.last_error = Some(Some(error.clone()));
+                }
                 update_watcher_job(&control, job_nonce.as_deref(), update);
 
                 let workspace = control.workspace.clone();
-                let changed_paths = control.take_dirty_paths();
+                if matches!(&pending_work.change, WatchChange::FullReconciliation) {
+                    reconcile_external_git_watch(&state, &workspace);
+                }
+                let changed_paths = match pending_work.change {
+                    WatchChange::Paths(paths) => paths.into_iter().collect(),
+                    WatchChange::FullReconciliation => Vec::new(),
+                    WatchChange::None => unreachable!("pending watcher work cannot be empty"),
+                };
                 // Gate watcher-triggered indexing behind the same CPU semaphore
                 // as client requests (#58). A multi-repo branch switch / build
                 // can dirty many watched workspaces at once; without this, each
@@ -2362,15 +2994,17 @@ fn modified_nanos(metadata: &std::fs::Metadata) -> u128 {
         .unwrap_or(0)
 }
 
-fn build_root_gitignore(root: &Path) -> Option<ignore::gitignore::Gitignore> {
+fn build_root_gitignore(
+    root: &Path,
+    git_exclude_path: Option<&Path>,
+) -> Option<ignore::gitignore::Gitignore> {
     let mut builder = ignore::gitignore::GitignoreBuilder::new(root);
+    if let Some(git_exclude) = git_exclude_path.filter(|path| path.exists()) {
+        let _ = builder.add(git_exclude);
+    }
     let gitignore = root.join(".gitignore");
     if gitignore.exists() {
         let _ = builder.add(&gitignore);
-    }
-    let git_exclude = root.join(".git/info/exclude");
-    if git_exclude.exists() {
-        let _ = builder.add(&git_exclude);
     }
     builder.build().ok()
 }
@@ -2379,27 +3013,6 @@ fn is_always_ignored_watch_path(rel: &Path) -> bool {
     rel.components().any(|component| {
         let part = component.as_os_str();
         part == ".git" || part == ".ivygrep"
-    })
-}
-
-fn is_common_build_output_path(rel: &Path) -> bool {
-    rel.components().any(|component| {
-        matches!(
-            component.as_os_str().to_str(),
-            Some(
-                "target"
-                    | "node_modules"
-                    | ".next"
-                    | ".nuxt"
-                    | ".svelte-kit"
-                    | ".turbo"
-                    | ".cache"
-                    | ".direnv"
-                    | "dist"
-                    | "build"
-                    | "coverage"
-            )
-        )
     })
 }
 
@@ -2485,18 +3098,37 @@ where
     request_unchecked(request, autospawn, progress_cb).await
 }
 
+pub async fn request_with_id<F>(
+    request: &DaemonRequest,
+    request_id: uuid::Uuid,
+    autospawn: bool,
+    progress_cb: Option<F>,
+) -> Result<Option<DaemonResponse>>
+where
+    F: FnMut(String, usize, usize) + Send,
+{
+    ensure_compatible_daemon().await;
+    request_unchecked_with_id(request, Some(request_id), autospawn, progress_cb).await
+}
+
 async fn ensure_compatible_daemon() {
     if !crate::ipc::socket_exists() {
         return;
     }
 
-    let compatible = matches!(
-        request_unchecked::<fn(String, usize, usize)>(&DaemonRequest::Version, false, None).await,
+    match request_unchecked::<fn(String, usize, usize)>(&DaemonRequest::Version, false, None).await
+    {
         Ok(Some(DaemonResponse::Version { version }))
-            if version.as_deref() == Some(BUILD_VERSION)
-    );
-    if !compatible {
-        restart_daemon_process().await;
+            if version.as_deref() == Some(BUILD_VERSION) => {}
+        Ok(Some(_)) => restart_daemon_process().await,
+        // A bounded transport probe can fail while a live daemon is overloaded.
+        // A response decoding failure means the endpoint speaks an incompatible
+        // protocol and must follow the existing restart path.
+        Ok(None) => {}
+        Err(err) => {
+            warn!("daemon compatibility response was invalid: {err:#}");
+            restart_daemon_process().await;
+        }
     }
 }
 
@@ -2508,115 +3140,186 @@ pub(crate) async fn restart_daemon_process() {
         let _ = crate::ipc::terminate_recorded_daemon(std::time::Duration::from_secs(2));
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    if crate::ipc::socket_exists() {
-        crate::ipc::cleanup_socket();
+    if crate::ipc::socket_exists()
+        && let Err(err) = crate::ipc::cleanup_stale_socket()
+    {
+        warn!("failed to inspect stale daemon endpoint after restart: {err:#}");
     }
+}
+
+enum DaemonConnectFailure {
+    TimedOut,
+    Io(std::io::Error),
+}
+
+async fn connect_with_timeout<F>(
+    connect: F,
+    timeout: Duration,
+) -> std::result::Result<crate::ipc::IpcStream, DaemonConnectFailure>
+where
+    F: std::future::Future<Output = std::io::Result<crate::ipc::IpcStream>>,
+{
+    match tokio::time::timeout(timeout, connect).await {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(err)) => Err(DaemonConnectFailure::Io(err)),
+        Err(_) => Err(DaemonConnectFailure::TimedOut),
+    }
+}
+
+fn recover_stale_daemon_endpoint() -> bool {
+    match crate::ipc::cleanup_stale_socket() {
+        Ok(cleaned) => cleaned,
+        Err(err) => {
+            warn!("failed to inspect stale daemon endpoint: {err:#}");
+            false
+        }
+    }
+}
+
+async fn spawn_daemon_if_missing(request: &DaemonRequest, autospawn: bool) {
+    if !autospawn
+        || crate::ipc::socket_exists()
+        || std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_some()
+    {
+        return;
+    }
+
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    if !is_ig_executable(&exe) {
+        return;
+    }
+
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--daemon");
+    if matches!(request, DaemonRequest::ServeWeb { .. }) {
+        cmd.env("IVYGREP_SKIP_WATCHER_RESTORE", "1");
+    }
+
+    // Redirect daemon I/O to a log file to keep the CLI terminal clean.
+    if let Ok(mut log_file) = open_daemon_log_file() {
+        let _ = writeln!(log_file, "{} spawning daemon", daemon_timestamp());
+        let log_stderr = log_file.try_clone();
+        cmd.stdout(std::process::Stdio::from(log_file));
+        if let Ok(stderr_file) = log_stderr {
+            cmd.stderr(std::process::Stdio::from(stderr_file));
+        } else {
+            cmd.stderr(std::process::Stdio::null());
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::nice(5);
+                Ok(())
+            });
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let _ = cmd.spawn();
+    // Poll for socket readiness (up to 2s).
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if crate::ipc::socket_exists() {
+            break;
+        }
+    }
+}
+
+async fn connect_to_daemon(
+    request: &DaemonRequest,
+    autospawn: bool,
+) -> Option<crate::ipc::IpcStream> {
+    // At most one stale-endpoint recovery and one retry. Every connection
+    // attempt has the same bound, including the first probe.
+    for attempt in 0..2 {
+        spawn_daemon_if_missing(request, autospawn).await;
+        if !crate::ipc::socket_exists() {
+            return None;
+        }
+
+        match connect_with_timeout(crate::ipc::connect(), DAEMON_CONNECT_TIMEOUT).await {
+            Ok(stream) => return Some(stream),
+            Err(DaemonConnectFailure::Io(err)) => {
+                warn!("daemon connection failed: {err}");
+            }
+            Err(DaemonConnectFailure::TimedOut) => {
+                warn!("daemon connection timed out");
+            }
+        }
+
+        if attempt > 0 || !recover_stale_daemon_endpoint() {
+            return None;
+        }
+    }
+
+    None
 }
 
 async fn request_unchecked<F>(
     request: &DaemonRequest,
+    autospawn: bool,
+    progress_cb: Option<F>,
+) -> Result<Option<DaemonResponse>>
+where
+    F: FnMut(String, usize, usize) + Send,
+{
+    request_unchecked_with_id(request, None, autospawn, progress_cb).await
+}
+
+async fn request_unchecked_with_id<F>(
+    request: &DaemonRequest,
+    request_id: Option<uuid::Uuid>,
     autospawn: bool,
     mut progress_cb: Option<F>,
 ) -> Result<Option<DaemonResponse>>
 where
     F: FnMut(String, usize, usize) + Send,
 {
-    if crate::ipc::socket_exists() && crate::ipc::connect().await.is_err() {
-        crate::ipc::cleanup_socket();
-    }
-
-    // Auto-spawn the daemon if it isn't running.
-    // Skip when IVYGREP_NO_AUTOSPAWN is set (for tests and CI).
-    if autospawn
-        && !crate::ipc::socket_exists()
-        && std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
-        && let Ok(exe) = std::env::current_exe()
-        && is_ig_executable(&exe)
-    {
-        let mut cmd = std::process::Command::new(exe);
-        cmd.arg("--daemon");
-        if matches!(request, DaemonRequest::ServeWeb { .. }) {
-            cmd.env("IVYGREP_SKIP_WATCHER_RESTORE", "1");
-        }
-
-        // Redirect daemon I/O to a log file to keep the CLI terminal clean.
-        if let Ok(mut log_file) = open_daemon_log_file() {
-            let _ = writeln!(log_file, "{} spawning daemon", daemon_timestamp());
-            let log_stderr = log_file.try_clone();
-            cmd.stdout(std::process::Stdio::from(log_file));
-            if let Ok(stderr_file) = log_stderr {
-                cmd.stderr(std::process::Stdio::from(stderr_file));
-            } else {
-                cmd.stderr(std::process::Stdio::null());
-            }
-        }
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            cmd.process_group(0);
-            unsafe {
-                cmd.pre_exec(|| {
-                    libc::nice(5);
-                    Ok(())
-                });
-            }
-        }
-
-        #[cfg(not(unix))]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-
-        let _ = cmd.spawn();
-        // Poll for socket readiness (up to 2s)
-        for _ in 0..20 {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            if crate::ipc::socket_exists() {
-                break;
-            }
-        }
-    }
-
-    if !crate::ipc::socket_exists() {
+    let Some(mut stream) = connect_to_daemon(request, autospawn).await else {
         return Ok(None);
-    }
-
-    // Timeout on connect — if the daemon is a zombie stuck in kernel sleep,
-    // the connect() will hang. Don't let the CLI join the zombie pile.
-    let mut stream = match tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        crate::ipc::connect(),
-    )
-    .await
-    {
-        Ok(Ok(stream)) => stream,
-        _ => {
-            // Connect timed out or failed — daemon is dead or zombie.
-            // Remove the stale socket so we don't try again.
-            crate::ipc::cleanup_socket();
-            return Ok(None);
-        }
     };
 
-    let payload = serde_json::to_vec(&DaemonRequestEnvelope::new(request.clone()))?;
+    let envelope = request_id.map_or_else(
+        || DaemonRequestEnvelope::new(request.clone()),
+        |request_id| DaemonRequestEnvelope::with_request_id(request.clone(), request_id),
+    );
+    let payload = serde_json::to_vec(&envelope)?;
     if payload.len() > MAX_DAEMON_REQUEST_BYTES {
         anyhow::bail!("daemon request exceeds maximum of {MAX_DAEMON_REQUEST_BYTES} bytes");
     }
     // Timeout writes too — a zombie daemon may accept the connection
     // but never read from it, causing writes to eventually block.
-    if tokio::time::timeout(std::time::Duration::from_secs(2), async {
+    match tokio::time::timeout(DAEMON_WRITE_TIMEOUT, async {
         stream.write_all(&payload).await?;
         stream.write_all(b"\n").await?;
         Ok::<_, anyhow::Error>(())
     })
     .await
-    .is_err()
     {
-        crate::ipc::cleanup_socket();
-        return Ok(None);
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            warn!("daemon request write failed: {err:#}");
+            recover_stale_daemon_endpoint();
+            return Ok(None);
+        }
+        Err(_) => {
+            warn!("daemon request write timed out");
+            recover_stale_daemon_endpoint();
+            return Ok(None);
+        }
     }
 
     let mut reader = BufReader::new(stream);
@@ -2633,7 +3336,8 @@ where
         | DaemonRequest::Restart => 5, // quick
         DaemonRequest::Search { .. }
         | DaemonRequest::RegexSearch { .. }
-        | DaemonRequest::LiteralSearch { .. } => 120, // 2 min for search
+        | DaemonRequest::LiteralSearch { .. }
+        | DaemonRequest::CancelSearch { .. } => 120, // wait for active search shutdown
         DaemonRequest::Remove { .. } => 30,  // cleanup
     };
 
@@ -2678,8 +3382,14 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::embedding::create_hash_model;
-    use crate::indexer::index_workspace;
-    use crate::search::{SearchOptions, hybrid_search, validate_forced_neural_workspaces};
+    use crate::indexer::{
+        index_workspace, index_workspace_for_watcher, index_workspace_paths_for_watcher,
+        open_sqlite_readonly,
+    };
+    use crate::search::{
+        SearchOptions, hybrid_search, literal_search_with_context,
+        validate_forced_neural_workspaces,
+    };
     use crate::workspace::WorkspaceMetadata;
 
     fn test_state() -> DaemonState {
@@ -2694,10 +3404,260 @@ mod tests {
             idle_search_context_count: Arc::new(AtomicUsize::new(0)),
             query_results: Arc::new(Mutex::new(QueryResultCache::default())),
             neural_queries: Arc::new(Mutex::new(NeuralQueryCache::default())),
+            search_cancellations: Arc::new(Mutex::new(SearchCancellationRegistry::default())),
             query_result_cache_enabled: true,
             cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
             web_server: Arc::new(Mutex::new(None)),
         }
+    }
+
+    #[test]
+    fn search_cancellation_tombstone_closes_registration_race() {
+        let state = test_state();
+        let request_id = uuid::Uuid::new_v4();
+
+        let _ = state.cancel_search(request_id);
+        let registration = state.register_search(Some(request_id)).unwrap().unwrap();
+
+        assert!(registration.cancellation.is_cancelled());
+        assert!(state.search_cancellations.lock().tombstones.is_empty());
+        drop(registration);
+        assert!(state.search_cancellations.lock().entries.is_empty());
+    }
+
+    #[test]
+    fn search_cancellation_registry_rejects_duplicates_and_bounds_tombstones() {
+        let state = test_state();
+        let active_id = uuid::Uuid::from_u128(1);
+        let registration = state.register_search(Some(active_id)).unwrap().unwrap();
+        assert!(state.register_search(Some(active_id)).is_err());
+
+        let _ = state.cancel_search(active_id);
+        assert!(registration.cancellation.is_cancelled());
+        drop(registration);
+
+        for value in 2..=(MAX_SEARCH_CANCELLATION_TOMBSTONES as u128 + 2) {
+            let _ = state.cancel_search(uuid::Uuid::from_u128(value));
+        }
+        let registry = state.search_cancellations.lock();
+        assert_eq!(
+            registry.tombstones.len(),
+            MAX_SEARCH_CANCELLATION_TOMBSTONES
+        );
+        assert_eq!(registry.entries.len(), MAX_SEARCH_CANCELLATION_TOMBSTONES);
+        assert!(!registry.entries.contains_key(&uuid::Uuid::from_u128(2)));
+    }
+
+    #[tokio::test]
+    async fn pre_cancelled_search_envelope_does_not_search_or_cache() {
+        let state = test_state();
+        let request_id = uuid::Uuid::new_v4();
+        let _ = state.cancel_search(request_id);
+        let request = DaemonRequest::Search {
+            path: Some(PathBuf::from("/path/that/must/not/be-resolved")),
+            query: "needle".to_string(),
+            limit: Some(10),
+            context: 0,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_path: None,
+            scope_is_file: false,
+            skip_gitignore: false,
+            force_neural: false,
+            disable_memory_expansion: true,
+        };
+
+        let response = handle_enveloped_request(
+            state.clone(),
+            DaemonRequestEnvelope::with_request_id(request, request_id),
+        )
+        .await;
+
+        assert!(matches!(
+            response,
+            DaemonResponse::Error { message } if message == "search cancelled"
+        ));
+        assert!(state.query_results.lock().results.is_empty());
+        assert!(state.search_cancellations.lock().entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelled_searches_leave_semaphore_queue_for_latest_request() {
+        let mut state = test_state();
+        state.cpu_permits = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut registrations = Vec::new();
+        let mut waiters = Vec::new();
+
+        for value in 1..=8 {
+            let request_id = uuid::Uuid::from_u128(value);
+            let registration = state.register_search(Some(request_id)).unwrap().unwrap();
+            let cancellation = registration.cancellation.clone();
+            let waiter_state = state.clone();
+            waiters.push(tokio::spawn(async move {
+                waiter_state
+                    .acquire_search_permit(Some(&cancellation))
+                    .await
+                    .is_none()
+            }));
+            registrations.push(registration);
+            let _ = state.cancel_search(request_id);
+        }
+
+        for waiter in waiters {
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), waiter)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            );
+        }
+
+        let latest_id = uuid::Uuid::from_u128(9);
+        let latest = state.register_search(Some(latest_id)).unwrap().unwrap();
+        let latest_cancellation = latest.cancellation.clone();
+        let latest_state = state.clone();
+        let latest_waiter = tokio::spawn(async move {
+            latest_state
+                .acquire_search_permit(Some(&latest_cancellation))
+                .await
+        });
+        state.cpu_permits.add_permits(1);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), latest_waiter)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_some()
+        );
+
+        drop(latest);
+        drop(registrations);
+        assert!(state.search_cancellations.lock().entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_request_stops_enveloped_search_waiting_for_cpu() {
+        let mut state = test_state();
+        state.cpu_permits = Arc::new(tokio::sync::Semaphore::new(0));
+        let root = tempdir().unwrap();
+        let request_id = uuid::Uuid::new_v4();
+        let request = DaemonRequest::Search {
+            path: Some(root.path().to_path_buf()),
+            query: "needle".to_string(),
+            limit: Some(10),
+            context: 0,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_path: None,
+            scope_is_file: false,
+            skip_gitignore: false,
+            force_neural: false,
+            disable_memory_expansion: true,
+        };
+        let search_state = state.clone();
+        let search = tokio::spawn(async move {
+            handle_enveloped_request(
+                search_state,
+                DaemonRequestEnvelope::with_request_id(request, request_id),
+            )
+            .await
+        });
+
+        for _ in 0..100 {
+            if state
+                .search_cancellations
+                .lock()
+                .entries
+                .contains_key(&request_id)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            state
+                .search_cancellations
+                .lock()
+                .entries
+                .contains_key(&request_id)
+        );
+
+        let cancel = handle_request(
+            state.clone(),
+            DaemonRequest::CancelSearch {
+                search_id: request_id,
+            },
+        )
+        .await;
+        assert!(matches!(cancel, DaemonResponse::Ack { .. }));
+        let response = tokio::time::timeout(Duration::from_secs(1), search)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            response,
+            DaemonResponse::Error { message } if message == "search cancelled"
+        ));
+        assert!(state.search_cancellations.lock().entries.is_empty());
+    }
+
+    fn git(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(["-c", "commit.gpgSign=false"])
+            .args(args)
+            .current_dir(root)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn indexed_file_contains(workspace: &Workspace, path: &str, needle: &str) -> bool {
+        let conn = open_sqlite_readonly(&workspace.sqlite_path()).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT text FROM chunks WHERE file_path = ?1")
+            .unwrap();
+        stmt.query_map([path], |row| row.get::<_, Vec<u8>>(0))
+            .unwrap()
+            .any(|row| crate::indexer::decompress_text(row.unwrap()).contains(needle))
+    }
+
+    fn indexed_literal_visible(workspace: &Workspace, needle: &str) -> Option<bool> {
+        let context = SearchContext::load(workspace, None, false).ok()?;
+        let hits = literal_search_with_context(
+            &context,
+            workspace,
+            needle,
+            &SearchOptions {
+                limit: Some(5),
+                ..Default::default()
+            },
+        )
+        .ok()?;
+        Some(!hits.is_empty())
+    }
+
+    async fn wait_for_literal_visibility(
+        workspace: &Workspace,
+        needle: &str,
+        expected: bool,
+    ) -> bool {
+        for _ in 0..60 {
+            if indexed_literal_visible(workspace, needle) == Some(expected) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
     }
 
     fn test_hit(path: &str, score: f32) -> SearchHit {
@@ -2716,6 +3676,31 @@ mod tests {
             neural_requested: false,
             neural_executed: false,
         }
+    }
+
+    #[test]
+    fn daemon_search_aggregation_applies_global_result_cap() {
+        let mut batch = SearchBatch::new(Vec::new());
+        for workspace in ["/one", "/two"] {
+            let hits = (0..600)
+                .map(|index| test_hit(&format!("src/{index}.rs"), 1.0))
+                .collect();
+            batch.record(Path::new(workspace), true, Ok(hits));
+        }
+        let options = SearchOptions {
+            limit: Some(crate::search::MAX_SEARCH_RESULT_LIMIT + 500),
+            ..Default::default()
+        };
+
+        let outcome = finish_daemon_search_batch(batch, &options, HitOrdering::Preserve).unwrap();
+
+        assert_eq!(outcome.hits.len(), crate::search::MAX_SEARCH_RESULT_LIMIT);
+
+        let mut hybrid_hits = (0..1_200)
+            .map(|index| test_hit(&format!("src/{index}.rs"), 1.0))
+            .collect();
+        truncate_daemon_search_hits(&mut hybrid_hits, &options);
+        assert_eq!(hybrid_hits.len(), crate::search::MAX_SEARCH_RESULT_LIMIT);
     }
 
     #[test]
@@ -3058,6 +4043,145 @@ mod tests {
         }
     }
 
+    struct BlockingNeuralModel {
+        active: Arc<AtomicUsize>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl EmbeddingModel for BlockingNeuralModel {
+        fn dimensions(&self) -> usize {
+            384
+        }
+
+        fn embed(&self, _text: &str) -> Vec<f32> {
+            self.active.fetch_add(1, Ordering::SeqCst);
+            self.release.lock().recv().unwrap();
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            let mut vector = vec![0.0; self.dimensions()];
+            vector[0] = 1.0;
+            vector
+        }
+
+        fn model_identity(&self) -> Option<&crate::embedding::NeuralModelIdentity> {
+            TestNeuralModel.model_identity()
+        }
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn forced_neural_cancellation_keeps_precompute_bounded_and_uncached() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        std::fs::write(
+            repo.path().join("search.rs"),
+            "pub fn forced_neural_cancellation() {}\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let hash_model = create_hash_model();
+        index_workspace(&workspace, hash_model.as_ref()).unwrap();
+        crate::indexer::enhance_workspace_neural(&workspace, &TestNeuralModel).unwrap();
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let model: Arc<dyn EmbeddingModel> = Arc::new(BlockingNeuralModel {
+            active: active.clone(),
+            release: Mutex::new(release_rx),
+        });
+        let lazy_model = std::sync::OnceLock::new();
+        assert!(lazy_model.set(model).is_ok());
+        let mut state = test_state();
+        state.lazy_model = Arc::new(lazy_model);
+        state.cpu_permits = Arc::new(tokio::sync::Semaphore::new(1));
+
+        let request_id = uuid::Uuid::new_v4();
+        let query = "forced neural cancellation".to_string();
+        let request = DaemonRequest::Search {
+            path: Some(workspace.root.clone()),
+            query: query.clone(),
+            limit: Some(10),
+            context: 0,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_path: None,
+            scope_is_file: false,
+            skip_gitignore: false,
+            force_neural: true,
+            disable_memory_expansion: true,
+        };
+        let search_state = state.clone();
+        let search = tokio::spawn(async move {
+            handle_enveloped_request(
+                search_state,
+                DaemonRequestEnvelope::with_request_id(request, request_id),
+            )
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while active.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let cancel_state = state.clone();
+        let cancel = tokio::spawn(async move {
+            handle_request(
+                cancel_state,
+                DaemonRequest::CancelSearch {
+                    search_id: request_id,
+                },
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let cancelled = state
+                    .search_cancellations
+                    .lock()
+                    .entries
+                    .get(&request_id)
+                    .is_some_and(|entry| match entry {
+                        SearchCancellationEntry::Active(cancellation)
+                        | SearchCancellationEntry::Tombstone(cancellation) => {
+                            cancellation.is_cancelled()
+                        }
+                    });
+                if cancelled {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!cancel.is_finished());
+        assert_eq!(active.load(Ordering::SeqCst), 1);
+        assert_eq!(state.cpu_permits.available_permits(), 0);
+        assert!(state.cached_neural_query(&query).is_none());
+
+        release_tx.send(()).unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(5), search)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            response,
+            DaemonResponse::Error { message } if message == "search cancelled"
+        ));
+        let cancel = tokio::time::timeout(Duration::from_secs(5), cancel)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(cancel, DaemonResponse::Ack { .. }));
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(state.cpu_permits.available_permits(), 1);
+        assert!(state.cached_neural_query(&query).is_none());
+    }
+
     #[test]
     #[serial]
     fn daemon_caches_only_exact_absolute_workspace_roots() {
@@ -3141,6 +4265,40 @@ mod tests {
             "cached neural search",
             true,
         ));
+    }
+
+    #[test]
+    fn cancelled_neural_precompute_joins_without_populating_cache() {
+        let state = test_state();
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let options = SearchOptions {
+            cancel_token: Some(cancellation.clone()),
+            ..SearchOptions::default()
+        };
+        let completed = Arc::new(std::sync::OnceLock::new());
+        let worker_completed = completed.clone();
+        let active = Arc::new(AtomicUsize::new(0));
+        let worker_active = active.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let job = NeuralQueryVectorJob::pending(std::thread::spawn(move || {
+            worker_active.fetch_add(1, Ordering::SeqCst);
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            let vector = vec![1.0; 3];
+            let _ = worker_completed.set(vector.clone());
+            worker_active.fetch_sub(1, Ordering::SeqCst);
+            vector
+        }));
+        started_rx.recv().unwrap();
+
+        cancellation.store(true, Ordering::SeqCst);
+        release_tx.send(()).unwrap();
+        drop(job);
+        state.store_completed_neural_query("cancelled".to_string(), &completed, &options);
+
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert!(state.cached_neural_query("cancelled").is_none());
     }
 
     #[test]
@@ -3291,6 +4449,50 @@ mod tests {
         assert!(!is_ig_executable(Path::new("/usr/local/bin/ivygrep")));
     }
 
+    #[tokio::test]
+    #[serial]
+    async fn daemon_connection_failure_preserves_endpoint_owned_by_live_daemon() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        crate::config::ensure_app_dirs().unwrap();
+
+        let daemon_lock = crate::ipc::acquire_daemon_lock()
+            .unwrap()
+            .expect("test should acquire daemon lock");
+        let endpoint = crate::ipc::socket_path().unwrap();
+        std::fs::write(&endpoint, b"not a daemon endpoint").unwrap();
+
+        let response =
+            request_unchecked::<fn(String, usize, usize)>(&DaemonRequest::Status, false, None)
+                .await
+                .unwrap();
+
+        assert!(response.is_none());
+        assert!(
+            endpoint.exists(),
+            "client must not unlink an endpoint while daemon lock is held"
+        );
+
+        drop(daemon_lock);
+        crate::ipc::cleanup_socket();
+    }
+
+    #[tokio::test]
+    async fn daemon_connect_attempt_is_bounded() {
+        let started = std::time::Instant::now();
+        let result = connect_with_timeout(
+            std::future::pending::<std::io::Result<crate::ipc::IpcStream>>(),
+            Duration::from_millis(20),
+        )
+        .await;
+
+        assert!(matches!(result, Err(DaemonConnectFailure::TimedOut)));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "stalled connection must respect timeout"
+        );
+    }
+
     #[test]
     fn daemon_rejects_malformed_and_mismatched_protocol_requests() {
         let malformed = parse_daemon_request(b"{not-json}\n").unwrap_err();
@@ -3393,11 +4595,17 @@ mod tests {
 
         assert!(matches!(
             read_daemon_request(&mut reader).await.unwrap(),
-            Some(DaemonRequest::Status)
+            Some(DaemonRequestEnvelope {
+                request: DaemonRequest::Status,
+                ..
+            })
         ));
         assert!(matches!(
             read_daemon_request(&mut reader).await.unwrap(),
-            Some(DaemonRequest::Status)
+            Some(DaemonRequestEnvelope {
+                request: DaemonRequest::Status,
+                ..
+            })
         ));
         assert!(read_daemon_request(&mut reader).await.unwrap().is_none());
     }
@@ -3439,6 +4647,58 @@ mod tests {
                 reader
                     .get_mut()
                     .write_all(format!("{}\n", responses[request_types.len() - 1]).as_bytes())
+                    .await
+                    .unwrap();
+            }
+            crate::ipc::cleanup_socket();
+            request_types
+        });
+
+        let response = request::<fn(String, usize, usize)>(
+            &DaemonRequest::Remove {
+                path: home.path().join("workspace"),
+            },
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(response.is_none());
+        assert_eq!(server.await.unwrap(), ["version", "restart"]);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn non_status_request_restarts_daemon_after_invalid_version_response() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        crate::config::ensure_app_dirs().unwrap();
+
+        let (listener, _) = crate::ipc::bind().await.unwrap();
+        let server = tokio::spawn(async move {
+            let mut request_types = Vec::new();
+            let responses = [
+                "{\"type\":\"version\",\"version\":42}\n",
+                "{\"type\":\"ack\",\"message\":\"restarting\"}\n",
+            ];
+            while request_types.len() < responses.len() {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                if line.is_empty() {
+                    continue;
+                }
+                request_types.push(
+                    serde_json::from_str::<serde_json::Value>(&line).unwrap()["type"]
+                        .as_str()
+                        .unwrap()
+                        .to_string(),
+                );
+                reader
+                    .get_mut()
+                    .write_all(responses[request_types.len() - 1].as_bytes())
                     .await
                     .unwrap();
             }
@@ -3991,6 +5251,105 @@ mod tests {
         assert!(broken_workspace.index_health().is_queryable());
     }
 
+    #[tokio::test]
+    #[serial]
+    async fn daemon_all_indices_clears_scope_for_every_search_mode() {
+        let home = tempdir().unwrap();
+        unsafe {
+            std::env::set_var("IVYGREP_HOME", home.path());
+            std::env::set_var("IVYGREP_NO_AUTOSPAWN", "1");
+        }
+        let first = tempdir().unwrap();
+        let second = tempdir().unwrap();
+        std::fs::create_dir_all(first.path().join("src")).unwrap();
+        std::fs::create_dir_all(second.path().join("other")).unwrap();
+        std::fs::write(
+            first.path().join("src/first.rs"),
+            "before\npub fn daemon_cross_workspace_marker() {}\nafter\n",
+        )
+        .unwrap();
+        std::fs::write(
+            second.path().join("other/second.rs"),
+            "before\npub fn daemon_cross_workspace_marker() {}\nafter\n",
+        )
+        .unwrap();
+        std::fs::write(
+            second.path().join("other/decoy.md"),
+            "before\ndaemon_cross_workspace_marker\nafter\n",
+        )
+        .unwrap();
+
+        let first_workspace = Workspace::resolve(first.path()).unwrap();
+        let second_workspace = Workspace::resolve(second.path()).unwrap();
+        let model = create_hash_model();
+        index_workspace(&first_workspace, model.as_ref()).unwrap();
+        index_workspace(&second_workspace, model.as_ref()).unwrap();
+
+        let common_scope = Some(PathBuf::from("src"));
+        let include = vec!["**/*.rs".to_string()];
+        let requests = [
+            DaemonRequest::LiteralSearch {
+                path: None,
+                query: "daemon_cross_workspace_marker".to_string(),
+                limit: Some(10),
+                context: 1,
+                type_filter: Some("rust".to_string()),
+                include_globs: include.clone(),
+                exclude_globs: Vec::new(),
+                scope_path: common_scope.clone(),
+                scope_is_file: false,
+                skip_gitignore: false,
+            },
+            DaemonRequest::RegexSearch {
+                path: None,
+                pattern: "daemon_cross_workspace_marker".to_string(),
+                limit: Some(10),
+                context: 1,
+                type_filter: Some("rust".to_string()),
+                include_globs: include.clone(),
+                exclude_globs: Vec::new(),
+                scope_path: common_scope.clone(),
+                scope_is_file: false,
+                skip_gitignore: false,
+            },
+            DaemonRequest::Search {
+                path: None,
+                query: "daemon_cross_workspace_marker".to_string(),
+                limit: Some(10),
+                context: 1,
+                type_filter: Some("rust".to_string()),
+                include_globs: include,
+                exclude_globs: Vec::new(),
+                scope_path: common_scope,
+                scope_is_file: false,
+                skip_gitignore: false,
+                force_neural: false,
+                disable_memory_expansion: true,
+            },
+        ];
+
+        for request in requests {
+            let response = handle_request(test_state(), request).await;
+            let DaemonResponse::SearchResults { hits, .. } = response else {
+                panic!("expected search results, got {response:?}");
+            };
+            let paths = hits
+                .iter()
+                .map(|hit| hit.file_path.clone())
+                .collect::<std::collections::HashSet<_>>();
+            let first_path = first.path().join("src/first.rs").canonicalize().unwrap();
+            let second_path = second
+                .path()
+                .join("other/second.rs")
+                .canonicalize()
+                .unwrap();
+            let decoy_path = second.path().join("other/decoy.md").canonicalize().unwrap();
+            assert!(paths.contains(&first_path), "{paths:?}");
+            assert!(paths.contains(&second_path), "{paths:?}");
+            assert!(!paths.contains(&decoy_path));
+        }
+    }
+
     #[test]
     fn daemon_query_cache_can_be_disabled() {
         let mut state = test_state();
@@ -4137,6 +5496,342 @@ mod tests {
         assert!(filter.path_should_reindex(&repo.path().join("target/debug/build.o")));
         assert!(filter.path_should_reindex(&repo.path().join("secret.txt")));
         assert!(!filter.path_should_reindex(&repo.path().join(".git/index")));
+    }
+
+    #[test]
+    #[serial]
+    fn watcher_updates_tracked_and_unignored_sources_in_build_named_directories() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        git(repo.path(), &["init", "-b", "main"]);
+        std::fs::create_dir_all(repo.path().join("target")).unwrap();
+        std::fs::create_dir_all(repo.path().join("dist")).unwrap();
+        std::fs::write(
+            repo.path().join("target/generated.rs"),
+            "pub fn tracked_build_old_marker() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.path().join("dist/kept.rs"),
+            "pub fn unignored_build_old_marker() {}\n",
+        )
+        .unwrap();
+        std::fs::write(repo.path().join(".gitignore"), "dist/*\n!dist/kept.rs\n").unwrap();
+        git(repo.path(), &["add", ".gitignore", "target/generated.rs"]);
+        git(repo.path(), &["commit", "-m", "seed build paths"]);
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+        assert!(indexed_file_contains(
+            &workspace,
+            "target/generated.rs",
+            "tracked_build_old_marker"
+        ));
+        assert!(indexed_file_contains(
+            &workspace,
+            "dist/kept.rs",
+            "unignored_build_old_marker"
+        ));
+
+        std::fs::write(
+            repo.path().join("target/generated.rs"),
+            "pub fn tracked_build_new_marker() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.path().join("dist/kept.rs"),
+            "pub fn unignored_build_new_marker() {}\n",
+        )
+        .unwrap();
+        let mut filter = WatchEventFilter::new(&workspace);
+        let change = filter.change_for_event(
+            &notify::Event::new(notify::EventKind::Any)
+                .add_path(repo.path().join("target/generated.rs"))
+                .add_path(repo.path().join("dist/kept.rs")),
+        );
+        let WatchChange::Paths(paths) = change else {
+            panic!("valid build paths should produce a targeted watcher change");
+        };
+        assert_eq!(paths.len(), 2);
+        let paths = paths.into_iter().collect::<Vec<_>>();
+        index_workspace_paths_for_watcher(&workspace, model.as_ref(), &paths).unwrap();
+
+        assert!(indexed_file_contains(
+            &workspace,
+            "target/generated.rs",
+            "tracked_build_new_marker"
+        ));
+        assert!(indexed_file_contains(
+            &workspace,
+            "dist/kept.rs",
+            "unignored_build_new_marker"
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn repository_exclude_events_refresh_filter_and_force_complete_reconciliation() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        git(repo.path(), &["init", "-b", "main"]);
+        std::fs::write(
+            repo.path().join("visible.rs"),
+            "pub fn repository_exclude_marker() {}\n",
+        )
+        .unwrap();
+        git(repo.path(), &["add", "visible.rs"]);
+        git(repo.path(), &["commit", "-m", "seed visible source"]);
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+        let source = repo.path().join("visible.rs");
+        let exclude = crate::workspace::git_common_dir(repo.path())
+            .unwrap()
+            .join("info/exclude");
+        let mut filter = WatchEventFilter::new(&workspace);
+        assert!(filter.path_should_reindex(&source));
+
+        std::fs::write(&exclude, "visible.rs\n").unwrap();
+        assert!(matches!(
+            filter.change_for_event(
+                &notify::Event::new(notify::EventKind::Any).add_path(exclude.clone())
+            ),
+            WatchChange::FullReconciliation
+        ));
+        assert!(!filter.path_should_reindex(&source));
+        index_workspace_for_watcher(&workspace, model.as_ref()).unwrap();
+        assert!(!indexed_file_contains(
+            &workspace,
+            "visible.rs",
+            "repository_exclude_marker"
+        ));
+
+        std::fs::write(&exclude, "").unwrap();
+        assert!(matches!(
+            filter.change_for_event(
+                &notify::Event::new(notify::EventKind::Any).add_path(exclude.clone())
+            ),
+            WatchChange::FullReconciliation
+        ));
+        assert!(filter.path_should_reindex(&source));
+        index_workspace_for_watcher(&workspace, model.as_ref()).unwrap();
+        assert!(indexed_file_contains(
+            &workspace,
+            "visible.rs",
+            "repository_exclude_marker"
+        ));
+    }
+
+    #[test]
+    #[serial]
+    fn watcher_backend_error_supersedes_coalesced_paths_with_full_reconciliation() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let control = WatchControl::new(workspace.clone());
+        let filter = Mutex::new(WatchEventFilter::new(&workspace));
+
+        let source = repo.path().join("recovered.rs");
+        std::fs::write(&source, "pub fn recovered() {}\n").unwrap();
+        std::fs::write(repo.path().join(".gitignore"), "recovered.rs\n").unwrap();
+        filter.lock().refresh();
+        assert!(!filter.lock().path_should_reindex(&source));
+
+        control.mark_paths_dirty([PathBuf::from("before.rs")]);
+        std::fs::write(repo.path().join(".gitignore"), "").unwrap();
+        handle_watch_result(
+            &control,
+            &filter,
+            Err(notify::Error::generic("injected watcher overflow")),
+        );
+        control.mark_paths_dirty([PathBuf::from("after.rs")]);
+
+        let pending = control.take_pending_work().unwrap();
+        assert!(matches!(pending.change, WatchChange::FullReconciliation));
+        assert!(
+            pending
+                .backend_error
+                .as_deref()
+                .is_some_and(|error| error.contains("injected watcher overflow"))
+        );
+        assert!(filter.lock().path_should_reindex(&source));
+        assert!(control.take_pending_work().is_none());
+
+        std::fs::write(repo.path().join(".gitignore"), "recovered.rs\n").unwrap();
+        handle_watch_result(
+            &control,
+            &filter,
+            Ok(notify::Event::new(notify::EventKind::Other).set_flag(notify::event::Flag::Rescan)),
+        );
+        assert!(matches!(
+            control.take_pending_work().unwrap().change,
+            WatchChange::FullReconciliation
+        ));
+        assert!(!filter.lock().path_should_reindex(&source));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn linked_worktree_watcher_reconciles_external_common_git_exclude_toggles() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repositories = tempdir().unwrap();
+        let main = repositories.path().join("main");
+        let linked = repositories.path().join("linked");
+        std::fs::create_dir(&main).unwrap();
+        git(&main, &["init", "-b", "main"]);
+        std::fs::write(
+            main.join("shared.rs"),
+            "pub fn external_common_git_marker() {}\n",
+        )
+        .unwrap();
+        git(&main, &["add", "shared.rs"]);
+        git(&main, &["commit", "-m", "seed linked source"]);
+        git(
+            &main,
+            &["worktree", "add", "--detach", linked.to_str().unwrap()],
+        );
+
+        let workspace = Workspace::resolve(&linked).unwrap();
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+        assert_eq!(
+            indexed_literal_visible(&workspace, "external_common_git_marker"),
+            Some(true)
+        );
+
+        let exclude = crate::workspace::git_common_dir(&linked)
+            .unwrap()
+            .join("info/exclude");
+        assert!(!exclude.starts_with(&linked));
+        let state = test_state();
+        register_watcher(&state, &linked).unwrap();
+
+        std::fs::write(&exclude, "shared.rs\n").unwrap();
+        let disappeared =
+            wait_for_literal_visibility(&workspace, "external_common_git_marker", false).await;
+        std::fs::write(&exclude, "").unwrap();
+        let reappeared =
+            wait_for_literal_visibility(&workspace, "external_common_git_marker", true).await;
+        stop_all_watchers(&state);
+
+        assert!(
+            disappeared,
+            "external common-dir exclude update did not remove linked-worktree result"
+        );
+        assert!(
+            reappeared,
+            "external common-dir exclude update did not restore linked-worktree result"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn linked_worktree_watcher_bootstraps_missing_external_git_info_directory() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repositories = tempdir().unwrap();
+        let main = repositories.path().join("main");
+        let linked = repositories.path().join("linked");
+        std::fs::create_dir(&main).unwrap();
+        git(&main, &["init", "-b", "main"]);
+        std::fs::write(
+            main.join("shared.rs"),
+            "pub fn missing_external_git_info_marker() {}\n",
+        )
+        .unwrap();
+        git(&main, &["add", "shared.rs"]);
+        git(&main, &["commit", "-m", "seed linked source"]);
+        git(
+            &main,
+            &["worktree", "add", "--detach", linked.to_str().unwrap()],
+        );
+
+        let common_dir = crate::workspace::git_common_dir(&linked).unwrap();
+        let info = common_dir.join("info");
+        std::fs::remove_dir_all(&info).unwrap();
+        assert!(!info.exists());
+
+        let workspace = Workspace::resolve(&linked).unwrap();
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+        assert_eq!(
+            indexed_literal_visible(&workspace, "missing_external_git_info_marker"),
+            Some(true)
+        );
+
+        let state = test_state();
+        register_watcher(&state, &linked).unwrap();
+        assert_eq!(
+            state
+                .watchers
+                .lock()
+                .get(&workspace.id)
+                .and_then(|registration| registration.external_git_watch.as_deref()),
+            Some(common_dir.as_path())
+        );
+
+        std::fs::create_dir(&info).unwrap();
+        let exclude = info.join("exclude");
+        std::fs::write(&exclude, "shared.rs\n").unwrap();
+        assert!(
+            wait_for_literal_visibility(&workspace, "missing_external_git_info_marker", false)
+                .await,
+            "creating external info/exclude did not remove linked-worktree result"
+        );
+        assert_eq!(
+            state
+                .watchers
+                .lock()
+                .get(&workspace.id)
+                .and_then(|registration| registration.external_git_watch.as_deref()),
+            Some(info.as_path())
+        );
+
+        std::fs::remove_dir_all(&info).unwrap();
+        assert!(
+            wait_for_literal_visibility(&workspace, "missing_external_git_info_marker", true).await,
+            "removing external info directory did not restore linked-worktree result"
+        );
+        assert_eq!(
+            state
+                .watchers
+                .lock()
+                .get(&workspace.id)
+                .and_then(|registration| registration.external_git_watch.as_deref()),
+            Some(common_dir.as_path())
+        );
+
+        std::fs::create_dir(&info).unwrap();
+        std::fs::write(&exclude, "shared.rs\n").unwrap();
+        assert!(
+            wait_for_literal_visibility(&workspace, "missing_external_git_info_marker", false)
+                .await,
+            "recreating external info/exclude did not remove linked-worktree result"
+        );
+        assert_eq!(
+            state
+                .watchers
+                .lock()
+                .get(&workspace.id)
+                .and_then(|registration| registration.external_git_watch.as_deref()),
+            Some(info.as_path())
+        );
+        std::fs::write(&exclude, "").unwrap();
+        assert!(
+            wait_for_literal_visibility(&workspace, "missing_external_git_info_marker", true).await,
+            "toggling recreated external info/exclude did not restore linked-worktree result"
+        );
+        stop_all_watchers(&state);
     }
 
     #[test]

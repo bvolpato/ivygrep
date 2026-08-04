@@ -78,34 +78,53 @@ fn syn_to_ratatui(style: SynStyle) -> Style {
     ))
 }
 
-fn resolve_editor() -> String {
-    std::env::var("EDITOR")
-        .or_else(|_| std::env::var("VISUAL"))
-        .unwrap_or_else(|_| "vim".to_string())
-}
-
 fn open_in_editor(
     file: &std::path::Path,
     line: usize,
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
 ) -> Result<()> {
-    let editor = resolve_editor();
+    let launch = crate::launcher::tui_editor_launch(file, line, None)?;
+    let program = launch.program.to_string_lossy().into_owned();
     disable_raw_mode()?;
-    stdout().execute(LeaveAlternateScreen)?;
+    if let Err(error) = stdout().execute(LeaveAlternateScreen) {
+        let restore = restore_terminal(terminal);
+        return match restore {
+            Ok(()) => Err(error.into()),
+            Err(restore) => bail!("failed to suspend terminal: {error}; {restore:#}"),
+        };
+    }
 
-    let result = std::process::Command::new(&editor)
-        .arg(format!("+{}", line))
-        .arg(file)
-        .status();
+    let launch_result = launch.status();
+    let restore_result = restore_terminal(terminal);
+    match (launch_result, restore_result) {
+        (Ok(status), Ok(())) if status.success() => Ok(()),
+        (Ok(status), Ok(())) => bail!("editor exited with {status}"),
+        (Err(error), Ok(())) => bail!("failed to launch {program}: {error}"),
+        (Ok(status), Err(restore)) if status.success() => Err(restore),
+        (Ok(status), Err(restore)) => {
+            bail!("editor exited with {status}; terminal restoration also failed: {restore:#}")
+        }
+        (Err(error), Err(restore)) => bail!(
+            "failed to launch {program}: {error}; terminal restoration also failed: {restore:#}"
+        ),
+    }
+}
 
-    stdout().execute(EnterAlternateScreen)?;
-    enable_raw_mode()?;
-    terminal.clear()?;
-
-    match result {
-        Ok(s) if !s.success() => bail!("editor exited with {s}"),
-        Err(e) => bail!("failed to launch {editor}: {e}"),
-        _ => Ok(()),
+fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>) -> Result<()> {
+    let mut errors = Vec::new();
+    if let Err(error) = stdout().execute(EnterAlternateScreen) {
+        errors.push(format!("alternate screen: {error}"));
+    }
+    if let Err(error) = enable_raw_mode() {
+        errors.push(format!("raw mode: {error}"));
+    }
+    if let Err(error) = terminal.clear() {
+        errors.push(format!("clear: {error}"));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        bail!("failed to restore terminal ({})", errors.join("; "))
     }
 }
 
@@ -141,6 +160,9 @@ struct App {
     last_query: String,
     debounce_timer: Option<Instant>,
     cancel_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    active_search_id: Option<uuid::Uuid>,
+    search_task: Option<tokio::task::JoinHandle<()>>,
+    cleanup_tasks: Vec<tokio::task::JoinHandle<()>>,
 
     // -- config --
     cli: Cli,
@@ -195,6 +217,9 @@ impl App {
             last_query: String::new(),
             debounce_timer: Some(Instant::now()),
             cancel_token: None,
+            active_search_id: None,
+            search_task: None,
+            cleanup_tasks: Vec::new(),
             cli,
             workspace,
             scope_filter,
@@ -345,15 +370,84 @@ impl App {
 
     // -- search --
 
-    /// Cancel any in-flight search immediately. The background task will
-    /// notice the token on its next cancellation check and bail out.
+    /// Cancel local and daemon work for any in-flight search.
     fn cancel_search(&mut self) {
+        self.cleanup_tasks.retain(|task| !task.is_finished());
         if let Some(token) = self.cancel_token.take() {
             token.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if let Some(task) = self.search_task.take() {
+            task.abort();
+            self.cleanup_tasks.push(task);
+        }
+        if let Some(request_id) = self.active_search_id.take() {
+            self.cleanup_tasks.push(self.runtime.spawn(async move {
+                let request = DaemonRequest::CancelSearch {
+                    search_id: request_id,
+                };
+                let _ = daemon::request::<fn(String, usize, usize)>(&request, false, None).await;
+            }));
         }
         self.search_rx = None;
         self.is_searching = false;
         self.pending_search = false;
+    }
+
+    async fn shutdown(&mut self) {
+        self.cancel_search();
+        for task in std::mem::take(&mut self.cleanup_tasks) {
+            let _ = task.await;
+        }
+    }
+
+    fn finish_search(&mut self, result: Result<SearchOutcome>) {
+        self.search_rx = None;
+        self.search_task = None;
+        self.active_search_id = None;
+        self.cancel_token = None;
+        self.is_searching = false;
+        match result {
+            Ok(mut outcome) => {
+                outcome.hits.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                self.hits = outcome.hits;
+                self.grouped_files = group_hits_by_file(&self.hits, None);
+                if self.grouped_files.is_empty() {
+                    self.file_list_state.select(None);
+                    self.status_message = Some(if outcome.warnings.is_empty() {
+                        "No results".to_string()
+                    } else {
+                        format!(
+                            "No results; partial search: {}",
+                            outcome.warnings.join("; ")
+                        )
+                    });
+                } else if outcome.warnings.is_empty() {
+                    self.file_list_state.select(Some(0));
+                    self.status_message = None;
+                } else {
+                    self.file_list_state.select(Some(0));
+                    self.status_message =
+                        Some(format!("Partial results: {}", outcome.warnings.join("; ")));
+                }
+                self.snippet_index = 0;
+                self.file_view_cache = None;
+                self.file_view_scroll = 0;
+            }
+            Err(err) => {
+                self.reset_results();
+                self.status_message = Some(format!("Search failed: {err:#}"));
+            }
+        }
+        if self.transition_after_search {
+            self.transition_after_search = false;
+            if !self.grouped_files.is_empty() {
+                self.mode = Mode::FileList;
+            }
+        }
     }
 
     fn trigger_search(&mut self) {
@@ -371,6 +465,8 @@ impl App {
         // Fresh cancellation token for this search.
         let token = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.cancel_token = Some(token.clone());
+        let request_id = uuid::Uuid::new_v4();
+        self.active_search_id = Some(request_id);
 
         let request = build_search_request(
             &self.cli,
@@ -388,7 +484,7 @@ impl App {
         let workspace = self.workspace.clone();
         let scope_filter = self.scope_filter.clone();
 
-        self.runtime.spawn(async move {
+        let task = self.runtime.spawn(async move {
             let tx_clone = tx.clone();
             let progress_cb = Some(Box::new(
                 move |stage: String, scanned: usize, total: usize| {
@@ -396,7 +492,11 @@ impl App {
                 },
             ));
 
-            let daemon_result = daemon::request(&request, watch, progress_cb).await;
+            let daemon_result =
+                daemon::request_with_id(&request, request_id, watch, progress_cb).await;
+            if token.load(std::sync::atomic::Ordering::Relaxed) {
+                return;
+            }
             let result = match daemon_result {
                 Ok(Some(DaemonResponse::SearchResults { hits, warnings })) => {
                     Ok(SearchOutcome { hits, warnings })
@@ -437,8 +537,11 @@ impl App {
                 Err(err) => Err(err),
             };
 
-            let _ = tx.send(TuiSearchProgress::Done(result));
+            if !token.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = tx.send(TuiSearchProgress::Done(result));
+            }
         });
+        self.search_task = Some(task);
     }
 }
 
@@ -466,6 +569,9 @@ fn local_search_detached(
     });
 
     for ws in workspaces {
+        if cancel_token.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
         let mut ws_opts = options.clone();
         ws_opts.progress_tx = Some(std_tx.clone());
         ws_opts.cancel_token = Some(cancel_token.clone());
@@ -475,7 +581,8 @@ fn local_search_detached(
     let outcome = batch.finish(tui_limit(cli), HitOrdering::Score)?;
 
     let query_uses_neural = crate::search::query_uses_neural(query, cli.force_neural);
-    if !cli.all_indices
+    if !cancel_token.load(std::sync::atomic::Ordering::Relaxed)
+        && !cli.all_indices
         && !cli.hash
         && std::env::var_os("IVYGREP_NO_AUTOSPAWN").is_none()
         && workspace.needs_search_enhancement(query_uses_neural)
@@ -898,7 +1005,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
     let rt = tokio::runtime::Handle::current();
     let mut app = App::new(cli, rt)?;
 
-    let _session = TerminalSession::enter()?;
+    let session = TerminalSession::enter()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
     // Pre-filled query → defer search so the UI draws "Searching…" first.
@@ -909,7 +1016,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
         app.last_query = app.input.value().to_string();
     }
 
-    loop {
+    let result: Result<()> = 'event_loop: loop {
         // ---- debounced search ----
         if let Some(timer) = app.debounce_timer
             && timer.elapsed() >= Duration::from_millis(300)
@@ -936,52 +1043,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         }
                     }
                     TuiSearchProgress::Done(result) => {
-                        app.search_rx = None;
-                        app.is_searching = false;
-                        match result {
-                            Ok(mut outcome) => {
-                                outcome.hits.sort_by(|a, b| {
-                                    b.score
-                                        .partial_cmp(&a.score)
-                                        .unwrap_or(std::cmp::Ordering::Equal)
-                                });
-                                app.hits = outcome.hits;
-                                app.grouped_files = group_hits_by_file(&app.hits, None);
-                                if app.grouped_files.is_empty() {
-                                    app.file_list_state.select(None);
-                                    app.status_message = Some(if outcome.warnings.is_empty() {
-                                        "No results".to_string()
-                                    } else {
-                                        format!(
-                                            "No results; partial search: {}",
-                                            outcome.warnings.join("; ")
-                                        )
-                                    });
-                                } else if outcome.warnings.is_empty() {
-                                    app.file_list_state.select(Some(0));
-                                    app.status_message = None;
-                                } else {
-                                    app.file_list_state.select(Some(0));
-                                    app.status_message = Some(format!(
-                                        "Partial results: {}",
-                                        outcome.warnings.join("; ")
-                                    ));
-                                }
-                                app.snippet_index = 0;
-                                app.file_view_cache = None;
-                                app.file_view_scroll = 0;
-                            }
-                            Err(err) => {
-                                app.reset_results();
-                                app.status_message = Some(format!("Search failed: {err:#}"));
-                            }
-                        }
-                        if app.transition_after_search {
-                            app.transition_after_search = false;
-                            if !app.grouped_files.is_empty() {
-                                app.mode = Mode::FileList;
-                            }
-                        }
+                        app.finish_search(result);
                         break;
                     }
                 }
@@ -1003,7 +1065,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
                                 | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
                         ) else {
-                            return Err(anyhow::anyhow!("db error"));
+                            break 'event_loop Err(anyhow::anyhow!("db error"));
                         };
                         c.query_row(
                             "SELECT value FROM _stats WHERE key = 'total_chunks'",
@@ -1045,7 +1107,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
         }
 
         // ---- render ----
-        terminal.draw(|f| {
+        if let Err(error) = terminal.draw(|f| {
             let outer = Layout::default()
                 .direction(Direction::Vertical)
                 .margin(1)
@@ -1329,7 +1391,9 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                     y: outer[0].y + 1,
                 });
             }
-        })?;
+        }) {
+            break 'event_loop Err(error.into());
+        }
 
         if app.pending_search {
             app.trigger_search();
@@ -1348,10 +1412,17 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
         }
 
         // ---- input handling ----
-        if !crossterm::event::poll(Duration::from_millis(50))? {
+        let has_event = match crossterm::event::poll(Duration::from_millis(50)) {
+            Ok(has_event) => has_event,
+            Err(error) => break 'event_loop Err(error.into()),
+        };
+        if !has_event {
             continue;
         }
-        let ev = event::read()?;
+        let ev = match event::read() {
+            Ok(event) => event,
+            Err(error) => break 'event_loop Err(error.into()),
+        };
 
         // ---- mouse events (global, mode-independent) ----
         if let Event::Mouse(mouse) = ev {
@@ -1429,7 +1500,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         app.cancel_search();
                         app.status_message = Some("Search cancelled".to_string());
                     } else if app.input.value().is_empty() {
-                        break; // quit
+                        break 'event_loop Ok(()); // quit
                     } else {
                         app.input = Input::default();
                         app.reset_results();
@@ -1450,7 +1521,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         app.debounce_timer = None;
                     } else {
                         // 3rd press: quit
-                        break;
+                        break 'event_loop Ok(());
                     }
                 }
                 KeyCode::Enter => {
@@ -1554,7 +1625,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         app.debounce_timer = None;
                         app.mode = Mode::Search;
                     } else {
-                        break;
+                        break 'event_loop Ok(());
                     }
                 }
                 // Other printable chars → switch to search and type.
@@ -1654,7 +1725,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         app.debounce_timer = None;
                         app.mode = Mode::Search;
                     } else {
-                        break;
+                        break 'event_loop Ok(());
                     }
                 }
                 KeyCode::Tab => {
@@ -1752,7 +1823,7 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                         app.mode = Mode::Search;
                         app.file_view_cache = None;
                     } else {
-                        break;
+                        break 'event_loop Ok(());
                     }
                 }
                 KeyCode::Tab | KeyCode::BackTab => {
@@ -1763,9 +1834,11 @@ pub async fn run_tui(cli: Cli) -> Result<()> {
                 _ => {}
             },
         }
-    }
-
-    Ok(())
+    };
+    drop(terminal);
+    drop(session);
+    app.shutdown().await;
+    result
 }
 
 /// Check if a point (col, row) falls inside a `Rect`.
@@ -1842,6 +1915,9 @@ mod tests {
             last_query: String::new(),
             debounce_timer: None,
             cancel_token: None,
+            active_search_id: None,
+            search_task: None,
+            cleanup_tasks: Vec::new(),
             bg_indexing_active: false,
             last_bg_check: std::time::Instant::now(),
             cli,
@@ -1865,6 +1941,111 @@ mod tests {
             file_list_rect: Rect::default(),
             right_panel_rect: Rect::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn cancelling_search_aborts_task_and_discards_progress_channel() {
+        struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                if let Some(signal) = self.0.take() {
+                    let _ = signal.send(());
+                }
+            }
+        }
+
+        let mut app = test_app(Vec::new());
+        let token = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _signal = DropSignal(Some(dropped_tx));
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+
+        app.cancel_token = Some(token.clone());
+        app.search_task = Some(task);
+        app.search_rx = Some(progress_rx);
+        app.is_searching = true;
+        app.pending_search = true;
+        app.cancel_search();
+
+        assert!(token.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(app.search_task.is_none());
+        assert_eq!(app.cleanup_tasks.len(), 1);
+        assert!(app.search_rx.is_none());
+        assert!(!app.is_searching);
+        assert!(!app.pending_search);
+        assert!(
+            progress_tx
+                .send(TuiSearchProgress::Searching("stale".to_string(), 0, 0))
+                .is_err()
+        );
+        tokio::time::timeout(Duration::from_secs(1), dropped_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        app.shutdown().await;
+        assert!(app.cleanup_tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn rapid_cancelled_query_cannot_replace_latest_results() {
+        let mut app = test_app(Vec::new());
+        let (stale_tx, stale_rx) = std::sync::mpsc::channel();
+        app.search_rx = Some(stale_rx);
+        app.cancel_token = Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )));
+        app.is_searching = true;
+        stale_tx
+            .send(TuiSearchProgress::Done(Ok(SearchOutcome {
+                hits: vec![make_hit("stale-a.rs", 1, 1, 1.0)],
+                warnings: Vec::new(),
+            })))
+            .unwrap();
+
+        app.cancel_search();
+
+        let (latest_tx, latest_rx) = std::sync::mpsc::channel();
+        app.search_rx = Some(latest_rx);
+        app.is_searching = true;
+        latest_tx
+            .send(TuiSearchProgress::Done(Ok(SearchOutcome {
+                hits: vec![make_hit("latest-b.rs", 1, 1, 2.0)],
+                warnings: Vec::new(),
+            })))
+            .unwrap();
+        let latest = app.search_rx.as_ref().unwrap().try_recv().unwrap();
+        let TuiSearchProgress::Done(result) = latest else {
+            panic!("expected latest query completion");
+        };
+        app.finish_search(result);
+
+        assert_eq!(app.hits.len(), 1);
+        assert_eq!(app.hits[0].file_path, PathBuf::from("latest-b.rs"));
+        assert!(
+            stale_tx
+                .send(TuiSearchProgress::Searching("stale".to_string(), 0, 0))
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_awaits_tracked_cleanup_tasks() {
+        let mut app = test_app(Vec::new());
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        app.cleanup_tasks.push(tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            let _ = done_tx.send(());
+        }));
+
+        app.shutdown().await;
+
+        done_rx.await.unwrap();
+        assert!(app.cleanup_tasks.is_empty());
     }
 
     // ── Request Building Tests ──────────────────────────────────────────
@@ -1968,17 +2149,6 @@ mod tests {
             .filter(|(_, t)| t.elapsed() < FLASH_DURATION)
             .map(|(msg, _)| msg.as_str());
         assert_eq!(active, Some("hello"));
-    }
-
-    #[test]
-    fn resolve_editor_reads_env() {
-        let original = std::env::var("EDITOR").ok();
-        unsafe { std::env::set_var("EDITOR", "nano") };
-        assert_eq!(resolve_editor(), "nano");
-        match original {
-            Some(val) => unsafe { std::env::set_var("EDITOR", val) },
-            None => unsafe { std::env::remove_var("EDITOR") },
-        }
     }
 
     // ── Rendering Tests ─────────────────────────────────────────────────

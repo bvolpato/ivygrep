@@ -13,7 +13,10 @@ use std::collections::HashSet;
 use std::ffi::CString;
 use std::fs;
 #[cfg(unix)]
-use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
+use std::os::unix::{
+    ffi::OsStrExt,
+    fs::{MetadataExt, PermissionsExt},
+};
 
 use serial_test::serial;
 use tempfile::tempdir;
@@ -355,6 +358,53 @@ fn same_size_edit_with_restored_mtime_is_reindexed() {
         !text.contains("old_marker"),
         "stale content must be removed"
     );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn unreadable_changed_file_aborts_without_publishing_snapshot() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    let file = root.path().join("mutable.rs");
+
+    fs::write(&file, "pub fn old_marker() -> u32 { 1 }\n").unwrap();
+    setup_and_index(root.path(), home.path());
+    let workspace = workspace_for(root.path());
+    let old_snapshot = MerkleSnapshot::load(&workspace.merkle_snapshot_path()).unwrap();
+
+    fs::write(&file, "pub fn new_marker() -> u32 { 200 }\n").unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&file).is_ok() {
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+        return;
+    }
+    let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+    let result = index_workspace(&workspace, &model);
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+
+    let error = result.unwrap_err().to_string();
+    assert!(
+        error.contains("failed reading source file") && error.contains("mutable.rs"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(
+        MerkleSnapshot::load(&workspace.merkle_snapshot_path()).unwrap(),
+        old_snapshot,
+        "failed ingest must not publish the pending snapshot"
+    );
+
+    let conn = open_sqlite(&workspace.sqlite_path()).unwrap();
+    let raw: Vec<u8> = conn
+        .query_row(
+            "SELECT text FROM chunks WHERE file_path = 'mutable.rs' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let text = ivygrep::indexer::decompress_text(raw);
+    assert!(text.contains("old_marker"));
+    assert!(!text.contains("new_marker"));
 }
 
 // ---------------------------------------------------------------------------

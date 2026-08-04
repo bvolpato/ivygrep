@@ -12,7 +12,7 @@ fn is_false(value: &bool) -> bool {
 /// Compile-time version tag so the CLI can detect stale daemon processes.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Wire protocol version for daemon request compatibility.
-pub const DAEMON_PROTOCOL_VERSION: u32 = 5;
+pub const DAEMON_PROTOCOL_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchHit {
@@ -75,6 +75,10 @@ pub enum DaemonRequest {
         pattern: String,
         limit: Option<usize>,
         #[serde(default)]
+        context: usize,
+        #[serde(default)]
+        type_filter: Option<String>,
+        #[serde(default)]
         include_globs: Vec<String>,
         #[serde(default)]
         exclude_globs: Vec<String>,
@@ -100,6 +104,9 @@ pub enum DaemonRequest {
         #[serde(default)]
         skip_gitignore: bool,
     },
+    CancelSearch {
+        search_id: uuid::Uuid,
+    },
     Remove {
         path: PathBuf,
     },
@@ -109,6 +116,8 @@ pub enum DaemonRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonRequestEnvelope {
     pub protocol_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<uuid::Uuid>,
     #[serde(flatten)]
     pub request: DaemonRequest,
 }
@@ -117,6 +126,15 @@ impl DaemonRequestEnvelope {
     pub fn new(request: DaemonRequest) -> Self {
         Self {
             protocol_version: DAEMON_PROTOCOL_VERSION,
+            request_id: None,
+            request,
+        }
+    }
+
+    pub fn with_request_id(request: DaemonRequest, request_id: uuid::Uuid) -> Self {
+        Self {
+            protocol_version: DAEMON_PROTOCOL_VERSION,
+            request_id: Some(request_id),
             request,
         }
     }
@@ -219,6 +237,65 @@ pub fn group_hits_by_file(hits: &[SearchHit], limit: Option<usize>) -> Vec<FileS
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_request_id_and_cancellation_round_trip() {
+        let request_id = uuid::Uuid::new_v4();
+        let search = DaemonRequestEnvelope::with_request_id(
+            DaemonRequest::LiteralSearch {
+                path: None,
+                query: "needle".to_string(),
+                limit: Some(10),
+                context: 0,
+                type_filter: None,
+                include_globs: Vec::new(),
+                exclude_globs: Vec::new(),
+                scope_path: None,
+                scope_is_file: false,
+                skip_gitignore: false,
+            },
+            request_id,
+        );
+        let decoded: DaemonRequestEnvelope =
+            serde_json::from_slice(&serde_json::to_vec(&search).unwrap()).unwrap();
+        assert_eq!(decoded.protocol_version, DAEMON_PROTOCOL_VERSION);
+        assert_eq!(decoded.request_id, Some(request_id));
+
+        let cancel = DaemonRequestEnvelope::new(DaemonRequest::CancelSearch {
+            search_id: request_id,
+        });
+        let cancel: DaemonRequestEnvelope =
+            serde_json::from_slice(&serde_json::to_vec(&cancel).unwrap()).unwrap();
+        assert!(cancel.request_id.is_none());
+        assert!(matches!(
+            cancel.request,
+            DaemonRequest::CancelSearch { search_id } if search_id == request_id
+        ));
+    }
+
+    #[test]
+    fn legacy_regex_request_defaults_new_search_options() {
+        let request: DaemonRequest = serde_json::from_value(serde_json::json!({
+            "type": "regex_search",
+            "path": null,
+            "pattern": "marker",
+            "limit": 10,
+            "include_globs": [],
+            "exclude_globs": [],
+            "scope_path": null
+        }))
+        .unwrap();
+        let DaemonRequest::RegexSearch {
+            context,
+            type_filter,
+            ..
+        } = request
+        else {
+            panic!("expected regex request");
+        };
+        assert_eq!(context, 0);
+        assert!(type_filter.is_none());
+    }
 
     fn hit(file: &str, score: f32, line: usize) -> SearchHit {
         SearchHit {

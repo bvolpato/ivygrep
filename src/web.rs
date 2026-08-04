@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -576,6 +575,8 @@ fn build_search_request_for_path(
             path,
             pattern: query,
             limit,
+            context,
+            type_filter,
             include_globs,
             exclude_globs,
             scope_path,
@@ -958,180 +959,23 @@ fn read_tracked_file(params: &HashMap<String, Vec<String>>) -> Result<Value> {
     }))
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct EditorLaunch {
-    program: String,
-    args: Vec<String>,
-}
-
 fn open_tracked_file(params: &HashMap<String, Vec<String>>) -> Result<Value> {
     let (_, path) = resolve_tracked_path(params, false)?;
     let line = parse_usize_param(params, "line", 1).max(1);
-    let launch = editor_launch_for_path(&path, line);
-    std::process::Command::new(&launch.program)
-        .args(&launch.args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("failed to launch {}", launch.program))?;
+    let column = param(params, "column")
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|column| column.max(1));
+    let launch = crate::launcher::web_editor_launch(&path, line, column)?;
+    let program = launch.program.to_string_lossy().into_owned();
+    launch
+        .spawn_detached()
+        .with_context(|| format!("failed to launch {program}"))?;
     Ok(json!({
         "ok": true,
         "path": path,
         "line": line,
-        "program": launch.program
+        "program": program
     }))
-}
-
-fn editor_launch_for_path(path: &Path, line: usize) -> EditorLaunch {
-    if let Some(launch) = configured_editor_launch(path, line) {
-        return launch;
-    }
-    for candidate in [
-        "code",
-        "code-insiders",
-        "cursor",
-        "codium",
-        "windsurf",
-        "zed",
-        "subl",
-    ] {
-        if let Some(program) = find_program(candidate) {
-            return editor_launch_from_parts([program], path, line);
-        }
-    }
-    platform_open_launch(path)
-}
-
-fn configured_editor_launch(path: &Path, line: usize) -> Option<EditorLaunch> {
-    for name in ["IVYGREP_WEB_EDITOR", "IVYGREP_EDITOR", "EDITOR", "VISUAL"] {
-        let Ok(value) = std::env::var(name) else {
-            continue;
-        };
-        let value = value.trim().to_string();
-        if value.is_empty() {
-            continue;
-        }
-        let parts = split_editor_command(&value);
-        let Some(program) = parts.first() else {
-            continue;
-        };
-        if matches!(name, "EDITOR" | "VISUAL") && is_terminal_editor(program) {
-            continue;
-        }
-        return Some(editor_launch_from_parts(parts, path, line));
-    }
-    None
-}
-
-fn split_editor_command(value: &str) -> Vec<String> {
-    value
-        .split_whitespace()
-        .filter(|part| !part.is_empty())
-        .map(ToString::to_string)
-        .collect()
-}
-
-fn editor_launch_from_parts<I>(parts: I, path: &Path, line: usize) -> EditorLaunch
-where
-    I: IntoIterator<Item = String>,
-{
-    let mut parts = parts.into_iter();
-    let program = parts
-        .next()
-        .unwrap_or_else(|| platform_open_program().to_string());
-    let mut args = parts.collect::<Vec<_>>();
-    let target = path.display().to_string();
-    let basename = program_basename(&program);
-    match basename.as_str() {
-        "code" | "code-insiders" | "codium" | "cursor" | "windsurf" => {
-            args.push("-g".to_string());
-            args.push(format!("{target}:{}", line.max(1)));
-        }
-        "zed" | "subl" | "mate" => args.push(format!("{target}:{}", line.max(1))),
-        "vim" | "nvim" | "vi" | "nano" | "emacs" => {
-            args.push(format!("+{}", line.max(1)));
-            args.push(target);
-        }
-        _ => args.push(target),
-    }
-    EditorLaunch { program, args }
-}
-
-fn program_basename(program: &str) -> String {
-    let name = Path::new(program)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(program)
-        .to_ascii_lowercase();
-    name.trim_end_matches(".exe").to_string()
-}
-
-fn is_terminal_editor(program: &str) -> bool {
-    matches!(
-        program_basename(program).as_str(),
-        "vim" | "nvim" | "vi" | "nano" | "emacs" | "emacsclient" | "hx" | "helix"
-    )
-}
-
-fn find_program(name: &str) -> Option<String> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate.display().to_string());
-        }
-        #[cfg(windows)]
-        {
-            let candidate = dir.join(format!("{name}.exe"));
-            if candidate.is_file() {
-                return Some(candidate.display().to_string());
-            }
-        }
-    }
-    None
-}
-
-fn platform_open_launch(path: &Path) -> EditorLaunch {
-    EditorLaunch {
-        program: platform_open_program().to_string(),
-        args: platform_open_args(path),
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn platform_open_program() -> &'static str {
-    "open"
-}
-
-#[cfg(target_os = "windows")]
-fn platform_open_program() -> &'static str {
-    "cmd"
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn platform_open_program() -> &'static str {
-    "xdg-open"
-}
-
-#[cfg(target_os = "macos")]
-fn platform_open_args(path: &Path) -> Vec<String> {
-    vec![path.display().to_string()]
-}
-
-#[cfg(target_os = "windows")]
-fn platform_open_args(path: &Path) -> Vec<String> {
-    vec![
-        "/C".to_string(),
-        "start".to_string(),
-        "".to_string(),
-        path.display().to_string(),
-    ]
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn platform_open_args(path: &Path) -> Vec<String> {
-    vec![path.display().to_string()]
 }
 
 fn read_tracked_tree(params: &HashMap<String, Vec<String>>) -> Result<Value> {
@@ -1459,41 +1303,20 @@ mod tests {
         assert_eq!(path, Some(PathBuf::from("/tmp/repo")));
         assert_eq!(query, "needle");
     }
-
     #[test]
-    fn editor_launch_uses_line_aware_args_for_gui_editors() {
-        let path = PathBuf::from("/tmp/repo/src/lib.rs");
-        let launch = editor_launch_from_parts(["code".to_string()], &path, 42);
-        assert_eq!(
-            launch,
-            EditorLaunch {
-                program: "code".to_string(),
-                args: vec!["-g".to_string(), "/tmp/repo/src/lib.rs:42".to_string()]
-            }
-        );
-    }
-
-    #[test]
-    fn editor_launch_keeps_prefix_args() {
-        let path = PathBuf::from("/tmp/repo/src/lib.rs");
-        let launch = editor_launch_from_parts(
-            ["cursor".to_string(), "--reuse-window".to_string()],
-            &path,
-            7,
-        );
-        assert_eq!(
-            launch.args,
-            vec![
-                "--reuse-window".to_string(),
-                "-g".to_string(),
-                "/tmp/repo/src/lib.rs:7".to_string()
-            ]
-        );
-    }
-
-    #[test]
-    fn terminal_editors_are_not_used_from_plain_editor_env() {
-        assert!(is_terminal_editor("vim"));
-        assert!(!is_terminal_editor("code"));
+    fn regex_search_request_forwards_type_and_context() {
+        let (_, params) =
+            parse_target("/api/search?q=marker&mode=regex&type=markdown&context=7").unwrap();
+        let request = build_search_request(&params).unwrap();
+        let DaemonRequest::RegexSearch {
+            context,
+            type_filter,
+            ..
+        } = request
+        else {
+            panic!("expected regex search request");
+        };
+        assert_eq!(context, 7);
+        assert_eq!(type_filter.as_deref(), Some("markdown"));
     }
 }

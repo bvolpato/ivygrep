@@ -19,7 +19,7 @@ use crate::embedding::{EmbeddingModel, create_hash_model, create_neural_model};
 use crate::indexer::{index_workspace, workspace_is_indexed};
 use crate::path_glob::parse_glob_csv;
 use crate::protocol::{DaemonRequest, DaemonResponse, group_hits_by_file};
-use crate::regex_search::regex_search;
+use crate::regex_search::regex_search_with_options;
 use crate::search::{SearchOptions, hybrid_search, literal_search};
 use crate::symbols::{SymbolSearchMode, search_symbols_with_options};
 use crate::workspace::{Workspace, WorkspaceMetadata, resolve_workspace_and_scope};
@@ -865,6 +865,8 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
             path: Some(workspace.root.clone()),
             pattern: query.to_string(),
             limit: args.limit,
+            context: args.context.unwrap_or(2),
+            type_filter: args.type_filter.clone(),
             include_globs: include_globs.clone(),
             exclude_globs: exclude_globs.clone(),
             scope_path: scope_filter.as_ref().map(|scope| scope.rel_path.clone()),
@@ -915,15 +917,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
     } else if literal {
         literal_search(&workspace, query, &search_options)?
     } else if regex {
-        regex_search(
-            &workspace,
-            query,
-            args.limit,
-            scope_filter.as_ref(),
-            &include_globs,
-            &exclude_globs,
-            args.skip_gitignore.unwrap_or(false),
-        )?
+        regex_search_with_options(&workspace, query, &search_options)?
     } else {
         // Load a neural query model only after neural vectors exist; a new
         // index returns hash results without downloading/loading model assets.
@@ -1801,13 +1795,21 @@ mod tests {
         let root = tmp.path().join("repo");
         std::fs::create_dir_all(root.join(".git")).unwrap();
         std::fs::write(
+            root.join("match.md"),
+            "before\ncalculate_tax amount\nafter\n",
+        )
+        .unwrap();
+        std::fs::write(
             root.join("match.rs"),
-            "pub fn calculate_tax(amount: f64) -> f64 { amount * 0.2 }\n",
+            "before\npub fn calculate_tax() {}\nafter\n",
         )
         .unwrap();
 
         let home = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        unsafe {
+            std::env::set_var("IVYGREP_HOME", home.path());
+            std::env::set_var("IVYGREP_NO_AUTOSPAWN", "1");
+        }
 
         let response = execute_ivygrep_search(IvygrepSearchArgs {
             query: Some(r"calculate_\w+".to_string()),
@@ -1817,7 +1819,7 @@ mod tests {
             since: None,
             limit: Some(5),
             context: Some(2),
-            type_filter: None,
+            type_filter: Some("markdown".to_string()),
             regex: Some(true),
             literal: None,
             symbol: None,
@@ -1834,8 +1836,15 @@ mod tests {
 
         let result = tool_json_payload(&response);
         assert_eq!(result["mode"], "regex");
-        let count = result["result_count"].as_u64().unwrap();
-        assert!(count > 0, "regex search should find results");
+        assert_eq!(result["result_count"], 1);
+        let file = &result["results"][0];
+        assert_eq!(file["file_path"], "match.md");
+        assert_eq!(file["hits"][0]["start_line"], 1);
+        assert_eq!(file["hits"][0]["end_line"], 3);
+        assert_eq!(
+            file["hits"][0]["preview"],
+            "before\ncalculate_tax amount\nafter"
+        );
     }
 
     #[test]
