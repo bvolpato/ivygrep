@@ -1380,14 +1380,19 @@ fn git_main_worktree_root(root: &Path) -> Option<PathBuf> {
         }
     }
 
-    #[cfg(unix)]
-    let main_root = {
-        use std::os::unix::ffi::OsStringExt;
-        PathBuf::from(std::ffi::OsString::from_vec(main_path.to_vec()))
-    };
-    #[cfg(not(unix))]
-    let main_root = PathBuf::from(String::from_utf8(main_path.to_vec()).ok()?);
+    let main_root = path_from_git_output(main_path)?;
     main_root.canonicalize().ok().or(Some(main_root))
+}
+
+#[cfg(unix)]
+fn path_from_git_output(path: &[u8]) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    Some(PathBuf::from(std::ffi::OsString::from_vec(path.to_vec())))
+}
+
+#[cfg(not(unix))]
+fn path_from_git_output(path: &[u8]) -> Option<PathBuf> {
+    Some(PathBuf::from(String::from_utf8(path.to_vec()).ok()?))
 }
 
 pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
@@ -2342,6 +2347,15 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn git_output_path_preserves_non_utf8_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let path = path_from_git_output(b"main-\xff").unwrap();
+        assert_eq!(path.as_os_str().as_bytes(), b"main-\xff");
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     #[serial]
     fn linked_worktree_preserves_non_utf8_main_checkout_path() {
