@@ -107,20 +107,14 @@ with lower semantic quality. Run `ig --help` for full reference.
 
 ## Search notes and memories
 
-ivygrep also indexes Markdown, text, JSON, and other document files. Precompute local vectors once, then search a notes directory by meaning:
+Index notes once. Watcher keeps them current, and queries use local semantic + lexical search by default:
 
 ```bash
 ig --add ~/notes --wait-for-enhancement
 ig -n 20 "what did we decide about cache invalidation?" ~/notes
 ```
 
-Default daemon-backed queries across CLI, MCP, Web, and TUI blend semantic and
-lexical retrieval. Implicit questions with overwhelmingly note-like initial
-results add two bounded local memory probes. Index stays live as notes change;
-after model assets are present, queries, note contents, embeddings, and results
-stay local.
-
-On the public [MemoryQuest benchmark](https://bvolpato.github.io/ivygrep/benchmarks/public-memory-retrieval.html), default CLI search retrieved 74.9% of required memories in the top 20 and retrieved every required memory for 44.9% of questions. Warm CLI p95 was 87.63 ms across 535 implicit questions and 3,878 preindexed sessions. This is synthetic personal-assistant data and measures session retrieval, not answer quality. Report pins the v1.2.7 binary SHA-256 and release-tag equivalence evidence.
+Public [MemoryQuest results](https://bvolpato.github.io/ivygrep/benchmarks/public-memory-retrieval.html): 74.9% recall@20 at 87.63 ms warm p95. Benchmark measures retrieval only; answer accuracy is outside scope.
 
 ## Connect coding agents
 
