@@ -210,17 +210,17 @@ Signals: lexical, symbol, git change.</pre>
     <section id="memory" class="container relative z-10 section-spacing">
         <div class="section-header">
             <span class="section-tag">Beyond code</span>
-            <h2 class="section-title text-center">Preindex notes once. Retrieve memories by meaning.</h2>
-            <p class="text-center subtitle-small">Use same local index for Markdown vaults, research logs, meeting notes, decisions, and agent memories.</p>
+            <h2 class="section-title text-center">Search notes by meaning</h2>
+            <p class="text-center subtitle-small">Markdown vaults, research logs, meeting notes, decisions, and agent memories stay local.</p>
         </div>
 
         <div class="glass-panel fade-in-scroll mt-4">
             <div class="grid grid-2 align-center">
                 <div>
-                    <h3>Semantic recall without hosted search</h3>
-                    <p>Index a notes directory once and wait for local vectors. Later daemon-backed questions across CLI, MCP, Web, and TUI use default semantic + lexical retrieval, while watcher keeps changed notes current. Implicit questions over note-like results automatically add concurrent local memory probes. No semantic opt-in flag required.</p>
-                    <p>On public MemoryQuest benchmark, default CLI search retrieved <strong>74.9%</strong> of required memories in top 20 and found every required memory for <strong>44.9%</strong> of questions. Warm CLI p95 was <strong>87.63 ms</strong> across 535 implicit questions and 3,878 preindexed sessions.</p>
-                    <p class="benchmark-note">MemoryQuest uses synthetic personal-assistant conversations and measures retrieval, not final-answer correctness.</p>
+                    <h3>Local semantic recall</h3>
+                    <p>Index notes once. CLI, MCP, Web, and TUI search them while watcher keeps index current.</p>
+                    <p><strong>74.9%</strong> recall@20 at <strong>87.63 ms</strong> warm p95 on MemoryQuest.</p>
+                    <p class="benchmark-note">Benchmark measures retrieval only; answer accuracy is outside scope.</p>
                     <p class="benchmark-links"><a href="benchmarks/public-memory-retrieval.html">Methodology and results</a><a href="benchmarks/public-memory-retrieval-results.json">Raw JSON</a></p>
                 </div>
                 <div class="install-code relative">
