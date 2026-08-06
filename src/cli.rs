@@ -1540,17 +1540,31 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
                 tracing::info!(
                     "Re-indexing workspace to include gitignore entities as requested..."
                 );
-                meta.skip_gitignore = true;
-                let _ = workspace.write_metadata(&meta);
-                if search_via_daemon {
-                    let req = crate::protocol::DaemonRequest::Index {
+                let search_runs_locally = context_args.is_some()
+                    || cli.symbol
+                    || cli.refs
+                    || cli.callers
+                    || cli.lexical_only;
+                if search_via_daemon && search_runs_locally {
+                    let request = crate::protocol::DaemonRequest::Index {
                         path: workspace.root.clone(),
                         skip_gitignore: true,
-                        watch: false,
+                        watch: !cli.no_watch,
                     };
-                    let _ =
-                        crate::daemon::request::<fn(String, usize, usize)>(&req, false, None).await;
-                } else {
+                    match crate::daemon::request::<fn(String, usize, usize)>(&request, false, None)
+                        .await?
+                    {
+                        Some(crate::protocol::DaemonResponse::Ack { .. }) => {}
+                        Some(crate::protocol::DaemonResponse::Error { message }) => bail!(message),
+                        Some(response) => bail!("unexpected daemon response: {response:?}"),
+                        None => search_via_daemon = false,
+                    }
+                }
+                // Daemon searches reconcile mode under their per-workspace
+                // lease. Local execution must update metadata before indexing.
+                if !search_via_daemon {
+                    meta.skip_gitignore = true;
+                    let _ = workspace.write_metadata(&meta);
                     let model = crate::embedding::create_hash_model();
                     let _ = crate::indexer::index_workspace(&workspace, model.as_ref());
                 }

@@ -63,6 +63,7 @@ const INDEX_FILE_BATCH_SIZE: usize = 64;
 // Soft per-transaction target, checked after each file. One file's bounded
 // chunk-key batch may exceed it before the journal and SQLite commit checkpoint.
 const MAX_VECTOR_TOMBSTONE_TRANSACTION_BYTES: usize = 1024 * 1024;
+const INDEXED_SKIP_GITIGNORE_FILE: &str = ".indexed_skip_gitignore";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexingSummary {
@@ -295,6 +296,27 @@ pub fn workspace_is_indexed(workspace: &Workspace) -> bool {
     workspace.quick_index_health().is_queryable()
 }
 
+pub(crate) fn indexed_skip_gitignore(workspace: &Workspace) -> Option<bool> {
+    fs::read_to_string(workspace.index_dir.join(INDEXED_SKIP_GITIGNORE_FILE))
+        .ok()
+        .and_then(|value| value.trim().parse::<bool>().ok())
+}
+
+pub(crate) fn workspace_index_matches_skip_gitignore(
+    workspace: &Workspace,
+    skip_gitignore: bool,
+) -> bool {
+    indexed_skip_gitignore(workspace) == Some(skip_gitignore)
+}
+
+fn record_indexed_skip_gitignore(workspace: &Workspace, skip_gitignore: bool) -> Result<()> {
+    fs::write(
+        workspace.index_dir.join(INDEXED_SKIP_GITIGNORE_FILE),
+        skip_gitignore.to_string(),
+    )?;
+    Ok(())
+}
+
 pub fn remove_workspace_index(workspace: &Workspace) -> Result<()> {
     if !workspace.index_dir.exists() {
         return Ok(());
@@ -432,6 +454,11 @@ fn index_workspace_with_options(
         .with_context(|| format!("failed to acquire index lock {}", lock_path.display()))?;
 
     let preserved_metadata = workspace.read_metadata().ok().flatten();
+    let skip_gitignore = preserved_metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.skip_gitignore);
+    let indexed_filter_is_current =
+        workspace_index_matches_skip_gitignore(workspace, skip_gitignore);
     let index_health = workspace.quick_index_health();
     if index_health.needs_rebuild() {
         rebuild_index_storage(workspace, preserved_metadata.as_ref())?;
@@ -447,9 +474,8 @@ fn index_workspace_with_options(
         .flatten();
     let reusable_index_is_current = clean_git_state_before.as_deref().is_some_and(|state| {
         index_health.is_queryable()
-            && !preserved_metadata
-                .as_ref()
-                .is_some_and(|metadata| metadata.skip_gitignore)
+            && !skip_gitignore
+            && indexed_filter_is_current
             && fs::read_to_string(indexed_git_state_path(workspace))
                 .ok()
                 .as_deref()
@@ -520,7 +546,12 @@ fn index_workspace_with_options(
             embedding_model,
             trust_live_watcher,
             watcher_paths,
+            skip_gitignore,
         )
+    });
+    let result = result.and_then(|summary| {
+        record_indexed_skip_gitignore(workspace, skip_gitignore)?;
+        Ok(summary)
     });
     if result.is_ok() && tracks_reusable_base_state {
         record_indexed_git_state(workspace, clean_git_state_before.as_deref());
@@ -604,6 +635,7 @@ fn index_workspace_inner(
     embedding_model: &dyn EmbeddingModel,
     trust_live_watcher: bool,
     watcher_paths: Option<&[PathBuf]>,
+    skip_gitignore: bool,
 ) -> Result<IndexingSummary> {
     let index_started = std::time::Instant::now();
 
@@ -628,7 +660,11 @@ fn index_workspace_inner(
     // Trust-but-verify: if a live watcher daemon is confirmed, skip the
     // expensive Merkle rebuild entirely. The watcher already triggered
     // re-indexing for any changed files through filesystem events.
-    if trust_live_watcher && workspace.is_watcher_alive() && workspace_is_indexed(workspace) {
+    if trust_live_watcher
+        && workspace.is_watcher_alive()
+        && workspace_is_indexed(workspace)
+        && workspace_index_matches_skip_gitignore(workspace, skip_gitignore)
+    {
         return Ok(IndexingSummary {
             workspace_id: workspace.id.clone(),
             indexed_files: 0,
@@ -640,8 +676,6 @@ fn index_workspace_inner(
             },
         });
     }
-
-    let skip_gitignore = workspace.read_metadata()?.is_some_and(|m| m.skip_gitignore);
 
     // ── Worktree overlay ─────────────────────────────────────────────────
     // If this is a git worktree and the base has a fresh index, create a
@@ -691,6 +725,7 @@ fn index_workspace_inner(
                             embedding_model,
                             trust_live_watcher,
                             None,
+                            skip_gitignore,
                         );
                     }
                 }
@@ -716,7 +751,13 @@ fn index_workspace_inner(
             if workspace.has_overlay() {
                 // Existing overlay references the now-migrated base; rebuild it.
                 clear_worktree_overlay_storage(workspace);
-                return index_workspace_inner(workspace, embedding_model, trust_live_watcher, None);
+                return index_workspace_inner(
+                    workspace,
+                    embedding_model,
+                    trust_live_watcher,
+                    None,
+                    skip_gitignore,
+                );
             }
         }
 
@@ -807,7 +848,13 @@ fn index_workspace_inner(
                 );
                 clear_worktree_overlay_storage(workspace);
                 // Re-enter this function to take the fresh overlay creation path
-                return index_workspace_inner(workspace, embedding_model, trust_live_watcher, None);
+                return index_workspace_inner(
+                    workspace,
+                    embedding_model,
+                    trust_live_watcher,
+                    None,
+                    skip_gitignore,
+                );
             }
             None
         } else {
@@ -915,6 +962,7 @@ fn index_workspace_inner(
         // edits, directories, overlays, and uncertain state.
         let targeted = if let Some(paths) = watcher_paths.filter(|paths| !paths.is_empty())
             && workspace.merkle_snapshot_path().exists()
+            && workspace_index_matches_skip_gitignore(workspace, skip_gitignore)
         {
             old.refresh_paths(&workspace.root, paths, skip_gitignore)?
         } else {
@@ -4547,6 +4595,44 @@ mod tests {
 
         assert!(rows.iter().any(|path| path == "kept.rs"));
         assert!(!rows.iter().any(|path| path == "ignored.rs"));
+    }
+
+    #[test]
+    #[serial]
+    fn targeted_watcher_update_cannot_certify_unreconciled_filter_mode() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        fs::write(root.path().join(".gitignore"), "ignored.rs\n").unwrap();
+        fs::write(
+            root.path().join("visible.rs"),
+            "pub fn visible_migration_marker() {}\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("ignored.rs"),
+            "pub fn ignored_migration_marker() {}\n",
+        )
+        .unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        fs::remove_file(workspace.index_dir.join(INDEXED_SKIP_GITIGNORE_FILE)).unwrap();
+        let mut metadata = workspace.read_metadata().unwrap().unwrap();
+        metadata.skip_gitignore = true;
+        workspace.write_metadata(&metadata).unwrap();
+
+        index_workspace_paths_for_watcher(&workspace, &model, &[PathBuf::from("visible.rs")])
+            .unwrap();
+
+        assert!(workspace_index_matches_skip_gitignore(&workspace, true));
+        assert!(
+            indexed_texts_for_file(&workspace, "ignored.rs")
+                .iter()
+                .any(|text| text.contains("ignored_migration_marker"))
+        );
     }
 
     #[test]
