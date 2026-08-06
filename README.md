@@ -81,6 +81,7 @@ Build from source on macOS or Linux:
 ```bash
 git clone https://github.com/bvolpato/ivygrep.git && cd ivygrep
 ./build.sh
+mkdir -p ~/.local/bin
 install -m 0755 target/release/ig ~/.local/bin/ig
 ```
 

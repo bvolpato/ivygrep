@@ -161,6 +161,19 @@ impl Default for SearchOptions {
 }
 
 impl SearchOptions {
+    /// Return the language filter in the canonical form stored by the index.
+    ///
+    /// Search options can come from raw Web/MCP requests, which accept file
+    /// extensions and aliases (for example, `rs`). Unknown filters stay
+    /// unchanged so they retain their existing no-match behavior.
+    pub(crate) fn canonical_type_filter(&self) -> Option<String> {
+        self.type_filter.as_deref().map(|filter| {
+            crate::chunking::resolve_type_alias(filter)
+                .map(str::to_string)
+                .unwrap_or_else(|| filter.to_string())
+        })
+    }
+
     pub fn bounded_limit(&self) -> Option<usize> {
         self.limit.map(|limit| {
             if limit == usize::MAX {
@@ -2886,9 +2899,9 @@ fn indexed_filter_exceeds_exact_limit(
     if !options.skip_gitignore {
         sql.push_str(" AND is_ignored = 0");
     }
-    if let Some(type_filter) = options.type_filter.as_deref() {
+    if let Some(type_filter) = options.canonical_type_filter() {
         sql.push_str(" AND language = ?");
-        params_vec.push(Box::new(type_filter.to_string()));
+        params_vec.push(Box::new(type_filter));
     }
     if let Some(scope) = options.scope_filter.as_ref() {
         let prefix = index_path_string(&scope.rel_path);
@@ -2930,11 +2943,12 @@ fn build_semantic_filter_plan(
     if indexed_filter_exceeds_exact_limit(ctx, options, MAX_EXACT_FILTERED_CANDIDATES)? {
         return Ok(SemanticFilterPlan::Broad);
     }
+    let type_filter = options.canonical_type_filter();
     let filtered = collect_filtered_chunks(
         ctx,
         path_matcher,
         options.scope_filter.as_ref(),
-        options.type_filter.as_deref(),
+        type_filter.as_deref(),
         &options.include_globs,
         options.skip_gitignore,
         MAX_EXACT_FILTERED_CANDIDATES + 1,
@@ -4731,6 +4745,39 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("no such table"));
+    }
+
+    #[test]
+    #[serial]
+    fn semantic_type_alias_filter_matches_canonical_language() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(tmp.path().join("lib.rs"), "pub fn marker() {}\n").unwrap();
+
+        let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        let ctx = SearchContext::load(&workspace, None, false).unwrap();
+        let matcher = PathGlobMatcher::new(&[], &[]).unwrap();
+
+        let exact_paths = |type_filter: &str| {
+            let options = SearchOptions {
+                type_filter: Some(type_filter.to_string()),
+                ..Default::default()
+            };
+            match build_semantic_filter_plan(&ctx, &matcher, &options).unwrap() {
+                SemanticFilterPlan::Exact(chunks) => chunks
+                    .into_iter()
+                    .map(|chunk| chunk.file_path)
+                    .collect::<Vec<_>>(),
+                SemanticFilterPlan::Broad => panic!("small fixture should use exact filtering"),
+            }
+        };
+
+        assert_eq!(exact_paths("rs"), exact_paths("rust"));
+        assert_eq!(exact_paths("rs"), vec![PathBuf::from("lib.rs")]);
+        assert!(exact_paths("unknown-language").is_empty());
     }
 
     struct TestEmbeddingModel384;

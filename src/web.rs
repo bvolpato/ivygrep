@@ -1319,4 +1319,18 @@ mod tests {
         assert_eq!(context, 7);
         assert_eq!(type_filter.as_deref(), Some("markdown"));
     }
+
+    #[test]
+    fn raw_web_type_alias_reaches_shared_search_options_normalization() {
+        let (_, params) = parse_target("/api/search?q=marker&type=rs").unwrap();
+        let request = build_search_request(&params).unwrap();
+        let DaemonRequest::Search { type_filter, .. } = request else {
+            panic!("expected hybrid search request");
+        };
+        let options = crate::search::SearchOptions {
+            type_filter,
+            ..Default::default()
+        };
+        assert_eq!(options.canonical_type_filter().as_deref(), Some("rust"));
+    }
 }

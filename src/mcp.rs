@@ -1221,6 +1221,94 @@ mod tests {
 
     #[test]
     #[serial]
+    fn mcp_raw_type_alias_matches_canonical_semantic_filter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(
+            root.join("lib.rs"),
+            r#"pub struct AccountManager;
+
+impl AccountManager {
+    /// Performs durable credential refresh with retry and backoff after an expired session.
+    pub fn refresh_credentials(&self, token: &str) -> Result<(), String> {
+        let _ = token;
+        Ok(())
+    }
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("decoy.md"),
+            "request validation configuration is documented here\n",
+        )
+        .unwrap();
+
+        let home = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("IVYGREP_HOME", home.path());
+            std::env::set_var("IVYGREP_NO_AUTOSPAWN", "1");
+        }
+        let workspace = Workspace::resolve(&root).unwrap();
+        let hash_model = create_hash_model();
+        index_workspace(&workspace, hash_model.as_ref()).unwrap();
+        crate::indexer::enhance_workspace_hash(&workspace, hash_model.as_ref()).unwrap();
+        std::fs::write(workspace.watcher_pid_path(), std::process::id().to_string()).unwrap();
+
+        let search = |type_filter: &str| {
+            execute_ivygrep_search(IvygrepSearchArgs {
+                query: Some("secure account renewal strategy".to_string()),
+                path: Some(root.to_string_lossy().to_string()),
+                output: None,
+                budget_tokens: None,
+                since: None,
+                limit: Some(10),
+                context: Some(2),
+                type_filter: Some(type_filter.to_string()),
+                regex: None,
+                literal: None,
+                symbol: None,
+                refs: None,
+                callers: None,
+                include: None,
+                exclude: None,
+                first_line_only: None,
+                file_name_only: Some(false),
+                verbose: None,
+                skip_gitignore: None,
+            })
+            .map(|response| {
+                let payload = tool_json_payload(&response);
+                let results = payload["results"].as_array().unwrap();
+                let paths = results
+                    .iter()
+                    .filter_map(|result| result["file_path"].as_str())
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                let sources = results
+                    .iter()
+                    .flat_map(|result| result["hits"].as_array().unwrap())
+                    .flat_map(|hit| hit["sources"].as_array().unwrap())
+                    .filter_map(serde_json::Value::as_str)
+                    .map(ToString::to_string)
+                    .collect::<std::collections::BTreeSet<_>>();
+                (paths, sources)
+            })
+            .unwrap()
+        };
+
+        let (alias_paths, alias_sources) = search("rs");
+        let (canonical_paths, canonical_sources) = search("rust");
+        assert_eq!(alias_paths, canonical_paths);
+        assert_eq!(alias_paths, vec!["lib.rs"]);
+        assert_eq!(alias_sources, canonical_sources);
+        assert!(alias_sources.contains("semantic"));
+        assert!(alias_sources.contains("hash"));
+    }
+
+    #[test]
+    #[serial]
     fn mcp_search_returns_budgeted_context_graph_pack() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("repo");

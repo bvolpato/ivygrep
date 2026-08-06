@@ -3,7 +3,10 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
-use std::{collections::HashMap, fmt::Write as _};
+use std::{
+    collections::{BTreeSet, HashMap},
+    fmt::Write as _,
+};
 
 use serial_test::serial;
 use tempfile::tempdir;
@@ -42,6 +45,20 @@ fn create_repo(root: &Path) {
     std::fs::write(
         root.join("web.rs"),
         "pub fn web_marker_search_target() -> &'static str { \"needle\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("account.rs"),
+        r#"pub struct AccountManager;
+
+impl AccountManager {
+    /// Performs durable credential refresh with retry and backoff after an expired session.
+    pub fn refresh_credentials(&self, token: &str) -> Result<(), String> {
+        let _ = token;
+        Ok(())
+    }
+}
+"#,
     )
     .unwrap();
     git(root, &["init"]);
@@ -173,6 +190,22 @@ fn port_from_url(url: &str) -> u16 {
         .unwrap()
 }
 
+fn paths_and_sources(search: &serde_json::Value) -> (Vec<String>, BTreeSet<String>) {
+    let hits = search["hits"].as_array().unwrap();
+    let paths = hits
+        .iter()
+        .filter_map(|hit| hit["file_path"].as_str())
+        .map(ToString::to_string)
+        .collect();
+    let sources = hits
+        .iter()
+        .flat_map(|hit| hit["sources"].as_array().unwrap())
+        .filter_map(serde_json::Value::as_str)
+        .map(ToString::to_string)
+        .collect();
+    (paths, sources)
+}
+
 #[test]
 #[serial]
 fn web_server_serves_status_search_and_file() {
@@ -183,9 +216,9 @@ fn web_server_serves_status_search_and_file() {
     let add = Command::new(bin())
         .args(["--add"])
         .arg(repo.path())
-        .args(["--force", "--no-watch", "--hash"])
+        .args(["--force", "--no-watch", "--hash", "--wait-for-enhancement"])
         .env("IVYGREP_HOME", home.path())
-        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .env_remove("IVYGREP_NO_AUTOSPAWN")
         .output()
         .unwrap();
     assert!(
@@ -261,6 +294,25 @@ fn web_server_serves_status_search_and_file() {
             .any(|hit| hit["file_path"].as_str().unwrap().ends_with("web.rs")),
         "search response: {search:#}"
     );
+
+    let semantic_query = percent_encode("secure account renewal strategy");
+    let alias_search: serde_json::Value = serde_json::from_str(&http_get(
+        port,
+        &format!("/api/search?q={semantic_query}&workspace={workspace}&type=rs&limit=10"),
+    ))
+    .unwrap();
+    let canonical_search: serde_json::Value = serde_json::from_str(&http_get(
+        port,
+        &format!("/api/search?q={semantic_query}&workspace={workspace}&type=rust&limit=10"),
+    ))
+    .unwrap();
+    let (alias_paths, alias_sources) = paths_and_sources(&alias_search);
+    let (canonical_paths, canonical_sources) = paths_and_sources(&canonical_search);
+    assert_eq!(alias_paths, canonical_paths);
+    assert_eq!(alias_paths, vec!["account.rs"]);
+    assert_eq!(alias_sources, canonical_sources);
+    assert!(alias_sources.contains("semantic"));
+    assert!(alias_sources.contains("hash"));
 
     std::fs::write(
         repo.path().join("web.rs"),

@@ -4,6 +4,16 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.2.10] - 2026-08-05
+
+### Fixed
+- `--skip-gitignore` now reconciles healthy daemon indexes and watcher filters when ignore mode changes.
+- Cancelling a queued search now exits workspace-mode waits without delaying daemon cancellation.
+- Web and MCP type aliases such as `rs` and `py` now retain semantic search candidates.
+
+### Documentation
+- Source installation now creates `~/.local/bin` before copying the release binary.
+
 ## [1.2.9] - 2026-08-04
 
 ### Maintenance

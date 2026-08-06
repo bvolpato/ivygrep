@@ -4,13 +4,13 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::Result;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Notify;
 use tracing::{error, info, warn};
@@ -19,7 +19,8 @@ use crate::config;
 use crate::embedding::{EmbeddingModel, create_model};
 use crate::indexer::{
     index_workspace, index_workspace_for_watcher, index_workspace_paths_for_watcher,
-    reconcile_worktree_overlay, remove_workspace_index,
+    indexed_skip_gitignore, reconcile_worktree_overlay, remove_workspace_index,
+    workspace_index_matches_skip_gitignore,
 };
 use crate::jobs::{self, JobKind, JobUpdate};
 use crate::protocol::{
@@ -210,6 +211,7 @@ fn fuse_memory_probe_hits(
 struct WatchRegistration {
     watcher: RecommendedWatcher,
     control: Arc<WatchControl>,
+    event_filter: Arc<Mutex<WatchEventFilter>>,
     job_nonce: Option<String>,
     external_git_common_dir: Option<PathBuf>,
     external_git_watch: Option<PathBuf>,
@@ -373,6 +375,7 @@ struct WorkspaceReadinessCacheKey {
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 struct WorkspaceReadinessSignature {
     metadata: Option<FileStamp>,
+    indexed_skip_gitignore: Option<bool>,
     index_format: Option<FileStamp>,
     sqlite: Option<FileStamp>,
     tantivy: Option<DirStamp>,
@@ -794,6 +797,187 @@ impl Drop for ActiveSearchRegistration {
     }
 }
 
+#[derive(Default)]
+struct WorkspaceModeCoordinatorState {
+    active_mode: Option<bool>,
+    active_leases: usize,
+    next_mode: Option<bool>,
+    next_mode_generation: u64,
+    next_mode_waiters: usize,
+    exclusive_active: bool,
+    exclusive_waiters: usize,
+}
+
+#[derive(Default)]
+struct WorkspaceModeCoordinator {
+    state: Mutex<WorkspaceModeCoordinatorState>,
+    changed: Condvar,
+}
+
+impl WorkspaceModeCoordinator {
+    fn acquire_shared(
+        self: &Arc<Self>,
+        requested_mode: bool,
+        cancellation: Option<&AtomicBool>,
+    ) -> Option<WorkspaceModeLease> {
+        let mut state = self.state.lock();
+        let mut reserved_next_mode_generation = None;
+        loop {
+            if cancellation.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                if state.next_mode == Some(requested_mode)
+                    && reserved_next_mode_generation == Some(state.next_mode_generation)
+                {
+                    state.next_mode_waiters = state.next_mode_waiters.saturating_sub(1);
+                    if state.next_mode_waiters == 0 {
+                        state.next_mode = None;
+                    }
+                    self.changed.notify_all();
+                }
+                return None;
+            }
+            if !state.exclusive_active
+                && state.exclusive_waiters == 0
+                && state.active_leases == 0
+                && state.next_mode.is_none_or(|next| next == requested_mode)
+            {
+                state.active_mode = Some(requested_mode);
+                state.active_leases = 1;
+                state.next_mode = None;
+                state.next_mode_waiters = 0;
+                return Some(WorkspaceModeLease {
+                    coordinator: self.clone(),
+                    exclusive: false,
+                });
+            }
+            if !state.exclusive_active
+                && state.exclusive_waiters == 0
+                && state.active_mode == Some(requested_mode)
+                && state.next_mode.is_none()
+            {
+                state.active_leases += 1;
+                return Some(WorkspaceModeLease {
+                    coordinator: self.clone(),
+                    exclusive: false,
+                });
+            }
+            if !state.exclusive_active
+                && state.exclusive_waiters == 0
+                && state.active_mode != Some(requested_mode)
+            {
+                if state.next_mode.is_none() {
+                    state.next_mode = Some(requested_mode);
+                    state.next_mode_generation = state.next_mode_generation.wrapping_add(1);
+                    state.next_mode_waiters = 1;
+                    reserved_next_mode_generation = Some(state.next_mode_generation);
+                } else if state.next_mode == Some(requested_mode)
+                    && reserved_next_mode_generation != Some(state.next_mode_generation)
+                {
+                    state.next_mode_waiters += 1;
+                    reserved_next_mode_generation = Some(state.next_mode_generation);
+                }
+            }
+            if cancellation.is_some() {
+                self.changed.wait_for(&mut state, Duration::from_millis(10));
+            } else {
+                self.changed.wait(&mut state);
+            }
+        }
+    }
+
+    fn acquire_exclusive(
+        self: &Arc<Self>,
+        cancellation: Option<&AtomicBool>,
+    ) -> Option<WorkspaceModeLease> {
+        let mut state = self.state.lock();
+        if cancellation.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            return None;
+        }
+        state.exclusive_waiters += 1;
+        while state.exclusive_active || state.active_leases > 0 {
+            if cancellation.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                state.exclusive_waiters -= 1;
+                self.changed.notify_all();
+                return None;
+            }
+            if cancellation.is_some() {
+                self.changed.wait_for(&mut state, Duration::from_millis(10));
+            } else {
+                self.changed.wait(&mut state);
+            }
+        }
+        if cancellation.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            state.exclusive_waiters -= 1;
+            self.changed.notify_all();
+            return None;
+        }
+        state.exclusive_waiters -= 1;
+        state.exclusive_active = true;
+        Some(WorkspaceModeLease {
+            coordinator: self.clone(),
+            exclusive: true,
+        })
+    }
+}
+
+struct WorkspaceModeLease {
+    coordinator: Arc<WorkspaceModeCoordinator>,
+    exclusive: bool,
+}
+
+impl Drop for WorkspaceModeLease {
+    fn drop(&mut self) {
+        let mut state = self.coordinator.state.lock();
+        if self.exclusive {
+            state.exclusive_active = false;
+            self.coordinator.changed.notify_all();
+            return;
+        }
+        state.active_leases = state.active_leases.saturating_sub(1);
+        if state.active_leases == 0 {
+            self.coordinator.changed.notify_all();
+        }
+    }
+}
+
+struct ModeLeasedEmbeddingModel {
+    inner: Arc<dyn EmbeddingModel>,
+    _leases: Vec<WorkspaceModeLease>,
+}
+
+impl EmbeddingModel for ModeLeasedEmbeddingModel {
+    fn dimensions(&self) -> usize {
+        self.inner.dimensions()
+    }
+
+    fn embed(&self, text: &str) -> Vec<f32> {
+        self.inner.embed(text)
+    }
+
+    fn embed_batch(&self, texts: &[&str]) -> Vec<Vec<f32>> {
+        self.inner.embed_batch(texts)
+    }
+
+    fn warm_for_search(&self) {
+        self.inner.warm_for_search();
+    }
+
+    fn backend_info(&self) -> Option<&'static str> {
+        self.inner.backend_info()
+    }
+
+    fn profile_info(&self) -> Option<&'static str> {
+        self.inner.profile_info()
+    }
+
+    fn model_identity(&self) -> Option<&crate::embedding::NeuralModelIdentity> {
+        self.inner.model_identity()
+    }
+
+    fn respects_system_constraints(&self) -> bool {
+        self.inner.respects_system_constraints()
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct DaemonState {
     lazy_model: Arc<std::sync::OnceLock<Arc<dyn EmbeddingModel>>>,
@@ -807,6 +991,7 @@ pub(crate) struct DaemonState {
     query_results: Arc<Mutex<QueryResultCache>>,
     neural_queries: Arc<Mutex<NeuralQueryCache>>,
     search_cancellations: Arc<Mutex<SearchCancellationRegistry>>,
+    workspace_modes: Arc<Mutex<HashMap<String, Weak<WorkspaceModeCoordinator>>>>,
     query_result_cache_enabled: bool,
     /// Bounds concurrent CPU-heavy work (hybrid/literal/regex search + index).
     /// Without this, a burst of clients each spawn a `spawn_blocking` task on
@@ -835,6 +1020,89 @@ fn create_search_model() -> Arc<dyn EmbeddingModel> {
 impl DaemonState {
     pub(crate) async fn acquire_cpu_permit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
         self.cpu_permits.clone().acquire_owned().await.ok()
+    }
+
+    fn workspace_mode_coordinator(&self, workspace_id: &str) -> Arc<WorkspaceModeCoordinator> {
+        let mut coordinators = self.workspace_modes.lock();
+        if let Some(coordinator) = coordinators.get(workspace_id).and_then(Weak::upgrade) {
+            return coordinator;
+        }
+        coordinators.retain(|_, coordinator| coordinator.strong_count() > 0);
+        let coordinator = Arc::new(WorkspaceModeCoordinator::default());
+        coordinators.insert(workspace_id.to_string(), Arc::downgrade(&coordinator));
+        coordinator
+    }
+
+    #[cfg(test)]
+    fn acquire_workspace_mode(
+        &self,
+        workspace: &Workspace,
+        skip_gitignore: bool,
+    ) -> WorkspaceModeLease {
+        self.workspace_mode_coordinator(&workspace.id)
+            .acquire_shared(skip_gitignore, None)
+            .expect("uncancelled workspace mode acquisition")
+    }
+
+    fn acquire_workspace_modes(
+        &self,
+        workspaces: &[Workspace],
+        skip_gitignore: bool,
+    ) -> Vec<WorkspaceModeLease> {
+        self.acquire_workspace_leases(workspaces, skip_gitignore, false, None)
+            .expect("uncancelled workspace mode acquisition")
+    }
+
+    fn acquire_workspace_modes_cancellable(
+        &self,
+        workspaces: &[Workspace],
+        skip_gitignore: bool,
+        cancellation: Option<&AtomicBool>,
+    ) -> Option<Vec<WorkspaceModeLease>> {
+        self.acquire_workspace_leases(workspaces, skip_gitignore, false, cancellation)
+    }
+
+    fn acquire_workspace_mutations(&self, workspaces: &[Workspace]) -> Vec<WorkspaceModeLease> {
+        self.acquire_workspace_leases(workspaces, false, true, None)
+            .expect("uncancelled workspace mutation acquisition")
+    }
+
+    fn acquire_workspace_leases(
+        &self,
+        workspaces: &[Workspace],
+        skip_gitignore: bool,
+        direct_exclusive: bool,
+        cancellation: Option<&AtomicBool>,
+    ) -> Option<Vec<WorkspaceModeLease>> {
+        let mut requirements = HashMap::new();
+        for workspace in workspaces {
+            requirements
+                .entry(workspace.id.clone())
+                .and_modify(|exclusive| *exclusive |= direct_exclusive)
+                .or_insert(direct_exclusive);
+            if workspace.is_worktree()
+                && let Some(main_root) = workspace.main_worktree_root()
+                && let Ok(base_workspace) = Workspace::resolve(&main_root)
+            {
+                requirements
+                    .entry(base_workspace.id)
+                    .and_modify(|exclusive| *exclusive = true)
+                    .or_insert(true);
+            }
+        }
+        let mut requirements = requirements.into_iter().collect::<Vec<_>>();
+        requirements.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        let mut leases = Vec::with_capacity(requirements.len());
+        for (workspace_id, exclusive) in requirements {
+            let coordinator = self.workspace_mode_coordinator(&workspace_id);
+            let lease = if exclusive {
+                coordinator.acquire_exclusive(cancellation)
+            } else {
+                coordinator.acquire_shared(skip_gitignore, cancellation)
+            }?;
+            leases.push(lease);
+        }
+        Some(leases)
     }
 
     async fn acquire_search_permit(
@@ -925,12 +1193,18 @@ impl DaemonState {
         workspace: &Workspace,
         skip_gitignore: bool,
     ) -> Result<Arc<dyn EmbeddingModel>> {
+        let leases = self.acquire_workspace_modes(std::slice::from_ref(workspace), skip_gitignore);
         self.prepare_workspace_for_hybrid_query(workspace, skip_gitignore)?;
-        if self.cached_neural_identity(workspace).is_none() {
-            return Ok(cached_hash_model());
-        }
-        self.maybe_start_model_load();
-        self.get_model_for_search(false)
+        let inner = if self.cached_neural_identity(workspace).is_none() {
+            cached_hash_model()
+        } else {
+            self.maybe_start_model_load();
+            self.get_model_for_search(false)?
+        };
+        Ok(Arc::new(ModeLeasedEmbeddingModel {
+            inner,
+            _leases: leases,
+        }))
     }
 
     fn resolve_workspace(&self, path: &Path) -> Result<Workspace> {
@@ -1146,11 +1420,12 @@ impl DaemonState {
             return Ok(false);
         }
 
-        let mut changed = ensure_queryable_workspace(workspace, skip_gitignore)?;
+        let mut changed = ensure_queryable_workspace(self, workspace, skip_gitignore)?;
         let reconciliation_model = cached_hash_model();
         changed |= reconcile_worktree_overlay(workspace, reconciliation_model.as_ref())?;
         if changed {
             self.clear_workspace_contexts(workspace);
+            self.refresh_workspace_watcher(workspace)?;
         }
 
         self.store_workspace_ready(
@@ -1197,6 +1472,14 @@ impl DaemonState {
             .lock()
             .retain(|key, _| key.workspace_id != workspace.id);
         self.query_results.lock().remove_workspace(&workspace.id);
+    }
+
+    fn refresh_workspace_watcher(&self, workspace: &Workspace) -> Result<()> {
+        let mut watchers = self.watchers.lock();
+        if let Some(registration) = watchers.get_mut(&workspace.id) {
+            refresh_watch_registration(workspace, registration)?;
+        }
+        Ok(())
     }
 
     fn cached_query_results(&self, key: &QueryCacheKey) -> Option<Vec<crate::protocol::SearchHit>> {
@@ -1259,6 +1542,7 @@ fn create_daemon_state() -> DaemonState {
         query_results: Arc::new(Mutex::new(QueryResultCache::default())),
         neural_queries: Arc::new(Mutex::new(NeuralQueryCache::default())),
         search_cancellations: Arc::new(Mutex::new(SearchCancellationRegistry::default())),
+        workspace_modes: Arc::new(Mutex::new(HashMap::new())),
         query_result_cache_enabled: config::query_result_cache_enabled(),
         cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
         web_server: Arc::new(Mutex::new(None)),
@@ -1621,43 +1905,42 @@ async fn handle_request_with_cancellation(
                 }
             };
 
-            // Respect skip_gitignore by updating metadata before indexing
-            let _ = workspace.ensure_dirs();
-            let mut meta = workspace
-                .read_metadata()
-                .unwrap_or(None)
-                .unwrap_or_else(|| crate::workspace::WorkspaceMetadata {
-                    id: workspace.id.clone(),
-                    root: workspace.root.clone(),
-                    created_at_unix: std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs(),
-                    last_indexed_at_unix: None,
-                    watch_enabled: watch,
-                    skip_gitignore: false,
-                    index_generation: 0,
-                });
-
-            if meta.skip_gitignore != skip_gitignore {
-                meta.skip_gitignore = skip_gitignore;
-            }
-            meta.watch_enabled = watch;
-            let _ = workspace.write_metadata(&meta);
-
             // Bound concurrent heavy index work (see #58).
             let permit = state.cpu_permits.clone().acquire_owned().await.ok();
             let index_workspace_target = workspace.clone();
+            let index_state = state.clone();
             let index_result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
+                let mode_leases = index_state
+                    .acquire_workspace_mutations(std::slice::from_ref(&index_workspace_target));
+                index_workspace_target.ensure_dirs()?;
+                let mut metadata = index_workspace_target.read_metadata()?.unwrap_or_else(|| {
+                    crate::workspace::WorkspaceMetadata {
+                        id: index_workspace_target.id.clone(),
+                        root: index_workspace_target.root.clone(),
+                        created_at_unix: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs(),
+                        last_indexed_at_unix: None,
+                        watch_enabled: watch,
+                        skip_gitignore,
+                        index_generation: 0,
+                    }
+                });
+                metadata.skip_gitignore = skip_gitignore;
+                metadata.watch_enabled = watch;
+                index_workspace_target.write_metadata(&metadata)?;
+                index_state.refresh_workspace_watcher(&index_workspace_target)?;
                 let hash_model = cached_hash_model();
-                index_workspace(&index_workspace_target, hash_model.as_ref())
+                let summary = index_workspace(&index_workspace_target, hash_model.as_ref())?;
+                Result::<_, anyhow::Error>::Ok((summary, mode_leases))
             })
             .await
             .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
 
             match index_result {
-                Ok(summary) => {
+                Ok((summary, _mode_leases)) => {
                     if summary.indexed_files > 0 || summary.deleted_files > 0 {
                         state.clear_workspace_contexts(&workspace);
                     }
@@ -1803,6 +2086,13 @@ async fn handle_request_with_cancellation(
                     }
                 };
                 tracing::trace!("daemon_search_model={:?}", task_started.elapsed());
+                let Some(_mode_leases) = state_clone.acquire_workspace_modes_cancellable(
+                    &workspaces,
+                    options.skip_gitignore,
+                    options.cancel_token.as_deref(),
+                ) else {
+                    return (Vec::new(), workspace_warnings, 0, query, options, true);
+                };
                 let mut all_hits = Vec::new();
                 let mut all_errors = workspace_warnings;
                 let mut successful_workspaces = 0usize;
@@ -2157,11 +2447,19 @@ async fn handle_request_with_cancellation(
             let Some(permit) = state.acquire_search_permit(cancellation.as_ref()).await else {
                 return cancelled_search_response();
             };
+            let state_clone = state.clone();
             let result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
                 if options.is_cancelled() {
                     return Err("search cancelled".to_string());
                 }
+                let Some(_mode_leases) = state_clone.acquire_workspace_modes_cancellable(
+                    &workspaces,
+                    skip_gitignore,
+                    options.cancel_token.as_deref(),
+                ) else {
+                    return Err("search cancelled".to_string());
+                };
                 let mut batch = SearchBatch::new(workspace_warnings);
                 let mut workspace_options = options.clone();
                 if all_indices {
@@ -2171,10 +2469,12 @@ async fn handle_request_with_cancellation(
                     if options.is_cancelled() {
                         return Err("search cancelled".to_string());
                     }
-                    let result =
-                        ensure_queryable_workspace(workspace, skip_gitignore).and_then(|_| {
-                            regex_search_with_options(workspace, &pattern, &workspace_options)
-                        });
+                    let result = (|| {
+                        if ensure_queryable_workspace(&state_clone, workspace, skip_gitignore)? {
+                            state_clone.refresh_workspace_watcher(workspace)?;
+                        }
+                        regex_search_with_options(workspace, &pattern, &workspace_options)
+                    })();
                     batch.record(&workspace.root, all_indices, result);
                 }
                 let mut outcome =
@@ -2283,14 +2583,26 @@ async fn handle_request_with_cancellation(
                 if options.is_cancelled() {
                     return Err("search cancelled".to_string());
                 }
+                let Some(_mode_leases) = state_clone.acquire_workspace_modes_cancellable(
+                    &workspaces,
+                    options.skip_gitignore,
+                    options.cancel_token.as_deref(),
+                ) else {
+                    return Err("search cancelled".to_string());
+                };
                 let mut batch = SearchBatch::new(workspace_warnings);
                 for workspace in &workspaces {
                     if options.is_cancelled() {
                         return Err("search cancelled".to_string());
                     }
                     let result = (|| {
-                        if ensure_queryable_workspace(workspace, options.skip_gitignore)? {
+                        if ensure_queryable_workspace(
+                            &state_clone,
+                            workspace,
+                            options.skip_gitignore,
+                        )? {
                             state_clone.clear_workspace_contexts(workspace);
+                            state_clone.refresh_workspace_watcher(workspace)?;
                         }
                         let context = state_clone.cached_search_context(workspace, None, false)?;
                         literal_search_with_context(&context, workspace, &query, &options)
@@ -2329,20 +2641,24 @@ async fn handle_request_with_cancellation(
         DaemonRequest::Remove { path } => match Workspace::resolve(&path) {
             Ok(workspace) => {
                 let workspace_for_cache = workspace.clone();
-                // Stop watcher so no new indexing is triggered.
-                if let Some(registration) = state.watchers.lock().remove(&workspace.id) {
-                    stop_watcher(&workspace, registration);
-                }
-                if let Ok(Some(mut metadata)) = workspace.read_metadata() {
-                    metadata.watch_enabled = false;
-                    let _ = workspace.write_metadata(&metadata);
-                }
-
-                match tokio::task::spawn_blocking(move || remove_workspace_index(&workspace))
-                    .await
-                    .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())))
+                let remove_state = state.clone();
+                match tokio::task::spawn_blocking(move || {
+                    let leases =
+                        remove_state.acquire_workspace_mutations(std::slice::from_ref(&workspace));
+                    if let Some(registration) = remove_state.watchers.lock().remove(&workspace.id) {
+                        stop_watcher(&workspace, registration);
+                    }
+                    if let Ok(Some(mut metadata)) = workspace.read_metadata() {
+                        metadata.watch_enabled = false;
+                        let _ = workspace.write_metadata(&metadata);
+                    }
+                    remove_workspace_index(&workspace)?;
+                    Result::<_, anyhow::Error>::Ok(leases)
+                })
+                .await
+                .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())))
                 {
-                    Ok(_) => {
+                    Ok(_leases) => {
                         state.clear_workspace_contexts(&workspace_for_cache);
                         DaemonResponse::Ack {
                             message: format!("removed workspace index {}", path.display()),
@@ -2379,7 +2695,8 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
     let workspace = Workspace::resolve(path)?;
 
     let mut watchers = state.watchers.lock();
-    if watchers.contains_key(&workspace.id) {
+    if let Some(registration) = watchers.get_mut(&workspace.id) {
+        refresh_watch_registration(&workspace, registration)?;
         return Ok(());
     }
 
@@ -2450,6 +2767,7 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
         WatchRegistration {
             watcher,
             control: control.clone(),
+            event_filter,
             job_nonce: job_nonce.clone(),
             external_git_common_dir,
             external_git_watch,
@@ -2473,6 +2791,59 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
 
     daemon_log(&format!("watching {}", workspace.root.display()));
 
+    Ok(())
+}
+
+fn refresh_watch_registration(
+    workspace: &Workspace,
+    registration: &mut WatchRegistration,
+) -> Result<()> {
+    let desired_filter = WatchEventFilter::new(workspace);
+    let desired_common_dir = (!desired_filter.skip_gitignore)
+        .then(|| {
+            desired_filter
+                .git_exclude_path
+                .as_deref()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .filter(|path| !path.starts_with(&workspace.root))
+                .map(Path::to_path_buf)
+        })
+        .flatten();
+    let desired_watch = desired_common_dir
+        .as_deref()
+        .and_then(external_git_watch_target);
+
+    if registration.external_git_watch != desired_watch {
+        if let Some(desired) = &desired_watch {
+            registration
+                .watcher
+                .watch(desired, RecursiveMode::NonRecursive)
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "failed watching external Git metadata directory {}: {error:#}",
+                        desired.display()
+                    )
+                })?;
+        }
+
+        if let Some(current) = &registration.external_git_watch
+            && let Err(error) = registration.watcher.unwatch(current)
+            && !is_missing_watch_error(&error)
+        {
+            if let Some(desired) = &desired_watch {
+                let _ = registration.watcher.unwatch(desired);
+            }
+            return Err(anyhow::anyhow!(
+                "failed removing external Git metadata watch {}: {error:#}",
+                current.display()
+            ));
+        }
+    }
+
+    registration.external_git_common_dir = desired_common_dir;
+    registration.external_git_watch = desired_watch;
+    *registration.event_filter.lock() = desired_filter;
     Ok(())
 }
 
@@ -2649,8 +3020,14 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>, job_nonce:
                 // the rayon chunking pool + the blocking pool), oversubscribing
                 // CPU/memory exactly like the client burst #58 fixed.
                 let permit = state.cpu_permits.clone().acquire_owned().await.ok();
+                let index_state = state.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     let _permit = permit;
+                    let skip_gitignore = workspace
+                        .read_metadata()?
+                        .is_some_and(|metadata| metadata.skip_gitignore);
+                    let _mode_leases = index_state
+                        .acquire_workspace_modes(std::slice::from_ref(&workspace), skip_gitignore);
                     let hash_model = cached_hash_model();
                     let summary = if changed_paths.is_empty() {
                         index_workspace_for_watcher(&workspace, hash_model.as_ref())?
@@ -2776,14 +3153,36 @@ fn cached_hash_model() -> Arc<dyn EmbeddingModel> {
         .clone()
 }
 
-fn ensure_queryable_workspace(workspace: &Workspace, skip_gitignore: bool) -> Result<bool> {
-    if workspace.quick_index_health().is_queryable() {
+fn ensure_queryable_workspace(
+    state: &DaemonState,
+    workspace: &Workspace,
+    skip_gitignore: bool,
+) -> Result<bool> {
+    let indexed_filter_is_current =
+        workspace_index_matches_skip_gitignore(workspace, skip_gitignore);
+    if let Some(mut metadata) = workspace.read_metadata()?
+        && (!indexed_filter_is_current || metadata.skip_gitignore != skip_gitignore)
+    {
+        if metadata.skip_gitignore != skip_gitignore {
+            metadata.skip_gitignore = skip_gitignore;
+            workspace.write_metadata(&metadata)?;
+        }
+        state.refresh_workspace_watcher(workspace)?;
+    }
+
+    if workspace.quick_index_health().is_queryable() && indexed_filter_is_current {
         return Ok(false);
     }
 
     let health = workspace.index_health();
-    if health.is_queryable() {
+    if health.is_queryable() && indexed_filter_is_current {
         return Ok(false);
+    }
+
+    if health.is_queryable() {
+        let model = cached_hash_model();
+        index_workspace(workspace, model.as_ref())?;
+        return Ok(true);
     }
 
     let should_rebuild = match health.state {
@@ -2898,6 +3297,7 @@ fn workspace_readiness_signature(workspace: &Workspace) -> WorkspaceReadinessSig
     let base_dir = workspace.base_index_dir.as_ref();
     WorkspaceReadinessSignature {
         metadata: file_stamp(&workspace.metadata_path()),
+        indexed_skip_gitignore: indexed_skip_gitignore(workspace),
         index_format: file_stamp(&workspace.index_format_version_path()),
         sqlite: file_stamp(&workspace.sqlite_path()),
         tantivy: dir_stamp(&workspace.tantivy_dir()),
@@ -3405,6 +3805,7 @@ mod tests {
             query_results: Arc::new(Mutex::new(QueryResultCache::default())),
             neural_queries: Arc::new(Mutex::new(NeuralQueryCache::default())),
             search_cancellations: Arc::new(Mutex::new(SearchCancellationRegistry::default())),
+            workspace_modes: Arc::new(Mutex::new(HashMap::new())),
             query_result_cache_enabled: true,
             cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
             web_server: Arc::new(Mutex::new(None)),
@@ -5496,6 +5897,389 @@ mod tests {
         assert!(filter.path_should_reindex(&repo.path().join("target/debug/build.o")));
         assert!(filter.path_should_reindex(&repo.path().join("secret.txt")));
         assert!(!filter.path_should_reindex(&repo.path().join(".git/index")));
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn query_preparation_reconciles_healthy_index_filter_transitions() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join(".gitignore"), "ignored.rs\n").unwrap();
+        std::fs::write(
+            repo.path().join("visible.rs"),
+            "pub fn visible_transition_marker() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.path().join("ignored.rs"),
+            "pub fn ignored_transition_marker() {}\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+        let state = test_state();
+        register_watcher(&state, repo.path()).unwrap();
+        assert!(!indexed_file_contains(
+            &workspace,
+            "ignored.rs",
+            "ignored_transition_marker"
+        ));
+
+        assert!(
+            state
+                .prepare_workspace_for_hybrid_query(&workspace, true)
+                .unwrap()
+        );
+        assert!(indexed_file_contains(
+            &workspace,
+            "ignored.rs",
+            "ignored_transition_marker"
+        ));
+        assert!(
+            state
+                .watchers
+                .lock()
+                .get(&workspace.id)
+                .unwrap()
+                .event_filter
+                .lock()
+                .skip_gitignore
+        );
+
+        assert!(
+            state
+                .prepare_workspace_for_hybrid_query(&workspace, false)
+                .unwrap()
+        );
+        assert!(!indexed_file_contains(
+            &workspace,
+            "ignored.rs",
+            "ignored_transition_marker"
+        ));
+        assert!(
+            !state
+                .watchers
+                .lock()
+                .get(&workspace.id)
+                .unwrap()
+                .event_filter
+                .lock()
+                .skip_gitignore
+        );
+
+        let mut metadata = workspace.read_metadata().unwrap().unwrap();
+        metadata.skip_gitignore = true;
+        workspace.write_metadata(&metadata).unwrap();
+        register_watcher(&state, repo.path()).unwrap();
+        assert!(
+            state
+                .watchers
+                .lock()
+                .get(&workspace.id)
+                .unwrap()
+                .event_filter
+                .lock()
+                .skip_gitignore
+        );
+        assert!(
+            !state
+                .prepare_workspace_for_hybrid_query(&workspace, false)
+                .unwrap()
+        );
+        assert!(!workspace.read_metadata().unwrap().unwrap().skip_gitignore);
+        assert!(
+            !state
+                .watchers
+                .lock()
+                .get(&workspace.id)
+                .unwrap()
+                .event_filter
+                .lock()
+                .skip_gitignore
+        );
+
+        stop_all_watchers(&state);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn index_request_reconciles_filter_and_refreshes_live_watcher() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join(".gitignore"), "ignored.rs\n").unwrap();
+        std::fs::write(
+            repo.path().join("visible.rs"),
+            "pub fn visible_watcher_transition() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.path().join("ignored.rs"),
+            "pub fn ignored_watcher_transition() {}\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+        let state = test_state();
+        register_watcher(&state, repo.path()).unwrap();
+
+        for skip_gitignore in [true, false] {
+            let response = handle_request(
+                state.clone(),
+                DaemonRequest::Index {
+                    path: repo.path().to_path_buf(),
+                    watch: true,
+                    skip_gitignore,
+                },
+            )
+            .await;
+            assert!(matches!(response, DaemonResponse::Ack { .. }));
+
+            let registration_filter = state
+                .watchers
+                .lock()
+                .get(&workspace.id)
+                .unwrap()
+                .event_filter
+                .clone();
+            assert_eq!(registration_filter.lock().skip_gitignore, skip_gitignore);
+            assert_eq!(
+                indexed_file_contains(&workspace, "ignored.rs", "ignored_watcher_transition"),
+                skip_gitignore
+            );
+        }
+
+        stop_all_watchers(&state);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn opposite_filter_requests_wait_for_active_mode_through_search_and_index() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join(".gitignore"), "ignored.rs\n").unwrap();
+        std::fs::write(
+            repo.path().join("visible.rs"),
+            "pub fn visible_concurrency_marker() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.path().join("ignored.rs"),
+            "pub fn ignored_concurrency_marker() {}\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+        let mut state = test_state();
+        state.cpu_permits = Arc::new(tokio::sync::Semaphore::new(4));
+
+        let literal_request = |skip_gitignore| DaemonRequest::LiteralSearch {
+            path: Some(workspace.root.clone()),
+            query: "ignored_concurrency_marker".to_string(),
+            limit: Some(5),
+            context: 0,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_path: None,
+            scope_is_file: false,
+            skip_gitignore,
+        };
+        let hybrid_request = |skip_gitignore| DaemonRequest::Search {
+            path: Some(workspace.root.clone()),
+            query: "ignored_concurrency_marker".to_string(),
+            limit: Some(5),
+            context: 0,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_path: None,
+            scope_is_file: false,
+            skip_gitignore,
+            force_neural: false,
+            disable_memory_expansion: true,
+        };
+        let response_has_ignored_file = |response: DaemonResponse| match response {
+            DaemonResponse::SearchResults { hits, .. } => hits
+                .iter()
+                .any(|hit| hit.file_path.as_path() == Path::new("ignored.rs")),
+            other => panic!("expected search results, got {other:?}"),
+        };
+
+        let false_lease = state.acquire_workspace_mode(&workspace, false);
+        let same_mode = tokio::spawn(handle_request(state.clone(), literal_request(false)));
+        let same_mode = tokio::time::timeout(Duration::from_secs(2), same_mode)
+            .await
+            .expect("same-mode search should remain concurrent")
+            .unwrap();
+        assert!(!response_has_ignored_file(same_mode));
+
+        let opposite = tokio::spawn(handle_request(state.clone(), literal_request(true)));
+        let coordinator = state.workspace_mode_coordinator(&workspace.id);
+        for _ in 0..100 {
+            if coordinator.state.lock().next_mode == Some(true) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(coordinator.state.lock().next_mode, Some(true));
+        assert!(!opposite.is_finished());
+        drop(false_lease);
+        assert!(response_has_ignored_file(opposite.await.unwrap()));
+        assert!(response_has_ignored_file(
+            handle_request(state.clone(), hybrid_request(true)).await
+        ));
+        assert_eq!(state.query_results.lock().results.len(), 1);
+
+        let true_lease = state.acquire_workspace_mode(&workspace, true);
+        let index = tokio::spawn(handle_request(
+            state.clone(),
+            DaemonRequest::Index {
+                path: workspace.root.clone(),
+                watch: false,
+                skip_gitignore: false,
+            },
+        ));
+        for _ in 0..100 {
+            if coordinator.state.lock().exclusive_waiters > 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(coordinator.state.lock().exclusive_waiters > 0);
+        assert!(!index.is_finished());
+        drop(true_lease);
+        assert!(matches!(index.await.unwrap(), DaemonResponse::Ack { .. }));
+        assert!(state.query_results.lock().results.is_empty());
+        assert!(!response_has_ignored_file(
+            handle_request(state.clone(), hybrid_request(false)).await
+        ));
+        assert_eq!(state.query_results.lock().results.len(), 1);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn cancel_request_stops_search_waiting_for_opposite_workspace_mode() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let state = test_state();
+        let active_lease = state.acquire_workspace_mode(&workspace, false);
+        let request_id = uuid::Uuid::new_v4();
+        let request = DaemonRequest::LiteralSearch {
+            path: Some(workspace.root.clone()),
+            query: "needle".to_string(),
+            limit: Some(5),
+            context: 0,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_path: None,
+            scope_is_file: false,
+            skip_gitignore: true,
+        };
+        let search_state = state.clone();
+        let search = tokio::spawn(async move {
+            handle_enveloped_request(
+                search_state,
+                DaemonRequestEnvelope::with_request_id(request, request_id),
+            )
+            .await
+        });
+
+        let coordinator = state.workspace_mode_coordinator(&workspace.id);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while coordinator.state.lock().next_mode != Some(true) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("opposite-mode search should enter the workspace-mode queue");
+
+        let cancel = tokio::time::timeout(
+            Duration::from_secs(1),
+            handle_request(
+                state.clone(),
+                DaemonRequest::CancelSearch {
+                    search_id: request_id,
+                },
+            ),
+        )
+        .await
+        .expect("cancellation should not wait for the active workspace lease");
+        assert!(matches!(cancel, DaemonResponse::Ack { .. }));
+        let response = tokio::time::timeout(Duration::from_secs(1), search)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            response,
+            DaemonResponse::Error { message } if message == "search cancelled"
+        ));
+        assert_eq!(coordinator.state.lock().next_mode, None);
+        assert!(state.search_cancellations.lock().entries.is_empty());
+
+        drop(active_lease);
+    }
+
+    #[test]
+    fn cancelled_waiter_preserves_other_workspace_mode_reservations() {
+        let coordinator = Arc::new(WorkspaceModeCoordinator::default());
+        let active_lease = coordinator.acquire_shared(false, None).unwrap();
+        let owner_cancellation = Arc::new(AtomicBool::new(false));
+        let owner_coordinator = coordinator.clone();
+        let owner_cancellation_thread = owner_cancellation.clone();
+        let owner = std::thread::spawn(move || {
+            owner_coordinator.acquire_shared(true, Some(&owner_cancellation_thread))
+        });
+
+        for _ in 0..100 {
+            if coordinator.state.lock().next_mode_waiters == 1 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(coordinator.state.lock().next_mode_waiters, 1);
+
+        let waiter_cancellation = Arc::new(AtomicBool::new(false));
+        let waiter_coordinator = coordinator.clone();
+        let waiter_cancellation_thread = waiter_cancellation.clone();
+        let waiter = std::thread::spawn(move || {
+            waiter_coordinator.acquire_shared(true, Some(&waiter_cancellation_thread))
+        });
+        for _ in 0..100 {
+            if coordinator.state.lock().next_mode_waiters == 2 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(coordinator.state.lock().next_mode_waiters, 2);
+
+        let cancelled = AtomicBool::new(true);
+        assert!(coordinator.acquire_shared(true, Some(&cancelled)).is_none());
+        assert_eq!(coordinator.state.lock().next_mode, Some(true));
+        assert_eq!(coordinator.state.lock().next_mode_waiters, 2);
+
+        owner_cancellation.store(true, Ordering::Relaxed);
+        assert!(owner.join().unwrap().is_none());
+        assert_eq!(coordinator.state.lock().next_mode, Some(true));
+        assert_eq!(coordinator.state.lock().next_mode_waiters, 1);
+
+        drop(active_lease);
+        drop(waiter.join().unwrap());
     }
 
     #[test]
