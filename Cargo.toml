@@ -121,7 +121,7 @@ tempfile = "3.27"
 openssl = { version = "0.10", features = ["vendored"] }
 
 [target.'cfg(not(windows))'.dependencies]
-shlex = "1.3"
+shlex = "2.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 candle_embed = { package = "ivygrep-candle-embed", path = "vendor/candle_embed", version = "=0.1.4-ivygrep.1", default-features = false, optional = true, features = ["metal"] }
