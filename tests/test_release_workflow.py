@@ -136,7 +136,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("extra_features: cuda", workflow)
         self.assertIn("CUDA_COMPUTE_CAP", workflow)
         self.assertIn(
-            "Jimver/cuda-toolkit@3d45d157f327c09c04b50ee6ccdea2d9d017ec76",
+            "Jimver/cuda-toolkit@b8bf9c6c28f8a92fbb04dcfcaee872e60c57462d",
             workflow,
         )
         self.assertIn("libcuda.so.1", workflow)
