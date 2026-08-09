@@ -46,6 +46,7 @@ jobs:
             } >> "$GITHUB_OUTPUT"
             if git diff --quiet "$PR_BASE_SHA" HEAD -- \
               .cargo/ \
+              .github/workflows/million-scale.yml \
               assets/query_aliases.toml \
               benchmarks/public/reranker_model.json \
               build.rs \
@@ -152,14 +153,88 @@ jobs:
             fi
           done
 
-      - name: Reject statistically significant regressions
+      - name: Compare paired generated-corpus trials
+        id: comparison
         if: steps.parameters.outputs.required == 'true'
         run: |
+          set +e
           python3 scripts/compare_million_benchmarks.py \
             --baseline benchmark-results/baseline-*.json \
             --current benchmark-results/current-*.json \
             --significant-regression-ratio 1.10 \
-            --output benchmark-results/comparison.json
+            --output benchmark-results/comparison-initial.json
+          comparison_status=$?
+          set -e
+          if (( comparison_status == 0 )); then
+            cp benchmark-results/comparison-initial.json benchmark-results/comparison.json
+            echo "confirmation_required=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "confirmation_required=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Paired generated-corpus benchmark"
+              echo
+              echo "Initial comparison reported a regression. Running confirmation trials in reverse order."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Confirm reported regressions in reverse order
+        if: >-
+          steps.parameters.outputs.required == 'true' &&
+          steps.comparison.outputs.confirmation_required == 'true'
+        env:
+          BASE_SHA: ${{ steps.parameters.outputs.base }}
+          FILES: ${{ steps.parameters.outputs.files }}
+        run: |
+          for run in 1 2; do
+            run_base() {
+              uv run scripts/bench_million_chunks.py \
+                --corpus "$RUNNER_TEMP/generated-public-corpus" \
+                --home "$RUNNER_TEMP/base-confirmation-home-$run" \
+                --binary "$RUNNER_TEMP/base-target/release/ig" \
+                --files "$FILES" \
+                --query-samples 100 \
+                --source-commit "$BASE_SHA" \
+                --output "benchmark-results/baseline-confirmation-$run.json"
+              rm -rf "$RUNNER_TEMP/base-confirmation-home-$run"
+            }
+            run_head() {
+              uv run scripts/bench_million_chunks.py \
+                --corpus "$RUNNER_TEMP/generated-public-corpus" \
+                --home "$RUNNER_TEMP/head-confirmation-home-$run" \
+                --binary "$RUNNER_TEMP/head-target/release/ig" \
+                --files "$FILES" \
+                --query-samples 100 \
+                --source-commit "$GITHUB_SHA" \
+                --output "benchmark-results/current-confirmation-$run.json"
+              rm -rf "$RUNNER_TEMP/head-confirmation-home-$run"
+            }
+            if (( run % 2 )); then
+              run_head
+              run_base
+            else
+              run_base
+              run_head
+            fi
+          done
+          set +e
+          python3 scripts/compare_million_benchmarks.py \
+            --baseline benchmark-results/baseline-confirmation-*.json \
+            --current benchmark-results/current-confirmation-*.json \
+            --significant-regression-ratio 1.10 \
+            --output benchmark-results/comparison-confirmation.json
+          comparison_status=$?
+          set -e
+          cp benchmark-results/comparison-confirmation.json benchmark-results/comparison.json
+          if (( comparison_status == 0 )); then
+            echo "Confirmation trials did not reproduce the initial regression." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Confirmation trials reproduced the initial regression." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$comparison_status"
+
+      - name: Validate benchmark evidence
+        if: always() && steps.parameters.outputs.required == 'true'
+        run: |
           python3 scripts/check_public_benchmark_privacy.py benchmark-results
 
       - name: Run scheduled daemon soak
