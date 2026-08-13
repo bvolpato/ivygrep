@@ -94,6 +94,24 @@ jobs:
           echo "version=$main_version" >> "$GITHUB_OUTPUT"
           echo "source_commit=$tag_commit" >> "$GITHUB_OUTPUT"
 
+      - name: Verify git dependencies are published
+        run: |
+          set -Eeuo pipefail
+
+          metadata="$(cargo metadata --locked --format-version 1)"
+          while IFS=$'\t' read -r package version; do
+            http_code="$(curl -sS -L -A "ivygrep-release/${GITHUB_RUN_ID}" -o "$RUNNER_TEMP/${package}-${version}.json" -w '%{http_code}' \
+              "https://crates.io/api/v1/crates/${package}/${version}")"
+            if [[ "$http_code" != "200" ]]; then
+              echo "$package $version must be published on crates.io before ivygrep packages can be published (HTTP $http_code)" >&2
+              exit 1
+            fi
+          done < <(
+            jq -r \
+              '.packages[] | select((.source // "") | startswith("git+")) | [.name, .version] | @tsv' \
+              <<< "$metadata"
+          )
+
       - name: Authenticate to crates.io
         if: ${{ !inputs.bootstrap }}
         id: auth
