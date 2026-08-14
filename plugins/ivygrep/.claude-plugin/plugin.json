@@ -1,6 +1,6 @@
 {
   "name": "ivygrep",
-  "version": "1.2.10",
+  "version": "1.2.11",
   "description": "Local semantic search for code, notes, and memories with task context for coding agents",
   "author": {
     "name": "Bruno Volpato",

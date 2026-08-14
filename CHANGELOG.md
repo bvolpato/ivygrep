@@ -4,8 +4,14 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.2.11] - 2026-08-14
+
 ### Security
 - Updated Tantivy to its patched `lru` dependency, resolving `RUSTSEC-2026-0253` across search and TUI dependency paths.
+
+### Maintenance
+- Updated Cargo, Web, and GitHub Actions dependencies.
+- Added confirmation runs for noisy million-scale benchmark regressions.
 
 ## [1.2.10] - 2026-08-05
 
