@@ -2397,6 +2397,7 @@ struct GlobPathQueryFilter {
 struct GlobPathFilterCacheKey {
     include_globs: Vec<String>,
     exclude_globs: Vec<String>,
+    type_filter: Option<String>,
     scope_path: Option<String>,
     scope_is_file: bool,
 }
@@ -2422,6 +2423,7 @@ fn build_glob_path_query_filter(
     let cache_key = GlobPathFilterCacheKey {
         include_globs: options.include_globs.clone(),
         exclude_globs: options.exclude_globs.clone(),
+        type_filter: options.canonical_type_filter(),
         scope_path: options
             .scope_filter
             .as_ref()
@@ -2535,9 +2537,10 @@ fn visit_distinct_file_paths(
                     parameters.push(format!("{prefix}/"));
                     parameters.push(format!("{prefix}0"));
                 }
-                IndexedGlobPath::Language(language) => {
-                    alternatives.push("language = ?".to_string());
-                    parameters.push(language);
+                IndexedGlobPath::Languages(languages) => {
+                    let placeholders = vec!["?"; languages.len()].join(", ");
+                    alternatives.push(format!("language IN ({placeholders})"));
+                    parameters.extend(languages);
                 }
             }
         }
@@ -2562,7 +2565,7 @@ fn visit_distinct_file_paths(
 enum IndexedGlobPath {
     Exact(String),
     Prefix(String),
-    Language(String),
+    Languages(Vec<String>),
 }
 
 fn indexed_glob_path_filter(glob: &str) -> Option<IndexedGlobPath> {
@@ -2582,8 +2585,14 @@ fn indexed_glob_path_filter(glob: &str) -> Option<IndexedGlobPath> {
     {
         return None;
     }
-    crate::chunking::language_for_path(&PathBuf::from(format!("file.{extension}")))
-        .map(|language| IndexedGlobPath::Language(language.to_string()))
+    crate::chunking::languages_for_extension_glob(extension).map(|languages| {
+        IndexedGlobPath::Languages(
+            languages
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+        )
+    })
 }
 
 fn constrain_query_to_glob_paths(
@@ -5799,6 +5808,7 @@ mod tests {
             )
             .unwrap();
         for (path, language) in [
+            ("src/feature/Dockerfile.rs", "dockerfile"),
             ("src/feature/match.rs", "rust"),
             ("src/feature/readme.md", "markdown"),
             ("src/other.rs", "rust"),
@@ -5818,7 +5828,11 @@ mod tests {
                     include_globs: vec!["src/feature/**".to_string()],
                     ..SearchOptions::default()
                 },
-                vec!["src/feature/match.rs", "src/feature/readme.md"],
+                vec![
+                    "src/feature/Dockerfile.rs",
+                    "src/feature/match.rs",
+                    "src/feature/readme.md",
+                ],
             ),
             (
                 SearchOptions {
@@ -5836,7 +5850,7 @@ mod tests {
                     }),
                     ..SearchOptions::default()
                 },
-                vec!["src/feature/match.rs"],
+                vec!["src/feature/Dockerfile.rs", "src/feature/match.rs"],
             ),
         ] {
             let mut visited = Vec::new();
@@ -5847,6 +5861,34 @@ mod tests {
             .unwrap();
             visited.sort();
             assert_eq!(visited, expected);
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn cached_glob_filters_distinguish_canonical_type_filters() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let source = root.path().join("src");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("code.rs"), "pub fn cached_glob_marker() {}\n").unwrap();
+        std::fs::write(source.join("notes.md"), "# cached glob marker\n").unwrap();
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        let context = SearchContext::load(&workspace, None, false).unwrap();
+
+        for (type_filter, expected) in [("rs", "src/code.rs"), ("markdown", "src/notes.md")] {
+            let options = SearchOptions {
+                include_globs: vec!["src/**".to_string()],
+                type_filter: Some(type_filter.to_string()),
+                ..SearchOptions::default()
+            };
+            let matcher =
+                PathGlobMatcher::new(&options.include_globs, &options.exclude_globs).unwrap();
+            let filter = build_glob_path_query_filter(&context, &matcher, &options).unwrap();
+            assert_eq!(filter.included_paths, Some(vec![expected.to_string()]));
         }
     }
 

@@ -389,6 +389,22 @@ pub fn language_for_path(path: &Path) -> Option<&'static str> {
     find_language_def(path).map(|def| def.name)
 }
 
+pub(crate) fn languages_for_extension_glob(extension: &str) -> Option<Vec<&'static str>> {
+    let primary = language_for_path(&PathBuf::from(format!("file.{extension}")))?;
+    let mut languages = vec![primary];
+    for language in LANGUAGES {
+        if language.name != primary
+            && language
+                .filenames
+                .iter()
+                .any(|pattern| !pattern.starts_with('='))
+        {
+            languages.push(language.name);
+        }
+    }
+    Some(languages)
+}
+
 /// Resolve a user-provided type filter to a canonical language name.
 ///
 /// Accepts canonical names (`rust`), file extensions (`rs`, `py`, `md`),
