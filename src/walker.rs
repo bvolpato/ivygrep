@@ -70,7 +70,14 @@ fn is_owned_storage_path(root: &Path, path: &Path, owned_root: Option<&Path>) ->
         && path.file_name().is_some_and(|name| {
             matches!(
                 name.to_str(),
-                Some("daemon.lock" | "daemon.log" | "daemon.pid" | "daemon.port" | "daemon.sock")
+                Some(
+                    "daemon.lock"
+                        | "daemon.log"
+                        | "daemon.log.1"
+                        | "daemon.pid"
+                        | "daemon.port"
+                        | "daemon.sock"
+                )
             )
         })
 }
@@ -200,12 +207,14 @@ mod tests {
         std::fs::create_dir_all(root.path().join("indexes/workspace")).unwrap();
         std::fs::write(root.path().join("indexes/workspace/job.json"), "{}").unwrap();
         std::fs::write(root.path().join("daemon.log"), "internal state").unwrap();
+        std::fs::write(root.path().join("daemon.log.1"), "rotated internal state").unwrap();
         std::fs::write(root.path().join("main.rs"), "fn main() {}\n").unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", root.path()) };
 
         let files = collect_files(root.path(), true);
         assert!(files.contains("main.rs"));
         assert!(!files.contains("daemon.log"));
+        assert!(!files.contains("daemon.log.1"));
         assert!(!files.iter().any(|path| path.starts_with("indexes/")));
     }
 }
