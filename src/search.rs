@@ -2397,6 +2397,7 @@ struct GlobPathQueryFilter {
 struct GlobPathFilterCacheKey {
     include_globs: Vec<String>,
     exclude_globs: Vec<String>,
+    type_filter: Option<String>,
     scope_path: Option<String>,
     scope_is_file: bool,
 }
@@ -2422,6 +2423,7 @@ fn build_glob_path_query_filter(
     let cache_key = GlobPathFilterCacheKey {
         include_globs: options.include_globs.clone(),
         exclude_globs: options.exclude_globs.clone(),
+        type_filter: options.canonical_type_filter(),
         scope_path: options
             .scope_filter
             .as_ref()
@@ -2469,9 +2471,10 @@ fn build_glob_path_query_filter(
         filter.included_paths.is_some() || filter.excluded_paths.is_some()
     };
 
-    let should_continue = visit_distinct_file_paths(&ctx.sqlite, |path| collect_path(path, 0))?;
+    let should_continue =
+        visit_distinct_file_paths(&ctx.sqlite, options, |path| collect_path(path, 0))?;
     if should_continue && let Some(base_sqlite) = &ctx.base_sqlite {
-        visit_distinct_file_paths(base_sqlite, |path| collect_path(path, 1))?;
+        visit_distinct_file_paths(base_sqlite, options, |path| collect_path(path, 1))?;
     }
 
     let cached_terms = filter.included_paths.as_ref().map_or(0, Vec::len)
@@ -2489,16 +2492,107 @@ fn build_glob_path_query_filter(
 
 fn visit_distinct_file_paths(
     conn: &Connection,
+    options: &SearchOptions,
     mut visit: impl FnMut(String) -> bool,
 ) -> Result<bool> {
-    let mut stmt = conn.prepare("SELECT DISTINCT file_path FROM chunks")?;
-    let mut rows = stmt.query([])?;
+    let mut clauses = Vec::new();
+    let mut parameters = Vec::new();
+
+    if let Some(scope) = &options.scope_filter {
+        let path = index_path_string(&scope.rel_path);
+        if scope.is_file {
+            clauses.push("file_path = ?".to_string());
+            parameters.push(path);
+        } else if !path.is_empty() {
+            clauses.push("(file_path >= ? AND file_path < ?)".to_string());
+            parameters.push(format!("{path}/"));
+            parameters.push(format!("{path}0"));
+        }
+    }
+
+    if let Some(language) = options.canonical_type_filter() {
+        clauses.push("language = ?".to_string());
+        parameters.push(language);
+    }
+
+    let candidate_globs = if options.include_globs.is_empty() {
+        &options.exclude_globs
+    } else {
+        &options.include_globs
+    };
+    let indexed_globs = candidate_globs
+        .iter()
+        .map(|glob| indexed_glob_path_filter(glob))
+        .collect::<Option<Vec<_>>>();
+    if let Some(indexed_globs) = indexed_globs.filter(|globs| !globs.is_empty()) {
+        let mut alternatives = Vec::with_capacity(indexed_globs.len());
+        for glob in indexed_globs {
+            match glob {
+                IndexedGlobPath::Exact(path) => {
+                    alternatives.push("file_path = ?".to_string());
+                    parameters.push(path);
+                }
+                IndexedGlobPath::Prefix(prefix) => {
+                    alternatives.push("(file_path >= ? AND file_path < ?)".to_string());
+                    parameters.push(format!("{prefix}/"));
+                    parameters.push(format!("{prefix}0"));
+                }
+                IndexedGlobPath::Languages(languages) => {
+                    let placeholders = vec!["?"; languages.len()].join(", ");
+                    alternatives.push(format!("language IN ({placeholders})"));
+                    parameters.extend(languages);
+                }
+            }
+        }
+        clauses.push(format!("({})", alternatives.join(" OR ")));
+    }
+
+    let mut sql = "SELECT DISTINCT file_path FROM chunks".to_string();
+    if !clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&clauses.join(" AND "));
+    }
+    let mut stmt = conn.prepare(&sql)?;
+    let mut rows = stmt.query(rusqlite::params_from_iter(parameters.iter()))?;
     while let Some(row) = rows.next()? {
         if !visit(row.get(0)?) {
             return Ok(false);
         }
     }
     Ok(true)
+}
+
+enum IndexedGlobPath {
+    Exact(String),
+    Prefix(String),
+    Languages(Vec<String>),
+}
+
+fn indexed_glob_path_filter(glob: &str) -> Option<IndexedGlobPath> {
+    if let Some(path) = indexed_include_path_filter(glob) {
+        return Some(match path {
+            IndexedIncludePath::Exact(path) => IndexedGlobPath::Exact(path),
+            IndexedIncludePath::Prefix(path) => IndexedGlobPath::Prefix(path),
+        });
+    }
+
+    let glob = glob.trim();
+    let extension = glob.strip_prefix("*.")?;
+    if extension.is_empty()
+        || extension
+            .chars()
+            .any(|character| matches!(character, '/' | '\\' | '*' | '?' | '[' | '{'))
+    {
+        return None;
+    }
+    crate::chunking::languages_for_extension_glob(extension).map(|languages| {
+        IndexedGlobPath::Languages(
+            languages
+                .into_iter()
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+        )
+    })
 }
 
 fn constrain_query_to_glob_paths(
@@ -5700,6 +5794,101 @@ mod tests {
             let hybrid_hits = hybrid_search(&workspace, "targettoken", None, &options).unwrap();
             assert_eq!(hybrid_hits.len(), 1);
             assert_eq!(hybrid_hits[0].file_path, PathBuf::from("scoped/match.rs"));
+        }
+    }
+
+    #[test]
+    fn selective_globs_visit_only_indexed_candidate_paths() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE chunks (file_path TEXT NOT NULL, language TEXT NOT NULL);
+                 CREATE INDEX idx_chunks_file_path ON chunks(file_path);
+                 CREATE INDEX idx_chunks_language ON chunks(language);",
+            )
+            .unwrap();
+        for (path, language) in [
+            ("src/feature/Dockerfile.rs", "dockerfile"),
+            ("src/feature/match.rs", "rust"),
+            ("src/feature/readme.md", "markdown"),
+            ("src/other.rs", "rust"),
+            ("vendor/ignored.rs", "rust"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO chunks (file_path, language) VALUES (?1, ?2)",
+                    rusqlite::params![path, language],
+                )
+                .unwrap();
+        }
+
+        for (options, expected) in [
+            (
+                SearchOptions {
+                    include_globs: vec!["src/feature/**".to_string()],
+                    ..SearchOptions::default()
+                },
+                vec![
+                    "src/feature/Dockerfile.rs",
+                    "src/feature/match.rs",
+                    "src/feature/readme.md",
+                ],
+            ),
+            (
+                SearchOptions {
+                    exclude_globs: vec!["vendor/**".to_string()],
+                    ..SearchOptions::default()
+                },
+                vec!["vendor/ignored.rs"],
+            ),
+            (
+                SearchOptions {
+                    include_globs: vec!["*.rs".to_string()],
+                    scope_filter: Some(WorkspaceScope {
+                        rel_path: PathBuf::from("src/feature"),
+                        is_file: false,
+                    }),
+                    ..SearchOptions::default()
+                },
+                vec!["src/feature/Dockerfile.rs", "src/feature/match.rs"],
+            ),
+        ] {
+            let mut visited = Vec::new();
+            visit_distinct_file_paths(&connection, &options, |path| {
+                visited.push(path);
+                true
+            })
+            .unwrap();
+            visited.sort();
+            assert_eq!(visited, expected);
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn cached_glob_filters_distinguish_canonical_type_filters() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let source = root.path().join("src");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("code.rs"), "pub fn cached_glob_marker() {}\n").unwrap();
+        std::fs::write(source.join("notes.md"), "# cached glob marker\n").unwrap();
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        let context = SearchContext::load(&workspace, None, false).unwrap();
+
+        for (type_filter, expected) in [("rs", "src/code.rs"), ("markdown", "src/notes.md")] {
+            let options = SearchOptions {
+                include_globs: vec!["src/**".to_string()],
+                type_filter: Some(type_filter.to_string()),
+                ..SearchOptions::default()
+            };
+            let matcher =
+                PathGlobMatcher::new(&options.include_globs, &options.exclude_globs).unwrap();
+            let filter = build_glob_path_query_filter(&context, &matcher, &options).unwrap();
+            assert_eq!(filter.included_paths, Some(vec![expected.to_string()]));
         }
     }
 
