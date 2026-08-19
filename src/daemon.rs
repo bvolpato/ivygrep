@@ -244,6 +244,7 @@ struct PendingWatchWork {
 struct WatchControl {
     workspace: Workspace,
     notify: Notify,
+    shutdown: Notify,
     dirty: AtomicBool,
     indexing: AtomicBool,
     retrying: AtomicBool,
@@ -258,6 +259,7 @@ impl WatchControl {
         Self {
             workspace,
             notify: Notify::new(),
+            shutdown: Notify::new(),
             dirty: AtomicBool::new(false),
             indexing: AtomicBool::new(false),
             retrying: AtomicBool::new(false),
@@ -1720,6 +1722,7 @@ fn restore_configured_watchers(state: &DaemonState) {
 fn stop_watcher(workspace: &Workspace, registration: WatchRegistration) {
     registration.control.active.store(false, Ordering::Relaxed);
     registration.control.notify.notify_waiters();
+    registration.control.shutdown.notify_one();
     if let Some(nonce) = registration.job_nonce {
         let _ = jobs::finish_job_if_current(workspace, JobKind::Watcher, &nonce, "stopped", None);
     } else {
@@ -2992,12 +2995,18 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>, job_nonce:
             }
 
             wait_for_watch_quiet(&control).await;
+            if !control.active.load(Ordering::Relaxed) {
+                break;
+            }
 
             if control.indexing.swap(true, Ordering::Relaxed) {
                 continue;
             }
 
-            while let Some(pending_work) = control.take_pending_work() {
+            while control.active.load(Ordering::Relaxed) {
+                let Some(pending_work) = control.take_pending_work() else {
+                    break;
+                };
                 control.retrying.store(false, Ordering::Relaxed);
                 let pending = control.pending_events.swap(0, Ordering::Relaxed);
                 control
@@ -3104,16 +3113,22 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>, job_nonce:
                         };
                         update_watcher_job(&control, job_nonce.as_deref(), failed);
                         control.requeue_failed_index(error);
-                        tokio::time::sleep(watch_retry_delay(consecutive_failures)).await;
+                        tokio::select! {
+                            () = tokio::time::sleep(watch_retry_delay(consecutive_failures)) => {},
+                            () = control.shutdown.notified() => {},
+                        }
                     }
                 }
 
-                if control.dirty.load(Ordering::Relaxed) {
+                if control.active.load(Ordering::Relaxed) && control.dirty.load(Ordering::Relaxed) {
                     wait_for_watch_quiet(&control).await;
                 }
             }
 
             control.indexing.store(false, Ordering::Relaxed);
+            if !control.active.load(Ordering::Relaxed) {
+                break;
+            }
             let idle = JobUpdate {
                 phase: Some(if control.dirty.load(Ordering::Relaxed) {
                     "dirty".to_string()
@@ -6561,6 +6576,56 @@ mod tests {
         stop_all_watchers(&state);
 
         assert!(recovered, "failed watcher update was not retried");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn removing_workspace_cancels_pending_watcher_retry() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn pending_retry() {}\n").unwrap();
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+        let state = test_state();
+        register_watcher(&state, repo.path()).unwrap();
+        let control = state
+            .watchers
+            .lock()
+            .get(&workspace.id)
+            .unwrap()
+            .control
+            .clone();
+
+        std::fs::write(workspace.metadata_path(), "invalid metadata").unwrap();
+        control.mark_paths_dirty([PathBuf::from("lib.rs")]);
+        for _ in 0..60 {
+            if control.retrying.load(Ordering::Relaxed) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(control.retrying.load(Ordering::Relaxed));
+
+        let response = handle_request(
+            state,
+            DaemonRequest::Remove {
+                path: repo.path().to_path_buf(),
+            },
+        )
+        .await;
+        assert!(matches!(response, DaemonResponse::Ack { .. }));
+        assert!(!workspace.sqlite_path().exists());
+        assert!(!workspace.metadata_path().exists());
+
+        tokio::time::sleep(WATCH_RETRY_INITIAL_DELAY.saturating_mul(2)).await;
+        assert!(
+            !workspace.sqlite_path().exists() && !workspace.metadata_path().exists(),
+            "a stopped retry recreated the index"
+        );
+        assert!(!control.indexing.load(Ordering::Relaxed));
     }
 
     #[tokio::test]
