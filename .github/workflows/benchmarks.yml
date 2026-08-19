@@ -62,22 +62,7 @@ jobs:
         env:
           BENCHMARK_BASE_REF: ${{ steps.benchmark-base.outputs.ref }}
         run: |
-          if git diff --quiet "$BENCHMARK_BASE_REF" HEAD -- \
-            .cargo/ \
-            assets/query_aliases.toml \
-            benchmarks/public/reranker_model.json \
-            Cargo.lock \
-            Cargo.toml \
-            benches/ \
-            build.rs \
-            rust-toolchain.toml \
-            scripts/benchmark_guard.py \
-            scripts/criterion_to_benchmark_data.py \
-            scripts/eval_relevance.py \
-            scripts/run_current_head_benchmark.py \
-            src/ \
-            tests/fixtures/ivygrep_relevance_queries.json \
-            vendor/; then
+          if git diff --quiet "$BENCHMARK_BASE_REF" HEAD; then
             echo "required=false" >> "$GITHUB_OUTPUT"
           else
             echo "required=true" >> "$GITHUB_OUTPUT"

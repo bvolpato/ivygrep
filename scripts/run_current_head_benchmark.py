@@ -22,6 +22,17 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "ivygrep_relevance_queries.json"
 HARNESS = ROOT / "scripts" / "eval_relevance.py"
 DEFAULT_OUTPUT = ROOT / "docs" / "benchmarks" / "current-head-relevance.json"
+SOURCE_INPUTS = (
+    ".cargo",
+    "assets",
+    "benchmarks/public/reranker_model.json",
+    "Cargo.lock",
+    "Cargo.toml",
+    "build.rs",
+    "rust-toolchain.toml",
+    "src",
+    "vendor",
+)
 
 
 def sha256_file(path: Path) -> str:
@@ -32,6 +43,23 @@ def sha256_file(path: Path) -> str:
 def package_version(root: Path = ROOT) -> str:
     with (root / "Cargo.toml").open("rb") as handle:
         return tomllib.load(handle)["package"]["version"]
+
+
+def source_inputs_sha256(root: Path = ROOT) -> str:
+    paths = []
+    for name in SOURCE_INPUTS:
+        path = root / name
+        if path.is_file():
+            paths.append(path)
+        elif path.is_dir():
+            paths.extend(candidate for candidate in path.rglob("*") if candidate.is_file())
+
+    digest = hashlib.sha256()
+    for path in sorted(paths, key=lambda candidate: candidate.relative_to(root).as_posix()):
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(bytes.fromhex(sha256_file(path)))
+    return digest.hexdigest()
 
 
 def validate_report(report: dict, *, root: Path = ROOT) -> list[str]:
@@ -48,6 +76,9 @@ def validate_report(report: dict, *, root: Path = ROOT) -> list[str]:
         expected_digest = sha256_file(path)
         if actual_digest != expected_digest:
             errors.append(f"{name} SHA-256 no longer matches {path.relative_to(root)}")
+
+    if report.get("source", {}).get("sha256") != source_inputs_sha256(root):
+        errors.append("benchmark-relevant source SHA-256 no longer matches the current tree")
 
     expected_queries = len(json.loads(fixture.read_text(encoding="utf-8"))["queries"])
     modes = report.get("modes", {})
@@ -130,6 +161,10 @@ def measure(binary: Path) -> dict:
         "harness": {
             "path": str(HARNESS.relative_to(ROOT)),
             "sha256": sha256_file(HARNESS),
+        },
+        "source": {
+            "inputs": list(SOURCE_INPUTS),
+            "sha256": source_inputs_sha256(),
         },
         "modes": modes,
     }

@@ -31,9 +31,40 @@ embedding_renderer = load_script("render_embedding_bakeoff")
 matrix_runner = load_script("run_public_benchmark_matrix")
 reranker_trainer = load_script("train_public_reranker")
 reranker_renderer = load_script("render_public_reranker")
+current_head_runner = load_script("run_current_head_benchmark")
 
 
 class PublicBenchmarkTest(unittest.TestCase):
+    def test_current_head_evidence_rejects_changed_search_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture = root / "tests" / "fixtures" / "ivygrep_relevance_queries.json"
+            harness = root / "scripts" / "eval_relevance.py"
+            source = root / "src" / "search.rs"
+            for path in (fixture, harness, source):
+                path.parent.mkdir(parents=True, exist_ok=True)
+            (root / "Cargo.toml").write_text('[package]\nversion = "1.2.3"\n')
+            fixture.write_text('{"queries": [{}]}\n')
+            harness.write_text("original harness\n")
+            source.write_text("fn original_search() {}\n")
+            report = {
+                "binary": {"version": "ivygrep 1.2.3"},
+                "fixture": {"sha256": current_head_runner.sha256_file(fixture)},
+                "harness": {"sha256": current_head_runner.sha256_file(harness)},
+                "source": {"sha256": current_head_runner.source_inputs_sha256(root)},
+                "modes": {
+                    "foreground": {"queries": 1},
+                    "hash-enriched": {"queries": 1},
+                },
+            }
+            self.assertEqual(current_head_runner.validate_report(report, root=root), [])
+
+            source.write_text("fn replacement_search() {}\n")
+            self.assertTrue(
+                any("source SHA-256" in error for error in
+                    current_head_runner.validate_report(report, root=root))
+            )
+
     def test_coreb_hard_negatives_are_not_exported_as_relevant(self):
         rows = [
             {"query_id": "q1", "doc_id": "positive", "relevance": 2},
