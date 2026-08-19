@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import tomllib
 
 
 REPOSITORY = "https://github.com/bvolpato/ivygrep"
@@ -117,6 +118,16 @@ def summarize(evidence_id: str, path: Path) -> tuple[str | None, dict]:
         }
     document = json.loads(path.read_text(encoding="utf-8"))
     source_commit = document.get("ivygrep_commit")
+    if evidence_id == "current-head-relevance":
+        return source_commit, {
+            "version": document["binary"]["version"],
+            "binary_sha256": document["binary"]["sha256"],
+            "scope": document["scope"],
+            "runtime": document["runtime"],
+            "fixture": document["fixture"],
+            "harness": document["harness"],
+            "modes": document["modes"],
+        }
     if evidence_id.startswith("public-retrieval"):
         summary = document.get("summary", {})
         result_binaries = [
@@ -503,8 +514,37 @@ def build_dashboard(root: Path, manifest_path: Path) -> dict:
         and sha256_at_commit(root, release_history_path, release_history_commit)
         == release_history_sha
     )
+    package_manifest = root / "Cargo.toml"
+    if package_manifest.exists():
+        with package_manifest.open("rb") as handle:
+            current_version = tomllib.load(handle)["package"]["version"]
+    else:
+        current_version = None
+
+    versioned_evidence = {}
+    for item in evidence:
+        summary = item["summary"]
+        versions = summary.get("binary_versions", [])
+        if summary.get("version"):
+            versions = [summary["version"]]
+        if not versions:
+            continue
+        normalized = [version.removeprefix("ivygrep ") for version in versions]
+        versioned_evidence[item["id"]] = {
+            "versions": normalized,
+            "status": (
+                "current"
+                if current_version is not None and normalized == [current_version]
+                else "historical"
+            ),
+        }
+
     return {
         "schema_version": 1,
+        "freshness": {
+            "package_version": current_version,
+            "evidence": versioned_evidence,
+        },
         "evidence": evidence,
         "release_history": release_history,
         "release_history_artifact": {
@@ -595,6 +635,7 @@ def publication_note(dashboard: dict) -> str:
 
 def render_markdown(dashboard: dict) -> str:
     by_id = {item["id"]: item for item in dashboard["evidence"]}
+    current_relevance = by_id.get("current-head-relevance", {}).get("summary")
     retrieval = by_id["public-retrieval-current"]["summary"]
     million = by_id["million-scale"]["summary"]
     current_million = by_id.get("million-scale-current", {}).get("summary")
@@ -683,6 +724,16 @@ def render_markdown(dashboard: dict) -> str:
 
 {current_million_text} measures hash-only indexing and warm CLI latency on a deterministic synthetic CC0 corpus across three sequential trials. It is a scale and footprint measurement, not semantic quality or agent-task performance.
 """
+    current_relevance_row = ""
+    if current_relevance is not None:
+        measured = current_relevance["modes"]["foreground"]
+        current_relevance_row = (
+            f"| Current package self-repository relevance "
+            f"({current_relevance['version']}) | "
+            f"nDCG@10 {format_number(measured['mean_ndcg10'], 4)}, "
+            f"MRR {format_number(measured['mean_mrr'], 4)}, "
+            f"{measured['queries']} labeled queries |\n"
+        )
     return f"""# Benchmark dashboard
 
 This page is generated from benchmark and release artifacts. Links are pinned
@@ -691,6 +742,7 @@ marked as not pinned to an immutable revision instead of receiving a false link.
 
 | Area | Evidence summary |
 |---|---|
+{current_relevance_row}\
 | {retrieval_label} | nDCG@10 {format_number(retrieval['ndcg_at_10'], 4)}, MRR@10 {format_number(retrieval['mrr_at_10'], 4)}, {retrieval['queries']} queries x {retrieval['repetitions']} runs |
 | Learned reranker | gate {"passed" if reranker["passed"] else "failed"}, nDCG@10 delta {format_number(reranker["ndcg_at_10_delta"], 4)} |
 | Million-chunk latency | {million_latency} |
@@ -783,9 +835,24 @@ def render_html(dashboard: dict) -> str:
         None,
     )
     current_million = current_million_item["summary"] if current_million_item else None
+    current_relevance_item = next(
+        (item for item in dashboard["evidence"] if item["id"] == "current-head-relevance"),
+        None,
+    )
     current_scope = ""
-    if current_million is not None:
+    if current_relevance_item is not None:
+        current_relevance = current_relevance_item["summary"]
+        measured = current_relevance["modes"]["foreground"]
         current_scope = (
+            '<section class="report-card"><h2>Current package retrieval screen</h2>'
+            f"<p><code>{escape(current_relevance['version'])}</code>: "
+            f"nDCG@10 {measured['mean_ndcg10']:.4f}, "
+            f"MRR {measured['mean_mrr']:.4f}, "
+            f"{measured['queries']} labeled queries. "
+            f"{escape(current_relevance['scope'])}</p></section>"
+        )
+    if current_million is not None:
+        current_scope += (
             "<section class=\"report-card\"><h2>Latest measured release scope</h2>"
             f"<p><code>{escape(current_million['version'])}</code> binary "
             f"<code>{escape(current_million['binary_sha256'])}</code> was measured "

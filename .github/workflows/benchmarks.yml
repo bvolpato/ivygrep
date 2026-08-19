@@ -62,19 +62,7 @@ jobs:
         env:
           BENCHMARK_BASE_REF: ${{ steps.benchmark-base.outputs.ref }}
         run: |
-          if git diff --quiet "$BENCHMARK_BASE_REF" HEAD -- \
-            .cargo/ \
-            assets/query_aliases.toml \
-            benchmarks/public/reranker_model.json \
-            Cargo.lock \
-            Cargo.toml \
-            benches/ \
-            build.rs \
-            rust-toolchain.toml \
-            scripts/benchmark_guard.py \
-            scripts/criterion_to_benchmark_data.py \
-            src/ \
-            vendor/; then
+          if git diff --quiet "$BENCHMARK_BASE_REF" HEAD; then
             echo "required=false" >> "$GITHUB_OUTPUT"
           else
             echo "required=true" >> "$GITHUB_OUTPUT"
@@ -117,6 +105,34 @@ jobs:
             --bench-name critical_journeys/exact_filtered_vector_top_50_in_50k_hot \
             --threshold 1.20 \
             --output "$PAIRED_BENCHMARK_DIR/vector-filtered-exact.json"
+
+      - name: Measure current-head retrieval relevance
+        if: steps.benchmark-changes.outputs.required == 'true'
+        env:
+          CURRENT_RELEVANCE_REPORT: ${{ runner.temp }}/current-head-relevance.json
+        run: |
+          cargo build --release --locked --bin ig
+          python3 scripts/run_current_head_benchmark.py \
+            --binary target/release/ig \
+            --output "$CURRENT_RELEVANCE_REPORT"
+          jq -r '
+            "### Current-head retrieval relevance",
+            "",
+            "Binary: `\(.binary.version)`",
+            "",
+            "| Mode | Queries | nDCG@10 | MRR | Candidate recall |",
+            "| --- | ---: | ---: | ---: | ---: |",
+            (.modes | to_entries[] |
+              "| \(.key) | \(.value.queries) | \(.value.mean_ndcg10) | \(.value.mean_mrr) | \(.value.mean_candidate_recall) |")
+          ' "$CURRENT_RELEVANCE_REPORT" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload current-head retrieval evidence
+        if: always() && steps.benchmark-changes.outputs.required == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: current-head-relevance
+          path: ${{ runner.temp }}/current-head-relevance.json
+          if-no-files-found: warn
 
       - name: Report paired benchmark deltas
         if: always() && steps.benchmark-changes.outputs.required == 'true'
