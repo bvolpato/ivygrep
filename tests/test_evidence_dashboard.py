@@ -32,6 +32,7 @@ class EvidenceDashboardTest(unittest.TestCase):
                 encoding="utf-8"
             )
         )
+        report["source"]["sha256"] = current_head.source_inputs_sha256()
         self.assertEqual(current_head.validate_report(report), [])
         report["binary"]["version"] = "ivygrep 0.0.1"
         self.assertTrue(

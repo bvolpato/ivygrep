@@ -15,6 +15,12 @@ on:
     # so they're excluded — except the labeled query set, which is an input.
     paths:
       - "src/**/*.rs"
+      - "assets/**"
+      - "vendor/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
+      - "benchmarks/public/reranker_model.json"
       - "scripts/eval_relevance.py"
       - "scripts/eval_code_retrieval.py"
       - "scripts/bench_context_retrieval.py"
@@ -138,6 +144,15 @@ jobs:
               else error("retrieval routing matrix fell below quality floor")
               end
           ' routing-matrix-results.json
+
+      - name: Neural self-repository relevance gate
+        run: |
+          python3 scripts/eval_relevance.py \
+            --skip-build \
+            --binary target/release/ig \
+            --neural \
+            --no-audit-recall \
+            --check --min-mrr 0.90 --min-p1 0.85 --min-recall5 0.90
 
       - name: Upload public retrieval result
         if: always()

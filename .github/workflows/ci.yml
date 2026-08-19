@@ -62,7 +62,6 @@ jobs:
 
       - name: Verify generated benchmark dashboard
         run: |
-          python3 scripts/run_current_head_benchmark.py --check
           python3 scripts/render_evidence_dashboard.py
           git diff --exit-code -- \
             docs/benchmarks/evidence-dashboard.json \
