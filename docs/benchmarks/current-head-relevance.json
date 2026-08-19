@@ -1,6 +1,6 @@
 {
   "binary": {
-    "sha256": "3df89ba94144b4b4c8a1ce1cbe917fb085176ca336b058185e174fe90eef4b8d",
+    "sha256": "48835ae3cd9a38571a05177da86f5ee2d547c383fb8d532688c9a7d5610f8d89",
     "version": "ivygrep 1.2.11"
   },
   "fixture": {
@@ -11,7 +11,7 @@
     "path": "scripts/eval_relevance.py",
     "sha256": "d7cbac47ac8c18c67fa6c0a5ab8393fd3243c9290e80ed3f28662faec348b32d"
   },
-  "ivygrep_commit": "36fc7f00bda29743e7971497f30dc7b4c4db0216",
+  "ivygrep_commit": "7461a242cdaf4ae3ace9d67687b3677890461c92",
   "modes": {
     "foreground": {
       "audit_stage_counts": {
@@ -25,7 +25,7 @@
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 10479.662792000454,
+      "elapsed_ms": 10258.436416006589,
       "filter_misses": [],
       "low_rank_misses": [
         "daemon-watch"
@@ -58,7 +58,7 @@
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 10594.37354200054,
+      "elapsed_ms": 10705.428249995748,
       "filter_misses": [],
       "low_rank_misses": [
         "daemon-watch"
@@ -99,6 +99,6 @@
       "src",
       "vendor"
     ],
-    "sha256": "7ae9bf66f87df3038517d0172c6d40b5d7e4a63f71beaa3d534564972e345fc7"
+    "sha256": "51f93fea2f3eacbe6ada027531489b35ec630390335ad4e6dd78341e75768519"
   }
 }

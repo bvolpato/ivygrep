@@ -24,7 +24,7 @@ use ivygrep::indexer::{
     reconcile_worktree_overlay,
 };
 use ivygrep::regex_search::regex_search_with_options;
-use ivygrep::search::{SearchOptions, hybrid_search};
+use ivygrep::search::{SearchContext, SearchOptions, hybrid_search};
 use ivygrep::workspace::Workspace;
 
 /// Run a git command in the given directory, panicking on failure.
@@ -273,6 +273,24 @@ fn worktree_neural_search_includes_added_and_modified_branch_content() {
             "branch-local file {file} was absent from neural results: {hits:#?}"
         );
     }
+
+    let base_neural_identity = fs::read(base_workspace.neural_model_path()).unwrap();
+    fs::remove_file(base_workspace.neural_model_path()).unwrap();
+    let context = SearchContext::load(&overlay, Some(EMBEDDING_DIMENSIONS), true).unwrap();
+    assert!(context.neural_vectors.is_some());
+    assert!(
+        context.base_neural_vectors.is_none(),
+        "base neural vectors must not borrow the overlay model identity"
+    );
+
+    fs::write(base_workspace.neural_model_path(), base_neural_identity).unwrap();
+    fs::remove_file(overlay.neural_model_path()).unwrap();
+    let context = SearchContext::load(&overlay, Some(EMBEDDING_DIMENSIONS), true).unwrap();
+    assert!(context.base_neural_vectors.is_some());
+    assert!(
+        context.neural_vectors.is_none(),
+        "overlay neural vectors must not borrow the base model identity"
+    );
 
     git(
         root.path(),

@@ -8,10 +8,10 @@
       "path": "docs/benchmarks/current-head-relevance.json",
       "publication_commit": null,
       "publication_status": "not pinned to an immutable revision",
-      "sha256": "33a1cd155ca64b7ee195ab882b2d80bfda5ed6b7b384439a7c1a4b572144395f",
-      "source_commit": "36fc7f00bda29743e7971497f30dc7b4c4db0216",
+      "sha256": "4b96e9aceed0d4c8accbab7bdc004976611bedac02d4488fb1edecbb8862a13d",
+      "source_commit": "7461a242cdaf4ae3ace9d67687b3677890461c92",
       "summary": {
-        "binary_sha256": "3df89ba94144b4b4c8a1ce1cbe917fb085176ca336b058185e174fe90eef4b8d",
+        "binary_sha256": "48835ae3cd9a38571a05177da86f5ee2d547c383fb8d532688c9a7d5610f8d89",
         "fixture": {
           "path": "tests/fixtures/ivygrep_relevance_queries.json",
           "sha256": "40e5b778fd620a4315b0e405def180527ffbfa7254c63f5bd4525b8ef6b1fb7e"
@@ -33,7 +33,7 @@
             },
             "candidate_budget_misses": [],
             "candidate_recall_misses": [],
-            "elapsed_ms": 10479.662792000454,
+            "elapsed_ms": 10258.436416006589,
             "filter_misses": [],
             "low_rank_misses": [
               "daemon-watch"
@@ -66,7 +66,7 @@
             },
             "candidate_budget_misses": [],
             "candidate_recall_misses": [],
-            "elapsed_ms": 10594.37354200054,
+            "elapsed_ms": 10705.428249995748,
             "filter_misses": [],
             "low_rank_misses": [
               "daemon-watch"

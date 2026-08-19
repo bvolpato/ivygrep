@@ -352,7 +352,7 @@ impl SearchContext {
                     identity.dimensions
                 });
             let base_neural_vec = open_optional_vector_store(
-                wants_neural_vectors,
+                wants_neural_vectors && base_neural_model.is_some(),
                 &base_dir.join("vectors_neural.usearch"),
                 base_neural_dimensions,
                 NEURAL_VECTOR_QUANTIZATION,
@@ -370,7 +370,7 @@ impl SearchContext {
                 );
             }
             let overlay_neural_vec = open_optional_vector_store(
-                wants_neural_vectors,
+                wants_neural_vectors && overlay_neural_model.is_some(),
                 &workspace.vector_neural_path(),
                 overlay_neural_dimensions,
                 NEURAL_VECTOR_QUANTIZATION,
