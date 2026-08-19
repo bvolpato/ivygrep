@@ -1105,12 +1105,33 @@ impl DaemonState {
                 && let Some(main_root) = workspace.main_worktree_root()
                 && let Ok(base_workspace) = Workspace::resolve(&main_root)
             {
+                let base_requires_mutation = direct_exclusive
+                    || !self.workspace_is_ready(
+                        workspace,
+                        skip_gitignore,
+                        &workspace_readiness_signature(workspace),
+                    );
                 requirements
                     .entry(base_workspace.id)
-                    .and_modify(|exclusive| *exclusive = true)
-                    .or_insert(true);
+                    .and_modify(|exclusive| *exclusive |= base_requires_mutation)
+                    .or_insert(base_requires_mutation);
             }
         }
+        let shared_base_workspaces = if direct_exclusive {
+            Vec::new()
+        } else {
+            workspaces
+                .iter()
+                .filter(|workspace| {
+                    workspace.is_worktree()
+                        && workspace
+                            .main_worktree_root()
+                            .and_then(|root| Workspace::resolve(&root).ok())
+                            .and_then(|base| requirements.get(&base.id))
+                            .is_some_and(|exclusive| !exclusive)
+                })
+                .collect::<Vec<_>>()
+        };
         let mut requirements = requirements.into_iter().collect::<Vec<_>>();
         requirements.sort_unstable_by(|left, right| left.0.cmp(&right.0));
         let mut leases = Vec::with_capacity(requirements.len());
@@ -1122,6 +1143,16 @@ impl DaemonState {
                 coordinator.acquire_shared(skip_gitignore, cancellation)
             }?;
             leases.push(lease);
+        }
+        if shared_base_workspaces.into_iter().any(|workspace| {
+            !self.workspace_is_ready(
+                workspace,
+                skip_gitignore,
+                &workspace_readiness_signature(workspace),
+            )
+        }) {
+            drop(leases);
+            return self.acquire_workspace_leases(workspaces, skip_gitignore, true, cancellation);
         }
         Some(leases)
     }
@@ -6343,6 +6374,79 @@ mod tests {
             handle_request(state.clone(), hybrid_request(false)).await
         ));
         assert_eq!(state.query_results.lock().results.len(), 1);
+    }
+
+    #[test]
+    #[serial]
+    fn linked_worktree_readers_share_base_until_base_mutation() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repositories = tempdir().unwrap();
+        let main = repositories.path().join("main");
+        let first_path = repositories.path().join("first");
+        let second_path = repositories.path().join("second");
+        std::fs::create_dir(&main).unwrap();
+        git(&main, &["init", "-b", "main"]);
+        std::fs::write(main.join("lib.rs"), "pub fn shared_worktree_base() {}\n").unwrap();
+        git(&main, &["add", "lib.rs"]);
+        git(&main, &["commit", "-m", "seed shared base"]);
+        for path in [&first_path, &second_path] {
+            git(
+                &main,
+                &[
+                    "worktree",
+                    "add",
+                    "--detach",
+                    path.to_str().unwrap(),
+                    "HEAD",
+                ],
+            );
+        }
+
+        let base = Workspace::resolve(&main).unwrap();
+        let first = Workspace::resolve(&first_path).unwrap();
+        let second = Workspace::resolve(&second_path).unwrap();
+        let model = create_hash_model();
+        index_workspace(&base, model.as_ref()).unwrap();
+        index_workspace(&first, model.as_ref()).unwrap();
+        index_workspace(&second, model.as_ref()).unwrap();
+        let state = test_state();
+        let coordinator = state.workspace_mode_coordinator(&base.id);
+        let preparation_leases = state.acquire_workspace_modes(std::slice::from_ref(&first), false);
+        assert!(
+            coordinator.state.lock().exclusive_active,
+            "unprepared worktree searches must exclusively lock the base during reconciliation"
+        );
+        drop(preparation_leases);
+        for workspace in [&first, &second] {
+            state.store_workspace_ready(workspace, false, workspace_readiness_signature(workspace));
+        }
+
+        let first_leases = state.acquire_workspace_modes(std::slice::from_ref(&first), false);
+        assert!(
+            !coordinator.state.lock().exclusive_active,
+            "read-only worktree search must not exclusively lock its shared base"
+        );
+
+        let second_leases = state.acquire_workspace_modes(std::slice::from_ref(&second), false);
+        assert_eq!(coordinator.state.lock().active_leases, 2);
+
+        let mutation_state = state.clone();
+        let mutation_base = base.clone();
+        let (started, acquired) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let leases = mutation_state.acquire_workspace_mutations(&[mutation_base]);
+            started.send(()).unwrap();
+            leases
+        });
+        assert!(
+            acquired.recv_timeout(Duration::from_millis(100)).is_err(),
+            "base mutation must wait for active worktree readers"
+        );
+        drop(first_leases);
+        drop(second_leases);
+        acquired.recv_timeout(Duration::from_secs(2)).unwrap();
+        drop(writer.join().unwrap());
     }
 
     #[tokio::test]
