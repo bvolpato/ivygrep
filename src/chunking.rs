@@ -537,6 +537,12 @@ fn scan_minified_run(no_newline_run: &mut usize, bytes: &[u8]) -> bool {
 /// comments while still absorbing normal doc-comments.
 const MAX_LEADING_COMMENT_LINES: usize = 20;
 
+/// Keep structural chunks small enough for lexical ranking and embedding
+/// backends that truncate long inputs.
+const MAX_STRUCTURAL_CHUNK_LINES: usize = 48;
+const MAX_STRUCTURAL_CHUNK_BYTES: usize = 1536;
+const STRUCTURAL_CHUNK_OVERLAP_LINES: usize = 8;
+
 /// Only very large BUILD-like sources benefit from per-target AST chunks.
 /// Smaller sources keep bounded text chunks to avoid diluting retrieval scores.
 const STARLARK_TARGET_AST_LINE_THRESHOLD: usize = 500;
@@ -669,7 +675,7 @@ pub(crate) fn chunk_source_with_metadata(rel_path: &Path, text: &str) -> Chunked
         .map(|(start_line, _)| leading_doc_start(*start_line, &language, &lines))
         .collect::<Vec<_>>();
     let mut chunks = Vec::new();
-    for (idx, (_, kind)) in signatures.iter().enumerate() {
+    for (idx, (definition_start, kind)) in signatures.iter().enumerate() {
         let start = chunk_starts[idx];
         let end = chunk_starts
             .get(idx + 1)
@@ -680,17 +686,15 @@ pub(crate) fn chunk_source_with_metadata(rel_path: &Path, text: &str) -> Chunked
             continue;
         }
 
-        let block = lines[start.saturating_sub(1)..end].join("\n");
-        let text = format!("// {}\n\n{}", rel_path.to_string_lossy(), block);
-
-        chunks.push(make_chunk(
+        push_bounded_structural_chunks(
+            &mut chunks,
             rel_path,
-            start,
-            end,
-            text,
-            language.clone(),
-            kind.clone(),
-        ));
+            &lines,
+            (start, end),
+            &language,
+            kind,
+            lines[definition_start.saturating_sub(1)].trim(),
+        );
     }
 
     ChunkedSource {
@@ -850,8 +854,9 @@ fn try_tree_sitter_chunk_source_with_timeout(
     // Track which 1-indexed lines are covered by AST chunks (start..=end)
     let mut covered = vec![false; lines.len() + 1]; // index 0 unused
 
-    for (start, end, kind) in &ranges {
+    for (range_index, (start, end, kind)) in ranges.iter().enumerate() {
         let mut start = *start;
+        let definition_start = start;
         let end = *end;
         if start == 0 || start > lines.len() {
             continue;
@@ -884,20 +889,95 @@ fn try_tree_sitter_chunk_source_with_timeout(
             *flag = true;
         }
 
-        let block_lines = &lines[(start - 1)..safe_end];
-        let block_text = format!(
-            "// {}\n\n{}",
-            rel_path.to_string_lossy(),
-            block_lines.join("\n")
-        );
-        chunks.push(make_chunk(
-            rel_path,
-            start,
-            safe_end,
-            block_text,
-            language.to_string(),
-            kind.clone(),
-        ));
+        let oversized = safe_end - start + 1 > MAX_STRUCTURAL_CHUNK_LINES
+            || lines[(start - 1)..safe_end]
+                .iter()
+                .map(|line| line.len() + 1)
+                .sum::<usize>()
+                > MAX_STRUCTURAL_CHUNK_BYTES;
+        let nested = if oversized && matches!(kind, ChunkKind::Class | ChunkKind::Module) {
+            ranges
+                .iter()
+                .enumerate()
+                .filter(|(index, (nested_start, nested_end, _))| {
+                    *index != range_index
+                        && *nested_start > start
+                        && *nested_start <= safe_end
+                        && *nested_end <= safe_end
+                })
+                .map(|(_, (nested_start, nested_end, _))| {
+                    (
+                        leading_doc_start(*nested_start, language, lines).max(start + 1),
+                        *nested_start,
+                        *nested_end,
+                    )
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        for (nested_start, nested_definition, _) in &nested {
+            for flag in covered
+                .iter_mut()
+                .take(*nested_definition)
+                .skip(*nested_start)
+            {
+                *flag = false;
+            }
+        }
+
+        let context = lines[definition_start.saturating_sub(1)].trim();
+        if nested.is_empty() {
+            push_bounded_structural_chunks(
+                &mut chunks,
+                rel_path,
+                lines,
+                (start, safe_end),
+                language,
+                kind,
+                context,
+            );
+        } else {
+            // Retain one bounded structural overview. It keeps the parent
+            // declaration, early documentation, and nearby child signatures
+            // together without indexing the entire enclosing body again.
+            let overview_end = (start + MAX_STRUCTURAL_CHUNK_LINES - 1).min(safe_end);
+            push_bounded_structural_chunks(
+                &mut chunks,
+                rel_path,
+                lines,
+                (start, overview_end),
+                language,
+                kind,
+                context,
+            );
+            let mut parent_start = overview_end + 1;
+            for (nested_start, _, nested_end) in nested {
+                if nested_start > parent_start {
+                    push_bounded_structural_chunks(
+                        &mut chunks,
+                        rel_path,
+                        lines,
+                        (parent_start, nested_start - 1),
+                        language,
+                        kind,
+                        context,
+                    );
+                }
+                parent_start = parent_start.max(nested_end.saturating_add(1));
+            }
+            if parent_start <= safe_end {
+                push_bounded_structural_chunks(
+                    &mut chunks,
+                    rel_path,
+                    lines,
+                    (parent_start, safe_end),
+                    language,
+                    kind,
+                    context,
+                );
+            }
+        }
     }
 
     // Emit module-level chunks for uncovered line ranges (imports,
@@ -911,20 +991,15 @@ fn try_tree_sitter_chunk_source_with_timeout(
         } else if let Some(gs) = gap_start {
             let gs_end = i - 1;
             if gs_end >= gs {
-                let block_lines = &lines[(gs - 1)..gs_end];
-                let block_text = format!(
-                    "// {}\n\n{}",
-                    rel_path.to_string_lossy(),
-                    block_lines.join("\n")
-                );
-                chunks.push(make_chunk(
+                push_bounded_structural_chunks(
+                    &mut chunks,
                     rel_path,
-                    gs,
-                    gs_end,
-                    block_text,
-                    language.to_string(),
-                    ChunkKind::Module,
-                ));
+                    lines,
+                    (gs, gs_end),
+                    language,
+                    &ChunkKind::Module,
+                    lines[gs - 1].trim(),
+                );
             }
             gap_start = None;
         }
@@ -932,20 +1007,15 @@ fn try_tree_sitter_chunk_source_with_timeout(
     // Trailing gap at EOF
     if let Some(gs) = gap_start {
         let gs_end = lines.len();
-        let block_lines = &lines[(gs - 1)..gs_end];
-        let block_text = format!(
-            "// {}\n\n{}",
-            rel_path.to_string_lossy(),
-            block_lines.join("\n")
-        );
-        chunks.push(make_chunk(
+        push_bounded_structural_chunks(
+            &mut chunks,
             rel_path,
-            gs,
-            gs_end,
-            block_text,
-            language.to_string(),
-            ChunkKind::Module,
-        ));
+            lines,
+            (gs, gs_end),
+            language,
+            &ChunkKind::Module,
+            lines[gs - 1].trim(),
+        );
     }
 
     chunks.sort_by_key(|c| c.start_line);
@@ -961,6 +1031,65 @@ fn try_tree_sitter_chunk_source_with_timeout(
         chunks,
         rust_doc_includes,
     })
+}
+
+fn push_bounded_structural_chunks(
+    chunks: &mut Vec<Chunk>,
+    rel_path: &Path,
+    lines: &[&str],
+    (start_line, end_line): (usize, usize),
+    language: &str,
+    kind: &ChunkKind,
+    context: &str,
+) {
+    if start_line > end_line
+        || lines[(start_line - 1)..end_line]
+            .iter()
+            .all(|line| line.trim().is_empty() || matches!(line.trim(), "{" | "}" | "};" | ");"))
+    {
+        return;
+    }
+
+    let mut window_start = start_line;
+    while window_start <= end_line {
+        let mut window_end = window_start;
+        let mut bytes = lines[window_start - 1].len();
+        while window_end < end_line && window_end - window_start + 1 < MAX_STRUCTURAL_CHUNK_LINES {
+            let next_bytes = lines[window_end].len() + 1;
+            if bytes + next_bytes > MAX_STRUCTURAL_CHUNK_BYTES {
+                break;
+            }
+            bytes += next_bytes;
+            window_end += 1;
+        }
+
+        let block = lines[(window_start - 1)..window_end].join("\n");
+        let text = if window_start == start_line {
+            format!("// {}\n\n{}", rel_path.to_string_lossy(), block)
+        } else {
+            format!(
+                "// {}\n// continuation of {}\n\n{}",
+                rel_path.to_string_lossy(),
+                context,
+                block
+            )
+        };
+        chunks.push(make_chunk(
+            rel_path,
+            window_start,
+            window_end,
+            text,
+            language.to_string(),
+            kind.clone(),
+        ));
+
+        if window_end == end_line {
+            break;
+        }
+        window_start = window_end
+            .saturating_sub(STRUCTURAL_CHUNK_OVERLAP_LINES.saturating_sub(1))
+            .max(window_start + 1);
+    }
 }
 
 fn rust_doc_include(node: tree_sitter::Node<'_>, text: &str) -> Option<RustDocInclude> {
@@ -1975,6 +2104,103 @@ pub fn calculate_total(amount: f64) -> f64 {
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].kind, ChunkKind::Function);
         assert!(chunks[0].text.contains("calculate_tax"));
+    }
+
+    #[test]
+    fn oversized_tree_sitter_functions_are_bounded_without_losing_the_tail() {
+        let mut source =
+            String::from("/// Reconcile every record safely.\npub fn reconcile_every_record() {\n");
+        for index in 0..180 {
+            source.push_str(&format!("    process_record_{index:03}();\n"));
+        }
+        source.push_str("    recover_final_semantic_sentinel();\n}\n");
+
+        let chunks = chunk_source(Path::new("src/reconcile.rs"), &source);
+        let functions = chunks
+            .iter()
+            .filter(|chunk| chunk.kind == ChunkKind::Function)
+            .collect::<Vec<_>>();
+
+        assert!(functions.len() > 1);
+        assert!(functions.iter().all(|chunk| {
+            chunk.end_line - chunk.start_line < MAX_STRUCTURAL_CHUNK_LINES
+                && chunk.text.contains("reconcile_every_record")
+        }));
+        assert!(functions.iter().any(|chunk| {
+            chunk.text.contains("recover_final_semantic_sentinel")
+                && chunk.start_line > MAX_STRUCTURAL_CHUNK_LINES
+        }));
+        assert!(functions.windows(2).all(|pair| {
+            pair[1].start_line <= pair[0].end_line && pair[1].start_line > pair[0].start_line
+        }));
+    }
+
+    #[test]
+    fn oversized_structural_parents_do_not_duplicate_nested_method_bodies() {
+        let mut source = String::from("impl PaymentProcessor {\n");
+        for index in 0..35 {
+            source.push_str(&format!(
+                "    /// Settles payment {index:03}.\n    fn reconcile_payment_{index:03}(&self) {{\n        persist_payment_{index:03}();\n    }}\n\n"
+            ));
+        }
+        source.push_str("}\n");
+
+        let chunks = chunk_source(Path::new("src/payments.rs"), &source);
+        let parents = chunks
+            .iter()
+            .filter(|chunk| chunk.kind == ChunkKind::Class)
+            .collect::<Vec<_>>();
+
+        assert!(!parents.is_empty());
+        assert!(
+            parents
+                .iter()
+                .all(|chunk| { chunk.end_line - chunk.start_line < MAX_STRUCTURAL_CHUNK_LINES })
+        );
+        assert!(
+            parents
+                .iter()
+                .filter(|chunk| chunk.text.contains("persist_payment_"))
+                .count()
+                <= 2,
+            "the bounded parent overview must not grow with every nested method"
+        );
+        assert_eq!(
+            chunks
+                .iter()
+                .filter(|chunk| chunk.text.contains("persist_payment_017"))
+                .count(),
+            1
+        );
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk.text.contains("persist_payment_034"))
+        );
+        assert!(chunks.iter().any(|chunk| {
+            chunk.kind == ChunkKind::Function
+                && chunk.text.contains("Settles payment 034")
+                && chunk.text.contains("persist_payment_034")
+        }));
+    }
+
+    #[test]
+    fn oversized_fallback_definitions_are_bounded() {
+        let mut source = String::from("## Reconcile every record safely.\nproc reconcileAll() =\n");
+        for index in 0..140 {
+            source.push_str(&format!("  reconcileRecord({index})\n"));
+        }
+
+        let chunks = chunk_source(Path::new("src/reconcile.nim"), &source);
+        assert!(chunks.len() > 1);
+        assert!(chunks.iter().all(|chunk| chunk.end_line - chunk.start_line
+            < MAX_STRUCTURAL_CHUNK_LINES
+            && chunk.text.contains("reconcileAll")));
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk.text.contains("reconcileRecord(139)"))
+        );
     }
 
     #[test]

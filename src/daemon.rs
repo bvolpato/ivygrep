@@ -41,6 +41,8 @@ use crate::workspace::{Workspace, WorkspaceIndexState, WorkspaceScope, list_work
 const WATCH_SINGLE_EVENT_QUIET_PERIOD: Duration = Duration::from_millis(250);
 const WATCH_BURST_QUIET_PERIOD: Duration = Duration::from_millis(750);
 const WATCH_MAX_DEBOUNCE: Duration = Duration::from_secs(30);
+const WATCH_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(250);
+const WATCH_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
 const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const DAEMON_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_DAEMON_LOG_BYTES: u64 = 10 * 1024 * 1024;
@@ -242,8 +244,10 @@ struct PendingWatchWork {
 struct WatchControl {
     workspace: Workspace,
     notify: Notify,
+    shutdown: Notify,
     dirty: AtomicBool,
     indexing: AtomicBool,
+    retrying: AtomicBool,
     active: AtomicBool,
     pending_events: AtomicU64,
     coalesced_events: AtomicU64,
@@ -255,8 +259,10 @@ impl WatchControl {
         Self {
             workspace,
             notify: Notify::new(),
+            shutdown: Notify::new(),
             dirty: AtomicBool::new(false),
             indexing: AtomicBool::new(false),
+            retrying: AtomicBool::new(false),
             active: AtomicBool::new(true),
             pending_events: AtomicU64::new(0),
             coalesced_events: AtomicU64::new(0),
@@ -304,12 +310,19 @@ impl WatchControl {
         Some(work)
     }
 
+    fn requeue_failed_index(&self, error: String) {
+        self.retrying.store(true, Ordering::Relaxed);
+        self.mark_full_reconciliation(Some(error));
+    }
+
     fn snapshot_phase(&self) -> (&'static str, bool, bool, u64, u64) {
         let indexing = self.indexing.load(Ordering::Relaxed);
         let dirty = self.dirty.load(Ordering::Relaxed);
         let pending_events = self.pending_events.load(Ordering::Relaxed);
         let coalesced_events = self.coalesced_events.load(Ordering::Relaxed);
-        let phase = if indexing {
+        let phase = if self.retrying.load(Ordering::Relaxed) {
+            "error"
+        } else if indexing {
             "indexing"
         } else if dirty {
             "dirty"
@@ -566,11 +579,14 @@ impl WatchEventFilter {
         if matches!(event.kind, notify::EventKind::Access(_)) {
             return WatchChange::None;
         }
-        if event
-            .paths
-            .iter()
-            .any(|path| self.is_ignore_configuration_path(path))
-        {
+        if event.paths.iter().any(|path| {
+            !self
+                .normalize_watch_path(path)
+                .is_some_and(|(normalized, _)| {
+                    crate::walker::is_ivygrep_owned_path(&self.workspace.root, &normalized)
+                })
+                && self.is_ignore_configuration_path(path)
+        }) {
             self.refresh();
             return WatchChange::FullReconciliation;
         }
@@ -599,7 +615,10 @@ impl WatchEventFilter {
         let Some((normalized_path, rel)) = self.normalize_watch_path(path) else {
             return false;
         };
-        if rel.as_os_str().is_empty() || is_always_ignored_watch_path(&rel) {
+        if rel.as_os_str().is_empty()
+            || is_always_ignored_watch_path(&rel)
+            || crate::walker::is_ivygrep_owned_path(&self.workspace.root, &normalized_path)
+        {
             return false;
         }
 
@@ -1709,6 +1728,7 @@ fn restore_configured_watchers(state: &DaemonState) {
 fn stop_watcher(workspace: &Workspace, registration: WatchRegistration) {
     registration.control.active.store(false, Ordering::Relaxed);
     registration.control.notify.notify_waiters();
+    registration.control.shutdown.notify_one();
     if let Some(nonce) = registration.job_nonce {
         let _ = jobs::finish_job_if_current(workspace, JobKind::Watcher, &nonce, "stopped", None);
     } else {
@@ -2973,6 +2993,7 @@ fn spawn_watch_heartbeat(control: Arc<WatchControl>, job_nonce: Option<String>) 
 
 fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>, job_nonce: Option<String>) {
     tokio::spawn(async move {
+        let mut consecutive_failures = 0u32;
         loop {
             control.notify.notified().await;
             if !control.active.load(Ordering::Relaxed) {
@@ -2980,12 +3001,19 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>, job_nonce:
             }
 
             wait_for_watch_quiet(&control).await;
+            if !control.active.load(Ordering::Relaxed) {
+                break;
+            }
 
             if control.indexing.swap(true, Ordering::Relaxed) {
                 continue;
             }
 
-            while let Some(pending_work) = control.take_pending_work() {
+            while control.active.load(Ordering::Relaxed) {
+                let Some(pending_work) = control.take_pending_work() else {
+                    break;
+                };
+                control.retrying.store(false, Ordering::Relaxed);
                 let pending = control.pending_events.swap(0, Ordering::Relaxed);
                 control
                     .coalesced_events
@@ -3047,6 +3075,7 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>, job_nonce:
 
                 match result {
                     Ok(changed) => {
+                        consecutive_failures = 0;
                         if changed {
                             state.clear_workspace_contexts(&control.workspace);
                         }
@@ -3073,8 +3102,10 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>, job_nonce:
                         update_watcher_job(&control, job_nonce.as_deref(), success);
                     }
                     Err(err) => {
+                        let error = format!("{err:#}");
+                        consecutive_failures = consecutive_failures.saturating_add(1);
                         daemon_log(&format!(
-                            "watch update failed for {}: {err:#}",
+                            "watch update failed for {}: {error}",
                             control.workspace.root.display()
                         ));
                         warn!(
@@ -3083,19 +3114,27 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>, job_nonce:
                         );
                         let failed = JobUpdate {
                             phase: Some("error".to_string()),
-                            last_error: Some(Some(format!("{err:#}"))),
+                            last_error: Some(Some(error.clone())),
                             ..Default::default()
                         };
                         update_watcher_job(&control, job_nonce.as_deref(), failed);
+                        control.requeue_failed_index(error);
+                        tokio::select! {
+                            () = tokio::time::sleep(watch_retry_delay(consecutive_failures)) => {},
+                            () = control.shutdown.notified() => {},
+                        }
                     }
                 }
 
-                if control.dirty.load(Ordering::Relaxed) {
+                if control.active.load(Ordering::Relaxed) && control.dirty.load(Ordering::Relaxed) {
                     wait_for_watch_quiet(&control).await;
                 }
             }
 
             control.indexing.store(false, Ordering::Relaxed);
+            if !control.active.load(Ordering::Relaxed) {
+                break;
+            }
             let idle = JobUpdate {
                 phase: Some(if control.dirty.load(Ordering::Relaxed) {
                     "dirty".to_string()
@@ -3107,6 +3146,13 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>, job_nonce:
             update_watcher_job(&control, job_nonce.as_deref(), idle);
         }
     });
+}
+
+fn watch_retry_delay(consecutive_failures: u32) -> Duration {
+    let multiplier = 1u32 << consecutive_failures.saturating_sub(1).min(16);
+    WATCH_RETRY_INITIAL_DELAY
+        .saturating_mul(multiplier)
+        .min(WATCH_RETRY_MAX_DELAY)
 }
 
 async fn wait_for_watch_quiet(control: &WatchControl) {
@@ -3244,7 +3290,9 @@ fn search_context_signature(
             hash_vectors: wants_hash_vectors
                 .then(|| file_stamp(&workspace.overlay_vector_path()))
                 .flatten(),
-            neural_vectors: None,
+            neural_vectors: wants_neural_vectors
+                .then(|| file_stamp(&workspace.vector_neural_path()))
+                .flatten(),
             base_sqlite: file_stamp(&base_dir.join("metadata.sqlite3")),
             base_tantivy: dir_stamp(&base_dir.join("tantivy")),
             base_hash_vectors: wants_hash_vectors
@@ -5899,6 +5947,23 @@ mod tests {
         assert!(!filter.path_should_reindex(&repo.path().join(".git/index")));
     }
 
+    #[test]
+    #[serial]
+    fn watch_event_filter_ignores_nested_ivygrep_storage() {
+        let repo = tempdir().unwrap();
+        let home = repo.path().join("local-state");
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", &home) };
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        workspace.ensure_dirs().unwrap();
+        let filter = WatchEventFilter::new(&workspace);
+
+        assert!(filter.path_should_reindex(&workspace.root.join("src/lib.rs")));
+        assert!(!filter.path_should_reindex(&workspace.index_dir.join("job.json")));
+        assert!(!filter.path_should_reindex(&home.join("daemon.log")));
+    }
+
     #[tokio::test]
     #[serial]
     async fn query_preparation_reconciles_healthy_index_filter_transitions() {
@@ -6414,6 +6479,27 @@ mod tests {
 
     #[test]
     #[serial]
+    fn ignore_configuration_inside_ivygrep_storage_does_not_reconcile_workspace() {
+        let repo = tempdir().unwrap();
+        let home = repo.path().join("local-state");
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", &home) };
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let mut filter = WatchEventFilter::new(&workspace);
+        for name in [".gitignore", ".ignore"] {
+            let ignore = home.join(name);
+            std::fs::write(&ignore, "*.rs\n").unwrap();
+            assert!(matches!(
+                filter
+                    .change_for_event(&notify::Event::new(notify::EventKind::Any).add_path(ignore)),
+                WatchChange::None
+            ));
+        }
+    }
+
+    #[test]
+    #[serial]
     fn watcher_backend_error_supersedes_coalesced_paths_with_full_reconciliation() {
         let home = tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
@@ -6459,6 +6545,133 @@ mod tests {
             WatchChange::FullReconciliation
         ));
         assert!(!filter.lock().path_should_reindex(&source));
+    }
+
+    #[test]
+    #[serial]
+    fn failed_watch_index_requeues_full_reconciliation_and_preserves_error_phase() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let control = WatchControl::new(workspace);
+
+        control.mark_paths_dirty([PathBuf::from("changed.rs")]);
+        assert!(control.take_pending_work().is_some());
+        assert!(!control.dirty.load(Ordering::Relaxed));
+
+        control.requeue_failed_index("injected temporary indexing failure".to_string());
+
+        assert!(control.dirty.load(Ordering::Relaxed));
+        assert_eq!(control.snapshot_phase().0, "error");
+        let retry = control.take_pending_work().unwrap();
+        assert!(matches!(retry.change, WatchChange::FullReconciliation));
+        assert_eq!(
+            retry.backend_error.as_deref(),
+            Some("injected temporary indexing failure")
+        );
+    }
+
+    #[test]
+    fn watch_index_retry_backoff_is_exponential_and_bounded() {
+        assert_eq!(watch_retry_delay(1), Duration::from_millis(250));
+        assert_eq!(watch_retry_delay(2), Duration::from_millis(500));
+        assert_eq!(watch_retry_delay(3), Duration::from_secs(1));
+        assert_eq!(watch_retry_delay(100), WATCH_RETRY_MAX_DELAY);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn failed_watch_index_recovers_without_another_repository_event() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        let source = repo.path().join("lib.rs");
+        std::fs::write(&source, "pub fn original_watch_marker() {}\n").unwrap();
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+        let state = test_state();
+        register_watcher(&state, repo.path()).unwrap();
+        let metadata = std::fs::read(workspace.metadata_path()).unwrap();
+        let control = state
+            .watchers
+            .lock()
+            .get(&workspace.id)
+            .unwrap()
+            .control
+            .clone();
+
+        std::fs::write(workspace.metadata_path(), "invalid metadata").unwrap();
+        std::fs::write(&source, "pub fn recovered_watch_marker() {}\n").unwrap();
+        control.mark_paths_dirty([PathBuf::from("lib.rs")]);
+
+        for _ in 0..60 {
+            if control.retrying.load(Ordering::Relaxed) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(control.retrying.load(Ordering::Relaxed));
+        assert_eq!(control.snapshot_phase().0, "error");
+
+        std::fs::write(workspace.metadata_path(), metadata).unwrap();
+        let recovered =
+            wait_for_literal_visibility(&workspace, "recovered_watch_marker", true).await;
+        stop_all_watchers(&state);
+
+        assert!(recovered, "failed watcher update was not retried");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn removing_workspace_cancels_pending_watcher_retry() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn pending_retry() {}\n").unwrap();
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let model = create_hash_model();
+        index_workspace(&workspace, model.as_ref()).unwrap();
+        let state = test_state();
+        register_watcher(&state, repo.path()).unwrap();
+        let control = state
+            .watchers
+            .lock()
+            .get(&workspace.id)
+            .unwrap()
+            .control
+            .clone();
+
+        std::fs::write(workspace.metadata_path(), "invalid metadata").unwrap();
+        control.mark_paths_dirty([PathBuf::from("lib.rs")]);
+        for _ in 0..60 {
+            if control.retrying.load(Ordering::Relaxed) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(control.retrying.load(Ordering::Relaxed));
+
+        let response = handle_request(
+            state,
+            DaemonRequest::Remove {
+                path: repo.path().to_path_buf(),
+            },
+        )
+        .await;
+        assert!(matches!(response, DaemonResponse::Ack { .. }));
+        assert!(!workspace.sqlite_path().exists());
+        assert!(!workspace.metadata_path().exists());
+
+        tokio::time::sleep(WATCH_RETRY_INITIAL_DELAY.saturating_mul(2)).await;
+        assert!(
+            !workspace.sqlite_path().exists() && !workspace.metadata_path().exists(),
+            "a stopped retry recreated the index"
+        );
+        assert!(!control.indexing.load(Ordering::Relaxed));
     }
 
     #[tokio::test]

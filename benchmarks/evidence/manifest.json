@@ -2,6 +2,13 @@
   "schema_version": 1,
   "evidence": [
     {
+      "id": "current-head-relevance",
+      "kind": "quality",
+      "label": "Current package self-repository retrieval screen",
+      "path": "docs/benchmarks/current-head-relevance.json",
+      "publication_commit": "fbbbf0257acf96fca2fec8b4906f9b84563fc7d2"
+    },
+    {
       "id": "public-retrieval-baseline",
       "kind": "quality",
       "label": "Frozen public retrieval baseline",

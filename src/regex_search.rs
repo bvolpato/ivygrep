@@ -1,9 +1,9 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
 use grep_regex::RegexMatcherBuilder;
@@ -17,13 +17,28 @@ use tantivy::query::{BooleanQuery, Occur, Query, RegexQuery, TermQuery};
 use tantivy::schema::IndexRecordOption;
 use tantivy::schema::Value;
 
-use crate::indexer::open_tantivy_index;
+use crate::indexer::{open_sqlite_readonly, open_tantivy_index};
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
 use crate::search::SearchOptions;
 use crate::workspace::{Workspace, WorkspaceScope, index_path_string};
 
 const MAX_CONTEXT_FILE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_REGEX_COVERAGE_CACHE_ENTRIES: usize = 32;
+const MAX_REGEX_UNINDEXED_FILES: usize = 4_096;
+
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct RegexCoverageKey {
+    workspace_id: String,
+    index_generation: u64,
+    base_generation: u64,
+    skip_gitignore: bool,
+}
+
+fn regex_coverage_cache() -> &'static Mutex<HashMap<RegexCoverageKey, Arc<Vec<PathBuf>>>> {
+    static CACHE: OnceLock<Mutex<HashMap<RegexCoverageKey, Arc<Vec<PathBuf>>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 /// Index-backed regex search.
 ///
@@ -156,59 +171,198 @@ fn index_prefilter_files(
     options: &SearchOptions,
 ) -> Option<Vec<PathBuf>> {
     let required_runs = required_literal_runs(pattern)?;
-
-    let tantivy_dir = workspace.tantivy_dir();
-    if !tantivy_dir.exists() {
+    let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
+    if use_overlay && workspace.worktree_overlay_is_stale().ok()? {
         return None;
     }
-
-    let (idx, fields) = open_tantivy_index(&tantivy_dir).ok()?;
-    let reader = idx.reader().ok()?;
-    let searcher = reader.searcher();
-
-    let query = crate::search::substring_candidate_query(fields.text_trigrams?, &required_runs)?;
-    let query = constrain_query_to_scope(query, fields.file_path, scope_filter)?;
-
-    // Get up to 10K candidate chunks — we only need their file_path
-    let docs = searcher
-        .search(&query, &TopDocs::with_limit(10_000).order_by_score())
-        .ok()?;
-    if docs.len() == 10_000 {
+    let overlay_sqlite = use_overlay
+        .then(|| open_sqlite_readonly(&workspace.overlay_sqlite_path()).ok())
+        .flatten();
+    if use_overlay && overlay_sqlite.is_none() {
         return None;
     }
-
+    let mut shadowed_paths = HashSet::new();
+    if let Some(sqlite) = &overlay_sqlite {
+        for query in [
+            "SELECT DISTINCT file_path FROM chunks",
+            "SELECT file_path FROM tombstones",
+        ] {
+            collect_sqlite_paths(sqlite, query, &mut shadowed_paths)?;
+        }
+    }
+    let tiers = if use_overlay {
+        let base = workspace.base_index_dir.as_ref()?;
+        vec![
+            (workspace.overlay_tantivy_dir(), false),
+            (base.join("tantivy"), true),
+        ]
+    } else {
+        vec![(workspace.tantivy_dir(), false)]
+    };
     let mut candidate_files = HashSet::new();
-    for (_score, addr) in docs {
+    for (tantivy_dir, is_base) in tiers {
+        if !tantivy_dir.exists() {
+            return None;
+        }
+        let (idx, fields) = open_tantivy_index(&tantivy_dir).ok()?;
+        let reader = idx.reader().ok()?;
+        let searcher = reader.searcher();
+        let query =
+            crate::search::substring_candidate_query(fields.text_trigrams?, &required_runs)?;
+        let query = constrain_query_to_scope(query, fields.file_path, scope_filter)?;
+        let docs = searcher
+            .search(&query, &TopDocs::with_limit(10_000).order_by_score())
+            .ok()?;
+        if docs.len() == 10_000 {
+            return None;
+        }
+
+        for (_score, addr) in docs {
+            if options.is_cancelled() {
+                return Some(Vec::new());
+            }
+            if let Ok(doc) = searcher.doc::<TantivyDocument>(addr)
+                && (options.skip_gitignore
+                    || fields
+                        .is_ignored
+                        .and_then(|field| doc.get_first(field))
+                        .and_then(|value| value.as_u64())
+                        .is_none_or(|value| value == 0))
+                && let Some(path_val) = doc.get_first(fields.file_path)
+                && let Some(path_str) = path_val.as_str()
+                && !(is_base && shadowed_paths.contains(path_str))
+            {
+                let rel = PathBuf::from(path_str);
+                if scope_filter.is_none_or(|s| s.matches(&rel))
+                    && path_matcher.matches(&rel)
+                    && options.type_filter.as_deref().is_none_or(|filter| {
+                        doc.get_first(fields.language)
+                            .and_then(|value| value.as_str())
+                            .is_some_and(|language| type_filter_matches_language(language, filter))
+                    })
+                {
+                    candidate_files.insert(rel);
+                }
+            }
+        }
+    }
+
+    let uncovered = uncovered_regex_paths(workspace, use_overlay, &shadowed_paths, options)?;
+    for rel in uncovered.iter() {
         if options.is_cancelled() {
             return Some(Vec::new());
         }
-        if let Ok(doc) = searcher.doc::<TantivyDocument>(addr)
-            && (options.skip_gitignore
-                || fields
-                    .is_ignored
-                    .and_then(|field| doc.get_first(field))
-                    .and_then(|value| value.as_u64())
-                    .is_none_or(|value| value == 0))
-            && let Some(path_val) = doc.get_first(fields.file_path)
-            && let Some(path_str) = path_val.as_str()
+        let type_match = type_filter_match_for_path(rel, options.type_filter.as_deref());
+        if scope_filter.is_none_or(|scope| scope.matches(rel))
+            && path_matcher.matches(rel)
+            && type_match != PathTypeFilterMatch::Reject
+            && (type_match != PathTypeFilterMatch::ValidateText
+                || unknown_file_is_indexable_text(&workspace.root.join(rel)))
         {
-            let rel = PathBuf::from(path_str);
-            if scope_filter.is_none_or(|s| s.matches(&rel))
-                && path_matcher.matches(&rel)
-                && options.type_filter.as_deref().is_none_or(|filter| {
-                    doc.get_first(fields.language)
-                        .and_then(|value| value.as_str())
-                        .is_some_and(|language| type_filter_matches_language(language, filter))
-                })
-            {
-                candidate_files.insert(rel);
-            }
+            candidate_files.insert(rel.clone());
         }
     }
 
     let mut paths: Vec<PathBuf> = candidate_files.into_iter().collect();
     paths.sort();
     Some(paths)
+}
+
+fn collect_sqlite_paths(
+    sqlite: &rusqlite::Connection,
+    query: &str,
+    paths: &mut HashSet<String>,
+) -> Option<()> {
+    let mut statement = sqlite.prepare(query).ok()?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .ok()?;
+    for row in rows {
+        paths.insert(row.ok()?);
+    }
+    Some(())
+}
+
+fn uncovered_regex_paths(
+    workspace: &Workspace,
+    use_overlay: bool,
+    shadowed_paths: &HashSet<String>,
+    options: &SearchOptions,
+) -> Option<Arc<Vec<PathBuf>>> {
+    let index_generation = workspace
+        .read_metadata()
+        .ok()?
+        .map_or(0, |m| m.index_generation);
+    let base_generation = workspace
+        .base_index_dir
+        .as_ref()
+        .and_then(|base| fs::read(base.join("workspace.json")).ok())
+        .and_then(|raw| serde_json::from_slice::<crate::workspace::WorkspaceMetadata>(&raw).ok())
+        .map_or(0, |metadata| metadata.index_generation);
+    let cache_key = RegexCoverageKey {
+        workspace_id: workspace.id.clone(),
+        index_generation,
+        base_generation,
+        skip_gitignore: options.skip_gitignore,
+    };
+    if let Some(paths) = regex_coverage_cache().lock().ok()?.get(&cache_key) {
+        return Some(Arc::clone(paths));
+    }
+
+    let sqlite_path = if use_overlay {
+        workspace.overlay_sqlite_path()
+    } else {
+        workspace.sqlite_path()
+    };
+    let sqlite = open_sqlite_readonly(&sqlite_path).ok()?;
+    let mut indexed_paths = HashSet::new();
+    collect_sqlite_paths(
+        &sqlite,
+        "SELECT DISTINCT file_path FROM chunks",
+        &mut indexed_paths,
+    )?;
+    if use_overlay {
+        let base =
+            open_sqlite_readonly(&workspace.base_index_dir.as_ref()?.join("metadata.sqlite3"))
+                .ok()?;
+        let mut base_paths = HashSet::new();
+        collect_sqlite_paths(
+            &base,
+            "SELECT DISTINCT file_path FROM chunks",
+            &mut base_paths,
+        )?;
+        indexed_paths.extend(
+            base_paths
+                .into_iter()
+                .filter(|path| !shadowed_paths.contains(path)),
+        );
+    }
+
+    let mut uncovered = Vec::new();
+    for entry in crate::walker::source_walker(&workspace.root, options.skip_gitignore).build() {
+        if options.is_cancelled() {
+            return Some(Arc::new(Vec::new()));
+        }
+        let entry = entry.ok()?;
+        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
+            continue;
+        }
+        let relative = entry.path().strip_prefix(&workspace.root).ok()?;
+        if !indexed_paths.contains(&index_path_string(relative)) {
+            uncovered.push(relative.to_path_buf());
+            if uncovered.len() > MAX_REGEX_UNINDEXED_FILES {
+                return None;
+            }
+        }
+    }
+    uncovered.sort();
+    let uncovered = Arc::new(uncovered);
+    let mut cache = regex_coverage_cache().lock().ok()?;
+    if cache.len() >= MAX_REGEX_COVERAGE_CACHE_ENTRIES {
+        cache.clear();
+    }
+    cache.insert(cache_key, Arc::clone(&uncovered));
+    Some(uncovered)
 }
 
 fn constrain_query_to_scope(
@@ -1021,5 +1175,66 @@ mod tests {
             indexed_hits[0].preview,
             "before\nunknown_extension_marker\nafter"
         );
+    }
+
+    #[test]
+    #[serial]
+    fn indexed_regex_includes_minified_files_outside_lexical_index() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            root.path().join("indexed.rs"),
+            "pub fn shared_regex_marker() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("minified.js"),
+            format!("{}shared_regex_marker", "a".repeat(50_001)),
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        let hits =
+            regex_search_with_options(&workspace, "shared_regex_marker", &SearchOptions::default())
+                .unwrap();
+        let paths = hits
+            .iter()
+            .map(|hit| hit.file_path.as_path())
+            .collect::<HashSet<_>>();
+
+        assert!(paths.contains(std::path::Path::new("indexed.rs")));
+        assert!(paths.contains(std::path::Path::new("minified.js")));
+    }
+
+    #[test]
+    #[serial]
+    fn indexed_regex_includes_files_larger_than_indexing_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            root.path().join("indexed.rs"),
+            "pub fn ordinary_source() {}\n",
+        )
+        .unwrap();
+        let mut oversized = "padding line\n".repeat(1_400_000);
+        oversized.push_str("oversized_regex_marker\n");
+        std::fs::write(root.path().join("oversized.log"), oversized).unwrap();
+
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        let hits = regex_search_with_options(
+            &workspace,
+            "oversized_regex_marker",
+            &SearchOptions::default(),
+        )
+        .unwrap();
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].file_path, PathBuf::from("oversized.log"));
     }
 }

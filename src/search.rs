@@ -352,12 +352,30 @@ impl SearchContext {
                     identity.dimensions
                 });
             let base_neural_vec = open_optional_vector_store(
-                wants_neural_vectors,
+                wants_neural_vectors && base_neural_model.is_some(),
                 &base_dir.join("vectors_neural.usearch"),
                 base_neural_dimensions,
                 NEURAL_VECTOR_QUANTIZATION,
             )?;
             let base_neural_profile = read_optional_profile(&base_dir.join("neural_profile"))?;
+            let overlay_neural_model =
+                read_optional_neural_identity(&workspace.neural_model_path())?;
+            let overlay_neural_dimensions = overlay_neural_model
+                .as_ref()
+                .map_or(base_neural_dimensions, |identity| identity.dimensions);
+            if let (Some(overlay), Some(base)) = (&overlay_neural_model, &base_neural_model) {
+                anyhow::ensure!(
+                    overlay == base,
+                    "worktree neural model does not match the base workspace"
+                );
+            }
+            let overlay_neural_vec = open_optional_vector_store(
+                wants_neural_vectors && overlay_neural_model.is_some(),
+                &workspace.vector_neural_path(),
+                overlay_neural_dimensions,
+                NEURAL_VECTOR_QUANTIZATION,
+            )?;
+            let overlay_neural_profile = read_optional_profile(&workspace.neural_profile_path())?;
 
             let mut tombstones = HashSet::new();
             let mut overlay_files = HashSet::new();
@@ -383,11 +401,11 @@ impl SearchContext {
                 fields,
                 hash_vectors: overlay_hash_vec,
                 base_hash_vectors: base_hash_vec,
-                neural_vectors: None,
+                neural_vectors: overlay_neural_vec,
                 base_neural_vectors: base_neural_vec,
-                neural_profile: None,
+                neural_profile: overlay_neural_profile,
                 base_neural_profile,
-                neural_model: None,
+                neural_model: overlay_neural_model,
                 base_neural_model,
                 tombstones,
                 overlay_files,

@@ -652,10 +652,6 @@ impl Workspace {
             hash_enhanced_generation == Some(index_generation) && !hash_tombstones_pending;
 
         if hash_generation_current && hash_path.exists() {
-            if use_overlay {
-                return false;
-            }
-
             let neural_enhanced_generation =
                 std::fs::read_to_string(self.neural_enhanced_generation_path())
                     .ok()
@@ -691,12 +687,6 @@ impl Workspace {
         .is_none_or(|enhanced| enhanced < vector_key_count)
         {
             return true;
-        }
-
-        // Worktree-specific chunks use their overlay hash store. Neural search
-        // falls through to the base workspace's shared neural store.
-        if use_overlay {
-            return false;
         }
 
         if self.neural_tombstones_path().exists()
@@ -2624,7 +2614,7 @@ mod tests {
 
     #[test]
     #[serial]
-    fn worktree_overlay_only_requires_hash_enrichment() {
+    fn worktree_overlay_requires_hash_and_neural_enrichment() {
         let home = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
         let tmp = tempfile::tempdir().unwrap();
@@ -2681,9 +2671,30 @@ mod tests {
         store.save().unwrap();
         std::fs::write(ws.hash_enhanced_generation_path(), "0").unwrap();
 
-        assert!(!ws.needs_neural_enhancement());
+        assert!(
+            ws.needs_neural_enhancement(),
+            "a hash-complete worktree still needs neural vectors for branch-local chunks"
+        );
         assert_eq!(ws.hash_vector_count(), 1);
         assert_eq!(ws.hash_coverage_percent(), 100.0);
+
+        let mut neural = crate::vector_store::VectorStore::open(
+            &ws.vector_neural_path(),
+            crate::EMBEDDING_DIMENSIONS,
+            crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
+        )
+        .unwrap();
+        neural
+            .upsert(1, vec![0.0; crate::EMBEDDING_DIMENSIONS])
+            .unwrap();
+        neural.save().unwrap();
+        std::fs::write(
+            ws.neural_model_path(),
+            serde_json::to_vec(&crate::embedding::configured_neural_model_identity()).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(ws.neural_enhanced_generation_path(), "0").unwrap();
+        assert!(!ws.needs_neural_enhancement());
 
         let status = list_workspaces()
             .unwrap()

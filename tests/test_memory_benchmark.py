@@ -175,10 +175,12 @@ class MemoryBenchmarkProvenanceTest(unittest.TestCase):
                 encoding="utf-8"
             )
         )
+        version = report["modes"]["blended"]["binary"]["version"]
+        self.assertRegex(version, r"^ivygrep \d+\.\d+\.\d+$")
         self.assertEqual(
-            report["modes"]["blended"]["binary"]["version"], "ivygrep 1.2.7"
+            report["release_equivalence"]["tag"],
+            f"v{version.removeprefix('ivygrep ')}",
         )
-        self.assertEqual(report["release_equivalence"]["tag"], "v1.2.7")
         self.assertTrue(
             report["release_equivalence"]["benchmark_inputs_unchanged"]
         )
