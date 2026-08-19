@@ -279,7 +279,7 @@ jobs:
           if [[ -n "$ALLOWED_BACKEND" ]]; then
             args+=(--allow-backend "$ALLOWED_BACKEND")
           fi
-          args+=(--expect-file "src/lib.rs")
+          args+=(--expect-file "src/lib.rs" --check-worktree)
           HTTP_PROXY=http://127.0.0.1:9 \
           HTTPS_PROXY=http://127.0.0.1:9 \
           ALL_PROXY=http://127.0.0.1:9 \

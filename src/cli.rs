@@ -637,10 +637,6 @@ pub async fn run() -> Result<()> {
             let hash_model = crate::embedding::create_hash_model();
             crate::indexer::enhance_workspace_hash(&workspace, hash_model.as_ref())?;
 
-            if workspace.has_overlay() || workspace.base_ref_path().exists() {
-                return Ok(0);
-            }
-
             let model = crate::embedding::create_neural_model_background()?;
             crate::indexer::enhance_workspace_neural(&workspace, model.as_ref())
         })();

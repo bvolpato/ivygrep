@@ -253,6 +253,37 @@ class NeuralBackendE2ETest(unittest.TestCase):
         self.assertEqual(attempts, 1)
         self.assertIn("did not execute neural retrieval", result.stderr)
 
+    def test_worktree_option_checks_branch_local_neural_retrieval(self) -> None:
+        result, attempts = self.run_helper(
+            """
+            case "$1" in
+              --add)
+                exit 0
+                ;;
+              --enhance-internal)
+                echo 1 > "$state"
+                exit 0
+                ;;
+              --status)
+                echo '{"has_neural_vectors":true,"neural_backend":"StaticEmbedding token mean via Rust"}'
+                exit 0
+                ;;
+              --json)
+                [ "$2" = "--force-neural" ] || exit 7
+                echo '{"hits":[{"file_path":"src/branch_local.rs","neural_executed":true}]}'
+                exit 0
+                ;;
+            esac
+            exit 2
+            """,
+            attempts=1,
+            extra_args=["--check-worktree"],
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(attempts, 1)
+        self.assertIn("Worktree neural retrieval procedure passed", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

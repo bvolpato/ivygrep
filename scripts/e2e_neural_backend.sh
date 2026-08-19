@@ -8,6 +8,7 @@ expected_backend=""
 allowed_backend=""
 model_profile=""
 expected_file=""
+check_worktree=0
 semantic_query="where is the routine that matches user intent to source after a warm model load"
 
 usage() {
@@ -23,6 +24,7 @@ Options:
   --allow-backend TEXT   Alternate accepted status substring
   --model-profile NAME   Set IVYGREP_MODEL_PROFILE for this backend check
   --expect-file PATH     Require a semantic query to return PATH
+  --check-worktree       Also require branch-local neural retrieval from a Git worktree
   --semantic-query TEXT  Natural-language query used with --expect-file
   -h, --help             Show help
 EOF
@@ -65,6 +67,10 @@ while [ "$#" -gt 0 ]; do
       semantic_query=$2
       shift 2
       ;;
+    --check-worktree)
+      check_worktree=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -97,6 +103,15 @@ cat > "$project/README.md" <<'EOF'
 
 This decoy documents packaging and command-line flags. It does not implement source retrieval.
 EOF
+
+if [ "$check_worktree" -eq 1 ]; then
+  git -C "$project" init -q
+  git -C "$project" config user.name "ivygrep neural smoke test"
+  git -C "$project" config user.email "neural-smoke@example.invalid"
+  git -C "$project" config core.hooksPath "$tmp_root/no-hooks"
+  git -C "$project" add .
+  git -C "$project" -c commit.gpgsign=false commit -qm "seed neural smoke project"
+fi
 
 export IVYGREP_HOME="$tmp_root/home"
 export IVYGREP_NO_AUTOSPAWN=1
@@ -170,6 +185,35 @@ if [ -n "$expected_file" ]; then
     fail "forced semantic query did not execute neural retrieval"
   }
   echo "Semantic retrieval procedure passed: $expected_file"
+fi
+
+if [ "$check_worktree" -eq 1 ]; then
+  worktree="$tmp_root/worktree"
+  git -C "$project" worktree add --quiet --detach "$worktree" HEAD
+  cat > "$worktree/src/branch_local.rs" <<'EOF'
+/// Retrieves branch-local source by semantic intent.
+pub fn branch_local_semantic_retrieval_marker() -> bool {
+    true
+}
+EOF
+  "$ig_bin" --add "$worktree" --force --json --no-watch --hash > /dev/null
+  "$ig_bin" --enhance-internal "$worktree" > "$tmp_root/worktree-enhance.log" 2>&1 || {
+    cat "$tmp_root/worktree-enhance.log" >&2
+    fail "worktree neural enhancement failed"
+  }
+  worktree_json="$tmp_root/worktree-search.json"
+  "$ig_bin" --json --force-neural --limit 3 \
+    "branch_local_semantic_retrieval_marker" "$worktree" > "$worktree_json" ||
+    fail "worktree forced neural search failed"
+  grep -Fq 'src/branch_local.rs' "$worktree_json" || {
+    cat "$worktree_json" >&2
+    fail "worktree neural search omitted branch-local source"
+  }
+  grep -Eq '"neural_executed"[[:space:]]*:[[:space:]]*true' "$worktree_json" || {
+    cat "$worktree_json" >&2
+    fail "worktree forced search did not execute neural retrieval"
+  }
+  echo "Worktree neural retrieval procedure passed: src/branch_local.rs"
 fi
 
 echo "Neural backend procedure passed: $reported_backend"
