@@ -599,7 +599,10 @@ impl WatchEventFilter {
         let Some((normalized_path, rel)) = self.normalize_watch_path(path) else {
             return false;
         };
-        if rel.as_os_str().is_empty() || is_always_ignored_watch_path(&rel) {
+        if rel.as_os_str().is_empty()
+            || is_always_ignored_watch_path(&rel)
+            || crate::walker::is_ivygrep_owned_path(&self.workspace.root, &normalized_path)
+        {
             return false;
         }
 
@@ -5897,6 +5900,23 @@ mod tests {
         assert!(filter.path_should_reindex(&repo.path().join("target/debug/build.o")));
         assert!(filter.path_should_reindex(&repo.path().join("secret.txt")));
         assert!(!filter.path_should_reindex(&repo.path().join(".git/index")));
+    }
+
+    #[test]
+    #[serial]
+    fn watch_event_filter_ignores_nested_ivygrep_storage() {
+        let repo = tempdir().unwrap();
+        let home = repo.path().join("local-state");
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", &home) };
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        workspace.ensure_dirs().unwrap();
+        let filter = WatchEventFilter::new(&workspace);
+
+        assert!(filter.path_should_reindex(&workspace.root.join("src/lib.rs")));
+        assert!(!filter.path_should_reindex(&workspace.index_dir.join("job.json")));
+        assert!(!filter.path_should_reindex(&home.join("daemon.log")));
     }
 
     #[tokio::test]
