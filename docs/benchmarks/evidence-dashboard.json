@@ -4,7 +4,7 @@
       "id": "current-head-relevance",
       "immutable_url": null,
       "kind": "quality",
-      "label": "Current package self-repository retrieval screen",
+      "label": "Historical self-repository retrieval snapshot",
       "path": "docs/benchmarks/current-head-relevance.json",
       "publication_commit": null,
       "publication_status": "not pinned to an immutable revision",
@@ -1186,7 +1186,7 @@
   "freshness": {
     "evidence": {
       "current-head-relevance": {
-        "status": "current",
+        "status": "historical",
         "versions": [
           "1.2.11"
         ]

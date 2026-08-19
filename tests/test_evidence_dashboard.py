@@ -399,11 +399,11 @@ class EvidenceDashboardTest(unittest.TestCase):
         )
         self.assertEqual(
             dashboard["freshness"]["evidence"]["current-head-relevance"]["status"],
-            "current",
+            "historical",
         )
         self.assertEqual(current_scale["summary"]["version"].split()[0], "ivygrep")
         self.assertTrue(dashboard["release_history"]["releases"][0]["tag"].startswith("v"))
-        self.assertIn("Current package retrieval screen", html)
+        self.assertIn("Historical retrieval snapshot", html)
         self.assertIn("Latest measured release scope", html)
 
 
