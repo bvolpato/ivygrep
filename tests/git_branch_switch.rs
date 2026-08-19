@@ -18,8 +18,11 @@ use tempfile::tempdir;
 
 use ivygrep::EMBEDDING_DIMENSIONS;
 use ivygrep::context::{ContextRole, build_context_bundle};
-use ivygrep::embedding::HashEmbeddingModel;
-use ivygrep::indexer::{index_workspace, open_sqlite, reconcile_worktree_overlay};
+use ivygrep::embedding::{EmbeddingModel, HashEmbeddingModel, NeuralModelIdentity};
+use ivygrep::indexer::{
+    enhance_workspace_hash, enhance_workspace_neural, index_workspace, open_sqlite,
+    reconcile_worktree_overlay,
+};
 use ivygrep::search::{SearchOptions, hybrid_search};
 use ivygrep::workspace::Workspace;
 
@@ -72,6 +75,27 @@ fn setup_and_index(
     let workspace = Workspace::resolve(root).unwrap();
     let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
     index_workspace(&workspace, &model).unwrap()
+}
+
+struct TestWorktreeNeuralModel(HashEmbeddingModel);
+
+impl EmbeddingModel for TestWorktreeNeuralModel {
+    fn dimensions(&self) -> usize {
+        self.0.dimensions()
+    }
+
+    fn embed(&self, text: &str) -> Vec<f32> {
+        self.0.embed(text)
+    }
+
+    fn model_identity(&self) -> Option<&NeuralModelIdentity> {
+        static IDENTITY: std::sync::OnceLock<NeuralModelIdentity> = std::sync::OnceLock::new();
+        Some(IDENTITY.get_or_init(ivygrep::embedding::configured_neural_model_identity))
+    }
+
+    fn profile_info(&self) -> Option<&'static str> {
+        Some("static")
+    }
 }
 
 fn workspace_for(root: &std::path::Path) -> Workspace {
@@ -163,6 +187,85 @@ fn assert_only_overlay_stores(workspace: &Workspace) {
             path.display()
         );
     }
+}
+
+#[test]
+#[serial]
+fn worktree_neural_search_includes_added_and_modified_branch_content() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    init_git_repo(root.path());
+    fs::write(
+        root.path().join("shared.rs"),
+        "pub fn base_authentication_handler() -> bool { true }\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "seed base source"]);
+
+    setup_and_index(root.path(), home.path());
+    let base_workspace = workspace_for(root.path());
+    let hash_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+    let neural_model = TestWorktreeNeuralModel(HashEmbeddingModel::new(EMBEDDING_DIMENSIONS));
+    enhance_workspace_hash(&base_workspace, &hash_model).unwrap();
+    assert!(enhance_workspace_neural(&base_workspace, &neural_model).unwrap() > 0);
+
+    git(root.path(), &["branch", "neural-overlay", "main"]);
+    let worktrees = tempdir().unwrap();
+    let worktree = worktrees.path().join("neural-overlay");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            worktree.to_str().unwrap(),
+            "neural-overlay",
+        ],
+    );
+    fs::write(
+        worktree.join("shared.rs"),
+        "pub fn branch_authentication_handler() -> bool { true }\n",
+    )
+    .unwrap();
+    fs::write(
+        worktree.join("new.rs"),
+        "pub fn branch_session_validation() -> bool { true }\n",
+    )
+    .unwrap();
+
+    setup_and_index(&worktree, home.path());
+    let overlay = workspace_for(&worktree);
+    enhance_workspace_hash(&overlay, &hash_model).unwrap();
+    assert!(overlay.needs_neural_enhancement());
+    assert!(enhance_workspace_neural(&overlay, &neural_model).unwrap() >= 2);
+    assert!(!overlay.needs_neural_enhancement());
+
+    for (query, file) in [
+        ("branch_authentication_handler", "shared.rs"),
+        ("branch_session_validation", "new.rs"),
+    ] {
+        let hits = hybrid_search(
+            &overlay,
+            query,
+            Some(&neural_model),
+            &SearchOptions {
+                force_neural: true,
+                ..SearchOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            hits.iter().any(|hit| {
+                hit.file_path.ends_with(file) && hit.sources.iter().any(|source| source == "neural")
+            }),
+            "branch-local file {file} was absent from neural results: {hits:#?}"
+        );
+    }
+
+    git(
+        root.path(),
+        &["worktree", "remove", worktree.to_str().unwrap(), "--force"],
+    );
 }
 
 fn stored_chunk_text(workspace: &Workspace, file_path: &str) -> Option<String> {

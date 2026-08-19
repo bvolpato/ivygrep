@@ -3244,7 +3244,9 @@ fn search_context_signature(
             hash_vectors: wants_hash_vectors
                 .then(|| file_stamp(&workspace.overlay_vector_path()))
                 .flatten(),
-            neural_vectors: None,
+            neural_vectors: wants_neural_vectors
+                .then(|| file_stamp(&workspace.vector_neural_path()))
+                .flatten(),
             base_sqlite: file_stamp(&base_dir.join("metadata.sqlite3")),
             base_tantivy: dir_stamp(&base_dir.join("tantivy")),
             base_hash_vectors: wants_hash_vectors

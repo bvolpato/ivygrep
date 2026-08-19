@@ -652,10 +652,6 @@ impl Workspace {
             hash_enhanced_generation == Some(index_generation) && !hash_tombstones_pending;
 
         if hash_generation_current && hash_path.exists() {
-            if use_overlay {
-                return false;
-            }
-
             let neural_enhanced_generation =
                 std::fs::read_to_string(self.neural_enhanced_generation_path())
                     .ok()
@@ -691,12 +687,6 @@ impl Workspace {
         .is_none_or(|enhanced| enhanced < vector_key_count)
         {
             return true;
-        }
-
-        // Worktree-specific chunks use their overlay hash store. Neural search
-        // falls through to the base workspace's shared neural store.
-        if use_overlay {
-            return false;
         }
 
         if self.neural_tombstones_path().exists()
