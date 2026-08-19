@@ -23,6 +23,7 @@ use ivygrep::indexer::{
     enhance_workspace_hash, enhance_workspace_neural, index_workspace, open_sqlite,
     reconcile_worktree_overlay,
 };
+use ivygrep::regex_search::regex_search_with_options;
 use ivygrep::search::{SearchOptions, hybrid_search};
 use ivygrep::workspace::Workspace;
 
@@ -272,6 +273,76 @@ fn worktree_neural_search_includes_added_and_modified_branch_content() {
             "branch-local file {file} was absent from neural results: {hits:#?}"
         );
     }
+
+    git(
+        root.path(),
+        &["worktree", "remove", worktree.to_str().unwrap(), "--force"],
+    );
+}
+
+#[test]
+#[serial]
+fn worktree_indexed_regex_combines_base_and_overlay_without_stale_matches() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    init_git_repo(root.path());
+    fs::write(
+        root.path().join("base.rs"),
+        "pub fn shared_regex_needle() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("modified.rs"),
+        "pub fn obsolete_regex_needle() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("deleted.rs"),
+        "pub fn deleted_regex_needle() {}\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "seed regex base"]);
+    setup_and_index(root.path(), home.path());
+
+    git(root.path(), &["branch", "regex-overlay", "main"]);
+    let worktrees = tempdir().unwrap();
+    let worktree = worktrees.path().join("regex-overlay");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            worktree.to_str().unwrap(),
+            "regex-overlay",
+        ],
+    );
+    fs::write(
+        worktree.join("modified.rs"),
+        "pub fn updated_regex_needle() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        worktree.join("added.rs"),
+        "pub fn added_regex_needle() {}\n",
+    )
+    .unwrap();
+    fs::remove_file(worktree.join("deleted.rs")).unwrap();
+    setup_and_index(&worktree, home.path());
+    let workspace = workspace_for(&worktree);
+
+    let hits =
+        regex_search_with_options(&workspace, "regex_needle", &SearchOptions::default()).unwrap();
+    let files = hits
+        .iter()
+        .map(|hit| hit.file_path.to_string_lossy().into_owned())
+        .collect::<HashSet<_>>();
+
+    assert!(files.contains("base.rs"));
+    assert!(files.contains("modified.rs"));
+    assert!(files.contains("added.rs"));
+    assert!(!files.contains("deleted.rs"));
+    assert!(hits.iter().all(|hit| !hit.preview.contains("obsolete")));
 
     git(
         root.path(),
