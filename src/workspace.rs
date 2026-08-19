@@ -1385,34 +1385,86 @@ fn path_from_git_output(path: &[u8]) -> Option<PathBuf> {
     Some(PathBuf::from(String::from_utf8(path.to_vec()).ok()?))
 }
 
-pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
+struct WorkspaceRegistry {
+    entries: Vec<(PathBuf, WorkspaceMetadata)>,
+    warnings: Vec<String>,
+}
+
+fn workspace_registry() -> Result<WorkspaceRegistry> {
     let root = config::indexes_root()?;
     if !root.exists() {
-        return Ok(vec![]);
+        return Ok(WorkspaceRegistry {
+            entries: Vec::new(),
+            warnings: Vec::new(),
+        });
     }
 
-    let mut by_id = BTreeMap::new();
-    let reranker = crate::reranker::runtime_status();
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
+    let mut entries = Vec::new();
+    let mut warnings = Vec::new();
+    for entry in fs::read_dir(&root)? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                warnings.push(format!(
+                    "could not inspect indexed workspace in {}: {error}",
+                    root.display()
+                ));
+                continue;
+            }
+        };
+        let entry_path = entry.path();
+        let is_directory = match entry.file_type() {
+            Ok(file_type) => file_type.is_dir(),
+            Err(error) => {
+                warnings.push(format!(
+                    "could not inspect indexed workspace {}: {error}",
+                    entry_path.display()
+                ));
+                continue;
+            }
+        };
+        if !is_directory {
             continue;
         }
 
-        let metadata_path = entry.path().join("workspace.json");
+        let metadata_path = entry_path.join("workspace.json");
         if !metadata_path.exists() {
             continue;
         }
 
-        let raw = fs::read(&metadata_path).with_context(|| {
-            format!(
-                "failed reading workspace metadata at {}",
-                metadata_path.display()
-            )
-        })?;
-        let metadata: WorkspaceMetadata = serde_json::from_slice(&raw)?;
+        let metadata = fs::read(&metadata_path)
+            .with_context(|| {
+                format!(
+                    "failed reading workspace metadata at {}",
+                    metadata_path.display()
+                )
+            })
+            .and_then(|raw| {
+                serde_json::from_slice::<WorkspaceMetadata>(&raw).with_context(|| {
+                    format!(
+                        "failed parsing workspace metadata at {}",
+                        metadata_path.display()
+                    )
+                })
+            });
+        match metadata {
+            Ok(metadata) => entries.push((entry_path, metadata)),
+            Err(error) => warnings.push(format!("could not open indexed workspace: {error:#}")),
+        }
+    }
+    warnings.sort_unstable();
+    Ok(WorkspaceRegistry { entries, warnings })
+}
 
-        let index_dir = entry.path();
+pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
+    let WorkspaceRegistry { entries, warnings } = workspace_registry()?;
+    for warning in warnings {
+        tracing::warn!("{warning}");
+    }
+
+    let mut by_id = BTreeMap::new();
+    let reranker = crate::reranker::runtime_status();
+    for (index_dir, metadata) in entries {
         let (chunk_count, file_count) = read_sqlite_counts(&index_dir);
         let index_size_bytes = dir_size_bytes(&index_dir);
         let index_components = index_component_sizes(&index_dir);
@@ -1622,34 +1674,26 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
 }
 
 pub fn list_workspace_roots() -> Result<Vec<PathBuf>> {
-    let root = config::indexes_root()?;
-    if !root.exists() {
-        return Ok(vec![]);
+    let WorkspaceRegistry { entries, warnings } = workspace_registry()?;
+    for warning in warnings {
+        tracing::warn!("{warning}");
     }
+    Ok(entries
+        .into_iter()
+        .map(|(_, metadata)| metadata.root)
+        .collect())
+}
 
-    let mut roots = Vec::new();
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-
-        let metadata_path = entry.path().join("workspace.json");
-        if !metadata_path.exists() {
-            continue;
-        }
-
-        let raw = fs::read(&metadata_path).with_context(|| {
-            format!(
-                "failed reading workspace metadata at {}",
-                metadata_path.display()
-            )
-        })?;
-        let metadata: WorkspaceMetadata = serde_json::from_slice(&raw)?;
-        roots.push(metadata.root);
-    }
-
-    Ok(roots)
+pub(crate) fn list_indexed_workspace_roots() -> Result<(Vec<PathBuf>, Vec<String>)> {
+    let WorkspaceRegistry { entries, warnings } = workspace_registry()?;
+    let roots = entries
+        .into_iter()
+        .filter(|(_, metadata)| metadata.last_indexed_at_unix.is_some())
+        .map(|(_, metadata)| (metadata.id, metadata.root))
+        .collect::<BTreeMap<_, _>>()
+        .into_values()
+        .collect();
+    Ok((roots, warnings))
 }
 
 fn read_sqlite_counts(index_dir: &Path) -> (u64, u64) {

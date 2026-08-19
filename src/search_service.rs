@@ -3,7 +3,7 @@ use std::path::Path;
 use anyhow::{Result, bail};
 
 use crate::protocol::SearchHit;
-use crate::workspace::{Workspace, list_workspaces};
+use crate::workspace::{Workspace, list_indexed_workspace_roots};
 
 pub(crate) struct SearchWorkspaceSet {
     pub(crate) workspaces: Vec<Workspace>,
@@ -28,11 +28,11 @@ pub(crate) fn select_all_indexed_workspaces<F>(mut resolve: F) -> Result<SearchW
 where
     F: FnMut(&Path) -> Result<Workspace>,
 {
-    let roots = list_workspaces()?
-        .into_iter()
-        .filter(|status| status.last_indexed_at_unix.is_some())
-        .map(|status| status.root);
-    Ok(resolve_workspace_roots(roots, &mut resolve))
+    let (roots, mut warnings) = list_indexed_workspace_roots()?;
+    let mut selected = resolve_workspace_roots(roots, &mut resolve);
+    warnings.append(&mut selected.warnings);
+    selected.warnings = warnings;
+    Ok(selected)
 }
 
 fn resolve_workspace_roots(
@@ -140,6 +140,8 @@ mod tests {
     use std::path::PathBuf;
 
     use anyhow::anyhow;
+    use serial_test::serial;
+    use tempfile::tempdir;
 
     use super::*;
 
@@ -202,5 +204,33 @@ mod tests {
         assert_eq!(selection.warnings.len(), 1);
         assert!(selection.warnings[0].contains("/missing"));
         assert!(selection.warnings[0].contains("stale registry entry"));
+    }
+
+    #[test]
+    #[serial]
+    fn all_workspace_selection_survives_corrupt_registry_entries() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        std::fs::write(
+            repo.path().join("lib.rs"),
+            "pub fn healthy_workspace() {}\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let model = crate::embedding::create_hash_model();
+        crate::indexer::index_workspace(&workspace, model.as_ref()).unwrap();
+
+        let corrupt = home.path().join("indexes").join("corrupt-workspace");
+        std::fs::create_dir_all(&corrupt).unwrap();
+        std::fs::write(corrupt.join("workspace.json"), "{broken").unwrap();
+
+        let selection = select_all_indexed_workspaces(Workspace::resolve).unwrap();
+        assert_eq!(selection.workspaces.len(), 1);
+        assert_eq!(selection.workspaces[0].root, workspace.root);
+        assert_eq!(selection.warnings.len(), 1);
+        assert!(selection.warnings[0].contains("corrupt-workspace"));
+        assert_eq!(crate::workspace::list_workspaces().unwrap().len(), 1);
+        assert_eq!(crate::workspace::list_workspace_roots().unwrap().len(), 1);
     }
 }
