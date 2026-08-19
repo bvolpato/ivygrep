@@ -39,7 +39,11 @@ jobs:
         run: cargo fmt -- --check
 
       - name: Install ShellCheck
-        run: sudo apt-get update && sudo apt-get install -y shellcheck
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y shellcheck
+          fi
 
       - name: ShellCheck scripts
         run: shellcheck install.sh build.sh test.sh bench.sh scripts/bootstrap_stress_fixtures.sh scripts/e2e_all.sh scripts/e2e_web_ui.sh scripts/e2e_procedures.sh scripts/e2e_neural_backend.sh scripts/e2e_x86_baseline.sh scripts/e2e_cached_model.sh scripts/stress_large_repo.sh
@@ -279,7 +283,7 @@ jobs:
           if [[ -n "$ALLOWED_BACKEND" ]]; then
             args+=(--allow-backend "$ALLOWED_BACKEND")
           fi
-          args+=(--expect-file "src/lib.rs")
+          args+=(--expect-file "src/lib.rs" --check-worktree)
           HTTP_PROXY=http://127.0.0.1:9 \
           HTTPS_PROXY=http://127.0.0.1:9 \
           ALL_PROXY=http://127.0.0.1:9 \
@@ -296,7 +300,7 @@ jobs:
         run: |
           npm install -g pnpm@10.33.0
           pnpm -C web install --frozen-lockfile
-          pnpm -C web exec playwright install --with-deps chromium
+          pnpm -C web exec playwright install chromium
 
       - name: Run bundled Web UI browser E2E
         if: runner.os == 'Linux' && matrix.cargo_flags == ''

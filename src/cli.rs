@@ -637,11 +637,8 @@ pub async fn run() -> Result<()> {
             let hash_model = crate::embedding::create_hash_model();
             crate::indexer::enhance_workspace_hash(&workspace, hash_model.as_ref())?;
 
-            if workspace.has_overlay() || workspace.base_ref_path().exists() {
-                return Ok(0);
-            }
-
             let model = crate::embedding::create_neural_model_background()?;
+            ensure_compatible_worktree_base_model(&workspace, model.as_ref())?;
             crate::indexer::enhance_workspace_neural(&workspace, model.as_ref())
         })();
         if let Err(e) = &result {
@@ -2312,6 +2309,44 @@ fn local_hybrid_search_model(
         Ok(Some(crate::embedding::create_hash_model()))
     } else {
         Ok(Some(create_model(false)))
+    }
+}
+
+fn ensure_compatible_worktree_base_model(
+    workspace: &Workspace,
+    model: &dyn crate::embedding::EmbeddingModel,
+) -> Result<()> {
+    let Some(identity) = model.model_identity() else {
+        return Ok(());
+    };
+    let Some(base_root) = workspace.main_worktree_root() else {
+        return Ok(());
+    };
+    let base = Workspace::resolve(&base_root)?;
+    if base
+        .neural_model_identity()
+        .is_none_or(|persisted| persisted == *identity)
+    {
+        return Ok(());
+    }
+
+    base.trigger_background_enhancement()?;
+    loop {
+        if !base.is_enhancing_active() {
+            if base.neural_model_identity().as_ref() == Some(identity) {
+                return Ok(());
+            }
+            let status = jobs::job_status(
+                &base,
+                JobKind::Enhancement,
+                jobs::ENHANCEMENT_HEARTBEAT_TTL_SECS,
+            );
+            if let Some(error) = status.record.and_then(|record| record.last_error) {
+                bail!("base workspace neural enhancement failed: {error}");
+            }
+            bail!("base workspace neural model was not refreshed before worktree enhancement");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
 
