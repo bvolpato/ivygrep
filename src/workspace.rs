@@ -1385,10 +1385,18 @@ fn path_from_git_output(path: &[u8]) -> Option<PathBuf> {
     Some(PathBuf::from(String::from_utf8(path.to_vec()).ok()?))
 }
 
-fn workspace_registry() -> Result<(Vec<(PathBuf, WorkspaceMetadata)>, Vec<String>)> {
+struct WorkspaceRegistry {
+    entries: Vec<(PathBuf, WorkspaceMetadata)>,
+    warnings: Vec<String>,
+}
+
+fn workspace_registry() -> Result<WorkspaceRegistry> {
     let root = config::indexes_root()?;
     if !root.exists() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok(WorkspaceRegistry {
+            entries: Vec::new(),
+            warnings: Vec::new(),
+        });
     }
 
     let mut entries = Vec::new();
@@ -1445,11 +1453,11 @@ fn workspace_registry() -> Result<(Vec<(PathBuf, WorkspaceMetadata)>, Vec<String
         }
     }
     warnings.sort_unstable();
-    Ok((entries, warnings))
+    Ok(WorkspaceRegistry { entries, warnings })
 }
 
 pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
-    let (entries, warnings) = workspace_registry()?;
+    let WorkspaceRegistry { entries, warnings } = workspace_registry()?;
     for warning in warnings {
         tracing::warn!("{warning}");
     }
@@ -1666,7 +1674,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
 }
 
 pub fn list_workspace_roots() -> Result<Vec<PathBuf>> {
-    let (entries, warnings) = workspace_registry()?;
+    let WorkspaceRegistry { entries, warnings } = workspace_registry()?;
     for warning in warnings {
         tracing::warn!("{warning}");
     }
@@ -1677,7 +1685,7 @@ pub fn list_workspace_roots() -> Result<Vec<PathBuf>> {
 }
 
 pub(crate) fn list_indexed_workspace_roots() -> Result<(Vec<PathBuf>, Vec<String>)> {
-    let (entries, warnings) = workspace_registry()?;
+    let WorkspaceRegistry { entries, warnings } = workspace_registry()?;
     let roots = entries
         .into_iter()
         .filter(|(_, metadata)| metadata.last_indexed_at_unix.is_some())
