@@ -235,6 +235,17 @@ fn worktree_neural_search_includes_added_and_modified_branch_content() {
 
     setup_and_index(&worktree, home.path());
     let overlay = workspace_for(&worktree);
+    assert!(!overlay.vector_neural_path().exists());
+    fs::write(
+        worktree.join("shared.rs"),
+        "pub fn branch_authentication_handler() -> bool { false }\n",
+    )
+    .unwrap();
+    index_workspace(&overlay, &hash_model).unwrap();
+    assert!(
+        overlay.neural_tombstones_path().exists(),
+        "overlay edits must journal removed neural keys before the first vector save"
+    );
     enhance_workspace_hash(&overlay, &hash_model).unwrap();
     assert!(overlay.needs_neural_enhancement());
     assert!(enhance_workspace_neural(&overlay, &neural_model).unwrap() >= 2);

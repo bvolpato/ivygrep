@@ -1115,8 +1115,7 @@ fn index_workspace_inner(
     ensure_hash_vector_store(&vector_path, crate::EMBEDDING_DIMENSIONS)?;
     let mut vector_tombstones = VectorTombstoneJournals::new(
         workspace.hash_tombstones_path(),
-        (!use_overlay || workspace.vector_neural_path().exists())
-            .then(|| workspace.neural_tombstones_path()),
+        Some(workspace.neural_tombstones_path()),
     );
 
     // Periodic commits keep the WAL bounded during large indexes.
