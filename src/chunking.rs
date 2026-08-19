@@ -675,7 +675,7 @@ pub(crate) fn chunk_source_with_metadata(rel_path: &Path, text: &str) -> Chunked
         .map(|(start_line, _)| leading_doc_start(*start_line, &language, &lines))
         .collect::<Vec<_>>();
     let mut chunks = Vec::new();
-    for (idx, (_, kind)) in signatures.iter().enumerate() {
+    for (idx, (definition_start, kind)) in signatures.iter().enumerate() {
         let start = chunk_starts[idx];
         let end = chunk_starts
             .get(idx + 1)
@@ -693,7 +693,7 @@ pub(crate) fn chunk_source_with_metadata(rel_path: &Path, text: &str) -> Chunked
             (start, end),
             &language,
             kind,
-            lines[start.saturating_sub(1)].trim(),
+            lines[definition_start.saturating_sub(1)].trim(),
         );
     }
 
@@ -856,6 +856,7 @@ fn try_tree_sitter_chunk_source_with_timeout(
 
     for (range_index, (start, end, kind)) in ranges.iter().enumerate() {
         let mut start = *start;
+        let definition_start = start;
         let end = *end;
         if start == 0 || start > lines.len() {
             continue;
@@ -903,13 +904,29 @@ fn try_tree_sitter_chunk_source_with_timeout(
                         && *nested_start > start
                         && *nested_start <= safe_end
                         && *nested_end <= safe_end)
-                        .then_some((*nested_start, *nested_end))
+                        .then(|| {
+                            (
+                                leading_doc_start(*nested_start, language, lines).max(start + 1),
+                                *nested_start,
+                                *nested_end,
+                            )
+                        })
                 })
                 .collect::<Vec<_>>()
         } else {
             Vec::new()
         };
-        let context = lines[start.saturating_sub(1)].trim();
+        for (nested_start, nested_definition, _) in &nested {
+            for flag in covered
+                .iter_mut()
+                .take(*nested_definition)
+                .skip(*nested_start)
+            {
+                *flag = false;
+            }
+        }
+
+        let context = lines[definition_start.saturating_sub(1)].trim();
         if nested.is_empty() {
             push_bounded_structural_chunks(
                 &mut chunks,
@@ -935,7 +952,7 @@ fn try_tree_sitter_chunk_source_with_timeout(
                 context,
             );
             let mut parent_start = overview_end + 1;
-            for (nested_start, nested_end) in nested {
+            for (nested_start, _, nested_end) in nested {
                 if nested_start > parent_start {
                     push_bounded_structural_chunks(
                         &mut chunks,
@@ -2091,7 +2108,8 @@ pub fn calculate_total(amount: f64) -> f64 {
 
     #[test]
     fn oversized_tree_sitter_functions_are_bounded_without_losing_the_tail() {
-        let mut source = String::from("pub fn reconcile_every_record() {\n");
+        let mut source =
+            String::from("/// Reconcile every record safely.\npub fn reconcile_every_record() {\n");
         for index in 0..180 {
             source.push_str(&format!("    process_record_{index:03}();\n"));
         }
@@ -2122,7 +2140,7 @@ pub fn calculate_total(amount: f64) -> f64 {
         let mut source = String::from("impl PaymentProcessor {\n");
         for index in 0..35 {
             source.push_str(&format!(
-                "    fn reconcile_payment_{index:03}(&self) {{\n        persist_payment_{index:03}();\n    }}\n\n"
+                "    /// Settles payment {index:03}.\n    fn reconcile_payment_{index:03}(&self) {{\n        persist_payment_{index:03}();\n    }}\n\n"
             ));
         }
         source.push_str("}\n");
@@ -2159,22 +2177,25 @@ pub fn calculate_total(amount: f64) -> f64 {
                 .iter()
                 .any(|chunk| chunk.text.contains("persist_payment_034"))
         );
+        assert!(chunks.iter().any(|chunk| {
+            chunk.kind == ChunkKind::Function
+                && chunk.text.contains("Settles payment 034")
+                && chunk.text.contains("persist_payment_034")
+        }));
     }
 
     #[test]
     fn oversized_fallback_definitions_are_bounded() {
-        let mut source = String::from("proc reconcileAll() =\n");
+        let mut source = String::from("## Reconcile every record safely.\nproc reconcileAll() =\n");
         for index in 0..140 {
             source.push_str(&format!("  reconcileRecord({index})\n"));
         }
 
         let chunks = chunk_source(Path::new("src/reconcile.nim"), &source);
         assert!(chunks.len() > 1);
-        assert!(
-            chunks
-                .iter()
-                .all(|chunk| chunk.end_line - chunk.start_line < MAX_STRUCTURAL_CHUNK_LINES)
-        );
+        assert!(chunks.iter().all(|chunk| chunk.end_line - chunk.start_line
+            < MAX_STRUCTURAL_CHUNK_LINES
+            && chunk.text.contains("reconcileAll")));
         assert!(
             chunks
                 .iter()
