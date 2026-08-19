@@ -566,11 +566,14 @@ impl WatchEventFilter {
         if matches!(event.kind, notify::EventKind::Access(_)) {
             return WatchChange::None;
         }
-        if event
-            .paths
-            .iter()
-            .any(|path| self.is_ignore_configuration_path(path))
-        {
+        if event.paths.iter().any(|path| {
+            !self
+                .normalize_watch_path(path)
+                .is_some_and(|(normalized, _)| {
+                    crate::walker::is_ivygrep_owned_path(&self.workspace.root, &normalized)
+                })
+                && self.is_ignore_configuration_path(path)
+        }) {
             self.refresh();
             return WatchChange::FullReconciliation;
         }
@@ -599,7 +602,10 @@ impl WatchEventFilter {
         let Some((normalized_path, rel)) = self.normalize_watch_path(path) else {
             return false;
         };
-        if rel.as_os_str().is_empty() || is_always_ignored_watch_path(&rel) {
+        if rel.as_os_str().is_empty()
+            || is_always_ignored_watch_path(&rel)
+            || crate::walker::is_ivygrep_owned_path(&self.workspace.root, &normalized_path)
+        {
             return false;
         }
 
@@ -5899,6 +5905,23 @@ mod tests {
         assert!(!filter.path_should_reindex(&repo.path().join(".git/index")));
     }
 
+    #[test]
+    #[serial]
+    fn watch_event_filter_ignores_nested_ivygrep_storage() {
+        let repo = tempdir().unwrap();
+        let home = repo.path().join("local-state");
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", &home) };
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        workspace.ensure_dirs().unwrap();
+        let filter = WatchEventFilter::new(&workspace);
+
+        assert!(filter.path_should_reindex(&workspace.root.join("src/lib.rs")));
+        assert!(!filter.path_should_reindex(&workspace.index_dir.join("job.json")));
+        assert!(!filter.path_should_reindex(&home.join("daemon.log")));
+    }
+
     #[tokio::test]
     #[serial]
     async fn query_preparation_reconciles_healthy_index_filter_transitions() {
@@ -6410,6 +6433,27 @@ mod tests {
             "visible.rs",
             "repository_exclude_marker"
         ));
+    }
+
+    #[test]
+    #[serial]
+    fn ignore_configuration_inside_ivygrep_storage_does_not_reconcile_workspace() {
+        let repo = tempdir().unwrap();
+        let home = repo.path().join("local-state");
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", &home) };
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let mut filter = WatchEventFilter::new(&workspace);
+        for name in [".gitignore", ".ignore"] {
+            let ignore = home.join(name);
+            std::fs::write(&ignore, "*.rs\n").unwrap();
+            assert!(matches!(
+                filter
+                    .change_for_event(&notify::Event::new(notify::EventKind::Any).add_path(ignore)),
+                WatchChange::None
+            ));
+        }
     }
 
     #[test]
