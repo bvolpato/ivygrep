@@ -83,6 +83,36 @@ class BenchmarkGuardCheckoutTests(unittest.TestCase):
         self.assertEqual(benchmark_guard.ratio(10.0, 5.0), 2.0)
         self.assertEqual(benchmark_guard.ratio(10.0, 0.0), float("inf"))
 
+    def test_benchmark_binary_reuses_only_the_matching_revision(self) -> None:
+        compiled_binary = self.repo / "compiled-benchmark"
+        compiled_binary.write_text("benchmark executable", encoding="utf-8")
+        compiled_binary.chmod(0o755)
+        artifact = {
+            "reason": "compiler-artifact",
+            "target": {"name": "indexer_bench"},
+            "executable": str(compiled_binary),
+        }
+
+        with mock.patch.object(
+            benchmark_guard.subprocess,
+            "run",
+            return_value=mock.Mock(stdout=json.dumps(artifact)),
+        ) as cargo:
+            first = benchmark_guard.benchmark_binary(
+                self.repo, "head-revision", "indexer_bench"
+            )
+            second = benchmark_guard.benchmark_binary(
+                self.repo, "head-revision", "indexer_bench"
+            )
+            baseline = benchmark_guard.benchmark_binary(
+                self.repo, "base-revision", "indexer_bench"
+            )
+
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, baseline)
+        self.assertEqual(cargo.call_count, 2)
+        self.assertEqual(first.read_text(encoding="utf-8"), "benchmark executable")
+
     def run_guard(
         self, measurements: list[float], output_path: Path | None = None
     ) -> tuple[int, mock.Mock]:

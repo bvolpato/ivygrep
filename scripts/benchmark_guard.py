@@ -54,24 +54,48 @@ def restore_checkout(repo_root: Path, checkout: Checkout) -> None:
     run(cmd, cwd=repo_root)
 
 
-def measure(repo_root: Path, ref: str, bench_target: str, bench_name: str) -> float:
-    criterion_dir = repo_root / "target" / "criterion" / bench_name
-    shutil.rmtree(criterion_dir, ignore_errors=True)
+def benchmark_binary(repo_root: Path, revision: str, bench_target: str) -> Path:
+    cached_binary = repo_root / "target" / "benchmark-guard" / revision / bench_target
+    if cached_binary.is_file():
+        return cached_binary
 
-    run(["git", "checkout", "--quiet", "--detach", ref], cwd=repo_root)
-    run(
+    build = subprocess.run(
         [
             "cargo",
             "bench",
             "--locked",
             "--bench",
             bench_target,
-            bench_name,
-            "--",
-            "--noplot",
+            "--no-run",
+            "--message-format=json",
         ],
         cwd=repo_root,
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
     )
+    for line in build.stdout.splitlines():
+        artifact = json.loads(line)
+        if (
+            artifact.get("reason") == "compiler-artifact"
+            and artifact.get("target", {}).get("name") == bench_target
+            and artifact.get("executable")
+        ):
+            cached_binary.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(artifact["executable"], cached_binary)
+            return cached_binary
+
+    raise RuntimeError(f"cargo did not produce the {bench_target} benchmark executable")
+
+
+def measure(repo_root: Path, ref: str, bench_target: str, bench_name: str) -> float:
+    criterion_dir = repo_root / "target" / "criterion" / bench_name
+    shutil.rmtree(criterion_dir, ignore_errors=True)
+
+    run(["git", "checkout", "--quiet", "--detach", ref], cwd=repo_root)
+    revision = output(["git", "rev-parse", "HEAD"], repo_root)
+    binary = benchmark_binary(repo_root, revision, bench_target)
+    run([str(binary), bench_name, "--noplot"], cwd=repo_root)
 
     estimates_path = criterion_dir / "new" / "estimates.json"
     estimates = json.loads(estimates_path.read_text())
