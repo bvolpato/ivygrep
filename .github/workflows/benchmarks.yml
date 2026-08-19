@@ -115,6 +115,9 @@ jobs:
           python3 scripts/run_current_head_benchmark.py \
             --binary target/release/ig \
             --output "$CURRENT_RELEVANCE_REPORT"
+          python3 scripts/run_current_head_benchmark.py \
+            --check \
+            --output "$CURRENT_RELEVANCE_REPORT"
           jq -r '
             "### Current-head retrieval relevance",
             "",

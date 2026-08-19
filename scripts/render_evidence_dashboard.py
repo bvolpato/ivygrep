@@ -534,7 +534,9 @@ def build_dashboard(root: Path, manifest_path: Path) -> dict:
             "versions": normalized,
             "status": (
                 "current"
-                if current_version is not None and normalized == [current_version]
+                if current_version is not None
+                and normalized == [current_version]
+                and item["id"] != "current-head-relevance"
                 else "historical"
             ),
         }
@@ -728,7 +730,7 @@ def render_markdown(dashboard: dict) -> str:
     if current_relevance is not None:
         measured = current_relevance["modes"]["foreground"]
         current_relevance_row = (
-            f"| Current package self-repository relevance "
+            f"| Historical self-repository retrieval snapshot "
             f"({current_relevance['version']}) | "
             f"nDCG@10 {format_number(measured['mean_ndcg10'], 4)}, "
             f"MRR {format_number(measured['mean_mrr'], 4)}, "
@@ -844,7 +846,7 @@ def render_html(dashboard: dict) -> str:
         current_relevance = current_relevance_item["summary"]
         measured = current_relevance["modes"]["foreground"]
         current_scope = (
-            '<section class="report-card"><h2>Current package retrieval screen</h2>'
+            '<section class="report-card"><h2>Historical retrieval snapshot</h2>'
             f"<p><code>{escape(current_relevance['version'])}</code>: "
             f"nDCG@10 {measured['mean_ndcg10']:.4f}, "
             f"MRR {measured['mean_mrr']:.4f}, "
