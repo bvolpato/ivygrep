@@ -899,18 +899,18 @@ fn try_tree_sitter_chunk_source_with_timeout(
             ranges
                 .iter()
                 .enumerate()
-                .filter_map(|(index, (nested_start, nested_end, _))| {
-                    (index != range_index
+                .filter(|(index, (nested_start, nested_end, _))| {
+                    *index != range_index
                         && *nested_start > start
                         && *nested_start <= safe_end
-                        && *nested_end <= safe_end)
-                        .then(|| {
-                            (
-                                leading_doc_start(*nested_start, language, lines).max(start + 1),
-                                *nested_start,
-                                *nested_end,
-                            )
-                        })
+                        && *nested_end <= safe_end
+                })
+                .map(|(_, (nested_start, nested_end, _))| {
+                    (
+                        leading_doc_start(*nested_start, language, lines).max(start + 1),
+                        *nested_start,
+                        *nested_end,
+                    )
                 })
                 .collect::<Vec<_>>()
         } else {
