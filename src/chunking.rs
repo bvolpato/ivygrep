@@ -921,7 +921,20 @@ fn try_tree_sitter_chunk_source_with_timeout(
                 context,
             );
         } else {
-            let mut parent_start = start;
+            // Retain one bounded structural overview. It keeps the parent
+            // declaration, early documentation, and nearby child signatures
+            // together without indexing the entire enclosing body again.
+            let overview_end = (start + MAX_STRUCTURAL_CHUNK_LINES - 1).min(safe_end);
+            push_bounded_structural_chunks(
+                &mut chunks,
+                rel_path,
+                lines,
+                (start, overview_end),
+                language,
+                kind,
+                context,
+            );
+            let mut parent_start = overview_end + 1;
             for (nested_start, nested_end) in nested {
                 if nested_start > parent_start {
                     push_bounded_structural_chunks(
@@ -2121,10 +2134,19 @@ pub fn calculate_total(amount: f64) -> f64 {
             .collect::<Vec<_>>();
 
         assert!(!parents.is_empty());
-        assert!(parents.iter().all(|chunk| {
-            chunk.end_line - chunk.start_line < MAX_STRUCTURAL_CHUNK_LINES
-                && !chunk.text.contains("persist_payment_")
-        }));
+        assert!(
+            parents
+                .iter()
+                .all(|chunk| { chunk.end_line - chunk.start_line < MAX_STRUCTURAL_CHUNK_LINES })
+        );
+        assert!(
+            parents
+                .iter()
+                .filter(|chunk| chunk.text.contains("persist_payment_"))
+                .count()
+                <= 2,
+            "the bounded parent overview must not grow with every nested method"
+        );
         assert_eq!(
             chunks
                 .iter()
