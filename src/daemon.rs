@@ -347,10 +347,12 @@ struct SearchContextSignature {
     tantivy: Option<DirStamp>,
     hash_vectors: Option<FileStamp>,
     neural_vectors: Option<FileStamp>,
+    neural_model: Option<FileStamp>,
     base_sqlite: Option<FileStamp>,
     base_tantivy: Option<DirStamp>,
     base_hash_vectors: Option<FileStamp>,
     base_neural_vectors: Option<FileStamp>,
+    base_neural_model: Option<FileStamp>,
 }
 
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
@@ -3293,6 +3295,9 @@ fn search_context_signature(
             neural_vectors: wants_neural_vectors
                 .then(|| file_stamp(&workspace.vector_neural_path()))
                 .flatten(),
+            neural_model: wants_neural_vectors
+                .then(|| file_stamp(&workspace.neural_model_path()))
+                .flatten(),
             base_sqlite: file_stamp(&base_dir.join("metadata.sqlite3")),
             base_tantivy: dir_stamp(&base_dir.join("tantivy")),
             base_hash_vectors: wants_hash_vectors
@@ -3300,6 +3305,9 @@ fn search_context_signature(
                 .flatten(),
             base_neural_vectors: wants_neural_vectors
                 .then(|| file_stamp(&base_dir.join("vectors_neural.usearch")))
+                .flatten(),
+            base_neural_model: wants_neural_vectors
+                .then(|| file_stamp(&base_dir.join("neural_model.json")))
                 .flatten(),
         }
     } else {
@@ -3313,10 +3321,14 @@ fn search_context_signature(
             neural_vectors: wants_neural_vectors
                 .then(|| file_stamp(&workspace.vector_neural_path()))
                 .flatten(),
+            neural_model: wants_neural_vectors
+                .then(|| file_stamp(&workspace.neural_model_path()))
+                .flatten(),
             base_sqlite: None,
             base_tantivy: None,
             base_hash_vectors: None,
             base_neural_vectors: None,
+            base_neural_model: None,
         }
     }
 }
@@ -4714,6 +4726,106 @@ mod tests {
             "cached neural search",
             true,
         ));
+    }
+
+    #[test]
+    #[serial]
+    fn neural_identity_changes_invalidate_search_context_and_query_caches() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn model_identity() {}\n").unwrap();
+
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let hash_model = create_hash_model();
+        index_workspace(&workspace, hash_model.as_ref()).unwrap();
+        crate::indexer::enhance_workspace_neural(&workspace, &TestNeuralModel).unwrap();
+
+        let state = test_state();
+        let original_signature = search_context_signature(&workspace, Some(256), true);
+        let original_context = state
+            .cached_search_context(&workspace, Some(256), true)
+            .unwrap();
+        let original_pool = original_context.pool.clone();
+        drop(original_context);
+
+        let options = SearchOptions::default();
+        let original_key = query_cache_key(
+            std::slice::from_ref(&workspace),
+            vec![original_signature.clone()],
+            "model identity",
+            &options,
+            256,
+            true,
+            false,
+        );
+        state.store_query_results(original_key, &[]);
+
+        std::fs::remove_file(workspace.neural_model_path()).unwrap();
+        let changed_signature = search_context_signature(&workspace, Some(256), true);
+        assert_ne!(
+            original_signature, changed_signature,
+            "removing neural model metadata must change the search signature"
+        );
+
+        let changed_key = query_cache_key(
+            std::slice::from_ref(&workspace),
+            vec![changed_signature],
+            "model identity",
+            &options,
+            256,
+            true,
+            false,
+        );
+        assert!(state.cached_query_results(&changed_key).is_none());
+
+        let changed_context = state
+            .cached_search_context(&workspace, Some(256), true)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&original_pool, &changed_context.pool));
+        assert!(changed_context.neural_model.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn worktree_search_signature_tracks_base_neural_model_identity() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repositories = tempdir().unwrap();
+        let main = repositories.path().join("main");
+        let linked = repositories.path().join("linked");
+        std::fs::create_dir(&main).unwrap();
+        git(&main, &["init", "-b", "main"]);
+        std::fs::write(main.join("lib.rs"), "pub fn base_identity() {}\n").unwrap();
+        git(&main, &["add", "lib.rs"]);
+        git(&main, &["commit", "-m", "seed base identity"]);
+
+        let base = Workspace::resolve(&main).unwrap();
+        let hash_model = create_hash_model();
+        index_workspace(&base, hash_model.as_ref()).unwrap();
+        crate::indexer::enhance_workspace_neural(&base, &TestNeuralModel).unwrap();
+
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                linked.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        std::fs::write(linked.join("local.rs"), "pub fn branch_identity() {}\n").unwrap();
+        let overlay = Workspace::resolve(&linked).unwrap();
+        index_workspace(&overlay, hash_model.as_ref()).unwrap();
+
+        let original = search_context_signature(&overlay, Some(256), true);
+        std::fs::remove_file(base.neural_model_path()).unwrap();
+        let changed = search_context_signature(&overlay, Some(256), true);
+        assert_ne!(
+            original, changed,
+            "base neural identity changes must invalidate worktree search caches"
+        );
     }
 
     #[test]
