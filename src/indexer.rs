@@ -230,10 +230,27 @@ fn spawn_index_batch_producer(
                         );
                         chunked.chunks.extend(included_chunks);
                         let mut seen_vector_keys = HashSet::new();
+                        let mut content_occurrences = HashMap::new();
                         let mut indexed: Vec<_> = chunked
                             .chunks
                             .into_iter()
-                            .map(|chunk| build_indexed_chunk(chunk, *is_ignored))
+                            .map(|chunk| {
+                                let content_identity =
+                                    xxhash_rust::xxh3::xxh3_128(chunk.text.as_bytes());
+                                let occurrence =
+                                    content_occurrences.entry(content_identity).or_insert(0);
+                                let indexed = if *occurrence == 0 {
+                                    build_indexed_chunk(chunk, *is_ignored)
+                                } else {
+                                    build_indexed_chunk_with_occurrence(
+                                        chunk,
+                                        *is_ignored,
+                                        *occurrence,
+                                    )
+                                };
+                                *occurrence += 1;
+                                indexed
+                            })
                             .filter(|chunk| seen_vector_keys.insert(chunk.vector_key))
                             .map(|chunk| prepare_indexed_chunk(chunk, &fields))
                             .collect();
@@ -1145,8 +1162,14 @@ fn index_workspace_inner(
     // that have returned to base content or were removed after being overlay-only.
     if use_overlay {
         for rel_path in &clear_overlay_paths {
-            let removed_keys =
-                remove_file_chunks(&tx, &mut writer, &fields, &mut vector_tombstones, rel_path)?;
+            let removed_keys = remove_file_chunks(
+                &tx,
+                &mut writer,
+                &fields,
+                &mut vector_tombstones,
+                rel_path,
+                None,
+            )?;
             if let Some(stats) = &mut incremental_stats {
                 stats.record_removal(rel_path, &removed_keys);
             }
@@ -1159,8 +1182,14 @@ fn index_workspace_inner(
 
         for rel_path in &diff.deleted {
             let rel_str = index_path_string(rel_path);
-            let removed_keys =
-                remove_file_chunks(&tx, &mut writer, &fields, &mut vector_tombstones, rel_path)?;
+            let removed_keys = remove_file_chunks(
+                &tx,
+                &mut writer,
+                &fields,
+                &mut vector_tombstones,
+                rel_path,
+                None,
+            )?;
             if let Some(stats) = &mut incremental_stats {
                 stats.record_removal(rel_path, &removed_keys);
             }
@@ -1190,8 +1219,14 @@ fn index_workspace_inner(
         }
     } else {
         for rel_path in &diff.deleted {
-            let removed_keys =
-                remove_file_chunks(&tx, &mut writer, &fields, &mut vector_tombstones, rel_path)?;
+            let removed_keys = remove_file_chunks(
+                &tx,
+                &mut writer,
+                &fields,
+                &mut vector_tombstones,
+                rel_path,
+                None,
+            )?;
             if let Some(stats) = &mut incremental_stats {
                 stats.record_removal(rel_path, &removed_keys);
             }
@@ -1251,12 +1286,17 @@ fn index_workspace_inner(
             chunks_since_commit += indexed_chunks.len();
 
             if !is_fresh_index {
+                let retained_keys = indexed_chunks
+                    .iter()
+                    .map(|prepared| prepared.chunk.vector_key)
+                    .collect::<HashSet<_>>();
                 let removed_keys = persist_or_stop!(remove_file_chunks(
                     &tx,
                     &mut writer,
                     &fields,
                     &mut vector_tombstones,
                     &rel_path,
+                    Some(&retained_keys),
                 ));
                 if let Some(stats) = &mut incremental_stats {
                     stats.record_removal(&rel_path, &removed_keys);
@@ -2394,15 +2434,17 @@ pub fn enhance_workspace_neural(
 }
 
 fn build_indexed_chunk(chunk: Chunk, is_ignored: bool) -> IndexedChunk {
-    // Stable logical keys let background vector enrichment resume across an
-    // unchanged reindex. Path and bounds keep identical boilerplate chunks in
-    // different files distinct.
-    let vector_key = vector_key_for_chunk(
-        &chunk.file_path,
-        chunk.start_line,
-        chunk.end_line,
-        &chunk.content_hash,
-    );
+    build_indexed_chunk_with_occurrence(chunk, is_ignored, 0)
+}
+
+fn build_indexed_chunk_with_occurrence(
+    chunk: Chunk,
+    is_ignored: bool,
+    occurrence: usize,
+) -> IndexedChunk {
+    // Source bounds are presentation metadata, not embedding identity: adding
+    // lines above an unchanged definition must not invalidate its vector.
+    let vector_key = vector_key_for_chunk(&chunk.file_path, &chunk.text, occurrence);
     let kind = format!("{:?}", chunk.kind);
 
     IndexedChunk {
@@ -2421,17 +2463,11 @@ fn build_indexed_chunk(chunk: Chunk, is_ignored: bool) -> IndexedChunk {
     }
 }
 
-fn vector_key_for_chunk(
-    file_path: &Path,
-    start_line: usize,
-    end_line: usize,
-    content_hash: &str,
-) -> u64 {
-    let mut key_data = Vec::with_capacity(content_hash.len() + 64);
+fn vector_key_for_chunk(file_path: &Path, text: &str, occurrence: usize) -> u64 {
+    let mut key_data = Vec::with_capacity(text.len() + 64);
     key_data.extend_from_slice(index_path_string(file_path).as_bytes());
-    key_data.extend_from_slice(&start_line.to_le_bytes());
-    key_data.extend_from_slice(&end_line.to_le_bytes());
-    key_data.extend_from_slice(content_hash.as_bytes());
+    key_data.extend_from_slice(&occurrence.to_le_bytes());
+    key_data.extend_from_slice(text.as_bytes());
     let digest = xxhash_rust::xxh3::xxh3_128(&key_data).to_le_bytes();
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&digest[..8]);
@@ -2462,13 +2498,23 @@ fn remove_file_chunks(
     fields: &TantivyFields,
     vector_tombstones: &mut VectorTombstoneJournals,
     rel_path: &Path,
+    retained_keys: Option<&HashSet<u64>>,
 ) -> Result<Vec<u64>> {
     let rel_str = index_path_string(rel_path);
     let keys = chunk_vector_keys_for_file(sqlite, &rel_str)?;
 
     writer.delete_term(Term::from_field_text(fields.file_path, &rel_str));
 
-    vector_tombstones.record(&keys);
+    if let Some(retained_keys) = retained_keys {
+        let obsolete_keys = keys
+            .iter()
+            .copied()
+            .filter(|key| !retained_keys.contains(key))
+            .collect::<Vec<_>>();
+        vector_tombstones.record(&obsolete_keys);
+    } else {
+        vector_tombstones.record(&keys);
+    }
 
     crate::symbols::remove_file_graph(sqlite, &rel_str)?;
     sqlite.execute("DELETE FROM chunks WHERE file_path = ?1", params![rel_str])?;
@@ -3685,6 +3731,46 @@ mod tests {
     }
 
     #[test]
+    fn shifted_unchanged_chunk_keeps_its_vector_key() {
+        let make = |start_line, content_hash: &str| Chunk {
+            id: uuid::Uuid::new_v4(),
+            file_path: PathBuf::from("src/lib.rs"),
+            start_line,
+            end_line: start_line + 4,
+            text: "// src/lib.rs\n\npub fn stable() {}\n".to_string(),
+            language: "rust".to_string(),
+            kind: ChunkKind::Function,
+            content_hash: content_hash.to_string(),
+        };
+
+        assert_eq!(
+            build_indexed_chunk(make(10, "before"), false).vector_key,
+            build_indexed_chunk(make(30, "after"), false).vector_key,
+            "changing source offsets must not invalidate an unchanged embedding"
+        );
+    }
+
+    #[test]
+    fn identical_chunks_in_one_file_keep_distinct_vector_keys() {
+        let make = || Chunk {
+            id: uuid::Uuid::new_v4(),
+            file_path: PathBuf::from("src/lib.rs"),
+            start_line: 10,
+            end_line: 14,
+            text: "// src/lib.rs\n\npub fn duplicated() {}\n".to_string(),
+            language: "rust".to_string(),
+            kind: ChunkKind::Function,
+            content_hash: "same-content".to_string(),
+        };
+
+        assert_ne!(
+            build_indexed_chunk_with_occurrence(make(), false, 0).vector_key,
+            build_indexed_chunk_with_occurrence(make(), false, 1).vector_key,
+            "repeated boilerplate must not collapse distinct retrieval locations"
+        );
+    }
+
+    #[test]
     fn rust_doc_include_uses_concise_module_description_signature() {
         let chunk = chunk_rust_doc_include(
             Path::new("src/middleware/mod.rs"),
@@ -4786,6 +4872,60 @@ mod tests {
             fs::read_to_string(workspace.neural_backend_path()).unwrap(),
             "first backend",
             "no-op enhancement must not rewrite recorded backend"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn shifted_unchanged_chunks_reuse_hash_and_neural_embeddings() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let source_path = root.path().join("payments.rs");
+        let source = (0..12)
+            .map(|index| {
+                format!("pub fn reconcile_payment_{index:02}() -> usize {{ {index} }}\n\n")
+            })
+            .collect::<String>();
+        fs::write(&source_path, &source).unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let hash_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        let neural_model = RecordedTestEmbedding {
+            model: HashEmbeddingModel::new(EMBEDDING_DIMENSIONS),
+            backend: "test local neural backend",
+            identity: crate::embedding::configured_neural_model_identity(),
+        };
+        let indexed = index_workspace(&workspace, &hash_model).unwrap();
+        assert_eq!(
+            enhance_workspace_hash(&workspace, &hash_model).unwrap(),
+            indexed.total_chunks
+        );
+        assert_eq!(
+            enhance_workspace_neural(&workspace, &neural_model).unwrap(),
+            indexed.total_chunks
+        );
+
+        fs::write(&source_path, format!("\n\n{source}")).unwrap();
+        index_workspace(&workspace, &hash_model).unwrap();
+        assert!(!workspace.hash_tombstones_path().exists());
+        assert!(!workspace.neural_tombstones_path().exists());
+        assert_eq!(enhance_workspace_hash(&workspace, &hash_model).unwrap(), 0);
+        assert_eq!(
+            enhance_workspace_neural(&workspace, &neural_model).unwrap(),
+            0
+        );
+
+        let changed = format!("\n\n{source}").replace(
+            "pub fn reconcile_payment_05() -> usize { 5 }",
+            "pub fn reconcile_payment_05() -> usize { 500 }",
+        );
+        fs::write(&source_path, changed).unwrap();
+        index_workspace(&workspace, &hash_model).unwrap();
+        assert_eq!(enhance_workspace_hash(&workspace, &hash_model).unwrap(), 1);
+        assert_eq!(
+            enhance_workspace_neural(&workspace, &neural_model).unwrap(),
+            1
         );
     }
 
