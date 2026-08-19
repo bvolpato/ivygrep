@@ -196,11 +196,22 @@ pub fn branch_local_semantic_retrieval_marker() -> bool {
     true
 }
 EOF
+  for model in "$IVYGREP_HOME"/indexes/*/neural_model.json; do
+    if [ -f "$model" ]; then
+      sed 's/"revision": "[^"]*"/"revision": "stale-worktree-profile"/' \
+        "$model" > "$model.tmp"
+      mv "$model.tmp" "$model"
+      break
+    fi
+  done
   "$ig_bin" --add "$worktree" --force --json --no-watch --hash > /dev/null
   "$ig_bin" --enhance-internal "$worktree" > "$tmp_root/worktree-enhance.log" 2>&1 || {
     cat "$tmp_root/worktree-enhance.log" >&2
     fail "worktree neural enhancement failed"
   }
+  if [ -f "$model" ] && grep -Fq 'stale-worktree-profile' "$model"; then
+    fail "worktree enhancement did not refresh its incompatible base model"
+  fi
   worktree_json="$tmp_root/worktree-search.json"
   "$ig_bin" --json --force-neural --limit 3 \
     "branch_local_semantic_retrieval_marker" "$worktree" > "$worktree_json" ||
