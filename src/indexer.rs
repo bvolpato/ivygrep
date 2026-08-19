@@ -425,6 +425,13 @@ fn clear_worktree_overlay_storage(workspace: &Workspace) {
     let _ = fs::remove_file(workspace.overlay_sqlite_path());
     let _ = fs::remove_dir_all(workspace.overlay_tantivy_dir());
     let _ = fs::remove_file(workspace.overlay_vector_path());
+    let _ = fs::remove_file(workspace.vector_neural_path());
+    let _ = fs::remove_file(workspace.neural_model_path());
+    let _ = fs::remove_file(workspace.neural_profile_path());
+    let _ = fs::remove_file(workspace.neural_backend_path());
+    let _ = fs::remove_file(workspace.neural_tombstones_path());
+    let _ = fs::remove_file(workspace.neural_tombstones_processing_path());
+    let _ = fs::remove_file(workspace.neural_enhanced_generation_path());
     let _ = fs::remove_file(workspace.base_ref_path());
     let _ = fs::remove_file(workspace.merkle_snapshot_path());
 }
@@ -1108,7 +1115,7 @@ fn index_workspace_inner(
     ensure_hash_vector_store(&vector_path, crate::EMBEDDING_DIMENSIONS)?;
     let mut vector_tombstones = VectorTombstoneJournals::new(
         workspace.hash_tombstones_path(),
-        (!use_overlay).then(|| workspace.neural_tombstones_path()),
+        Some(workspace.neural_tombstones_path()),
     );
 
     // Periodic commits keep the WAL bounded during large indexes.
@@ -2124,8 +2131,27 @@ pub fn enhance_workspace_neural(
     workspace: &Workspace,
     neural_model: &dyn EmbeddingModel,
 ) -> Result<usize> {
-    if workspace.has_overlay() || workspace.base_ref_path().exists() {
+    let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
+    let sqlite_path = if use_overlay {
+        workspace.overlay_sqlite_path()
+    } else {
+        workspace.sqlite_path()
+    };
+    if !sqlite_path.exists() {
         return Ok(0);
+    }
+
+    if use_overlay
+        && let Some(base_dir) = &workspace.base_index_dir
+        && let Ok(raw) = fs::read(base_dir.join("neural_model.json"))
+        && let Ok(base_identity) =
+            serde_json::from_slice::<crate::embedding::NeuralModelIdentity>(&raw)
+        && let Some(active_identity) = neural_model.model_identity()
+    {
+        anyhow::ensure!(
+            base_identity == *active_identity,
+            "worktree neural model does not match the base workspace"
+        );
     }
 
     let index_generation = workspace
@@ -2159,7 +2185,7 @@ pub fn enhance_workspace_neural(
         )?;
     }
 
-    let sqlite = open_sqlite(&workspace.sqlite_path())?;
+    let sqlite = open_sqlite(&sqlite_path)?;
 
     // Phase 1: Collect all vector_keys to determine which still need embedding.
     // This avoids decompressing text for the ~31% already done.
