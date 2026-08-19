@@ -1,6 +1,99 @@
 {
   "evidence": [
     {
+      "id": "current-head-relevance",
+      "immutable_url": null,
+      "kind": "quality",
+      "label": "Current package self-repository retrieval screen",
+      "path": "docs/benchmarks/current-head-relevance.json",
+      "publication_commit": null,
+      "publication_status": "not pinned to an immutable revision",
+      "sha256": "6e35ea6ee020d72fbf96418924e68f83b05784e01e0d6bec5202dd4504cd9fd8",
+      "source_commit": "fbbbf0257acf96fca2fec8b4906f9b84563fc7d2",
+      "summary": {
+        "binary_sha256": "5f75d23db84cbe1edf25fedabdebe9f95d34800c21cc8708ad5168ad60652efa",
+        "fixture": {
+          "path": "tests/fixtures/ivygrep_relevance_queries.json",
+          "sha256": "40e5b778fd620a4315b0e405def180527ffbfa7254c63f5bd4525b8ef6b1fb7e"
+        },
+        "harness": {
+          "path": "scripts/eval_relevance.py",
+          "sha256": "d7cbac47ac8c18c67fa6c0a5ab8393fd3243c9290e80ed3f28662faec348b32d"
+        },
+        "modes": {
+          "foreground": {
+            "audit_stage_counts": {
+              "after_filtering": 0,
+              "before_fusion": 0,
+              "candidate_budget": 0,
+              "first_useful_low": 0,
+              "no_primary_judgment": 0,
+              "not_audited": 0,
+              "satisfied": 23
+            },
+            "candidate_budget_misses": [],
+            "candidate_recall_misses": [],
+            "elapsed_ms": 9916.414042003453,
+            "filter_misses": [],
+            "low_rank_misses": [],
+            "mean_candidate_recall": 0.9782608695652174,
+            "mean_hybrid_deep_recall": 0.9782608695652174,
+            "mean_mrr": 1.0,
+            "mean_ndcg10": 0.9560506549126064,
+            "mean_p1": 1.0,
+            "mean_p5": 0.21739130434782608,
+            "mean_recall5": 0.9565217391304348,
+            "mode": "foreground",
+            "neural_queries_executed": 0,
+            "neural_queries_unobservable": 0,
+            "neural_queries_with_results": 0,
+            "no_hit_queries": 0,
+            "queries": 23,
+            "satisfaction_k": 1,
+            "satisfaction_rate": 1.0
+          },
+          "hash-enriched": {
+            "audit_stage_counts": {
+              "after_filtering": 0,
+              "before_fusion": 0,
+              "candidate_budget": 0,
+              "first_useful_low": 0,
+              "no_primary_judgment": 0,
+              "not_audited": 0,
+              "satisfied": 23
+            },
+            "candidate_budget_misses": [],
+            "candidate_recall_misses": [],
+            "elapsed_ms": 10299.195583000255,
+            "filter_misses": [],
+            "low_rank_misses": [],
+            "mean_candidate_recall": 0.9782608695652174,
+            "mean_hybrid_deep_recall": 0.9782608695652174,
+            "mean_mrr": 1.0,
+            "mean_ndcg10": 0.9560506549126064,
+            "mean_p1": 1.0,
+            "mean_p5": 0.21739130434782608,
+            "mean_recall5": 0.9565217391304348,
+            "mode": "hash-enriched",
+            "neural_queries_executed": 0,
+            "neural_queries_unobservable": 0,
+            "neural_queries_with_results": 0,
+            "no_hit_queries": 0,
+            "queries": 23,
+            "satisfaction_k": 1,
+            "satisfaction_rate": 1.0
+          }
+        },
+        "runtime": {
+          "machine": "arm64",
+          "release": "25.4.0",
+          "system": "Darwin"
+        },
+        "scope": "Labeled self-repository retrieval screen with source-level candidate recall auditing. This is not a public-code, million-chunk, neural, or agent-task benchmark.",
+        "version": "ivygrep 1.2.11"
+      }
+    },
+    {
       "id": "public-retrieval-baseline",
       "immutable_url": "https://github.com/bvolpato/ivygrep/blob/14efc6643aadaf5114768d575610399ee48d5085/docs/benchmarks/public-code-retrieval-baseline-results.json",
       "kind": "quality",
@@ -1086,6 +1179,47 @@
       }
     }
   ],
+  "freshness": {
+    "evidence": {
+      "current-head-relevance": {
+        "status": "current",
+        "versions": [
+          "1.2.11"
+        ]
+      },
+      "million-scale-current": {
+        "status": "historical",
+        "versions": [
+          "1.2.7"
+        ]
+      },
+      "public-retrieval-baseline": {
+        "status": "historical",
+        "versions": [
+          "0.10.1"
+        ]
+      },
+      "public-retrieval-challenge-current": {
+        "status": "historical",
+        "versions": [
+          "1.1.9"
+        ]
+      },
+      "public-retrieval-compact-current": {
+        "status": "historical",
+        "versions": [
+          "0.10.1"
+        ]
+      },
+      "public-retrieval-current": {
+        "status": "historical",
+        "versions": [
+          "1.1.9"
+        ]
+      }
+    },
+    "package_version": "1.2.11"
+  },
   "histories": {
     "archive_size": [
       {

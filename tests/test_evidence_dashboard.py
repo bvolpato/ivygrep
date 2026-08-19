@@ -22,9 +22,33 @@ def load_script(name: str):
 
 history = load_script("normalize_release_history")
 renderer = load_script("render_evidence_dashboard")
+current_head = load_script("run_current_head_benchmark")
 
 
 class EvidenceDashboardTest(unittest.TestCase):
+    def test_current_head_relevance_rejects_stale_binary_versions(self) -> None:
+        report = json.loads(
+            (ROOT / "docs/benchmarks/current-head-relevance.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(current_head.validate_report(report), [])
+        report["binary"]["version"] = "ivygrep 0.0.1"
+        self.assertTrue(
+            any("does not match" in error for error in current_head.validate_report(report))
+        )
+
+    def test_current_head_relevance_rejects_changed_fixture_provenance(self) -> None:
+        report = json.loads(
+            (ROOT / "docs/benchmarks/current-head-relevance.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        report["fixture"]["sha256"] = "0" * 64
+        self.assertTrue(
+            any("fixture SHA-256" in error for error in current_head.validate_report(report))
+        )
+
     def test_published_commit_does_not_require_git_history(
         self,
     ) -> None:
@@ -324,6 +348,7 @@ class EvidenceDashboardTest(unittest.TestCase):
         self.assertEqual(
             {
                 "evidence",
+                "freshness",
                 "histories",
                 "release_history",
                 "release_history_artifact",
@@ -347,18 +372,37 @@ class EvidenceDashboardTest(unittest.TestCase):
             if item["id"] == "release-workflow"
         )
         self.assertEqual(current["summary"]["mode"], "blended")
-        self.assertEqual(current["summary"]["binary_versions"], ["ivygrep 1.1.9"])
         self.assertIn("Historical", current["label"])
+        self.assertEqual(
+            dashboard["freshness"]["evidence"]["public-retrieval-current"]["status"],
+            "historical",
+        )
         self.assertEqual(release["summary"]["release_archives"], 7)
         current_scale = next(
             item
             for item in dashboard["evidence"]
             if item["id"] == "million-scale-current"
         )
-        self.assertEqual(current_scale["summary"]["version"], "ivygrep 1.2.7")
         self.assertEqual(
-            dashboard["release_history"]["releases"][0]["tag"], "v1.2.7"
+            dashboard["freshness"]["evidence"]["million-scale-current"]["status"],
+            "historical",
         )
+        current_head_item = next(
+            item
+            for item in dashboard["evidence"]
+            if item["id"] == "current-head-relevance"
+        )
+        self.assertEqual(
+            current_head_item["summary"]["version"],
+            f"ivygrep {dashboard['freshness']['package_version']}",
+        )
+        self.assertEqual(
+            dashboard["freshness"]["evidence"]["current-head-relevance"]["status"],
+            "current",
+        )
+        self.assertEqual(current_scale["summary"]["version"].split()[0], "ivygrep")
+        self.assertTrue(dashboard["release_history"]["releases"][0]["tag"].startswith("v"))
+        self.assertIn("Current package retrieval screen", html)
         self.assertIn("Latest measured release scope", html)
 
 
