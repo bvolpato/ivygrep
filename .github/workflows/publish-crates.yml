@@ -80,8 +80,8 @@ jobs:
             exit 1
           fi
           for package in \
-            "vendor/hf-hub/Cargo.toml|ivygrep-hf-hub|0.3.2-ivygrep.1" \
-            "vendor/candle_embed/Cargo.toml|ivygrep-candle-embed|0.1.4-ivygrep.1" \
+            "vendor/hf-hub/Cargo.toml|ivygrep-hf-hub|0.3.2-ivygrep.2" \
+            "vendor/candle_embed/Cargo.toml|ivygrep-candle-embed|0.1.4-ivygrep.2" \
             "vendor/usearch/Cargo.toml|ivygrep-usearch|2.24.0-ivygrep.1" \
             "vendor/tree-sitter-haskell/Cargo.toml|ivygrep-tree-sitter-haskell|0.23.1-ivygrep.1"; do
             IFS='|' read -r manifest name version <<< "$package"
@@ -223,8 +223,8 @@ jobs:
           }
 
           : "${CARGO_REGISTRY_TOKEN:?crates.io authentication token is required}"
-          publish vendor/hf-hub/Cargo.toml ivygrep-hf-hub 0.3.2-ivygrep.1
-          publish vendor/candle_embed/Cargo.toml ivygrep-candle-embed 0.1.4-ivygrep.1
+          publish vendor/hf-hub/Cargo.toml ivygrep-hf-hub 0.3.2-ivygrep.2
+          publish vendor/candle_embed/Cargo.toml ivygrep-candle-embed 0.1.4-ivygrep.2
           publish vendor/usearch/Cargo.toml ivygrep-usearch 2.24.0-ivygrep.1
           publish vendor/tree-sitter-haskell/Cargo.toml ivygrep-tree-sitter-haskell 0.23.1-ivygrep.1
           publish Cargo.toml ivygrep "$MAIN_VERSION"

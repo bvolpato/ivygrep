@@ -1,7 +1,7 @@
 [package]
 edition = "2021"
 name = "ivygrep-hf-hub"
-version = "0.3.2-ivygrep.1"
+version = "0.3.2-ivygrep.2"
 description = """
 This crates aims ease the interaction with [huggingface](https://huggingface.co/) 
 It aims to be compatible with [huggingface_hub](https://github.com/huggingface/huggingface_hub/) python package, but only implements a smaller subset of functions.
@@ -49,7 +49,7 @@ version = "0.8.5"
 optional = true
 
 [dependencies.reqwest]
-version = "0.11.18"
+version = "0.12.28"
 features = ["json"]
 optional = true
 
