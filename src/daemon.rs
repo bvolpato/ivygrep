@@ -1107,8 +1107,8 @@ impl DaemonState {
             {
                 requirements
                     .entry(base_workspace.id)
-                    .and_modify(|exclusive| *exclusive = true)
-                    .or_insert(true);
+                    .and_modify(|exclusive| *exclusive |= direct_exclusive)
+                    .or_insert(direct_exclusive);
             }
         }
         let mut requirements = requirements.into_iter().collect::<Vec<_>>();
@@ -6343,6 +6343,65 @@ mod tests {
             handle_request(state.clone(), hybrid_request(false)).await
         ));
         assert_eq!(state.query_results.lock().results.len(), 1);
+    }
+
+    #[test]
+    #[serial]
+    fn linked_worktree_readers_share_base_until_base_mutation() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repositories = tempdir().unwrap();
+        let main = repositories.path().join("main");
+        let first_path = repositories.path().join("first");
+        let second_path = repositories.path().join("second");
+        std::fs::create_dir(&main).unwrap();
+        git(&main, &["init", "-b", "main"]);
+        std::fs::write(main.join("lib.rs"), "pub fn shared_worktree_base() {}\n").unwrap();
+        git(&main, &["add", "lib.rs"]);
+        git(&main, &["commit", "-m", "seed shared base"]);
+        for path in [&first_path, &second_path] {
+            git(
+                &main,
+                &[
+                    "worktree",
+                    "add",
+                    "--detach",
+                    path.to_str().unwrap(),
+                    "HEAD",
+                ],
+            );
+        }
+
+        let base = Workspace::resolve(&main).unwrap();
+        let first = Workspace::resolve(&first_path).unwrap();
+        let second = Workspace::resolve(&second_path).unwrap();
+        let state = test_state();
+        let first_leases = state.acquire_workspace_modes(std::slice::from_ref(&first), false);
+        let coordinator = state.workspace_mode_coordinator(&base.id);
+        assert!(
+            !coordinator.state.lock().exclusive_active,
+            "read-only worktree search must not exclusively lock its shared base"
+        );
+
+        let second_leases = state.acquire_workspace_modes(std::slice::from_ref(&second), false);
+        assert_eq!(coordinator.state.lock().active_leases, 2);
+
+        let mutation_state = state.clone();
+        let mutation_base = base.clone();
+        let (started, acquired) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let leases = mutation_state.acquire_workspace_mutations(&[mutation_base]);
+            started.send(()).unwrap();
+            leases
+        });
+        assert!(
+            acquired.recv_timeout(Duration::from_millis(100)).is_err(),
+            "base mutation must wait for active worktree readers"
+        );
+        drop(first_leases);
+        drop(second_leases);
+        acquired.recv_timeout(Duration::from_secs(2)).unwrap();
+        drop(writer.join().unwrap());
     }
 
     #[tokio::test]
