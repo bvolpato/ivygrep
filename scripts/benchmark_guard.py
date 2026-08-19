@@ -95,7 +95,7 @@ def measure(repo_root: Path, ref: str, bench_target: str, bench_name: str) -> fl
     run(["git", "checkout", "--quiet", "--detach", ref], cwd=repo_root)
     revision = output(["git", "rev-parse", "HEAD"], repo_root)
     binary = benchmark_binary(repo_root, revision, bench_target)
-    run([str(binary), bench_name, "--noplot"], cwd=repo_root)
+    run([str(binary), bench_name, "--bench", "--noplot"], cwd=repo_root)
 
     estimates_path = criterion_dir / "new" / "estimates.json"
     estimates = json.loads(estimates_path.read_text())
