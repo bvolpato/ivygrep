@@ -72,6 +72,43 @@ class EvidenceDashboardTest(unittest.TestCase):
             any("no-hit" in error for error in current_head.validate_report(degraded))
         )
 
+    def test_required_neural_relevance_rejects_missing_or_fallback_execution(self) -> None:
+        report = json.loads(
+            (ROOT / "docs/benchmarks/current-head-relevance.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        report["source"]["sha256"] = current_head.source_inputs_sha256()
+        self.assertTrue(
+            any(
+                "missing neural" in error
+                for error in current_head.validate_report(report, require_neural=True)
+            )
+        )
+
+        neural = dict(report["modes"]["foreground"])
+        neural["neural_queries_executed"] = neural["queries"]
+        neural["neural_queries_unobservable"] = 0
+        report["modes"]["neural"] = neural
+        self.assertEqual(current_head.validate_report(report, require_neural=True), [])
+
+        neural["neural_queries_executed"] = 0
+        self.assertTrue(
+            any(
+                "neural executed" in error
+                for error in current_head.validate_report(report, require_neural=True)
+            )
+        )
+
+        neural["neural_queries_executed"] = neural["queries"]
+        neural["neural_queries_unobservable"] = 1
+        self.assertTrue(
+            any(
+                "unobservable" in error
+                for error in current_head.validate_report(report, require_neural=True)
+            )
+        )
+
     def test_published_commit_does_not_require_git_history(
         self,
     ) -> None:
