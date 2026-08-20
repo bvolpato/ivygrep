@@ -2741,54 +2741,38 @@ fn query_filtered_chunks(
         }
     }
 
-    // Push exact paths and trailing-wildcard directory patterns into the
-    // file_path index. Rust glob matching below remains the source of truth.
+    // Push filters down only when every include alternative has a safe SQL
+    // representation. Mixed include globs retain their original OR semantics.
     let indexed_path_filters = query
         .include_globs
         .iter()
-        .map(|glob| indexed_include_path_filter(glob))
+        .map(|glob| indexed_glob_path_filter(glob))
         .collect::<Option<Vec<_>>>();
     if let Some(filters) = indexed_path_filters.filter(|filters| !filters.is_empty()) {
         let mut clauses = Vec::with_capacity(filters.len());
         for filter in filters {
             match filter {
-                IndexedIncludePath::Exact(path) => {
-                    clauses.push("file_path = ?");
+                IndexedGlobPath::Exact(path) => {
+                    clauses.push("file_path = ?".to_string());
                     params_vec.push(Box::new(path));
                 }
-                IndexedIncludePath::Prefix(prefix) => {
-                    clauses.push("(file_path >= ? AND file_path < ?)");
+                IndexedGlobPath::Prefix(prefix) => {
+                    clauses.push("(file_path >= ? AND file_path < ?)".to_string());
                     params_vec.push(Box::new(format!("{prefix}/")));
                     params_vec.push(Box::new(format!("{prefix}0")));
+                }
+                IndexedGlobPath::Languages(languages) => {
+                    let placeholders = vec!["?"; languages.len()].join(", ");
+                    clauses.push(format!("language IN ({placeholders})"));
+                    params_vec.extend(
+                        languages
+                            .into_iter()
+                            .map(|language| Box::new(language) as Box<dyn rusqlite::types::ToSql>),
+                    );
                 }
             }
         }
         sql.push_str(&format!(" AND ({})", clauses.join(" OR ")));
-    }
-
-    // Push simple extension globs into SQL for massive performance gains.
-    // e.g., "*.yaml" -> language IN ('yaml') (Hits the SQLite index instantly!)
-    // Instead of doing `file_path LIKE '%.yaml'` which triggers a full table scan.
-    let mut sql_ext_filters: Vec<String> = Vec::new();
-    for glob in query.include_globs {
-        let trimmed = glob.trim();
-        if trimmed.starts_with("*.") && !trimmed.contains('/') && !trimmed.contains('?') {
-            // Simple extension glob: *.yaml, *.rs, *.py, etc.
-            let ext = &trimmed[1..]; // ".yaml"
-            if let Some(lang) =
-                crate::chunking::language_for_path(&PathBuf::from(format!("dummy{}", ext)))
-            {
-                sql_ext_filters.push("language = ?".to_string());
-                params_vec.push(Box::new(lang.to_string()));
-            } else {
-                // If we don't have a known language for this extension, we must fall back to LIKE
-                sql_ext_filters.push("file_path LIKE ?".to_string());
-                params_vec.push(Box::new(format!("%{}", ext)));
-            }
-        }
-    }
-    if !sql_ext_filters.is_empty() {
-        sql.push_str(&format!(" AND ({})", sql_ext_filters.join(" OR ")));
     }
 
     let mut stmt = conn.prepare(&sql)?;
@@ -4890,6 +4874,58 @@ mod tests {
         assert_eq!(exact_paths("rs"), exact_paths("rust"));
         assert_eq!(exact_paths("rs"), vec![PathBuf::from("lib.rs")]);
         assert!(exact_paths("unknown-language").is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn semantic_glob_prefilters_preserve_full_glob_semantics() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::create_dir_all(root.path().join("src")).unwrap();
+        std::fs::create_dir_all(root.path().join("other")).unwrap();
+        std::fs::write(root.path().join("src/notes.md"), "# semantic marker\n").unwrap();
+        std::fs::write(root.path().join("src/Dockerfile.rs"), "FROM rust\n").unwrap();
+        std::fs::write(root.path().join("other/code.rs"), "pub fn marker() {}\n").unwrap();
+
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        let context = SearchContext::load(&workspace, None, false).unwrap();
+
+        for (globs, expected) in [
+            (
+                vec!["src/**", "*.rs"],
+                vec!["other/code.rs", "src/Dockerfile.rs", "src/notes.md"],
+            ),
+            (vec!["*.rs"], vec!["other/code.rs", "src/Dockerfile.rs"]),
+            (
+                vec!["*.*"],
+                vec!["other/code.rs", "src/Dockerfile.rs", "src/notes.md"],
+            ),
+            (vec!["*.r*"], vec!["other/code.rs", "src/Dockerfile.rs"]),
+            (
+                vec!["*.{rs,md}"],
+                vec!["other/code.rs", "src/Dockerfile.rs", "src/notes.md"],
+            ),
+        ] {
+            let options = SearchOptions {
+                include_globs: globs.iter().map(ToString::to_string).collect(),
+                ..SearchOptions::default()
+            };
+            let matcher =
+                PathGlobMatcher::new(&options.include_globs, &options.exclude_globs).unwrap();
+            let mut actual = match build_semantic_filter_plan(&context, &matcher, &options).unwrap()
+            {
+                SemanticFilterPlan::Exact(chunks) => chunks
+                    .into_iter()
+                    .map(|chunk| chunk.file_path.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>(),
+                SemanticFilterPlan::Broad => panic!("small fixture should use exact filtering"),
+            };
+            actual.sort();
+            assert_eq!(actual, expected, "include globs: {globs:?}");
+        }
     }
 
     struct TestEmbeddingModel384;
