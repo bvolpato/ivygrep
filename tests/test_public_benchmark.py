@@ -53,8 +53,20 @@ class PublicBenchmarkTest(unittest.TestCase):
                 "harness": {"sha256": current_head_runner.sha256_file(harness)},
                 "source": {"sha256": current_head_runner.source_inputs_sha256(root)},
                 "modes": {
-                    "foreground": {"queries": 1},
-                    "hash-enriched": {"queries": 1},
+                    "foreground": {
+                        "queries": 1,
+                        "mean_ndcg10": 1.0,
+                        "mean_mrr": 1.0,
+                        "mean_candidate_recall": 1.0,
+                        "no_hit_queries": 0,
+                    },
+                    "hash-enriched": {
+                        "queries": 1,
+                        "mean_ndcg10": 1.0,
+                        "mean_mrr": 1.0,
+                        "mean_candidate_recall": 1.0,
+                        "no_hit_queries": 0,
+                    },
                 },
             }
             self.assertEqual(current_head_runner.validate_report(report, root=root), [])

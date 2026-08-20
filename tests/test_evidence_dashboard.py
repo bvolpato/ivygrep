@@ -50,6 +50,28 @@ class EvidenceDashboardTest(unittest.TestCase):
             any("fixture SHA-256" in error for error in current_head.validate_report(report))
         )
 
+    def test_current_head_relevance_rejects_degraded_retrieval_metrics(self) -> None:
+        report = json.loads(
+            (ROOT / "docs/benchmarks/current-head-relevance.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        report["source"]["sha256"] = current_head.source_inputs_sha256()
+
+        for metric in ("mean_ndcg10", "mean_mrr", "mean_candidate_recall"):
+            with self.subTest(metric=metric):
+                degraded = json.loads(json.dumps(report))
+                degraded["modes"]["foreground"][metric] = 0.0
+                self.assertTrue(
+                    any(metric in error for error in current_head.validate_report(degraded))
+                )
+
+        degraded = json.loads(json.dumps(report))
+        degraded["modes"]["hash-enriched"]["no_hit_queries"] = 1
+        self.assertTrue(
+            any("no-hit" in error for error in current_head.validate_report(degraded))
+        )
+
     def test_published_commit_does_not_require_git_history(
         self,
     ) -> None:
