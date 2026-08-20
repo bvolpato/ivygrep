@@ -69,7 +69,9 @@ def source_inputs_sha256(root: Path = ROOT) -> str:
     return digest.hexdigest()
 
 
-def validate_report(report: dict, *, root: Path = ROOT) -> list[str]:
+def validate_report(
+    report: dict, *, root: Path = ROOT, require_neural: bool = False
+) -> list[str]:
     errors = []
     expected = f"ivygrep {package_version(root)}"
     actual = report.get("binary", {}).get("version")
@@ -89,7 +91,11 @@ def validate_report(report: dict, *, root: Path = ROOT) -> list[str]:
 
     expected_queries = len(json.loads(fixture.read_text(encoding="utf-8"))["queries"])
     modes = report.get("modes", {})
-    for mode in ("foreground", "hash-enriched"):
+    required_modes = ["foreground", "hash-enriched"]
+    if require_neural or "neural" in modes:
+        required_modes.append("neural")
+
+    for mode in required_modes:
         measured = modes.get(mode)
         if not isinstance(measured, dict):
             errors.append(f"missing {mode} relevance measurement")
@@ -116,10 +122,32 @@ def validate_report(report: dict, *, root: Path = ROOT) -> list[str]:
                 or no_hit_queries != 0
             ):
                 errors.append(f"{mode} reported {no_hit_queries!r} no-hit queries; expected 0")
+
+            if mode == "neural":
+                executed = measured.get("neural_queries_executed")
+                if (
+                    isinstance(executed, bool)
+                    or not isinstance(executed, int)
+                    or executed != expected_queries
+                ):
+                    errors.append(
+                        f"neural executed {executed!r} queries instead of "
+                        f"the {expected_queries} current fixture queries"
+                    )
+
+                unobservable = measured.get("neural_queries_unobservable")
+                if (
+                    isinstance(unobservable, bool)
+                    or not isinstance(unobservable, int)
+                    or unobservable != 0
+                ):
+                    errors.append(
+                        f"neural reported {unobservable!r} unobservable queries; expected 0"
+                    )
     return errors
 
 
-def measure(binary: Path) -> dict:
+def measure(binary: Path, *, require_neural: bool = False) -> dict:
     binary = binary.resolve()
     version = subprocess.run(
         [str(binary), "--version"],
@@ -135,7 +163,14 @@ def measure(binary: Path) -> dict:
     modes = {}
     environment = os.environ.copy()
     environment.setdefault("CI", "1")
-    for mode, flags in (("foreground", []), ("hash-enriched", ["--enhance-hash"])):
+    evaluated_modes = [
+        ("foreground", []),
+        ("hash-enriched", ["--enhance-hash"]),
+    ]
+    if require_neural:
+        evaluated_modes.append(("neural", ["--neural", "--no-audit-recall"]))
+
+    for mode, flags in evaluated_modes:
         result = subprocess.run(
             [
                 sys.executable,
@@ -169,6 +204,10 @@ def measure(binary: Path) -> dict:
         "schema_version": 1,
         "scope": (
             "Labeled self-repository retrieval screen with source-level candidate "
+            "recall auditing and verified neural execution. This is not a "
+            "public-code, million-chunk, or agent-task benchmark."
+            if require_neural
+            else "Labeled self-repository retrieval screen with source-level candidate "
             "recall auditing. This is not a public-code, million-chunk, neural, "
             "or agent-task benchmark."
         ),
@@ -193,7 +232,7 @@ def measure(binary: Path) -> dict:
         },
         "modes": modes,
     }
-    errors = validate_report(report)
+    errors = validate_report(report, require_neural=require_neural)
     if errors:
         raise ValueError("; ".join(errors))
     return report
@@ -206,18 +245,23 @@ def main() -> int:
     parser.add_argument(
         "--check", action="store_true", help="validate existing evidence without rerunning it"
     )
+    parser.add_argument(
+        "--require-neural",
+        action="store_true",
+        help="measure and require verified neural retrieval alongside hash modes",
+    )
     args = parser.parse_args()
 
     if args.check:
         report = json.loads(args.output.read_text(encoding="utf-8"))
-        errors = validate_report(report)
+        errors = validate_report(report, require_neural=args.require_neural)
         if errors:
             print("\n".join(errors), file=sys.stderr)
             return 1
         print(f"current-head relevance evidence matches {report['binary']['version']}")
         return 0
 
-    report = measure(args.binary)
+    report = measure(args.binary, require_neural=args.require_neural)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(f"wrote {args.output} for {report['binary']['version']}")
