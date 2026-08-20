@@ -108,10 +108,14 @@ jobs:
           BASE_SHA: ${{ steps.parameters.outputs.base }}
         run: |
           git worktree add --detach "$RUNNER_TEMP/ivygrep-base" "$BASE_SHA"
+          shared_target="$GITHUB_WORKSPACE/target"
+          mkdir -p "$RUNNER_TEMP/base-target/release" "$RUNNER_TEMP/head-target/release"
           cargo build --release --locked \
             --manifest-path "$RUNNER_TEMP/ivygrep-base/Cargo.toml" \
-            --target-dir "$RUNNER_TEMP/base-target"
-          cargo build --release --locked --target-dir "$RUNNER_TEMP/head-target"
+            --target-dir "$shared_target"
+          cp "$shared_target/release/ig" "$RUNNER_TEMP/base-target/release/ig"
+          cargo build --release --locked --target-dir "$shared_target"
+          cp "$shared_target/release/ig" "$RUNNER_TEMP/head-target/release/ig"
 
       - name: Run paired generated-corpus trials
         if: steps.parameters.outputs.required == 'true'
