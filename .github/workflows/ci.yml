@@ -312,7 +312,7 @@ jobs:
 
   ci-gate:
     name: CI gate
-    if: always()
+    if: always() && !cancelled()
     needs: [check, test, build]
     runs-on: ubuntu-latest
     steps:

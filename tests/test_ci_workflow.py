@@ -40,7 +40,7 @@ class CIWorkflowTest(unittest.TestCase):
         gate = workflow.split("  ci-gate:\n", maxsplit=1)[1]
 
         self.assertIn("name: CI gate", gate)
-        self.assertIn("if: always()", gate)
+        self.assertIn("if: always() && !cancelled()", gate)
         self.assertIn("needs: [check, test, build]", gate)
         self.assertIn('test "$CHECK_RESULT" = success', gate)
         self.assertIn('test "$TEST_RESULT" = success', gate)
