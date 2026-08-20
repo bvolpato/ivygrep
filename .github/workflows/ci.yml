@@ -81,7 +81,7 @@ jobs:
           cargo clippy --locked --all-targets --features accelerate,metal -- -D warnings
 
   test:
-    name: Test (${{ matrix.os }})
+    name: Test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -174,7 +174,7 @@ jobs:
           RUSTFLAGS: ${{ matrix.rust_flags }}
 
   build:
-    name: Build release (${{ matrix.os }})
+    name: Build release (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -183,27 +183,34 @@ jobs:
           - os: ubuntu-latest
             cargo_flags: ""
             rust_flags: "-D warnings -C target-cpu=x86-64-v3"
+            name: "Linux (Neural AVX2)"
           - os: ubuntu-latest
             cargo_flags: "--no-default-features"
             rust_flags: "-D warnings"
+            name: "Linux (Hash-only)"
           - os: macos-latest
             cargo_flags: "--features accelerate"
             rust_flags: "-D warnings"
+            name: "macOS ARM (Neural Accelerate)"
           - os: macos-15-intel
             cargo_flags: "--features accelerate"
             rust_flags: "-D warnings"
+            name: "macOS Intel (Neural Accelerate)"
           - os: macos-latest
             cargo_flags: "--features accelerate,metal"
             rust_flags: "-D warnings"
+            name: "macOS ARM (Metal opt-in)"
             validate_backend: "Candle Metal"
             allow_backend: "Candle CPU (Accelerate)"
             model_profile: "general"
           - os: macos-latest
             cargo_flags: "--no-default-features"
             rust_flags: "-D warnings"
+            name: "macOS ARM (Hash-only)"
           - os: windows-latest
             cargo_flags: ""
             rust_flags: "-D warnings -C target-feature=+crt-static"
+            name: "Windows x86_64 (Neural CPU)"
             validate_backend: "StaticEmbedding token mean via Rust"
             model_profile: "static"
     steps:
