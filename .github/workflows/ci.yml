@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
@@ -308,7 +312,7 @@ jobs:
 
   ci-gate:
     name: CI gate
-    if: always()
+    if: always() && !cancelled()
     needs: [check, test, build]
     runs-on: ubuntu-latest
     steps:
