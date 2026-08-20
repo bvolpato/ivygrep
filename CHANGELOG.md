@@ -4,6 +4,29 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+## [1.2.12] - 2026-08-20
+
+### Security
+- Upgraded the Hugging Face HTTP dependency chain to eliminate `RUSTSEC-2026-0258` from the inherited `h2` dependency.
+
+### Fixed
+- CLI search, task context, and MCP now preserve brace-alternative globs, mixed path filters, character classes, and escaped commas.
+- Semantic filtering retains include-glob alternatives and filename-based language overrides without incorrectly narrowing complex patterns.
+- Linked Git worktrees complete background neural enhancement and safely share base-index search leases.
+- Neural query caches invalidate when model identity changes, watcher failures are retried, regex candidate coverage is complete, and index storage stays excluded from indexed workspaces.
+
+### Performance
+- Reuse embeddings when unchanged source chunks shift and keep AST chunk generation bounded.
+- Seek directory-scoped and selective glob searches through indexed SQLite ranges instead of scanning candidate paths.
+- Retain hot query, neural, readiness, workspace, and search-context entries with bounded LRU caches.
+- Adapt Tantivy writer parallelism and memory to changed source size, reducing measured fresh-index latency by 22% at 30,001 chunks and 33% at 100,001 chunks.
+- Speed up all-workspace discovery and avoid redundant generated-corpus benchmark compilation.
+
+### Testing
+- Required CI now enforces lexical/hash and verified neural retrieval relevance, including nDCG, MRR, candidate recall, and zero-hit thresholds.
+- Fresh-index profiling reports individual SQLite, Tantivy, vector-counting, merge, and publication phases.
+- CI workflows cancel superseded pull-request runs and distinguish every platform/backend matrix job.
+
 ## [1.2.11] - 2026-08-14
 
 ### Security
