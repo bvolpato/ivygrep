@@ -3,12 +3,14 @@ use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::Result;
+use lru::LruCache;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::{Condvar, Mutex};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -493,61 +495,63 @@ struct QueryCacheKey {
     reranker: String,
 }
 
-#[derive(Default)]
 struct QueryResultCache {
-    results: HashMap<QueryCacheKey, Vec<crate::protocol::SearchHit>>,
-    order: VecDeque<QueryCacheKey>,
+    results: LruCache<QueryCacheKey, Vec<crate::protocol::SearchHit>>,
 }
 
-#[derive(Default)]
 struct NeuralQueryCache {
-    vectors: HashMap<String, Vec<f32>>,
-    order: VecDeque<String>,
+    vectors: LruCache<String, Vec<f32>>,
+}
+
+fn bounded_lru<K: std::hash::Hash + Eq, V>(capacity: usize) -> LruCache<K, V> {
+    LruCache::new(NonZeroUsize::new(capacity).expect("cache capacity must be nonzero"))
+}
+
+impl Default for QueryResultCache {
+    fn default() -> Self {
+        Self {
+            results: bounded_lru(MAX_QUERY_CACHE_ENTRIES),
+        }
+    }
+}
+
+impl Default for NeuralQueryCache {
+    fn default() -> Self {
+        Self {
+            vectors: bounded_lru(MAX_NEURAL_QUERY_CACHE_ENTRIES),
+        }
+    }
 }
 
 impl NeuralQueryCache {
-    fn get(&self, query: &str) -> Option<Vec<f32>> {
+    fn get(&mut self, query: &str) -> Option<Vec<f32>> {
         self.vectors.get(query.trim()).cloned()
     }
 
     fn insert(&mut self, query: String, vector: Vec<f32>) {
-        let query = query.trim().to_string();
-        if !self.vectors.contains_key(&query) {
-            self.order.push_back(query.clone());
-        }
-        self.vectors.insert(query, vector);
-        while self.vectors.len() > MAX_NEURAL_QUERY_CACHE_ENTRIES {
-            let Some(oldest) = self.order.pop_front() else {
-                break;
-            };
-            self.vectors.remove(&oldest);
-        }
+        self.vectors.put(query.trim().to_string(), vector);
     }
 }
 
 impl QueryResultCache {
-    fn get(&self, key: &QueryCacheKey) -> Option<Vec<crate::protocol::SearchHit>> {
+    fn get(&mut self, key: &QueryCacheKey) -> Option<Vec<crate::protocol::SearchHit>> {
         self.results.get(key).cloned()
     }
 
     fn insert(&mut self, key: QueryCacheKey, hits: Vec<crate::protocol::SearchHit>) {
-        if !self.results.contains_key(&key) {
-            self.order.push_back(key.clone());
-        }
-        self.results.insert(key, hits);
-
-        while self.results.len() > MAX_QUERY_CACHE_ENTRIES {
-            let Some(oldest) = self.order.pop_front() else {
-                break;
-            };
-            self.results.remove(&oldest);
-        }
+        self.results.put(key, hits);
     }
 
     fn remove_workspace(&mut self, workspace_id: &str) {
-        self.results
-            .retain(|key, _| !key.workspace_ids.iter().any(|id| id == workspace_id));
-        self.order.retain(|key| self.results.contains_key(key));
+        let keys = self
+            .results
+            .iter()
+            .filter(|(key, _)| key.workspace_ids.iter().any(|id| id == workspace_id))
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.results.pop(&key);
+        }
     }
 }
 
@@ -1004,10 +1008,10 @@ pub(crate) struct DaemonState {
     lazy_model: Arc<std::sync::OnceLock<Arc<dyn EmbeddingModel>>>,
     model_loading: Arc<AtomicBool>,
     watchers: Arc<Mutex<HashMap<String, WatchRegistration>>>,
-    resolved_workspaces: Arc<Mutex<HashMap<PathBuf, Workspace>>>,
-    neural_statuses: Arc<Mutex<HashMap<String, CachedNeuralStatus>>>,
-    ready_workspaces: Arc<Mutex<HashMap<WorkspaceReadinessCacheKey, WorkspaceReadinessSignature>>>,
-    search_contexts: Arc<Mutex<HashMap<SearchContextCacheKey, CachedSearchContext>>>,
+    resolved_workspaces: Arc<Mutex<LruCache<PathBuf, Workspace>>>,
+    neural_statuses: Arc<Mutex<LruCache<String, CachedNeuralStatus>>>,
+    ready_workspaces: Arc<Mutex<LruCache<WorkspaceReadinessCacheKey, WorkspaceReadinessSignature>>>,
+    search_contexts: Arc<Mutex<LruCache<SearchContextCacheKey, CachedSearchContext>>>,
     idle_search_context_count: Arc<AtomicUsize>,
     query_results: Arc<Mutex<QueryResultCache>>,
     neural_queries: Arc<Mutex<NeuralQueryCache>>,
@@ -1268,11 +1272,9 @@ impl DaemonState {
 
         let workspace = Workspace::resolve(path)?;
         if path == workspace.root {
-            let mut cache = self.resolved_workspaces.lock();
-            if cache.len() >= MAX_RESOLVED_WORKSPACES && !cache.contains_key(path) {
-                cache.clear();
-            }
-            cache.insert(path.to_path_buf(), workspace.clone());
+            self.resolved_workspaces
+                .lock()
+                .put(path.to_path_buf(), workspace.clone());
         }
         Ok(workspace)
     }
@@ -1289,11 +1291,7 @@ impl DaemonState {
         }
 
         let identity = workspace_neural_model_identity(workspace);
-        let mut cache = self.neural_statuses.lock();
-        if cache.len() >= MAX_NEURAL_STATUSES && !cache.contains_key(&workspace.id) {
-            cache.clear();
-        }
-        cache.insert(
+        self.neural_statuses.lock().put(
             workspace.id.clone(),
             CachedNeuralStatus {
                 signature,
@@ -1429,19 +1427,11 @@ impl DaemonState {
             {
                 entry.pool.clone()
             } else {
-                // Bound cached workspace/dimension keys; each key retains only
-                // MAX_IDLE_SEARCH_CONTEXTS_PER_KEY contexts after a burst.
-                if cache.len() >= MAX_SEARCH_CONTEXTS
-                    && !cache.contains_key(&key)
-                    && let Some(victim) = cache.keys().find(|k| **k != key).cloned()
-                {
-                    cache.remove(&victim);
-                }
                 let pool = Arc::new(SearchContextPool {
                     idle: Mutex::new(Vec::new()),
                     idle_context_count: self.idle_search_context_count.clone(),
                 });
-                cache.insert(
+                cache.put(
                     key,
                     CachedSearchContext {
                         signature,
@@ -1508,21 +1498,33 @@ impl DaemonState {
         signature: WorkspaceReadinessSignature,
     ) {
         let key = workspace_readiness_key(workspace, skip_gitignore);
-        let mut cache = self.ready_workspaces.lock();
-        if cache.len() >= MAX_READY_WORKSPACES && !cache.contains_key(&key) {
-            cache.clear();
-        }
-        cache.insert(key, signature);
+        self.ready_workspaces.lock().put(key, signature);
     }
 
     fn clear_workspace_contexts(&self, workspace: &Workspace) {
-        self.search_contexts
-            .lock()
-            .retain(|key, _| key.workspace_id != workspace.id);
-        self.neural_statuses.lock().remove(&workspace.id);
-        self.ready_workspaces
-            .lock()
-            .retain(|key, _| key.workspace_id != workspace.id);
+        {
+            let mut contexts = self.search_contexts.lock();
+            let keys = contexts
+                .iter()
+                .filter(|(key, _)| key.workspace_id == workspace.id)
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            for key in keys {
+                contexts.pop(&key);
+            }
+        }
+        self.neural_statuses.lock().pop(&workspace.id);
+        {
+            let mut ready = self.ready_workspaces.lock();
+            let keys = ready
+                .iter()
+                .filter(|(key, _)| key.workspace_id == workspace.id)
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>();
+            for key in keys {
+                ready.pop(&key);
+            }
+        }
         self.query_results.lock().remove_workspace(&workspace.id);
     }
 
@@ -1586,10 +1588,10 @@ fn create_daemon_state() -> DaemonState {
         lazy_model: lazy_model.clone(),
         model_loading: Arc::new(AtomicBool::new(false)),
         watchers: Arc::new(Mutex::new(HashMap::new())),
-        resolved_workspaces: Arc::new(Mutex::new(HashMap::new())),
-        neural_statuses: Arc::new(Mutex::new(HashMap::new())),
-        ready_workspaces: Arc::new(Mutex::new(HashMap::new())),
-        search_contexts: Arc::new(Mutex::new(HashMap::new())),
+        resolved_workspaces: Arc::new(Mutex::new(bounded_lru(MAX_RESOLVED_WORKSPACES))),
+        neural_statuses: Arc::new(Mutex::new(bounded_lru(MAX_NEURAL_STATUSES))),
+        ready_workspaces: Arc::new(Mutex::new(bounded_lru(MAX_READY_WORKSPACES))),
+        search_contexts: Arc::new(Mutex::new(bounded_lru(MAX_SEARCH_CONTEXTS))),
         idle_search_context_count: Arc::new(AtomicUsize::new(0)),
         query_results: Arc::new(Mutex::new(QueryResultCache::default())),
         neural_queries: Arc::new(Mutex::new(NeuralQueryCache::default())),
@@ -3888,10 +3890,10 @@ mod tests {
             lazy_model: Arc::new(std::sync::OnceLock::new()),
             model_loading: Arc::new(AtomicBool::new(false)),
             watchers: Arc::new(Mutex::new(HashMap::new())),
-            resolved_workspaces: Arc::new(Mutex::new(HashMap::new())),
-            neural_statuses: Arc::new(Mutex::new(HashMap::new())),
-            ready_workspaces: Arc::new(Mutex::new(HashMap::new())),
-            search_contexts: Arc::new(Mutex::new(HashMap::new())),
+            resolved_workspaces: Arc::new(Mutex::new(bounded_lru(MAX_RESOLVED_WORKSPACES))),
+            neural_statuses: Arc::new(Mutex::new(bounded_lru(MAX_NEURAL_STATUSES))),
+            ready_workspaces: Arc::new(Mutex::new(bounded_lru(MAX_READY_WORKSPACES))),
+            search_contexts: Arc::new(Mutex::new(bounded_lru(MAX_SEARCH_CONTEXTS))),
             idle_search_context_count: Arc::new(AtomicUsize::new(0)),
             query_results: Arc::new(Mutex::new(QueryResultCache::default())),
             neural_queries: Arc::new(Mutex::new(NeuralQueryCache::default())),
@@ -4396,6 +4398,48 @@ mod tests {
     }
 
     #[test]
+    fn frequently_accessed_queries_survive_cache_churn() {
+        let mut neural = NeuralQueryCache::default();
+        neural.insert("hot query".to_string(), vec![1.0]);
+        let mut results = QueryResultCache::default();
+        let options = SearchOptions::default();
+        let key =
+            |query: &str| query_cache_key(&[], Vec::new(), query, &options, 256, false, false);
+        let hot = key("hot query");
+        results.insert(hot.clone(), Vec::new());
+
+        for index in 0..MAX_QUERY_CACHE_ENTRIES {
+            neural.insert(format!("cold query {index}"), vec![index as f32]);
+            results.insert(key(&format!("cold query {index}")), Vec::new());
+            assert_eq!(neural.get("hot query"), Some(vec![1.0]));
+            assert!(results.get(&hot).is_some());
+        }
+    }
+
+    #[test]
+    fn readiness_cache_evicts_cold_workspaces_without_global_flushes() {
+        let state = test_state();
+        let workspace = Workspace {
+            id: "hot-workspace".to_string(),
+            root: PathBuf::from("/nonexistent/hot-workspace"),
+            index_dir: PathBuf::from("/nonexistent/hot-index"),
+            repo_id: None,
+            base_index_dir: None,
+        };
+        let signature = workspace_readiness_signature(&workspace);
+        state.store_workspace_ready(&workspace, false, signature.clone());
+
+        for index in 0..MAX_READY_WORKSPACES {
+            let mut cold = workspace.clone();
+            cold.id = format!("cold-workspace-{index}");
+            state.store_workspace_ready(&cold, false, signature.clone());
+            assert!(state.workspace_is_ready(&workspace, false, &signature));
+        }
+
+        assert_eq!(state.ready_workspaces.lock().len(), MAX_READY_WORKSPACES);
+    }
+
+    #[test]
     #[serial]
     fn readiness_cache_invalidates_when_index_artifacts_change() {
         let home = tempdir().unwrap();
@@ -4494,10 +4538,10 @@ mod tests {
         state.clear_workspace_contexts(&first);
 
         let cache = state.query_results.lock();
-        assert!(!cache.results.contains_key(&first_key));
-        assert!(!cache.results.contains_key(&combined_key));
-        assert!(cache.results.contains_key(&second_key));
-        assert_eq!(cache.order, VecDeque::from([second_key]));
+        assert!(!cache.results.contains(&first_key));
+        assert!(!cache.results.contains(&combined_key));
+        assert!(cache.results.contains(&second_key));
+        assert_eq!(cache.results.len(), 1);
     }
 
     fn write_broken_completed_index_metadata(workspace: &Workspace, skip_gitignore: bool) {
