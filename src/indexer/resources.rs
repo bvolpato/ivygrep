@@ -21,6 +21,12 @@ const NEURAL_CUDA_HIGH_UTILIZATION_PERCENT: u32 = 70;
 const NEURAL_CUDA_BUSY_UTILIZATION_PERCENT: u32 = 35;
 const NEURAL_CUDA_ACTIVE_UTILIZATION_PERCENT: u32 = 25;
 const MAX_CONFIGURED_NEURAL_BATCH_SIZE: usize = 4096;
+const DEFAULT_TANTIVY_MEMORY_BUDGET: usize = 50_000_000;
+const TANTIVY_MEMORY_PER_WORKER: usize = 16_000_000;
+const LARGE_TANTIVY_MEMORY_PER_WORKER: usize = 24_000_000;
+const SMALL_TANTIVY_WORKLOAD_BYTES: u64 = 512 * 1024;
+const MEDIUM_TANTIVY_WORKLOAD_BYTES: u64 = 2 * MIB;
+const LARGE_TANTIVY_WORKLOAD_BYTES: u64 = 8 * MIB;
 
 pub(super) const NEURAL_BATCH_SIZE_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -42,6 +48,31 @@ fn indexing_worker_count() -> usize {
         num_cpus::get_physical(),
         std::env::var("IVYGREP_INDEX_THREADS").ok().as_deref(),
     )
+}
+
+pub(super) fn tantivy_writer_settings(indexed_source_bytes: u64) -> (usize, usize) {
+    configured_tantivy_writer_settings(indexed_source_bytes, indexing_worker_count())
+}
+
+fn configured_tantivy_writer_settings(
+    indexed_source_bytes: u64,
+    indexing_workers: usize,
+) -> (usize, usize) {
+    let workload_workers = if indexed_source_bytes < SMALL_TANTIVY_WORKLOAD_BYTES {
+        2
+    } else if indexed_source_bytes < MEDIUM_TANTIVY_WORKLOAD_BYTES {
+        4
+    } else {
+        6
+    };
+    let writer_threads = indexing_workers.clamp(1, workload_workers);
+    let memory_per_worker = if indexed_source_bytes >= LARGE_TANTIVY_WORKLOAD_BYTES {
+        LARGE_TANTIVY_MEMORY_PER_WORKER
+    } else {
+        TANTIVY_MEMORY_PER_WORKER
+    };
+    let memory_budget = DEFAULT_TANTIVY_MEMORY_BUDGET.max(writer_threads * memory_per_worker);
+    (writer_threads, memory_budget)
 }
 
 fn configured_indexing_worker_count(
@@ -283,6 +314,31 @@ mod tests {
             16
         );
         assert_eq!(configured_indexing_worker_count(32, 16, Some("0")), 16);
+    }
+
+    #[test]
+    fn tantivy_writer_scales_with_workload_without_exceeding_index_workers() {
+        assert_eq!(configured_tantivy_writer_settings(0, 16), (2, 50_000_000));
+        assert_eq!(
+            configured_tantivy_writer_settings(SMALL_TANTIVY_WORKLOAD_BYTES, 16),
+            (4, 64_000_000)
+        );
+        assert_eq!(
+            configured_tantivy_writer_settings(MEDIUM_TANTIVY_WORKLOAD_BYTES, 16),
+            (6, 96_000_000)
+        );
+        assert_eq!(
+            configured_tantivy_writer_settings(LARGE_TANTIVY_WORKLOAD_BYTES, 16),
+            (6, 144_000_000)
+        );
+        assert_eq!(
+            configured_tantivy_writer_settings(LARGE_TANTIVY_WORKLOAD_BYTES, 4),
+            (4, 96_000_000)
+        );
+        assert_eq!(
+            configured_tantivy_writer_settings(LARGE_TANTIVY_WORKLOAD_BYTES, 1),
+            (1, 50_000_000)
+        );
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
