@@ -42,10 +42,14 @@ pub fn parse_glob_csv(raw: Option<&str>) -> Vec<String> {
 
     for character in raw.unwrap_or_default().chars() {
         if escaped {
-            if character != ',' {
-                pattern.push('\\');
+            if character == ',' && brace_depth > 0 && !in_character_class {
+                pattern.push_str("[,]");
+            } else {
+                if character != ',' {
+                    pattern.push('\\');
+                }
+                pattern.push(character);
             }
-            pattern.push(character);
             escaped = false;
             continue;
         }
@@ -164,7 +168,7 @@ mod tests {
     fn parse_glob_csv_preserves_alternatives_classes_and_escaped_commas() {
         assert_eq!(
             parse_glob_csv(Some(
-                r"*.{rs,md}, src/**, literal\,name.rs, nested/{a,b}/{x,y}.rs, file[,a].rs"
+                r"*.{rs,md}, src/**, literal\,name.rs, nested/{a,b}/{x,y}.rs, file[,a].rs, file{foo\,bar,baz}.rs"
             )),
             vec![
                 "*.{rs,md}",
@@ -172,8 +176,20 @@ mod tests {
                 "literal,name.rs",
                 "nested/{a,b}/{x,y}.rs",
                 "file[,a].rs",
+                "file{foo[,]bar,baz}.rs",
             ]
         );
+    }
+
+    #[test]
+    fn escaped_commas_inside_brace_alternatives_remain_literal() {
+        let patterns = parse_glob_csv(Some(r"file{foo\,bar,baz}.rs"));
+        let matcher = PathGlobMatcher::new(&patterns, &[]).unwrap();
+
+        assert!(matcher.matches(Path::new("filefoo,bar.rs")));
+        assert!(matcher.matches(Path::new("filebaz.rs")));
+        assert!(!matcher.matches(Path::new("filefoo.rs")));
+        assert!(!matcher.matches(Path::new("filebar.rs")));
     }
 
     #[test]
