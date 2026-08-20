@@ -1647,6 +1647,33 @@ impl AccountManager {
             "include glob should keep only markdown results"
         );
 
+        let brace_filtered = execute_ivygrep_search(IvygrepSearchArgs {
+            query: Some("applyFilter".to_string()),
+            path: Some(root.to_string_lossy().to_string()),
+            output: None,
+            budget_tokens: None,
+            since: None,
+            limit: Some(5),
+            context: Some(2),
+            type_filter: None,
+            regex: Some(false),
+            literal: None,
+            symbol: None,
+            refs: None,
+            callers: None,
+            include: Some("*.{rs,md},*.txt".to_string()),
+            exclude: Some("*.rs".to_string()),
+            first_line_only: Some(false),
+            file_name_only: Some(true),
+            verbose: Some(false),
+            skip_gitignore: None,
+        })
+        .unwrap();
+        assert_eq!(
+            tool_json_payload(&brace_filtered)["file_paths"],
+            serde_json::json!(["match.md"])
+        );
+
         let include_and_exclude = execute_ivygrep_search(IvygrepSearchArgs {
             query: Some("applyFilter".to_string()),
             path: Some(root.to_string_lossy().to_string()),

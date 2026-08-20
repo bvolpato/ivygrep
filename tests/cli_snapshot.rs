@@ -477,6 +477,73 @@ fn cli_context_json_respects_budget_and_captures_relationships() {
 
 #[test]
 #[serial]
+fn cli_search_and_context_accept_brace_aware_globs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("workspace");
+    let home = tmp.path().join("ivygrep_home");
+    init_git_repo(&root);
+    for name in ["match.rs", "match.md", "match.txt", "literal,name.rs"] {
+        std::fs::write(root.join(name), "pub fn applyFilter() {}\n").unwrap();
+    }
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args([
+            "--hash",
+            "--no-watch",
+            "--literal",
+            "--json",
+            "--file-name-only",
+            "--include",
+            r"*.{rs,md},literal\,name.rs",
+            "--exclude",
+            "*.{txt,log}",
+            "applyFilter",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let paths: Vec<String> = serde_json::from_slice(&output).unwrap();
+    assert_eq!(paths.len(), 3, "unexpected filtered paths: {paths:?}");
+    assert!(paths.iter().any(|path| path.ends_with("match.rs")));
+    assert!(paths.iter().any(|path| path.ends_with("match.md")));
+    assert!(paths.iter().any(|path| path.ends_with("literal,name.rs")));
+
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args([
+            "context",
+            "--hash",
+            "--json",
+            "--no-watch",
+            "--include",
+            "*.{rs,md}",
+            "--exclude",
+            r"literal\,name.rs",
+            "applyFilter behavior",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let pack: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let items = pack["items"].as_array().unwrap();
+    assert!(!items.is_empty(), "context pack was empty: {pack:#}");
+    assert!(items.iter().all(|item| {
+        let path = item["file_path"].as_str().unwrap();
+        (path.ends_with(".rs") || path.ends_with(".md")) && !path.ends_with("literal,name.rs")
+    }));
+}
+
+#[test]
+#[serial]
 fn cli_context_graph_tracks_dependencies_across_incremental_reindex() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("workspace");

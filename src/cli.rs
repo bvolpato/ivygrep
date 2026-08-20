@@ -13,6 +13,7 @@ use crate::embedding::create_model;
 use crate::indexer::{index_workspace, remove_workspace_index, workspace_is_indexed};
 use crate::jobs::{self, JobKind, JobUpdate};
 use crate::mcp;
+use crate::path_glob::parse_glob_csv;
 use crate::protocol::{
     BUILD_VERSION, DaemonRequest, DaemonResponse, SearchHit, group_hits_by_file,
 };
@@ -174,11 +175,11 @@ pub struct Cli {
     pub all_indices: bool,
 
     /// Include only comma-separated path globs. May be repeated.
-    #[arg(long, value_name = "GLOBS", value_delimiter = ',')]
+    #[arg(long, value_name = "GLOBS")]
     pub include: Vec<String>,
 
     /// Exclude comma-separated path globs. May be repeated.
-    #[arg(long, value_name = "GLOBS", value_delimiter = ',')]
+    #[arg(long, value_name = "GLOBS")]
     pub exclude: Vec<String>,
 
     /// Retrieval breadth and maximum ranked result files, not a token, line, or
@@ -285,11 +286,11 @@ pub struct ContextArgs {
     pub type_filter: Option<String>,
 
     /// Include only comma-separated path globs. May be repeated.
-    #[arg(long, value_name = "GLOBS", value_delimiter = ',')]
+    #[arg(long, value_name = "GLOBS")]
     pub include: Vec<String>,
 
     /// Exclude comma-separated path globs. May be repeated.
-    #[arg(long, value_name = "GLOBS", value_delimiter = ',')]
+    #[arg(long, value_name = "GLOBS")]
     pub exclude: Vec<String>,
 
     /// Index once without starting a filesystem watcher.
@@ -341,6 +342,19 @@ fn apply_context_args(cli: &mut Cli, args: &ContextArgs) {
     cli.hash |= args.hash;
 }
 
+fn normalize_glob_args(cli: &mut Cli) {
+    cli.include = cli
+        .include
+        .iter()
+        .flat_map(|value| parse_glob_csv(Some(value)))
+        .collect();
+    cli.exclude = cli
+        .exclude
+        .iter()
+        .flat_map(|value| parse_glob_csv(Some(value)))
+        .collect();
+}
+
 pub async fn run() -> Result<()> {
     init_tracing();
 
@@ -373,6 +387,7 @@ pub async fn run() -> Result<()> {
         }
         None => None,
     };
+    normalize_glob_args(&mut cli);
 
     // Resolve --type aliases: "rs" → "rust", "py" → "python", "c++" → "cpp", etc.
     if let Some(ref tf) = cli.type_filter
@@ -2411,6 +2426,49 @@ mod tests {
         };
         apply_context_args(&mut cli, &args);
         assert!(cli.lexical_only);
+    }
+
+    #[test]
+    fn cli_glob_arguments_preserve_alternatives_and_repeated_values() {
+        let mut cli = Cli::try_parse_from([
+            "ig",
+            "--include",
+            "*.{rs,md},src/**",
+            "--include",
+            r"literal\,name.rs",
+            "--exclude",
+            "*.{tmp,log}",
+            "needle",
+        ])
+        .unwrap();
+        normalize_glob_args(&mut cli);
+
+        assert_eq!(cli.include, ["*.{rs,md}", "src/**", "literal,name.rs"]);
+        assert_eq!(cli.exclude, ["*.{tmp,log}"]);
+    }
+
+    #[test]
+    fn context_glob_arguments_merge_parent_and_subcommand_values() {
+        let mut cli = Cli::try_parse_from([
+            "ig",
+            "--include",
+            "*.{rs,md}",
+            "context",
+            "--include",
+            "src/**,docs/**",
+            "--exclude",
+            "*.{tmp,log}",
+            "task",
+        ])
+        .unwrap();
+        let Some(CliCommand::Context(args)) = cli.command.take() else {
+            panic!("context subcommand was not parsed");
+        };
+        apply_context_args(&mut cli, &args);
+        normalize_glob_args(&mut cli);
+
+        assert_eq!(cli.include, ["*.{rs,md}", "src/**", "docs/**"]);
+        assert_eq!(cli.exclude, ["*.{tmp,log}"]);
     }
 
     #[test]

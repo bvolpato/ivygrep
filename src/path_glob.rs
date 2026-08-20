@@ -34,12 +34,59 @@ impl PathGlobMatcher {
 }
 
 pub fn parse_glob_csv(raw: Option<&str>) -> Vec<String> {
-    raw.unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
-        .collect()
+    let mut patterns = Vec::new();
+    let mut pattern = String::new();
+    let mut brace_depth = 0usize;
+    let mut in_character_class = false;
+    let mut escaped = false;
+
+    for character in raw.unwrap_or_default().chars() {
+        if escaped {
+            if character != ',' {
+                pattern.push('\\');
+            }
+            pattern.push(character);
+            escaped = false;
+            continue;
+        }
+
+        match character {
+            '\\' => escaped = true,
+            '[' if !in_character_class => {
+                in_character_class = true;
+                pattern.push(character);
+            }
+            ']' if in_character_class => {
+                in_character_class = false;
+                pattern.push(character);
+            }
+            '{' if !in_character_class => {
+                brace_depth = brace_depth.saturating_add(1);
+                pattern.push(character);
+            }
+            '}' if !in_character_class => {
+                brace_depth = brace_depth.saturating_sub(1);
+                pattern.push(character);
+            }
+            ',' if brace_depth == 0 && !in_character_class => {
+                let trimmed = pattern.trim();
+                if !trimmed.is_empty() {
+                    patterns.push(trimmed.to_string());
+                }
+                pattern.clear();
+            }
+            _ => pattern.push(character),
+        }
+    }
+
+    if escaped {
+        pattern.push('\\');
+    }
+    let trimmed = pattern.trim();
+    if !trimmed.is_empty() {
+        patterns.push(trimmed.to_string());
+    }
+    patterns
 }
 
 fn build_glob_set(globs: &[String], label: &str) -> Result<Option<GlobSet>> {
@@ -111,6 +158,22 @@ mod tests {
     #[test]
     fn parse_glob_csv_skips_empty_segments() {
         assert_eq!(parse_glob_csv(Some(",*.rs,,*.py,")), vec!["*.rs", "*.py"]);
+    }
+
+    #[test]
+    fn parse_glob_csv_preserves_alternatives_classes_and_escaped_commas() {
+        assert_eq!(
+            parse_glob_csv(Some(
+                r"*.{rs,md}, src/**, literal\,name.rs, nested/{a,b}/{x,y}.rs, file[,a].rs"
+            )),
+            vec![
+                "*.{rs,md}",
+                "src/**",
+                "literal,name.rs",
+                "nested/{a,b}/{x,y}.rs",
+                "file[,a].rs",
+            ]
+        );
     }
 
     #[test]
