@@ -76,10 +76,18 @@ pub struct IndexingSummary {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct IndexingPhaseTimings {
     pub discovery_ms: f64,
     pub persist_ms: f64,
     pub finalize_ms: f64,
+    pub secondary_indexes_ms: f64,
+    pub vector_key_count_ms: f64,
+    pub sqlite_commit_ms: f64,
+    pub tantivy_commit_ms: f64,
+    pub tantivy_merge_ms: f64,
+    pub staging_publish_ms: f64,
+    pub metadata_ms: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -1383,14 +1391,17 @@ fn index_workspace_inner(
         );
     }
 
+    let secondary_indexes_started = Instant::now();
     persist_statements.flush_symbols()?;
     drop(persist_statements);
     if defer_secondary_indexes {
         create_secondary_indexes(&tx)?;
     }
     finalize_graph_indexes(&tx)?;
+    let secondary_indexes_ms = secondary_indexes_started.elapsed().as_secs_f64() * 1_000.0;
 
     // Update cached stats before committing so status reads are O(1).
+    let vector_key_count_started = Instant::now();
     let (chunk_count, file_count, vector_key_count) = if let Some(stats) = incremental_stats {
         stats.final_counts(&tx)?
     } else {
@@ -1399,10 +1410,10 @@ fn index_workspace_inner(
             indexed_files_with_chunks as i64,
             tx.query_row("SELECT COUNT(DISTINCT vector_key) FROM chunks", [], |row| {
                 row.get(0)
-            })
-            .unwrap_or(0),
+            })?,
         )
     };
+    let vector_key_count_ms = vector_key_count_started.elapsed().as_secs_f64() * 1_000.0;
     tx.execute(
         "INSERT OR REPLACE INTO _stats (key, value) VALUES ('chunk_count', ?1)",
         params![chunk_count],
@@ -1416,10 +1427,16 @@ fn index_workspace_inner(
         params![vector_key_count],
     )?;
 
+    let sqlite_commit_started = Instant::now();
     commit_with_vector_tombstones(tx, &mut vector_tombstones)?;
+    let sqlite_commit_ms = sqlite_commit_started.elapsed().as_secs_f64() * 1_000.0;
 
+    let tantivy_commit_started = Instant::now();
     writer.commit()?;
+    let tantivy_commit_ms = tantivy_commit_started.elapsed().as_secs_f64() * 1_000.0;
+    let tantivy_merge_started = Instant::now();
     writer.wait_merging_threads()?;
+    let tantivy_merge_ms = tantivy_merge_started.elapsed().as_secs_f64() * 1_000.0;
     if fresh_staging.is_some() {
         apply_default_write_pragmas(&sqlite)?;
         sqlite.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
@@ -1427,21 +1444,39 @@ fn index_workspace_inner(
     drop(tantivy);
     drop(sqlite);
 
-    if let Some(staging) = fresh_staging {
+    let staging_publish_started = Instant::now();
+    let staging_publish_ms = if let Some(staging) = fresh_staging {
         staging.promote(workspace)?;
-    }
+        staging_publish_started.elapsed().as_secs_f64() * 1_000.0
+    } else {
+        0.0
+    };
 
+    let metadata_started = Instant::now();
     finalize_workspace_index_state(workspace, pending_snapshot)?;
+    let metadata_ms = metadata_started.elapsed().as_secs_f64() * 1_000.0;
+    let total_chunks = if use_overlay {
+        count_workspace_chunks(workspace)?
+    } else {
+        chunk_count as usize
+    };
 
     Ok(IndexingSummary {
         workspace_id: workspace.id.clone(),
         indexed_files: touched_files.len(),
         deleted_files: diff.deleted.len(),
-        total_chunks: count_workspace_chunks(workspace).unwrap_or(0),
+        total_chunks,
         phase_timings: IndexingPhaseTimings {
             discovery_ms,
             persist_ms,
             finalize_ms: finalize_started.elapsed().as_secs_f64() * 1_000.0,
+            secondary_indexes_ms,
+            vector_key_count_ms,
+            sqlite_commit_ms,
+            tantivy_commit_ms,
+            tantivy_merge_ms,
+            staging_publish_ms,
+            metadata_ms,
         },
     })
 }
@@ -3333,6 +3368,34 @@ mod tests {
             .unwrap()
             .map(|row| decompress_text(row.unwrap()))
             .collect()
+    }
+
+    #[test]
+    #[serial]
+    fn fresh_index_reports_individual_finalization_phases() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        fs::write(root.path().join("lib.rs"), "pub fn profiled() {}\n").unwrap();
+
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        let summary = index_workspace(&workspace, &model).unwrap();
+        let timings = summary.phase_timings;
+
+        assert!(timings.finalize_ms > 0.0);
+        assert!(timings.secondary_indexes_ms > 0.0);
+        assert!(timings.vector_key_count_ms > 0.0);
+        assert!(timings.sqlite_commit_ms > 0.0);
+        assert!(timings.tantivy_commit_ms > 0.0);
+        assert!(timings.staging_publish_ms > 0.0);
+        assert!(timings.metadata_ms > 0.0);
+        assert!(timings.finalize_ms >= timings.tantivy_merge_ms);
+
+        let legacy: IndexingPhaseTimings =
+            serde_json::from_str(r#"{"discovery_ms":1.0,"persist_ms":2.0,"finalize_ms":3.0}"#)
+                .unwrap();
+        assert_eq!(legacy.vector_key_count_ms, 0.0);
     }
 
     #[test]
