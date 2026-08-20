@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -33,6 +34,12 @@ SOURCE_INPUTS = (
     "src",
     "vendor",
 )
+
+MIN_RELEVANCE_METRICS = {
+    "mean_ndcg10": 0.85,
+    "mean_mrr": 0.90,
+    "mean_candidate_recall": 0.95,
+}
 
 
 def sha256_file(path: Path) -> str:
@@ -91,6 +98,24 @@ def validate_report(report: dict, *, root: Path = ROOT) -> list[str]:
                 f"{mode} measured {measured.get('queries')} queries instead of "
                 f"the {expected_queries} current fixture queries"
             )
+        else:
+            for metric, minimum in MIN_RELEVANCE_METRICS.items():
+                value = measured.get(metric)
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                    or value < minimum
+                ):
+                    errors.append(f"{mode} {metric} {value!r} is below minimum {minimum}")
+
+            no_hit_queries = measured.get("no_hit_queries")
+            if (
+                isinstance(no_hit_queries, bool)
+                or not isinstance(no_hit_queries, int)
+                or no_hit_queries != 0
+            ):
+                errors.append(f"{mode} reported {no_hit_queries!r} no-hit queries; expected 0")
     return errors
 
 
