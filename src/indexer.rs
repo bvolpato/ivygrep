@@ -39,7 +39,7 @@ use git_state::{
 };
 use resources::{
     NEURAL_BATCH_SIZE_REFRESH_INTERVAL, check_memory_before_index, check_system_constraints,
-    indexing_pool, neural_enhance_batch_size,
+    indexing_pool, neural_enhance_batch_size, tantivy_writer_settings,
 };
 use staging::FreshIndexStaging;
 pub use storage::{
@@ -1115,10 +1115,23 @@ fn index_workspace_inner(
     let tantivy_lock = tantivy_path.join(".tantivy-writer.lock");
     let _ = fs::remove_file(&tantivy_lock);
     let (tantivy, fields) = open_tantivy_index(&tantivy_path)?;
+    let indexed_source_bytes = diff
+        .added_or_modified
+        .iter()
+        .filter_map(|(path, _)| fs::metadata(workspace.root.join(path)).ok())
+        .map(|metadata| metadata.len())
+        .sum();
+    let (writer_threads, writer_memory_budget) = tantivy_writer_settings(indexed_source_bytes);
+    tracing::debug!(
+        indexed_source_bytes,
+        writer_threads,
+        writer_memory_budget,
+        "configured workload-aware Tantivy writer"
+    );
     // Retry with backoff — NFS/overlayfs may delay flock release.
     let mut writer = None;
     for attempt in 0..5u32 {
-        match tantivy.writer(50_000_000) {
+        match tantivy.writer_with_num_threads(writer_threads, writer_memory_budget) {
             Ok(w) => {
                 writer = Some(w);
                 break;
