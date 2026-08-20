@@ -110,17 +110,36 @@ jobs:
             --threshold 1.20 \
             --output "$PAIRED_BENCHMARK_DIR/vector-filtered-exact.json"
 
+      - name: Install uv for protected neural relevance
+        if: steps.benchmark-changes.outputs.required == 'true'
+        uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
+
+      - name: Prime pinned neural relevance model
+        if: steps.benchmark-changes.outputs.required == 'true'
+        timeout-minutes: 8
+        env:
+          HF_HOME: ${{ runner.temp }}/ivygrep-benchmark-hf-cache
+        run: |
+          uv run scripts/cache_neural_model.py \
+            --profile static \
+            --cache "$HF_HOME"
+
       - name: Measure current-head retrieval relevance
         if: steps.benchmark-changes.outputs.required == 'true'
+        timeout-minutes: 8
         env:
           CURRENT_RELEVANCE_REPORT: ${{ runner.temp }}/current-head-relevance.json
+          HF_HOME: ${{ runner.temp }}/ivygrep-benchmark-hf-cache
+          IVYGREP_MODEL_PROFILE: static
         run: |
           cargo build --release --locked --bin ig
           python3 scripts/run_current_head_benchmark.py \
             --binary target/release/ig \
+            --require-neural \
             --output "$CURRENT_RELEVANCE_REPORT"
           python3 scripts/run_current_head_benchmark.py \
             --check \
+            --require-neural \
             --output "$CURRENT_RELEVANCE_REPORT"
           jq -r '
             "### Current-head retrieval relevance",
