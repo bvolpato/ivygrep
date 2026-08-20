@@ -2627,17 +2627,6 @@ fn constrain_query_to_glob_paths(
     }
 }
 
-fn escape_like_pattern(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len());
-    for ch in value.chars() {
-        if matches!(ch, '\\' | '%' | '_') {
-            escaped.push('\\');
-        }
-        escaped.push(ch);
-    }
-    escaped
-}
-
 fn is_definition_kind(kind: &str) -> bool {
     matches!(
         kind,
@@ -2735,9 +2724,9 @@ fn query_filtered_chunks(
             sql.push_str(" AND file_path = ?");
             params_vec.push(Box::new(prefix));
         } else {
-            let dir_prefix = format!("{prefix}/");
-            sql.push_str(" AND file_path LIKE ? ESCAPE '\\'");
-            params_vec.push(Box::new(format!("{}%", escape_like_pattern(&dir_prefix))));
+            sql.push_str(" AND file_path >= ? AND file_path < ?");
+            params_vec.push(Box::new(format!("{prefix}/")));
+            params_vec.push(Box::new(format!("{prefix}0")));
         }
     }
 
@@ -3005,9 +2994,9 @@ fn indexed_filter_exceeds_exact_limit(
             sql.push_str(" AND file_path = ?");
             params_vec.push(Box::new(prefix));
         } else {
-            let dir_prefix = format!("{prefix}/");
-            sql.push_str(" AND file_path LIKE ? ESCAPE '\\'");
-            params_vec.push(Box::new(format!("{}%", escape_like_pattern(&dir_prefix))));
+            sql.push_str(" AND file_path >= ? AND file_path < ?");
+            params_vec.push(Box::new(format!("{prefix}/")));
+            params_vec.push(Box::new(format!("{prefix}0")));
         }
     }
     sql.push_str(" LIMIT 1 OFFSET ?");
@@ -5020,14 +5009,6 @@ mod tests {
         assert!(
             hits.iter()
                 .all(|hit| hit.file_path.starts_with(Path::new(scope_dir)))
-        );
-    }
-
-    #[test]
-    fn escape_like_pattern_escapes_sql_wildcards() {
-        assert_eq!(
-            escape_like_pattern(r"test_utils\match%"),
-            r"test\_utils\\match\%"
         );
     }
 
