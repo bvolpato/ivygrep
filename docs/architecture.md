@@ -274,6 +274,14 @@ Watchers coalesce bursts and cap continuous-event starvation. Successful changes
 invalidate only cache entries involving affected workspaces. No-op indexing
 preserves valid cache entries.
 
+Heavy work is bounded by a CPU-permit semaphore sized to the core count. Index,
+search, and watcher tasks take their per-workspace lease on the blocking pool
+first and only then a CPU permit, so requests parked behind an exclusive index
+lease never pin CPU capacity that other workspaces could use. Concurrent `Index`
+requests for one workspace coalesce: the first request leads, identical requests
+await its response, and a request that waited while the index generation
+advanced skips the redundant rescan.
+
 `ig --doctor` checks workspace health and can repair stale daemon state or broken
 indexes. Status distinguishes lexical readiness, hash coverage, neural coverage,
 active jobs, stalled work, watcher health, and compaction recommendations.
@@ -291,6 +299,13 @@ progress, and structured errors.
 Cancellation acknowledgements for active searches are sent after registered work
 has stopped. Pre-registration cancellations use bounded tombstones so reordered
 IPC connections cannot revive stale searches.
+
+Every search also carries a server-side cancellation token. The connection
+handler races the search against the client stream reaching EOF and cancels
+abandoned work on disconnect; CLI and MCP searches send request IDs and issue
+`CancelSearch` when they time out or drop the request. A per-request deadline
+(`IVYGREP_SEARCH_DEADLINE_SECS`, default 60 s, `0` disables) cancels long
+searches and returns the hits gathered so far with a `warnings` entry.
 
 `warnings` on search results is additive and omitted when empty, preserving
 compatibility with older response readers. Unsupported protocol versions and

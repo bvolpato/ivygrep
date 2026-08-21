@@ -13,6 +13,10 @@ All notable changes to ivygrep are documented in this file.
 
 ### Performance
 - Cache the macOS power/thermal probe for five seconds instead of forking `pmset` twice per enhancement batch.
+- Daemon index and search requests take their workspace lease before a CPU permit, so requests parked behind a busy workspace no longer starve searches on other workspaces; uncontended search leases are still granted inline so the common query keeps a single blocking hop.
+- Concurrent daemon `Index` requests for one workspace coalesce into a single run, and a request that waited while the index generation advanced skips the redundant rescan only when the run that advanced it started after the request arrived; requests that arrived mid-walk run their own incremental rescan.
+- Daemon searches are cancelled when the client disconnects mid-request; CLI and MCP tag searches with request IDs and send `CancelSearch` on timeout or abandonment.
+- Daemon searches stop at a server-side deadline (`IVYGREP_SEARCH_DEADLINE_SECS`, default 60, `0` disables) and return the hits gathered so far with a warning.
 
 ## [1.2.12] - 2026-08-20
 

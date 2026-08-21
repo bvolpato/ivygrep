@@ -95,6 +95,62 @@ fn cancelled_search_response() -> DaemonResponse {
     }
 }
 
+/// Warning attached to results when the daemon's per-request deadline
+/// cancelled a search; `None` for client-driven cancellation.
+fn deadline_warning(cancellation: Option<&SearchCancellation>) -> Option<String> {
+    cancellation
+        .filter(|cancellation| cancellation.deadline_expired())
+        .map(|_| {
+            let secs = config::search_deadline()
+                .map_or(config::DEFAULT_SEARCH_DEADLINE_SECS, |deadline| {
+                    deadline.as_secs()
+                });
+            format!("search deadline of {secs}s exceeded; returning partial results")
+        })
+}
+
+/// Response for a search cancelled before it produced anything: deadline
+/// expiry yields empty results plus the warning, client cancellation the error.
+fn cancelled_search_outcome(
+    cancellation: Option<&SearchCancellation>,
+    mut warnings: Vec<String>,
+) -> DaemonResponse {
+    match deadline_warning(cancellation) {
+        Some(warning) => {
+            warnings.push(warning);
+            DaemonResponse::SearchResults {
+                hits: Vec::new(),
+                warnings,
+            }
+        }
+        None => cancelled_search_response(),
+    }
+}
+
+/// Map a regex/literal task outcome to a response, honouring cancellation:
+/// deadline expiry returns the partial outcome plus a warning, client
+/// cancellation keeps the explicit error.
+fn finish_cancellable_search(
+    result: std::result::Result<SearchOutcome, String>,
+    cancellation: Option<&SearchCancellation>,
+) -> DaemonResponse {
+    match result {
+        Ok(mut outcome) => {
+            if cancellation.is_some_and(SearchCancellation::is_cancelled) {
+                match deadline_warning(cancellation) {
+                    Some(warning) => outcome.warnings.push(warning),
+                    None => return cancelled_search_response(),
+                }
+            }
+            DaemonResponse::SearchResults {
+                hits: outcome.hits,
+                warnings: outcome.warnings,
+            }
+        }
+        Err(message) => DaemonResponse::Error { message },
+    }
+}
+
 fn should_start_model_load(has_neural_vectors: bool, query: &str, force_neural: bool) -> bool {
     has_neural_vectors && query_uses_neural(query, force_neural)
 }
@@ -742,6 +798,10 @@ fn canonicalize_existing_prefix(path: &Path) -> Option<PathBuf> {
 #[derive(Clone)]
 struct SearchCancellation {
     flag: Arc<AtomicBool>,
+    /// Set when the daemon's own per-request deadline fired. Deadline-cancelled
+    /// searches return the hits gathered so far plus a warning instead of the
+    /// client-cancel error.
+    deadline_expired: Arc<AtomicBool>,
     signal: tokio::sync::watch::Sender<bool>,
     finished_signal: tokio::sync::watch::Sender<bool>,
 }
@@ -752,6 +812,7 @@ impl SearchCancellation {
         let (finished_signal, _) = tokio::sync::watch::channel(false);
         Self {
             flag: Arc::new(AtomicBool::new(cancelled)),
+            deadline_expired: Arc::new(AtomicBool::new(false)),
             signal,
             finished_signal,
         }
@@ -762,8 +823,17 @@ impl SearchCancellation {
         self.signal.send_replace(true);
     }
 
+    fn cancel_for_deadline(&self) {
+        self.deadline_expired.store(true, Ordering::Relaxed);
+        self.cancel();
+    }
+
     fn is_cancelled(&self) -> bool {
         self.flag.load(Ordering::Relaxed)
+    }
+
+    fn deadline_expired(&self) -> bool {
+        self.deadline_expired.load(Ordering::Relaxed)
     }
 
     async fn cancelled(&self) {
@@ -909,6 +979,35 @@ impl WorkspaceModeCoordinator {
         }
     }
 
+    /// Grant a shared lease only when it is available right now: no exclusive
+    /// holder or waiter, and the requested mode is active or nothing is
+    /// active. Never waits or reserves the next mode, so it is safe to call
+    /// inline from the async runtime.
+    fn try_acquire_shared(self: &Arc<Self>, requested_mode: bool) -> Option<WorkspaceModeLease> {
+        let mut state = self.state.lock();
+        if state.exclusive_active || state.exclusive_waiters > 0 {
+            return None;
+        }
+        if state.active_leases == 0 && state.next_mode.is_none_or(|next| next == requested_mode) {
+            state.active_mode = Some(requested_mode);
+            state.active_leases = 1;
+            state.next_mode = None;
+            state.next_mode_waiters = 0;
+            return Some(WorkspaceModeLease {
+                coordinator: self.clone(),
+                exclusive: false,
+            });
+        }
+        if state.active_mode == Some(requested_mode) && state.next_mode.is_none() {
+            state.active_leases += 1;
+            return Some(WorkspaceModeLease {
+                coordinator: self.clone(),
+                exclusive: false,
+            });
+        }
+        None
+    }
+
     fn acquire_exclusive(
         self: &Arc<Self>,
         cancellation: Option<&AtomicBool>,
@@ -964,6 +1063,45 @@ impl Drop for WorkspaceModeLease {
     }
 }
 
+#[derive(Clone)]
+struct InflightIndex {
+    watch: bool,
+    skip_gitignore: bool,
+    outcome: tokio::sync::watch::Receiver<Option<DaemonResponse>>,
+}
+
+/// Leader-side handle for a coalesced `Index` request. Publishes the final
+/// response to followers and removes the in-flight entry on drop so an aborted
+/// leader never strands followers or blocks later requests.
+struct InflightIndexLead {
+    workspace_id: String,
+    outcome: tokio::sync::watch::Sender<Option<DaemonResponse>>,
+    registry: Arc<Mutex<HashMap<String, InflightIndex>>>,
+}
+
+impl InflightIndexLead {
+    fn publish(&self, response: &DaemonResponse) {
+        self.registry.lock().remove(&self.workspace_id);
+        self.outcome.send_replace(Some(response.clone()));
+    }
+}
+
+impl Drop for InflightIndexLead {
+    fn drop(&mut self) {
+        self.registry.lock().remove(&self.workspace_id);
+        if self.outcome.borrow().is_none() {
+            self.outcome.send_replace(Some(DaemonResponse::Error {
+                message: "index request aborted before completion".to_string(),
+            }));
+        }
+    }
+}
+
+enum InflightIndexSlot {
+    Lead(InflightIndexLead),
+    Follow(tokio::sync::watch::Receiver<Option<DaemonResponse>>),
+}
+
 struct ModeLeasedEmbeddingModel {
     inner: Arc<dyn EmbeddingModel>,
     _leases: Vec<WorkspaceModeLease>,
@@ -1017,6 +1155,15 @@ pub(crate) struct DaemonState {
     neural_queries: Arc<Mutex<NeuralQueryCache>>,
     search_cancellations: Arc<Mutex<SearchCancellationRegistry>>,
     workspace_modes: Arc<Mutex<HashMap<String, Weak<WorkspaceModeCoordinator>>>>,
+    /// Explicit `Index` requests in flight, keyed by workspace id. Concurrent
+    /// requests with the same options await the leader's outcome instead of
+    /// queuing another full rescan behind the exclusive workspace lease.
+    inflight_indexes: Arc<Mutex<HashMap<String, InflightIndex>>>,
+    /// When the daemon last started a full index walk per workspace. A waiting
+    /// Index request may only skip its own rescan when a full walk started
+    /// after the request arrived; anything earlier could have scanned files
+    /// before edits the request was meant to pick up.
+    full_index_run_starts: Arc<Mutex<HashMap<String, std::time::Instant>>>,
     query_result_cache_enabled: bool,
     /// Bounds concurrent CPU-heavy work (hybrid/literal/regex search + index).
     /// Without this, a burst of clients each spawn a `spawn_blocking` task on
@@ -1176,6 +1323,136 @@ impl DaemonState {
             () = cancellation.cancelled() => None,
             permit = self.cpu_permits.clone().acquire_owned() => permit.ok(),
         }
+    }
+
+    /// Shared search leases for plain (non-worktree) workspaces when every
+    /// coordinator can grant immediately. Returns `None` as soon as one is
+    /// contended, releasing anything already taken, so callers fall back to
+    /// the blocking wait. This keeps the common uncontended query on one
+    /// blocking hop instead of two.
+    fn try_acquire_search_leases_inline(
+        &self,
+        workspaces: &[Workspace],
+        skip_gitignore: bool,
+    ) -> Option<Vec<WorkspaceModeLease>> {
+        if workspaces.iter().any(Workspace::is_worktree) {
+            return None;
+        }
+        let mut ids = workspaces
+            .iter()
+            .map(|workspace| workspace.id.as_str())
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids.dedup();
+        let mut leases = Vec::with_capacity(ids.len());
+        for workspace_id in ids {
+            let lease = self
+                .workspace_mode_coordinator(workspace_id)
+                .try_acquire_shared(skip_gitignore)?;
+            leases.push(lease);
+        }
+        Some(leases)
+    }
+
+    /// Take the workspace leases for a search before any CPU permit is held.
+    /// Uncontended leases are granted inline; otherwise the wait runs on the
+    /// blocking pool. A search parked behind an exclusive index lease must not
+    /// pin CPU capacity that unrelated workspaces could use.
+    async fn acquire_search_leases(
+        &self,
+        workspaces: &[Workspace],
+        skip_gitignore: bool,
+        cancellation: Option<&SearchCancellation>,
+    ) -> std::result::Result<Option<Vec<WorkspaceModeLease>>, DaemonResponse> {
+        if !cancellation.is_some_and(SearchCancellation::is_cancelled)
+            && let Some(leases) = self.try_acquire_search_leases_inline(workspaces, skip_gitignore)
+        {
+            return Ok(Some(leases));
+        }
+        let lease_state = self.clone();
+        let lease_workspaces = workspaces.to_vec();
+        let cancel_flag = cancellation.map(|cancellation| cancellation.flag.clone());
+        tokio::task::spawn_blocking(move || {
+            lease_state.acquire_workspace_modes_cancellable(
+                &lease_workspaces,
+                skip_gitignore,
+                cancel_flag.as_deref(),
+            )
+        })
+        .await
+        .map_err(|join_err| DaemonResponse::Error {
+            message: format!("workspace lease task panicked: {join_err:#}"),
+        })
+    }
+
+    /// Take the exclusive mutation lease for an index run on the blocking
+    /// pool, before any CPU permit is held (see `acquire_search_leases`).
+    async fn acquire_index_lease(
+        &self,
+        workspace: &Workspace,
+    ) -> std::result::Result<Vec<WorkspaceModeLease>, DaemonResponse> {
+        let lease_state = self.clone();
+        let lease_workspace = workspace.clone();
+        tokio::task::spawn_blocking(move || {
+            lease_state.acquire_workspace_mutations(std::slice::from_ref(&lease_workspace))
+        })
+        .await
+        .map_err(|join_err| DaemonResponse::Error {
+            message: format!("workspace lease task panicked: {join_err:#}"),
+        })
+    }
+
+    /// Coalesce explicit `Index` requests per workspace: the first request
+    /// leads; later requests with identical options follow the leader's
+    /// outcome. Requests with different options fall through to the normal
+    /// path and rely on the post-lease generation check to avoid a rescan.
+    fn join_or_lead_index(
+        &self,
+        workspace_id: &str,
+        watch: bool,
+        skip_gitignore: bool,
+    ) -> Option<InflightIndexSlot> {
+        let mut inflight = self.inflight_indexes.lock();
+        if let Some(existing) = inflight.get(workspace_id) {
+            if existing.watch == watch && existing.skip_gitignore == skip_gitignore {
+                return Some(InflightIndexSlot::Follow(existing.outcome.clone()));
+            }
+            return None;
+        }
+        let (outcome_tx, outcome_rx) = tokio::sync::watch::channel(None);
+        inflight.insert(
+            workspace_id.to_string(),
+            InflightIndex {
+                watch,
+                skip_gitignore,
+                outcome: outcome_rx,
+            },
+        );
+        Some(InflightIndexSlot::Lead(InflightIndexLead {
+            workspace_id: workspace_id.to_string(),
+            outcome: outcome_tx,
+            registry: self.inflight_indexes.clone(),
+        }))
+    }
+
+    /// Record that a full index walk of `workspace_id` starts now.
+    fn note_full_index_run_start(&self, workspace_id: &str) {
+        self.full_index_run_starts
+            .lock()
+            .insert(workspace_id.to_string(), std::time::Instant::now());
+    }
+
+    /// Whether a full index walk of `workspace_id` started after `arrived_at`,
+    /// i.e. observed a filesystem at least as new as a request arriving then.
+    fn full_index_run_started_after(
+        &self,
+        workspace_id: &str,
+        arrived_at: std::time::Instant,
+    ) -> bool {
+        self.full_index_run_starts
+            .lock()
+            .get(workspace_id)
+            .is_some_and(|started| *started > arrived_at)
     }
 
     fn register_search(
@@ -1597,6 +1874,8 @@ fn create_daemon_state() -> DaemonState {
         neural_queries: Arc::new(Mutex::new(NeuralQueryCache::default())),
         search_cancellations: Arc::new(Mutex::new(SearchCancellationRegistry::default())),
         workspace_modes: Arc::new(Mutex::new(HashMap::new())),
+        inflight_indexes: Arc::new(Mutex::new(HashMap::new())),
+        full_index_run_starts: Arc::new(Mutex::new(HashMap::new())),
         query_result_cache_enabled: config::query_result_cache_enabled(),
         cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
         web_server: Arc::new(Mutex::new(None)),
@@ -1784,10 +2063,14 @@ async fn handle_connection(stream: crate::ipc::IpcStream, state: DaemonState) ->
     let mut reader = BufReader::new(stream);
     loop {
         let (response, keep_alive) = match read_daemon_request(&mut reader).await {
-            Ok(Some(envelope)) => (
-                handle_enveloped_request(state.clone(), envelope).await,
-                true,
-            ),
+            Ok(Some(envelope)) => {
+                match handle_client_request(state.clone(), envelope, &mut reader).await {
+                    ClientRequestOutcome::Respond(response) => (response, true),
+                    // The client went away mid-request; its search was
+                    // cancelled and there is nobody left to answer.
+                    ClientRequestOutcome::Disconnected => return Ok(()),
+                }
+            }
             Ok(None) => return Ok(()),
             Err(response) => (response, false),
         };
@@ -1797,6 +2080,81 @@ async fn handle_connection(stream: crate::ipc::IpcStream, state: DaemonState) ->
         reader.get_mut().write_all(b"\n").await?;
         if !keep_alive {
             return Ok(());
+        }
+    }
+}
+
+enum ClientRequestOutcome {
+    Respond(DaemonResponse),
+    Disconnected,
+}
+
+/// Run one request for a connected client. Searches are raced against the
+/// client disconnecting (EOF/error on the idle stream) and against the
+/// daemon-side deadline; either one trips the request's cancellation token so
+/// abandoned work stops holding leases and CPU permits.
+async fn handle_client_request<R>(
+    state: DaemonState,
+    envelope: DaemonRequestEnvelope,
+    reader: &mut R,
+) -> ClientRequestOutcome
+where
+    R: AsyncBufRead + Unpin,
+{
+    let (registration, cancellation) = match register_request_cancellation(&state, &envelope) {
+        Ok(prepared) => prepared,
+        Err(response) => return ClientRequestOutcome::Respond(response),
+    };
+    let handler = handle_request_with_cancellation(state, envelope.request, cancellation.clone());
+    tokio::pin!(handler);
+    let Some(cancellation) = cancellation else {
+        let response = handler.await;
+        drop(registration);
+        return ClientRequestOutcome::Respond(response);
+    };
+
+    let deadline = config::search_deadline();
+    let deadline_timer = async move {
+        match deadline {
+            Some(deadline) => tokio::time::sleep(deadline).await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(deadline_timer);
+    let mut deadline_armed = deadline.is_some();
+    let mut watch_client = true;
+    let mut client_disconnected = false;
+    loop {
+        tokio::select! {
+            biased;
+            response = &mut handler => {
+                drop(registration);
+                return if client_disconnected {
+                    ClientRequestOutcome::Disconnected
+                } else {
+                    ClientRequestOutcome::Respond(response)
+                };
+            }
+            peek = reader.fill_buf(), if watch_client => {
+                watch_client = false;
+                match peek {
+                    // Pipelined bytes: the client is alive and waiting.
+                    Ok(buffered) if !buffered.is_empty() => {}
+                    Ok(_) | Err(_) => {
+                        client_disconnected = true;
+                        tracing::debug!("client disconnected mid-search; cancelling");
+                        cancellation.cancel();
+                    }
+                }
+            }
+            () = &mut deadline_timer, if deadline_armed => {
+                deadline_armed = false;
+                warn!(
+                    "search exceeded the {}s daemon deadline; returning partial results",
+                    deadline.map_or(0, |deadline| deadline.as_secs())
+                );
+                cancellation.cancel_for_deadline();
+            }
         }
     }
 }
@@ -1852,31 +2210,52 @@ async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonRes
     handle_request_with_cancellation(state, request, None).await
 }
 
+fn is_search_request(request: &DaemonRequest) -> bool {
+    matches!(
+        request,
+        DaemonRequest::Search { .. }
+            | DaemonRequest::RegexSearch { .. }
+            | DaemonRequest::LiteralSearch { .. }
+    )
+}
+
+/// Every search gets a cancellation token so disconnects and deadlines can
+/// stop it. Only requests carrying a `request_id` are registered for explicit
+/// `CancelSearch`; the registration keeps the existing tombstone semantics.
+fn register_request_cancellation(
+    state: &DaemonState,
+    envelope: &DaemonRequestEnvelope,
+) -> std::result::Result<
+    (Option<ActiveSearchRegistration>, Option<SearchCancellation>),
+    DaemonResponse,
+> {
+    if !is_search_request(&envelope.request) {
+        return Ok((None, None));
+    }
+    let registration = state
+        .register_search(envelope.request_id)
+        .map_err(|error| DaemonResponse::Error {
+            message: error.to_string(),
+        })?;
+    let cancellation = registration
+        .as_ref()
+        .map(|registration| registration.cancellation.clone())
+        .unwrap_or_else(|| SearchCancellation::new(false));
+    Ok((registration, Some(cancellation)))
+}
+
+#[cfg(test)]
 async fn handle_enveloped_request(
     state: DaemonState,
     envelope: DaemonRequestEnvelope,
 ) -> DaemonResponse {
-    let registration = if matches!(
-        envelope.request,
-        DaemonRequest::Search { .. }
-            | DaemonRequest::RegexSearch { .. }
-            | DaemonRequest::LiteralSearch { .. }
-    ) {
-        match state.register_search(envelope.request_id) {
-            Ok(registration) => registration,
-            Err(error) => {
-                return DaemonResponse::Error {
-                    message: error.to_string(),
-                };
-            }
-        }
-    } else {
-        None
+    let (registration, cancellation) = match register_request_cancellation(&state, &envelope) {
+        Ok(prepared) => prepared,
+        Err(response) => return response,
     };
-    let cancellation = registration
-        .as_ref()
-        .map(|registration| registration.cancellation.clone());
-    handle_request_with_cancellation(state, envelope.request, cancellation).await
+    let response = handle_request_with_cancellation(state, envelope.request, cancellation).await;
+    drop(registration);
+    response
 }
 
 async fn handle_request_with_cancellation(
@@ -1960,14 +2339,55 @@ async fn handle_request_with_cancellation(
                 }
             };
 
+            let arrived_at = std::time::Instant::now();
+            // Coalesce concurrent explicit index requests for one workspace:
+            // followers with identical options await the leader's response,
+            // and may reuse it only when the leader's walk started after they
+            // arrived. A follower that arrived mid-walk may have edits the
+            // leader scanned past, so it falls through to its own (incremental)
+            // rescan once the leader releases the lease.
+            let lead = match state.join_or_lead_index(&workspace.id, watch, skip_gitignore) {
+                Some(InflightIndexSlot::Follow(mut outcome)) => {
+                    let response = match outcome.wait_for(Option::is_some).await {
+                        Ok(response) => response.clone().unwrap_or_else(|| DaemonResponse::Error {
+                            message: "coalesced index request produced no response".to_string(),
+                        }),
+                        Err(_) => DaemonResponse::Error {
+                            message: "coalesced index request aborted".to_string(),
+                        },
+                    };
+                    if state.full_index_run_started_after(&workspace.id, arrived_at)
+                        || matches!(response, DaemonResponse::Error { .. })
+                    {
+                        return response;
+                    }
+                    None
+                }
+                Some(InflightIndexSlot::Lead(lead)) => Some(lead),
+                None => None,
+            };
+            // Generation observed on arrival: if another index run (leader,
+            // watcher, or search-side repair) advances it while this request
+            // waits for the exclusive lease, the rescan is redundant.
+            let generation_on_arrival = workspace
+                .read_metadata()
+                .ok()
+                .flatten()
+                .map(|metadata| metadata.index_generation);
+
+            // Take the exclusive workspace lease before a CPU permit so requests
+            // parked behind an in-flight index never pin CPU capacity.
+            let mode_leases = match state.acquire_index_lease(&workspace).await {
+                Ok(leases) => leases,
+                Err(response) => return response,
+            };
             // Bound concurrent heavy index work (see #58).
             let permit = state.cpu_permits.clone().acquire_owned().await.ok();
             let index_workspace_target = workspace.clone();
             let index_state = state.clone();
             let index_result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                let mode_leases = index_state
-                    .acquire_workspace_mutations(std::slice::from_ref(&index_workspace_target));
+                let _mode_leases = mode_leases;
                 index_workspace_target.ensure_dirs()?;
                 let mut metadata = index_workspace_target.read_metadata()?.unwrap_or_else(|| {
                     crate::workspace::WorkspaceMetadata {
@@ -1983,43 +2403,69 @@ async fn handle_request_with_cancellation(
                         index_generation: 0,
                     }
                 });
+                let already_current = metadata.last_indexed_at_unix.is_some()
+                    && metadata.skip_gitignore == skip_gitignore
+                    && generation_on_arrival
+                        .is_some_and(|arrival| metadata.index_generation > arrival)
+                    && index_state
+                        .full_index_run_started_after(&index_workspace_target.id, arrived_at);
                 metadata.skip_gitignore = skip_gitignore;
                 metadata.watch_enabled = watch;
                 index_workspace_target.write_metadata(&metadata)?;
                 index_state.refresh_workspace_watcher(&index_workspace_target)?;
+                if already_current {
+                    daemon_log(&format!(
+                        "index already current for {} (generation {}); skipping redundant rescan",
+                        index_workspace_target.root.display(),
+                        metadata.index_generation
+                    ));
+                    return Result::<_, anyhow::Error>::Ok(None);
+                }
                 let hash_model = cached_hash_model();
+                index_state.note_full_index_run_start(&index_workspace_target.id);
                 let summary = index_workspace(&index_workspace_target, hash_model.as_ref())?;
-                Result::<_, anyhow::Error>::Ok((summary, mode_leases))
+                Result::<_, anyhow::Error>::Ok(Some(summary))
             })
             .await
             .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
 
-            match index_result {
-                Ok((summary, _mode_leases)) => {
-                    if summary.indexed_files > 0 || summary.deleted_files > 0 {
+            let response = match index_result {
+                Ok(summary) => {
+                    if summary.as_ref().is_some_and(|summary| {
+                        summary.indexed_files > 0 || summary.deleted_files > 0
+                    }) {
                         state.clear_workspace_contexts(&workspace);
                     }
-                    if watch {
-                        if let Err(err) = register_watcher(&state, &path) {
-                            return DaemonResponse::Error {
-                                message: format!("indexed but failed to watch: {err:#}"),
-                            };
+                    let watcher_result = if watch {
+                        register_watcher(&state, &path)
+                            .map_err(|err| format!("indexed but failed to watch: {err:#}"))
+                    } else {
+                        if let Some(registration) = state.watchers.lock().remove(&workspace.id) {
+                            stop_watcher(&workspace, registration);
                         }
-                    } else if let Some(registration) = state.watchers.lock().remove(&workspace.id) {
-                        stop_watcher(&workspace, registration);
-                    }
-
-                    DaemonResponse::Ack {
-                        message: format!(
-                            "indexed {} files ({} chunks)",
-                            summary.indexed_files, summary.total_chunks
-                        ),
+                        Ok(())
+                    };
+                    match (watcher_result, summary) {
+                        (Err(message), _) => DaemonResponse::Error { message },
+                        (Ok(()), Some(summary)) => DaemonResponse::Ack {
+                            message: format!(
+                                "indexed {} files ({} chunks)",
+                                summary.indexed_files, summary.total_chunks
+                            ),
+                        },
+                        (Ok(()), None) => DaemonResponse::Ack {
+                            message: "index already current; skipped redundant rescan".to_string(),
+                        },
                     }
                 }
                 Err(err) => DaemonResponse::Error {
                     message: err.to_string(),
                 },
+            };
+            if let Some(lead) = lead {
+                lead.publish(&response);
             }
+            response
         }
         DaemonRequest::Search {
             path,
@@ -2117,18 +2563,32 @@ async fn handle_request_with_cancellation(
                 has_neural_vectors
             );
 
+            // Workspace leases come before the CPU permit: a search parked
+            // behind an exclusive index lease must not pin CPU capacity.
+            let mode_leases = match state_clone
+                .acquire_search_leases(&workspaces, options.skip_gitignore, cancellation.as_ref())
+                .await
+            {
+                Ok(Some(leases)) => leases,
+                Ok(None) => {
+                    return cancelled_search_outcome(cancellation.as_ref(), workspace_warnings);
+                }
+                Err(response) => return response,
+            };
+            tracing::trace!("daemon_search_lease={:?}", request_started.elapsed());
             // Bound concurrent heavy search work (see #58). The permit is held
             // for the whole blocking task and released when it completes.
             let Some(permit) = state_clone
                 .acquire_search_permit(cancellation.as_ref())
                 .await
             else {
-                return cancelled_search_response();
+                return cancelled_search_outcome(cancellation.as_ref(), workspace_warnings);
             };
             tracing::trace!("daemon_search_permit={:?}", request_started.elapsed());
             let result = tokio::task::spawn_blocking(move || {
                 let task_started = std::time::Instant::now();
                 let _permit = permit;
+                let _mode_leases = mode_leases;
                 if options.is_cancelled() {
                     return (Vec::new(), workspace_warnings, 0, query, options, true);
                 }
@@ -2141,13 +2601,6 @@ async fn handle_request_with_cancellation(
                     }
                 };
                 tracing::trace!("daemon_search_model={:?}", task_started.elapsed());
-                let Some(_mode_leases) = state_clone.acquire_workspace_modes_cancellable(
-                    &workspaces,
-                    options.skip_gitignore,
-                    options.cancel_token.as_deref(),
-                ) else {
-                    return (Vec::new(), workspace_warnings, 0, query, options, true);
-                };
                 let mut all_hits = Vec::new();
                 let mut all_errors = workspace_warnings;
                 let mut successful_workspaces = 0usize;
@@ -2353,7 +2806,7 @@ async fn handle_request_with_cancellation(
 
             let (
                 mut hits,
-                errors,
+                mut errors,
                 successful_workspaces,
                 expansion_query,
                 expansion_options,
@@ -2364,7 +2817,18 @@ async fn handle_request_with_cancellation(
                     .as_ref()
                     .is_some_and(SearchCancellation::is_cancelled)
             {
-                return cancelled_search_response();
+                // The daemon's own deadline returns whatever completed before
+                // it fired; client cancellation keeps the explicit error.
+                return match deadline_warning(cancellation.as_ref()) {
+                    Some(warning) => {
+                        errors.push(warning);
+                        DaemonResponse::SearchResults {
+                            hits,
+                            warnings: errors,
+                        }
+                    }
+                    None => cancelled_search_response(),
+                };
             }
             if successful_workspaces == 0 && !errors.is_empty() {
                 DaemonResponse::Error {
@@ -2412,7 +2876,16 @@ async fn handle_request_with_cancellation(
                         .as_ref()
                         .is_some_and(SearchCancellation::is_cancelled)
                     {
-                        return cancelled_search_response();
+                        return match deadline_warning(cancellation.as_ref()) {
+                            Some(warning) => {
+                                errors.push(warning);
+                                DaemonResponse::SearchResults {
+                                    hits,
+                                    warnings: errors,
+                                }
+                            }
+                            None => cancelled_search_response(),
+                        };
                     }
                     let mut probe_outputs = Vec::new();
                     for response in [first, second] {
@@ -2498,31 +2971,36 @@ async fn handle_request_with_cancellation(
                     .as_ref()
                     .map(|cancellation| cancellation.flag.clone()),
             };
+            // Workspace leases come before the CPU permit (see Search).
+            let mode_leases = match state
+                .acquire_search_leases(&workspaces, skip_gitignore, cancellation.as_ref())
+                .await
+            {
+                Ok(Some(leases)) => leases,
+                Ok(None) => {
+                    return cancelled_search_outcome(cancellation.as_ref(), workspace_warnings);
+                }
+                Err(response) => return response,
+            };
             // Bound concurrent heavy regex work (see #58).
             let Some(permit) = state.acquire_search_permit(cancellation.as_ref()).await else {
-                return cancelled_search_response();
+                return cancelled_search_outcome(cancellation.as_ref(), workspace_warnings);
             };
             let state_clone = state.clone();
             let result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                if options.is_cancelled() {
-                    return Err("search cancelled".to_string());
-                }
-                let Some(_mode_leases) = state_clone.acquire_workspace_modes_cancellable(
-                    &workspaces,
-                    skip_gitignore,
-                    options.cancel_token.as_deref(),
-                ) else {
-                    return Err("search cancelled".to_string());
-                };
+                let _mode_leases = mode_leases;
                 let mut batch = SearchBatch::new(workspace_warnings);
+                if options.is_cancelled() {
+                    return Ok(batch.finish_partial(options.bounded_limit()));
+                }
                 let mut workspace_options = options.clone();
                 if all_indices {
                     workspace_options.context = 0;
                 }
                 for workspace in &workspaces {
                     if options.is_cancelled() {
-                        return Err("search cancelled".to_string());
+                        return Ok(batch.finish_partial(options.bounded_limit()));
                     }
                     let result = (|| {
                         if ensure_queryable_workspace(&state_clone, workspace, skip_gitignore)? {
@@ -2532,21 +3010,18 @@ async fn handle_request_with_cancellation(
                     })();
                     batch.record(&workspace.root, all_indices, result);
                 }
+                if options.is_cancelled() {
+                    return Ok(batch.finish_partial(options.bounded_limit()));
+                }
                 let mut outcome =
                     finish_daemon_search_batch(batch, &options, HitOrdering::Preserve)
                         .map_err(|err| err.to_string())?;
-                if options.is_cancelled() {
-                    return Err("search cancelled".to_string());
-                }
-                if all_indices {
+                if all_indices && !options.is_cancelled() {
                     crate::regex_search::expand_regex_context_absolute_with_options(
                         &mut outcome.hits,
                         options.bounded_context(),
                         &options,
                     );
-                }
-                if options.is_cancelled() {
-                    return Err("search cancelled".to_string());
                 }
                 Ok(outcome)
             })
@@ -2556,13 +3031,7 @@ async fn handle_request_with_cancellation(
                 Err(join_err.to_string())
             });
 
-            match result {
-                Ok(outcome) => DaemonResponse::SearchResults {
-                    hits: outcome.hits,
-                    warnings: outcome.warnings,
-                },
-                Err(message) => DaemonResponse::Error { message },
-            }
+            finish_cancellable_search(result, cancellation.as_ref())
         }
         DaemonRequest::LiteralSearch {
             path,
@@ -2626,29 +3095,34 @@ async fn handle_request_with_cancellation(
             };
 
             let state_clone = state.clone();
+            // Workspace leases come before the CPU permit (see Search).
+            let mode_leases = match state_clone
+                .acquire_search_leases(&workspaces, options.skip_gitignore, cancellation.as_ref())
+                .await
+            {
+                Ok(Some(leases)) => leases,
+                Ok(None) => {
+                    return cancelled_search_outcome(cancellation.as_ref(), workspace_warnings);
+                }
+                Err(response) => return response,
+            };
             // Bound concurrent heavy literal work (see #58).
             let Some(permit) = state_clone
                 .acquire_search_permit(cancellation.as_ref())
                 .await
             else {
-                return cancelled_search_response();
+                return cancelled_search_outcome(cancellation.as_ref(), workspace_warnings);
             };
             let result = tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                if options.is_cancelled() {
-                    return Err("search cancelled".to_string());
-                }
-                let Some(_mode_leases) = state_clone.acquire_workspace_modes_cancellable(
-                    &workspaces,
-                    options.skip_gitignore,
-                    options.cancel_token.as_deref(),
-                ) else {
-                    return Err("search cancelled".to_string());
-                };
+                let _mode_leases = mode_leases;
                 let mut batch = SearchBatch::new(workspace_warnings);
+                if options.is_cancelled() {
+                    return Ok(batch.finish_partial(options.bounded_limit()));
+                }
                 for workspace in &workspaces {
                     if options.is_cancelled() {
-                        return Err("search cancelled".to_string());
+                        return Ok(batch.finish_partial(options.bounded_limit()));
                     }
                     let result = (|| {
                         if ensure_queryable_workspace(
@@ -2664,12 +3138,11 @@ async fn handle_request_with_cancellation(
                     })();
                     batch.record(&workspace.root, all_indices, result);
                 }
-                let outcome = finish_daemon_search_batch(batch, &options, HitOrdering::Preserve)
-                    .map_err(|err| err.to_string())?;
                 if options.is_cancelled() {
-                    return Err("search cancelled".to_string());
+                    return Ok(batch.finish_partial(options.bounded_limit()));
                 }
-                Ok(outcome)
+                finish_daemon_search_batch(batch, &options, HitOrdering::Preserve)
+                    .map_err(|err| err.to_string())
             })
             .await
             .unwrap_or_else(|join_err| {
@@ -2677,13 +3150,7 @@ async fn handle_request_with_cancellation(
                 Err(join_err.to_string())
             });
 
-            match result {
-                Ok(outcome) => DaemonResponse::SearchResults {
-                    hits: outcome.hits,
-                    warnings: outcome.warnings,
-                },
-                Err(message) => DaemonResponse::Error { message },
-            }
+            finish_cancellable_search(result, cancellation.as_ref())
         }
         DaemonRequest::CancelSearch { search_id } => {
             if let Some(cancellation) = state.cancel_search(search_id) {
@@ -3082,31 +3549,48 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>, job_nonce:
                 // watcher's indexing spawn_blocking runs unbounded (saturating
                 // the rayon chunking pool + the blocking pool), oversubscribing
                 // CPU/memory exactly like the client burst #58 fixed.
-                let permit = state.cpu_permits.clone().acquire_owned().await.ok();
-                let index_state = state.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    let _permit = permit;
-                    let skip_gitignore = workspace
+                // Workspace lease first, CPU permit second: a watcher parked
+                // behind an explicit index must not pin CPU capacity.
+                let lease_state = state.clone();
+                let lease_workspace = workspace.clone();
+                let mode_leases = tokio::task::spawn_blocking(move || {
+                    let skip_gitignore = lease_workspace
                         .read_metadata()?
                         .is_some_and(|metadata| metadata.skip_gitignore);
-                    let _mode_leases = index_state
-                        .acquire_workspace_modes(std::slice::from_ref(&workspace), skip_gitignore);
-                    let hash_model = cached_hash_model();
-                    let summary = if changed_paths.is_empty() {
-                        index_workspace_for_watcher(&workspace, hash_model.as_ref())?
-                    } else {
-                        index_workspace_paths_for_watcher(
-                            &workspace,
-                            hash_model.as_ref(),
-                            &changed_paths,
-                        )?
-                    };
-                    Result::<bool, anyhow::Error>::Ok(
-                        summary.indexed_files > 0 || summary.deleted_files > 0,
-                    )
+                    Result::<_, anyhow::Error>::Ok(lease_state.acquire_workspace_modes(
+                        std::slice::from_ref(&lease_workspace),
+                        skip_gitignore,
+                    ))
                 })
                 .await
                 .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
+                let result = match mode_leases {
+                    Err(err) => Err(err),
+                    Ok(mode_leases) => {
+                        let permit = state.cpu_permits.clone().acquire_owned().await.ok();
+                        let watcher_state = state.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let _permit = permit;
+                            let _mode_leases = mode_leases;
+                            let hash_model = cached_hash_model();
+                            let summary = if changed_paths.is_empty() {
+                                watcher_state.note_full_index_run_start(&workspace.id);
+                                index_workspace_for_watcher(&workspace, hash_model.as_ref())?
+                            } else {
+                                index_workspace_paths_for_watcher(
+                                    &workspace,
+                                    hash_model.as_ref(),
+                                    &changed_paths,
+                                )?
+                            };
+                            Result::<bool, anyhow::Error>::Ok(
+                                summary.indexed_files > 0 || summary.deleted_files > 0,
+                            )
+                        })
+                        .await
+                        .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())))
+                    }
+                };
 
                 match result {
                     Ok(changed) => {
@@ -3555,16 +4039,36 @@ pub fn request_blocking(
     daemon_request: &DaemonRequest,
     autospawn: bool,
 ) -> Result<Option<DaemonResponse>> {
+    request_blocking_with_id(daemon_request, None, autospawn)
+}
+
+/// Blocking variant that tags the request with a cancellation id. Search
+/// callers should pass a fresh id so a client-side timeout (or an abandoned
+/// future) sends `CancelSearch` instead of leaving daemon work running.
+pub fn request_blocking_with_id(
+    daemon_request: &DaemonRequest,
+    request_id: Option<uuid::Uuid>,
+    autospawn: bool,
+) -> Result<Option<DaemonResponse>> {
     let daemon_request = daemon_request.clone();
     std::thread::spawn(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()?;
-        runtime.block_on(crate::daemon::request::<fn(String, usize, usize)>(
-            &daemon_request,
-            autospawn,
-            None,
-        ))
+        runtime.block_on(async {
+            match request_id {
+                Some(request_id) => {
+                    request_with_id::<fn(String, usize, usize)>(
+                        &daemon_request,
+                        request_id,
+                        autospawn,
+                        None,
+                    )
+                    .await
+                }
+                None => request::<fn(String, usize, usize)>(&daemon_request, autospawn, None).await,
+            }
+        })
     })
     .join()
     .map_err(|_| anyhow::anyhow!("daemon request thread panicked"))?
@@ -3817,6 +4321,11 @@ where
 
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
+    // Searches tagged with an id are cancelled on the daemon when this client
+    // gives up (timeout, transport error) or its future is dropped mid-flight.
+    let mut cancel_guard = request_id
+        .filter(|_| is_search_request(request))
+        .map(SearchCancelOnDrop::new);
 
     // Timeout varies by request type: Index can take 30+ min on massive repos
     // (large monorepos: 270K+ files), while Status should complete in seconds.
@@ -3842,16 +4351,37 @@ where
         )
         .await
         {
-            Ok(Ok(0)) => return Ok(None),
+            Ok(Ok(0)) => {
+                // Daemon closed the stream: nothing left to cancel.
+                if let Some(guard) = cancel_guard.as_mut() {
+                    guard.disarm();
+                }
+                return Ok(None);
+            }
             Ok(Ok(_)) => {}
-            Ok(Err(_)) | Err(_) => return Ok(None),
+            Ok(Err(_)) | Err(_) => {
+                if let Some(guard) = cancel_guard.take() {
+                    warn!("daemon search timed out; requesting cancellation");
+                    guard.cancel_now().await;
+                }
+                return Ok(None);
+            }
         }
 
         if line.trim().is_empty() {
             continue;
         }
 
-        let response: DaemonResponse = serde_json::from_str(&line)?;
+        let response: DaemonResponse = match serde_json::from_str(&line) {
+            Ok(response) => response,
+            Err(err) => {
+                // A final line arrived, so the daemon-side search is over.
+                if let Some(guard) = cancel_guard.as_mut() {
+                    guard.disarm();
+                }
+                return Err(err.into());
+            }
+        };
         match response {
             DaemonResponse::SearchProgress {
                 stage,
@@ -3862,9 +4392,70 @@ where
                     cb(stage, scanned, total);
                 }
             }
-            other => return Ok(Some(other)),
+            other => {
+                if let Some(guard) = cancel_guard.as_mut() {
+                    guard.disarm();
+                }
+                return Ok(Some(other));
+            }
         }
     }
+}
+
+const DAEMON_CANCEL_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Client-side guard for an in-flight daemon search. Dropping it before the
+/// response arrived (caller aborted, future cancelled) sends a best-effort
+/// `CancelSearch`; explicit timeouts call `cancel_now` and wait briefly.
+struct SearchCancelOnDrop {
+    request_id: uuid::Uuid,
+    armed: bool,
+}
+
+impl SearchCancelOnDrop {
+    fn new(request_id: uuid::Uuid) -> Self {
+        Self {
+            request_id,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    async fn cancel_now(mut self) {
+        self.armed = false;
+        cancel_daemon_search(self.request_id).await;
+    }
+}
+
+impl Drop for SearchCancelOnDrop {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let request_id = self.request_id;
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(cancel_daemon_search(request_id));
+        }
+    }
+}
+
+/// Best-effort `CancelSearch` for an abandoned request. Bounded so a wedged
+/// daemon cannot hold the client; the daemon also cancels on disconnect.
+async fn cancel_daemon_search(request_id: uuid::Uuid) {
+    let request = DaemonRequest::CancelSearch {
+        search_id: request_id,
+    };
+    // Boxed: this runs from inside the request path it calls back into.
+    let _ = tokio::time::timeout(
+        DAEMON_CANCEL_TIMEOUT,
+        Box::pin(request_unchecked::<fn(String, usize, usize)>(
+            &request, false, None,
+        )),
+    )
+    .await;
 }
 
 #[cfg(test)]
@@ -3899,6 +4490,8 @@ mod tests {
             neural_queries: Arc::new(Mutex::new(NeuralQueryCache::default())),
             search_cancellations: Arc::new(Mutex::new(SearchCancellationRegistry::default())),
             workspace_modes: Arc::new(Mutex::new(HashMap::new())),
+            inflight_indexes: Arc::new(Mutex::new(HashMap::new())),
+            full_index_run_starts: Arc::new(Mutex::new(HashMap::new())),
             query_result_cache_enabled: true,
             cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
             web_server: Arc::new(Mutex::new(None)),
@@ -6491,6 +7084,426 @@ mod tests {
         drop(second_leases);
         acquired.recv_timeout(Duration::from_secs(2)).unwrap();
         drop(writer.join().unwrap());
+    }
+
+    fn literal_request_for(workspace: &Workspace, query: &str) -> DaemonRequest {
+        DaemonRequest::LiteralSearch {
+            path: Some(workspace.root.clone()),
+            query: query.to_string(),
+            limit: Some(5),
+            context: 0,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_path: None,
+            scope_is_file: false,
+            skip_gitignore: false,
+        }
+    }
+
+    fn index_request_for(workspace: &Workspace, skip_gitignore: bool) -> DaemonRequest {
+        DaemonRequest::Index {
+            path: workspace.root.clone(),
+            watch: false,
+            skip_gitignore,
+        }
+    }
+
+    fn indexed_workspace(marker: &str) -> (tempfile::TempDir, Workspace) {
+        let repo = tempdir().unwrap();
+        std::fs::write(
+            repo.path().join("lib.rs"),
+            format!("pub fn {marker}() -> bool {{ true }}\n"),
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
+        (repo, workspace)
+    }
+
+    #[test]
+    #[serial]
+    fn uncontended_search_leases_are_granted_inline_and_contended_ones_are_not() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let state = test_state();
+
+        let first = state
+            .try_acquire_search_leases_inline(std::slice::from_ref(&workspace), false)
+            .expect("idle workspace grants a shared lease inline");
+        let second = state
+            .try_acquire_search_leases_inline(std::slice::from_ref(&workspace), false)
+            .expect("shared leases stack in the same mode");
+        assert!(
+            state
+                .try_acquire_search_leases_inline(std::slice::from_ref(&workspace), true)
+                .is_none(),
+            "a different ignore mode must wait for the active readers"
+        );
+        drop(first);
+        drop(second);
+
+        let exclusive = state.acquire_workspace_mutations(std::slice::from_ref(&workspace));
+        assert!(
+            state
+                .try_acquire_search_leases_inline(std::slice::from_ref(&workspace), false)
+                .is_none(),
+            "an exclusive holder makes the inline path decline instead of waiting"
+        );
+        drop(exclusive);
+        assert!(
+            state
+                .try_acquire_search_leases_inline(std::slice::from_ref(&workspace), false)
+                .is_some()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn requests_parked_on_a_workspace_lease_do_not_hold_cpu_permits() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let (_repo_a, workspace_a) = indexed_workspace("lease_parked_marker");
+        let (_repo_b, workspace_b) = indexed_workspace("other_workspace_marker");
+
+        let mut state = test_state();
+        // One CPU permit: any parked request that still held a permit would
+        // starve every other workspace.
+        state.cpu_permits = Arc::new(tokio::sync::Semaphore::new(1));
+        // Simulate a long-running index holding A's exclusive lease.
+        let held = state.acquire_workspace_mutations(std::slice::from_ref(&workspace_a));
+
+        let mut parked = Vec::new();
+        for _ in 0..2 {
+            parked.push(tokio::spawn(handle_request(
+                state.clone(),
+                literal_request_for(&workspace_a, "lease_parked_marker"),
+            )));
+        }
+        parked.push(tokio::spawn(handle_request(
+            state.clone(),
+            DaemonRequest::Search {
+                path: Some(workspace_a.root.clone()),
+                query: "lease parked marker".to_string(),
+                limit: Some(5),
+                context: 0,
+                type_filter: None,
+                include_globs: Vec::new(),
+                exclude_globs: Vec::new(),
+                scope_path: None,
+                scope_is_file: false,
+                skip_gitignore: false,
+                force_neural: false,
+                disable_memory_expansion: true,
+            },
+        )));
+        parked.push(tokio::spawn(handle_request(
+            state.clone(),
+            index_request_for(&workspace_a, false),
+        )));
+
+        let coordinator = state.workspace_mode_coordinator(&workspace_a.id);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while coordinator.state.lock().exclusive_waiters == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("index request should queue for A's exclusive lease");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(parked.iter().all(|task| !task.is_finished()));
+        assert_eq!(
+            state.cpu_permits.available_permits(),
+            1,
+            "requests waiting for a workspace lease must not hold CPU permits"
+        );
+
+        let other = tokio::time::timeout(
+            Duration::from_secs(5),
+            handle_request(
+                state.clone(),
+                literal_request_for(&workspace_b, "other_workspace_marker"),
+            ),
+        )
+        .await
+        .expect("search on an idle workspace must not wait for A's lease");
+        match other {
+            DaemonResponse::SearchResults { hits, .. } => assert!(!hits.is_empty()),
+            other => panic!("expected search results, got {other:?}"),
+        }
+        assert_eq!(state.cpu_permits.available_permits(), 1);
+
+        drop(held);
+        for task in parked {
+            let response = tokio::time::timeout(Duration::from_secs(30), task)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                matches!(
+                    response,
+                    DaemonResponse::SearchResults { .. } | DaemonResponse::Ack { .. }
+                ),
+                "parked request should complete once the lease frees: {response:?}"
+            );
+        }
+        assert_eq!(state.cpu_permits.available_permits(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn concurrent_index_requests_coalesce_into_one_run() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        for index in 0..3 {
+            std::fs::write(
+                repo.path().join(format!("module_{index}.rs")),
+                format!("pub fn coalesced_marker_{index}() -> usize {{ {index} }}\n"),
+            )
+            .unwrap();
+        }
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let state = test_state();
+        let held = state.acquire_workspace_mutations(std::slice::from_ref(&workspace));
+
+        let requests = (0..5)
+            .map(|_| {
+                tokio::spawn(handle_request(
+                    state.clone(),
+                    index_request_for(&workspace, false),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let coordinator = state.workspace_mode_coordinator(&workspace.id);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while coordinator.state.lock().exclusive_waiters == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("leader should queue for the exclusive lease");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            coordinator.state.lock().exclusive_waiters,
+            1,
+            "only the leader waits for the lease; followers await its outcome"
+        );
+        assert!(state.inflight_indexes.lock().contains_key(&workspace.id));
+
+        drop(held);
+        let mut messages = Vec::new();
+        for request in requests {
+            match tokio::time::timeout(Duration::from_secs(30), request)
+                .await
+                .unwrap()
+                .unwrap()
+            {
+                DaemonResponse::Ack { message } => messages.push(message),
+                other => panic!("expected ack, got {other:?}"),
+            }
+        }
+        assert!(
+            messages[0].starts_with("indexed 3 files"),
+            "leader should index every file: {}",
+            messages[0]
+        );
+        assert!(
+            messages.iter().all(|message| message == &messages[0]),
+            "followers must share the leader's outcome: {messages:?}"
+        );
+        assert!(state.inflight_indexes.lock().is_empty());
+        let generation = workspace.read_metadata().unwrap().unwrap().index_generation;
+        assert_eq!(generation, 1, "exactly one index run should have committed");
+
+        // A request that waited for the lease while a full walk that STARTED
+        // AFTER it arrived advanced the generation skips the redundant rescan.
+        let held = state.acquire_workspace_mutations(std::slice::from_ref(&workspace));
+        let late = tokio::spawn(handle_request(
+            state.clone(),
+            index_request_for(&workspace, false),
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while coordinator.state.lock().exclusive_waiters == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        std::fs::write(
+            repo.path().join("module_0.rs"),
+            "pub fn coalesced_marker_0() -> usize { 100 }\n",
+        )
+        .unwrap();
+        state.note_full_index_run_start(&workspace.id);
+        index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
+        assert_eq!(
+            workspace.read_metadata().unwrap().unwrap().index_generation,
+            2
+        );
+        drop(held);
+        match tokio::time::timeout(Duration::from_secs(30), late)
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            DaemonResponse::Ack { message } => {
+                assert!(message.contains("already current"), "{message}");
+            }
+            other => panic!("expected ack, got {other:?}"),
+        }
+        assert_eq!(
+            workspace.read_metadata().unwrap().unwrap().index_generation,
+            2,
+            "skipped rescan must not touch the index generation"
+        );
+
+        // A walk that started BEFORE the request arrived cannot vouch for edits
+        // made afterwards: the request must rescan even though the generation
+        // advanced while it waited.
+        state.note_full_index_run_start(&workspace.id);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let held = state.acquire_workspace_mutations(std::slice::from_ref(&workspace));
+        let late = tokio::spawn(handle_request(
+            state.clone(),
+            index_request_for(&workspace, false),
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while coordinator.state.lock().exclusive_waiters == 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // The earlier walk commits without this edit, then the edit lands.
+        index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
+        std::fs::write(
+            repo.path().join("late_edit.rs"),
+            "pub fn late_edit_marker() -> usize { 7 }\n",
+        )
+        .unwrap();
+        let generation_before_late = workspace.read_metadata().unwrap().unwrap().index_generation;
+        drop(held);
+        match tokio::time::timeout(Duration::from_secs(30), late)
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            DaemonResponse::Ack { message } => {
+                assert!(
+                    !message.contains("already current"),
+                    "a walk that predates the request must not satisfy it: {message}"
+                );
+                assert!(message.contains("indexed 1 file"), "{message}");
+            }
+            other => panic!("expected ack, got {other:?}"),
+        }
+        assert!(
+            workspace.read_metadata().unwrap().unwrap().index_generation > generation_before_late,
+            "the late edit must be picked up by the request's own rescan"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn client_disconnect_cancels_parked_search() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let (_repo, workspace) = indexed_workspace("disconnect_marker");
+        let state = test_state();
+        let held = state.acquire_workspace_mutations(std::slice::from_ref(&workspace));
+
+        let request_id = uuid::Uuid::new_v4();
+        let envelope = DaemonRequestEnvelope::with_request_id(
+            literal_request_for(&workspace, "disconnect_marker"),
+            request_id,
+        );
+        let (client, server) = tokio::io::duplex(1024);
+        let task_state = state.clone();
+        let task = tokio::spawn(async move {
+            let mut reader = BufReader::new(server);
+            handle_client_request(task_state, envelope, &mut reader).await
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!task.is_finished(), "search should be parked on the lease");
+        assert!(matches!(
+            state.search_cancellations.lock().entries.get(&request_id),
+            Some(SearchCancellationEntry::Active(_))
+        ));
+
+        drop(client);
+        let outcome = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("disconnect must cancel the parked search")
+            .unwrap();
+        assert!(matches!(outcome, ClientRequestOutcome::Disconnected));
+        assert!(
+            state.search_cancellations.lock().entries.is_empty(),
+            "cancelled registration must be released"
+        );
+        drop(held);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn search_deadline_returns_partial_results_with_warning() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        unsafe { std::env::set_var("IVYGREP_SEARCH_DEADLINE_SECS", "1") };
+        let (_repo, workspace) = indexed_workspace("deadline_marker");
+        let state = test_state();
+        let held = state.acquire_workspace_mutations(std::slice::from_ref(&workspace));
+
+        let envelope =
+            DaemonRequestEnvelope::new(literal_request_for(&workspace, "deadline_marker"));
+        let (_client, server) = tokio::io::duplex(1024);
+        let task_state = state.clone();
+        let started = std::time::Instant::now();
+        let task = tokio::spawn(async move {
+            let mut reader = BufReader::new(server);
+            handle_client_request(task_state, envelope, &mut reader).await
+        });
+        let outcome = tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .expect("deadline must release the parked search")
+            .unwrap();
+        unsafe { std::env::remove_var("IVYGREP_SEARCH_DEADLINE_SECS") };
+        assert!(started.elapsed() >= Duration::from_secs(1));
+        match outcome {
+            ClientRequestOutcome::Respond(DaemonResponse::SearchResults { hits, warnings }) => {
+                assert!(hits.is_empty());
+                assert_eq!(warnings.len(), 1, "{warnings:?}");
+                assert!(
+                    warnings[0].contains("deadline of 1s exceeded"),
+                    "{warnings:?}"
+                );
+            }
+            ClientRequestOutcome::Respond(other) => {
+                panic!("deadline should return partial results, got {other:?}")
+            }
+            ClientRequestOutcome::Disconnected => panic!("client stayed connected"),
+        }
+        drop(held);
+
+        // Once the lease is free the same request completes normally.
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            handle_request(
+                state.clone(),
+                literal_request_for(&workspace, "deadline_marker"),
+            ),
+        )
+        .await
+        .unwrap();
+        match response {
+            DaemonResponse::SearchResults { hits, warnings } => {
+                assert!(!hits.is_empty());
+                assert!(warnings.is_empty());
+            }
+            other => panic!("expected search results, got {other:?}"),
+        }
     }
 
     #[tokio::test]

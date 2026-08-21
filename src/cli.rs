@@ -1681,7 +1681,14 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         };
 
         if search_via_daemon {
-            match daemon::request::<fn(String, usize, usize)>(&request, false, None).await? {
+            match daemon::request_with_id::<fn(String, usize, usize)>(
+                &request,
+                uuid::Uuid::new_v4(),
+                false,
+                None,
+            )
+            .await?
+            {
                 Some(DaemonResponse::SearchResults { hits, warnings }) => {
                     report_search_warnings(&warnings);
                     hits
@@ -1729,7 +1736,14 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         };
 
         if search_via_daemon {
-            match daemon::request::<fn(String, usize, usize)>(&request, false, None).await? {
+            match daemon::request_with_id::<fn(String, usize, usize)>(
+                &request,
+                uuid::Uuid::new_v4(),
+                false,
+                None,
+            )
+            .await?
+            {
                 Some(DaemonResponse::SearchResults { hits, warnings }) => {
                     report_search_warnings(&warnings);
                     hits
@@ -1776,7 +1790,12 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
         if should_route_hybrid_query_via_daemon(search_via_daemon, cli.lexical_only) {
             let show_spinner = std::io::stderr().is_terminal();
             let _t_search = std::time::Instant::now();
-            let search_future = daemon::request::<fn(String, usize, usize)>(&request, false, None);
+            let search_future = daemon::request_with_id::<fn(String, usize, usize)>(
+                &request,
+                uuid::Uuid::new_v4(),
+                false,
+                None,
+            );
 
             let daemon_result = if show_spinner {
                 let spinner_handle = tokio::spawn(async move {
@@ -1796,7 +1815,7 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
                 eprint!("\r\x1b[K");
                 result?
             } else {
-                daemon::request::<fn(String, usize, usize)>(&request, false, None).await?
+                search_future.await?
             };
 
             match daemon_result {

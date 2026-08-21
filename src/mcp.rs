@@ -891,7 +891,13 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
     };
     let mut search_warnings = Vec::new();
     let daemon_hits = if let Some(daemon_request) = daemon_request {
-        match crate::daemon::request_blocking(&daemon_request, false)? {
+        // Tag the search so a client-side timeout cancels it on the daemon
+        // instead of leaving the work running for a caller that gave up.
+        match crate::daemon::request_blocking_with_id(
+            &daemon_request,
+            Some(uuid::Uuid::new_v4()),
+            false,
+        )? {
             Some(DaemonResponse::SearchResults { hits, warnings }) => {
                 search_warnings = warnings;
                 Some(hits)
