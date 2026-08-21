@@ -7,6 +7,7 @@ All notable changes to ivygrep are documented in this file.
 ### Fixed
 - Neural enhancement now embeds whole chunks for the static and Model2Vec profiles (16 KiB safety cap) and sizes the cut for transformer profiles from their token window, instead of truncating every chunk at 1,024 characters. Notes and long functions no longer embed only their first lines; the identity change re-enhances existing neural vectors.
 - Neural vector stores now build with USearch's default HNSW graph instead of the sparse hash-tier graph. The default 256-dimensional F16 neural profile matched the hash store's shape, which cut neural ANN recall@10 to about 0.24 on clustered vectors. Existing neural vectors re-enhance automatically through a neural identity bump.
+- Lowercase natural-language questions no longer return zero results on Markdown and notes corpora. The recommendation authority floor now adapts to the best authority that actually matched instead of assuming implementation files exist, and a sentence-initial capital letter no longer classifies a question as a precise identifier lookup.
 
 ## [1.2.12] - 2026-08-20
 
