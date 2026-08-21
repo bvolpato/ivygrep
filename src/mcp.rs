@@ -2166,6 +2166,7 @@ impl AccountManager {
             &workspace.vector_path(),
             256,
             crate::vector_store::ScalarKind::F16,
+            crate::vector_store::VectorTier::Hash,
         )
         .expect("hash vector store (vectors.usearch) should open at 256 dims");
         assert_eq!(

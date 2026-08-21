@@ -138,6 +138,7 @@ fn neural_model_identity_from_index_dir(
         &index_dir.join("vectors_neural.usearch"),
         identity.dimensions,
         NEURAL_VECTOR_QUANTIZATION,
+        crate::vector_store::VectorTier::Neural,
     )
     .ok()?;
     (store.size() > 0).then_some(identity)
@@ -274,11 +275,12 @@ fn open_optional_vector_store(
     path: &Path,
     dimensions: usize,
     quantization: crate::vector_store::ScalarKind,
+    tier: crate::vector_store::VectorTier,
 ) -> Result<Option<VectorStore>> {
     if !enabled || !path.exists() {
         return Ok(None);
     }
-    VectorStore::open_readonly(path, dimensions, quantization)
+    VectorStore::open_readonly(path, dimensions, quantization, tier)
         .with_context(|| format!("open vector store {}", path.display()))
         .map(Some)
 }
@@ -328,6 +330,7 @@ impl SearchContext {
                 &workspace.overlay_vector_path(),
                 256,
                 HASH_VECTOR_QUANTIZATION,
+                crate::vector_store::VectorTier::Hash,
             )?;
 
             let base_dir = workspace
@@ -343,6 +346,7 @@ impl SearchContext {
                 &base_dir.join("vectors.usearch"),
                 256,
                 HASH_VECTOR_QUANTIZATION,
+                crate::vector_store::VectorTier::Hash,
             )?;
             let base_neural_model =
                 read_optional_neural_identity(&base_dir.join("neural_model.json"))?;
@@ -356,6 +360,7 @@ impl SearchContext {
                 &base_dir.join("vectors_neural.usearch"),
                 base_neural_dimensions,
                 NEURAL_VECTOR_QUANTIZATION,
+                crate::vector_store::VectorTier::Neural,
             )?;
             let base_neural_profile = read_optional_profile(&base_dir.join("neural_profile"))?;
             let overlay_neural_model =
@@ -374,6 +379,7 @@ impl SearchContext {
                 &workspace.vector_neural_path(),
                 overlay_neural_dimensions,
                 NEURAL_VECTOR_QUANTIZATION,
+                crate::vector_store::VectorTier::Neural,
             )?;
             let overlay_neural_profile = read_optional_profile(&workspace.neural_profile_path())?;
 
@@ -422,6 +428,7 @@ impl SearchContext {
                 &workspace.vector_path(),
                 256,
                 HASH_VECTOR_QUANTIZATION,
+                crate::vector_store::VectorTier::Hash,
             )?;
             let neural_model = read_optional_neural_identity(&workspace.neural_model_path())?;
             let neural_dimensions = neural_model
@@ -432,6 +439,7 @@ impl SearchContext {
                 &workspace.vector_neural_path(),
                 neural_dimensions,
                 NEURAL_VECTOR_QUANTIZATION,
+                crate::vector_store::VectorTier::Neural,
             )?;
             let neural_profile = read_optional_profile(&workspace.neural_profile_path())?;
 
@@ -4830,9 +4838,15 @@ mod tests {
         let path = tmp.path().join("vectors.usearch");
         std::fs::write(&path, b"not a vector store").unwrap();
 
-        let err = open_optional_vector_store(true, &path, 256, HASH_VECTOR_QUANTIZATION)
-            .err()
-            .unwrap();
+        let err = open_optional_vector_store(
+            true,
+            &path,
+            256,
+            HASH_VECTOR_QUANTIZATION,
+            crate::vector_store::VectorTier::Hash,
+        )
+        .err()
+        .unwrap();
         assert!(err.to_string().contains("open vector store"));
     }
 
@@ -4843,9 +4857,15 @@ mod tests {
         std::fs::write(&path, b"not a vector store").unwrap();
 
         assert!(
-            open_optional_vector_store(false, &path, 256, HASH_VECTOR_QUANTIZATION)
-                .unwrap()
-                .is_none()
+            open_optional_vector_store(
+                false,
+                &path,
+                256,
+                HASH_VECTOR_QUANTIZATION,
+                crate::vector_store::VectorTier::Hash,
+            )
+            .unwrap()
+            .is_none()
         );
     }
 

@@ -8,9 +8,8 @@ use anyhow::{Context, Result};
 use rayon::prelude::*;
 use usearch::{Index, IndexOptions, MetricKind};
 
-use super::{ScalarKind, VectorMatch, top_vector_matches};
+use super::{ScalarKind, VectorMatch, VectorTier, top_vector_matches};
 
-const HASH_VECTOR_DIMENSIONS: usize = 256;
 const HASH_CONNECTIVITY: usize = 2;
 const HASH_EXPANSION_ADD: usize = 8;
 const HASH_EXPANSION_SEARCH: usize = 64;
@@ -21,7 +20,6 @@ const MIN_CAPACITY: usize = 1_024;
 const MAX_CAPACITY_GROWTH: usize = 262_144;
 const MAX_CAPACITY_GROWTH_BYTES: usize = 128 * 1024 * 1024;
 const PARALLEL_SCORE_MIN_KEYS: usize = 5_000;
-#[cfg(target_os = "windows")]
 const BACKUP_EXTENSION: &str = "usearch.bak";
 
 type DotAndNormSquared = fn(&[f32], &[f32]) -> (f32, f32);
@@ -101,7 +99,7 @@ pub struct VectorStore {
     _readonly_buffer: Option<Box<[u8]>>,
 }
 
-fn create_index(dimensions: usize, quantization: ScalarKind) -> Result<Index> {
+fn create_index(dimensions: usize, quantization: ScalarKind, tier: VectorTier) -> Result<Index> {
     let mut options = IndexOptions {
         dimensions,
         metric: MetricKind::Cos,
@@ -113,8 +111,10 @@ fn create_index(dimensions: usize, quantization: ScalarKind) -> Result<Index> {
     };
 
     // Hash vectors provide first results before neural enhancement. A smaller
-    // graph reduces background build cost; neural vectors retain quality defaults.
-    if dimensions == HASH_VECTOR_DIMENSIONS && matches!(quantization, ScalarKind::F16) {
+    // graph reduces background build cost; neural vectors retain quality
+    // defaults. Select by tier only: the default neural profile shares the
+    // hash store's 256-dimensional F16 shape, so shape cannot identify tier.
+    if tier == VectorTier::Hash {
         options.connectivity = HASH_CONNECTIVITY;
         options.expansion_add = HASH_EXPANSION_ADD;
         options.expansion_search = HASH_EXPANSION_SEARCH;
@@ -162,8 +162,13 @@ fn validate_existing_index_file(path: &Path) -> Result<()> {
 }
 
 impl VectorStore {
-    pub fn open(path: &Path, dimensions: usize, quantization: ScalarKind) -> Result<Self> {
-        let index = create_index(dimensions, quantization)?;
+    pub fn open(
+        path: &Path,
+        dimensions: usize,
+        quantization: ScalarKind,
+        tier: VectorTier,
+    ) -> Result<Self> {
+        let index = create_index(dimensions, quantization, tier)?;
         if let Some(load_path) = existing_index_path(path) {
             validate_existing_index_file(&load_path)?;
             #[cfg(target_os = "windows")]
@@ -189,7 +194,7 @@ impl VectorStore {
                         return Err(err.into());
                     }
                     // Old index may use different quantization; retry with F32.
-                    let fallback = create_index(dimensions, ScalarKind::F32)?;
+                    let fallback = create_index(dimensions, ScalarKind::F32, tier)?;
                     #[cfg(target_os = "windows")]
                     {
                         let bytes = fs::read(&load_path)?;
@@ -221,8 +226,18 @@ impl VectorStore {
     }
 
     /// Atomically replace an existing store with a freshly allocated empty index.
-    pub(crate) fn reset(path: &Path, dimensions: usize, quantization: ScalarKind) -> Result<()> {
-        Self::new(path, create_index(dimensions, quantization)?, quantization).save()
+    pub(crate) fn reset(
+        path: &Path,
+        dimensions: usize,
+        quantization: ScalarKind,
+        tier: VectorTier,
+    ) -> Result<()> {
+        Self::new(
+            path,
+            create_index(dimensions, quantization, tier)?,
+            quantization,
+        )
+        .save()
     }
 
     /// Open for read-only search using memory-mapping on Unix and a retained
@@ -230,8 +245,13 @@ impl VectorStore {
     /// native path APIs and keeps the index file replaceable by another process.
     ///
     /// The returned store must NOT be used for writes (upsert/remove/save).
-    pub fn open_readonly(path: &Path, dimensions: usize, quantization: ScalarKind) -> Result<Self> {
-        let index = create_index(dimensions, quantization)?;
+    pub fn open_readonly(
+        path: &Path,
+        dimensions: usize,
+        quantization: ScalarKind,
+        tier: VectorTier,
+    ) -> Result<Self> {
+        let index = create_index(dimensions, quantization, tier)?;
         let Some(load_path) = existing_index_path(path) else {
             return Ok(Self::new(path, index, quantization));
         };
@@ -254,7 +274,7 @@ impl VectorStore {
                     if matches!(quantization, ScalarKind::F32) {
                         return Err(err.into());
                     }
-                    let fallback = create_index(dimensions, ScalarKind::F32)?;
+                    let fallback = create_index(dimensions, ScalarKind::F32, tier)?;
                     // SAFETY: same retained-buffer lifetime guarantee as above.
                     unsafe { fallback.view_from_buffer(&buffer) }?;
                     Ok(Self {
@@ -278,7 +298,7 @@ impl VectorStore {
                     if matches!(quantization, ScalarKind::F32) {
                         return Err(err.into());
                     }
-                    let fallback = create_index(dimensions, ScalarKind::F32)?;
+                    let fallback = create_index(dimensions, ScalarKind::F32, tier)?;
                     fallback.view(path_str)?;
                     return Ok(Self::new(path, fallback, ScalarKind::F32));
                 }
@@ -534,6 +554,17 @@ fn bounded_capacity_target(needed: usize, capacity: usize, growth_limit: usize) 
         .max(needed.min(MIN_CAPACITY))
 }
 
+/// Delete a store file together with every sibling artifact that `open` or
+/// `open_readonly` would otherwise recover from (the Windows backup and an
+/// interrupted temporary save). Callers use this when the store must be rebuilt
+/// from scratch, e.g. after a vector identity change; removing only the
+/// primary file would let the backup resurrect the old vectors.
+pub fn remove_store_files(path: &Path) {
+    let _ = fs::remove_file(path);
+    let _ = fs::remove_file(path.with_extension("usearch.tmp"));
+    let _ = fs::remove_file(path.with_extension(BACKUP_EXTENSION));
+}
+
 fn existing_index_path(path: &Path) -> Option<PathBuf> {
     if path.exists() {
         return Some(path.to_path_buf());
@@ -600,7 +631,7 @@ mod tests {
         // It must now return the true cosine similarity in [0, 1].
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("vectors.bin");
-        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32, VectorTier::Neural).unwrap();
         store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]).unwrap(); // identical to query
         store.upsert(2, vec![0.0, 1.0, 0.0, 0.0]).unwrap(); // orthogonal to query
 
@@ -626,12 +657,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("vectors.bin");
 
-        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32, VectorTier::Neural).unwrap();
         store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
         store.upsert(2, vec![0.0, 1.0, 0.0, 0.0]).unwrap();
         store.save().unwrap();
 
-        let store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        let store = VectorStore::open(&path, 4, ScalarKind::F32, VectorTier::Neural).unwrap();
         let hits = store.search(&[1.0, 0.0, 0.0, 0.0], 2);
         assert!(!hits.is_empty());
         assert_eq!(hits[0].key, 1);
@@ -645,11 +676,12 @@ mod tests {
         fs::create_dir_all(&directory).unwrap();
         let path = directory.join("vectors.usearch");
 
-        let mut store = VectorStore::open(&path, 4, ScalarKind::F16).unwrap();
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F16, VectorTier::Neural).unwrap();
         store.upsert(7, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
         store.save().unwrap();
 
-        let reopened = VectorStore::open_readonly(&path, 4, ScalarKind::F16).unwrap();
+        let reopened =
+            VectorStore::open_readonly(&path, 4, ScalarKind::F16, VectorTier::Neural).unwrap();
         assert!(reopened.contains(7));
         assert_eq!(reopened.search(&[1.0, 0.0, 0.0, 0.0], 1)[0].key, 7);
     }
@@ -659,17 +691,19 @@ mod tests {
     fn save_replaces_an_existing_index_while_readonly_view_is_open() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("vectors.usearch");
-        let mut store = VectorStore::open(&path, 2, ScalarKind::F16).unwrap();
+        let mut store = VectorStore::open(&path, 2, ScalarKind::F16, VectorTier::Neural).unwrap();
         store.upsert(1, vec![1.0, 0.0]).unwrap();
         store.save().unwrap();
 
-        let readonly = VectorStore::open_readonly(&path, 2, ScalarKind::F16).unwrap();
+        let readonly =
+            VectorStore::open_readonly(&path, 2, ScalarKind::F16, VectorTier::Neural).unwrap();
         store.upsert(2, vec![0.0, 1.0]).unwrap();
         store.save().unwrap();
 
         assert!(readonly.contains(1));
         assert!(!readonly.contains(2));
-        let reopened = VectorStore::open_readonly(&path, 2, ScalarKind::F16).unwrap();
+        let reopened =
+            VectorStore::open_readonly(&path, 2, ScalarKind::F16, VectorTier::Neural).unwrap();
         assert!(reopened.contains(1));
         assert!(reopened.contains(2));
     }
@@ -680,17 +714,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("vectors.usearch");
         let backup = path.with_extension(BACKUP_EXTENSION);
-        let mut store = VectorStore::open(&path, 2, ScalarKind::F16).unwrap();
+        let mut store = VectorStore::open(&path, 2, ScalarKind::F16, VectorTier::Neural).unwrap();
         store.upsert(1, vec![1.0, 0.0]).unwrap();
         store.save().unwrap();
         fs::rename(&path, &backup).unwrap();
 
-        let mut recovered = VectorStore::open(&path, 2, ScalarKind::F16).unwrap();
+        let mut recovered =
+            VectorStore::open(&path, 2, ScalarKind::F16, VectorTier::Neural).unwrap();
         assert!(recovered.contains(1));
         recovered.upsert(2, vec![0.0, 1.0]).unwrap();
         recovered.save().unwrap();
 
-        let reopened = VectorStore::open_readonly(&path, 2, ScalarKind::F16).unwrap();
+        let reopened =
+            VectorStore::open_readonly(&path, 2, ScalarKind::F16, VectorTier::Neural).unwrap();
         assert!(reopened.contains(1));
         assert!(reopened.contains(2));
         assert!(!backup.exists());
@@ -701,7 +737,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("vectors.bin");
 
-        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32, VectorTier::Neural).unwrap();
         store.upsert(42, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
         assert!(store.contains(42));
         assert!(!store.contains(99));
@@ -715,7 +751,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("vectors.bin");
 
-        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32, VectorTier::Neural).unwrap();
         assert_eq!(store.size(), 0);
         store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
         assert_eq!(store.size(), 1);
@@ -728,7 +764,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("vectors.bin");
 
-        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32, VectorTier::Neural).unwrap();
         store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
         store.upsert(1, vec![0.0, 1.0, 0.0, 0.0]).unwrap();
 
@@ -742,7 +778,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("vectors.bin");
 
-        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32, VectorTier::Neural).unwrap();
         store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
 
         assert!(store.upsert(1, vec![0.0, 1.0]).is_err());
@@ -757,7 +793,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("vectors.bin");
 
-        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32, VectorTier::Neural).unwrap();
         store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
 
         let score = store.score(1, &[1.0, 0.0, 0.0, 0.0]);
@@ -771,7 +807,7 @@ mod tests {
     fn batch_exact_top_k_matches_scalar_scoring() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("vectors.bin");
-        let mut store = VectorStore::open(&path, 16, ScalarKind::F16).unwrap();
+        let mut store = VectorStore::open(&path, 16, ScalarKind::F16, VectorTier::Neural).unwrap();
         let keys = (0..128u64).rev().collect::<Vec<_>>();
         for key in &keys {
             let vector = (0..16)
@@ -819,7 +855,7 @@ mod tests {
     fn batch_exact_top_k_uses_key_order_for_tied_scores() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("vectors.bin");
-        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32, VectorTier::Neural).unwrap();
         for key in [9, 3, 7, 1] {
             store.add_unchecked(key, vec![0.0, 1.0, 0.0, 0.0]).unwrap();
         }
@@ -835,7 +871,7 @@ mod tests {
     fn parallel_batch_exact_top_k_preserves_tie_order() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("vectors.bin");
-        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32, VectorTier::Neural).unwrap();
         let keys = (0..PARALLEL_SCORE_MIN_KEYS as u64)
             .rev()
             .collect::<Vec<_>>();
@@ -858,7 +894,7 @@ mod tests {
     fn batch_exact_top_k_skips_missing_keys_without_reusing_the_buffer() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("vectors.bin");
-        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32, VectorTier::Neural).unwrap();
         store.add_unchecked(1, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
 
         let matches = store.score_many_top_k(&[1, 999], &[1.0, 0.0, 0.0, 0.0], 2);
@@ -871,12 +907,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("vectors.bin");
 
-        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32, VectorTier::Neural).unwrap();
         store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
         store.upsert(2, vec![0.0, 1.0, 0.0, 0.0]).unwrap();
         store.save().unwrap();
 
-        let ro = VectorStore::open_readonly(&path, 4, ScalarKind::F32).unwrap();
+        let ro = VectorStore::open_readonly(&path, 4, ScalarKind::F32, VectorTier::Neural).unwrap();
         assert_eq!(ro.size(), 2);
         assert!(ro.contains(1));
         assert!(ro.contains(2));
@@ -888,7 +924,7 @@ mod tests {
         let path = tmp.path().join("vectors.bin");
         fs::write(&path, b"truncated").unwrap();
 
-        let err = VectorStore::open_readonly(&path, 4, ScalarKind::F32)
+        let err = VectorStore::open_readonly(&path, 4, ScalarKind::F32, VectorTier::Neural)
             .err()
             .expect("truncated vector store should fail");
         assert!(err.to_string().contains("vector store is truncated"));
@@ -900,7 +936,7 @@ mod tests {
         let path = tmp.path().join("vectors.bin");
         fs::write(&path, vec![0; 80]).unwrap();
 
-        let err = VectorStore::open_readonly(&path, 4, ScalarKind::F32)
+        let err = VectorStore::open_readonly(&path, 4, ScalarKind::F32, VectorTier::Neural)
             .err()
             .expect("invalid vector store should fail");
         assert!(
@@ -914,7 +950,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("vectors.bin");
 
-        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32, VectorTier::Neural).unwrap();
         for i in 0..1100 {
             store.upsert(i, vec![i as f32, 0.0, 0.0, 0.0]).unwrap();
         }
@@ -952,7 +988,7 @@ mod tests {
     fn native_reservation_does_not_amplify_the_bounded_target() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("vectors.bin");
-        let mut store = VectorStore::open(&path, 4, ScalarKind::F32).unwrap();
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F32, VectorTier::Neural).unwrap();
         let requested = 5_000;
 
         store.reserve_additional(requested).unwrap();
@@ -961,26 +997,140 @@ mod tests {
     }
 
     #[test]
-    fn hash_first_tier_uses_lower_build_expansion_only_for_f16_store() {
+    fn remove_store_files_deletes_recoverable_siblings() {
         let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("vectors_neural.usearch");
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F16, VectorTier::Neural).unwrap();
+        store.upsert(1, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
+        store.save().unwrap();
+        let backup = path.with_extension(BACKUP_EXTENSION);
+        fs::copy(&path, &backup).unwrap();
+        fs::write(path.with_extension("usearch.tmp"), b"partial").unwrap();
+
+        remove_store_files(&path);
+
+        assert!(!path.exists());
+        assert!(
+            !backup.exists(),
+            "a stale backup must not resurrect old vectors"
+        );
+        assert!(!path.with_extension("usearch.tmp").exists());
+        let reopened = VectorStore::open(&path, 4, ScalarKind::F16, VectorTier::Neural).unwrap();
+        assert_eq!(reopened.size(), 0);
+    }
+
+    #[test]
+    fn hash_tier_uses_sparse_graph_and_neural_tier_keeps_defaults_for_same_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        // The default neural profile shares the hash store's 256-d F16 shape.
         let hash = VectorStore::open(
             &tmp.path().join("hash.bin"),
-            HASH_VECTOR_DIMENSIONS,
+            256,
             ScalarKind::F16,
+            VectorTier::Hash,
         )
         .unwrap();
         let neural = VectorStore::open(
             &tmp.path().join("neural.bin"),
-            HASH_VECTOR_DIMENSIONS,
-            ScalarKind::F32,
+            256,
+            ScalarKind::F16,
+            VectorTier::Neural,
         )
         .unwrap();
+        let defaults = Index::new(&IndexOptions::default()).unwrap();
 
         assert_eq!(hash.index.connectivity(), HASH_CONNECTIVITY);
         assert_eq!(hash.index.expansion_add(), HASH_EXPANSION_ADD);
         assert_eq!(hash.index.expansion_search(), HASH_EXPANSION_SEARCH);
-        assert_ne!(neural.index.connectivity(), HASH_CONNECTIVITY);
-        assert_ne!(neural.index.expansion_add(), HASH_EXPANSION_ADD);
+        assert_eq!(neural.index.connectivity(), defaults.connectivity());
+        assert_eq!(neural.index.expansion_add(), defaults.expansion_add());
+        assert_eq!(neural.index.expansion_search(), defaults.expansion_search());
+    }
+
+    /// Deterministic clustered unit vectors: `clusters` centroids with small
+    /// per-vector perturbations, mimicking embedded code chunks.
+    fn clustered_unit_vectors(count: usize, dimensions: usize, clusters: usize) -> Vec<Vec<f32>> {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+        };
+        let centroids = (0..clusters)
+            .map(|_| (0..dimensions).map(|_| next()).collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        (0..count)
+            .map(|index| {
+                let centroid = &centroids[index % clusters];
+                let mut vector = centroid
+                    .iter()
+                    .map(|value| value + next() * 0.15)
+                    .collect::<Vec<_>>();
+                let norm = vector
+                    .iter()
+                    .map(|v| v * v)
+                    .sum::<f32>()
+                    .sqrt()
+                    .max(f32::EPSILON);
+                vector.iter_mut().for_each(|v| *v /= norm);
+                vector
+            })
+            .collect()
+    }
+
+    fn exact_top_keys(vectors: &[Vec<f32>], query: &[f32], count: usize) -> Vec<u64> {
+        let mut scored = vectors
+            .iter()
+            .enumerate()
+            .map(|(key, vector)| {
+                let (dot, _) = scalar_dot_and_norm_squared(vector, query);
+                (key as u64, dot)
+            })
+            .collect::<Vec<_>>();
+        scored.sort_by(|left, right| right.1.total_cmp(&left.1));
+        scored.into_iter().take(count).map(|(key, _)| key).collect()
+    }
+
+    fn ann_recall_at_10(tier: VectorTier) -> f64 {
+        const COUNT: usize = 20_000;
+        const DIMENSIONS: usize = 256;
+        const QUERIES: usize = 50;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("store.usearch");
+        let vectors = clustered_unit_vectors(COUNT + QUERIES, DIMENSIONS, 64);
+        let (corpus, queries) = vectors.split_at(COUNT);
+        {
+            let mut store = VectorStore::open(&path, DIMENSIONS, ScalarKind::F16, tier).unwrap();
+            store.reserve_additional(COUNT).unwrap();
+            for (key, vector) in corpus.iter().enumerate() {
+                store.add_unchecked(key as u64, vector.clone()).unwrap();
+            }
+            store.save().unwrap();
+        }
+        let store = VectorStore::open_readonly(&path, DIMENSIONS, ScalarKind::F16, tier).unwrap();
+        let mut hits = 0usize;
+        for query in queries {
+            let expected = exact_top_keys(corpus, query, 10);
+            let found = store.search(query, 10);
+            hits += found
+                .iter()
+                .filter(|found| expected.contains(&found.key))
+                .count();
+        }
+        hits as f64 / (QUERIES * 10) as f64
+    }
+
+    #[test]
+    fn neural_tier_f16_256d_store_keeps_ann_recall() {
+        // Regression: the neural store was silently built with the hash
+        // tier's sparse graph whenever it matched the 256-d F16 shape,
+        // dropping ANN recall@10 to roughly 0.15 on clustered vectors.
+        let neural_recall = ann_recall_at_10(VectorTier::Neural);
+        assert!(
+            neural_recall >= 0.9,
+            "neural tier recall@10 {neural_recall:.3} below 0.9"
+        );
     }
 
     #[test]
@@ -1003,7 +1153,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         for (path, quantization) in [(&f16_path, ScalarKind::F16), (&f32_path, ScalarKind::F32)] {
-            let mut store = VectorStore::open(path, 384, quantization).unwrap();
+            let mut store = VectorStore::open(path, 384, quantization, VectorTier::Neural).unwrap();
             store.reserve_additional(vectors.len()).unwrap();
             for (key, vector) in &vectors {
                 store.add_unchecked(*key, vector.clone()).unwrap();
@@ -1012,8 +1162,10 @@ mod tests {
         }
 
         let query = &vectors[427].1;
-        let f16 = VectorStore::open_readonly(&f16_path, 384, ScalarKind::F16).unwrap();
-        let f32 = VectorStore::open_readonly(&f32_path, 384, ScalarKind::F32).unwrap();
+        let f16 = VectorStore::open_readonly(&f16_path, 384, ScalarKind::F16, VectorTier::Neural)
+            .unwrap();
+        let f32 = VectorStore::open_readonly(&f32_path, 384, ScalarKind::F32, VectorTier::Neural)
+            .unwrap();
         let f16_keys = f16
             .search(query, 20)
             .into_iter()

@@ -450,7 +450,7 @@ fn clear_worktree_overlay_storage(workspace: &Workspace) {
     let _ = fs::remove_file(workspace.overlay_sqlite_path());
     let _ = fs::remove_dir_all(workspace.overlay_tantivy_dir());
     let _ = fs::remove_file(workspace.overlay_vector_path());
-    let _ = fs::remove_file(workspace.vector_neural_path());
+    crate::vector_store::remove_store_files(&workspace.vector_neural_path());
     let _ = fs::remove_file(workspace.neural_model_path());
     let _ = fs::remove_file(workspace.neural_profile_path());
     let _ = fs::remove_file(workspace.neural_backend_path());
@@ -2094,6 +2094,7 @@ pub fn enhance_workspace_hash(
         &vector_path,
         hash_model.dimensions(),
         HASH_VECTOR_QUANTIZATION,
+        crate::vector_store::VectorTier::Hash,
     )?;
     let claimed_tombstones = claim_vector_tombstones(
         &workspace.hash_tombstones_path(),
@@ -2193,6 +2194,7 @@ pub fn enhance_workspace_hash(
             &vector_path,
             hash_model.dimensions(),
             HASH_VECTOR_QUANTIZATION,
+            crate::vector_store::VectorTier::Hash,
         )?;
     } else if newly_processed > 0 || removed_tombstones {
         vector_index.save()?;
@@ -2260,7 +2262,7 @@ pub fn enhance_workspace_neural(
         _ => false,
     };
     if !identity_matches {
-        let _ = fs::remove_file(workspace.vector_neural_path());
+        crate::vector_store::remove_store_files(&workspace.vector_neural_path());
         let _ = fs::remove_file(workspace.neural_tombstones_path());
         let _ = fs::remove_file(workspace.neural_tombstones_processing_path());
         let _ = fs::remove_file(workspace.neural_enhanced_generation_path());
@@ -2289,6 +2291,7 @@ pub fn enhance_workspace_neural(
         &vector_path,
         neural_model.dimensions(),
         NEURAL_VECTOR_QUANTIZATION,
+        crate::vector_store::VectorTier::Neural,
     )?;
     let claimed_tombstones = claim_vector_tombstones(
         &workspace.neural_tombstones_path(),
@@ -2457,6 +2460,7 @@ pub fn enhance_workspace_neural(
             &vector_path,
             neural_model.dimensions(),
             NEURAL_VECTOR_QUANTIZATION,
+            crate::vector_store::VectorTier::Neural,
         )?;
     } else if newly_processed > 0 || removed_tombstones || !vector_store_existed {
         vector_index.save()?;
@@ -4577,6 +4581,7 @@ mod tests {
             &workspace.vector_path(),
             EMBEDDING_DIMENSIONS,
             ScalarKind::F16,
+            crate::vector_store::VectorTier::Hash,
         )
         .unwrap();
         assert_eq!(
@@ -4606,6 +4611,7 @@ mod tests {
             &workspace.vector_path(),
             EMBEDDING_DIMENSIONS,
             ScalarKind::F16,
+            crate::vector_store::VectorTier::Hash,
         )
         .unwrap();
         assert_eq!(enriched.size(), summary.total_chunks);
@@ -4671,6 +4677,7 @@ mod tests {
             &workspace.vector_path(),
             EMBEDDING_DIMENSIONS,
             ScalarKind::F16,
+            crate::vector_store::VectorTier::Hash,
         )
         .unwrap();
         assert_eq!(hash_store.size(), vector_key_count);
@@ -4683,6 +4690,7 @@ mod tests {
             &workspace.vector_neural_path(),
             EMBEDDING_DIMENSIONS,
             crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
+            crate::vector_store::VectorTier::Neural,
         )
         .unwrap();
         assert_eq!(neural_store.size(), vector_key_count);
@@ -4869,6 +4877,7 @@ mod tests {
             &workspace.vector_neural_path(),
             EMBEDDING_DIMENSIONS,
             crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
+            crate::vector_store::VectorTier::Neural,
         )
         .unwrap();
         assert_eq!(store.size(), enhanced);
@@ -5213,19 +5222,21 @@ mod tests {
             next_key += 1;
         }
 
-        for (path, dimensions, quantization) in [
+        for (path, dimensions, quantization, tier) in [
             (
                 workspace.vector_path(),
                 hash_model.dimensions(),
                 HASH_VECTOR_QUANTIZATION,
+                crate::vector_store::VectorTier::Hash,
             ),
             (
                 workspace.vector_neural_path(),
                 neural_model.dimensions(),
                 NEURAL_VECTOR_QUANTIZATION,
+                crate::vector_store::VectorTier::Neural,
             ),
         ] {
-            let mut store = VectorStore::open(&path, dimensions, quantization).unwrap();
+            let mut store = VectorStore::open(&path, dimensions, quantization, tier).unwrap();
             store
                 .reserve_additional(VECTOR_COUNT.saturating_sub(store.size()))
                 .unwrap();
@@ -5273,6 +5284,7 @@ mod tests {
             &workspace.vector_path(),
             EMBEDDING_DIMENSIONS,
             HASH_VECTOR_QUANTIZATION,
+            crate::vector_store::VectorTier::Hash,
         )
         .unwrap();
         assert_eq!(hash_store.size(), 0);
@@ -5284,6 +5296,7 @@ mod tests {
             &workspace.vector_neural_path(),
             neural_model.dimensions(),
             NEURAL_VECTOR_QUANTIZATION,
+            crate::vector_store::VectorTier::Neural,
         )
         .unwrap();
         assert_eq!(neural_store.size(), 0);

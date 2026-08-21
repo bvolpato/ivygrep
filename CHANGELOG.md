@@ -4,6 +4,9 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- Neural vector stores now build with USearch's default HNSW graph instead of the sparse hash-tier graph. The default 256-dimensional F16 neural profile matched the hash store's shape, which cut neural ANN recall@10 to about 0.24 on clustered vectors. Existing neural vectors re-enhance automatically through a neural identity bump.
+
 ## [1.2.12] - 2026-08-20
 
 ### Security

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use super::{ScalarKind, VectorMatch, top_vector_matches};
+use super::{ScalarKind, VectorMatch, VectorTier, top_vector_matches};
 
 const MAGIC: &[u8; 8] = b"IVYVEC01";
 const BACKUP_EXTENSION: &str = "usearch.bak";
@@ -18,15 +18,30 @@ pub struct VectorStore {
 }
 
 impl VectorStore {
-    pub fn open(path: &Path, dimensions: usize, quantization: ScalarKind) -> Result<Self> {
+    pub fn open(
+        path: &Path,
+        dimensions: usize,
+        quantization: ScalarKind,
+        _tier: VectorTier,
+    ) -> Result<Self> {
         Self::load(path, dimensions, quantization)
     }
 
-    pub fn open_readonly(path: &Path, dimensions: usize, quantization: ScalarKind) -> Result<Self> {
+    pub fn open_readonly(
+        path: &Path,
+        dimensions: usize,
+        quantization: ScalarKind,
+        _tier: VectorTier,
+    ) -> Result<Self> {
         Self::load(path, dimensions, quantization)
     }
 
-    pub(crate) fn reset(path: &Path, dimensions: usize, quantization: ScalarKind) -> Result<()> {
+    pub(crate) fn reset(
+        path: &Path,
+        dimensions: usize,
+        quantization: ScalarKind,
+        _tier: VectorTier,
+    ) -> Result<()> {
         Self {
             path: path.to_path_buf(),
             dimensions,
@@ -361,12 +376,13 @@ mod tests {
     fn persists_and_searches_portable_vectors() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("vectors.usearch");
-        let mut store = VectorStore::open(&path, 4, ScalarKind::F16).unwrap();
+        let mut store = VectorStore::open(&path, 4, ScalarKind::F16, VectorTier::Neural).unwrap();
         store.upsert(7, vec![1.0, 0.0, 0.0, 0.0]).unwrap();
         store.upsert(9, vec![0.0, 1.0, 0.0, 0.0]).unwrap();
         store.save().unwrap();
 
-        let reopened = VectorStore::open_readonly(&path, 4, ScalarKind::F16).unwrap();
+        let reopened =
+            VectorStore::open_readonly(&path, 4, ScalarKind::F16, VectorTier::Neural).unwrap();
         assert_eq!(reopened.size(), 2);
         assert_eq!(reopened.search(&[0.9, 0.1, 0.0, 0.0], 1)[0].key, 7);
         assert!(reopened.score(7, &[1.0, 0.0, 0.0, 0.0]).unwrap() > 0.99);
@@ -382,7 +398,7 @@ mod tests {
         let f16_path = temp.path().join("f16.usearch");
         let f32_path = temp.path().join("f32.usearch");
         for (path, quantization) in [(&f16_path, ScalarKind::F16), (&f32_path, ScalarKind::F32)] {
-            let mut store = VectorStore::open(path, 384, quantization).unwrap();
+            let mut store = VectorStore::open(path, 384, quantization, VectorTier::Neural).unwrap();
             for key in 0..32 {
                 store
                     .add_unchecked(
@@ -406,12 +422,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("vectors.usearch");
         let backup = path.with_extension(BACKUP_EXTENSION);
-        let mut store = VectorStore::open(&path, 2, ScalarKind::F16).unwrap();
+        let mut store = VectorStore::open(&path, 2, ScalarKind::F16, VectorTier::Neural).unwrap();
         store.upsert(1, vec![1.0, 0.0]).unwrap();
         store.save().unwrap();
         fs::rename(&path, &backup).unwrap();
 
-        let reopened = VectorStore::open_readonly(&path, 2, ScalarKind::F16).unwrap();
+        let reopened =
+            VectorStore::open_readonly(&path, 2, ScalarKind::F16, VectorTier::Neural).unwrap();
         assert!(reopened.contains(1));
     }
 
@@ -420,16 +437,18 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("vectors.usearch");
         let backup = path.with_extension(BACKUP_EXTENSION);
-        let mut store = VectorStore::open(&path, 2, ScalarKind::F16).unwrap();
+        let mut store = VectorStore::open(&path, 2, ScalarKind::F16, VectorTier::Neural).unwrap();
         store.upsert(1, vec![1.0, 0.0]).unwrap();
         store.save().unwrap();
         fs::rename(&path, &backup).unwrap();
 
-        let mut recovered = VectorStore::open(&path, 2, ScalarKind::F16).unwrap();
+        let mut recovered =
+            VectorStore::open(&path, 2, ScalarKind::F16, VectorTier::Neural).unwrap();
         recovered.upsert(2, vec![0.0, 1.0]).unwrap();
         recovered.save().unwrap();
 
-        let reopened = VectorStore::open_readonly(&path, 2, ScalarKind::F16).unwrap();
+        let reopened =
+            VectorStore::open_readonly(&path, 2, ScalarKind::F16, VectorTier::Neural).unwrap();
         assert!(reopened.contains(1));
         assert!(reopened.contains(2));
         assert!(!backup.exists());

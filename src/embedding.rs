@@ -179,7 +179,11 @@ impl NeuralProfile {
             ),
         };
         NeuralModelIdentity {
-            schema_version: 1,
+            // Bump when persisted neural vectors must be rebuilt for reasons
+            // the other fields cannot express. v2: neural HNSW graphs built
+            // before the tier-aware vector store used the sparse hash-tier
+            // graph and must be re-enhanced.
+            schema_version: 2,
             profile: self.name().to_string(),
             model_id: model_id.to_string(),
             revision: self.model_revision().to_string(),
