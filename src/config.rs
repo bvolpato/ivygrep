@@ -75,6 +75,18 @@ pub fn query_result_cache_enabled() -> bool {
     env::var_os("IVYGREP_DISABLE_QUERY_CACHE").is_none()
 }
 
+pub const DEFAULT_SEARCH_DEADLINE_SECS: u64 = 60;
+
+/// Server-side bound on a single daemon search. `IVYGREP_SEARCH_DEADLINE_SECS`
+/// overrides the default; `0` disables the deadline.
+pub fn search_deadline() -> Option<std::time::Duration> {
+    let secs = env::var("IVYGREP_SEARCH_DEADLINE_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_SEARCH_DEADLINE_SECS);
+    (secs > 0).then(|| std::time::Duration::from_secs(secs))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -588,3 +588,164 @@ async fn daemon_ipc_recovers_stale_socket() {
     drop(new_listener);
     ivygrep::ipc::cleanup_socket();
 }
+
+// ---------------------------------------------------------------------------
+// 7. Real daemon: lease waiters must not starve other workspaces, and
+//    concurrent Index requests for one workspace coalesce into one run.
+// ---------------------------------------------------------------------------
+
+struct DaemonGuard(std::process::Child);
+
+impl Drop for DaemonGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+async fn spawn_real_daemon(home: &Path) -> DaemonGuard {
+    let child = Command::new(env!("CARGO_BIN_EXE_ig"))
+        .arg("--daemon")
+        .env("IVYGREP_HOME", home)
+        .env("IVYGREP_SKIP_WATCHER_RESTORE", "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn ig --daemon");
+    let guard = DaemonGuard(child);
+    for _ in 0..100 {
+        if ivygrep::ipc::socket_exists() && ivygrep::ipc::connect().await.is_ok() {
+            return guard;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("daemon did not start listening");
+}
+
+fn create_bulk_repo(root: &Path, files: usize) {
+    fs::create_dir_all(root.join("src")).unwrap();
+    for index in 0..files {
+        let body = (0..40)
+            .map(|line| {
+                format!(
+                    "pub fn bulk_symbol_{index}_{line}(value: u64) -> u64 {{ value.wrapping_mul({}) }}\n",
+                    line + 1
+                )
+            })
+            .collect::<String>();
+        fs::write(root.join("src").join(format!("module_{index}.rs")), body).unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial]
+async fn daemon_ipc_index_storm_does_not_starve_other_workspaces() {
+    let home = tempdir().unwrap();
+    isolate_home(home.path());
+    if bind_for_test().await.is_none() {
+        return;
+    }
+    ivygrep::ipc::cleanup_socket();
+
+    let busy_dir = tempdir().unwrap();
+    create_bulk_repo(busy_dir.path(), 600);
+    let busy_path = ivygrep::config::canonicalize_lossy(busy_dir.path()).unwrap();
+    let idle_dir = tempdir().unwrap();
+    create_test_repo(idle_dir.path());
+    let idle_path = ivygrep::config::canonicalize_lossy(idle_dir.path()).unwrap();
+
+    let _daemon = spawn_real_daemon(home.path()).await;
+
+    let idle_index = roundtrip(&DaemonRequest::Index {
+        path: idle_path.clone(),
+        watch: false,
+        skip_gitignore: false,
+    })
+    .await;
+    assert!(
+        matches!(idle_index, DaemonResponse::Ack { .. }),
+        "{idle_index:?}"
+    );
+
+    // More concurrent Index requests than CPU permits, all for one workspace.
+    let storm = num_cpus::get().max(1) + 2;
+    let mut index_tasks = Vec::new();
+    for _ in 0..storm {
+        let busy_path = busy_path.clone();
+        index_tasks.push(tokio::spawn(async move {
+            roundtrip(&DaemonRequest::Index {
+                path: busy_path,
+                watch: false,
+                skip_gitignore: false,
+            })
+            .await
+        }));
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let started = std::time::Instant::now();
+    let idle_search = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        roundtrip(&DaemonRequest::LiteralSearch {
+            path: Some(idle_path.clone()),
+            query: "daemon_roundtrip_marker".to_string(),
+            limit: Some(5),
+            context: 0,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_path: None,
+            scope_is_file: false,
+            skip_gitignore: false,
+        }),
+    )
+    .await
+    .expect("search on an idle workspace must not queue behind the index storm");
+    let idle_latency = started.elapsed();
+    let storm_still_running = index_tasks.iter().any(|task| !task.is_finished());
+    match idle_search {
+        DaemonResponse::SearchResults { hits, .. } => assert!(!hits.is_empty()),
+        other => panic!("expected SearchResults, got {other:?}"),
+    }
+    eprintln!(
+        "idle workspace search took {idle_latency:?} while index storm running={storm_still_running}"
+    );
+
+    let mut messages = Vec::new();
+    for task in index_tasks {
+        match tokio::time::timeout(std::time::Duration::from_secs(120), task)
+            .await
+            .expect("index storm must finish")
+            .unwrap()
+        {
+            DaemonResponse::Ack { message } => messages.push(message),
+            other => panic!("expected Ack, got {other:?}"),
+        }
+    }
+    // Exactly one request performs the full walk. Followers that arrived
+    // before that walk started share its Ack; followers that arrived while it
+    // was already scanning cannot rely on it and run an incremental rescan,
+    // which finds nothing left to do.
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.starts_with("indexed 600 files")),
+        "the leader indexes the whole workspace: {messages:?}"
+    );
+    assert!(
+        messages.iter().all(|message| {
+            message.starts_with("indexed 600 files") || message.starts_with("indexed 0 files")
+        }),
+        "followers either share the walk or rescan to a no-op: {messages:?}"
+    );
+    let generation = ivygrep::workspace::Workspace::resolve(&busy_path)
+        .unwrap()
+        .read_metadata()
+        .unwrap()
+        .unwrap()
+        .index_generation;
+    assert_eq!(
+        generation, 1,
+        "exactly one index run committed; follower rescans were no-ops"
+    );
+}

@@ -133,6 +133,18 @@ impl SearchBatch {
             warnings: self.warnings,
         })
     }
+
+    /// Outcome for a cancelled batch: the hits recorded so far in arrival
+    /// order, never an error even when no workspace completed.
+    pub(crate) fn finish_partial(mut self, limit: Option<usize>) -> SearchOutcome {
+        if let Some(limit) = limit {
+            self.hits.truncate(limit);
+        }
+        SearchOutcome {
+            hits: self.hits,
+            warnings: self.warnings,
+        }
+    }
 }
 
 #[cfg(test)]
