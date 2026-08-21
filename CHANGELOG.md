@@ -4,6 +4,12 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- Hash-tier background enhancement no longer pauses on battery power, so semantic results are available on laptops instead of falling back to lexical-only search; `IVYGREP_ENHANCE_ON_BATTERY=1` keeps neural enhancement running on battery too.
+
+### Performance
+- Cache the macOS power/thermal probe for five seconds instead of forking `pmset` twice per enhancement batch.
+
 ## [1.2.12] - 2026-08-20
 
 ### Security

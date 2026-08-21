@@ -1,5 +1,9 @@
 use std::process::Command;
+#[cfg(any(target_os = "macos", test))]
+use std::sync::Mutex;
 use std::time::Duration;
+#[cfg(any(target_os = "macos", test))]
+use std::time::Instant;
 
 use anyhow::Result;
 
@@ -212,19 +216,112 @@ pub(super) fn check_memory_before_index() -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "macos")]
-fn parse_pmset_batt(stdout: &str) -> Option<String> {
-    stdout
-        .contains("Battery Power")
-        .then(|| "Battery Power".to_string())
+/// Background vector enhancement tier asking whether it may run right now.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) enum EnhancementTier {
+    /// Cheap static/hash embeddings. Pauses only for memory and load since it is
+    /// the only source of vector results before neural coverage exists.
+    Hash,
+    /// Transformer embeddings. Additionally pauses on battery and thermal
+    /// pressure unless `IVYGREP_ENHANCE_ON_BATTERY=1` opts out of the battery pause.
+    Neural,
+}
+
+/// Point-in-time view of host pressure signals feeding the pause decision.
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+struct ConstraintSnapshot {
+    low_memory: Option<String>,
+    power: Option<PowerProbe>,
+    high_load: Option<String>,
+}
+
+/// Result of the macOS `pmset` probes. Cached for `POWER_PROBE_TTL` so a batch
+/// that takes ~25 ms does not fork `pmset` twice on every iteration.
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
+struct PowerProbe {
+    on_battery: bool,
+    thermal_throttled: bool,
 }
 
 #[cfg(target_os = "macos")]
-fn parse_pmset_therm(stdout: &str) -> Option<String> {
-    (stdout.contains("warning level")
+const POWER_PROBE_TTL: Duration = Duration::from_secs(5);
+const ENHANCE_MIN_AVAILABLE_MEMORY: u64 = 1024 * MIB;
+
+fn enhancement_pause_reason(
+    tier: EnhancementTier,
+    snapshot: &ConstraintSnapshot,
+    enhance_on_battery: bool,
+) -> Option<String> {
+    if let Some(reason) = &snapshot.low_memory {
+        return Some(reason.clone());
+    }
+    if tier == EnhancementTier::Neural
+        && let Some(power) = snapshot.power
+    {
+        if power.on_battery && !enhance_on_battery {
+            return Some("Battery Power".to_string());
+        }
+        if power.thermal_throttled {
+            return Some("Thermal Throttling".to_string());
+        }
+    }
+    snapshot.high_load.clone()
+}
+
+/// Returns the cached value when it is younger than `ttl`, otherwise re-probes.
+#[cfg(any(target_os = "macos", test))]
+fn cached_probe<T: Copy>(
+    cache: &Mutex<Option<(Instant, T)>>,
+    ttl: Duration,
+    now: Instant,
+    probe: impl FnOnce() -> T,
+) -> T {
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some((probed_at, value)) = *guard
+        && now.saturating_duration_since(probed_at) < ttl
+    {
+        return value;
+    }
+    let value = probe();
+    *guard = Some((now, value));
+    value
+}
+
+#[cfg(target_os = "macos")]
+fn parse_pmset_batt(stdout: &str) -> bool {
+    stdout.contains("Battery Power")
+}
+
+#[cfg(target_os = "macos")]
+fn parse_pmset_therm(stdout: &str) -> bool {
+    stdout.contains("warning level")
         && !stdout.contains("No thermal warning level")
-        && !stdout.contains("No performance warning level"))
-    .then(|| "Thermal Throttling".to_string())
+        && !stdout.contains("No performance warning level")
+}
+
+#[cfg(target_os = "macos")]
+fn pmset_output(section: &str) -> Option<String> {
+    Command::new("pmset")
+        .args(["-g", section])
+        .output()
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(target_os = "macos")]
+fn probe_power() -> PowerProbe {
+    PowerProbe {
+        on_battery: pmset_output("batt").is_some_and(|stdout| parse_pmset_batt(&stdout)),
+        thermal_throttled: pmset_output("therm").is_some_and(|stdout| parse_pmset_therm(&stdout)),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn cached_power_probe() -> PowerProbe {
+    static CACHE: Mutex<Option<(Instant, PowerProbe)>> = Mutex::new(None);
+    cached_probe(&CACHE, POWER_PROBE_TTL, Instant::now(), probe_power)
 }
 
 /// Load-average multiple of CPU count that pauses background neural work.
@@ -249,33 +346,41 @@ fn parse_system_load(load1: f64, cpus: f64) -> Option<String> {
     (load1 > max_load).then(|| format!("High System Load ({load1:.1} > {max_load:.1} max)"))
 }
 
-#[cfg(target_os = "macos")]
-pub(super) fn check_system_constraints() -> Option<String> {
+/// Reason the given enhancement tier should pause right now, if any.
+pub(super) fn check_system_constraints(tier: EnhancementTier) -> Option<String> {
     if cfg!(test) || std::env::var("CI").is_ok() {
         return None;
     }
-    if let Some(reason) = low_available_memory_reason(1024 * MIB) {
-        return Some(reason);
+    let snapshot = constraint_snapshot(tier);
+    enhancement_pause_reason(tier, &snapshot, crate::config::enhance_on_battery())
+}
+
+#[cfg(target_os = "macos")]
+fn constraint_snapshot(tier: EnhancementTier) -> ConstraintSnapshot {
+    ConstraintSnapshot {
+        low_memory: low_available_memory_reason(ENHANCE_MIN_AVAILABLE_MEMORY),
+        // Hash never consults power state, so skip the pmset fork entirely.
+        power: (tier == EnhancementTier::Neural).then(cached_power_probe),
+        high_load: high_load_reason(),
     }
-    if let Ok(output) = Command::new("pmset").args(["-g", "batt"]).output()
-        && let Some(reason) = parse_pmset_batt(&String::from_utf8_lossy(&output.stdout))
-    {
-        return Some(reason);
-    }
-    if let Ok(output) = Command::new("pmset").args(["-g", "therm"]).output()
-        && let Some(reason) = parse_pmset_therm(&String::from_utf8_lossy(&output.stdout))
-    {
-        return Some(reason);
-    }
-    high_load_reason()
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn check_system_constraints() -> Option<String> {
-    if cfg!(test) || std::env::var("CI").is_ok() {
-        return None;
+fn constraint_snapshot(_tier: EnhancementTier) -> ConstraintSnapshot {
+    ConstraintSnapshot {
+        low_memory: low_available_memory_reason(ENHANCE_MIN_AVAILABLE_MEMORY),
+        power: None,
+        high_load: high_load_reason(),
     }
-    high_load_reason().or_else(|| low_available_memory_reason(1024 * MIB))
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
+fn constraint_snapshot(_tier: EnhancementTier) -> ConstraintSnapshot {
+    ConstraintSnapshot {
+        low_memory: low_available_memory_reason(ENHANCE_MIN_AVAILABLE_MEMORY),
+        power: None,
+        high_load: None,
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -285,11 +390,6 @@ fn high_load_reason() -> Option<String> {
     (has_load > 0)
         .then(|| parse_system_load(loadavg[0], num_cpus::get() as f64))
         .flatten()
-}
-
-#[cfg(all(not(target_os = "macos"), not(target_os = "linux")))]
-pub(super) fn check_system_constraints() -> Option<String> {
-    low_available_memory_reason(1024 * MIB)
 }
 
 fn low_available_memory_reason(minimum_bytes: u64) -> Option<String> {
@@ -471,8 +571,8 @@ mod tests {
     fn parses_pmset_battery_state() {
         let ac = "Now drawing from 'AC Power'";
         let battery = "Now drawing from 'Battery Power'";
-        assert_eq!(parse_pmset_batt(ac), None);
-        assert_eq!(parse_pmset_batt(battery), Some("Battery Power".to_string()));
+        assert!(!parse_pmset_batt(ac));
+        assert!(parse_pmset_batt(battery));
     }
 
     #[test]
@@ -480,10 +580,123 @@ mod tests {
     fn parses_pmset_thermal_state() {
         let normal = "Note: No thermal warning level has been recorded";
         let throttled = "Note: Thermal warning level CPU_Speed_Limit = 50";
-        assert_eq!(parse_pmset_therm(normal), None);
+        assert!(!parse_pmset_therm(normal));
+        assert!(parse_pmset_therm(throttled));
+    }
+
+    fn on_battery() -> ConstraintSnapshot {
+        ConstraintSnapshot {
+            power: Some(PowerProbe {
+                on_battery: true,
+                thermal_throttled: false,
+            }),
+            ..ConstraintSnapshot::default()
+        }
+    }
+
+    #[test]
+    fn hash_tier_ignores_battery_and_thermal_pressure() {
+        let snapshot = ConstraintSnapshot {
+            power: Some(PowerProbe {
+                on_battery: true,
+                thermal_throttled: true,
+            }),
+            ..ConstraintSnapshot::default()
+        };
         assert_eq!(
-            parse_pmset_therm(throttled),
-            Some("Thermal Throttling".to_string())
+            enhancement_pause_reason(EnhancementTier::Hash, &snapshot, false),
+            None
         );
+    }
+
+    #[test]
+    fn hash_tier_still_pauses_for_memory_and_load() {
+        let low_memory = ConstraintSnapshot {
+            low_memory: Some("Low Available Memory (512 MiB)".to_string()),
+            ..on_battery()
+        };
+        assert_eq!(
+            enhancement_pause_reason(EnhancementTier::Hash, &low_memory, false).as_deref(),
+            Some("Low Available Memory (512 MiB)")
+        );
+        let high_load = ConstraintSnapshot {
+            high_load: Some("High System Load (20.0 > 16.0 max)".to_string()),
+            ..on_battery()
+        };
+        assert_eq!(
+            enhancement_pause_reason(EnhancementTier::Hash, &high_load, false).as_deref(),
+            Some("High System Load (20.0 > 16.0 max)")
+        );
+    }
+
+    #[test]
+    fn neural_tier_pauses_on_battery_unless_opted_out() {
+        let snapshot = on_battery();
+        assert_eq!(
+            enhancement_pause_reason(EnhancementTier::Neural, &snapshot, false).as_deref(),
+            Some("Battery Power")
+        );
+        assert_eq!(
+            enhancement_pause_reason(EnhancementTier::Neural, &snapshot, true),
+            None
+        );
+    }
+
+    #[test]
+    fn neural_tier_battery_opt_out_keeps_thermal_memory_and_load_pauses() {
+        let throttled = ConstraintSnapshot {
+            power: Some(PowerProbe {
+                on_battery: true,
+                thermal_throttled: true,
+            }),
+            ..ConstraintSnapshot::default()
+        };
+        assert_eq!(
+            enhancement_pause_reason(EnhancementTier::Neural, &throttled, true).as_deref(),
+            Some("Thermal Throttling")
+        );
+        let low_memory = ConstraintSnapshot {
+            low_memory: Some("Low Available Memory (256 MiB)".to_string()),
+            ..on_battery()
+        };
+        assert_eq!(
+            enhancement_pause_reason(EnhancementTier::Neural, &low_memory, true).as_deref(),
+            Some("Low Available Memory (256 MiB)")
+        );
+        let high_load = ConstraintSnapshot {
+            high_load: Some("High System Load (40.0 > 16.0 max)".to_string()),
+            ..on_battery()
+        };
+        assert_eq!(
+            enhancement_pause_reason(EnhancementTier::Neural, &high_load, true).as_deref(),
+            Some("High System Load (40.0 > 16.0 max)")
+        );
+    }
+
+    #[test]
+    fn cached_probe_reuses_value_within_ttl_and_refreshes_after() {
+        let cache: Mutex<Option<(Instant, u32)>> = Mutex::new(None);
+        let ttl = Duration::from_secs(5);
+        let start = Instant::now();
+        let mut calls = 0u32;
+        let mut probe = || {
+            calls += 1;
+            calls
+        };
+
+        assert_eq!(cached_probe(&cache, ttl, start, &mut probe), 1);
+        assert_eq!(
+            cached_probe(&cache, ttl, start + Duration::from_secs(4), &mut probe),
+            1
+        );
+        assert_eq!(
+            cached_probe(&cache, ttl, start + Duration::from_secs(5), &mut probe),
+            2
+        );
+        assert_eq!(
+            cached_probe(&cache, ttl, start + Duration::from_secs(6), &mut probe),
+            2
+        );
+        assert_eq!(calls, 2);
     }
 }

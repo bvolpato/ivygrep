@@ -75,6 +75,21 @@ pub fn query_result_cache_enabled() -> bool {
     env::var_os("IVYGREP_DISABLE_QUERY_CACHE").is_none()
 }
 
+/// `IVYGREP_ENHANCE_ON_BATTERY=1` keeps background neural enhancement running
+/// while a laptop is on battery power instead of pausing it.
+pub fn enhance_on_battery() -> bool {
+    parse_bool_flag(env::var("IVYGREP_ENHANCE_ON_BATTERY").ok().as_deref())
+}
+
+fn parse_bool_flag(value: Option<&str>) -> bool {
+    matches!(
+        value
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,5 +104,17 @@ mod tests {
     fn parse_env_path_accepts_trimmed_path() {
         let path = parse_env_path("  /tmp/ivygrep-home  ").unwrap();
         assert_eq!(path, PathBuf::from("/tmp/ivygrep-home"));
+    }
+
+    #[test]
+    fn parse_bool_flag_accepts_common_truthy_values_only() {
+        assert!(parse_bool_flag(Some("1")));
+        assert!(parse_bool_flag(Some(" TRUE ")));
+        assert!(parse_bool_flag(Some("yes")));
+        assert!(parse_bool_flag(Some("on")));
+        assert!(!parse_bool_flag(Some("0")));
+        assert!(!parse_bool_flag(Some("false")));
+        assert!(!parse_bool_flag(Some("")));
+        assert!(!parse_bool_flag(None));
     }
 }

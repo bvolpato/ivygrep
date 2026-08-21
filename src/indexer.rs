@@ -38,8 +38,8 @@ use git_state::{
     record_indexed_git_state, refresh_clean_base_metadata,
 };
 use resources::{
-    NEURAL_BATCH_SIZE_REFRESH_INTERVAL, check_memory_before_index, check_system_constraints,
-    indexing_pool, neural_enhance_batch_size, tantivy_writer_settings,
+    EnhancementTier, NEURAL_BATCH_SIZE_REFRESH_INTERVAL, check_memory_before_index,
+    check_system_constraints, indexing_pool, neural_enhance_batch_size, tantivy_writer_settings,
 };
 use staging::FreshIndexStaging;
 pub use storage::{
@@ -2161,7 +2161,7 @@ pub fn enhance_workspace_hash(
             .with_context(|| format!("failed to read stored text for vector key {key}"))?;
         batch.push((key, text));
         if batch.len() >= BATCH_SIZE {
-            while let Some(reason) = check_system_constraints() {
+            while let Some(reason) = check_system_constraints(EnhancementTier::Hash) {
                 let _ = fs::write(&paused_path, &reason);
                 std::thread::sleep(std::time::Duration::from_secs(10));
             }
@@ -2179,7 +2179,7 @@ pub fn enhance_workspace_hash(
 
     let tail_len = batch.len();
     while !batch.is_empty()
-        && let Some(reason) = check_system_constraints()
+        && let Some(reason) = check_system_constraints(EnhancementTier::Hash)
     {
         let _ = fs::write(&paused_path, &reason);
         std::thread::sleep(std::time::Duration::from_secs(10));
@@ -2393,7 +2393,7 @@ pub fn enhance_workspace_neural(
 
             if batch.len() >= current_batch_size {
                 while neural_model.respects_system_constraints()
-                    && let Some(reason) = check_system_constraints()
+                    && let Some(reason) = check_system_constraints(EnhancementTier::Neural)
                 {
                     let _ = std::fs::write(&paused_path, &reason);
                     std::thread::sleep(std::time::Duration::from_secs(10));
@@ -2442,7 +2442,7 @@ pub fn enhance_workspace_neural(
     let tail_len = batch.len();
     while neural_model.respects_system_constraints()
         && !batch.is_empty()
-        && let Some(reason) = check_system_constraints()
+        && let Some(reason) = check_system_constraints(EnhancementTier::Neural)
     {
         let _ = std::fs::write(&paused_path, &reason);
         std::thread::sleep(std::time::Duration::from_secs(10));

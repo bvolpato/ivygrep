@@ -106,6 +106,10 @@ for language, `--include`/`--exclude` path globs, `--lexical-only`, `--hash`, an
 uses lightweight local embeddings for faster startup and no model download,
 with lower semantic quality. Run `ig --help` for full reference.
 
+On macOS laptops, background neural enhancement pauses on battery power (`ig --status`
+shows `Paused: Battery Power`); set `IVYGREP_ENHANCE_ON_BATTERY=1` to keep it running.
+The lightweight hash tier keeps computing on battery so semantic results stay available.
+
 ## Search notes and memories
 
 Index notes once. Watcher keeps them current, and queries use local semantic + lexical search by default:
