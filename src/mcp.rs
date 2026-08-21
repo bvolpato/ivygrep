@@ -18,7 +18,9 @@ use crate::config;
 use crate::embedding::{EmbeddingModel, create_hash_model, create_neural_model};
 use crate::indexer::{index_workspace, workspace_is_indexed};
 use crate::path_glob::parse_glob_csv;
-use crate::protocol::{DaemonRequest, DaemonResponse, group_hits_by_file};
+use crate::protocol::{
+    DaemonRequest, DaemonResponse, FileSearchResult, SearchHit, group_hits_by_file,
+};
 use crate::regex_search::regex_search_with_options;
 use crate::search::{SearchOptions, hybrid_search, literal_search};
 use crate::symbols::{SymbolSearchMode, search_symbols_with_options};
@@ -35,6 +37,20 @@ const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[
 ];
 const TOOL_IG_SEARCH: &str = "ig_search";
 const TOOL_IG_STATUS: &str = "ig_status";
+/// Result files returned by `ig_search` in hits mode when the caller omits
+/// `limit`. Unbounded hit payloads (hundreds of chunks, ~40k tokens, emitted
+/// twice) were the P0 failure mode for coding agents.
+const DEFAULT_HITS_FILE_LIMIT: usize = 10;
+/// Hits kept per result file in hits mode unless `hits_per_file` overrides it.
+const DEFAULT_HITS_PER_FILE: usize = 3;
+const MAX_HITS_PER_FILE: usize = 100;
+/// Hits fetched per requested result file for ranked modes (hybrid, symbol
+/// definitions). Keeps the default retrieval cost equal to the CLI default.
+const RANKED_HIT_OVERFETCH: usize = 5;
+/// Hits fetched per requested result file for enumerating modes (literal,
+/// regex, references, callers), whose matches cluster inside few files.
+const ENUMERATING_HIT_OVERFETCH: usize = 20;
+const MIN_ENUMERATING_HIT_BUDGET: usize = 200;
 
 #[derive(Debug, Deserialize)]
 struct JsonRpcRequest {
@@ -100,6 +116,7 @@ struct IvygrepSearchArgs {
     budget_tokens: Option<usize>,
     since: Option<String>,
     limit: Option<usize>,
+    hits_per_file: Option<usize>,
     context: Option<usize>,
     #[serde(rename = "type")]
     type_filter: Option<String>,
@@ -235,7 +252,7 @@ fn initialize_result(params: &Value) -> Value {
             "description": "Local hybrid semantic and lexical code search",
             "websiteUrl": env!("CARGO_PKG_HOMEPAGE")
         },
-        "instructions": "Use ig_search with an absolute path to the active workspace so searches stay scoped to the intended repository. For implementation tasks, request output=context_pack with budget_tokens=8000 to receive one bounded pack containing primary code, dependencies, dependents, definitions, callers, references, tests, configuration, documentation, and recent co-change evidence. For iterative discovery, keep output=hits, use natural-language queries for concepts, and literal=true for exact identifiers. Start with limit=5-10 and context=2. Use ig_status when indexing health is unclear. Workspaces are indexed on first use and watched for incremental updates. If ig_search returns status=indexing (not an error), the first index is still building in the background: wait retry_after_secs, then call again; do not retry immediately or fall back to scanning the filesystem."
+        "instructions": "Use ig_search with an absolute path to the active workspace so searches stay scoped to the intended repository. For implementation tasks, request output=context_pack with budget_tokens=8000 to receive one bounded pack containing primary code, dependencies, dependents, definitions, callers, references, tests, configuration, documentation, and recent co-change evidence. For iterative discovery, keep output=hits, use natural-language queries for concepts, and literal=true for exact identifiers. Hits mode returns at most limit files (default 10) with at most hits_per_file hits each (default 3); check truncated, total_matches, and more_hits_in_file, then narrow the query, scope path, or raise limit instead of re-running broad queries. Start with limit=5-10 and context=2. Use ig_status when indexing health is unclear. If ig_search returns status=indexing (not an error), the first index is still building in the background: wait retry_after_secs, then call again; do not retry immediately or fall back to scanning the filesystem. Workspaces are indexed on first use and watched for incremental updates."
     })
 }
 
@@ -269,7 +286,14 @@ fn search_tool_schema() -> Value {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 1000,
-                    "description": "Retrieval breadth and maximum number of ranked result files, not a token, line, or confidence limit. Larger values search a deeper candidate pool and may improve recall while adding lower-ranked matches. If omitted, normal candidate budgets remain bounded but no explicit final file cap is applied."
+                    "description": "Maximum number of ranked result files in hits mode; defaults to 10 when omitted. Retrieval depth scales with it, so larger values may improve recall while adding lower-ranked files. Not a token, line, hit, or confidence limit; each file is further capped by hits_per_file. Ignored for output=context_pack, which is bounded by budget_tokens."
+                },
+                "hits_per_file": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 100,
+                    "default": 3,
+                    "description": "Maximum hits returned per result file in hits mode. Files with more matches report more_hits_in_file. Raise it, or scope path to one file, to see every match in a file."
                 },
                 "context": {
                     "type": "integer",
@@ -335,10 +359,33 @@ fn search_output_schema() -> Value {
             "query": {"type": "string"},
             "mode": {"type": "string", "enum": ["hybrid", "literal", "regex", "symbol", "references", "callers", "context"]},
             "result_count": {"type": "integer", "minimum": 0},
+            "total_matches": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Files matched before limit was applied (hits mode). A lower bound when retrieval hit its candidate budget."
+            },
+            "truncated": {
+                "type": "boolean",
+                "description": "True when matched files were cut to limit or retrieval hit its candidate budget; narrow the query or raise limit to see more."
+            },
             "include": {"type": "array", "items": {"type": "string"}},
             "exclude": {"type": "array", "items": {"type": "string"}},
             "warnings": {"type": "array", "items": {"type": "string"}},
-            "results": {"type": "array", "items": {"type": "object"}},
+            "results": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {"type": "string"},
+                        "total_score": {"type": "number"},
+                        "hit_count": {"type": "integer", "minimum": 0, "description": "Hits matched in this file before hits_per_file was applied."},
+                        "more_hits_in_file": {"type": "integer", "minimum": 1, "description": "Hits omitted from this file by hits_per_file among the retrieved matches. Absent when nothing was cut."},
+                        "hit_count_is_lower_bound": {"type": "boolean", "description": "True when retrieval stopped at its candidate budget, so hit_count and more_hits_in_file are lower bounds for this file. Absent when counts are exact."},
+                        "hits": {"type": "array", "items": {"type": "object"}}
+                    },
+                    "required": ["file_path", "total_score", "hit_count", "hits"]
+                }
+            },
             "file_paths": {"type": "array", "items": {"type": "string"}},
             "context_pack": context_pack_output_schema(),
             "status": {
@@ -592,7 +639,14 @@ fn tool_success_result(payload: Value, pretty: bool) -> Result<Value> {
     } else {
         serde_json::to_string(&payload)?
     };
-    Ok(json!({
+    Ok(tool_success_result_with_text(payload, text))
+}
+
+/// Build a tool result whose `structuredContent` is the machine-readable
+/// payload and whose text block is a separate rendering. Emitting the same JSON
+/// in both places doubled every search payload on the wire.
+fn tool_success_result_with_text(payload: Value, text: String) -> Value {
+    json!({
         "content": [
             {
                 "type": "text",
@@ -601,7 +655,7 @@ fn tool_success_result(payload: Value, pretty: bool) -> Result<Value> {
         ],
         "structuredContent": payload,
         "isError": false
-    }))
+    })
 }
 
 fn execute_ivygrep_status() -> Result<Value> {
@@ -1077,6 +1131,12 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
     if args.limit == Some(0) || args.limit.is_some_and(|limit| limit > 1000) {
         bail!("limit must be between 1 and 1000");
     }
+    if args
+        .hits_per_file
+        .is_some_and(|hits| !(1..=MAX_HITS_PER_FILE).contains(&hits))
+    {
+        bail!("hits_per_file must be between 1 and {MAX_HITS_PER_FILE}");
+    }
     if args.context.is_some_and(|context| context > 100) {
         bail!("context must be between 0 and 100");
     }
@@ -1091,6 +1151,9 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
     }
     if !wants_context_pack && args.since.is_some() {
         bail!("since requires output=context_pack");
+    }
+    if wants_context_pack && args.hits_per_file.is_some() {
+        bail!("hits_per_file requires output=hits");
     }
     if wants_context_pack
         && (requested_modes.into_iter().any(|enabled| enabled)
@@ -1120,10 +1183,34 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
     let workspace = current_workspace.clone();
     let _ = workspace.cleanup_stale_legacy_runtime_files();
 
+    let literal = args.literal.unwrap_or(false);
+    let regex = args.regex.unwrap_or(false);
+    let symbol_mode = if args.symbol.unwrap_or(false) {
+        Some(SymbolSearchMode::Definitions)
+    } else if args.refs.unwrap_or(false) {
+        Some(SymbolSearchMode::References)
+    } else if args.callers.unwrap_or(false) {
+        Some(SymbolSearchMode::Callers)
+    } else {
+        None
+    };
+    // `limit` counts result files. Retrieval APIs count hits, so over-fetch a
+    // bounded hit budget and group/cap afterwards.
+    let file_limit = args.limit.unwrap_or(DEFAULT_HITS_FILE_LIMIT);
+    let hits_per_file = args.hits_per_file.unwrap_or(DEFAULT_HITS_PER_FILE);
+    let ranked_mode = !literal
+        && !regex
+        && !matches!(
+            symbol_mode,
+            Some(SymbolSearchMode::References | SymbolSearchMode::Callers)
+        );
+    let hit_budget = hits_mode_hit_budget(file_limit, ranked_mode);
+    let search_limit = Some(hit_budget);
+
     let include_globs = parse_glob_csv(args.include.as_deref());
     let exclude_globs = parse_glob_csv(args.exclude.as_deref());
     let search_options = SearchOptions {
-        limit: args.limit,
+        limit: search_limit,
         context: args.context.unwrap_or(2),
         type_filter: args.type_filter.clone(),
         include_globs: include_globs.clone(),
@@ -1170,24 +1257,13 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
         return tool_success_result(payload, false);
     }
 
-    let literal = args.literal.unwrap_or(false);
-    let regex = args.regex.unwrap_or(false);
-    let symbol_mode = if args.symbol.unwrap_or(false) {
-        Some(SymbolSearchMode::Definitions)
-    } else if args.refs.unwrap_or(false) {
-        Some(SymbolSearchMode::References)
-    } else if args.callers.unwrap_or(false) {
-        Some(SymbolSearchMode::Callers)
-    } else {
-        None
-    };
     let daemon_request = if symbol_mode.is_some() {
         None
     } else if literal {
         Some(DaemonRequest::LiteralSearch {
             path: Some(workspace.root.clone()),
             query: query.to_string(),
-            limit: args.limit,
+            limit: search_limit,
             context: args.context.unwrap_or(2),
             type_filter: args.type_filter.clone(),
             include_globs: include_globs.clone(),
@@ -1200,7 +1276,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
         Some(DaemonRequest::RegexSearch {
             path: Some(workspace.root.clone()),
             pattern: query.to_string(),
-            limit: args.limit,
+            limit: search_limit,
             context: args.context.unwrap_or(2),
             type_filter: args.type_filter.clone(),
             include_globs: include_globs.clone(),
@@ -1213,7 +1289,7 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
         Some(DaemonRequest::Search {
             path: Some(workspace.root.clone()),
             query: query.to_string(),
-            limit: args.limit,
+            limit: search_limit,
             context: args.context.unwrap_or(2),
             type_filter: args.type_filter.clone(),
             include_globs: include_globs.clone(),
@@ -1282,11 +1358,12 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
     }
-    if let Some(l) = args.limit {
-        hits.truncate(l);
-    }
 
-    let mut grouped = group_hits_by_file(&hits, args.limit);
+    let BoundedHits {
+        files: mut grouped,
+        total_matches,
+        truncated,
+    } = bound_hits_by_file(&hits, file_limit, hits_per_file, hit_budget);
     let verbose = args.verbose.unwrap_or(false);
     let first_line_only = args.first_line_only.unwrap_or(false);
     let file_name_only = args.file_name_only.unwrap_or(false);
@@ -1325,6 +1402,20 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
             None => "hybrid",
         }
     };
+    let summary = HitsSummary {
+        workspace_root: &current_workspace.root,
+        query,
+        mode: mode_name,
+        total_matches,
+        truncated,
+        warnings: &search_warnings,
+        verbose,
+    };
+    let text = if file_name_only {
+        render_file_paths_text(&summary, &grouped)
+    } else {
+        render_hits_text(&summary, &grouped)
+    };
     let payload = if file_name_only {
         json!({
             "workspace_root": current_workspace.root,
@@ -1333,6 +1424,8 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
             "query": query,
             "mode": mode_name,
             "result_count": grouped.len(),
+            "total_matches": total_matches,
+            "truncated": truncated,
             "include": include_globs,
             "exclude": exclude_globs,
             "warnings": search_warnings,
@@ -1346,6 +1439,8 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
             "query": query,
             "mode": mode_name,
             "result_count": grouped.len(),
+            "total_matches": total_matches,
+            "truncated": truncated,
             "include": include_globs,
             "exclude": exclude_globs,
             "warnings": search_warnings,
@@ -1353,7 +1448,170 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
         })
     };
 
-    tool_success_result(payload, false)
+    Ok(tool_success_result_with_text(payload, text))
+}
+
+/// Hit budget requested from the search layer for one hits-mode call.
+///
+/// Ranked modes return score-ordered chunks spread across files, so a small
+/// multiple of `file_limit` fills the file list; the floor matches the CLI
+/// default so the default MCP call costs the same as `ig <query>`. Enumerating
+/// modes (literal, regex, references, callers) cluster many hits per file and
+/// need a deeper budget to reach `file_limit` distinct files.
+fn hits_mode_hit_budget(file_limit: usize, ranked_mode: bool) -> usize {
+    let budget = if ranked_mode {
+        file_limit
+            .saturating_mul(RANKED_HIT_OVERFETCH)
+            .max(crate::search::DEFAULT_SEARCH_LIMIT)
+    } else {
+        file_limit
+            .saturating_mul(ENUMERATING_HIT_OVERFETCH)
+            .max(MIN_ENUMERATING_HIT_BUDGET)
+    };
+    budget.min(crate::search::MAX_SEARCH_RESULT_LIMIT)
+}
+
+struct BoundedHits {
+    files: Vec<FileSearchResult>,
+    /// Distinct files matched before `file_limit` was applied. A lower bound
+    /// when retrieval saturated `hit_budget`.
+    total_matches: usize,
+    /// Files were dropped, or retrieval saturated its hit budget so more files
+    /// may exist.
+    truncated: bool,
+}
+
+fn bound_hits_by_file(
+    hits: &[SearchHit],
+    file_limit: usize,
+    hits_per_file: usize,
+    hit_budget: usize,
+) -> BoundedHits {
+    let mut files = group_hits_by_file(hits, None);
+    let total_matches = files.len();
+    let budget_saturated = hits.len() >= hit_budget;
+    let truncated = total_matches > file_limit || budget_saturated;
+    files.truncate(file_limit);
+    for file in &mut files {
+        // With the retrieval budget exhausted, a dense file may hold matches
+        // that were never retrieved; its counts are lower bounds, not totals.
+        file.hit_count_is_lower_bound = budget_saturated;
+        if file.hits.len() > hits_per_file {
+            file.more_hits_in_file = file.hits.len() - hits_per_file;
+            file.hits.truncate(hits_per_file);
+        }
+    }
+    BoundedHits {
+        files,
+        total_matches,
+        truncated,
+    }
+}
+
+struct HitsSummary<'a> {
+    workspace_root: &'a Path,
+    query: &'a str,
+    mode: &'a str,
+    total_matches: usize,
+    truncated: bool,
+    warnings: &'a [String],
+    verbose: bool,
+}
+
+fn render_hits_header(summary: &HitsSummary<'_>, shown: usize, out: &mut String) {
+    use std::fmt::Write as _;
+    if shown == 0 {
+        let _ = writeln!(
+            out,
+            "No {} matches for \"{}\" in {}",
+            summary.mode,
+            summary.query,
+            summary.workspace_root.display()
+        );
+    } else {
+        // Retrieval that saturated its hit budget makes total_matches a lower
+        // bound; say so instead of printing a misleading "3 of 3".
+        let lower_bound = if summary.truncated && summary.total_matches <= shown {
+            "+"
+        } else {
+            ""
+        };
+        let _ = write!(
+            out,
+            "{shown} of {}{lower_bound} files for \"{}\" ({}) in {}",
+            summary.total_matches,
+            summary.query,
+            summary.mode,
+            summary.workspace_root.display()
+        );
+        if summary.truncated {
+            out.push_str("; truncated: narrow the query or scope path, or raise limit");
+        }
+        out.push('\n');
+    }
+    for warning in summary.warnings {
+        let _ = writeln!(out, "warning: {warning}");
+    }
+}
+
+/// Compact text rendering of grouped hits for LLM clients that read the text
+/// block rather than `structuredContent`. Carries paths, line ranges, and
+/// previews without JSON keys, escaping, scores, or per-hit path repetition.
+fn render_hits_text(summary: &HitsSummary<'_>, files: &[FileSearchResult]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    render_hits_header(summary, files.len(), &mut out);
+    for file in files {
+        let lower_bound = if file.hit_count_is_lower_bound {
+            "+"
+        } else {
+            ""
+        };
+        let _ = write!(
+            out,
+            "\n{}  ({}{lower_bound} hit{}",
+            file.file_path.display(),
+            file.hit_count,
+            if file.hit_count == 1 && !file.hit_count_is_lower_bound {
+                ""
+            } else {
+                "s"
+            }
+        );
+        if file.more_hits_in_file > 0 {
+            let _ = write!(
+                out,
+                ", {} shown, {}{lower_bound} more",
+                file.hits.len(),
+                file.more_hits_in_file
+            );
+        }
+        out.push_str(")\n");
+        for hit in &file.hits {
+            if hit.start_line == hit.end_line {
+                let _ = writeln!(out, "  L{}", hit.start_line);
+            } else {
+                let _ = writeln!(out, "  L{}-{}", hit.start_line, hit.end_line);
+            }
+            if summary.verbose && !hit.reason.is_empty() {
+                let _ = writeln!(out, "    reason: {}", hit.reason.trim());
+            }
+            for line in hit.preview.lines() {
+                let _ = writeln!(out, "    {line}");
+            }
+        }
+    }
+    out
+}
+
+fn render_file_paths_text(summary: &HitsSummary<'_>, files: &[FileSearchResult]) -> String {
+    let mut out = String::new();
+    render_hits_header(summary, files.len(), &mut out);
+    for file in files {
+        out.push_str(&file.file_path.to_string_lossy());
+        out.push('\n');
+    }
+    out
 }
 
 /// Detected framing mode for the stdio transport.
@@ -1532,6 +1790,7 @@ mod tests {
             budget_tokens: None,
             since: None,
             limit: None,
+            hits_per_file: None,
             context: Some(2),
             type_filter: None,
             regex: Some(false),
@@ -1606,6 +1865,7 @@ impl AccountManager {
                 budget_tokens: None,
                 since: None,
                 limit: Some(10),
+                hits_per_file: None,
                 context: Some(2),
                 type_filter: Some(type_filter.to_string()),
                 regex: None,
@@ -1720,6 +1980,7 @@ impl AccountManager {
             budget_tokens: Some(4_000),
             since: Some("main".to_string()),
             limit: None,
+            hits_per_file: None,
             context: Some(2),
             type_filter: None,
             regex: None,
@@ -1824,6 +2085,7 @@ impl AccountManager {
             budget_tokens: None,
             since: None,
             limit: Some(10),
+            hits_per_file: None,
             context: Some(2),
             type_filter: None,
             regex: None,
@@ -1857,6 +2119,7 @@ impl AccountManager {
                 budget_tokens: Some(4_000),
                 since: None,
                 limit: None,
+                hits_per_file: None,
                 context: Some(2),
                 type_filter: None,
                 regex: None,
@@ -1904,6 +2167,7 @@ impl AccountManager {
             budget_tokens: None,
             since: None,
             limit: Some(5),
+            hits_per_file: None,
             context: Some(2),
             type_filter: None,
             regex: Some(false),
@@ -1961,6 +2225,7 @@ impl AccountManager {
             budget_tokens: None,
             since: None,
             limit: Some(5),
+            hits_per_file: None,
             context: Some(2),
             type_filter: None,
             regex: Some(false),
@@ -1996,6 +2261,7 @@ impl AccountManager {
             budget_tokens: None,
             since: None,
             limit: Some(5),
+            hits_per_file: None,
             context: Some(2),
             type_filter: None,
             regex: Some(false),
@@ -2023,6 +2289,7 @@ impl AccountManager {
             budget_tokens: None,
             since: None,
             limit: Some(5),
+            hits_per_file: None,
             context: Some(2),
             type_filter: None,
             regex: Some(false),
@@ -2103,6 +2370,15 @@ impl AccountManager {
         );
         assert_eq!(schema["properties"]["limit"]["minimum"], 1);
         assert_eq!(schema["properties"]["limit"]["maximum"], 1000);
+        assert!(
+            schema["properties"]["limit"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("defaults to 10")
+        );
+        assert_eq!(schema["properties"]["hits_per_file"]["minimum"], 1);
+        assert_eq!(schema["properties"]["hits_per_file"]["maximum"], 100);
+        assert_eq!(schema["properties"]["hits_per_file"]["default"], 3);
         assert_eq!(schema["properties"]["context"]["minimum"], 0);
         assert_eq!(schema["properties"]["context"]["maximum"], 100);
         assert_eq!(schema["properties"]["context"]["default"], 2);
@@ -2113,6 +2389,13 @@ impl AccountManager {
         assert_eq!(
             tools[0]["outputSchema"]["properties"]["context_pack"]["additionalProperties"],
             false
+        );
+        let output_properties = &tools[0]["outputSchema"]["properties"];
+        assert_eq!(output_properties["total_matches"]["type"], "integer");
+        assert_eq!(output_properties["truncated"]["type"], "boolean");
+        assert_eq!(
+            output_properties["results"]["items"]["properties"]["more_hits_in_file"]["type"],
+            "integer"
         );
         assert_eq!(tools[0]["annotations"]["readOnlyHint"], false);
         assert_eq!(tools[1]["name"], "ig_status");
@@ -2275,6 +2558,7 @@ impl AccountManager {
             budget_tokens: None,
             since: None,
             limit: Some(5),
+            hits_per_file: None,
             context: Some(2),
             type_filter: Some("markdown".to_string()),
             regex: Some(true),
@@ -2326,6 +2610,7 @@ impl AccountManager {
             budget_tokens: None,
             since: None,
             limit: Some(5),
+            hits_per_file: None,
             context: Some(2),
             type_filter: None,
             regex: None,
@@ -2378,6 +2663,7 @@ impl AccountManager {
                 budget_tokens: None,
                 since: None,
                 limit: Some(5),
+                hits_per_file: None,
                 context: Some(2),
                 type_filter: None,
                 regex: None,
@@ -2409,6 +2695,7 @@ impl AccountManager {
                     budget_tokens: None,
                     since: None,
                     limit: Some(5),
+                    hits_per_file: None,
                     context: Some(2),
                     type_filter: None,
                     regex: None,
@@ -2440,6 +2727,7 @@ impl AccountManager {
             budget_tokens: None,
             since: None,
             limit: Some(5),
+            hits_per_file: None,
             context: Some(2),
             type_filter: None,
             regex: None,
@@ -2487,6 +2775,7 @@ impl AccountManager {
             budget_tokens: None,
             since: None,
             limit: Some(5),
+            hits_per_file: None,
             context: Some(2),
             type_filter: None,
             regex: Some(false),
@@ -2558,26 +2847,351 @@ impl AccountManager {
         assert_eq!(mcp_search_model(&workspace).dimensions(), 256);
     }
 
-    fn tool_json_payload(response: &Value) -> Value {
-        if let Some(payload) = response.get("structuredContent") {
-            let content = response
-                .get("content")
-                .and_then(|v| v.as_array())
-                .and_then(|arr| arr.first())
-                .and_then(|item| item.get("text"))
-                .and_then(|v| v.as_str())
-                .expect("tool response content text");
-            let text_payload: Value = serde_json::from_str(content).expect("valid JSON payload");
-            assert_eq!(payload.is_object(), text_payload.is_object());
-            return payload.clone();
+    fn synthetic_hit(file: &str, line: usize, score: f32) -> SearchHit {
+        SearchHit {
+            file_path: PathBuf::from(file),
+            start_line: line,
+            end_line: line + 2,
+            preview: format!("line {line}\nbody {line}\nend {line}"),
+            reason: String::new(),
+            score,
+            sources: vec!["literal".to_string()],
+            neural_requested: false,
+            neural_executed: false,
         }
-        let content = response
+    }
+
+    #[test]
+    fn hits_mode_hit_budget_scales_with_files_and_mode() {
+        assert_eq!(
+            hits_mode_hit_budget(DEFAULT_HITS_FILE_LIMIT, true),
+            crate::search::DEFAULT_SEARCH_LIMIT
+        );
+        assert_eq!(
+            hits_mode_hit_budget(1, true),
+            crate::search::DEFAULT_SEARCH_LIMIT
+        );
+        assert_eq!(hits_mode_hit_budget(40, true), 200);
+        assert_eq!(
+            hits_mode_hit_budget(DEFAULT_HITS_FILE_LIMIT, false),
+            MIN_ENUMERATING_HIT_BUDGET
+        );
+        assert_eq!(hits_mode_hit_budget(25, false), 500);
+        assert_eq!(
+            hits_mode_hit_budget(1000, false),
+            crate::search::MAX_SEARCH_RESULT_LIMIT
+        );
+        assert_eq!(
+            hits_mode_hit_budget(1000, true),
+            crate::search::MAX_SEARCH_RESULT_LIMIT
+        );
+    }
+
+    #[test]
+    fn bound_hits_by_file_applies_file_limit_and_per_file_cap() {
+        let mut hits = (1..=6)
+            .map(|line| synthetic_hit("busy.rs", line * 10, 1.0))
+            .collect::<Vec<_>>();
+        hits.push(synthetic_hit("quiet.rs", 1, 1.0));
+        hits.push(synthetic_hit("other.rs", 1, 1.0));
+
+        let saturated = bound_hits_by_file(&hits, 2, 3, hits.len());
+        assert!(saturated.truncated);
+        assert!(
+            saturated
+                .files
+                .iter()
+                .all(|file| file.hit_count_is_lower_bound),
+            "an exhausted retrieval budget makes every per-file count a lower bound"
+        );
+        let serialized = serde_json::to_value(&saturated.files).unwrap();
+        assert_eq!(serialized[0]["hit_count_is_lower_bound"], true);
+
+        let bounded = bound_hits_by_file(&hits, 2, 3, 1000);
+        assert_eq!(bounded.total_matches, 3);
+        assert!(bounded.truncated, "third file was dropped");
+        assert!(
+            bounded
+                .files
+                .iter()
+                .all(|file| !file.hit_count_is_lower_bound)
+        );
+        assert_eq!(bounded.files.len(), 2);
+        assert_eq!(bounded.files[0].file_path, PathBuf::from("busy.rs"));
+        assert_eq!(bounded.files[0].hit_count, 6);
+        assert_eq!(bounded.files[0].hits.len(), 3);
+        assert_eq!(bounded.files[0].more_hits_in_file, 3);
+        assert_eq!(bounded.files[1].more_hits_in_file, 0);
+        let serialized = serde_json::to_value(&bounded.files).unwrap();
+        assert_eq!(serialized[0]["more_hits_in_file"], 3);
+        assert!(
+            serialized[1].get("more_hits_in_file").is_none(),
+            "uncut files omit more_hits_in_file: {serialized:#}"
+        );
+        assert!(
+            serialized[0].get("hit_count_is_lower_bound").is_none(),
+            "exact counts omit the lower-bound flag: {serialized:#}"
+        );
+
+        let complete = bound_hits_by_file(&hits, 10, 10, 1000);
+        assert_eq!(complete.total_matches, 3);
+        assert!(!complete.truncated);
+        assert_eq!(complete.files[0].hits.len(), 6);
+        assert_eq!(complete.files[0].more_hits_in_file, 0);
+
+        // Retrieval that saturated its hit budget may hide more files.
+        let saturated = bound_hits_by_file(&hits, 10, 10, hits.len());
+        assert_eq!(saturated.total_matches, 3);
+        assert!(saturated.truncated);
+    }
+
+    #[test]
+    fn render_hits_text_is_compact_and_self_contained() {
+        let mut hits = (1..=4)
+            .map(|line| synthetic_hit("src/busy.rs", line * 10, 1.0))
+            .collect::<Vec<_>>();
+        hits.push(synthetic_hit("src/quiet.rs", 7, 1.0));
+        let bounded = bound_hits_by_file(&hits, 10, 3, 1000);
+        let summary = HitsSummary {
+            workspace_root: Path::new("/repo"),
+            query: "needle",
+            mode: "literal",
+            total_matches: bounded.total_matches,
+            truncated: bounded.truncated,
+            warnings: &["one workspace failed".to_string()],
+            verbose: false,
+        };
+        let text = render_hits_text(&summary, &bounded.files);
+        assert!(
+            text.starts_with("2 of 2 files for \"needle\" (literal) in /repo\n"),
+            "{text}"
+        );
+        assert!(text.contains("warning: one workspace failed\n"), "{text}");
+        assert!(
+            text.contains("src/busy.rs  (4 hits, 3 shown, 1 more)\n"),
+            "{text}"
+        );
+        assert!(text.contains("src/quiet.rs  (1 hit)\n"), "{text}");
+        assert!(
+            text.contains("  L10-12\n    line 10\n    body 10\n"),
+            "{text}"
+        );
+        assert!(!text.contains("\"file_path\""), "{text}");
+        let json = serde_json::to_string(&bounded.files).unwrap();
+        assert!(
+            text.len() * 4 < json.len() * 3,
+            "text ({}) should be materially smaller than JSON ({})",
+            text.len(),
+            json.len()
+        );
+
+        let saturated = render_hits_text(
+            &HitsSummary {
+                truncated: true,
+                warnings: &[],
+                ..summary
+            },
+            &bounded.files,
+        );
+        assert!(
+            saturated.starts_with("2 of 2+ files for \"needle\" (literal) in /repo; truncated"),
+            "{saturated}"
+        );
+
+        let empty = render_hits_text(
+            &HitsSummary {
+                total_matches: 0,
+                truncated: false,
+                warnings: &[],
+                ..summary
+            },
+            &[],
+        );
+        assert_eq!(empty, "No literal matches for \"needle\" in /repo\n");
+    }
+
+    #[test]
+    #[serial]
+    fn mcp_hits_mode_bounds_files_and_hits_per_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        // One busy file with six matching lines plus fourteen single-match files.
+        let busy = (0..6)
+            .map(|i| format!("pub fn needle_token_{i}() -> u32 {{ {i} }}\n"))
+            .collect::<String>();
+        std::fs::write(root.join("busy.rs"), busy).unwrap();
+        for i in 0..14 {
+            std::fs::write(
+                root.join(format!("file_{i:02}.rs")),
+                format!("pub fn other_{i}() -> u32 {{ needle_token_{i}() }}\n"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            root.join("unique.rs"),
+            "pub fn lonely_marker_fn() -> u32 { 7 }\n",
+        )
+        .unwrap();
+
+        let home = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("IVYGREP_HOME", home.path());
+            std::env::set_var("IVYGREP_NO_AUTOSPAWN", "1");
+        }
+
+        let search = |query: &str, limit: Option<usize>, hits_per_file: Option<usize>| {
+            execute_ivygrep_search(IvygrepSearchArgs {
+                query: Some(query.to_string()),
+                path: Some(root.to_string_lossy().to_string()),
+                output: None,
+                budget_tokens: None,
+                since: None,
+                limit,
+                hits_per_file,
+                context: Some(0),
+                type_filter: None,
+                regex: None,
+                literal: Some(true),
+                symbol: None,
+                refs: None,
+                callers: None,
+                include: None,
+                exclude: None,
+                first_line_only: None,
+                file_name_only: None,
+                verbose: None,
+                skip_gitignore: None,
+            })
+            .unwrap()
+        };
+
+        // (a) omitted limit: server-side default of 10 files, not 500 hits.
+        let response = search("needle_token", None, None);
+        let payload = tool_json_payload(&response);
+        let results = payload["results"].as_array().unwrap();
+        assert_eq!(results.len(), DEFAULT_HITS_FILE_LIMIT, "{payload:#}");
+        assert_eq!(payload["result_count"], DEFAULT_HITS_FILE_LIMIT);
+        // (c) truncation signals.
+        assert_eq!(payload["total_matches"], 15, "{payload:#}");
+        assert_eq!(payload["truncated"], true);
+        // (b) per-file cap on the busiest file.
+        let busy = &results[0];
+        assert_eq!(busy["file_path"], "busy.rs", "{payload:#}");
+        assert_eq!(busy["hit_count"], 6);
+        assert_eq!(
+            busy["hits"].as_array().unwrap().len(),
+            DEFAULT_HITS_PER_FILE
+        );
+        assert_eq!(busy["more_hits_in_file"], 3);
+        assert!(
+            results[1..]
+                .iter()
+                .all(|file| file.get("more_hits_in_file").is_none()),
+            "{payload:#}"
+        );
+        // (d) text block is a compact rendering, not the JSON payload again.
+        let text = tool_text(&response);
+        let structured_len = serde_json::to_string(&response["structuredContent"])
+            .unwrap()
+            .len();
+        assert!(!text.trim_start().starts_with('{'), "{text}");
+        assert!(!text.contains("\"file_path\""), "{text}");
+        assert!(!text.contains("structuredContent"), "{text}");
+        assert!(
+            text.contains("busy.rs  (6 hits, 3 shown, 3 more)"),
+            "{text}"
+        );
+        assert!(text.contains("truncated"), "{text}");
+        assert!(
+            text.len() * 2 < structured_len,
+            "text {} bytes vs structuredContent {structured_len} bytes",
+            text.len()
+        );
+
+        // limit counts files, not hits: two files, busy.rs still capped.
+        let payload = tool_json_payload(&search("needle_token", Some(2), None));
+        let paths = payload["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|file| file["file_path"].as_str().unwrap().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(paths.len(), 2, "{payload:#}");
+        assert_eq!(payload["results"][0]["hits"].as_array().unwrap().len(), 3);
+        assert_eq!(payload["truncated"], true);
+
+        // hits_per_file lifts the cap.
+        let payload = tool_json_payload(&search("needle_token", Some(1), Some(10)));
+        assert_eq!(payload["results"][0]["file_path"], "busy.rs");
+        assert_eq!(payload["results"][0]["hits"].as_array().unwrap().len(), 6);
+        assert!(payload["results"][0].get("more_hits_in_file").is_none());
+
+        // Nothing cut: truncated is false and total_matches equals result_count.
+        let payload = tool_json_payload(&search("lonely_marker_fn", None, None));
+        assert_eq!(payload["result_count"], 1);
+        assert_eq!(payload["total_matches"], 1);
+        assert_eq!(payload["truncated"], false);
+
+        // hits_per_file is validated and hits-mode only.
+        let error = dispatch(
+            "tools/call",
+            json!({
+                "name": "ig_search",
+                "arguments": {"query": "needle_token", "path": root, "hits_per_file": 0}
+            }),
+        )
+        .unwrap();
+        assert_eq!(error["isError"], true);
+        assert!(
+            error["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("hits_per_file must be between 1 and 100"),
+            "{error:#}"
+        );
+        let error = dispatch(
+            "tools/call",
+            json!({
+                "name": "ig_search",
+                "arguments": {
+                    "query": "needle_token",
+                    "path": root,
+                    "output": "context_pack",
+                    "hits_per_file": 3
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(error["isError"], true);
+        assert!(
+            error["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("hits_per_file requires output=hits"),
+            "{error:#}"
+        );
+
+        unsafe { std::env::remove_var("IVYGREP_NO_AUTOSPAWN") };
+    }
+
+    fn tool_text(response: &Value) -> &str {
+        response
             .get("content")
             .and_then(|v| v.as_array())
             .and_then(|arr| arr.first())
             .and_then(|item| item.get("text"))
             .and_then(|v| v.as_str())
-            .expect("tool response content text");
+            .expect("tool response content text")
+    }
+
+    fn tool_json_payload(response: &Value) -> Value {
+        let content = tool_text(response);
+        if let Some(payload) = response.get("structuredContent") {
+            assert!(payload.is_object(), "structuredContent must be an object");
+            assert!(!content.trim().is_empty(), "text content must not be empty");
+            return payload.clone();
+        }
         serde_json::from_str(content).expect("valid JSON payload")
     }
 

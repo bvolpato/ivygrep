@@ -6,6 +6,12 @@ All notable changes to ivygrep are documented in this file.
 
 ### Performance
 - Search responses no longer wait on background-enhancement bookkeeping: the needs check and worker trigger run after the hits are returned, at most once per workspace and mode every 10 seconds; verified worker identities are remembered for 30 seconds instead of forking `ps` on every liveness check; and the Merkle snapshot corruption check memoizes successful parses through a size/mtime sidecar instead of re-parsing the whole snapshot on every CLI query. Warm repeated CLI queries on a 205k-chunk index dropped from roughly 200-460 ms to 90-140 ms wall on the same host.
+- Cache the macOS power/thermal probe for five seconds instead of forking `pmset` twice per enhancement batch.
+- Daemon index and search requests take their workspace lease before a CPU permit, so requests parked behind a busy workspace no longer starve searches on other workspaces; uncontended search leases are still granted inline so the common query keeps a single blocking hop.
+- Concurrent daemon `Index` requests for one workspace coalesce into a single run, and a request that waited while the index generation advanced skips the redundant rescan only when the run that advanced it started after the request arrived; requests that arrived mid-walk run their own incremental rescan.
+- Daemon searches are cancelled when the client disconnects mid-request; CLI and MCP tag searches with request IDs and send `CancelSearch` on timeout or abandonment.
+- Daemon searches stop at a server-side deadline (`IVYGREP_SEARCH_DEADLINE_SECS`, default 60, `0` disables) and return the hits gathered so far with a warning.
+- MCP no longer blocks a tool call on a whole first index. `ig_search` enqueues the run on the daemon (`StartIndex`), waits at most `IVYGREP_MCP_INDEX_WAIT_SECS` (default 20), and otherwise returns a non-error `status: indexing` payload with progress and `retry_after_secs`; the MCP process never indexes locally while a daemon answers (including after a lost reply), and `ig_status` reports runs still queued on the daemon. Daemon protocol version 7; older daemons restart on the next request.
 
 ### Fixed
 - Neural enhancement now embeds whole chunks for the static and Model2Vec profiles (16 KiB safety cap) and sizes the cut for transformer profiles from their token window, instead of truncating every chunk at 1,024 characters. Notes and long functions no longer embed only their first lines; the identity change re-enhances existing neural vectors.
@@ -13,14 +19,8 @@ All notable changes to ivygrep are documented in this file.
 - Lowercase natural-language questions no longer return zero results on Markdown and notes corpora. The recommendation authority floor now adapts to the best authority that actually matched instead of assuming implementation files exist, and a sentence-initial capital letter no longer classifies a question as a precise identifier lookup.
 - Lexical retrieval no longer drops queries containing quotes, colons, parentheses, equals signs, or apostrophes. The indexed fields store no term positions, so Tantivy's query parser rejected every multi-token word in such queries and the primary BM25 variant (three quarters of the candidate budget) silently returned nothing; short punctuated queries (up to 24 distinct tokens: snippets, error strings, questions) are now built from analyzer tokens, with the parser reserved for explicit `AND`/`OR`/`NOT` syntax; long pasted prompts keep relying on their normalized expansions. Path-recall variants such as `error_handling` are built the same way instead of being rejected.
 - Hash-tier background enhancement no longer pauses on battery power, so semantic results are available on laptops instead of falling back to lexical-only search; `IVYGREP_ENHANCE_ON_BATTERY=1` keeps neural enhancement running on battery too.
-
-### Performance
-- Cache the macOS power/thermal probe for five seconds instead of forking `pmset` twice per enhancement batch.
-- Daemon index and search requests take their workspace lease before a CPU permit, so requests parked behind a busy workspace no longer starve searches on other workspaces; uncontended search leases are still granted inline so the common query keeps a single blocking hop.
-- Concurrent daemon `Index` requests for one workspace coalesce into a single run, and a request that waited while the index generation advanced skips the redundant rescan only when the run that advanced it started after the request arrived; requests that arrived mid-walk run their own incremental rescan.
-- Daemon searches are cancelled when the client disconnects mid-request; CLI and MCP tag searches with request IDs and send `CancelSearch` on timeout or abandonment.
-- Daemon searches stop at a server-side deadline (`IVYGREP_SEARCH_DEADLINE_SECS`, default 60, `0` disables) and return the hits gathered so far with a warning.
-- MCP no longer blocks a tool call on a whole first index. `ig_search` enqueues the run on the daemon (`StartIndex`), waits at most `IVYGREP_MCP_INDEX_WAIT_SECS` (default 20), and otherwise returns a non-error `status: indexing` payload with progress and `retry_after_secs`; the MCP process never indexes locally while a daemon answers (including after a lost reply), and `ig_status` reports runs still queued on the daemon. Daemon protocol version 7; older daemons restart on the next request.
+- MCP `ig_search` hits mode now defaults to 10 result files when `limit` is omitted, treats `limit` as a file count, caps hits per file (`hits_per_file`, default 3) with `more_hits_in_file`, and reports `total_matches` and `truncated`.
+- MCP search results no longer duplicate the full JSON payload in the text block; `structuredContent` stays machine-readable while text is a compact path, line-range, and preview rendering.
 
 ## [1.2.12] - 2026-08-20
 

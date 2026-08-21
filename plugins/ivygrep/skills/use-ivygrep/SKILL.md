@@ -36,5 +36,10 @@ Use one focused search only when context pack leaves a concrete gap:
 ig --literal "<identifier>" -n 10 /absolute/repository/path
 ```
 
+MCP `ig_search` with `output: hits` returns at most `limit` files (default 10)
+and `hits_per_file` hits per file (default 3). Check `truncated`,
+`total_matches`, and `more_hits_in_file`; narrow `query` or `path`, or raise
+`limit`, instead of repeating broad queries.
+
 Do not repeat broad synonymous queries. Continue with normal code inspection,
 implementation, and project validation after ivygrep identifies working set.

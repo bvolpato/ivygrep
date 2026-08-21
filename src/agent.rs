@@ -285,10 +285,17 @@ fn verify_mcp(executable: &Path) -> Result<SmokeResult> {
         }),
     )?;
     let search = receive_response(&receiver, 3)?;
-    let payload_text = search["result"]["content"][0]["text"]
-        .as_str()
-        .context("ig_search response omitted text payload")?;
-    let payload: Value = serde_json::from_str(payload_text).context("invalid ig_search payload")?;
+    // Current servers return the machine-readable payload in structuredContent
+    // and a compact text rendering; older servers only returned JSON text.
+    let payload: Value = match search["result"].get("structuredContent") {
+        Some(structured) if structured.is_object() => structured.clone(),
+        _ => {
+            let payload_text = search["result"]["content"][0]["text"]
+                .as_str()
+                .context("ig_search response omitted text payload")?;
+            serde_json::from_str(payload_text).context("invalid ig_search payload")?
+        }
+    };
     let result_count = payload["result_count"]
         .as_u64()
         .context("ig_search response omitted result_count")?;
