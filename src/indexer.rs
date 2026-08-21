@@ -1031,26 +1031,32 @@ fn index_workspace_inner(
             .ok()
             .map(Arc::new)
     });
+    // Determine which stores to write to: overlay or main
+    let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
+    let is_fresh_index = !workspace_is_indexed(workspace);
+    // A from-scratch main index has no prior stores or snapshot to consult:
+    // the diff already lists every file, so dependent discovery cannot add
+    // anything and only costs a serial read of the whole tree.
+    let builds_from_scratch = !use_overlay && is_fresh_index;
     add_included_file_dependents(
         workspace,
         &mut diff,
         &clear_overlay_paths,
         current_snapshot.as_deref(),
+        builds_from_scratch,
     )?;
     add_file_edge_dependents(
         workspace,
         &mut diff,
         &clear_overlay_paths,
         current_snapshot.as_deref(),
+        builds_from_scratch,
     )?;
 
     let discovery_ms = index_started.elapsed().as_secs_f64() * 1_000.0;
     let persist_started = std::time::Instant::now();
 
-    // Determine which stores to write to: overlay or main
-    let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
-    let is_fresh_index = !workspace_is_indexed(workspace);
-    let fresh_staging = if !use_overlay && is_fresh_index {
+    let fresh_staging = if builds_from_scratch {
         Some(FreshIndexStaging::create(workspace)?)
     } else {
         None
@@ -1538,10 +1544,16 @@ fn add_included_file_dependents(
     diff: &mut MerkleDiff,
     clear_overlay_paths: &[PathBuf],
     current_snapshot: Option<&MerkleSnapshot>,
+    builds_from_scratch: bool,
 ) -> Result<()> {
     let Some(current_snapshot) = current_snapshot else {
         return Ok(());
     };
+    // Fresh index: every owner in the snapshot is already in the changed set
+    // and no prior stores exist to query, so there is nothing to add.
+    if builds_from_scratch {
+        return Ok(());
+    }
 
     let mut changed_paths = diff
         .added_or_modified
@@ -1632,15 +1644,41 @@ fn add_included_file_dependents(
     Ok(())
 }
 
+/// Resolution signatures for the manifests among `paths`. Only paths that can
+/// carry a signature (`has_manifest_resolution_signature`) are read from disk;
+/// everything else is skipped without touching the filesystem.
+fn current_manifest_signatures<'a>(
+    root: &Path,
+    paths: impl IntoIterator<Item = &'a PathBuf>,
+) -> HashMap<String, String> {
+    paths
+        .into_iter()
+        .filter(|path| crate::context_graph::has_manifest_resolution_signature(path))
+        .filter_map(|path| {
+            let content = fs::read_to_string(root.join(path)).ok()?;
+            crate::context_graph::manifest_resolution_signature(path, &content)
+                .map(|signature| (index_path_string(path), signature))
+        })
+        .collect()
+}
+
 fn add_file_edge_dependents(
     workspace: &Workspace,
     diff: &mut MerkleDiff,
     clear_overlay_paths: &[PathBuf],
     current_snapshot: Option<&MerkleSnapshot>,
+    builds_from_scratch: bool,
 ) -> Result<()> {
     let Some(current_snapshot) = current_snapshot else {
         return Ok(());
     };
+    // Fresh index: `changed` covers every snapshot path (owners are a subset
+    // of it), no stored edges, signatures, or unresolved specs exist yet, and
+    // every manifest is indexed in this same run. Skipping avoids a serial
+    // read of the whole tree before the parallel producer starts.
+    if builds_from_scratch {
+        return Ok(());
+    }
     if diff.added_or_modified.is_empty()
         && diff.deleted.is_empty()
         && clear_overlay_paths.is_empty()
@@ -1669,17 +1707,13 @@ fn add_file_edge_dependents(
         .iter()
         .map(|(path, _)| index_path_string(path))
         .collect::<HashSet<_>>();
-    let current_manifest_signatures = diff
-        .added_or_modified
-        .iter()
-        .map(|(path, _)| path)
-        .chain(clear_overlay_paths)
-        .filter_map(|path| {
-            let content = fs::read_to_string(workspace.root.join(path)).ok()?;
-            crate::context_graph::manifest_resolution_signature(path, &content)
-                .map(|signature| (index_path_string(path), signature))
-        })
-        .collect::<HashMap<_, _>>();
+    let current_manifest_signatures = current_manifest_signatures(
+        &workspace.root,
+        diff.added_or_modified
+            .iter()
+            .map(|(path, _)| path)
+            .chain(clear_overlay_paths),
+    );
     let candidate_lookup_keys = diff
         .added_or_modified
         .iter()
@@ -4403,6 +4437,77 @@ mod tests {
             )
             .unwrap();
         assert_eq!(edge, 1);
+    }
+
+    #[test]
+    fn current_manifest_signatures_only_reads_resolution_manifests() {
+        let root = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("crates/core/src")).unwrap();
+        fs::create_dir_all(root.path().join("services/api")).unwrap();
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[workspace]\nmembers = ['crates/core']\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("crates/core/Cargo.toml"),
+            "[package]\nname = 'core'\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("services/api/go.mod"),
+            "module example.com/api\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("crates/core/src/lib.rs"),
+            "pub fn run() {}\n",
+        )
+        .unwrap();
+        fs::write(root.path().join("package.json"), "{\"name\": \"web\"}\n").unwrap();
+        // Non-manifest entries drop out regardless of readability: a source
+        // file, a directory, a missing path, and a non-UTF-8 blob.
+        fs::write(
+            root.path().join("services/api/blob.bin"),
+            [0xff, 0xfe, 0x00],
+        )
+        .unwrap();
+
+        let paths = [
+            "Cargo.toml",
+            "crates/core/Cargo.toml",
+            "services/api/go.mod",
+            "crates/core/src/lib.rs",
+            "package.json",
+            "services/api",
+            "missing/main.go",
+            "services/api/blob.bin",
+        ]
+        .map(PathBuf::from);
+        let signatures = current_manifest_signatures(root.path(), paths.iter());
+
+        let mut keys = signatures.keys().cloned().collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "Cargo.toml".to_string(),
+                "crates/core/Cargo.toml".to_string(),
+                "services/api/go.mod".to_string(),
+            ]
+        );
+        assert_eq!(
+            signatures.get("crates/core/Cargo.toml").map(String::as_str),
+            crate::context_graph::manifest_resolution_signature(
+                Path::new("crates/core/Cargo.toml"),
+                "[package]\nname = 'core'\n",
+            )
+            .as_deref()
+        );
+        assert_eq!(
+            signatures.get("services/api/go.mod").map(String::as_str),
+            Some("go\0example.com/api")
+        );
     }
 
     #[test]

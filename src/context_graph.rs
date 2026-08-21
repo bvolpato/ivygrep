@@ -361,6 +361,17 @@ pub(crate) fn is_manifest_path(path: &Path) -> bool {
         })
 }
 
+/// Manifest file names whose contents feed `manifest_resolution_signature`.
+/// Kept next to it so callers can decide whether a path is worth reading
+/// before touching disk; every other path yields no signature.
+const RESOLUTION_SIGNATURE_MANIFEST_NAMES: &[&str] = &["Cargo.toml", "go.mod", "pubspec.yaml"];
+
+pub(crate) fn has_manifest_resolution_signature(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|name| RESOLUTION_SIGNATURE_MANIFEST_NAMES.contains(&name))
+}
+
 pub(crate) fn manifest_resolution_signature(path: &Path, content: &str) -> Option<String> {
     match path.file_name().and_then(|value| value.to_str())? {
         "Cargo.toml" => {
@@ -2568,6 +2579,57 @@ mod tests {
                 .iter()
                 .any(|edge| edge.target_path == Path::new("guide.md"))
         );
+    }
+
+    #[test]
+    fn manifest_resolution_signature_predicate_matches_signature_support() {
+        for path in [
+            "Cargo.toml",
+            "crates/core/Cargo.toml",
+            "go.mod",
+            "services/api/go.mod",
+            "pubspec.yaml",
+            "apps/mobile/pubspec.yaml",
+        ] {
+            let path = Path::new(path);
+            assert!(
+                has_manifest_resolution_signature(path),
+                "{}",
+                path.display()
+            );
+            assert!(
+                manifest_resolution_signature(path, "").is_some(),
+                "{}",
+                path.display()
+            );
+        }
+        for path in [
+            "src/main.rs",
+            "main.go",
+            "lib/app.dart",
+            "package.json",
+            "pyproject.toml",
+            "pom.xml",
+            "build.gradle",
+            "Cargo.lock",
+            "go.sum",
+            "pubspec.lock",
+            "cargo.toml",
+            "docs/Cargo.toml.md",
+            "README.md",
+        ] {
+            let path = Path::new(path);
+            assert!(
+                !has_manifest_resolution_signature(path),
+                "{}",
+                path.display()
+            );
+            assert!(
+                manifest_resolution_signature(path, "[package]\nname = 'x'\n").is_none(),
+                "{}",
+                path.display()
+            );
+        }
     }
 
     #[test]

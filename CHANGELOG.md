@@ -4,6 +4,9 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Performance
+- Fresh indexes skip the serial dependent-discovery pass, and incremental runs read only `Cargo.toml`/`go.mod`/`pubspec.yaml` for manifest resolution signatures instead of every changed file.
+
 ## [1.2.12] - 2026-08-20
 
 ### Security
