@@ -43,6 +43,10 @@ Useful environment variables:
 
 - `IVYGREP_HOME`: isolate indexes and configuration during testing.
 - `IVYGREP_NO_AUTOSPAWN=1`: prevent daemon auto-start.
+- `IVYGREP_ENHANCE_ON_BATTERY=1`: keep background neural enhancement running on
+  battery power (macOS pauses it by default; the hash tier never pauses for battery).
+- `IVYGREP_ENHANCE_MAX_LOAD_RATIO`: load-average multiple of CPU count that pauses
+  background enhancement (default `2.0`; `0` disables).
 - `CARGO_BUILD_JOBS`: cap local build concurrency.
 - `RUST_TEST_THREADS`: cap test concurrency.
 

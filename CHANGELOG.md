@@ -9,6 +9,10 @@ All notable changes to ivygrep are documented in this file.
 - Neural vector stores now build with USearch's default HNSW graph instead of the sparse hash-tier graph. The default 256-dimensional F16 neural profile matched the hash store's shape, which cut neural ANN recall@10 to about 0.24 on clustered vectors. Existing neural vectors re-enhance automatically through a neural identity bump.
 - Lowercase natural-language questions no longer return zero results on Markdown and notes corpora. The recommendation authority floor now adapts to the best authority that actually matched instead of assuming implementation files exist, and a sentence-initial capital letter no longer classifies a question as a precise identifier lookup.
 - Lexical retrieval no longer drops queries containing quotes, colons, parentheses, equals signs, or apostrophes. The indexed fields store no term positions, so Tantivy's query parser rejected every multi-token word in such queries and the primary BM25 variant (three quarters of the candidate budget) silently returned nothing; short punctuated queries (up to 24 distinct tokens: snippets, error strings, questions) are now built from analyzer tokens, with the parser reserved for explicit `AND`/`OR`/`NOT` syntax; long pasted prompts keep relying on their normalized expansions. Path-recall variants such as `error_handling` are built the same way instead of being rejected.
+- Hash-tier background enhancement no longer pauses on battery power, so semantic results are available on laptops instead of falling back to lexical-only search; `IVYGREP_ENHANCE_ON_BATTERY=1` keeps neural enhancement running on battery too.
+
+### Performance
+- Cache the macOS power/thermal probe for five seconds instead of forking `pmset` twice per enhancement batch.
 
 ## [1.2.12] - 2026-08-20
 
