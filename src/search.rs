@@ -1382,6 +1382,7 @@ struct LexicalQueryExecutor<'a> {
     conjunctive_numeric_query: bool,
     scope_filter: Option<&'a WorkspaceScope>,
     glob_path_filter: &'a GlobPathQueryFilter,
+    include_globs: &'a [String],
     can_pushdown_languages: bool,
     allowed_languages: &'a [String],
     searchers: &'a [tantivy::Searcher],
@@ -1413,6 +1414,12 @@ impl LexicalQueryExecutor<'_> {
         parsed_query = constrain_query_to_scope(parsed_query, self.fields, self.scope_filter)?;
         parsed_query =
             constrain_query_to_glob_paths(parsed_query, self.fields, self.glob_path_filter);
+        parsed_query = constrain_query_to_broad_extension_globs(
+            parsed_query,
+            self.fields,
+            self.glob_path_filter,
+            self.include_globs,
+        )?;
 
         if self.can_pushdown_languages && !self.allowed_languages.is_empty() {
             let lang_queries = self
@@ -2625,6 +2632,37 @@ fn constrain_query_to_glob_paths(
     } else {
         Box::new(BooleanQuery::new(clauses))
     }
+}
+
+fn constrain_query_to_broad_extension_globs(
+    query: Box<dyn Query>,
+    fields: &TantivyFields,
+    filter: &GlobPathQueryFilter,
+    include_globs: &[String],
+) -> Result<Box<dyn Query>> {
+    if filter.included_paths.is_some() || include_globs.is_empty() {
+        return Ok(query);
+    }
+
+    let mut extensions = Vec::with_capacity(include_globs.len());
+    for glob in include_globs {
+        let Some(IndexedGlobPath::Languages(_)) = indexed_glob_path_filter(glob) else {
+            return Ok(query);
+        };
+        let Some(extension) = glob.trim().strip_prefix("*.") else {
+            return Ok(query);
+        };
+        let pattern = format!(r".*\.{}", regex::escape(extension));
+        extensions.push((
+            Occur::Should,
+            Box::new(RegexQuery::from_pattern(&pattern, fields.file_path)?) as Box<dyn Query>,
+        ));
+    }
+
+    Ok(Box::new(BooleanQuery::new(vec![
+        (Occur::Must, query),
+        (Occur::Must, Box::new(BooleanQuery::new(extensions))),
+    ])))
 }
 
 fn is_definition_kind(kind: &str) -> bool {
@@ -5812,6 +5850,74 @@ mod tests {
             assert_eq!(hybrid_hits.len(), 1);
             assert_eq!(hybrid_hits[0].file_path, PathBuf::from("scoped/match.rs"));
         }
+    }
+
+    #[test]
+    #[serial]
+    fn broad_extension_globs_filter_override_languages_before_topdocs() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        std::fs::write(
+            root.path().join("Dockerfile.rs"),
+            "FROM scratch\n# targettoken\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("match.rs"),
+            "pub fn relevant() { let _ = \"targettoken\"; }\n",
+        )
+        .unwrap();
+        for index in 0..8 {
+            std::fs::write(
+                root.path().join(format!("noise_{index}.rb")),
+                "targettoken overfitneedle precisionneedle\n",
+            )
+            .unwrap();
+        }
+
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        let context = SearchContext::load(&workspace, None, false).unwrap();
+        let parser = QueryParser::for_index(&context.indexes[0], vec![context.fields.text]);
+        let allowed_languages = crate::chunking::languages_for_extension_glob("rs")
+            .unwrap()
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        // Broad globs deliberately discard the exact-path term set once it
+        // overflows. Simulate that state without indexing 10,001 fixture files.
+        let glob_path_filter = GlobPathQueryFilter::default();
+        let include_globs = vec!["*.rs".to_string()];
+        let executor = LexicalQueryExecutor {
+            fields: &context.fields,
+            parser: &parser,
+            conjunctive_numeric_query: false,
+            scope_filter: None,
+            glob_path_filter: &glob_path_filter,
+            include_globs: &include_globs,
+            can_pushdown_languages: true,
+            allowed_languages: &allowed_languages,
+            searchers: &context.searchers,
+        };
+
+        let mut paths = executor
+            .collect_docs("targettoken overfitneedle precisionneedle", 10)
+            .unwrap()
+            .into_iter()
+            .map(|(_, _, document)| {
+                fetch_chunk_by_id(document, &context.fields)
+                    .unwrap()
+                    .file_path
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        assert_eq!(
+            paths,
+            [PathBuf::from("Dockerfile.rs"), PathBuf::from("match.rs")]
+        );
     }
 
     #[test]

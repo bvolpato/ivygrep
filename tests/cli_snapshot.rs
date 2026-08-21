@@ -544,6 +544,77 @@ fn cli_search_and_context_accept_brace_aware_globs() {
 
 #[test]
 #[serial]
+fn cli_extension_glob_keeps_filename_override_before_and_after_hash_enhancement() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("workspace");
+    let home = tmp.path().join("ivygrep_home");
+    init_git_repo(&root);
+    std::fs::write(
+        root.join("Dockerfile.rs"),
+        "FROM rust:1.85\n# deployment override resilience sentinel\n",
+    )
+    .unwrap();
+    std::fs::write(root.join("ordinary.rs"), "pub fn unrelated_source() {}\n").unwrap();
+
+    Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .env("IVYGREP_DISABLE_BACKGROUND_ENHANCEMENT", "1")
+        .args(["--add", "--hash", "--no-watch", "."])
+        .assert()
+        .success();
+
+    unsafe { std::env::set_var("IVYGREP_HOME", &home) };
+    let workspace = Workspace::resolve(&root).unwrap();
+    assert!(workspace.needs_hash_enhancement());
+
+    let assert_override_is_found = |mode: &str| {
+        let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+            .current_dir(&root)
+            .env("IVYGREP_HOME", &home)
+            .env("IVYGREP_NO_AUTOSPAWN", "1")
+            .env("IVYGREP_DISABLE_BACKGROUND_ENHANCEMENT", "1")
+            .args([
+                "--json",
+                mode,
+                "--include",
+                "*.rs",
+                "deployment override resilience sentinel",
+            ])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let results: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert!(
+            results.as_array().unwrap().iter().any(|result| result
+                .get("file_path")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|path| path.ends_with("Dockerfile.rs"))),
+            "{mode} extension glob lost filename override: {results:#}"
+        );
+    };
+
+    assert_override_is_found("--lexical-only");
+    assert_override_is_found("--hash");
+
+    Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+        .current_dir(&root)
+        .env("IVYGREP_HOME", &home)
+        .env("CI", "1")
+        .args(["--enhance-hash-internal", root.to_str().unwrap()])
+        .assert()
+        .success();
+    assert!(!workspace.needs_hash_enhancement());
+
+    assert_override_is_found("--lexical-only");
+    assert_override_is_found("--hash");
+}
+
+#[test]
+#[serial]
 fn cli_context_graph_tracks_dependencies_across_incremental_reindex() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("workspace");
