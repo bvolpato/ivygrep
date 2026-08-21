@@ -8,6 +8,7 @@
 //!    or use [`detect_text_only`] for languages without structural boundaries.
 //! 4. Done — indexing, search, and MCP pick it up automatically.
 
+use std::collections::HashSet;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
@@ -20,7 +21,7 @@ const MIN_PRINTABLE_RATIO: f32 = 0.85;
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub enum ChunkKind {
     Function,
     Class,
@@ -553,10 +554,12 @@ fn scan_minified_run(no_newline_run: &mut usize, bytes: &[u8]) -> bool {
 /// comments while still absorbing normal doc-comments.
 const MAX_LEADING_COMMENT_LINES: usize = 20;
 
-/// Keep structural chunks small enough for lexical ranking and embedding
-/// backends that truncate long inputs.
-const MAX_STRUCTURAL_CHUNK_LINES: usize = 48;
-const MAX_STRUCTURAL_CHUNK_BYTES: usize = 1536;
+/// Split genuinely large definitions while preserving ordinary complete
+/// functions as one lexical document. Small windows distort corpus-wide BM25
+/// statistics and fragment the cross-language evidence needed for retrieval.
+const MAX_STRUCTURAL_CHUNK_LINES: usize = 128;
+const MAX_STRUCTURAL_CHUNK_BYTES: usize = 4096;
+const MAX_PARENT_OVERVIEW_LINES: usize = 48;
 const STRUCTURAL_CHUNK_OVERLAP_LINES: usize = 8;
 
 /// Only very large BUILD-like sources benefit from per-target AST chunks.
@@ -862,6 +865,12 @@ fn try_tree_sitter_chunk_source_with_timeout(
         return None;
     }
 
+    // Multiple Tree-sitter captures can describe the exact same malformed
+    // source span. Keep overlapping parent/child definitions, but never let
+    // duplicate captures become extra lexical documents or embedding vectors.
+    let mut unique_ranges = HashSet::with_capacity(ranges.len());
+    ranges.retain(|(start, end, kind)| unique_ranges.insert((*start, *end, kind.clone())));
+
     // Sort by start line; keep overlapping structural chunks (impl+fn).
     ranges.sort_by_key(|r| r.0);
 
@@ -957,7 +966,7 @@ fn try_tree_sitter_chunk_source_with_timeout(
             // Retain one bounded structural overview. It keeps the parent
             // declaration, early documentation, and nearby child signatures
             // together without indexing the entire enclosing body again.
-            let overview_end = (start + MAX_STRUCTURAL_CHUNK_LINES - 1).min(safe_end);
+            let overview_end = (start + MAX_PARENT_OVERVIEW_LINES - 1).min(safe_end);
             push_bounded_structural_chunks(
                 &mut chunks,
                 rel_path,
@@ -2123,6 +2132,41 @@ pub fn calculate_total(amount: f64) -> f64 {
     }
 
     #[test]
+    fn ordinary_structural_definitions_keep_their_complete_lexical_document() {
+        let mut source = String::from("pub fn reconcile_customer_payments() {\n");
+        for index in 0..36 {
+            source.push_str(&format!(
+                "    reconcile_payment_record_{index:03}(customer_account, payment_ledger);\n"
+            ));
+        }
+        source.push_str("}\n");
+
+        let chunks = chunk_source(Path::new("src/payments.rs"), &source);
+        let functions = chunks
+            .iter()
+            .filter(|chunk| chunk.kind == ChunkKind::Function)
+            .collect::<Vec<_>>();
+
+        assert_eq!(functions.len(), 1);
+        assert!(functions[0].text.contains("reconcile_payment_record_000"));
+        assert!(functions[0].text.contains("reconcile_payment_record_035"));
+    }
+
+    #[test]
+    fn malformed_cpp_prose_does_not_duplicate_identical_class_captures() {
+        let source = "#include <memory>\n\nclass WidgetImpl {};\n\nclass Widget {\npublic:\n  Widget();\n\nprivate:\n  WidgetImpl* implementation;\n};\n\nThe class Widget class wrapper prevents creating a new Widget class handle within the WidgetImpl class destructor.\n";
+        let chunks = chunk_source(Path::new("src/widget.cpp"), source);
+        let prose_classes = chunks
+            .iter()
+            .filter(|chunk| {
+                chunk.kind == ChunkKind::Class && chunk.start_line == 13 && chunk.end_line == 13
+            })
+            .count();
+
+        assert_eq!(prose_classes, 1);
+    }
+
+    #[test]
     fn oversized_tree_sitter_functions_are_bounded_without_losing_the_tail() {
         let mut source =
             String::from("/// Reconcile every record safely.\npub fn reconcile_every_record() {\n");
@@ -2144,7 +2188,8 @@ pub fn calculate_total(amount: f64) -> f64 {
         }));
         assert!(functions.iter().any(|chunk| {
             chunk.text.contains("recover_final_semantic_sentinel")
-                && chunk.start_line > MAX_STRUCTURAL_CHUNK_LINES
+                && chunk.start_line
+                    > MAX_STRUCTURAL_CHUNK_LINES.saturating_sub(STRUCTURAL_CHUNK_OVERLAP_LINES)
         }));
         assert!(functions.windows(2).all(|pair| {
             pair[1].start_line <= pair[0].end_line && pair[1].start_line > pair[0].start_line

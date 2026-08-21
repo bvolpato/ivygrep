@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "profile": "public-core",
+  "required_modes": ["lexical", "hash", "hybrid", "blended", "neural"],
+  "canary_modes": ["lexical", "hybrid"],
+  "datasets": {
+    "codefeedback-st": {
+      "minimum_ndcg_at_10": 0.62,
+      "minimum_recall_at_20": 0.72,
+      "canary_minimum_ndcg_at_10": 0.75,
+      "retention_modes": ["lexical", "hash", "hybrid", "blended"],
+      "retained_query_ids": [
+        "q115868",
+        "q127754",
+        "q75973",
+        "q85256",
+        "q98484"
+      ]
+    },
+    "codetrans-contest": {
+      "minimum_ndcg_at_10": 0.365,
+      "minimum_recall_at_20": 0.50,
+      "canary_minimum_ndcg_at_10": 0.48,
+      "retention_modes": ["lexical", "hash", "hybrid", "blended", "neural"],
+      "retained_query_ids": ["q142", "q145", "q313", "q463", "q471"]
+    },
+    "codetrans-dl": {
+      "minimum_ndcg_at_10": 0.22,
+      "minimum_recall_at_20": 0.55
+    },
+    "cosqa": {
+      "minimum_ndcg_at_10": 0.14,
+      "minimum_recall_at_20": 0.35
+    }
+  }
+}

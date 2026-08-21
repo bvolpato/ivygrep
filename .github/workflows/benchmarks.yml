@@ -160,6 +160,34 @@ jobs:
           path: ${{ runner.temp }}/current-head-relevance.json
           if-no-files-found: warn
 
+      - name: Guard pinned public retrieval canary
+        if: steps.benchmark-changes.outputs.required == 'true'
+        timeout-minutes: 12
+        env:
+          HF_HOME: ${{ runner.temp }}/ivygrep-benchmark-hf-cache
+          PUBLIC_RELEVANCE_REPORT: ${{ runner.temp }}/public-relevance-canary.json
+        run: |
+          python3 scripts/run_public_relevance_canary.py \
+            --binary target/release/ig \
+            --datasets-root "$RUNNER_TEMP/public-relevance-canary-datasets" \
+            --output "$PUBLIC_RELEVANCE_REPORT"
+          jq -r '
+            "### Pinned public retrieval canary",
+            "",
+            "| Dataset | Mode | Retained queries | nDCG@10 | Recall@20 |",
+            "| --- | --- | ---: | ---: | ---: |",
+            (.results[] |
+              "| \(.dataset) | \(.mode) | \(.queries) | \(.ndcg_at_10) | \(.recall_at_20) |")
+          ' "$PUBLIC_RELEVANCE_REPORT" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload public retrieval canary evidence
+        if: always() && steps.benchmark-changes.outputs.required == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: public-relevance-canary
+          path: ${{ runner.temp }}/public-relevance-canary.json
+          if-no-files-found: warn
+
       - name: Report paired benchmark deltas
         if: always() && steps.benchmark-changes.outputs.required == 'true'
         env:

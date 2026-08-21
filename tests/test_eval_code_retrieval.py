@@ -13,6 +13,16 @@ SPEC.loader.exec_module(eval_code_retrieval)
 
 
 class RetrievalMetricsTest(unittest.TestCase):
+    def test_query_selection_preserves_dataset_order_and_rejects_missing_ids(self):
+        queries = [{"_id": "q2"}, {"_id": "q1"}, {"_id": "q3"}]
+        self.assertEqual(
+            eval_code_retrieval.selected_queries(queries, ["q1", "q2", "q1"]),
+            queries[:2],
+        )
+        self.assertIs(eval_code_retrieval.selected_queries(queries, []), queries)
+        with self.assertRaisesRegex(ValueError, "missing: q4"):
+            eval_code_retrieval.selected_queries(queries, ["q4"])
+
     def test_graded_metrics_reward_correct_order(self):
         judgments = {"best": 3, "related": 1}
         good = eval_code_retrieval.score_query(["best", "related"], judgments)
