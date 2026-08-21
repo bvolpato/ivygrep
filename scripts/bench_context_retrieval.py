@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
@@ -359,6 +360,38 @@ def summarize_mode(mode: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def constant_topk_baseline(tasks: list[dict[str, Any]], k: int) -> dict[str, Any]:
+    """Score the K most frequent gold paths in the fixture as a constant answer.
+
+    This is an oracle prior, not a retriever: it reads the labels. Any retriever
+    that cannot beat it by a margin is not using the task text.
+    """
+    if k < 1:
+        raise ValueError("constant baseline k must be >= 1")
+    counts = Counter(path for task in tasks for path in task["expected_paths"])
+    selected = [path for path, _ in sorted(counts.items(), key=lambda item: (-item[1], item[0]))][:k]
+    rows = [
+        {**task, **retrieval_metrics(selected, task["expected_paths"])} for task in tasks
+    ]
+    roles = sorted({role for row in rows for role in row["role_recall"]})
+    return {
+        "mode": "constant-topk",
+        "k": k,
+        "paths": selected,
+        "queries": len(rows),
+        "mean_recall": statistics.fmean(row["recall"] for row in rows),
+        "mean_precision": statistics.fmean(row["precision"] for row in rows),
+        "mean_reciprocal_rank": statistics.fmean(row["reciprocal_rank"] for row in rows),
+        "zero_recall_rate": sum(row["recall"] == 0 for row in rows) / len(rows),
+        "mean_role_recall": {
+            role: statistics.fmean(
+                row["role_recall"][role] for row in rows if role in row["role_recall"]
+            )
+            for role in roles
+        },
+    }
+
+
 def evaluate_tasks(
     binary: Path,
     repo: Path,
@@ -403,6 +436,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--budget", type=int, default=8_000)
     parser.add_argument("--search-limit", type=int, default=20)
     parser.add_argument("--modes", default="search,context")
+    parser.add_argument(
+        "--baseline",
+        choices=["none", "constant-topk"],
+        default="constant-topk",
+        help="Label-derived constant answer scored next to ivygrep (default: constant-topk).",
+    )
+    parser.add_argument("--baseline-k", type=int, default=5)
+    parser.add_argument(
+        "--min-margin-over-baseline",
+        type=float,
+        default=None,
+        help=(
+            "Gate: context mean_recall must exceed the baseline mean_recall by this "
+            "margin. Off by default; the baseline is always scored and reported."
+        ),
+    )
     parser.add_argument("--min-context-recall", type=float)
     parser.add_argument("--min-context-primary-recall", type=float)
     parser.add_argument("--min-context-test-recall", type=float)
@@ -412,7 +461,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def check_context_gates(results: list[dict[str, Any]], args: argparse.Namespace) -> None:
+def check_context_gates(
+    results: list[dict[str, Any]],
+    args: argparse.Namespace,
+    baseline: dict[str, Any] | None = None,
+) -> None:
     gates = {
         "mean_recall": (args.min_context_recall, lambda actual, expected: actual >= expected),
         "zero_recall_rate": (
@@ -457,6 +510,15 @@ def check_context_gates(results: list[dict[str, Any]], args: argparse.Namespace)
                 actual = actual[component]
             if not predicate(actual, expected):
                 failures.append(f"{metric}={actual:.6f}, threshold={expected:.6f}")
+        margin = getattr(args, "min_margin_over_baseline", None)
+        if baseline is not None and margin is not None:
+            actual_margin = context["mean_recall"] - baseline["mean_recall"]
+            if actual_margin < margin:
+                failures.append(
+                    f"mean_recall margin over {baseline['mode']}(k={baseline['k']})="
+                    f"{actual_margin:.6f}, threshold={margin:.6f} "
+                    f"(context={context['mean_recall']:.6f}, baseline={baseline['mean_recall']:.6f})"
+                )
     if failures:
         raise SystemExit("context retrieval gate failed: " + "; ".join(failures))
 
@@ -475,6 +537,11 @@ def main() -> None:
     else:
         tasks = historical_tasks(repo, args.tasks)
     results = evaluate_tasks(binary, repo, modes, args.budget, args.search_limit, tasks)
+    baseline = (
+        constant_topk_baseline(tasks, args.baseline_k)
+        if args.baseline == "constant-topk"
+        else None
+    )
     output = {
         "schema_version": 2,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -490,11 +557,27 @@ def main() -> None:
         "search_limit": args.search_limit,
         "tasks": tasks,
         "results": results,
+        "baseline": baseline,
+        "min_margin_over_baseline": args.min_margin_over_baseline,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(output, indent=2) + "\n")
-    print(json.dumps({result["mode"]: {key: value for key, value in result.items() if key != "rows"} for result in results}, indent=2))
-    check_context_gates(results, args)
+    summary = {
+        result["mode"]: {key: value for key, value in result.items() if key != "rows"}
+        for result in results
+    }
+    if baseline is not None:
+        summary[baseline["mode"]] = baseline
+        context = next((result for result in results if result["mode"] == "context"), None)
+        if context is not None:
+            summary["context_margin_over_baseline"] = {
+                "mean_recall": context["mean_recall"] - baseline["mean_recall"],
+                "mean_reciprocal_rank": (
+                    context["mean_reciprocal_rank"] - baseline["mean_reciprocal_rank"]
+                ),
+            }
+    print(json.dumps(summary, indent=2))
+    check_context_gates(results, args, baseline)
 
 
 if __name__ == "__main__":

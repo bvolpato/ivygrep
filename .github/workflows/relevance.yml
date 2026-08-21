@@ -91,6 +91,15 @@ jobs:
             --min-precision-at-5 0.18 \
             --min-recall-at-20 0.95
 
+      # Absolute floors alone are gameable: the five most frequent gold files
+      # in the fixture, returned as a constant answer, score mean recall 0.78
+      # and clear --min-context-recall 0.70 without reading the task. The
+      # constant baseline is scored and reported next to ivygrep so the gap is
+      # visible in every run. It is not enforced yet: on the current 12-task
+      # fixture one task is 0.083 recall and ANN build variance flips results
+      # between runs (measured 0.771 vs 0.903 on the same commit), so a margin
+      # gate (--min-margin-over-baseline) needs a larger fixture or averaged
+      # runs first.
       - name: Context retrieval evidence
         run: |
           uv run scripts/bench_context_retrieval.py \
@@ -98,6 +107,8 @@ jobs:
             --repo . \
             --tasks-from tests/fixtures/context_retrieval_tasks.json \
             --output context-retrieval-results.json \
+            --baseline constant-topk \
+            --baseline-k 5 \
             --min-context-recall 0.70 \
             --min-context-primary-recall 0.75 \
             --min-context-test-recall 1.0 \

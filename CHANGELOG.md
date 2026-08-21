@@ -27,6 +27,11 @@ All notable changes to ivygrep are documented in this file.
 - `--refs` / `--callers` only scan languages that define the symbol, so a Python `.resolve()` call is no longer reported as a reference to a Rust `fn resolve`.
 - Index format bumped to v22; existing indexes rebuild on first use.
 
+### Testing
+- Added `scripts/bench_file_localization.py` and a curated 30-task public set (`benchmarks/public/file_localization_tasks.jsonl`, issue text to files the merged fix touched across Python, Rust, and TypeScript repositories) reporting File Acc@k, Recall@k, MRR, and context-pack precision/recall with a lexical baseline delta; hash-only results are committed under `docs/benchmarks/file-localization-hash-2026-08-21.json`.
+- `scripts/bench_context_retrieval.py` now scores a label-derived `constant-topk` baseline next to ivygrep and reports it in the relevance workflow; `--min-margin-over-baseline` can enforce a margin once the 12-task fixture is large enough to make that gate stable.
+- Public code-retrieval and challenge reports state corpus sampling next to the headline numbers (documents indexed versus full CoIR corpus size per task).
+
 ## [1.2.12] - 2026-08-20
 
 ### Security

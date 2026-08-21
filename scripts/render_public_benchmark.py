@@ -98,6 +98,67 @@ def dataset_scope_note(matrix: dict) -> str:
     return " ".join(notes)
 
 
+def corpus_sampling(matrix: dict) -> list[dict]:
+    """Per-task corpus size actually indexed versus the full upstream corpus."""
+    records = {}
+    for result in matrix.get("results", []):
+        task = result.get("dataset")
+        provenance = result.get("dataset_provenance")
+        if task and isinstance(provenance, dict):
+            records.setdefault(task, provenance)
+    rows = []
+    for task in matrix.get("tasks", []):
+        provenance = records.get(task, {})
+        counts = provenance.get("counts") or {}
+        sample = provenance.get("sample") or {}
+        indexed = counts.get("corpus")
+        full = counts.get("source_corpus")
+        if indexed is None and sample.get("corpus_limit"):
+            indexed = sample["corpus_limit"]
+        if indexed is None:
+            continue
+        rows.append(
+            {
+                "task": task,
+                "indexed": int(indexed),
+                "full": int(full) if full is not None else None,
+                "sampled": full is not None and int(indexed) < int(full),
+            }
+        )
+    return rows
+
+
+def corpus_sampling_note(matrix: dict) -> str:
+    """Headline-level disclosure: which corpora were sampled and how much was dropped."""
+    rows = corpus_sampling(matrix)
+    if not rows:
+        return "Corpus sampling: provenance counts unavailable; see raw JSON."
+    sampled = [row for row in rows if row["sampled"]]
+    if not sampled:
+        return "Corpus sampling: none. Every task indexes its full upstream corpus."
+    limits = sorted({row["indexed"] for row in sampled})
+    limit_text = (
+        f"{limits[0]:,} documents" if len(limits) == 1 else f"{limits[0]:,}-{limits[-1]:,} documents"
+    )
+    parts = [
+        f"{row['task']} {row['full']:,} documents ({row['indexed']:,} indexed)"
+        for row in sampled
+    ]
+    note = (
+        f"Corpus sampling: {len(sampled)} of {len(rows)} corpora sampled to {limit_text} "
+        "(qrel documents retained, remainder dropped deterministically). Full CoIR corpora: "
+        + ", ".join(parts)
+        + "."
+    )
+    unsampled = [row for row in rows if not row["sampled"]]
+    if unsampled:
+        note += " Indexed in full: " + ", ".join(
+            f"{row['task']} ({row['indexed']:,})" for row in unsampled
+        ) + "."
+    note += " Scores on sampled corpora are not comparable to full-corpus CoIR leaderboard numbers."
+    return note
+
+
 def markdown(matrix: dict, baseline: dict | None = None) -> str:
     lines = [
         "# Public code-retrieval benchmark",
@@ -111,6 +172,7 @@ def markdown(matrix: dict, baseline: dict | None = None) -> str:
         f"- Languages: {len(matrix.get('languages', []))}",
         f"- Held-out queries: {matrix['queries']}",
         f"- Repetitions: {matrix['repetitions']}",
+        f"- {corpus_sampling_note(matrix)}",
         f"- Dataset scope: {dataset_scope_note(matrix)}",
     ]
     if matrix.get("query_text_limit") is not None:
@@ -329,6 +391,14 @@ def html(matrix: dict, baseline: dict | None = None) -> str:
             <h2>Change from frozen baseline</h2>
             <p><code>{escape(current_mode)}</code> improves nDCG@10 by {ndcg_change:+.2%} and MRR@10 by {mrr_change:+.2%} over <code>{escape(baseline_mode)}</code> at commit <code>{escape(baseline["ivygrep_commit"][:12])}</code>. The raw JSON retains every task and run.</p>
         </section>"""
+    sampling_rows = corpus_sampling(matrix)
+    sampled_count = sum(row["sampled"] for row in sampling_rows)
+    sampling_stat = (
+        f"""            <div class="report-stat"><strong>{sampled_count}/{len(sampling_rows)}</strong><span>corpora sampled</span></div>
+"""
+        if sampling_rows
+        else ""
+    )
     query_text_limit = matrix.get("query_text_limit")
     query_limit_stat = (
         f"""            <div class="report-stat"><strong>{escape(str(query_text_limit))}</strong><span>query char limit</span></div>
@@ -359,12 +429,14 @@ def html(matrix: dict, baseline: dict | None = None) -> str:
             <div class="report-eyebrow">Public benchmark</div>
             <h1>Code-retrieval quality and cost</h1>
             <p>Profile <code>{escape(matrix["profile"])}</code>: {matrix["queries"]} held-out queries across {len(matrix["tasks"])} public CoIR tasks, repeated {matrix["repetitions"]} times. No private corpus or local path is included.</p>
+            <p><strong>{escape(corpus_sampling_note(matrix))}</strong></p>
         </section>
         <section class="report-grid">
             <div class="report-stat"><strong>{matrix["queries"]}</strong><span>held-out queries</span></div>
             <div class="report-stat"><strong>{len(matrix["tasks"])}</strong><span>public tasks</span></div>
             <div class="report-stat"><strong>{len(matrix.get("languages", []))}</strong><span>languages</span></div>
             <div class="report-stat"><strong>{matrix["repetitions"]}</strong><span>repetitions</span></div>
+{sampling_stat.rstrip()}
 {query_limit_stat.rstrip()}
         </section>
         <section class="report-card">
@@ -387,6 +459,7 @@ def html(matrix: dict, baseline: dict | None = None) -> str:
         <section class="report-card">
             <h2>Scope</h2>
             <p>Matrix covers held-out natural-language and code-to-code retrieval. Exact-search tools require a separate exact-query workload.</p>
+            <p>{escape(corpus_sampling_note(matrix))}</p>
             <p>{escape(dataset_scope_note(matrix))}</p>
         </section>
     </main>
