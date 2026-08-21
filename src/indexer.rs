@@ -2348,6 +2348,7 @@ pub fn enhance_workspace_neural(
             None
         };
 
+    let document_character_limit = neural_model.document_character_limit();
     let process_batch = |batch: &mut Vec<(u64, String)>,
                          count: &mut usize,
                          v_index: &mut VectorStore|
@@ -2358,16 +2359,8 @@ pub fn enhance_workspace_neural(
 
         let texts: Vec<&str> = batch
             .iter()
-            .map(|(_, t)| {
-                if t.len() > 1024 {
-                    let mut end = 1024;
-                    while !t.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    &t[..end]
-                } else {
-                    t.as_str()
-                }
+            .map(|(_, text)| {
+                crate::embedding::truncate_document_text(text, document_character_limit)
             })
             .collect();
 
@@ -3482,6 +3475,88 @@ mod tests {
         fn model_identity(&self) -> Option<&crate::embedding::NeuralModelIdentity> {
             Some(&self.identity)
         }
+    }
+
+    /// Records every document text handed to the encoder.
+    struct TextRecordingEmbedding {
+        model: HashEmbeddingModel,
+        identity: crate::embedding::NeuralModelIdentity,
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl EmbeddingModel for TextRecordingEmbedding {
+        fn dimensions(&self) -> usize {
+            self.model.dimensions()
+        }
+
+        fn embed(&self, text: &str) -> Vec<f32> {
+            self.seen.lock().unwrap().push(text.to_string());
+            self.model.embed(text)
+        }
+
+        fn profile_info(&self) -> Option<&'static str> {
+            Some("static")
+        }
+
+        fn model_identity(&self) -> Option<&crate::embedding::NeuralModelIdentity> {
+            Some(&self.identity)
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn neural_enhancement_embeds_whole_chunks_up_to_the_profile_limit() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        // A prose note well past the old 1024-character cut; the decisive
+        // sentence sits near the end.
+        let filler = "The team reviewed the cache invalidation options at length. ".repeat(40);
+        let note = format!(
+            "# Cache decision\n\n{filler}\nFinal call: versioned keys replace TTL sweeps.\n"
+        );
+        assert!(note.len() > 2_000);
+        fs::write(root.path().join("decision.md"), &note).unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let hash_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &hash_model).unwrap();
+
+        let unwindowed = TextRecordingEmbedding {
+            model: HashEmbeddingModel::new(EMBEDDING_DIMENSIONS),
+            identity: crate::embedding::NeuralProfile::Static.identity(),
+            seen: std::sync::Mutex::new(Vec::new()),
+        };
+        enhance_workspace_neural(&workspace, &unwindowed).unwrap();
+        let seen = unwindowed.seen.lock().unwrap();
+        assert!(
+            seen.iter()
+                .any(|text| text.contains("versioned keys replace TTL sweeps")),
+            "static profile must embed the whole note, not its first 1024 characters"
+        );
+        assert!(
+            seen.iter().all(|text| {
+                text.len() <= crate::embedding::UNWINDOWED_DOCUMENT_CHARACTER_LIMIT
+            })
+        );
+        drop(seen);
+
+        let _ = fs::remove_file(workspace.vector_neural_path());
+        let windowed = TextRecordingEmbedding {
+            model: HashEmbeddingModel::new(EMBEDDING_DIMENSIONS),
+            identity: crate::embedding::NeuralProfile::General.identity(),
+            seen: std::sync::Mutex::new(Vec::new()),
+        };
+        enhance_workspace_neural(&workspace, &windowed).unwrap();
+        let limit = windowed.document_character_limit();
+        assert_eq!(limit, 256 * 4);
+        let seen = windowed.seen.lock().unwrap();
+        assert!(!seen.is_empty());
+        assert!(seen.iter().all(|text| text.len() <= limit));
+        assert!(
+            seen.iter().any(|text| text.len() == limit),
+            "a token-windowed profile is cut at its character budget"
+        );
     }
 
     #[test]
