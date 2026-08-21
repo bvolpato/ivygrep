@@ -7,6 +7,13 @@ on:
   pull_request:
     branches: [main]
     paths:
+      - "src/**"
+      - "assets/**"
+      - "vendor/**"
+      - ".cargo/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
       - "benchmarks/public/**"
       - "scripts/eval_code_retrieval.py"
       - "scripts/export_memoryquest.py"
@@ -22,8 +29,11 @@ on:
       - "scripts/normalize_release_history.py"
       - "scripts/render_public_benchmark.py"
       - "scripts/check_public_benchmark_privacy.py"
+      - "scripts/check_public_relevance.py"
+      - "scripts/run_public_relevance_canary.py"
       - "scripts/check_retrieval_benchmark_leakage.py"
       - "tests/test_public_benchmark.py"
+      - "tests/test_public_relevance.py"
       - "tests/test_million_benchmark.py"
       - "tests/test_evidence_dashboard.py"
       - "tests/test_memory_benchmark.py"
@@ -84,6 +94,7 @@ jobs:
           python3 -m unittest \
             tests.test_public_benchmark \
             tests.test_eval_code_retrieval \
+            tests.test_public_relevance \
             tests.test_million_benchmark \
             tests.test_evidence_dashboard \
             tests.test_memory_benchmark \
@@ -194,7 +205,15 @@ jobs:
             public-code-retrieval-results.json \
             public-code-retrieval.html
 
+      - name: Enforce per-dataset public relevance and query retention
+        if: steps.parameters.outputs.profile == 'public-core'
+        run: |
+          python3 scripts/check_public_relevance.py \
+            --matrix public-code-retrieval-results.json \
+            --raw-results "$RUNNER_TEMP/public-results"
+
       - name: Upload public benchmark evidence
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: public-code-retrieval-${{ steps.parameters.outputs.profile }}

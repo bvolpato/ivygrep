@@ -45,6 +45,18 @@ def load_qrels(path: Path) -> dict[str, dict[str, int]]:
     return qrels
 
 
+def selected_queries(queries: list[dict], query_ids: list[str]) -> list[dict]:
+    if not query_ids:
+        return queries
+
+    required = set(query_ids)
+    selected = [query for query in queries if str(query["_id"]) in required]
+    missing = required - {str(query["_id"]) for query in selected}
+    if missing:
+        raise ValueError("requested query IDs are missing: " + ", ".join(sorted(missing)))
+    return selected
+
+
 def score_query(ranked: list[str], judgments: dict[str, int]) -> dict[str, float]:
     relevant = {doc_id for doc_id, grade in judgments.items() if grade > 0}
 
@@ -488,7 +500,10 @@ def evaluate(args: argparse.Namespace) -> dict:
         home = temp_path / "home"
         path_to_id = materialize_corpus(dataset, repo)
         id_to_path = {document_id: path for path, document_id in path_to_id.items()}
-        queries = load_jsonl(dataset / "queries.jsonl")
+        queries = selected_queries(
+            load_jsonl(dataset / "queries.jsonl"),
+            args.query_id,
+        )
         qrels = load_qrels(dataset / "qrels.tsv")
         env = os.environ.copy()
         env["IVYGREP_HOME"] = str(home)
@@ -862,6 +877,7 @@ def main() -> int:
         default="hash",
     )
     parser.add_argument("--limit", type=int, default=20)
+    parser.add_argument("--query-id", action="append", default=[])
     parser.add_argument("--max-query-chars", type=int)
     parser.add_argument(
         "--query-expansion",
@@ -889,6 +905,7 @@ def main() -> int:
     parser.add_argument("--min-mrr-at-10", type=float, default=0.0)
     parser.add_argument("--min-precision-at-5", type=float, default=0.0)
     parser.add_argument("--min-recall-at-20", type=float, default=0.0)
+    parser.add_argument("--require-relevant-results", action="store_true")
     args = parser.parse_args()
     if args.query_expansion_workers < 1:
         parser.error("--query-expansion-workers must be positive")
@@ -937,6 +954,14 @@ def main() -> int:
         for metric, minimum in thresholds.items()
         if result[metric] < minimum
     ]
+    if args.require_relevant_results:
+        missing = [
+            detail["query_id"]
+            for detail in result["details"]
+            if detail["recall_at_20"] <= 0.0
+        ]
+        if missing:
+            failures.append("queries lost every relevant result: " + ", ".join(missing))
     if failures:
         raise SystemExit("retrieval quality gate failed: " + ", ".join(failures))
     return 0
