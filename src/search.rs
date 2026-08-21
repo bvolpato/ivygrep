@@ -1337,6 +1337,12 @@ fn literal_candidate_terms(query: &str) -> Vec<String> {
     terms
 }
 
+fn has_explicit_boolean_operators(query: &str) -> bool {
+    query
+        .split_ascii_whitespace()
+        .any(|term| matches!(term, "AND" | "OR" | "NOT"))
+}
+
 fn simple_lexical_query(
     fields: &TantivyFields,
     query: &str,
@@ -1348,13 +1354,32 @@ fn simple_lexical_query(
     {
         return None;
     }
-    if query
-        .split_ascii_whitespace()
-        .any(|term| matches!(term, "AND" | "OR" | "NOT"))
-    {
+    if has_explicit_boolean_operators(query) {
         return None;
     }
+    lexical_terms_query(fields, query, conjunction_by_default)
+}
 
+/// Longest punctuated variant that still runs as a flat token disjunction.
+/// Short punctuated queries are code snippets, error strings, and questions
+/// whose every token carries signal. A long pasted prompt is different: as a
+/// flat disjunction its hundreds of common tokens flood the fused ranking
+/// with long documents and bury the hits the normalized, stopword-free
+/// expansions find. Those prompts keep relying on the expansions, which is
+/// also what happened before token queries existed (the parser rejected the
+/// raw variant and it contributed nothing).
+const MAX_PUNCTUATED_TOKEN_QUERY_TERMS: usize = 24;
+
+/// BM25 query built directly from code-analyzer tokens. This never fails on
+/// punctuation: the indexed fields store frequencies without positions, so
+/// handing raw user text to Tantivy's `QueryParser` turns every multi-token
+/// word (`foo.bar`, `what's`, `config.yaml`, quoted phrases) into a phrase
+/// query the index cannot serve.
+fn lexical_terms_query(
+    fields: &TantivyFields,
+    query: &str,
+    conjunction_by_default: bool,
+) -> Option<Box<dyn Query>> {
     let terms = literal_candidate_terms(query);
     if terms.is_empty() {
         return None;
@@ -1407,13 +1432,37 @@ impl LexicalQueryExecutor<'_> {
         {
             query
         } else {
-            match self.parser.parse_query(lexical_query) {
-                Ok(query) => query,
-                Err(err) => {
+            let explicit_boolean = has_explicit_boolean_operators(lexical_query)
+                .then(|| self.parser.parse_query(lexical_query))
+                .and_then(|parsed| match parsed {
+                    Ok(query) => Some(query),
+                    Err(err) => {
+                        tracing::debug!(
+                            query_variant = lexical_query,
+                            error = %err,
+                            "boolean lexical query rejected by Tantivy parser; using term query"
+                        );
+                        None
+                    }
+                });
+            let token_query = || {
+                let terms = literal_candidate_terms(lexical_query);
+                if terms.len() > MAX_PUNCTUATED_TOKEN_QUERY_TERMS {
                     tracing::debug!(
                         query_variant = lexical_query,
-                        error = %err,
-                        "skipping lexical expansion rejected by Tantivy parser"
+                        terms = terms.len(),
+                        "long punctuated variant left to its expansions"
+                    );
+                    return None;
+                }
+                lexical_terms_query(self.fields, lexical_query, self.conjunctive_numeric_query)
+            };
+            match explicit_boolean.or_else(token_query) {
+                Some(query) => query,
+                None => {
+                    tracing::debug!(
+                        query_variant = lexical_query,
+                        "skipping lexical expansion without indexable terms"
                     );
                     return Ok(Vec::new());
                 }
@@ -1462,6 +1511,37 @@ impl LexicalQueryExecutor<'_> {
         }
         Ok(docs)
     }
+}
+
+/// Term query over one path field built from analyzer tokens. Conjunctive
+/// when the caller wants exact path matches, disjunctive for recall.
+pub(crate) fn path_terms_query(
+    field: tantivy::schema::Field,
+    query: &str,
+    conjunction: bool,
+) -> Option<Box<dyn Query>> {
+    let terms = literal_candidate_terms(query);
+    if terms.is_empty() {
+        return None;
+    }
+    let occur = if conjunction {
+        Occur::Must
+    } else {
+        Occur::Should
+    };
+    let clauses = terms
+        .iter()
+        .map(|term| {
+            (
+                occur,
+                Box::new(TermQuery::new(
+                    tantivy::Term::from_field_text(field, term),
+                    IndexRecordOption::Basic,
+                )) as Box<dyn Query>,
+            )
+        })
+        .collect::<Vec<_>>();
+    Some(Box::new(BooleanQuery::new(clauses)))
 }
 
 fn simple_lexical_term_query(fields: &TantivyFields, term_text: &str) -> Box<dyn Query> {
@@ -8696,5 +8776,124 @@ export function registerCommands(p: Plugin) {
                 hits[0].file_path
             );
         }
+    }
+
+    /// Executes one raw lexical variant the way the hybrid pipeline does and
+    /// returns the matched file paths.
+    fn lexical_variant_paths(ctx: &SearchContext, variant: &str) -> Vec<PathBuf> {
+        let mut search_fields = vec![ctx.fields.text, ctx.fields.file_path];
+        if let Some(field) = ctx.fields.file_path_text {
+            search_fields.push(field);
+        }
+        if let Some(field) = ctx.fields.signature {
+            search_fields.push(field);
+        }
+        let parser = QueryParser::for_index(&ctx.indexes[0], search_fields);
+        let glob_path_filter = GlobPathQueryFilter {
+            included_paths: None,
+            excluded_paths: None,
+        };
+        let executor = LexicalQueryExecutor {
+            fields: &ctx.fields,
+            parser: &parser,
+            conjunctive_numeric_query: false,
+            scope_filter: None,
+            glob_path_filter: &glob_path_filter,
+            include_globs: &[],
+            can_pushdown_languages: false,
+            allowed_languages: &[],
+            searchers: &ctx.searchers,
+        };
+        let mut paths = executor
+            .collect_docs(variant, 20)
+            .unwrap()
+            .into_iter()
+            .filter_map(|(_, _, doc)| fetch_chunk_by_id(doc, &ctx.fields))
+            .map(|chunk| chunk.file_path)
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    #[test]
+    #[serial]
+    fn punctuated_lexical_variants_still_produce_bm25_candidates() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::create_dir_all(root.path().join("src")).unwrap();
+        std::fs::write(
+            root.path().join("src/greeter.py"),
+            "def greet(name):\n    print(\"hello world\", name)\n    return None\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("src/retry_policy.md"),
+            "# Retry policy\n\nWhat's the retry policy? POST requests retry three times with backoff.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("src/net.rs"),
+            "pub fn connect() -> Result<(), Error> { Err(Error::ConnectionRefused) }\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        let ctx = SearchContext::load(&workspace, None, false).unwrap();
+
+        // Each raw variant below is rejected by Tantivy's QueryParser on an
+        // index without positions (phrase from `print(`/`"hello world"`,
+        // field syntax from `error:`, apostrophe token split). They must still
+        // reach BM25 through analyzer-token queries.
+        assert_eq!(
+            lexical_variant_paths(&ctx, "print(\"hello world\", name)"),
+            vec![PathBuf::from("src/greeter.py")]
+        );
+        assert_eq!(
+            lexical_variant_paths(&ctx, "what's the retry policy for POST requests?"),
+            vec![PathBuf::from("src/retry_policy.md")]
+        );
+        assert_eq!(
+            lexical_variant_paths(&ctx, "error: connection refused"),
+            vec![PathBuf::from("src/net.rs")]
+        );
+        // Explicit boolean syntax still goes through the parser.
+        assert_eq!(
+            lexical_variant_paths(&ctx, "greet AND hello"),
+            vec![PathBuf::from("src/greeter.py")]
+        );
+        assert!(lexical_variant_paths(&ctx, "greet AND refused").is_empty());
+
+        // A long pasted prompt with punctuation is not turned into a flat
+        // disjunction of every token; its normalized expansions carry it.
+        let prompt = format!(
+            "I'd like a review of this: {} the greet function prints hello world.",
+            (0..MAX_PUNCTUATED_TOKEN_QUERY_TERMS)
+                .map(|index| format!("filler{index}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        assert!(literal_candidate_terms(&prompt).len() > MAX_PUNCTUATED_TOKEN_QUERY_TERMS);
+        assert!(
+            lexical_variant_paths(&ctx, &prompt).is_empty(),
+            "long punctuated raw variant must be left to its expansions"
+        );
+    }
+
+    #[test]
+    fn path_terms_query_accepts_multi_token_words() {
+        let mut schema = tantivy::schema::Schema::builder();
+        let field = schema.add_text_field("file_path_text", tantivy::schema::TEXT);
+        let _ = schema.build();
+        for variant in ["error_handling", "errorHandling", "src/error/handling.rs"] {
+            assert!(
+                path_terms_query(field, variant, true).is_some(),
+                "{variant:?} should build a term query"
+            );
+        }
+        assert!(path_terms_query(field, "   ", false).is_none());
     }
 }
