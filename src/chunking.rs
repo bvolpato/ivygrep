@@ -30,6 +30,15 @@ pub enum ChunkKind {
     Text,
 }
 
+/// A definition name captured from the parser at chunk time.
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+pub struct ChunkDefinition {
+    /// Exact-case identifier of the definition (`run`, `PaymentRouter`).
+    pub name: String,
+    /// Enclosing class/impl/struct/module name when the parser exposes one.
+    pub owner: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Chunk {
     pub id: Uuid,
@@ -40,6 +49,11 @@ pub struct Chunk {
     pub language: String,
     pub kind: ChunkKind,
     pub content_hash: String,
+    /// Parser-derived definitions. `None` means the parser did not resolve
+    /// this chunk, so the symbol layer falls back to its text heuristic.
+    /// `Some(empty)` means the chunk is known to define nothing (for example a
+    /// continuation window or a Rust `impl` block).
+    pub definitions: Option<Vec<ChunkDefinition>>,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -713,6 +727,7 @@ pub(crate) fn chunk_source_with_metadata(rel_path: &Path, text: &str) -> Chunked
             &language,
             kind,
             lines[definition_start.saturating_sub(1)].trim(),
+            None,
         );
     }
 
@@ -789,7 +804,7 @@ fn try_tree_sitter_chunk_source_with_timeout(
     }
     let mut cursor = QueryCursor::new();
 
-    let mut ranges = Vec::new();
+    let mut captured = Vec::new();
     let mut rust_doc_includes = Vec::new();
     let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
 
@@ -805,9 +820,6 @@ fn try_tree_sitter_chunk_source_with_timeout(
             if capture_name.starts_with('_') {
                 continue;
             }
-
-            let start_line = capture.node.start_position().row;
-            let end_line = capture.node.end_position().row;
 
             let kind = match capture_name {
                 "module" => ChunkKind::Module,
@@ -856,20 +868,21 @@ fn try_tree_sitter_chunk_source_with_timeout(
                 },
             };
 
-            // Convert to 1-indexed bounds, end_line is inclusive in tree-sitter rows
-            ranges.push((start_line + 1, end_line + 1, kind));
+            captured.push((capture.node, kind));
         }
     }
 
-    if ranges.is_empty() && rust_doc_includes.is_empty() {
+    if captured.is_empty() && rust_doc_includes.is_empty() {
         return None;
     }
+
+    let mut ranges = captured_definition_ranges(captured, language, text.as_bytes());
 
     // Multiple Tree-sitter captures can describe the exact same malformed
     // source span. Keep overlapping parent/child definitions, but never let
     // duplicate captures become extra lexical documents or embedding vectors.
     let mut unique_ranges = HashSet::with_capacity(ranges.len());
-    ranges.retain(|(start, end, kind)| unique_ranges.insert((*start, *end, kind.clone())));
+    ranges.retain(|(start, end, kind, _)| unique_ranges.insert((*start, *end, kind.clone())));
 
     // Sort by start line; keep overlapping structural chunks (impl+fn).
     ranges.sort_by_key(|r| r.0);
@@ -879,7 +892,7 @@ fn try_tree_sitter_chunk_source_with_timeout(
     // Track which 1-indexed lines are covered by AST chunks (start..=end)
     let mut covered = vec![false; lines.len() + 1]; // index 0 unused
 
-    for (range_index, (start, end, kind)) in ranges.iter().enumerate() {
+    for (range_index, (start, end, kind, definitions)) in ranges.iter().enumerate() {
         let mut start = *start;
         let definition_start = start;
         let end = *end;
@@ -924,13 +937,13 @@ fn try_tree_sitter_chunk_source_with_timeout(
             ranges
                 .iter()
                 .enumerate()
-                .filter(|(index, (nested_start, nested_end, _))| {
+                .filter(|(index, (nested_start, nested_end, _, _))| {
                     *index != range_index
                         && *nested_start > start
                         && *nested_start <= safe_end
                         && *nested_end <= safe_end
                 })
-                .map(|(_, (nested_start, nested_end, _))| {
+                .map(|(_, (nested_start, nested_end, _, _))| {
                     (
                         leading_doc_start(*nested_start, language, lines).max(start + 1),
                         *nested_start,
@@ -952,6 +965,7 @@ fn try_tree_sitter_chunk_source_with_timeout(
         }
 
         let context = lines[definition_start.saturating_sub(1)].trim();
+        let definitions = definitions.as_deref();
         if nested.is_empty() {
             push_bounded_structural_chunks(
                 &mut chunks,
@@ -961,6 +975,7 @@ fn try_tree_sitter_chunk_source_with_timeout(
                 language,
                 kind,
                 context,
+                definitions,
             );
         } else {
             // Retain one bounded structural overview. It keeps the parent
@@ -975,7 +990,10 @@ fn try_tree_sitter_chunk_source_with_timeout(
                 language,
                 kind,
                 context,
+                definitions,
             );
+            // Remaining parent windows carry no captured definition of their
+            // own; nested declarations were captured separately.
             let mut parent_start = overview_end + 1;
             for (nested_start, _, nested_end) in nested {
                 if nested_start > parent_start {
@@ -987,6 +1005,7 @@ fn try_tree_sitter_chunk_source_with_timeout(
                         language,
                         kind,
                         context,
+                        None,
                     );
                 }
                 parent_start = parent_start.max(nested_end.saturating_add(1));
@@ -1000,6 +1019,7 @@ fn try_tree_sitter_chunk_source_with_timeout(
                     language,
                     kind,
                     context,
+                    None,
                 );
             }
         }
@@ -1024,6 +1044,7 @@ fn try_tree_sitter_chunk_source_with_timeout(
                     language,
                     &ChunkKind::Module,
                     lines[gs - 1].trim(),
+                    None,
                 );
             }
             gap_start = None;
@@ -1040,6 +1061,7 @@ fn try_tree_sitter_chunk_source_with_timeout(
             language,
             &ChunkKind::Module,
             lines[gs - 1].trim(),
+            None,
         );
     }
 
@@ -1058,6 +1080,7 @@ fn try_tree_sitter_chunk_source_with_timeout(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_bounded_structural_chunks(
     chunks: &mut Vec<Chunk>,
     rel_path: &Path,
@@ -1066,6 +1089,7 @@ fn push_bounded_structural_chunks(
     language: &str,
     kind: &ChunkKind,
     context: &str,
+    definitions: Option<&[ChunkDefinition]>,
 ) {
     if start_line > end_line
         || lines[(start_line - 1)..end_line]
@@ -1089,14 +1113,24 @@ fn push_bounded_structural_chunks(
         }
 
         let block = lines[(window_start - 1)..window_end].join("\n");
-        let text = if window_start == start_line {
-            format!("// {}\n\n{}", rel_path.to_string_lossy(), block)
+        let (text, window_definitions) = if window_start == start_line {
+            (
+                format!("// {}\n\n{}", rel_path.to_string_lossy(), block),
+                definitions.map(<[ChunkDefinition]>::to_vec),
+            )
         } else {
-            format!(
-                "// {}\n// continuation of {}\n\n{}",
-                rel_path.to_string_lossy(),
-                context,
-                block
+            // Continuation windows repeat the body of the definition above;
+            // they never define a symbol of their own. Module gaps are
+            // collections of declarations, so every window keeps the text
+            // heuristic.
+            (
+                format!(
+                    "// {}\n// continuation of {}\n\n{}",
+                    rel_path.to_string_lossy(),
+                    context,
+                    block
+                ),
+                (!matches!(kind, ChunkKind::Module)).then(Vec::new),
             )
         };
         chunks.push(make_chunk(
@@ -1106,6 +1140,7 @@ fn push_bounded_structural_chunks(
             text,
             language.to_string(),
             kind.clone(),
+            window_definitions,
         ));
 
         if window_end == end_line {
@@ -1209,6 +1244,7 @@ pub(crate) fn chunk_rust_doc_include(
             text,
             "rust".to_string(),
             ChunkKind::Documentation,
+            None,
         ));
         if end == lines.len() {
             break;
@@ -1216,6 +1252,347 @@ pub(crate) fn chunk_rust_doc_include(
         start = end.saturating_sub(OVERLAP);
     }
     chunks
+}
+
+// ── Parser-derived definition names ────────────────────────────────────────
+
+/// Outcome of asking the grammar for a captured node's declared name.
+enum ParsedName {
+    /// The node declares this (possibly qualified) name.
+    Found(String),
+    /// One captured node declares several names (grouped Go `type (...)`).
+    FoundMany(Vec<String>),
+    /// The node is structural but never a canonical definition
+    /// (Rust `impl` blocks, C++ operator/destructor definitions).
+    NotADefinition,
+    /// The grammar shape is not understood; keep the text heuristic.
+    Unknown,
+}
+
+type CapturedRange = (usize, usize, ChunkKind, Option<Vec<ChunkDefinition>>);
+
+/// Converts captured nodes into 1-indexed line ranges with parser-derived
+/// definitions. Owners come from the innermost captured class-like node that
+/// contains a definition, tracked with a containment stack in document order
+/// rather than `Node::parent`, whose root-down search is quadratic on flat
+/// files with thousands of siblings.
+fn captured_definition_ranges(
+    mut captured: Vec<(tree_sitter::Node<'_>, ChunkKind)>,
+    language: &str,
+    source: &[u8],
+) -> Vec<CapturedRange> {
+    captured.sort_by(|left, right| {
+        left.0
+            .start_byte()
+            .cmp(&right.0.start_byte())
+            .then_with(|| right.0.end_byte().cmp(&left.0.end_byte()))
+    });
+
+    let mut owners: Vec<(usize, String)> = Vec::new();
+    let mut ranges = Vec::with_capacity(captured.len());
+    for (node, kind) in captured {
+        let start_byte = node.start_byte();
+        while owners
+            .last()
+            .is_some_and(|(end_byte, _)| *end_byte <= start_byte)
+        {
+            owners.pop();
+        }
+        let enclosing = if language == "go" && node.kind() == "method_declaration" {
+            go_receiver_type(node, source)
+        } else {
+            owners.last().map(|(_, owner)| owner.clone())
+        };
+        let definitions = parser_definitions(node, language, source, enclosing);
+        if is_owner_kind(node.kind(), language)
+            && let Some(owner) = owner_name(node, language, source)
+        {
+            owners.push((node.end_byte(), owner));
+        }
+        // Convert to 1-indexed bounds, end_line is inclusive in tree-sitter rows
+        ranges.push((
+            node.start_position().row + 1,
+            node.end_position().row + 1,
+            kind,
+            definitions,
+        ));
+    }
+    ranges
+}
+
+/// Resolves the definition name of a captured Tree-sitter node, using the
+/// innermost enclosing captured owner when the name itself is unqualified.
+/// `None` leaves symbol extraction to the text heuristic.
+fn parser_definitions(
+    node: tree_sitter::Node<'_>,
+    language: &str,
+    source: &[u8],
+    enclosing_owner: Option<String>,
+) -> Option<Vec<ChunkDefinition>> {
+    match node.kind() {
+        // Elixir definitions and Starlark target calls are `call` nodes whose
+        // shape the text heuristic already handles.
+        "call" => return None,
+        // Haskell instances name the class they implement, not a new symbol.
+        "instance" if language == "haskell" => return None,
+        _ => {}
+    }
+    match parsed_name(node, language, source) {
+        ParsedName::Found(raw) => {
+            let (qualifier, leaf) = split_qualified_name(&raw)?;
+            let owner = qualifier.or(enclosing_owner);
+            Some(vec![ChunkDefinition { name: leaf, owner }])
+        }
+        ParsedName::FoundMany(raws) => {
+            let definitions = raws
+                .iter()
+                .filter_map(|raw| split_qualified_name(raw))
+                .map(|(qualifier, leaf)| ChunkDefinition {
+                    name: leaf,
+                    owner: qualifier.or_else(|| enclosing_owner.clone()),
+                })
+                .collect::<Vec<_>>();
+            (!definitions.is_empty()).then_some(definitions)
+        }
+        ParsedName::NotADefinition => Some(Vec::new()),
+        ParsedName::Unknown => None,
+    }
+}
+
+fn parsed_name(node: tree_sitter::Node<'_>, language: &str, source: &[u8]) -> ParsedName {
+    let text = |candidate: tree_sitter::Node<'_>| {
+        candidate
+            .utf8_text(source)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(ParsedName::Found)
+            .unwrap_or(ParsedName::Unknown)
+    };
+    match node.kind() {
+        "impl_item" => ParsedName::NotADefinition,
+        "function_definition" if matches!(language, "c" | "cpp") => {
+            c_function_declarator_name(node)
+                .map(text)
+                .unwrap_or(ParsedName::Unknown)
+        }
+        "init_declaration" | "initializer_declaration" => ParsedName::Found("init".to_string()),
+        // `type Foo struct{}` and grouped `type ( Foo ...; Bar ... )` alike.
+        "type_declaration" if language == "go" => {
+            let mut cursor = node.walk();
+            let names = node
+                .named_children(&mut cursor)
+                .filter(|child| child.kind() == "type_spec" || child.kind() == "type_alias")
+                .filter_map(|spec| spec.child_by_field_name("name"))
+                .filter_map(|name| name.utf8_text(source).ok())
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .collect::<Vec<_>>();
+            match names.len() {
+                0 => ParsedName::Unknown,
+                1 => ParsedName::Found(names.into_iter().next().unwrap_or_default()),
+                _ => ParsedName::FoundMany(names),
+            }
+        }
+        "method_signature" if language == "dart" => {
+            first_named_child(node, Some("function_signature"))
+                .and_then(|signature| signature.child_by_field_name("name"))
+                .map(text)
+                .unwrap_or(ParsedName::Unknown)
+        }
+        "val_definition" if language == "scala" => node
+            .child_by_field_name("pattern")
+            .filter(|pattern| pattern.kind() == "identifier")
+            .map(text)
+            .unwrap_or(ParsedName::Unknown),
+        "value_definition" if language == "ocaml" => first_named_child(node, Some("let_binding"))
+            .and_then(|binding| binding.child_by_field_name("pattern"))
+            .filter(|pattern| pattern.kind() == "value_name")
+            .map(text)
+            .unwrap_or(ParsedName::Unknown),
+        "module_definition" if language == "ocaml" => {
+            first_named_child(node, Some("module_binding"))
+                .and_then(|binding| first_named_child(binding, Some("module_name")))
+                .map(text)
+                .unwrap_or(ParsedName::Unknown)
+        }
+        // `typealias Channel<T> = Flow<T>` declares `Channel`. In the
+        // tree-sitter-kotlin-ng grammar the alias name is an `identifier`
+        // exposed through the `type` field; the aliased target is a separate
+        // unnamed `type` child, so it is never read here.
+        "type_alias" if language == "kotlin" => node
+            .child_by_field_name("type")
+            .filter(|name| name.kind() == "identifier")
+            .map(text)
+            .unwrap_or(ParsedName::Unknown),
+        "variable_declaration" if language == "zig" => first_named_child(node, Some("identifier"))
+            .map(text)
+            .unwrap_or(ParsedName::Unknown),
+        "package_statement" if language == "perl" => first_named_child(node, Some("package_name"))
+            .map(text)
+            .unwrap_or(ParsedName::Unknown),
+        "class_interface" | "class_implementation" | "protocol_declaration"
+            if language == "objc" =>
+        {
+            first_named_child(node, Some("identifier"))
+                .map(text)
+                .unwrap_or(ParsedName::Unknown)
+        }
+        _ => node
+            .child_by_field_name("name")
+            .map(text)
+            .unwrap_or(ParsedName::Unknown),
+    }
+}
+
+fn first_named_child<'tree>(
+    parent: tree_sitter::Node<'tree>,
+    kind: Option<&str>,
+) -> Option<tree_sitter::Node<'tree>> {
+    let mut cursor = parent.walk();
+    parent
+        .named_children(&mut cursor)
+        .find(|child| kind.is_none_or(|kind| child.kind() == kind))
+}
+
+/// Walks C/C++ declarators (`static int *run(int)`, `void (*getfn(void))(int)`,
+/// `void Outer::run()`) down to the declared identifier.
+fn c_function_declarator_name(node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
+    let mut current = node.child_by_field_name("declarator")?;
+    loop {
+        match current.kind() {
+            "identifier" | "field_identifier" | "qualified_identifier" | "type_identifier" => {
+                return Some(current);
+            }
+            "destructor_name" | "operator_name" => return None,
+            "parenthesized_declarator" => {
+                let mut cursor = current.walk();
+                current = current.named_children(&mut cursor).next()?;
+            }
+            _ => current = current.child_by_field_name("declarator")?,
+        }
+    }
+}
+
+/// Splits `ns::Outer::run`, `M.sub`, `M:meth`, or `Foo<T>` into an optional
+/// owner leaf and the bare definition name. Returns `None` when the text is
+/// not an identifier.
+fn split_qualified_name(raw: &str) -> Option<(Option<String>, String)> {
+    // Drop generic argument lists (`Outer<T>::run`, `Map<K, V>`) without
+    // truncating whatever follows them, then cut at the first parameter list,
+    // index, body, or initializer.
+    let without_generics = strip_generic_arguments(raw);
+    let head = without_generics
+        .split(['(', '[', '{', '='])
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .trim_start_matches(['*', '&', '~']);
+    let (qualifier, leaf) = match head.rfind(['.', ':', '#']) {
+        Some(index) => (
+            Some(head[..index].trim_end_matches([':', '.', '#'])),
+            &head[index + 1..],
+        ),
+        None => (None, head),
+    };
+    if !is_identifier_token(leaf) {
+        return None;
+    }
+    let owner = qualifier
+        .and_then(|qualifier| {
+            qualifier
+                .rsplit(['.', ':', '#'])
+                .find(|part| !part.is_empty())
+        })
+        .map(|owner| owner.trim_start_matches(['*', '&']).to_string())
+        .filter(|owner| is_identifier_token(owner));
+    Some((owner, leaf.to_string()))
+}
+
+/// Removes balanced `<...>` segments so `Outer<T>::run` becomes `Outer::run`.
+/// An unbalanced `<` ends the name, matching the old truncation behavior.
+fn strip_generic_arguments(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut depth = 0usize;
+    for character in raw.chars() {
+        match character {
+            '<' => depth += 1,
+            '>' if depth > 0 => depth -= 1,
+            _ if depth == 0 => out.push(character),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn is_identifier_token(token: &str) -> bool {
+    let mut characters = token.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_' || first == '$')
+        && characters.all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '$' | '\'' | '?' | '!')
+        })
+}
+
+fn is_owner_kind(kind: &str, language: &str) -> bool {
+    matches!(
+        kind,
+        "class_definition"
+            | "class_declaration"
+            | "abstract_class_declaration"
+            | "class"
+            | "class_specifier"
+            | "struct_specifier"
+            | "union_specifier"
+            | "namespace_definition"
+            | "namespace_declaration"
+            | "interface_declaration"
+            | "enum_declaration"
+            | "record_declaration"
+            | "struct_declaration"
+            | "trait_declaration"
+            | "annotation_type_declaration"
+            | "trait_item"
+            | "impl_item"
+            | "module"
+            | "object_definition"
+            | "trait_definition"
+            | "module_definition"
+            | "object_declaration"
+            | "protocol_declaration"
+            | "extension_declaration"
+            | "class_interface"
+            | "class_implementation"
+    ) || (language == "zig" && kind == "variable_declaration")
+}
+
+fn owner_name(node: tree_sitter::Node<'_>, language: &str, source: &[u8]) -> Option<String> {
+    let raw = if node.kind() == "impl_item" {
+        node.child_by_field_name("type")?
+            .utf8_text(source)
+            .ok()?
+            .to_string()
+    } else {
+        match parsed_name(node, language, source) {
+            ParsedName::Found(raw) => raw,
+            _ => return None,
+        }
+    };
+    split_qualified_name(&raw).map(|(_, leaf)| leaf)
+}
+
+fn go_receiver_type(node: tree_sitter::Node<'_>, source: &[u8]) -> Option<String> {
+    let receiver = node.child_by_field_name("receiver")?;
+    let mut cursor = receiver.walk();
+    let declaration = receiver
+        .named_children(&mut cursor)
+        .find(|child| child.kind() == "parameter_declaration")?;
+    let raw = declaration
+        .child_by_field_name("type")?
+        .utf8_text(source)
+        .ok()?;
+    split_qualified_name(raw).map(|(_, leaf)| leaf)
 }
 
 thread_local! {
@@ -2065,6 +2442,7 @@ fn fallback_chunks(rel_path: &Path, language: &str, lines: &[&str]) -> Vec<Chunk
             text,
             language.to_string(),
             ChunkKind::Text,
+            None,
         ));
 
         if end == lines.len() {
@@ -2084,6 +2462,7 @@ fn make_chunk(
     text: String,
     language: String,
     kind: ChunkKind,
+    definitions: Option<Vec<ChunkDefinition>>,
 ) -> Chunk {
     let mut content_hash_data = Vec::with_capacity(text.len() + 32);
     content_hash_data.extend_from_slice(rel_path.to_string_lossy().as_bytes());
@@ -2104,6 +2483,7 @@ fn make_chunk(
         language,
         kind,
         content_hash,
+        definitions,
     }
 }
 
@@ -2112,6 +2492,197 @@ fn make_chunk(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// (name, owner) pairs of every parser-resolved definition, in order.
+    fn parsed_definitions(path: &str, src: &str) -> Vec<(String, Option<String>)> {
+        chunk_source(Path::new(path), src)
+            .into_iter()
+            .filter_map(|chunk| chunk.definitions)
+            .flatten()
+            .map(|definition| (definition.name, definition.owner))
+            .collect()
+    }
+
+    fn pairs(items: &[(&str, Option<&str>)]) -> Vec<(String, Option<String>)> {
+        items
+            .iter()
+            .map(|(name, owner)| (name.to_string(), owner.map(str::to_string)))
+            .collect()
+    }
+
+    #[test]
+    fn parser_definitions_capture_names_and_owners() {
+        assert_eq!(
+            parsed_definitions(
+                "Worker.java",
+                "@Component\npublic class Worker {\n    @Override public void run() {\n        if (ready()) { dispatch(); }\n    }\n    Worker() {}\n    enum Mode { FAST; void tick() {} }\n}\n",
+            ),
+            pairs(&[
+                ("Worker", None),
+                ("run", Some("Worker")),
+                ("Worker", Some("Worker")),
+                ("Mode", Some("Worker")),
+                ("tick", Some("Mode")),
+            ])
+        );
+        assert_eq!(
+            parsed_definitions(
+                "profile.py",
+                "class Profile:\n    @property\n    def name(self):\n        return normalize(self._name)\n\n@cache\ndef load():\n    pass\n",
+            ),
+            pairs(&[("Profile", None), ("name", Some("Profile")), ("load", None)])
+        );
+        assert_eq!(
+            parsed_definitions(
+                "sampler.go",
+                "package p\n\ntype Sampler struct{}\n\nfunc (s *Sampler) Keep() bool { return true }\n\nfunc New() *Sampler { return nil }\n",
+            ),
+            pairs(&[("Sampler", None), ("Keep", Some("Sampler")), ("New", None)])
+        );
+        assert_eq!(
+            parsed_definitions(
+                "engine.rs",
+                "pub struct Engine;\nimpl<'a> Engine {\n    pub fn method(&self) {}\n}\nimpl std::fmt::Display for Engine {\n    fn fmt(&self) {}\n}\ntrait Runner {\n    fn run(&self) {}\n}\n",
+            ),
+            pairs(&[
+                ("method", Some("Engine")),
+                ("fmt", Some("Engine")),
+                ("Runner", None),
+                ("run", Some("Runner")),
+            ])
+        );
+        assert_eq!(
+            parsed_definitions(
+                "widget.cpp",
+                "namespace ui {\nclass Widget {\npublic:\n  void inline_draw() {}\n};\n}\nvoid ui::Widget::draw() {}\nstatic int *helper(int a) { return nullptr; }\nWidget::~Widget() {}\n",
+            ),
+            pairs(&[
+                ("ui", None),
+                ("Widget", Some("ui")),
+                ("inline_draw", Some("Widget")),
+                ("draw", Some("Widget")),
+                ("helper", None),
+            ])
+        );
+        assert_eq!(
+            parsed_definitions(
+                "component.ts",
+                "export class Panel {\n  @Input() value: string;\n  @HostListener('click')\n  onClick(): void {}\n}\nexport function helper() {}\n",
+            ),
+            pairs(&[
+                ("Panel", None),
+                ("onClick", Some("Panel")),
+                ("helper", None)
+            ])
+        );
+        assert_eq!(
+            parsed_definitions(
+                "order.rb",
+                "module Billing\n  class Order < Base\n    def total\n      1\n    end\n    def self.build\n    end\n  end\nend\n",
+            ),
+            pairs(&[
+                ("Billing", None),
+                ("Order", Some("Billing")),
+                ("total", Some("Order")),
+                ("build", Some("Order")),
+            ])
+        );
+        assert_eq!(
+            parsed_definitions(
+                "mod.lua",
+                "local M = {}\nfunction M.create(x)\n  return x\nend\nfunction M:method()\n  return self\nend\n",
+            ),
+            pairs(&[("create", Some("M")), ("method", Some("M"))])
+        );
+    }
+
+    #[test]
+    fn continuation_windows_carry_no_definitions() {
+        // Well past MAX_STRUCTURAL_CHUNK_LINES/BYTES so the definition splits
+        // into continuation windows.
+        let mut src = String::from("pub fn long_pipeline() {\n");
+        for index in 0..400 {
+            src.push_str(&format!("    probe_callee({index});\n"));
+        }
+        src.push_str("}\n");
+        let chunks = chunk_source(Path::new("pipeline.rs"), &src);
+        assert!(chunks.len() > 1, "{}", chunks.len());
+        assert_eq!(
+            chunks[0].definitions,
+            Some(vec![ChunkDefinition {
+                name: "long_pipeline".to_string(),
+                owner: None,
+            }])
+        );
+        for chunk in &chunks[1..] {
+            assert_eq!(chunk.definitions, Some(Vec::new()), "{}", chunk.start_line);
+        }
+
+        // Module gaps are collections: every window keeps the text heuristic.
+        let mut gap = String::from("fn anchor() {}\n");
+        for index in 0..400 {
+            gap.push_str(&format!("pub struct Record{index};\n"));
+        }
+        let chunks = chunk_source(Path::new("records.rs"), &gap);
+        let gap_chunks = chunks
+            .iter()
+            .filter(|chunk| chunk.kind == ChunkKind::Module)
+            .collect::<Vec<_>>();
+        assert!(gap_chunks.len() > 1, "{}", gap_chunks.len());
+        assert!(gap_chunks.iter().all(|chunk| chunk.definitions.is_none()));
+    }
+
+    #[test]
+    fn qualified_parser_names_split_owner_and_leaf() {
+        assert_eq!(
+            split_qualified_name("ns::Outer::run"),
+            Some((Some("Outer".to_string()), "run".to_string()))
+        );
+        assert_eq!(
+            split_qualified_name("*Gen[T]"),
+            Some((None, "Gen".to_string()))
+        );
+        assert_eq!(
+            split_qualified_name("Wrapper<'a, T>"),
+            Some((None, "Wrapper".to_string()))
+        );
+        // Generic arguments on a qualifier must not swallow the member.
+        assert_eq!(
+            split_qualified_name("Outer<T>::run"),
+            Some((Some("Outer".to_string()), "run".to_string()))
+        );
+        assert_eq!(
+            split_qualified_name("Map<K, Vec<V>>::insert"),
+            Some((Some("Map".to_string()), "insert".to_string()))
+        );
+        assert_eq!(split_qualified_name("operator+"), None);
+        assert_eq!(split_qualified_name("42"), None);
+    }
+
+    #[test]
+    fn parser_definitions_cover_grouped_go_types_kotlin_aliases_and_cpp_templates() {
+        assert_eq!(
+            parsed_definitions(
+                "types.go",
+                "package p\n\ntype (\n\tFoo struct{}\n\tBar struct{}\n)\n\ntype Baz int\n",
+            ),
+            pairs(&[("Foo", None), ("Bar", None), ("Baz", None)])
+        );
+        assert_eq!(
+            parsed_definitions(
+                "Aliases.kt",
+                "typealias Channel<T> = Flow<T>\n\nclass Sink {\n    fun drain() {}\n}\n",
+            ),
+            pairs(&[("Channel", None), ("Sink", None), ("drain", Some("Sink"))])
+        );
+        assert_eq!(
+            parsed_definitions(
+                "outer.cpp",
+                "template <typename T>\nvoid Outer<T>::run() {}\n",
+            ),
+            pairs(&[("run", Some("Outer"))])
+        );
+    }
 
     #[test]
     fn rust_chunker_extracts_functions() {

@@ -239,6 +239,8 @@ pub(super) fn create_tables_schema(conn: &Connection, create_indexes: bool) -> R
         CREATE TABLE IF NOT EXISTS symbols (
             normalized_name TEXT NOT NULL,
             chunk_key INTEGER NOT NULL,
+            name TEXT,
+            owner TEXT,
             PRIMARY KEY (normalized_name, chunk_key)
         ) WITHOUT ROWID;
 
@@ -274,7 +276,11 @@ pub(super) fn create_tables_schema(conn: &Connection, create_indexes: bool) -> R
     }
 
     add_is_ignored_column(conn)?;
-    migrate_legacy_symbols_table(conn)
+    migrate_legacy_symbols_table(conn)?;
+    if create_indexes {
+        create_symbol_indexes(conn)?;
+    }
+    Ok(())
 }
 
 fn add_is_ignored_column(conn: &Connection) -> Result<()> {
@@ -296,6 +302,10 @@ fn is_duplicate_is_ignored_column(error: &SqliteError) -> bool {
     )
 }
 
+/// Upgrades pre-v22 `symbols` tables (single name per chunk, or name-only
+/// rows) to the current layout. Legacy rows carry no display name or owner
+/// (readers fall back to the normalized name); the format bump rebuilds them
+/// with parser-derived names on the next index.
 fn migrate_legacy_symbols_table(conn: &Connection) -> Result<()> {
     let mut table_info = conn.prepare("PRAGMA table_info(symbols)")?;
     let columns = table_info
@@ -309,9 +319,10 @@ fn migrate_legacy_symbols_table(conn: &Connection) -> Result<()> {
         && columns
             .iter()
             .any(|(name, primary_key)| name == "normalized_name" && *primary_key == 0);
+    let missing_symbol_metadata = !columns.iter().any(|(name, _)| name == "name");
     drop(table_info);
 
-    if legacy_single_symbol_schema {
+    if legacy_single_symbol_schema || missing_symbol_metadata {
         conn.execute_batch(
             r#"
             BEGIN IMMEDIATE;
@@ -320,15 +331,24 @@ fn migrate_legacy_symbols_table(conn: &Connection) -> Result<()> {
             CREATE TABLE symbols (
                 normalized_name TEXT NOT NULL,
                 chunk_key INTEGER NOT NULL,
+                name TEXT,
+                owner TEXT,
                 PRIMARY KEY (normalized_name, chunk_key)
             ) WITHOUT ROWID;
-            INSERT OR IGNORE INTO symbols (normalized_name, chunk_key)
-                SELECT normalized_name, chunk_key FROM symbols_legacy;
+            INSERT OR IGNORE INTO symbols (normalized_name, chunk_key, name, owner)
+                SELECT normalized_name, chunk_key, NULL, NULL FROM symbols_legacy;
             DROP TABLE symbols_legacy;
             COMMIT;
             "#,
         )?;
     }
+    Ok(())
+}
+
+/// Symbol rows are keyed by name; file removal needs the reverse lookup.
+/// Fresh indexes defer this with the other secondary indexes.
+pub(super) fn create_symbol_indexes(conn: &Connection) -> Result<()> {
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_symbols_chunk_key ON symbols(chunk_key);")?;
     Ok(())
 }
 
@@ -346,7 +366,7 @@ pub(super) fn create_secondary_indexes(conn: &Connection) -> Result<()> {
             ON unresolved_file_dependencies(lookup_key, source_path);
         "#,
     )?;
-    Ok(())
+    create_symbol_indexes(conn)
 }
 
 pub(super) fn finalize_graph_indexes(conn: &Connection) -> Result<()> {
@@ -477,7 +497,8 @@ mod tests {
 
         create_tables(&conn).unwrap();
         conn.execute(
-            "INSERT INTO symbols (normalized_name, chunk_key) VALUES (?1, ?2)",
+            "INSERT INTO symbols (normalized_name, chunk_key, name, owner)
+             VALUES (?1, ?2, NULL, NULL)",
             params!["routekind", 7],
         )
         .unwrap();
@@ -490,6 +511,50 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn name_only_symbols_gain_metadata_columns() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chunks (
+                chunk_key INTEGER PRIMARY KEY,
+                file_path TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                language TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                text TEXT NOT NULL,
+                vector_key INTEGER NOT NULL,
+                modified_unix INTEGER NOT NULL,
+                is_ignored INTEGER NOT NULL DEFAULT 0
+             );
+             INSERT INTO chunks VALUES (7, 'src/router.rs', 1, 2, 'rust', 'Class', '', 7, 0, 0);
+             CREATE TABLE symbols (
+                normalized_name TEXT NOT NULL,
+                chunk_key INTEGER NOT NULL,
+                PRIMARY KEY (normalized_name, chunk_key)
+             ) WITHOUT ROWID;
+             INSERT INTO symbols (normalized_name, chunk_key) VALUES ('router', 7);",
+        )
+        .unwrap();
+
+        create_tables(&conn).unwrap();
+
+        let row = conn
+            .query_row(
+                "SELECT normalized_name, name, owner FROM symbols WHERE chunk_key = 7",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(row, ("router".to_string(), None, None));
     }
 
     #[test]

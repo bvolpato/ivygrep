@@ -1237,7 +1237,7 @@ fn relationship_anchor_keys(task: &str, anchors: &[String]) -> HashSet<String> {
 
 fn terminal_symbol_member(symbol: &str) -> Option<&str> {
     let member = symbol
-        .rsplit_once('.')
+        .rsplit_once(['.', '#'])
         .map(|(_, member)| member)
         .or_else(|| symbol.rsplit_once("::").map(|(_, member)| member))?;
     (member.len() >= 3
@@ -1454,13 +1454,15 @@ fn task_symbols(task: &str) -> Vec<String> {
             && character != '$'
             && character != ':'
             && character != '.'
+            && character != '#'
     })
-    .map(|part| part.trim_matches([':', '.', '$']))
+    .map(|part| part.trim_matches([':', '.', '$', '#']))
     .filter(|part| part.len() >= 3)
     .filter(|part| !looks_like_path_location(part))
     .filter(|part| {
         part.contains('_')
             || part.contains("::")
+            || part.contains('#')
             || part.contains('.') && !looks_like_file_name(part)
             || looks_like_mixed_case_identifier(part)
     })
@@ -2319,6 +2321,10 @@ mod tests {
         assert_eq!(
             anchor_symbols("change UserService.handle through std::io", &[]),
             ["UserService.handle", "handle", "std::io"]
+        );
+        assert_eq!(
+            anchor_symbols("fix Worker#run retries", &[]),
+            ["Worker#run", "run"]
         );
         assert_eq!(
             relationship_anchor_keys(

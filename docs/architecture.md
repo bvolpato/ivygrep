@@ -219,6 +219,19 @@ Literal, regex, symbol, and caller commands have specialized paths where their
 contracts differ from hybrid semantic search. They still reuse workspace,
 filtering, grouping, and output types where appropriate.
 
+Symbol rows (`symbols` in SQLite) store the case-folded lookup key, the
+exact-case definition `name` when it differs from that key, and an optional
+enclosing `owner` (class, impl, struct, module, or Go receiver); language and
+kind are read from the joined chunk row, and a `chunk_key` index keeps file
+removal proportional to the file's own symbols. Names come
+from the Tree-sitter capture at chunk time; the line heuristic is only a
+fallback for languages without a grammar, and continuation windows never
+register symbols. Qualified lookups (`Owner.method`, `Owner::method`,
+`Owner#method`, `Owner->method`) filter by owner, preferring exact-case matches
+and falling back to the bare name; reference and caller scans are restricted
+to the languages that define the symbol. Adding these columns bumped the index
+format to v22.
+
 ## Context-pack pipeline
 
 Context packs answer a different question from ranked search: which bounded set
