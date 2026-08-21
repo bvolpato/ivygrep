@@ -179,6 +179,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
         conjunctive_numeric_query,
         scope_filter: options.scope_filter.as_ref(),
         glob_path_filter: &glob_path_filter,
+        include_globs: &options.include_globs,
         can_pushdown_languages,
         allowed_languages: &allowed_languages,
         searchers: &ctx.searchers,
