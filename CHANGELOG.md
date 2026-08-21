@@ -22,6 +22,10 @@ All notable changes to ivygrep are documented in this file.
 - MCP `ig_search` hits mode now defaults to 10 result files when `limit` is omitted, treats `limit` as a file count, caps hits per file (`hits_per_file`, default 3) with `more_hits_in_file`, and reports `total_matches` and `truncated`.
 - MCP search results no longer duplicate the full JSON payload in the text block; `structuredContent` stays machine-readable while text is a compact path, line-range, and preview rendering.
 - Fresh indexes skip the serial dependent-discovery pass, and incremental runs read only `Cargo.toml`/`go.mod`/`pubspec.yaml` for manifest resolution signatures instead of every changed file.
+- Symbol names come from the Tree-sitter parse when a grammar is available; annotated/decorated declarations (`@Override public void run()`, `@property def name`) no longer register `if` or body callees, and continuation windows register nothing.
+- Symbol rows persist the exact-case `name` (when it differs from the normalized name) and the enclosing `owner`, indexed by chunk for fast file removal; `--symbol Owner.method` / `Owner::method` / `Owner#method` / `Owner->method` and context-pack anchors filter by owner (exact case first) and rank exact-case names ahead of case-folded ones.
+- `--refs` / `--callers` only scan languages that define the symbol, so a Python `.resolve()` call is no longer reported as a reference to a Rust `fn resolve`.
+- Index format bumped to v22; existing indexes rebuild on first use.
 
 ## [1.2.12] - 2026-08-20
 

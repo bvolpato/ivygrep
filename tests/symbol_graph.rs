@@ -418,3 +418,298 @@ fn worktree_overlay_hides_shadowed_base_symbols() {
         &["worktree", "remove", worktree.to_str().unwrap(), "--force"],
     );
 }
+
+#[test]
+#[serial]
+fn annotated_definitions_register_their_declared_names() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join(".git")).unwrap();
+    fs::write(
+        root.path().join("Worker.java"),
+        "public class Worker implements Runnable {\n\
+         \x20   @Override public void run() {\n\
+         \x20       if (ready()) {\n\
+         \x20           dispatch();\n\
+         \x20       }\n\
+         \x20   }\n\
+         }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("profile.py"),
+        "class Profile:\n\
+         \x20   @property\n\
+         \x20   def name(self):\n\
+         \x20       return normalize(self._name)\n",
+    )
+    .unwrap();
+
+    let workspace = index(root.path(), home.path());
+    let definitions = |symbol: &str| {
+        search_symbols(
+            &workspace,
+            symbol,
+            SymbolSearchMode::Definitions,
+            Some(10),
+            None,
+        )
+        .unwrap()
+    };
+
+    let run = definitions("run");
+    assert!(
+        run.iter()
+            .any(|hit| hit.file_path == Path::new("Worker.java")),
+        "annotated Java method must register its own name: {run:?}"
+    );
+    let name = definitions("name");
+    assert!(
+        name.iter()
+            .any(|hit| hit.file_path == Path::new("profile.py")),
+        "decorated Python method must register its own name: {name:?}"
+    );
+    for junk in [
+        "if",
+        "ready",
+        "dispatch",
+        "normalize",
+        "property",
+        "Override",
+    ] {
+        assert!(
+            definitions(junk).is_empty(),
+            "{junk} must not be registered as a definition"
+        );
+    }
+}
+
+#[test]
+#[serial]
+fn continuation_windows_register_no_fallback_symbols() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join(".git")).unwrap();
+    // Well past the structural chunk limits so continuation windows exist.
+    let mut source = String::from("pub fn long_pipeline() {\n");
+    for index in 0..400 {
+        source.push_str(&format!("    probe_callee({index});\n"));
+    }
+    source.push_str("}\n");
+    fs::write(root.path().join("pipeline.rs"), source).unwrap();
+
+    let workspace = index(root.path(), home.path());
+    let definition = search_symbols(
+        &workspace,
+        "long_pipeline",
+        SymbolSearchMode::Definitions,
+        Some(10),
+        None,
+    )
+    .unwrap();
+    assert_eq!(definition.len(), 1, "{definition:?}");
+    assert_eq!(definition[0].start_line, 1);
+
+    let callee = search_symbols(
+        &workspace,
+        "probe_callee",
+        SymbolSearchMode::Definitions,
+        Some(10),
+        None,
+    )
+    .unwrap();
+    assert!(
+        callee.is_empty(),
+        "continuation windows must not register body callees: {callee:?}"
+    );
+}
+
+#[test]
+#[serial]
+fn qualified_symbol_lookups_filter_by_owner() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join(".git")).unwrap();
+    fs::write(
+        root.path().join("shapes.py"),
+        "class Outer:\n\
+         \x20   def method(self):\n\
+         \x20       return 1\n\
+         \n\
+         class Other:\n\
+         \x20   def method(self):\n\
+         \x20       return 2\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("engine.rs"),
+        "pub struct Engine;\n\
+         impl Engine {\n\
+         \x20   pub fn method(&self) -> u8 { 1 }\n\
+         }\n\
+         pub struct Gearbox;\n\
+         impl Gearbox {\n\
+         \x20   pub fn method(&self) -> u8 { 2 }\n\
+         }\n",
+    )
+    .unwrap();
+
+    let workspace = index(root.path(), home.path());
+    let definitions = |symbol: &str| {
+        search_symbols(
+            &workspace,
+            symbol,
+            SymbolSearchMode::Definitions,
+            Some(10),
+            None,
+        )
+        .unwrap()
+    };
+
+    let outer = definitions("Outer.method");
+    assert_eq!(outer.len(), 1, "{outer:?}");
+    assert_eq!(outer[0].file_path, Path::new("shapes.py"));
+    assert_eq!(outer[0].start_line, 2);
+
+    let other = definitions("Other#method");
+    assert_eq!(other.len(), 1, "{other:?}");
+    assert_eq!(other[0].start_line, 6);
+
+    let engine = definitions("Engine::method");
+    assert_eq!(engine.len(), 1, "{engine:?}");
+    assert_eq!(engine[0].file_path, Path::new("engine.rs"));
+    assert_eq!(engine[0].start_line, 3);
+
+    let gearbox = definitions("Gearbox->method");
+    assert_eq!(gearbox.len(), 1, "{gearbox:?}");
+    assert_eq!(gearbox[0].start_line, 7);
+
+    // Case-insensitive owner matches rank after exact ones but still filter.
+    let folded = definitions("gearbox.method");
+    assert_eq!(folded.len(), 1, "{folded:?}");
+    assert_eq!(folded[0].start_line, 7);
+
+    // Unknown owners fall back to the bare name.
+    let bare = definitions("method");
+    assert_eq!(bare.len(), 4, "{bare:?}");
+    let unknown_owner = definitions("Missing.method");
+    assert_eq!(unknown_owner.len(), 4, "{unknown_owner:?}");
+
+    let mut command = AssertCommand::new(assert_cmd::cargo::cargo_bin!("ig"));
+    let output = command
+        .current_dir(root.path())
+        .env("IVYGREP_HOME", home.path())
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .args(["--symbol", "--json", "Outer.method"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let hits = value[0]["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "{value}");
+    assert_eq!(hits[0]["start_line"], 2);
+}
+
+#[test]
+#[serial]
+fn worktree_reference_languages_ignore_shadowed_base_definitions() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    git(root.path(), &["init"]);
+    git(root.path(), &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    fs::write(root.path().join("service.rs"), "pub fn resolve() {}\n").unwrap();
+    fs::write(
+        root.path().join("client.py"),
+        "def run():\n    return resolve()\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base"]);
+    git(root.path(), &["checkout", "-b", "feature"]);
+    git(root.path(), &["rm", "-q", "service.rs"]);
+    git(root.path(), &["commit", "-m", "drop rust definition"]);
+    git(root.path(), &["checkout", "main"]);
+
+    let worktree_parent = tempfile::tempdir().unwrap();
+    let worktree = worktree_parent.path().join("feature");
+    git(
+        root.path(),
+        &["worktree", "add", worktree.to_str().unwrap(), "feature"],
+    );
+
+    index(root.path(), home.path());
+    let overlay = index(&worktree, home.path());
+    // The base still defines `resolve` in Rust, but the worktree deleted that
+    // file; its language must not restrict the reference scan.
+    let refs = search_symbols(
+        &overlay,
+        "resolve",
+        SymbolSearchMode::References,
+        Some(10),
+        None,
+    )
+    .unwrap();
+    assert!(
+        refs.iter().any(|hit| hit.file_path.ends_with("client.py")),
+        "python call site must survive when the only definition is shadowed: {refs:?}"
+    );
+
+    git(
+        root.path(),
+        &["worktree", "remove", worktree.to_str().unwrap(), "--force"],
+    );
+}
+
+#[test]
+#[serial]
+fn references_are_restricted_to_definition_languages() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join(".git")).unwrap();
+    fs::write(
+        root.path().join("resolver.rs"),
+        "pub fn resolve(name: &str) -> String { name.to_string() }\n\
+         pub fn lookup() -> String { resolve(\"x\") }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("paths.py"),
+        "from pathlib import Path\n\
+         def here():\n\
+         \x20   return Path(__file__).resolve()\n",
+    )
+    .unwrap();
+
+    let workspace = index(root.path(), home.path());
+    for mode in [SymbolSearchMode::References, SymbolSearchMode::Callers] {
+        let hits = search_symbols(&workspace, "resolve", mode, Some(10), None).unwrap();
+        assert!(
+            hits.iter()
+                .any(|hit| hit.file_path == Path::new("resolver.rs")),
+            "{mode:?} must keep the Rust call site: {hits:?}"
+        );
+        assert!(
+            hits.iter()
+                .all(|hit| hit.file_path != Path::new("paths.py")),
+            "{mode:?} must not report a Python call for a Rust definition: {hits:?}"
+        );
+    }
+
+    // Symbols without any known definition keep the plain substring scan.
+    let unknown = search_symbols(
+        &workspace,
+        "Path",
+        SymbolSearchMode::References,
+        Some(10),
+        None,
+    )
+    .unwrap();
+    assert!(
+        unknown
+            .iter()
+            .any(|hit| hit.file_path == Path::new("paths.py")),
+        "{unknown:?}"
+    );
+}

@@ -489,19 +489,24 @@ pub fn first_code_line_range(text: &str) -> Option<Range<usize>> {
             continue;
         }
 
-        if trimmed.is_empty()
-            || trimmed.starts_with("//")
-            || trimmed.starts_with('#')
-            || trimmed.starts_with('*')
-            || trimmed.starts_with('@')
-            || trimmed.starts_with("*/")
-            || trimmed.starts_with('[') && trimmed.ends_with(']')
+        // Annotations and attributes that share a line with the declaration
+        // (`@Override public void run() {`) are stripped rather than hiding
+        // the declaration behind them.
+        let code = strip_leading_annotations(trimmed);
+        if code.is_empty()
+            || code.starts_with("//")
+            || code.starts_with('#')
+            || code.starts_with('*')
+            || code.starts_with('@')
+            || code.starts_with("*/")
+            || code.starts_with('[') && code.ends_with(']')
         {
             offset += line.len();
             continue;
         }
 
-        let leading_bytes = line_without_newline.len() - line_without_newline.trim_start().len();
+        let leading_bytes = line_without_newline.len() - line_without_newline.trim_start().len()
+            + (trimmed.len() - code.len());
         let trailing_bytes = line_without_newline.len() - line_without_newline.trim_end().len();
         return Some(offset + leading_bytes..offset + line_without_newline.len() - trailing_bytes);
     }
@@ -509,9 +514,88 @@ pub fn first_code_line_range(text: &str) -> Option<Range<usize>> {
     None
 }
 
+/// Strips leading annotation / decorator / attribute tokens (`@Name`,
+/// `@Name(...)`, `#[...]`) from a trimmed line and returns the remaining
+/// declaration text. A line that only holds annotations becomes empty.
+pub fn strip_leading_annotations(mut line: &str) -> &str {
+    loop {
+        if let Some(rest) = line.strip_prefix('@') {
+            let identifier_end = rest
+                .find(|character: char| {
+                    !character.is_ascii_alphanumeric() && !matches!(character, '_' | '.' | '$')
+                })
+                .unwrap_or(rest.len());
+            if identifier_end == 0 {
+                return line;
+            }
+            let mut rest = &rest[identifier_end..];
+            if rest.starts_with('(') {
+                match matching_close_offset(rest, b'(', b')') {
+                    Some(close) => rest = &rest[close + 1..],
+                    None => return "",
+                }
+            }
+            line = rest.trim_start();
+            continue;
+        }
+        if line.starts_with("#[") {
+            match matching_close_offset(line, b'[', b']') {
+                Some(close) => line = line[close + 1..].trim_start(),
+                None => return "",
+            }
+            continue;
+        }
+        return line;
+    }
+}
+
+fn matching_close_offset(text: &str, open: u8, close: u8) -> Option<usize> {
+    let mut depth = 0usize;
+    for (offset, byte) in text.bytes().enumerate() {
+        if byte == open {
+            depth += 1;
+        } else if byte == close {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(offset);
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn leading_annotations_are_stripped_from_declarations() {
+        assert_eq!(
+            strip_leading_annotations("@Override public void run() {"),
+            "public void run() {"
+        );
+        assert_eq!(
+            strip_leading_annotations(
+                "@Route('/x', methods = {\"GET\"}) @Auth public function index()"
+            ),
+            "public function index()"
+        );
+        assert_eq!(
+            strip_leading_annotations("#[inline] pub fn method(&self) {}"),
+            "pub fn method(&self) {}"
+        );
+        assert_eq!(strip_leading_annotations("@property"), "");
+        assert_eq!(strip_leading_annotations("@Route('/x'"), "");
+        assert_eq!(
+            strip_leading_annotations("pub fn plain() {}"),
+            "pub fn plain() {}"
+        );
+        assert_eq!(strip_leading_annotations("@"), "@");
+
+        let text = "// src/Worker.java\n\n@Override public void run() {\n";
+        let range = first_code_line_range(text).unwrap();
+        assert_eq!(&text[range], "public void run() {");
+    }
 
     #[test]
     fn camel_case_split() {

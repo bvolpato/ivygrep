@@ -690,6 +690,7 @@ fn query_chunks_for_file(
             content_hash: String::new(),
             vector_key,
             is_ignored,
+            definitions: None,
         });
     }
     Ok(chunks)
@@ -7376,6 +7377,7 @@ export function registerCommands(p: Plugin) {
             content_hash: id.to_string(),
             vector_key: xxhash_rust::xxh3::xxh3_64(id.as_bytes()),
             is_ignored: false,
+            definitions: None,
         }
     }
 
@@ -7391,6 +7393,7 @@ export function registerCommands(p: Plugin) {
             content_hash: format!("hash-{id}"),
             vector_key: xxhash_rust::xxh3::xxh3_64(id.as_bytes()),
             is_ignored: false,
+            definitions: None,
         }
     }
 
@@ -8131,6 +8134,7 @@ export function registerCommands(p: Plugin) {
             content_hash: format!("hash-{id}"),
             vector_key: 42,
             is_ignored: false,
+            definitions: None,
         }
     }
 

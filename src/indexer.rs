@@ -17,7 +17,8 @@ use tantivy::{TantivyDocument, Term};
 use crate::text::first_code_line_range;
 
 use crate::chunking::{
-    Chunk, RustDocInclude, chunk_rust_doc_include, chunk_source_with_metadata, is_indexable_file,
+    Chunk, ChunkDefinition, RustDocInclude, chunk_rust_doc_include, chunk_source_with_metadata,
+    is_indexable_file,
 };
 use crate::embedding::EmbeddingModel;
 use crate::jobs::{self, JobKind, JobUpdate};
@@ -58,7 +59,12 @@ const MAX_RUST_DOC_INCLUDES_PER_SOURCE: usize = 16;
 const MAX_RUST_DOC_INCLUDE_BYTES: u64 = MIB;
 const MAX_RUST_DOC_INCLUDE_TOTAL_BYTES: u64 = 2 * MIB;
 const MAX_RUST_DOC_INCLUDE_CHUNKS_PER_SOURCE: usize = 128;
-const SYMBOL_INSERT_BATCH_ROWS: usize = 256;
+// Six bind parameters per row keeps each batch under SQLite's conservative
+// 999-parameter limit.
+const SYMBOL_INSERT_BATCH_ROWS: usize = 160;
+const SYMBOL_INSERT_PREFIX: &str =
+    "INSERT OR REPLACE INTO symbols (normalized_name, chunk_key, name, owner) VALUES ";
+const SYMBOL_INSERT_ROW: &str = "(?, ?, ?, ?)";
 const INDEX_FILE_BATCH_SIZE: usize = 64;
 // Soft per-transaction target, checked after each file. One file's bounded
 // chunk-key batch may exceed it before the journal and SQLite commit checkpoint.
@@ -102,6 +108,10 @@ pub struct IndexedChunk {
     pub content_hash: String,
     pub vector_key: u64,
     pub is_ignored: bool,
+    /// Parser-derived definitions captured at chunk time. `None` when the
+    /// chunk was loaded from storage or the parser did not resolve it, in
+    /// which case symbol extraction falls back to the text heuristic.
+    pub definitions: Option<Vec<ChunkDefinition>>,
 }
 
 #[derive(Debug, Clone)]
@@ -2539,6 +2549,7 @@ fn build_indexed_chunk_with_occurrence(
         content_hash: chunk.content_hash,
         vector_key,
         is_ignored,
+        definitions: chunk.definitions,
     }
 }
 
@@ -2995,7 +3006,7 @@ struct PersistStatements<'conn> {
     file_edge_insert: Statement<'conn>,
     unresolved_dependency_insert: Statement<'conn>,
     manifest_resolution_signature_insert: Statement<'conn>,
-    symbol_rows: Vec<(String, i64)>,
+    symbol_rows: Vec<crate::symbols::SymbolRow>,
     symbol_insert_sql: String,
 }
 
@@ -3038,8 +3049,7 @@ impl<'conn> PersistStatements<'conn> {
             )?,
             symbol_rows: Vec::with_capacity(SYMBOL_INSERT_BATCH_ROWS),
             symbol_insert_sql: String::with_capacity(
-                "INSERT OR REPLACE INTO symbols (normalized_name, chunk_key) VALUES ".len()
-                    + SYMBOL_INSERT_BATCH_ROWS * "(?, ?),".len(),
+                SYMBOL_INSERT_PREFIX.len() + SYMBOL_INSERT_BATCH_ROWS * SYMBOL_INSERT_ROW.len(),
             ),
         })
     }
@@ -3089,20 +3099,19 @@ impl<'conn> PersistStatements<'conn> {
         while !self.symbol_rows.is_empty() {
             let batch_len = self.symbol_rows.len().min(SYMBOL_INSERT_BATCH_ROWS);
             self.symbol_insert_sql.clear();
-            self.symbol_insert_sql
-                .push_str("INSERT OR REPLACE INTO symbols (normalized_name, chunk_key) VALUES ");
+            self.symbol_insert_sql.push_str(SYMBOL_INSERT_PREFIX);
             for index in 0..batch_len {
                 if index > 0 {
                     self.symbol_insert_sql.push(',');
                 }
-                self.symbol_insert_sql.push_str("(?, ?)");
+                self.symbol_insert_sql.push_str(SYMBOL_INSERT_ROW);
             }
 
             {
-                let mut params: Vec<&dyn ToSql> = Vec::with_capacity(batch_len * 2);
-                for (name, chunk_key) in &self.symbol_rows[..batch_len] {
-                    params.push(name);
-                    params.push(chunk_key);
+                let mut params: Vec<&dyn ToSql> =
+                    Vec::with_capacity(batch_len * crate::symbols::SYMBOL_ROW_COLUMNS);
+                for row in &self.symbol_rows[..batch_len] {
+                    row.push_params(&mut params);
                 }
                 self.conn
                     .execute(&self.symbol_insert_sql, params.as_slice())?;
@@ -3177,6 +3186,7 @@ pub fn fetch_chunk_by_vector_key(
             content_hash: String::new(),
             vector_key,
             is_ignored: row.get::<_, bool>(7)?,
+            definitions: None,
         };
 
         return Ok(Some(chunk));
@@ -3300,6 +3310,7 @@ fn fetch_chunks_by_vector_keys_batch_impl(
                 content_hash: String::new(),
                 vector_key,
                 is_ignored: row.get::<_, bool>(7)?,
+                definitions: None,
             };
             result.insert(vector_key, chunk);
         }
@@ -3374,6 +3385,7 @@ pub fn fetch_chunk_by_id(
         content_hash: String::new(),
         vector_key,
         is_ignored,
+        definitions: None,
     })
 }
 
@@ -3612,6 +3624,7 @@ mod tests {
             content_hash: "big".to_string(),
             vector_key: 1,
             is_ignored: false,
+            definitions: None,
         };
         let tail_chunk = IndexedChunk {
             chunk_id: String::new(),
@@ -3624,6 +3637,7 @@ mod tests {
             content_hash: "tail".to_string(),
             vector_key: 2,
             is_ignored: false,
+            definitions: None,
         };
 
         let tx = conn.transaction().unwrap();
@@ -3888,6 +3902,7 @@ mod tests {
             language: "rust".to_string(),
             kind: ChunkKind::Module,
             content_hash: "identical-hash".to_string(),
+            definitions: None,
         };
         let a = build_indexed_chunk(make("a.rs"), false);
         let b = build_indexed_chunk(make("b.rs"), false);
@@ -3910,6 +3925,7 @@ mod tests {
             language: "rust".to_string(),
             kind: ChunkKind::Function,
             content_hash: "stable-content-hash".to_string(),
+            definitions: None,
         };
 
         assert_eq!(
@@ -3930,6 +3946,7 @@ mod tests {
             language: "rust".to_string(),
             kind: ChunkKind::Function,
             content_hash: content_hash.to_string(),
+            definitions: None,
         };
 
         assert_eq!(
@@ -3950,6 +3967,7 @@ mod tests {
             language: "rust".to_string(),
             kind: ChunkKind::Function,
             content_hash: "same-content".to_string(),
+            definitions: None,
         };
 
         assert_ne!(
@@ -3990,6 +4008,7 @@ mod tests {
             language: "java".to_string(),
             kind: ChunkKind::Function,
             content_hash: "java-signature".to_string(),
+            definitions: None,
         };
         let indexed = build_indexed_chunk(chunk, false);
 
@@ -5564,6 +5583,7 @@ mod tests {
                 language: "rust".to_string(),
                 kind: ChunkKind::Function,
                 content_hash: "prepared-content-hash".to_string(),
+                definitions: None,
             },
             false,
         );
