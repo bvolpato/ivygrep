@@ -3637,6 +3637,7 @@ fn filter_meaningful_scores_with_query(
     if !has_direct_candidate {
         return filter_semantic_only_scores(ranked, query, precise_query);
     }
+    let floor_ceiling = direct_candidate_authority_ceiling(&ranked, query_tokens, secondary_intent);
 
     if ranked.len() == 1 {
         let item = &ranked[0];
@@ -3648,6 +3649,7 @@ fn filter_meaningful_scores_with_query(
             secondary_intent,
             implementation_intent,
             short_literal_lookup,
+            floor_ceiling,
         ) {
             return ranked;
         }
@@ -3671,13 +3673,16 @@ fn filter_meaningful_scores_with_query(
         let path_lower = lower_index_path(&chunk.file_path);
         let authority =
             effective_authority_score_for_path(query_tokens, path_lower.as_ref(), secondary_intent);
-        let authority_floor = recommendation_authority_floor(
+        let mut authority_floor = recommendation_authority_floor(
             sources,
             precise_query,
             secondary_intent,
             implementation_intent,
             short_literal_lookup,
         );
+        if candidate_may_relax_authority_floor(path_lower.as_ref()) {
+            authority_floor = authority_floor.min(floor_ceiling);
+        }
         (authority, authority_floor)
     };
     let mut fallback = None;
@@ -3811,6 +3816,7 @@ fn has_path_source(sources: SourceMask) -> bool {
     sources & SOURCE_PATH != 0
 }
 
+#[allow(clippy::too_many_arguments)]
 fn direct_candidate_has_enough_authority(
     chunk: &IndexedChunk,
     sources: SourceMask,
@@ -3819,18 +3825,83 @@ fn direct_candidate_has_enough_authority(
     secondary_intent: bool,
     implementation_intent: bool,
     short_literal_lookup: bool,
+    floor_ceiling: f32,
 ) -> bool {
     let path_lower = lower_index_path(&chunk.file_path);
     let authority =
         effective_authority_score_for_path(query_tokens, path_lower.as_ref(), secondary_intent);
-    authority
-        >= recommendation_authority_floor(
-            sources,
-            precise_query,
-            secondary_intent,
-            implementation_intent,
-            short_literal_lookup,
-        )
+    let mut floor = recommendation_authority_floor(
+        sources,
+        precise_query,
+        secondary_intent,
+        implementation_intent,
+        short_literal_lookup,
+    );
+    if candidate_may_relax_authority_floor(path_lower.as_ref()) {
+        floor = floor.min(floor_ceiling);
+    }
+    authority >= floor
+}
+
+/// Lowest base authority a candidate may have for the corpus-relative floor
+/// to adapt to it. Generated, data, and vendored paths stay below this bound
+/// and are still suppressed when nothing better matched.
+const RELAXABLE_AUTHORITY_ROLE_SCORE: f32 = 0.45;
+
+/// Upper bound for the recommendation authority floor given what actually
+/// matched. The static floors (0.65-0.75) assume a repository where
+/// implementation files exist and outrank docs, tests, and notes. A corpus of
+/// Markdown notes, or a question that only notes answer, has no such files:
+/// every direct hit is `Documentation` (0.5) and a fixed floor returns nothing.
+/// The floor therefore never exceeds the best authority among direct
+/// candidates whose path role is at least documentation-grade, and when
+/// documentation dominates the direct hits, documentation passes. Repositories
+/// with primary-source hits keep the static floors unchanged.
+fn direct_candidate_authority_ceiling(
+    ranked: &[RankedCandidate],
+    query_tokens: &[String],
+    secondary_intent: bool,
+) -> f32 {
+    let mut best_relaxable_authority = 0.0f32;
+    let mut lowest_documentation_authority = f32::MAX;
+    let mut direct = 0usize;
+    let mut documentation = 0usize;
+    for item in ranked.iter().filter(|item| has_direct_source(item.sources)) {
+        direct += 1;
+        let path_lower = lower_index_path(&item.chunk.file_path);
+        let role = path_role(path_lower.as_ref());
+        if role == PathRole::PrimarySource {
+            // Implementation code matched: the static floors apply unchanged.
+            return f32::MAX;
+        }
+        if !candidate_may_relax_authority_floor(path_lower.as_ref()) {
+            continue;
+        }
+        let authority =
+            effective_authority_score_for_path(query_tokens, path_lower.as_ref(), secondary_intent);
+        best_relaxable_authority = best_relaxable_authority.max(authority);
+        if role == PathRole::Documentation {
+            documentation += 1;
+            lowest_documentation_authority = lowest_documentation_authority.min(authority);
+        }
+    }
+    if direct == 0 || best_relaxable_authority <= 0.0 {
+        return f32::MAX;
+    }
+    if documentation * 2 > direct {
+        // Notes and docs are the corpus here; keep all of them eligible.
+        return lowest_documentation_authority.min(best_relaxable_authority);
+    }
+    best_relaxable_authority
+}
+
+/// Whether a candidate's path role is documentation-grade or better, i.e.
+/// eligible for the corpus-relative floor. Generated, data, and vendored paths
+/// never are: they keep the static floor even when the ceiling drops below
+/// their base score (a deeply nested documentation candidate can pull the
+/// ceiling under 0.45).
+fn candidate_may_relax_authority_floor(path_lower: &str) -> bool {
+    file_authority_score_for_path(path_lower) >= RELAXABLE_AUTHORITY_ROLE_SCORE
 }
 
 fn recommendation_authority_floor(
@@ -3876,9 +3947,38 @@ fn support_signals(
 fn is_precise_lookup_query_with_tokens(query: &str, tokens: &[String]) -> bool {
     !query.is_empty()
         && (tokens.len() == 1
-            || query.chars().any(|ch| {
-                ch == '_' || ch == '-' || ch == '/' || ch == ':' || ch.is_ascii_uppercase()
-            }))
+            || query
+                .split_whitespace()
+                .any(query_term_has_identifier_shape))
+}
+
+/// Whether one whitespace-delimited query term looks like a code identifier or
+/// path rather than prose: `snake_case`, `kebab-case`, `a/b`, `a::b`, `a:b`,
+/// `camelCase`, or an all-caps token of at least two letters (`HTTP`). A
+/// sentence-initial capital ("What", "Which") is prose, not an identifier.
+fn query_term_has_identifier_shape(term: &str) -> bool {
+    if term
+        .chars()
+        .any(|ch| ch == '_' || ch == '-' || ch == '/' || ch == ':')
+    {
+        return true;
+    }
+    let mut previous_is_lower_or_digit = false;
+    let mut alphabetic = 0usize;
+    let mut uppercase = 0usize;
+    for ch in term.chars() {
+        if ch.is_ascii_uppercase() {
+            if previous_is_lower_or_digit {
+                return true;
+            }
+            uppercase += 1;
+        }
+        if ch.is_ascii_alphabetic() {
+            alphabetic += 1;
+        }
+        previous_is_lower_or_digit = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+    }
+    alphabetic >= 2 && uppercase == alphabetic
 }
 
 fn normalize_lexical_score(raw_score: f32) -> f32 {
@@ -7600,7 +7700,90 @@ export function registerCommands(p: Plugin) {
     }
 
     #[test]
-    fn filter_drops_doc_literal_without_doc_intent() {
+    fn filter_drops_doc_literal_when_implementation_also_matched() {
+        let doc_chunk = make_chunk_with_path(
+            "search_docs",
+            "docs/search.md",
+            "Search guide: where is tax calculated?",
+        );
+        let code_chunk = make_chunk_with_path(
+            "tax_impl",
+            "src/billing/tax.rs",
+            "pub fn calculate_tax(amount: f64) -> f64 { amount * 0.2 }",
+        );
+        let ranked = make_ranked_with_chunks(&[
+            (doc_chunk, 0.9, &["literal", "lexical"]),
+            (code_chunk, 0.85, &["lexical"]),
+        ]);
+        let filtered = filter_meaningful_scores(ranked, "where is tax calculated");
+        let paths = filtered
+            .iter()
+            .map(|(chunk, _, _)| chunk.chunk_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            vec!["tax_impl"],
+            "docs example should not outrank or accompany the implementation"
+        );
+    }
+
+    #[test]
+    fn documentation_majority_never_relaxes_the_floor_past_an_implementation_match() {
+        // Two doc chunks (one long Markdown file) and one implementation chunk.
+        let doc_a = make_chunk_with_path("doc_a", "docs/billing.md", "tax is calculated here");
+        let doc_b = make_chunk_with_path("doc_b", "docs/billing.md", "how tax is calculated");
+        let code = make_chunk_with_path(
+            "tax_impl",
+            "src/billing/tax.rs",
+            "pub fn calculate_tax(amount: f64) -> f64 { amount * 0.2 }",
+        );
+        let ranked = make_ranked_with_chunks(&[
+            (doc_a, 0.9, &["lexical"]),
+            (code, 0.89, &["lexical"]),
+            (doc_b, 0.88, &["lexical"]),
+        ]);
+        let filtered = filter_meaningful_scores(ranked, "where is tax calculated");
+        let ids = filtered
+            .iter()
+            .map(|(chunk, _, _)| chunk.chunk_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["tax_impl"]);
+    }
+
+    #[test]
+    fn relaxed_floor_never_admits_generated_or_data_candidates() {
+        // Best eligible candidate is a deep examples/ file whose effective
+        // authority (0.45 * 0.74) sits below the generated (0.35) and data
+        // (0.4) role scores; those roles must still be filtered.
+        let example = make_chunk_with_path(
+            "example",
+            "a/b/c/d/e/examples/demo_payment.rs",
+            "fn demo_payment() {}",
+        );
+        let generated = make_chunk_with_path(
+            "generated",
+            "generated/payment_stub.rs",
+            "fn demo_payment() {}",
+        );
+        let data = make_chunk_with_path("data", "payment.json", "{\"demo_payment\": 1}");
+        let ranked = make_ranked_with_chunks(&[
+            (example, 0.9, &["lexical"]),
+            (generated, 0.89, &["lexical"]),
+            (data, 0.88, &["lexical"]),
+        ]);
+        let filtered = filter_meaningful_scores(ranked, "demo payment flow");
+        let ids = filtered
+            .iter()
+            .map(|(chunk, _, _)| chunk.chunk_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["example"]);
+    }
+
+    #[test]
+    fn filter_keeps_doc_literal_when_nothing_more_authoritative_matched() {
+        // A corpus of notes, or a question only notes answer, has no
+        // implementation files to prefer. Returning nothing hides a real
+        // lexical match; the floor adapts to the best available authority.
         let doc_chunk = make_chunk_with_path(
             "search_docs",
             "docs/search.md",
@@ -7608,10 +7791,8 @@ export function registerCommands(p: Plugin) {
         );
         let ranked = make_ranked_with_chunks(&[(doc_chunk, 0.9, &["literal", "lexical"])]);
         let filtered = filter_meaningful_scores(ranked, "where is tax calculated");
-        assert!(
-            filtered.is_empty(),
-            "docs example should not become high-confidence recommendation"
-        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].0.chunk_id, "search_docs");
     }
 
     #[test]
@@ -8400,5 +8581,100 @@ export function registerCommands(p: Plugin) {
             first_path.contains("tax-engine"),
             "path exact match should rank tax-engine/ first, got {first_path}"
         );
+    }
+
+    #[test]
+    fn precise_lookup_requires_identifier_shape_not_sentence_capitals() {
+        let tokens = |query: &str| expanded_query_tokens(query);
+        for prose in [
+            "What did we decide about cache invalidation?",
+            "Which database did we pick for the notes service?",
+            "How do I reload the gateway locally?",
+            "what did we decide about cache invalidation?",
+        ] {
+            assert!(
+                !is_precise_lookup_query_with_tokens(prose, &tokens(prose)),
+                "{prose:?} is prose, not a precise lookup"
+            );
+        }
+        for identifier in [
+            "where is HivePartitionManager used",
+            "calculate_tax callers",
+            "src/search.rs ranking",
+            "Workspace::resolve",
+            "what is the API rate limit",
+            "reindex",
+        ] {
+            assert!(
+                is_precise_lookup_query_with_tokens(identifier, &tokens(identifier)),
+                "{identifier:?} should be a precise lookup"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn lowercase_questions_return_notes_from_markdown_only_corpora() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::create_dir_all(root.path().join("decisions")).unwrap();
+        std::fs::create_dir_all(root.path().join("memory")).unwrap();
+        std::fs::write(
+            root.path().join("decisions/2026-03-14-cache-invalidation.md"),
+            "---\ntitle: Cache invalidation\ndate: 2026-03-14\n---\n\n# Decision\n\nWe decided to invalidate the cache with versioned keys instead of TTL sweeps.\nKafka fan-out was dropped because of ordering problems.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("decisions/2026-04-02-database-choice.md"),
+            "---\ntitle: Database choice\n---\n\nWe picked Postgres for the notes service because of JSONB and mature tooling.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("memory/user_prefers_tabs.md"),
+            "---\nname: user-prefers-tabs\ndescription: editor preference\n---\n\nThe user prefers tabs over spaces in every language.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("memory/meeting-notes.txt"),
+            "Weekly sync: Tom prefers meetings after lunch. Ana wants to own the retry policy next half.\n",
+        )
+        .unwrap();
+
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+
+        let options = SearchOptions {
+            limit: Some(10),
+            ..Default::default()
+        };
+        for (query, expected) in [
+            (
+                "what did we decide about cache invalidation?",
+                "decisions/2026-03-14-cache-invalidation.md",
+            ),
+            (
+                "which database did we pick for the notes service?",
+                "decisions/2026-04-02-database-choice.md",
+            ),
+            (
+                "does the user prefer tabs or spaces?",
+                "memory/user_prefers_tabs.md",
+            ),
+            (
+                "when does tom prefer to have meetings?",
+                "memory/meeting-notes.txt",
+            ),
+        ] {
+            let hits = hybrid_search(&workspace, query, Some(&model), &options).unwrap();
+            assert!(!hits.is_empty(), "{query:?} returned no hits");
+            assert_eq!(
+                hits[0].file_path,
+                PathBuf::from(expected),
+                "{query:?} ranked {:?} first",
+                hits[0].file_path
+            );
+        }
     }
 }

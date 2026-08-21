@@ -4,6 +4,9 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- Lowercase natural-language questions no longer return zero results on Markdown and notes corpora. The recommendation authority floor now adapts to the best authority that actually matched instead of assuming implementation files exist, and a sentence-initial capital letter no longer classifies a question as a precise identifier lookup.
+
 ## [1.2.12] - 2026-08-20
 
 ### Security
