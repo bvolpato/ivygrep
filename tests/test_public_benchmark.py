@@ -375,6 +375,36 @@ class PublicBenchmarkTest(unittest.TestCase):
         self.assertIn("license", note.lower())
         self.assertIn("do not redistribute", note)
 
+    def test_corpus_sampling_note_states_indexed_versus_full_corpus(self):
+        matrix = {
+            "tasks": ["codefeedback-st", "cosqa"],
+            "results": [
+                {
+                    "dataset": "codefeedback-st",
+                    "dataset_provenance": {
+                        "counts": {"corpus": 5000, "source_corpus": 156526},
+                        "sample": {"corpus_limit": 5000},
+                    },
+                },
+                {
+                    "dataset": "cosqa",
+                    "dataset_provenance": {
+                        "counts": {"corpus": 20604, "source_corpus": 20604},
+                        "sample": {"corpus_limit": None},
+                    },
+                },
+            ],
+        }
+        note = renderer.corpus_sampling_note(matrix)
+        self.assertIn("1 of 2 corpora sampled to 5,000 documents", note)
+        self.assertIn("codefeedback-st 156,526 documents (5,000 indexed)", note)
+        self.assertIn("cosqa (20,604)", note)
+        self.assertIn("not comparable", note)
+        self.assertEqual(
+            renderer.corpus_sampling_note({"tasks": ["x"], "results": []}),
+            "Corpus sampling: provenance counts unavailable; see raw JSON.",
+        )
+
     def test_renderer_compares_matching_frozen_baseline(self):
         def matrix(commit: str, ndcg: float) -> dict:
             metrics = {

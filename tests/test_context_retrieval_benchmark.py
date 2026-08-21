@@ -132,6 +132,51 @@ class ContextRetrievalBenchmarkTests(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "mean_recall=0.750000"):
             benchmark.check_context_gates([result], arguments)
 
+    def test_constant_topk_baseline_scores_most_frequent_gold_paths(self) -> None:
+        tasks = [
+            {"id": "a", "expected_paths": ["src/search.rs", "src/indexer.rs"]},
+            {"id": "b", "expected_paths": ["src/search.rs", "src/daemon.rs"]},
+            {"id": "c", "expected_paths": ["src/search.rs", "tests/web.rs"]},
+            {"id": "d", "expected_paths": ["src/web.rs"]},
+        ]
+
+        baseline = benchmark.constant_topk_baseline(tasks, 2)
+
+        self.assertEqual(baseline["mode"], "constant-topk")
+        self.assertEqual(baseline["k"], 2)
+        # Ties break on path so the baseline is deterministic.
+        self.assertEqual(baseline["paths"], ["src/search.rs", "src/daemon.rs"])
+        self.assertAlmostEqual(baseline["mean_recall"], (0.5 + 1.0 + 0.5 + 0.0) / 4)
+        self.assertAlmostEqual(baseline["zero_recall_rate"], 0.25)
+        self.assertEqual(baseline["mean_role_recall"]["test"], 0.0)
+
+    def test_context_gates_require_margin_over_constant_baseline(self) -> None:
+        result = {
+            "mode": "context",
+            "mean_recall": 0.80,
+            "zero_recall_rate": 0.08,
+            "mean_recall_per_1k_tokens": 0.12,
+            "mean_covered_roles": 7.0,
+            "mean_role_recall": {"primary": 0.82},
+        }
+        baseline = {"mode": "constant-topk", "k": 5, "mean_recall": 0.78}
+        arguments = SimpleNamespace(
+            min_context_recall=0.70,
+            min_context_primary_recall=None,
+            min_context_test_recall=None,
+            max_context_zero_recall_rate=None,
+            min_context_covered_roles=None,
+            min_context_recall_per_1k_tokens=None,
+            min_margin_over_baseline=0.10,
+        )
+
+        with self.assertRaisesRegex(SystemExit, r"margin over constant-topk\(k=5\)=0\.020000"):
+            benchmark.check_context_gates([result], arguments, baseline)
+
+        result["mean_recall"] = 0.89
+        benchmark.check_context_gates([result], arguments, baseline)
+        benchmark.check_context_gates([result], arguments, None)
+
     def test_context_gates_reject_role_coverage_loss(self) -> None:
         result = {
             "mode": "context",
