@@ -9,6 +9,7 @@ All notable changes to ivygrep are documented in this file.
 - Concurrent daemon `Index` requests for one workspace coalesce into a single run, and a request that waited while the index generation advanced skips the redundant rescan only when the run that advanced it started after the request arrived; requests that arrived mid-walk run their own incremental rescan.
 - Daemon searches are cancelled when the client disconnects mid-request; CLI and MCP tag searches with request IDs and send `CancelSearch` on timeout or abandonment.
 - Daemon searches stop at a server-side deadline (`IVYGREP_SEARCH_DEADLINE_SECS`, default 60, `0` disables) and return the hits gathered so far with a warning.
+- MCP no longer blocks a tool call on a whole first index. `ig_search` enqueues the run on the daemon (`StartIndex`), waits at most `IVYGREP_MCP_INDEX_WAIT_SECS` (default 20), and otherwise returns a non-error `status: indexing` payload with progress and `retry_after_secs`; the MCP process never indexes locally while a daemon answers (including after a lost reply), and `ig_status` reports runs still queued on the daemon. Daemon protocol version 7; older daemons restart on the next request.
 
 ## [1.2.12] - 2026-08-20
 

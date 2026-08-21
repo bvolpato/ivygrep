@@ -286,11 +286,15 @@ active jobs, stalled work, watcher health, and compaction recommendations.
 
 ### Daemon IPC
 
-Daemon uses a versioned JSON-line request envelope. Protocol version 6 adds
-request IDs and explicit cancellation for hybrid, literal, and regex searches.
-Cancellation also removes queued searches from daemon CPU backpressure. Existing
-requests cover version/status, indexing, Web startup, workspace removal, restart,
-progress, and structured errors.
+Daemon uses a versioned JSON-line request envelope. Protocol version 6 added
+request IDs and explicit cancellation for hybrid, literal, and regex searches;
+version 7 adds the fire-and-forget `StartIndex` request (answered with
+`IndexStarted`) and the `index_in_flight` runtime-status field. Cancellation
+also removes queued searches from daemon CPU backpressure. Existing requests
+cover version/status, indexing, Web startup, workspace removal, restart,
+progress, and structured errors. A client that reaches a daemon speaking an
+older protocol (for example a development build with the same build version)
+gets a structured version error from the `Version` probe and restarts it.
 
 Cancellation acknowledgements for active searches are sent after registered work
 has stopped. Pre-registration cancellations use bounded tombstones so reordered
@@ -320,8 +324,15 @@ MCP uses JSON-RPC 2.0 over stdio and accepts newline-delimited or
 - `ig_status` for indexed-workspace and runtime state
 
 MCP can auto-index a requested workspace, so search is idempotent but not
-read-only. Tool failures return structured MCP errors. Handler panics are
-isolated instead of terminating the session.
+read-only. A first index is never awaited for its full duration: `ig_search`
+enqueues it on the daemon with `StartIndex` (coalesced with any in-flight run
+for that workspace), polls `RuntimeStatus.index_in_flight` for at most
+`IVYGREP_MCP_INDEX_WAIT_SECS` (default 20 s), and otherwise returns a non-error
+`status: indexing` payload (`progress`, `elapsed_secs`, `retry_after_secs`) read
+from the shared job ledger and progress file. The MCP process indexes in-process
+only when no daemon is reachable, so it never duplicates a run the daemon owns.
+Tool failures return structured MCP errors. Handler panics are isolated instead
+of terminating the session.
 
 ### Web
 

@@ -235,7 +235,7 @@ fn initialize_result(params: &Value) -> Value {
             "description": "Local hybrid semantic and lexical code search",
             "websiteUrl": env!("CARGO_PKG_HOMEPAGE")
         },
-        "instructions": "Use ig_search with an absolute path to the active workspace so searches stay scoped to the intended repository. For implementation tasks, request output=context_pack with budget_tokens=8000 to receive one bounded pack containing primary code, dependencies, dependents, definitions, callers, references, tests, configuration, documentation, and recent co-change evidence. For iterative discovery, keep output=hits, use natural-language queries for concepts, and literal=true for exact identifiers. Start with limit=5-10 and context=2. Use ig_status when indexing health is unclear. Workspaces are indexed on first use and watched for incremental updates."
+        "instructions": "Use ig_search with an absolute path to the active workspace so searches stay scoped to the intended repository. For implementation tasks, request output=context_pack with budget_tokens=8000 to receive one bounded pack containing primary code, dependencies, dependents, definitions, callers, references, tests, configuration, documentation, and recent co-change evidence. For iterative discovery, keep output=hits, use natural-language queries for concepts, and literal=true for exact identifiers. Start with limit=5-10 and context=2. Use ig_status when indexing health is unclear. Workspaces are indexed on first use and watched for incremental updates. If ig_search returns status=indexing (not an error), the first index is still building in the background: wait retry_after_secs, then call again; do not retry immediately or fall back to scanning the filesystem."
     })
 }
 
@@ -243,7 +243,7 @@ fn search_tool_schema() -> Value {
     json!({
         "name": TOOL_IG_SEARCH,
         "title": "Search local code or build a task context pack",
-        "description": "Hybrid semantic+lexical code search and token-budgeted task context. Auto-indexes on first query, stays local, respects .gitignore, and restricts results to the provided path scope. Use output=context_pack for implementation tasks; keep output=hits for iterative discovery.",
+        "description": "Hybrid semantic+lexical code search and token-budgeted task context. Auto-indexes on first query, stays local, respects .gitignore, and restricts results to the provided path scope. Use output=context_pack for implementation tasks; keep output=hits for iterative discovery. On a large repository the first call may return status=indexing with progress instead of results: the index keeps building in the background, so wait retry_after_secs and call again rather than retrying immediately.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -340,22 +340,55 @@ fn search_output_schema() -> Value {
             "warnings": {"type": "array", "items": {"type": "string"}},
             "results": {"type": "array", "items": {"type": "object"}},
             "file_paths": {"type": "array", "items": {"type": "string"}},
-            "context_pack": context_pack_output_schema()
+            "context_pack": context_pack_output_schema(),
+            "status": {
+                "type": "string",
+                "enum": ["indexing"],
+                "description": "Present only when the workspace's first index is still running; no results are returned. Retry after retry_after_secs."
+            },
+            "progress": {
+                "type": "object",
+                "properties": {
+                    "phase": {"type": "string"},
+                    "done": {"type": ["integer", "null"], "minimum": 0},
+                    "total": {"type": ["integer", "null"], "minimum": 0},
+                    "percent": {"type": ["number", "null"], "minimum": 0, "maximum": 100}
+                },
+                "required": ["phase", "done", "total", "percent"],
+                "additionalProperties": false
+            },
+            "elapsed_secs": {"type": "integer", "minimum": 0},
+            "retry_after_secs": {"type": "integer", "minimum": 1},
+            "message": {"type": "string"}
         },
-        "required": [
-            "workspace_root",
-            "scope_path",
-            "scope_is_file",
-            "query",
-            "mode",
-            "result_count",
-            "include",
-            "exclude"
-        ],
         "oneOf": [
-            {"required": ["results"]},
-            {"required": ["file_paths"]},
-            {"required": ["context_pack"]}
+            {
+                "required": [
+                    "workspace_root",
+                    "scope_path",
+                    "scope_is_file",
+                    "query",
+                    "mode",
+                    "result_count",
+                    "include",
+                    "exclude"
+                ],
+                "oneOf": [
+                    {"required": ["results"]},
+                    {"required": ["file_paths"]},
+                    {"required": ["context_pack"]}
+                ]
+            },
+            {
+                "required": [
+                    "status",
+                    "workspace_root",
+                    "progress",
+                    "elapsed_secs",
+                    "retry_after_secs",
+                    "message"
+                ]
+            }
         ],
         "additionalProperties": false
     })
@@ -577,6 +610,11 @@ fn execute_ivygrep_status() -> Result<Value> {
     let mut projects = Vec::new();
     for ws in workspaces {
         let ready_to_query = ws.chunk_count > 0 && ws.last_indexed_at_unix.is_some();
+        // A run accepted by the daemon but still parked behind the workspace
+        // lease or CPU permits has no job heartbeat yet; ask the daemon so the
+        // workspace is not reported as idle while its first index is queued.
+        let indexing_in_progress =
+            ws.indexing_in_progress || (!ready_to_query && daemon_index_in_flight(&ws.root));
         let status_msg = if ready_to_query {
             if ws.enhancing_in_progress {
                 "Ready to query (Background enhancement in progress)"
@@ -587,7 +625,7 @@ fn execute_ivygrep_status() -> Result<Value> {
             } else {
                 "Ready to query"
             }
-        } else if ws.indexing_in_progress {
+        } else if indexing_in_progress {
             "Indexing in progress (Not ready)"
         } else if ws.indexing_stalled {
             "Indexing stalled (Needs attention)"
@@ -601,7 +639,7 @@ fn execute_ivygrep_status() -> Result<Value> {
             "status": status_msg,
             "chunk_count": ws.chunk_count,
             "file_count": ws.file_count,
-            "indexing_in_progress": ws.indexing_in_progress,
+            "indexing_in_progress": indexing_in_progress,
             "enhancing_in_progress": ws.enhancing_in_progress,
             "watch_enabled": ws.watch_enabled,
             "watcher_alive": ws.watcher_alive,
@@ -615,6 +653,24 @@ fn execute_ivygrep_status() -> Result<Value> {
     });
 
     tool_success_result(payload, true)
+}
+
+/// Whether the daemon has an explicit index run queued or running for `root`.
+/// Never spawns a daemon; an absent daemon means nothing is in flight.
+fn daemon_index_in_flight(root: &Path) -> bool {
+    if !crate::ipc::socket_exists() {
+        return false;
+    }
+    let request = DaemonRequest::RuntimeStatus {
+        path: Some(root.to_path_buf()),
+    };
+    matches!(
+        crate::daemon::request_blocking(&request, false),
+        Ok(Some(DaemonResponse::RuntimeStatus {
+            workspace: Some(status),
+            ..
+        })) if status.index_in_flight
+    )
 }
 
 /// The neural query model for this MCP process, loaded once and reused across
@@ -657,30 +713,72 @@ fn mcp_search_model(workspace: &Workspace) -> Arc<dyn EmbeddingModel> {
     }
 }
 
-fn ensure_mcp_workspace_ready(workspace: &Workspace, include_ignored: bool) -> Result<()> {
+/// Outcome of preparing a workspace for an MCP search.
+enum WorkspaceReadiness {
+    Ready,
+    /// The daemon is still building the index; carries the structured
+    /// `status: indexing` payload for the tool result.
+    Indexing(Value),
+}
+
+const MCP_INDEX_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+const DEFAULT_INDEX_RETRY_AFTER_SECS: u64 = 10;
+
+/// Re-index when the caller wants ignored files but the index excludes them.
+fn needs_ignored_refresh(workspace: &Workspace, include_ignored: bool) -> Result<bool> {
+    let metadata = workspace.read_metadata()?;
+    Ok(include_ignored
+        && !metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.skip_gitignore))
+}
+
+fn ensure_mcp_workspace_ready(
+    workspace: &Workspace,
+    include_ignored: bool,
+) -> Result<WorkspaceReadiness> {
     let metadata = workspace.read_metadata()?;
     let include_ignored = include_ignored
         || metadata
             .as_ref()
             .is_some_and(|metadata| metadata.skip_gitignore);
-    let needs_ignored_refresh = include_ignored
-        && !metadata
-            .as_ref()
-            .is_some_and(|metadata| metadata.skip_gitignore);
 
-    if workspace_is_indexed(workspace) && workspace.is_watcher_alive() && !needs_ignored_refresh {
-        return Ok(());
+    if workspace_is_indexed(workspace)
+        && workspace.is_watcher_alive()
+        && !needs_ignored_refresh(workspace, include_ignored)?
+    {
+        return Ok(WorkspaceReadiness::Ready);
     }
 
-    let request = DaemonRequest::Index {
+    // Enqueue on the daemon and wait a bounded time. A first index of a large
+    // repository can take minutes; MCP clients time out tool calls long before
+    // that, so never block the call on the whole run.
+    let start_request = DaemonRequest::StartIndex {
         path: workspace.root.clone(),
         watch: true,
         skip_gitignore: include_ignored,
     };
-    match crate::daemon::request_blocking(&request, true)? {
-        Some(DaemonResponse::Ack { .. }) => return Ok(()),
+    let wait_started = std::time::Instant::now();
+    match crate::daemon::request_blocking(&start_request, true)? {
+        Some(DaemonResponse::IndexStarted { .. }) => {
+            return wait_for_daemon_index(workspace, include_ignored, wait_started);
+        }
         Some(DaemonResponse::Error { message }) => {
-            tracing::warn!("MCP daemon indexing unavailable, reconciling locally: {message}");
+            // The daemon is up and rejected the request; do not duplicate its
+            // work locally. An already queryable index still serves searches,
+            // unless the request needs ignored files the index never saw.
+            if workspace_is_indexed(workspace)
+                && !needs_ignored_refresh(workspace, include_ignored)?
+            {
+                tracing::warn!(
+                    "MCP daemon index request rejected; searching existing index: {message}"
+                );
+                return Ok(WorkspaceReadiness::Ready);
+            }
+            bail!(
+                "ivygrep daemon rejected index request for {}: {message}",
+                workspace.root.display()
+            );
         }
         Some(response) => {
             tracing::warn!("unexpected MCP daemon indexing response: {response:?}");
@@ -688,6 +786,133 @@ fn ensure_mcp_workspace_ready(workspace: &Workspace, include_ignored: bool) -> R
         None => {}
     }
 
+    // No response. Either the daemon is unreachable (no socket, autospawn
+    // disabled, transport failure before the request was sent) or the request
+    // was accepted but the reply was lost (timeout, dropped connection). Only
+    // the first case may index in-process: if a daemon still answers, its
+    // detached run may already be active and a local run would duplicate it.
+    if crate::daemon::request_blocking(&DaemonRequest::Version, false)?.is_some() {
+        tracing::warn!(
+            "MCP index request for {} got no reply from a live daemon; polling its status instead of indexing locally",
+            workspace.root.display()
+        );
+        return wait_for_daemon_index(workspace, include_ignored, wait_started);
+    }
+    index_workspace_locally(workspace, include_ignored)?;
+    Ok(WorkspaceReadiness::Ready)
+}
+
+/// Poll the daemon until its run for `workspace` clears or the bounded wait
+/// (`IVYGREP_MCP_INDEX_WAIT_SECS`) elapses. Never indexes locally: the daemon
+/// owns the run, and a second `StartIndex` joins it instead of duplicating it.
+fn wait_for_daemon_index(
+    workspace: &Workspace,
+    include_ignored: bool,
+    wait_started: std::time::Instant,
+) -> Result<WorkspaceReadiness> {
+    let deadline = wait_started + config::mcp_index_wait();
+    let status_request = DaemonRequest::RuntimeStatus {
+        path: Some(workspace.root.clone()),
+    };
+    let mut resubmitted = false;
+    loop {
+        let in_flight = match crate::daemon::request_blocking(&status_request, false)? {
+            Some(DaemonResponse::RuntimeStatus {
+                workspace: Some(status),
+                ..
+            }) => status.index_in_flight,
+            Some(DaemonResponse::RuntimeStatus { .. }) => false,
+            Some(DaemonResponse::Error { message }) => {
+                bail!(
+                    "ivygrep daemon status failed for {}: {message}",
+                    workspace.root.display()
+                )
+            }
+            Some(response) => {
+                tracing::warn!("unexpected MCP daemon status response: {response:?}");
+                false
+            }
+            None => {
+                // A queryable index only counts if it already covers what the
+                // request asked for; a gitignore-respecting index cannot serve
+                // a skip_gitignore search.
+                if workspace_is_indexed(workspace)
+                    && !needs_ignored_refresh(workspace, include_ignored)?
+                {
+                    return Ok(WorkspaceReadiness::Ready);
+                }
+                bail!(
+                    "ivygrep daemon became unavailable while indexing {}; call again to resume",
+                    workspace.root.display()
+                );
+            }
+        };
+
+        if !in_flight {
+            if workspace_is_indexed(workspace)
+                && !needs_ignored_refresh(workspace, include_ignored)?
+            {
+                return Ok(WorkspaceReadiness::Ready);
+            }
+            let failure = crate::jobs::job_status(
+                workspace,
+                crate::jobs::JobKind::Indexing,
+                crate::jobs::INDEXING_HEARTBEAT_TTL_SECS,
+            )
+            .record
+            .filter(|record| !record.active)
+            .and_then(|record| record.last_error);
+            if let Some(error) = failure {
+                bail!(
+                    "ivygrep daemon index failed for {}: {error}",
+                    workspace.root.display()
+                );
+            }
+            if resubmitted {
+                bail!(
+                    "ivygrep daemon index for {} finished without a queryable index; call again",
+                    workspace.root.display()
+                );
+            }
+            // The run that was in flight had different options (for example a
+            // CLI `--no-watch` index) and did not satisfy this request; queue
+            // ours now that it can lead.
+            resubmitted = true;
+            let start_request = DaemonRequest::StartIndex {
+                path: workspace.root.clone(),
+                watch: true,
+                skip_gitignore: include_ignored,
+            };
+            match crate::daemon::request_blocking(&start_request, false)? {
+                Some(DaemonResponse::IndexStarted { .. }) => {}
+                Some(DaemonResponse::Error { message }) => {
+                    bail!(
+                        "ivygrep daemon rejected index request for {}: {message}",
+                        workspace.root.display()
+                    )
+                }
+                _ => bail!(
+                    "ivygrep daemon became unavailable while indexing {}; call again to resume",
+                    workspace.root.display()
+                ),
+            }
+        }
+
+        if std::time::Instant::now() >= deadline {
+            return Ok(WorkspaceReadiness::Indexing(indexing_status_payload(
+                workspace,
+                wait_started.elapsed(),
+            )));
+        }
+        std::thread::sleep(
+            MCP_INDEX_POLL_INTERVAL
+                .min(deadline.saturating_duration_since(std::time::Instant::now())),
+        );
+    }
+}
+
+/// In-process index used only when no daemon is reachable.
+fn index_workspace_locally(workspace: &Workspace, include_ignored: bool) -> Result<()> {
     workspace.ensure_dirs()?;
     let mut metadata = workspace
         .read_metadata()?
@@ -712,6 +937,113 @@ fn ensure_mcp_workspace_ready(workspace: &Workspace, include_ignored: bool) -> R
     let index_model = create_hash_model();
     index_workspace(workspace, index_model.as_ref())?;
     Ok(())
+}
+
+/// Progress of the daemon's index run, read from the same job ledger and
+/// progress file that `ig --status` and the CLI first-run spinner use.
+fn indexing_status_payload(workspace: &Workspace, waited: std::time::Duration) -> Value {
+    let job = crate::jobs::job_status(
+        workspace,
+        crate::jobs::JobKind::Indexing,
+        crate::jobs::INDEXING_HEARTBEAT_TTL_SECS,
+    );
+    let active_record = job.record.as_ref().filter(|_| job.active());
+    let raw_progress = std::fs::read_to_string(workspace.indexing_progress_path())
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| active_record.and_then(|record| record.details.get("progress").cloned()))
+        .or_else(|| {
+            active_record
+                .map(|record| record.phase.clone())
+                .filter(|phase| !phase.is_empty())
+        });
+    let (phase, done, total) = match raw_progress.as_deref() {
+        Some(progress) => match parse_file_progress(progress) {
+            Some((done, total)) => ("indexing".to_string(), Some(done), Some(total)),
+            None => (progress.to_string(), None, None),
+        },
+        None => ("queued".to_string(), None, None),
+    };
+    let now = crate::jobs::now_unix();
+    let elapsed_secs = active_record
+        .and_then(|record| record.started_at_unix)
+        .map(|started| now.saturating_sub(started))
+        .map_or(waited.as_secs(), |since_start| {
+            since_start.max(waited.as_secs())
+        });
+    let percent = match (done, total) {
+        (Some(done), Some(total)) if total > 0 => {
+            Some(((done as f64 / total as f64) * 1000.0).round() / 10.0)
+        }
+        _ => None,
+    };
+    let retry_after_secs = estimate_retry_after_secs(done, total, elapsed_secs);
+    json!({
+        "status": "indexing",
+        "workspace_root": workspace.root,
+        "progress": {
+            "phase": phase,
+            "done": done,
+            "total": total,
+            "percent": percent,
+        },
+        "elapsed_secs": elapsed_secs,
+        "retry_after_secs": retry_after_secs,
+        "message": "Index in progress; call again later. Lexical search becomes available when the first index commits.",
+    })
+}
+
+/// Parse the indexer's `done/total` progress string.
+fn parse_file_progress(progress: &str) -> Option<(u64, u64)> {
+    let (done, total) = progress.split_once('/')?;
+    Some((done.trim().parse().ok()?, total.trim().parse().ok()?))
+}
+
+/// Remaining-time estimate from observed throughput, clamped to 5-60 s;
+/// falls back to a fixed delay when no throughput is known yet.
+fn estimate_retry_after_secs(done: Option<u64>, total: Option<u64>, elapsed_secs: u64) -> u64 {
+    match (done, total) {
+        (Some(done), Some(total)) if done > 0 && total > done && elapsed_secs > 0 => {
+            let remaining = (total - done) as f64 * elapsed_secs as f64 / done as f64;
+            (remaining.ceil() as u64).clamp(5, 60)
+        }
+        _ => DEFAULT_INDEX_RETRY_AFTER_SECS,
+    }
+}
+
+/// Non-error tool result for a workspace whose first index is still running.
+/// `content[0].text` is human-readable (followed by the JSON payload) so agents
+/// without `structuredContent` support still see what to do.
+fn indexing_tool_result(payload: Value) -> Result<Value> {
+    let progress = &payload["progress"];
+    let phase = progress["phase"].as_str().unwrap_or("indexing");
+    let counts = match (progress["done"].as_u64(), progress["total"].as_u64()) {
+        (Some(done), Some(total)) => {
+            let percent = progress["percent"].as_f64().unwrap_or(0.0);
+            format!(" {done}/{total} files ({percent:.1}%)")
+        }
+        _ => String::new(),
+    };
+    let text = format!(
+        "Indexing {}: {phase}{counts}, {}s elapsed. Not ready yet; call ig_search again in ~{}s. Lexical search becomes available when the first index commits.\n{}",
+        payload["workspace_root"].as_str().unwrap_or("workspace"),
+        payload["elapsed_secs"].as_u64().unwrap_or(0),
+        payload["retry_after_secs"]
+            .as_u64()
+            .unwrap_or(DEFAULT_INDEX_RETRY_AFTER_SECS),
+        serde_json::to_string(&payload)?
+    );
+    Ok(json!({
+        "content": [
+            {
+                "type": "text",
+                "text": text
+            }
+        ],
+        "structuredContent": payload,
+        "isError": false
+    }))
 }
 
 fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
@@ -780,7 +1112,11 @@ fn execute_ivygrep_search(args: IvygrepSearchArgs) -> Result<Value> {
     // MCP search is intentionally scoped to one workspace. Ensure that
     // workspace is indexed and watched before searching so edits made by a
     // coding agent become searchable without restarting the MCP process.
-    ensure_mcp_workspace_ready(&current_workspace, args.skip_gitignore.unwrap_or(false))?;
+    if let WorkspaceReadiness::Indexing(payload) =
+        ensure_mcp_workspace_ready(&current_workspace, args.skip_gitignore.unwrap_or(false))?
+    {
+        return indexing_tool_result(payload);
+    }
     let workspace = current_workspace.clone();
     let _ = workspace.cleanup_stale_legacy_runtime_files();
 
@@ -2242,6 +2578,52 @@ impl AccountManager {
             .and_then(|v| v.as_str())
             .expect("tool response content text");
         serde_json::from_str(content).expect("valid JSON payload")
+    }
+
+    #[test]
+    fn indexing_status_result_is_non_error_with_progress_estimate() {
+        assert_eq!(parse_file_progress("1200/4000"), Some((1200, 4000)));
+        assert_eq!(parse_file_progress("scanning"), None);
+        // 1200 files in 30 s leaves 2800 files at 40/s: 70 s, clamped to 60.
+        assert_eq!(estimate_retry_after_secs(Some(1200), Some(4000), 30), 60);
+        assert_eq!(estimate_retry_after_secs(Some(3900), Some(4000), 30), 5);
+        assert_eq!(
+            estimate_retry_after_secs(None, None, 30),
+            DEFAULT_INDEX_RETRY_AFTER_SECS
+        );
+
+        let result = indexing_tool_result(json!({
+            "status": "indexing",
+            "workspace_root": "/tmp/repo",
+            "progress": {"phase": "indexing", "done": 1200, "total": 4000, "percent": 30.0},
+            "elapsed_secs": 30,
+            "retry_after_secs": 60,
+            "message": "Index in progress; call again later."
+        }))
+        .unwrap();
+        assert_eq!(result["isError"], false);
+        assert_eq!(result["structuredContent"]["status"], "indexing");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let (summary, payload) = text.split_once('\n').unwrap();
+        assert!(summary.contains("1200/4000 files (30.0%)"), "{summary}");
+        assert!(summary.contains("again in ~60s"), "{summary}");
+        let payload: Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(payload, result["structuredContent"]);
+    }
+
+    #[test]
+    fn search_output_schema_accepts_indexing_status_branch() {
+        let schema = search_output_schema();
+        let branches = schema["oneOf"].as_array().unwrap();
+        assert_eq!(branches.len(), 2);
+        assert!(
+            branches[1]["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("status"))
+        );
+        assert_eq!(schema["properties"]["status"]["enum"], json!(["indexing"]));
+        assert_eq!(schema["additionalProperties"], false);
     }
 
     #[test]

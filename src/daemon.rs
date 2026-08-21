@@ -1402,6 +1402,11 @@ impl DaemonState {
         })
     }
 
+    /// Whether an explicit `Index`/`StartIndex` run is queued or running.
+    fn index_in_flight(&self, workspace_id: &str) -> bool {
+        self.inflight_indexes.lock().contains_key(workspace_id)
+    }
+
     /// Coalesce explicit `Index` requests per workspace: the first request
     /// leads; later requests with identical options follow the leader's
     /// outcome. Requests with different options fall through to the normal
@@ -2206,6 +2211,159 @@ fn parse_daemon_request(line: &[u8]) -> std::result::Result<DaemonRequestEnvelop
     Ok(envelope)
 }
 
+/// Await the outcome a coalesced `Index` leader publishes for its followers.
+async fn await_coalesced_index(
+    mut outcome: tokio::sync::watch::Receiver<Option<DaemonResponse>>,
+) -> DaemonResponse {
+    match outcome.wait_for(Option::is_some).await {
+        Ok(response) => response.clone().unwrap_or_else(|| DaemonResponse::Error {
+            message: "coalesced index request produced no response".to_string(),
+        }),
+        Err(_) => DaemonResponse::Error {
+            message: "coalesced index request aborted".to_string(),
+        },
+    }
+}
+
+/// Make a workspace visible to `ig --status`/`ig_status` as soon as an index
+/// run is accepted, so a run parked behind the lease or CPU permits is not
+/// reported as absent. Existing metadata is left untouched; the run rewrites
+/// it once it holds the lease.
+fn register_workspace_for_index(workspace: &Workspace, watch: bool, skip_gitignore: bool) {
+    if workspace.ensure_dirs().is_err() {
+        return;
+    }
+    if matches!(workspace.read_metadata(), Ok(None)) {
+        let _ = workspace.write_metadata(&crate::workspace::WorkspaceMetadata {
+            id: workspace.id.clone(),
+            root: workspace.root.clone(),
+            created_at_unix: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            last_indexed_at_unix: None,
+            watch_enabled: watch,
+            skip_gitignore,
+            index_generation: 0,
+        });
+    }
+}
+
+/// Run one explicit index request end to end: exclusive workspace lease, CPU
+/// permit, index, watcher registration. Shared by the blocking `Index` request
+/// and the detached `StartIndex` run; `lead` publishes the outcome to
+/// coalesced followers and clears the in-flight entry.
+async fn run_index_request(
+    state: DaemonState,
+    workspace: Workspace,
+    path: PathBuf,
+    watch: bool,
+    skip_gitignore: bool,
+    lead: Option<InflightIndexLead>,
+    arrived_at: std::time::Instant,
+) -> DaemonResponse {
+    // Generation observed on arrival: if a full walk that started after this
+    // request arrived advances it while the request waits for the exclusive
+    // lease, the rescan is redundant. Earlier walks cannot vouch for edits made
+    // after they scanned.
+    let generation_on_arrival = workspace
+        .read_metadata()
+        .ok()
+        .flatten()
+        .map(|metadata| metadata.index_generation);
+
+    // Take the exclusive workspace lease before a CPU permit so requests
+    // parked behind an in-flight index never pin CPU capacity.
+    let mode_leases = match state.acquire_index_lease(&workspace).await {
+        Ok(leases) => leases,
+        Err(response) => return response,
+    };
+    // Bound concurrent heavy index work (see #58).
+    let permit = state.cpu_permits.clone().acquire_owned().await.ok();
+    let index_workspace_target = workspace.clone();
+    let index_state = state.clone();
+    let index_result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let _mode_leases = mode_leases;
+        index_workspace_target.ensure_dirs()?;
+        let mut metadata = index_workspace_target.read_metadata()?.unwrap_or_else(|| {
+            crate::workspace::WorkspaceMetadata {
+                id: index_workspace_target.id.clone(),
+                root: index_workspace_target.root.clone(),
+                created_at_unix: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                last_indexed_at_unix: None,
+                watch_enabled: watch,
+                skip_gitignore,
+                index_generation: 0,
+            }
+        });
+        let already_current = metadata.last_indexed_at_unix.is_some()
+            && metadata.skip_gitignore == skip_gitignore
+            && generation_on_arrival.is_some_and(|arrival| metadata.index_generation > arrival)
+            && index_state.full_index_run_started_after(&index_workspace_target.id, arrived_at);
+        metadata.skip_gitignore = skip_gitignore;
+        metadata.watch_enabled = watch;
+        index_workspace_target.write_metadata(&metadata)?;
+        index_state.refresh_workspace_watcher(&index_workspace_target)?;
+        if already_current {
+            daemon_log(&format!(
+                "index already current for {} (generation {}); skipping redundant rescan",
+                index_workspace_target.root.display(),
+                metadata.index_generation
+            ));
+            return Result::<_, anyhow::Error>::Ok(None);
+        }
+        let hash_model = cached_hash_model();
+        index_state.note_full_index_run_start(&index_workspace_target.id);
+        let summary = index_workspace(&index_workspace_target, hash_model.as_ref())?;
+        Result::<_, anyhow::Error>::Ok(Some(summary))
+    })
+    .await
+    .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
+
+    let response = match index_result {
+        Ok(summary) => {
+            if summary
+                .as_ref()
+                .is_some_and(|summary| summary.indexed_files > 0 || summary.deleted_files > 0)
+            {
+                state.clear_workspace_contexts(&workspace);
+            }
+            let watcher_result = if watch {
+                register_watcher(&state, &path)
+                    .map_err(|err| format!("indexed but failed to watch: {err:#}"))
+            } else {
+                if let Some(registration) = state.watchers.lock().remove(&workspace.id) {
+                    stop_watcher(&workspace, registration);
+                }
+                Ok(())
+            };
+            match (watcher_result, summary) {
+                (Err(message), _) => DaemonResponse::Error { message },
+                (Ok(()), Some(summary)) => DaemonResponse::Ack {
+                    message: format!(
+                        "indexed {} files ({} chunks)",
+                        summary.indexed_files, summary.total_chunks
+                    ),
+                },
+                (Ok(()), None) => DaemonResponse::Ack {
+                    message: "index already current; skipped redundant rescan".to_string(),
+                },
+            }
+        }
+        Err(err) => DaemonResponse::Error {
+            message: err.to_string(),
+        },
+    };
+    if let Some(lead) = lead {
+        lead.publish(&response);
+    }
+    response
+}
+
 async fn handle_request(state: DaemonState, request: DaemonRequest) -> DaemonResponse {
     handle_request_with_cancellation(state, request, None).await
 }
@@ -2280,6 +2438,7 @@ async fn handle_request_with_cancellation(
                             id: workspace.id.clone(),
                             watch_enabled,
                             watcher_alive: workspace.is_watcher_alive(),
+                            index_in_flight: state.index_in_flight(&workspace.id),
                         })
                     }
                     Err(err) => {
@@ -2347,15 +2506,8 @@ async fn handle_request_with_cancellation(
             // leader scanned past, so it falls through to its own (incremental)
             // rescan once the leader releases the lease.
             let lead = match state.join_or_lead_index(&workspace.id, watch, skip_gitignore) {
-                Some(InflightIndexSlot::Follow(mut outcome)) => {
-                    let response = match outcome.wait_for(Option::is_some).await {
-                        Ok(response) => response.clone().unwrap_or_else(|| DaemonResponse::Error {
-                            message: "coalesced index request produced no response".to_string(),
-                        }),
-                        Err(_) => DaemonResponse::Error {
-                            message: "coalesced index request aborted".to_string(),
-                        },
-                    };
+                Some(InflightIndexSlot::Follow(outcome)) => {
+                    let response = await_coalesced_index(outcome).await;
                     if state.full_index_run_started_after(&workspace.id, arrived_at)
                         || matches!(response, DaemonResponse::Error { .. })
                     {
@@ -2366,106 +2518,72 @@ async fn handle_request_with_cancellation(
                 Some(InflightIndexSlot::Lead(lead)) => Some(lead),
                 None => None,
             };
-            // Generation observed on arrival: if another index run (leader,
-            // watcher, or search-side repair) advances it while this request
-            // waits for the exclusive lease, the rescan is redundant.
-            let generation_on_arrival = workspace
+            register_workspace_for_index(&workspace, watch, skip_gitignore);
+            run_index_request(
+                state,
+                workspace,
+                path,
+                watch,
+                skip_gitignore,
+                lead,
+                arrived_at,
+            )
+            .await
+        }
+        DaemonRequest::StartIndex {
+            path,
+            watch,
+            skip_gitignore,
+        } => {
+            let workspace = match Workspace::resolve(&path) {
+                Ok(workspace) => workspace,
+                Err(err) => {
+                    return DaemonResponse::Error {
+                        message: err.to_string(),
+                    };
+                }
+            };
+            let generation = workspace
                 .read_metadata()
                 .ok()
                 .flatten()
                 .map(|metadata| metadata.index_generation);
-
-            // Take the exclusive workspace lease before a CPU permit so requests
-            // parked behind an in-flight index never pin CPU capacity.
-            let mode_leases = match state.acquire_index_lease(&workspace).await {
-                Ok(leases) => leases,
-                Err(response) => return response,
-            };
-            // Bound concurrent heavy index work (see #58).
-            let permit = state.cpu_permits.clone().acquire_owned().await.ok();
-            let index_workspace_target = workspace.clone();
-            let index_state = state.clone();
-            let index_result = tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                let _mode_leases = mode_leases;
-                index_workspace_target.ensure_dirs()?;
-                let mut metadata = index_workspace_target.read_metadata()?.unwrap_or_else(|| {
-                    crate::workspace::WorkspaceMetadata {
-                        id: index_workspace_target.id.clone(),
-                        root: index_workspace_target.root.clone(),
-                        created_at_unix: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
-                        last_indexed_at_unix: None,
-                        watch_enabled: watch,
-                        skip_gitignore,
-                        index_generation: 0,
+            // Only a leader spawns work; followers (and requests whose options
+            // differ from the in-flight run) report the existing run and let
+            // the client poll `RuntimeStatus` until it clears.
+            let already_running =
+                match state.join_or_lead_index(&workspace.id, watch, skip_gitignore) {
+                    Some(InflightIndexSlot::Lead(lead)) => {
+                        register_workspace_for_index(&workspace, watch, skip_gitignore);
+                        let root = workspace.root.clone();
+                        let arrived_at = std::time::Instant::now();
+                        tokio::spawn(async move {
+                            let response = run_index_request(
+                                state,
+                                workspace,
+                                path,
+                                watch,
+                                skip_gitignore,
+                                Some(lead),
+                                arrived_at,
+                            )
+                            .await;
+                            if let DaemonResponse::Error { message } = response {
+                                daemon_log(&format!(
+                                    "background index for {} failed: {message}",
+                                    root.display()
+                                ));
+                            }
+                        });
+                        false
                     }
-                });
-                let already_current = metadata.last_indexed_at_unix.is_some()
-                    && metadata.skip_gitignore == skip_gitignore
-                    && generation_on_arrival
-                        .is_some_and(|arrival| metadata.index_generation > arrival)
-                    && index_state
-                        .full_index_run_started_after(&index_workspace_target.id, arrived_at);
-                metadata.skip_gitignore = skip_gitignore;
-                metadata.watch_enabled = watch;
-                index_workspace_target.write_metadata(&metadata)?;
-                index_state.refresh_workspace_watcher(&index_workspace_target)?;
-                if already_current {
-                    daemon_log(&format!(
-                        "index already current for {} (generation {}); skipping redundant rescan",
-                        index_workspace_target.root.display(),
-                        metadata.index_generation
-                    ));
-                    return Result::<_, anyhow::Error>::Ok(None);
-                }
-                let hash_model = cached_hash_model();
-                index_state.note_full_index_run_start(&index_workspace_target.id);
-                let summary = index_workspace(&index_workspace_target, hash_model.as_ref())?;
-                Result::<_, anyhow::Error>::Ok(Some(summary))
-            })
-            .await
-            .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
-
-            let response = match index_result {
-                Ok(summary) => {
-                    if summary.as_ref().is_some_and(|summary| {
-                        summary.indexed_files > 0 || summary.deleted_files > 0
-                    }) {
-                        state.clear_workspace_contexts(&workspace);
-                    }
-                    let watcher_result = if watch {
-                        register_watcher(&state, &path)
-                            .map_err(|err| format!("indexed but failed to watch: {err:#}"))
-                    } else {
-                        if let Some(registration) = state.watchers.lock().remove(&workspace.id) {
-                            stop_watcher(&workspace, registration);
-                        }
-                        Ok(())
-                    };
-                    match (watcher_result, summary) {
-                        (Err(message), _) => DaemonResponse::Error { message },
-                        (Ok(()), Some(summary)) => DaemonResponse::Ack {
-                            message: format!(
-                                "indexed {} files ({} chunks)",
-                                summary.indexed_files, summary.total_chunks
-                            ),
-                        },
-                        (Ok(()), None) => DaemonResponse::Ack {
-                            message: "index already current; skipped redundant rescan".to_string(),
-                        },
-                    }
-                }
-                Err(err) => DaemonResponse::Error {
-                    message: err.to_string(),
-                },
-            };
-            if let Some(lead) = lead {
-                lead.publish(&response);
+                    Some(InflightIndexSlot::Follow(_)) | None => true,
+                };
+            DaemonResponse::IndexStarted {
+                accepted: true,
+                already_running,
+                generation,
             }
-            response
         }
         DaemonRequest::Search {
             path,
@@ -4330,7 +4448,8 @@ where
     // Timeout varies by request type: Index can take 30+ min on massive repos
     // (large monorepos: 270K+ files), while Status should complete in seconds.
     let timeout_secs = match request {
-        DaemonRequest::Index { .. } => 1800, // 30 min for large repos
+        DaemonRequest::Index { .. } => 1800,    // 30 min for large repos
+        DaemonRequest::StartIndex { .. } => 30, // enqueue only; generous for a loaded daemon
         DaemonRequest::Version
         | DaemonRequest::RuntimeStatus { .. }
         | DaemonRequest::Status
@@ -4340,7 +4459,7 @@ where
         | DaemonRequest::RegexSearch { .. }
         | DaemonRequest::LiteralSearch { .. }
         | DaemonRequest::CancelSearch { .. } => 120, // wait for active search shutdown
-        DaemonRequest::Remove { .. } => 30,  // cleanup
+        DaemonRequest::Remove { .. } => 30,     // cleanup
     };
 
     loop {
@@ -4468,7 +4587,7 @@ mod tests {
     use crate::embedding::create_hash_model;
     use crate::indexer::{
         index_workspace, index_workspace_for_watcher, index_workspace_paths_for_watcher,
-        open_sqlite_readonly,
+        open_sqlite_readonly, workspace_is_indexed,
     };
     use crate::search::{
         SearchOptions, hybrid_search, literal_search_with_context,
@@ -7403,6 +7522,134 @@ mod tests {
         assert!(
             workspace.read_metadata().unwrap().unwrap().index_generation > generation_before_late,
             "the late edit must be picked up by the request's own rescan"
+        );
+    }
+
+    /// `StartIndex` returns before the run, registers the workspace for status
+    /// immediately, joins an in-flight run instead of queuing another, and
+    /// reports `index_in_flight` through `RuntimeStatus` until the run commits.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn start_index_enqueues_and_reports_in_flight_until_commit() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        for index in 0..3 {
+            std::fs::write(
+                repo.path().join(format!("module_{index}.rs")),
+                format!("pub fn start_index_marker_{index}() -> usize {{ {index} }}\n"),
+            )
+            .unwrap();
+        }
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let state = test_state();
+        // Park the run behind the exclusive lease so the request must return
+        // while the index is still pending.
+        let held = state.acquire_workspace_mutations(std::slice::from_ref(&workspace));
+
+        let start_request = DaemonRequest::StartIndex {
+            path: workspace.root.clone(),
+            watch: false,
+            skip_gitignore: false,
+        };
+        let started = std::time::Instant::now();
+        let first = tokio::time::timeout(
+            Duration::from_secs(5),
+            handle_request(state.clone(), start_request.clone()),
+        )
+        .await
+        .expect("StartIndex must not wait for the run");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        match first {
+            DaemonResponse::IndexStarted {
+                accepted,
+                already_running,
+                generation,
+            } => {
+                assert!(accepted);
+                assert!(!already_running, "first request leads the run");
+                assert_eq!(generation, None, "no index existed before the run");
+            }
+            other => panic!("expected IndexStarted, got {other:?}"),
+        }
+        assert!(
+            workspace.read_metadata().unwrap().is_some(),
+            "accepted run registers the workspace before it holds the lease"
+        );
+        assert!(state.index_in_flight(&workspace.id));
+
+        // A second request with the same options follows the queued run.
+        match handle_request(state.clone(), start_request.clone()).await {
+            DaemonResponse::IndexStarted {
+                already_running, ..
+            } => assert!(already_running),
+            other => panic!("expected IndexStarted, got {other:?}"),
+        }
+        // A blocking `Index` also joins the same run instead of queuing.
+        let follower = tokio::spawn(handle_request(
+            state.clone(),
+            index_request_for(&workspace, false),
+        ));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let coordinator = state.workspace_mode_coordinator(&workspace.id);
+        assert_eq!(
+            coordinator.state.lock().exclusive_waiters,
+            1,
+            "only the StartIndex leader waits for the lease"
+        );
+
+        match handle_request(
+            state.clone(),
+            DaemonRequest::RuntimeStatus {
+                path: Some(workspace.root.clone()),
+            },
+        )
+        .await
+        {
+            DaemonResponse::RuntimeStatus {
+                workspace: Some(status),
+                ..
+            } => assert!(status.index_in_flight),
+            other => panic!("expected RuntimeStatus, got {other:?}"),
+        }
+
+        drop(held);
+        match tokio::time::timeout(Duration::from_secs(30), follower)
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            DaemonResponse::Ack { message } => {
+                assert!(message.starts_with("indexed 3 files"), "{message}");
+            }
+            other => panic!("expected Ack, got {other:?}"),
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while state.index_in_flight(&workspace.id) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("in-flight entry clears once the run publishes");
+        match handle_request(
+            state.clone(),
+            DaemonRequest::RuntimeStatus {
+                path: Some(workspace.root.clone()),
+            },
+        )
+        .await
+        {
+            DaemonResponse::RuntimeStatus {
+                workspace: Some(status),
+                ..
+            } => assert!(!status.index_in_flight),
+            other => panic!("expected RuntimeStatus, got {other:?}"),
+        }
+        assert!(workspace_is_indexed(&workspace));
+        assert_eq!(
+            workspace.read_metadata().unwrap().unwrap().index_generation,
+            1,
+            "exactly one run committed for three requests"
         );
     }
 
