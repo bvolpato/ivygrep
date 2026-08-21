@@ -4,6 +4,9 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- Lexical retrieval no longer drops queries containing quotes, colons, parentheses, equals signs, or apostrophes. The indexed fields store no term positions, so Tantivy's query parser rejected every multi-token word in such queries and the primary BM25 variant (three quarters of the candidate budget) silently returned nothing; short punctuated queries (up to 24 distinct tokens: snippets, error strings, questions) are now built from analyzer tokens, with the parser reserved for explicit `AND`/`OR`/`NOT` syntax; long pasted prompts keep relying on their normalized expansions. Path-recall variants such as `error_handling` are built the same way instead of being rejected.
+
 ## [1.2.12] - 2026-08-20
 
 ### Security

@@ -378,29 +378,24 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     if !path_query_variants.is_empty()
         && let Some(fpt_field) = ctx.fields.file_path_text
     {
-        let mut path_parser = QueryParser::for_index(&ctx.indexes[0], vec![fpt_field]);
         let path_candidate_limit = if exact_path_pass {
             100
         } else {
             NATURAL_LANGUAGE_PATH_FILE_LIMIT * NATURAL_LANGUAGE_PATH_DOCUMENT_OVERFETCH
         };
-        if exact_path_pass {
-            path_parser.set_conjunction_by_default();
-        }
         let lexical_ids: HashSet<u64> = lexical_chunks.iter().map(|(c, _)| c.vector_key).collect();
         let mut path_by_id: HashMap<u64, (IndexedChunk, f32)> = HashMap::new();
         let mut path_by_file: HashMap<PathBuf, (IndexedChunk, f32)> = HashMap::new();
         for pq in &path_query_variants {
-            let parsed = match path_parser.parse_query(pq) {
-                Ok(parsed) => parsed,
-                Err(err) => {
-                    tracing::debug!(
-                        query_variant = pq,
-                        error = %err,
-                        "skipping path recall variant rejected by Tantivy parser"
-                    );
-                    continue;
-                }
+            // Build term queries directly: the path field stores no positions,
+            // so the query parser would reject any variant whose words split
+            // into several tokens (`error_handling`, `errorHandling`).
+            let Some(parsed) = path_terms_query(fpt_field, pq, exact_path_pass) else {
+                tracing::debug!(
+                    query_variant = pq,
+                    "skipping path recall variant without indexable terms"
+                );
+                continue;
             };
             let parsed =
                 constrain_query_to_scope(parsed, &ctx.fields, options.scope_filter.as_ref())?;
