@@ -102,6 +102,19 @@ pub fn search_deadline() -> Option<std::time::Duration> {
     (secs > 0).then(|| std::time::Duration::from_secs(secs))
 }
 
+pub const DEFAULT_MCP_INDEX_WAIT_SECS: u64 = 20;
+
+/// How long an MCP tool call waits for the daemon to finish a first index
+/// before returning an `indexing` status payload. `IVYGREP_MCP_INDEX_WAIT_SECS`
+/// overrides the default; `0` returns immediately after enqueuing the run.
+pub fn mcp_index_wait() -> std::time::Duration {
+    let secs = env::var("IVYGREP_MCP_INDEX_WAIT_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_MCP_INDEX_WAIT_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

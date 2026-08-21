@@ -2034,7 +2034,7 @@ fn print_daemon_response(response: DaemonResponse, json: bool) -> Result<()> {
         DaemonResponse::Version { .. }
         | DaemonResponse::RuntimeStatus { .. }
         | DaemonResponse::WebStarted { .. } => Ok(()),
-        DaemonResponse::SearchProgress { .. } => Ok(()),
+        DaemonResponse::SearchProgress { .. } | DaemonResponse::IndexStarted { .. } => Ok(()),
     }
 }
 
