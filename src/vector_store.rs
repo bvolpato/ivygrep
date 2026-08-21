@@ -10,6 +10,17 @@ pub enum ScalarKind {
 pub const HASH_VECTOR_QUANTIZATION: ScalarKind = ScalarKind::F16;
 pub const NEURAL_VECTOR_QUANTIZATION: ScalarKind = ScalarKind::F16;
 
+/// Which retrieval tier a vector store serves. The tier, not the vector shape,
+/// decides HNSW graph parameters: hash vectors are a cheap first tier built
+/// with a sparse graph, while neural vectors keep quality defaults. Hash and
+/// neural stores can share dimensions and quantization, so callers must name
+/// the tier explicitly.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum VectorTier {
+    Hash,
+    Neural,
+}
+
 #[derive(Debug, Clone)]
 pub struct VectorMatch {
     pub key: u64,
@@ -87,4 +98,4 @@ mod optimized;
 #[cfg_attr(test, allow(dead_code))]
 mod portable;
 
-pub use optimized::VectorStore;
+pub use optimized::{VectorStore, remove_store_files};

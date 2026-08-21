@@ -15,7 +15,7 @@ use tantivy::schema::{
 use crate::text::{
     CODE_TOKENIZER_NAME, TRIGRAM_TOKENIZER_NAME, build_code_analyzer, build_trigram_analyzer,
 };
-use crate::vector_store::{ScalarKind, VectorStore};
+use crate::vector_store::{ScalarKind, VectorStore, VectorTier};
 use crate::workspace::Workspace;
 
 const TANTIVY_WRITE_RETRY_ATTEMPTS: u32 = 16;
@@ -150,9 +150,20 @@ pub(super) fn open_storage_with_options(
 
 pub(super) fn ensure_hash_vector_store(path: &Path, embedding_dimensions: usize) -> Result<()> {
     if path.exists() {
-        let _ = VectorStore::open_readonly(path, embedding_dimensions, ScalarKind::F16)?;
+        let _ = VectorStore::open_readonly(
+            path,
+            embedding_dimensions,
+            ScalarKind::F16,
+            VectorTier::Hash,
+        )?;
     } else {
-        VectorStore::open(path, embedding_dimensions, ScalarKind::F16)?.save()?;
+        VectorStore::open(
+            path,
+            embedding_dimensions,
+            ScalarKind::F16,
+            VectorTier::Hash,
+        )?
+        .save()?;
     }
     Ok(())
 }
