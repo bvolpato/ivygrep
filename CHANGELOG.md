@@ -4,6 +4,10 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- MCP `ig_search` hits mode now defaults to 10 result files when `limit` is omitted, treats `limit` as a file count, caps hits per file (`hits_per_file`, default 3) with `more_hits_in_file`, and reports `total_matches` and `truncated`.
+- MCP search results no longer duplicate the full JSON payload in the text block; `structuredContent` stays machine-readable while text is a compact path, line-range, and preview rendering.
+
 ## [1.2.12] - 2026-08-20
 
 ### Security

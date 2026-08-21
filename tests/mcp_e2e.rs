@@ -46,12 +46,18 @@ fn find_watcher_pid(home: &Path) -> Option<u32> {
 }
 
 fn search_payload(response: &Value) -> Value {
-    serde_json::from_str(
+    assert!(
         response["result"]["content"][0]["text"]
             .as_str()
-            .expect("search response should contain text"),
-    )
-    .expect("search response text should contain JSON")
+            .is_some_and(|text| !text.trim().is_empty()),
+        "search response should contain text: {response}"
+    );
+    let payload = &response["result"]["structuredContent"];
+    assert!(
+        payload.is_object(),
+        "search response should contain structuredContent: {response}"
+    );
+    payload.clone()
 }
 
 #[test]
@@ -261,6 +267,14 @@ fn e2e_mcp_full_session() {
     let payload = search_payload(&search_res);
     assert!(payload["result_count"].as_u64().unwrap() > 0);
     assert_eq!(payload["results"][0]["file_path"], "test.rs");
+    assert!(payload["total_matches"].as_u64().unwrap() >= 1);
+    assert!(payload["truncated"].is_boolean(), "{payload:#}");
+    let search_text = search_res["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        serde_json::from_str::<Value>(search_text).is_err(),
+        "hits text block should be a compact rendering, not JSON: {search_text}"
+    );
+    assert!(search_text.contains("test.rs"), "{search_text}");
 
     // 5. Build one bounded context pack through the same MCP tool.
     send_request(

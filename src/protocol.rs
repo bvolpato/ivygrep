@@ -9,6 +9,10 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
 /// Compile-time version tag so the CLI can detect stale daemon processes.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Wire protocol version for daemon request compatibility.
@@ -191,7 +195,16 @@ pub struct WorkspaceRuntimeStatus {
 pub struct FileSearchResult {
     pub file_path: PathBuf,
     pub total_score: f32,
+    /// Hits matched in this file before any per-file cap.
     pub hit_count: usize,
+    /// Hits dropped from `hits` by a per-file cap (MCP). Zero when no cap applied.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub more_hits_in_file: usize,
+    /// True when retrieval stopped at its candidate budget before this file was
+    /// fully enumerated, so `hit_count` and `more_hits_in_file` are lower
+    /// bounds rather than exact counts (MCP).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hit_count_is_lower_bound: bool,
     pub hits: Vec<SearchHit>,
 }
 
@@ -205,6 +218,8 @@ pub fn group_hits_by_file(hits: &[SearchHit], limit: Option<usize>) -> Vec<FileS
                 file_path: hit.file_path.clone(),
                 total_score: 0.0,
                 hit_count: 0,
+                more_hits_in_file: 0,
+                hit_count_is_lower_bound: false,
                 hits: vec![],
             });
         entry.total_score += hit.score;
