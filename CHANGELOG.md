@@ -4,6 +4,9 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Performance
+- Search responses no longer wait on background-enhancement bookkeeping: the needs check and worker trigger run after the hits are returned, at most once per workspace and mode every 10 seconds; verified worker identities are remembered for 30 seconds instead of forking `ps` on every liveness check; and the Merkle snapshot corruption check memoizes successful parses through a size/mtime sidecar instead of re-parsing the whole snapshot on every CLI query. Warm repeated CLI queries on a 205k-chunk index dropped from roughly 200-460 ms to 90-140 ms wall on the same host.
+
 ### Fixed
 - Daemon index and search requests take their workspace lease before a CPU permit, so requests parked behind a busy workspace no longer starve searches on other workspaces; uncontended search leases are still granted inline so the common query keeps a single blocking hop.
 - Concurrent daemon `Index` requests for one workspace coalesce into a single run, and a request that waited while the index generation advanced skips the redundant rescan only when the run that advanced it started after the request arrived; requests that arrived mid-walk run their own incremental rescan.

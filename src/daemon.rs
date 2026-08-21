@@ -66,6 +66,13 @@ const MAX_IDLE_SEARCH_CONTEXTS: usize = 32;
 /// same immutable path-derived workspace descriptor.
 const MAX_RESOLVED_WORKSPACES: usize = 128;
 const MAX_NEURAL_STATUSES: usize = 128;
+/// Bound on remembered enhancement-trigger attempts (one per workspace/mode).
+const MAX_ENHANCEMENT_TRIGGERS: usize = 256;
+/// Minimum spacing between background enhancement trigger attempts for one
+/// workspace and mode. Each attempt reads the job ledger, probes the worker
+/// process, and may spawn a child; doing that on every query is wasted work
+/// while a worker is already running or paused.
+const ENHANCEMENT_TRIGGER_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_READY_WORKSPACES: usize = 256;
 const MAX_SEARCH_CANCELLATION_TOMBSTONES: usize = 256;
 const MAX_MEMORY_PROBE_LIMIT: usize = 80;
@@ -1148,6 +1155,8 @@ pub(crate) struct DaemonState {
     watchers: Arc<Mutex<HashMap<String, WatchRegistration>>>,
     resolved_workspaces: Arc<Mutex<LruCache<PathBuf, Workspace>>>,
     neural_statuses: Arc<Mutex<LruCache<String, CachedNeuralStatus>>>,
+    /// Last background enhancement trigger attempt per (workspace, mode).
+    enhancement_triggers: Arc<Mutex<LruCache<EnhancementTriggerKey, std::time::Instant>>>,
     ready_workspaces: Arc<Mutex<LruCache<WorkspaceReadinessCacheKey, WorkspaceReadinessSignature>>>,
     search_contexts: Arc<Mutex<LruCache<SearchContextCacheKey, CachedSearchContext>>>,
     idle_search_context_count: Arc<AtomicUsize>,
@@ -1556,6 +1565,69 @@ impl DaemonState {
         Ok(workspace)
     }
 
+    /// Kick background hash/neural enhancement for `workspaces` without
+    /// holding up the search response. The check of whether enhancement is
+    /// needed (SQLite counts, vector store sizes, job ledger, worker probe)
+    /// and the trigger itself run on a blocking task after the hits are
+    /// returned, and each workspace/mode is re-checked at most once per
+    /// `ENHANCEMENT_TRIGGER_INTERVAL`.
+    fn schedule_search_enhancement(&self, workspaces: Vec<Workspace>, query_uses_neural: bool) {
+        if workspaces.is_empty() || !crate::config::background_enhancement_enabled() {
+            return;
+        }
+        let due = self.due_enhancement_workspaces(workspaces, query_uses_neural);
+        if due.is_empty() {
+            return;
+        }
+        let trigger = move || {
+            for workspace in due {
+                if workspace.needs_search_enhancement(query_uses_neural)
+                    && let Err(err) =
+                        workspace.trigger_background_search_enhancement(query_uses_neural)
+                {
+                    warn!(
+                        "failed to trigger background enhancement for {}: {err:#}",
+                        workspace.root.display()
+                    );
+                }
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn_blocking(trigger);
+            }
+            Err(_) => trigger(),
+        }
+    }
+
+    /// Workspaces whose enhancement trigger is due: not attempted for this
+    /// mode within `ENHANCEMENT_TRIGGER_INTERVAL`. Records the attempt.
+    fn due_enhancement_workspaces(
+        &self,
+        workspaces: Vec<Workspace>,
+        query_uses_neural: bool,
+    ) -> Vec<Workspace> {
+        let now = std::time::Instant::now();
+        let mut triggers = self.enhancement_triggers.lock();
+        workspaces
+            .into_iter()
+            .filter(|workspace| {
+                let key = EnhancementTriggerKey {
+                    workspace_id: workspace.id.clone(),
+                    query_uses_neural,
+                };
+                let recent = triggers
+                    .get(&key)
+                    .is_some_and(|last| now.duration_since(*last) < ENHANCEMENT_TRIGGER_INTERVAL);
+                if recent {
+                    return false;
+                }
+                triggers.put(key, now);
+                true
+            })
+            .collect()
+    }
+
     fn cached_neural_identity(
         &self,
         workspace: &Workspace,
@@ -1867,6 +1939,7 @@ fn create_daemon_state() -> DaemonState {
         watchers: Arc::new(Mutex::new(HashMap::new())),
         resolved_workspaces: Arc::new(Mutex::new(bounded_lru(MAX_RESOLVED_WORKSPACES))),
         neural_statuses: Arc::new(Mutex::new(bounded_lru(MAX_NEURAL_STATUSES))),
+        enhancement_triggers: Arc::new(Mutex::new(bounded_lru(MAX_ENHANCEMENT_TRIGGERS))),
         ready_workspaces: Arc::new(Mutex::new(bounded_lru(MAX_READY_WORKSPACES))),
         search_contexts: Arc::new(Mutex::new(bounded_lru(MAX_SEARCH_CONTEXTS))),
         idle_search_context_count: Arc::new(AtomicUsize::new(0)),
@@ -2629,18 +2702,7 @@ async fn handle_request_with_cancellation(
                 if options.is_cancelled() {
                     return (Vec::new(), all_errors, 0, query, options, true);
                 }
-                let background_enhancement_enabled =
-                    crate::config::background_enhancement_enabled();
                 let query_uses_neural = query_uses_neural(&query, options.force_neural);
-                let workspaces_needing_enhancement = if background_enhancement_enabled {
-                    workspaces
-                        .iter()
-                        .filter(|workspace| workspace.needs_search_enhancement(query_uses_neural))
-                        .map(|workspace| workspace.root.clone())
-                        .collect::<Vec<PathBuf>>()
-                } else {
-                    Vec::new()
-                };
                 let workspace_signatures = workspaces
                     .iter()
                     .map(|workspace| {
@@ -2664,12 +2726,9 @@ async fn handle_request_with_cancellation(
                 );
                 if let Some(cached_hits) = state_clone.cached_query_results(&cache_key) {
                     let cancelled = options.is_cancelled();
-                    if background_enhancement_enabled && !cancelled {
-                        for root in workspaces_needing_enhancement {
-                            if let Ok(ws) = Workspace::resolve(&root) {
-                                let _ = ws.trigger_background_search_enhancement(query_uses_neural);
-                            }
-                        }
+                    if !cancelled {
+                        state_clone
+                            .schedule_search_enhancement(workspaces.clone(), query_uses_neural);
                     }
                     return (
                         cached_hits,
@@ -2774,13 +2833,9 @@ async fn handle_request_with_cancellation(
                 if !cancelled && all_errors.is_empty() {
                     state_clone.store_query_results(cache_key, &all_hits);
                 }
-                // Spawn background hash and neural enhancement for workspaces that need it.
-                if background_enhancement_enabled && !cancelled {
-                    for root in workspaces_needing_enhancement {
-                        if let Ok(ws) = Workspace::resolve(&root) {
-                            let _ = ws.trigger_background_search_enhancement(query_uses_neural);
-                        }
-                    }
+                // Background hash and neural enhancement runs off the response path.
+                if !cancelled {
+                    state_clone.schedule_search_enhancement(workspaces.clone(), query_uses_neural);
                 }
                 tracing::trace!("daemon_search_task_total={:?}", task_started.elapsed());
                 (
@@ -3850,6 +3905,12 @@ fn search_context_signature(
     }
 }
 
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+struct EnhancementTriggerKey {
+    workspace_id: String,
+    query_uses_neural: bool,
+}
+
 fn neural_status_signature(workspace: &Workspace) -> NeuralStatusSignature {
     let base_dir = workspace.base_index_dir.as_ref();
     NeuralStatusSignature {
@@ -4483,6 +4544,7 @@ mod tests {
             watchers: Arc::new(Mutex::new(HashMap::new())),
             resolved_workspaces: Arc::new(Mutex::new(bounded_lru(MAX_RESOLVED_WORKSPACES))),
             neural_statuses: Arc::new(Mutex::new(bounded_lru(MAX_NEURAL_STATUSES))),
+            enhancement_triggers: Arc::new(Mutex::new(bounded_lru(MAX_ENHANCEMENT_TRIGGERS))),
             ready_workspaces: Arc::new(Mutex::new(bounded_lru(MAX_READY_WORKSPACES))),
             search_contexts: Arc::new(Mutex::new(bounded_lru(MAX_SEARCH_CONTEXTS))),
             idle_search_context_count: Arc::new(AtomicUsize::new(0)),
@@ -5336,6 +5398,46 @@ mod tests {
         assert!(
             state.resolved_workspaces.lock().is_empty(),
             "subpaths must still perform full workspace resolution"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn enhancement_triggers_are_rate_limited_per_workspace_and_mode() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo_a = tempdir().unwrap();
+        let repo_b = tempdir().unwrap();
+        let a = Workspace::resolve(repo_a.path()).unwrap();
+        let b = Workspace::resolve(repo_b.path()).unwrap();
+        let state = test_state();
+
+        let due = state.due_enhancement_workspaces(vec![a.clone(), b.clone()], false);
+        assert_eq!(
+            due.iter().map(|ws| ws.id.clone()).collect::<Vec<_>>(),
+            vec![a.id.clone(), b.id.clone()],
+            "first attempt is due for every workspace"
+        );
+        assert!(
+            state
+                .due_enhancement_workspaces(vec![a.clone(), b.clone()], false)
+                .is_empty(),
+            "a second query within the interval does not re-probe or re-spawn"
+        );
+        let neural_due = state.due_enhancement_workspaces(vec![a.clone()], true);
+        assert_eq!(neural_due.len(), 1, "neural mode is tracked separately");
+
+        state.enhancement_triggers.lock().put(
+            EnhancementTriggerKey {
+                workspace_id: a.id.clone(),
+                query_uses_neural: false,
+            },
+            std::time::Instant::now() - ENHANCEMENT_TRIGGER_INTERVAL,
+        );
+        assert_eq!(
+            state.due_enhancement_workspaces(vec![a, b], false).len(),
+            1,
+            "only the workspace whose interval elapsed is due again"
         );
     }
 

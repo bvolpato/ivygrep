@@ -44,6 +44,73 @@ pub struct MerkleDiff {
     pub deleted: Vec<PathBuf>,
 }
 
+/// Identity of one snapshot file's content: size, modification time, and on
+/// Unix the inode plus change time. Size and mtime alone can survive an
+/// mtime-preserving restore or a same-length overwrite on a coarse-timestamp
+/// filesystem; ctime changes on every write and cannot be set by userland, and
+/// the inode changes when the file is replaced.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SnapshotStamp {
+    len: u64,
+    modified_nanos: u128,
+    inode: u64,
+    changed_nanos: i128,
+}
+
+fn snapshot_stamp(path: &Path) -> Option<SnapshotStamp> {
+    let metadata = fs::metadata(path).ok()?;
+    let modified_nanos = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    #[cfg(unix)]
+    let (inode, changed_nanos) = {
+        use std::os::unix::fs::MetadataExt;
+        (
+            metadata.ino(),
+            i128::from(metadata.ctime()) * 1_000_000_000 + i128::from(metadata.ctime_nsec()),
+        )
+    };
+    #[cfg(not(unix))]
+    let (inode, changed_nanos) = (0u64, 0i128);
+    Some(SnapshotStamp {
+        len: metadata.len(),
+        modified_nanos,
+        inode,
+        changed_nanos,
+    })
+}
+
+fn verified_stamp_path(path: &Path) -> PathBuf {
+    path.with_extension("verified")
+}
+
+fn read_verified_stamp(path: &Path) -> Option<SnapshotStamp> {
+    let raw = fs::read_to_string(verified_stamp_path(path)).ok()?;
+    let mut fields = raw.split_whitespace();
+    let stamp = SnapshotStamp {
+        len: fields.next()?.parse().ok()?,
+        modified_nanos: fields.next()?.parse().ok()?,
+        inode: fields.next()?.parse().ok()?,
+        changed_nanos: fields.next()?.parse().ok()?,
+    };
+    fields.next().is_none().then_some(stamp)
+}
+
+fn write_verified_stamp(path: &Path, stamp: SnapshotStamp) {
+    let sidecar = verified_stamp_path(path);
+    let tmp = sidecar.with_extension("verified.tmp");
+    let payload = format!(
+        "{} {} {} {}\n",
+        stamp.len, stamp.modified_nanos, stamp.inode, stamp.changed_nanos
+    );
+    if fs::write(&tmp, payload).is_ok() {
+        let _ = fs::rename(&tmp, &sidecar);
+    }
+}
+
 impl MerkleSnapshot {
     pub fn empty() -> Self {
         Self {
@@ -56,13 +123,28 @@ impl MerkleSnapshot {
     /// an incremental diff impossible (we'd diff against an empty old set, which
     /// re-adds everything but never removes chunks for files deleted before the
     /// corruption), so the caller should force a full rebuild instead.
+    ///
+    /// Parsing a large snapshot on every health check is expensive (the file
+    /// grows with the repository), so a successful parse or save records the
+    /// file's size and modification time in a sidecar; while that stamp
+    /// matches, the content is known good and the parse is skipped.
     pub fn file_is_corrupt(path: &Path) -> bool {
-        if !path.exists() {
+        let Some(stamp) = snapshot_stamp(path) else {
+            // Missing or unreadable (not corrupt content) — let normal IO
+            // handling deal.
+            return false;
+        };
+        if read_verified_stamp(path) == Some(stamp) {
             return false;
         }
         match fs::read(path) {
-            Ok(data) => serde_json::from_slice::<Self>(&data).is_err(),
-            // Unreadable (not corrupt content) — let normal IO handling deal.
+            Ok(data) => {
+                let corrupt = serde_json::from_slice::<Self>(&data).is_err();
+                if !corrupt {
+                    write_verified_stamp(path, stamp);
+                }
+                corrupt
+            }
             Err(_) => false,
         }
     }
@@ -92,6 +174,9 @@ impl MerkleSnapshot {
         let tmp = path.with_extension("tmp");
         fs::write(&tmp, payload)?;
         fs::rename(&tmp, path)?;
+        if let Some(stamp) = snapshot_stamp(path) {
+            write_verified_stamp(path, stamp);
+        }
         Ok(())
     }
 
@@ -436,6 +521,57 @@ mod tests {
             root_hash(&files),
             hex::encode(xxhash_rust::xxh3::xxh3_128(&contiguous).to_le_bytes())
         );
+    }
+
+    #[test]
+    fn corruption_check_is_memoized_by_verified_stamp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("merkle_snapshot.json");
+        let mut snapshot = MerkleSnapshot::empty();
+        snapshot
+            .files
+            .insert("src/lib.rs".to_string(), "hash-0".to_string());
+        snapshot.save(&path).unwrap();
+
+        assert!(
+            verified_stamp_path(&path).exists(),
+            "save records the stamp"
+        );
+        assert!(!MerkleSnapshot::file_is_corrupt(&path));
+
+        // Truncate in place: the size changes, so the stamp no longer matches
+        // and the content is parsed again.
+        let data = fs::read(&path).unwrap();
+        fs::write(&path, &data[..data.len() / 2]).unwrap();
+        assert!(MerkleSnapshot::file_is_corrupt(&path));
+
+        // Restoring valid content re-verifies and re-records the stamp.
+        fs::remove_file(verified_stamp_path(&path)).unwrap();
+        fs::write(&path, &data).unwrap();
+        assert!(!MerkleSnapshot::file_is_corrupt(&path));
+        assert_eq!(read_verified_stamp(&path), snapshot_stamp(&path));
+
+        // A same-length corruption that preserves the mtime (as an
+        // mtime-preserving restore would) still invalidates the stamp on Unix
+        // because the change time and, after a replace, the inode differ.
+        #[cfg(unix)]
+        {
+            let modified = fs::metadata(&path).unwrap().modified().unwrap();
+            let mut garbage = data.clone();
+            garbage[0] = b'#';
+            let replacement = path.with_extension("replacement");
+            fs::write(&replacement, &garbage).unwrap();
+            fs::File::open(&replacement)
+                .unwrap()
+                .set_modified(modified)
+                .unwrap();
+            fs::rename(&replacement, &path).unwrap();
+            assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
+            assert!(
+                MerkleSnapshot::file_is_corrupt(&path),
+                "same length and mtime must not bypass validation"
+            );
+        }
     }
 
     #[test]
