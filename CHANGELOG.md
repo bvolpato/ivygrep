@@ -4,6 +4,9 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Performance
+- Search responses no longer wait on background-enhancement bookkeeping: the needs check and worker trigger run after the hits are returned, at most once per workspace and mode every 10 seconds; verified worker identities are remembered for 30 seconds instead of forking `ps` on every liveness check; and the Merkle snapshot corruption check memoizes successful parses through a size/mtime sidecar instead of re-parsing the whole snapshot on every CLI query. Warm repeated CLI queries on a 205k-chunk index dropped from roughly 200-460 ms to 90-140 ms wall on the same host.
+
 ### Fixed
 - Neural enhancement now embeds whole chunks for the static and Model2Vec profiles (16 KiB safety cap) and sizes the cut for transformer profiles from their token window, instead of truncating every chunk at 1,024 characters. Notes and long functions no longer embed only their first lines; the identity change re-enhances existing neural vectors.
 - Neural vector stores now build with USearch's default HNSW graph instead of the sparse hash-tier graph. The default 256-dimensional F16 neural profile matched the hash store's shape, which cut neural ANN recall@10 to about 0.24 on clustered vectors. Existing neural vectors re-enhance automatically through a neural identity bump.

@@ -156,7 +156,7 @@ stores and metadata agree.
 | `vectors.usearch` | Lightweight hash-vector index |
 | `vectors_neural.usearch` | Learned neural-vector index |
 | `neural_profile` and model identity metadata | Vector compatibility contract |
-| `merkle_snapshot.json` | Last committed path fingerprints and aggregate root hash |
+| `merkle_snapshot.json`, `merkle_snapshot.verified` | Last committed path fingerprints and aggregate root hash; the sidecar records the size and mtime of the last snapshot that parsed successfully so health checks skip re-parsing it |
 | `job.json`, locks, progress files | Index, enhancement, and watcher coordination |
 
 SQLite stores compressed chunk text when compression is useful. Reads use a
@@ -273,6 +273,11 @@ Daemon owns long-lived state that should not be recreated for every query:
 Watchers coalesce bursts and cap continuous-event starvation. Successful changes
 invalidate only cache entries involving affected workspaces. No-op indexing
 preserves valid cache entries.
+
+Search responses never wait on background enhancement bookkeeping. After the
+hits are computed, the daemon schedules a blocking task that checks whether
+hash or neural enhancement is needed and triggers the worker, at most once per
+workspace and mode every ten seconds.
 
 Heavy work is bounded by a CPU-permit semaphore sized to the core count. Index,
 search, and watcher tasks take their per-workspace lease on the blocking pool

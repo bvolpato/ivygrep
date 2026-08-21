@@ -320,13 +320,21 @@ pub fn process_is_alive(pid: u32, expected_start_time: Option<&str>) -> bool {
         let pid_i32 = pid as i32;
         let alive = unsafe { libc::kill(pid_i32, 0) } == 0;
         if !alive {
+            forget_verified_process(pid);
             return false;
         }
 
-        if let Some(expected) = expected_start_time
-            && let Some(actual) = process_start_time_token(pid)
-        {
-            return actual == expected;
+        if let Some(expected) = expected_start_time {
+            if process_identity_verified(pid, expected) {
+                return true;
+            }
+            if let Some(actual) = process_start_time_token(pid) {
+                let matches = actual == expected;
+                if matches {
+                    remember_verified_process(pid, expected);
+                }
+                return matches;
+            }
         }
 
         alive
@@ -337,6 +345,54 @@ pub fn process_is_alive(pid: u32, expected_start_time: Option<&str>) -> bool {
         let _ = expected_start_time;
         true
     }
+}
+
+/// How long a positive `(pid, start time)` match is trusted before the start
+/// time is probed again. Hot query paths check worker liveness several times
+/// per second; forking `ps` (macOS) or reading `/proc` each time is the cost
+/// being avoided. The bound caps the window in which a recycled pid could be
+/// mistaken for the job that owned it.
+#[cfg(unix)]
+const VERIFIED_PROCESS_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[cfg(unix)]
+type VerifiedProcesses = std::collections::HashMap<u32, (String, std::time::Instant)>;
+
+#[cfg(unix)]
+fn verified_processes() -> &'static std::sync::Mutex<VerifiedProcesses> {
+    static VERIFIED: std::sync::OnceLock<std::sync::Mutex<VerifiedProcesses>> =
+        std::sync::OnceLock::new();
+    VERIFIED.get_or_init(|| std::sync::Mutex::new(VerifiedProcesses::new()))
+}
+
+#[cfg(unix)]
+fn process_identity_verified(pid: u32, expected_start_time: &str) -> bool {
+    verified_processes()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&pid)
+        .is_some_and(|(token, verified_at)| {
+            token == expected_start_time && verified_at.elapsed() < VERIFIED_PROCESS_TTL
+        })
+}
+
+#[cfg(unix)]
+fn remember_verified_process(pid: u32, start_time: &str) {
+    let mut verified = verified_processes()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if verified.len() >= 1024 {
+        verified.retain(|_, (_, verified_at)| verified_at.elapsed() < VERIFIED_PROCESS_TTL);
+    }
+    verified.insert(pid, (start_time.to_string(), std::time::Instant::now()));
+}
+
+#[cfg(unix)]
+fn forget_verified_process(pid: u32) {
+    verified_processes()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&pid);
 }
 
 pub fn process_start_time_token(pid: u32) -> Option<String> {
@@ -494,5 +550,41 @@ mod tests {
         assert_eq!(current.nonce.as_deref(), Some(second_nonce));
         assert_eq!(current.phase, "second");
         assert!(current.active);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_liveness_memoizes_only_verified_identities() {
+        let pid = std::process::id();
+        let token = process_start_time_token(pid).expect("own start time");
+
+        forget_verified_process(pid);
+        assert!(!process_identity_verified(pid, &token));
+        assert!(process_is_alive(pid, Some(&token)));
+        assert!(
+            process_identity_verified(pid, &token),
+            "a confirmed start time is remembered"
+        );
+
+        assert!(
+            !process_is_alive(pid, Some("Thu Jan  1 00:00:00 1970")),
+            "a different start time means a different process"
+        );
+        assert!(
+            process_identity_verified(pid, &token),
+            "a mismatch does not poison the verified entry"
+        );
+        assert!(!process_identity_verified(pid, "Thu Jan  1 00:00:00 1970"));
+
+        // A child that has already exited is dead regardless of its token,
+        // and its entry is dropped.
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn true");
+        let child_pid = child.id();
+        remember_verified_process(child_pid, "stale");
+        child.wait().expect("wait child");
+        assert!(!process_is_alive(child_pid, Some("stale")));
+        assert!(!process_identity_verified(child_pid, "stale"));
     }
 }
