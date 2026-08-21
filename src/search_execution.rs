@@ -154,22 +154,18 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     } else if !options.include_globs.is_empty() {
         can_pushdown_languages = true;
         for glob in &options.include_globs {
-            let trimmed = glob.trim();
-            if trimmed.starts_with("*.") && !trimmed.contains('/') && !trimmed.contains('?') {
-                let ext = &trimmed[1..];
-                if let Some(lang) =
-                    crate::chunking::language_for_path(&PathBuf::from(format!("dummy{}", ext)))
-                {
-                    allowed_languages.push(lang.to_string());
-                } else {
+            match indexed_glob_path_filter(glob) {
+                Some(IndexedGlobPath::Languages(languages)) => {
+                    allowed_languages.extend(languages);
+                }
+                _ => {
                     can_pushdown_languages = false;
                     break;
                 }
-            } else {
-                can_pushdown_languages = false;
-                break;
             }
         }
+        allowed_languages.sort_unstable();
+        allowed_languages.dedup();
     }
 
     let mut lexical_by_id = HashMap::<u64, (IndexedChunk, f32)>::new();
