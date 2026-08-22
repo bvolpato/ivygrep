@@ -54,7 +54,8 @@ pub struct Workspace {
 ///  19 — JVM and .NET source-test mappings persist late-bound graph ownership
 ///  20 — File-level trigram postings support exact substring candidate search
 ///  21 — Relevance-preserving structural chunks and duplicate capture suppression
-pub const INDEX_FORMAT_VERSION: u32 = 21;
+///  22 — Symbols persist parser-derived names, owners, language, and kind
+pub const INDEX_FORMAT_VERSION: u32 = 22;
 const COMPACTION_FREE_BYTES_THRESHOLD: u64 = 16 * 1024 * 1024;
 const COMPACTION_FREE_PERCENT_THRESHOLD: f64 = 20.0;
 
@@ -370,6 +371,7 @@ impl Workspace {
             &path,
             identity.dimensions,
             crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
+            crate::vector_store::VectorTier::Neural,
         )
         .unwrap_or(0)
     }
@@ -383,6 +385,7 @@ impl Workspace {
             &path,
             crate::EMBEDDING_DIMENSIONS,
             crate::vector_store::HASH_VECTOR_QUANTIZATION,
+            crate::vector_store::VectorTier::Hash,
         )
         .unwrap_or(0)
     }
@@ -619,6 +622,7 @@ impl Workspace {
             &hash_path,
             crate::EMBEDDING_DIMENSIONS,
             crate::vector_store::HASH_VECTOR_QUANTIZATION,
+            crate::vector_store::VectorTier::Hash,
         )
         .is_none_or(|enhanced| enhanced < vector_key_count)
     }
@@ -684,6 +688,7 @@ impl Workspace {
             &hash_path,
             crate::EMBEDDING_DIMENSIONS,
             crate::vector_store::HASH_VECTOR_QUANTIZATION,
+            crate::vector_store::VectorTier::Hash,
         )
         .is_none_or(|enhanced| enhanced < vector_key_count)
         {
@@ -722,6 +727,7 @@ impl Workspace {
             &neural_path,
             crate::embedding::configured_neural_model_identity().dimensions,
             crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
+            crate::vector_store::VectorTier::Neural,
         ) {
             let enhanced = store.size();
             return (enhanced as u64) < vector_key_count;
@@ -1112,6 +1118,7 @@ impl Workspace {
                     &vector_p,
                     256,
                     crate::vector_store::HASH_VECTOR_QUANTIZATION,
+                    crate::vector_store::VectorTier::Hash,
                 ) {
                     Ok(store) => {
                         let generation = metadata.as_ref().map(|meta| meta.index_generation);
@@ -1142,6 +1149,7 @@ impl Workspace {
                             .map(|identity| identity.dimensions)
                             .unwrap_or(384),
                         crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
+                        crate::vector_store::VectorTier::Neural,
                     )
                 {
                     issues.push(format!("failed to open neural vector store: {err:#}"));
@@ -1475,6 +1483,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
             &hash_vector_store_path(&index_dir),
             crate::EMBEDDING_DIMENSIONS,
             crate::vector_store::HASH_VECTOR_QUANTIZATION,
+            crate::vector_store::VectorTier::Hash,
         )
         .unwrap_or(0);
         let hash_coverage_percent = if vector_key_count > 0 {
@@ -1494,6 +1503,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
                 &neural_path,
                 neural_dimensions,
                 crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
+                crate::vector_store::VectorTier::Neural,
             )
             .map(|store| store.size() as u64)
             .unwrap_or(0)
@@ -1843,6 +1853,7 @@ fn sqlite_tier_bytes(path: &Path) -> (u64, u64) {
         &[
             "symbols",
             "idx_symbols_name",
+            "idx_symbols_chunk_key",
             "file_edges",
             "idx_file_edges_target",
             "unresolved_file_dependencies",
@@ -2015,6 +2026,7 @@ fn neural_store_has_vectors(index_dir: &Path) -> bool {
         &index_dir.join("vectors_neural.usearch"),
         dimensions,
         crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
+        crate::vector_store::VectorTier::Neural,
     )
     .is_ok_and(|store| store.size() > 0)
 }
@@ -2023,8 +2035,9 @@ fn vector_store_size(
     path: &Path,
     dimensions: usize,
     scalar_kind: crate::vector_store::ScalarKind,
+    tier: crate::vector_store::VectorTier,
 ) -> Option<u64> {
-    crate::vector_store::VectorStore::open_readonly(path, dimensions, scalar_kind)
+    crate::vector_store::VectorStore::open_readonly(path, dimensions, scalar_kind, tier)
         .ok()
         .map(|store| store.size() as u64)
 }
@@ -2559,6 +2572,7 @@ mod tests {
                 &ws.vector_path(),
                 crate::EMBEDDING_DIMENSIONS,
                 crate::vector_store::ScalarKind::F16,
+                crate::vector_store::VectorTier::Hash,
             )
             .unwrap();
             store
@@ -2586,6 +2600,7 @@ mod tests {
                 &ws.vector_neural_path(),
                 neural_dimensions,
                 crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
+                crate::vector_store::VectorTier::Neural,
             )
             .unwrap();
             store.upsert(1, vec![0.0; neural_dimensions]).unwrap();
@@ -2601,6 +2616,7 @@ mod tests {
                 &ws.vector_neural_path(),
                 neural_dimensions,
                 crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
+                crate::vector_store::VectorTier::Neural,
             )
             .unwrap();
             store.upsert(2, vec![0.0; neural_dimensions]).unwrap();
@@ -2708,6 +2724,7 @@ mod tests {
             &ws.overlay_vector_path(),
             crate::EMBEDDING_DIMENSIONS,
             crate::vector_store::ScalarKind::F16,
+            crate::vector_store::VectorTier::Hash,
         )
         .unwrap();
         store
@@ -2727,6 +2744,7 @@ mod tests {
             &ws.vector_neural_path(),
             crate::EMBEDDING_DIMENSIONS,
             crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
+            crate::vector_store::VectorTier::Neural,
         )
         .unwrap();
         neural
@@ -3015,6 +3033,7 @@ mod tests {
             &ws.vector_path(),
             crate::EMBEDDING_DIMENSIONS,
             crate::vector_store::ScalarKind::F16,
+            crate::vector_store::VectorTier::Hash,
         )
         .unwrap();
         vectors.remove(vector_key);
@@ -3127,6 +3146,7 @@ mod tests {
             &base_index_dir.join("vectors_neural.usearch"),
             identity.dimensions,
             crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
+            crate::vector_store::VectorTier::Neural,
         )
         .unwrap();
         std::fs::write(

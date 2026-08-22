@@ -46,12 +46,18 @@ fn find_watcher_pid(home: &Path) -> Option<u32> {
 }
 
 fn search_payload(response: &Value) -> Value {
-    serde_json::from_str(
+    assert!(
         response["result"]["content"][0]["text"]
             .as_str()
-            .expect("search response should contain text"),
-    )
-    .expect("search response text should contain JSON")
+            .is_some_and(|text| !text.trim().is_empty()),
+        "search response should contain text: {response}"
+    );
+    let payload = &response["result"]["structuredContent"];
+    assert!(
+        payload.is_object(),
+        "search response should contain structuredContent: {response}"
+    );
+    payload.clone()
 }
 
 #[test]
@@ -261,6 +267,14 @@ fn e2e_mcp_full_session() {
     let payload = search_payload(&search_res);
     assert!(payload["result_count"].as_u64().unwrap() > 0);
     assert_eq!(payload["results"][0]["file_path"], "test.rs");
+    assert!(payload["total_matches"].as_u64().unwrap() >= 1);
+    assert!(payload["truncated"].is_boolean(), "{payload:#}");
+    let search_text = search_res["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        serde_json::from_str::<Value>(search_text).is_err(),
+        "hits text block should be a compact rendering, not JSON: {search_text}"
+    );
+    assert!(search_text.contains("test.rs"), "{search_text}");
 
     // 5. Build one bounded context pack through the same MCP tool.
     send_request(
@@ -416,6 +430,182 @@ fn e2e_mcp_autospawn_watches_edits() {
         thread::sleep(Duration::from_millis(100));
     };
     assert!(search_payload(&refreshed)["result_count"].as_u64().unwrap() > 0);
+
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+}
+
+fn create_bulk_repo(root: &Path, files: usize) {
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join(".git")).unwrap();
+    for index in 0..files {
+        let body = (0..30)
+            .map(|line| {
+                format!(
+                    "pub fn bulk_first_call_symbol_{index}_{line}(value: u64) -> u64 {{ value.wrapping_add({}) }}\n",
+                    line + 1
+                )
+            })
+            .collect::<String>();
+        fs::write(root.join("src").join(format!("module_{index}.rs")), body).unwrap();
+    }
+}
+
+/// Indexing job records (`job.json`) under `home`, as (workspace dir, pid).
+fn indexing_job_pids(home: &Path) -> Vec<(String, u64)> {
+    let mut pids = Vec::new();
+    let Ok(entries) = fs::read_dir(home.join("indexes")) else {
+        return pids;
+    };
+    for entry in entries.flatten() {
+        let Ok(raw) = fs::read_to_string(entry.path().join("job.json")) else {
+            continue;
+        };
+        let Ok(ledger) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        for job in ledger["jobs"].as_array().into_iter().flatten() {
+            if job["kind"] == "indexing"
+                && let Some(pid) = job["pid"].as_u64()
+            {
+                pids.push((entry.file_name().to_string_lossy().to_string(), pid));
+            }
+        }
+    }
+    pids
+}
+
+/// First call on an unindexed workspace must return a bounded, non-error
+/// `status: indexing` payload while the daemon keeps indexing; the MCP process
+/// itself must not index locally; a later call returns hits.
+#[test]
+fn e2e_mcp_first_call_reports_indexing_instead_of_blocking() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("ivygrep_home");
+    let repo = tmp.path().join("repo");
+    create_bulk_repo(&repo, 3_000);
+
+    let mut child = Command::new(assert_cmd::cargo::cargo_bin("ig"))
+        .env("IVYGREP_HOME", &home)
+        .env_remove("IVYGREP_NO_AUTOSPAWN")
+        // Return right after the daemon accepts the run so the assertion does
+        // not depend on how fast this machine indexes the fixture.
+        .env("IVYGREP_MCP_INDEX_WAIT_SECS", "0")
+        .arg("--mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn ig --mcp");
+    let mcp_pid = u64::from(child.id());
+    let mut stdin = child.stdin.take().unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap());
+    let mut daemon = DaemonGuard { pid: None };
+
+    let call_search = |stdin: &mut std::process::ChildStdin,
+                       reader: &mut BufReader<std::process::ChildStdout>,
+                       id: usize|
+     -> Value {
+        writeln!(
+            stdin,
+            "{}",
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {
+                    "name": "ig_search",
+                    "arguments": {
+                        "query": "bulk_first_call_symbol_7_3",
+                        "path": repo.to_string_lossy(),
+                        "literal": true
+                    }
+                }
+            })
+        )
+        .unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    };
+
+    let started = Instant::now();
+    let first = call_search(&mut stdin, &mut reader, 1);
+    let first_latency = started.elapsed();
+    // Record the daemon pid before any assertion so a failure still stops it.
+    if let Ok(raw) = fs::read_to_string(home.join("daemon.pid")) {
+        daemon.pid = raw.trim().parse().ok();
+    }
+    let result = &first["result"];
+    assert_eq!(result["isError"], false, "{first}");
+    let status = &result["structuredContent"];
+    assert_eq!(status["status"], "indexing", "{first}");
+    assert_eq!(
+        status["workspace_root"],
+        json!(repo.canonicalize().unwrap())
+    );
+    assert!(status["progress"]["phase"].is_string(), "{status}");
+    assert!(status["elapsed_secs"].is_u64(), "{status}");
+    assert!(
+        status["retry_after_secs"].as_u64().unwrap() >= 1,
+        "{status}"
+    );
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.starts_with("Indexing "), "{text}");
+    assert!(text.contains("call ig_search again"), "{text}");
+    // Bounded: autospawn plus one status poll, not the whole index run.
+    assert!(
+        first_latency < Duration::from_secs(15),
+        "first call blocked for {first_latency:?}"
+    );
+
+    let daemon_pid = daemon.pid.expect("MCP autospawned a daemon");
+
+    // The daemon owns the run: poll until results arrive, asserting that the
+    // MCP process never started an index job of its own.
+    let deadline = Instant::now() + Duration::from_secs(180);
+    let mut id = 2;
+    let mut saw_daemon_job = false;
+    let hits = loop {
+        for (workspace, pid) in indexing_job_pids(&home) {
+            assert_ne!(
+                pid, mcp_pid,
+                "MCP process indexed {workspace} locally while the daemon was indexing"
+            );
+            if pid == u64::from(daemon_pid) {
+                saw_daemon_job = true;
+            }
+        }
+        let response = call_search(&mut stdin, &mut reader, id);
+        let result = &response["result"];
+        assert_eq!(result["isError"], false, "{response}");
+        if result["structuredContent"]["status"] != "indexing" {
+            break search_payload(&response);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon did not finish indexing the fixture: {response}"
+        );
+        id += 1;
+        thread::sleep(Duration::from_millis(250));
+    };
+    for (workspace, pid) in indexing_job_pids(&home) {
+        assert_ne!(pid, mcp_pid, "MCP process indexed {workspace} locally");
+        if pid == u64::from(daemon_pid) {
+            saw_daemon_job = true;
+        }
+    }
+    assert!(
+        saw_daemon_job,
+        "index job was not recorded under the daemon pid"
+    );
+    assert!(hits["result_count"].as_u64().unwrap() > 0, "{hits}");
+    assert!(
+        !home
+            .join("indexes")
+            .read_dir()
+            .unwrap()
+            .any(|entry| { entry.unwrap().path().join(".indexing.pid").exists() })
+    );
 
     drop(stdin);
     assert!(child.wait().unwrap().success());

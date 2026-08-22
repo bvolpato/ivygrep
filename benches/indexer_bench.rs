@@ -5,7 +5,7 @@ use ivygrep::embedding::{EmbeddingModel, HashEmbeddingModel};
 use ivygrep::indexer::{enhance_workspace_hash, index_workspace, remove_workspace_index};
 use ivygrep::merkle::MerkleSnapshot;
 use ivygrep::search::{SearchOptions, hybrid_search, literal_search};
-use ivygrep::vector_store::{ScalarKind, VectorStore};
+use ivygrep::vector_store::{ScalarKind, VectorStore, VectorTier};
 use ivygrep::workspace::Workspace;
 use std::cell::OnceCell;
 use std::fmt::Write as _;
@@ -68,7 +68,10 @@ where
     start.elapsed() / repetitions
 }
 
-fn setup_ann_fixture() -> (tempfile::TempDir, PathBuf, Vec<f32>) {
+/// 50K pseudo-random 256-d F16 vectors in a store built for `tier`. The two
+/// tiers differ only in HNSW graph parameters: the hash tier uses the sparse
+/// first-results graph and the neural tier uses USearch defaults.
+fn setup_ann_fixture(tier: VectorTier) -> (tempfile::TempDir, PathBuf, Vec<f32>) {
     let ann_dir = tempfile::tempdir().unwrap();
     let ann_path = ann_dir.path().join("ann.usearch");
     {
@@ -76,6 +79,7 @@ fn setup_ann_fixture() -> (tempfile::TempDir, PathBuf, Vec<f32>) {
             &ann_path,
             EMBEDDING_DIMENSIONS,
             ivygrep::vector_store::NEURAL_VECTOR_QUANTIZATION,
+            tier,
         )
         .unwrap();
         for i in 0..50_000u64 {
@@ -147,6 +151,7 @@ fn setup_indexed_workspace(
         &workspace.vector_path(),
         EMBEDDING_DIMENSIONS,
         ScalarKind::F16,
+        VectorTier::Hash,
     )
     .unwrap();
     assert_eq!(store.size(), summary.total_chunks);
@@ -219,6 +224,7 @@ fn setup_bulk_indexed_workspace(
         &workspace.vector_path(),
         EMBEDDING_DIMENSIONS,
         ScalarKind::F16,
+        VectorTier::Hash,
     )
     .unwrap();
     assert_eq!(store.size(), summary.total_chunks);
@@ -728,6 +734,7 @@ fn bench_vector_store(c: &mut Criterion) {
                     &dir.path().join("bench.usearch"),
                     EMBEDDING_DIMENSIONS,
                     ivygrep::vector_store::ScalarKind::F32,
+                    VectorTier::Neural,
                 )
                 .unwrap();
                 for (key, vec) in vectors {
@@ -747,6 +754,7 @@ fn bench_vector_store(c: &mut Criterion) {
                 &search_dir.path().join("bench.usearch"),
                 EMBEDDING_DIMENSIONS,
                 ivygrep::vector_store::ScalarKind::F32,
+                VectorTier::Neural,
             )
             .unwrap();
             for i in 0..1000u64 {
@@ -768,6 +776,7 @@ fn bench_vector_store(c: &mut Criterion) {
                     black_box(search_path),
                     EMBEDDING_DIMENSIONS,
                     ivygrep::vector_store::ScalarKind::F32,
+                    VectorTier::Neural,
                 )
                 .unwrap();
                 let results = store.search(black_box(query), 10);
@@ -806,6 +815,7 @@ fn bench_hash_vector_build(c: &mut Criterion) {
                     &dir.path().join("hash.usearch"),
                     EMBEDDING_DIMENSIONS,
                     ivygrep::vector_store::ScalarKind::F16,
+                    VectorTier::Hash,
                 )
                 .unwrap();
                 store.reserve_additional(vectors.len()).unwrap();
@@ -901,9 +911,14 @@ fn bench_critical_journeys(c: &mut Criterion) {
 
     // ANN search at scale: 50K pseudo-random vectors (vs the 1K micro-bench),
     // enough to exercise usearch HNSW behaviour rather than a trivial set.
+    // The guarded `vector_search_in_50k*` benches measure the sparse hash-tier
+    // graph, which is the graph every historical baseline was built with.
+    // `neural_vector_search_in_50k_hot` measures the default-parameter graph
+    // used by neural stores.
     let ann_fixture = OnceCell::new();
     group.bench_function("vector_search_in_50k", |b| {
-        let (_ann_dir, ann_path, query) = ann_fixture.get_or_init(setup_ann_fixture);
+        let (_ann_dir, ann_path, query) =
+            ann_fixture.get_or_init(|| setup_ann_fixture(VectorTier::Hash));
 
         b.iter_custom(|iters| {
             let start = Instant::now();
@@ -912,6 +927,7 @@ fn bench_critical_journeys(c: &mut Criterion) {
                     black_box(ann_path),
                     EMBEDDING_DIMENSIONS,
                     ivygrep::vector_store::NEURAL_VECTOR_QUANTIZATION,
+                    VectorTier::Hash,
                 )
                 .unwrap();
                 let results = store.search(black_box(query), 50);
@@ -923,11 +939,34 @@ fn bench_critical_journeys(c: &mut Criterion) {
     });
 
     group.bench_function("vector_search_in_50k_hot", |b| {
-        let (_ann_dir, ann_path, query) = ann_fixture.get_or_init(setup_ann_fixture);
+        let (_ann_dir, ann_path, query) =
+            ann_fixture.get_or_init(|| setup_ann_fixture(VectorTier::Hash));
         let store = VectorStore::open_readonly(
             ann_path,
             EMBEDDING_DIMENSIONS,
             ivygrep::vector_store::NEURAL_VECTOR_QUANTIZATION,
+            VectorTier::Hash,
+        )
+        .unwrap();
+
+        b.iter_custom(|iters| {
+            repeated_per_op(iters, VECTOR_SEARCH_REPETITIONS, |_| {
+                let results = store.search(black_box(query), 50);
+                assert!(!results.is_empty());
+                black_box(results);
+            })
+        })
+    });
+
+    let neural_ann_fixture = OnceCell::new();
+    group.bench_function("neural_vector_search_in_50k_hot", |b| {
+        let (_ann_dir, ann_path, query) =
+            neural_ann_fixture.get_or_init(|| setup_ann_fixture(VectorTier::Neural));
+        let store = VectorStore::open_readonly(
+            ann_path,
+            EMBEDDING_DIMENSIONS,
+            ivygrep::vector_store::NEURAL_VECTOR_QUANTIZATION,
+            VectorTier::Neural,
         )
         .unwrap();
 
@@ -942,11 +981,13 @@ fn bench_critical_journeys(c: &mut Criterion) {
 
     let exact_keys = (0..50_000u64).collect::<Vec<_>>();
     group.bench_function("exact_filtered_vector_top_50_in_50k_hot", |b| {
-        let (_ann_dir, ann_path, query) = ann_fixture.get_or_init(setup_ann_fixture);
+        let (_ann_dir, ann_path, query) =
+            ann_fixture.get_or_init(|| setup_ann_fixture(VectorTier::Hash));
         let store = VectorStore::open_readonly(
             ann_path,
             EMBEDDING_DIMENSIONS,
             ivygrep::vector_store::NEURAL_VECTOR_QUANTIZATION,
+            VectorTier::Hash,
         )
         .unwrap();
 
@@ -963,11 +1004,13 @@ fn bench_critical_journeys(c: &mut Criterion) {
             BenchmarkId::new("exact_filtered_vector_subset_top_50_in_50k_hot", selected),
             &selected,
             |b, &selected| {
-                let (_ann_dir, ann_path, query) = ann_fixture.get_or_init(setup_ann_fixture);
+                let (_ann_dir, ann_path, query) =
+                    ann_fixture.get_or_init(|| setup_ann_fixture(VectorTier::Hash));
                 let store = VectorStore::open_readonly(
                     ann_path,
                     EMBEDDING_DIMENSIONS,
                     ivygrep::vector_store::NEURAL_VECTOR_QUANTIZATION,
+                    VectorTier::Hash,
                 )
                 .unwrap();
                 let keys = &exact_keys[..selected];

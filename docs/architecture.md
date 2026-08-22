@@ -156,7 +156,7 @@ stores and metadata agree.
 | `vectors.usearch` | Lightweight hash-vector index |
 | `vectors_neural.usearch` | Learned neural-vector index |
 | `neural_profile` and model identity metadata | Vector compatibility contract |
-| `merkle_snapshot.json` | Last committed path fingerprints and aggregate root hash |
+| `merkle_snapshot.json`, `merkle_snapshot.verified` | Last committed path fingerprints and aggregate root hash; the sidecar records the size and mtime of the last snapshot that parsed successfully so health checks skip re-parsing it |
 | `job.json`, locks, progress files | Index, enhancement, and watcher coordination |
 
 SQLite stores compressed chunk text when compression is useful. Reads use a
@@ -165,7 +165,11 @@ returns a contextual error instead of being treated as source text.
 
 Tantivy is the lexical candidate store. SQLite remains authoritative for rich
 chunk metadata and graph relationships. USearch stores F16 vectors and validates
-headers, dimensions, and file bounds before native loading.
+headers, dimensions, and file bounds before native loading. Callers open every
+vector store with an explicit `VectorTier`: the hash tier uses a sparse HNSW
+graph for cheap background builds, and the neural tier keeps USearch quality
+defaults. Vector shape cannot select the tier because the default neural profile
+shares the hash store's 256-dimensional F16 layout.
 
 The current on-disk format version is defined by `INDEX_FORMAT_VERSION` in
 `src/workspace.rs`. Incompatible schema, chunking, or vector-identity changes
@@ -219,6 +223,19 @@ Literal, regex, symbol, and caller commands have specialized paths where their
 contracts differ from hybrid semantic search. They still reuse workspace,
 filtering, grouping, and output types where appropriate.
 
+Symbol rows (`symbols` in SQLite) store the case-folded lookup key, the
+exact-case definition `name` when it differs from that key, and an optional
+enclosing `owner` (class, impl, struct, module, or Go receiver); language and
+kind are read from the joined chunk row, and a `chunk_key` index keeps file
+removal proportional to the file's own symbols. Names come
+from the Tree-sitter capture at chunk time; the line heuristic is only a
+fallback for languages without a grammar, and continuation windows never
+register symbols. Qualified lookups (`Owner.method`, `Owner::method`,
+`Owner#method`, `Owner->method`) filter by owner, preferring exact-case matches
+and falling back to the bare name; reference and caller scans are restricted
+to the languages that define the symbol. Adding these columns bumped the index
+format to v22.
+
 ## Context-pack pipeline
 
 Context packs answer a different question from ranked search: which bounded set
@@ -270,6 +287,19 @@ Watchers coalesce bursts and cap continuous-event starvation. Successful changes
 invalidate only cache entries involving affected workspaces. No-op indexing
 preserves valid cache entries.
 
+Search responses never wait on background enhancement bookkeeping. After the
+hits are computed, the daemon schedules a blocking task that checks whether
+hash or neural enhancement is needed and triggers the worker, at most once per
+workspace and mode every ten seconds.
+
+Heavy work is bounded by a CPU-permit semaphore sized to the core count. Index,
+search, and watcher tasks take their per-workspace lease on the blocking pool
+first and only then a CPU permit, so requests parked behind an exclusive index
+lease never pin CPU capacity that other workspaces could use. Concurrent `Index`
+requests for one workspace coalesce: the first request leads, identical requests
+await its response, and a request that waited while the index generation
+advanced skips the redundant rescan.
+
 `ig --doctor` checks workspace health and can repair stale daemon state or broken
 indexes. Status distinguishes lexical readiness, hash coverage, neural coverage,
 active jobs, stalled work, watcher health, and compaction recommendations.
@@ -278,15 +308,26 @@ active jobs, stalled work, watcher health, and compaction recommendations.
 
 ### Daemon IPC
 
-Daemon uses a versioned JSON-line request envelope. Protocol version 6 adds
-request IDs and explicit cancellation for hybrid, literal, and regex searches.
-Cancellation also removes queued searches from daemon CPU backpressure. Existing
-requests cover version/status, indexing, Web startup, workspace removal, restart,
-progress, and structured errors.
+Daemon uses a versioned JSON-line request envelope. Protocol version 6 added
+request IDs and explicit cancellation for hybrid, literal, and regex searches;
+version 7 adds the fire-and-forget `StartIndex` request (answered with
+`IndexStarted`) and the `index_in_flight` runtime-status field. Cancellation
+also removes queued searches from daemon CPU backpressure. Existing requests
+cover version/status, indexing, Web startup, workspace removal, restart,
+progress, and structured errors. A client that reaches a daemon speaking an
+older protocol (for example a development build with the same build version)
+gets a structured version error from the `Version` probe and restarts it.
 
 Cancellation acknowledgements for active searches are sent after registered work
 has stopped. Pre-registration cancellations use bounded tombstones so reordered
 IPC connections cannot revive stale searches.
+
+Every search also carries a server-side cancellation token. The connection
+handler races the search against the client stream reaching EOF and cancels
+abandoned work on disconnect; CLI and MCP searches send request IDs and issue
+`CancelSearch` when they time out or drop the request. A per-request deadline
+(`IVYGREP_SEARCH_DEADLINE_SECS`, default 60 s, `0` disables) cancels long
+searches and returns the hits gathered so far with a `warnings` entry.
 
 `warnings` on search results is additive and omitted when empty, preserving
 compatibility with older response readers. Unsupported protocol versions and
@@ -305,8 +346,15 @@ MCP uses JSON-RPC 2.0 over stdio and accepts newline-delimited or
 - `ig_status` for indexed-workspace and runtime state
 
 MCP can auto-index a requested workspace, so search is idempotent but not
-read-only. Tool failures return structured MCP errors. Handler panics are
-isolated instead of terminating the session.
+read-only. A first index is never awaited for its full duration: `ig_search`
+enqueues it on the daemon with `StartIndex` (coalesced with any in-flight run
+for that workspace), polls `RuntimeStatus.index_in_flight` for at most
+`IVYGREP_MCP_INDEX_WAIT_SECS` (default 20 s), and otherwise returns a non-error
+`status: indexing` payload (`progress`, `elapsed_secs`, `retry_after_secs`) read
+from the shared job ledger and progress file. The MCP process indexes in-process
+only when no daemon is reachable, so it never duplicates a run the daemon owns.
+Tool failures return structured MCP errors. Handler panics are isolated instead
+of terminating the session.
 
 ### Web
 

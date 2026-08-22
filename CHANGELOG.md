@@ -4,6 +4,34 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Performance
+- Search responses no longer wait on background-enhancement bookkeeping: the needs check and worker trigger run after the hits are returned, at most once per workspace and mode every 10 seconds; verified worker identities are remembered for 30 seconds instead of forking `ps` on every liveness check; and the Merkle snapshot corruption check memoizes successful parses through a size/mtime sidecar instead of re-parsing the whole snapshot on every CLI query. Warm repeated CLI queries on a 205k-chunk index dropped from roughly 200-460 ms to 90-140 ms wall on the same host.
+- Cache the macOS power/thermal probe for five seconds instead of forking `pmset` twice per enhancement batch.
+- Daemon index and search requests take their workspace lease before a CPU permit, so requests parked behind a busy workspace no longer starve searches on other workspaces; uncontended search leases are still granted inline so the common query keeps a single blocking hop.
+- Concurrent daemon `Index` requests for one workspace coalesce into a single run, and a request that waited while the index generation advanced skips the redundant rescan only when the run that advanced it started after the request arrived; requests that arrived mid-walk run their own incremental rescan.
+- Daemon searches are cancelled when the client disconnects mid-request; CLI and MCP tag searches with request IDs and send `CancelSearch` on timeout or abandonment.
+- Daemon searches stop at a server-side deadline (`IVYGREP_SEARCH_DEADLINE_SECS`, default 60, `0` disables) and return the hits gathered so far with a warning.
+- MCP no longer blocks a tool call on a whole first index. `ig_search` enqueues the run on the daemon (`StartIndex`), waits at most `IVYGREP_MCP_INDEX_WAIT_SECS` (default 20), and otherwise returns a non-error `status: indexing` payload with progress and `retry_after_secs`; the MCP process never indexes locally while a daemon answers (including after a lost reply), and `ig_status` reports runs still queued on the daemon. Daemon protocol version 7; older daemons restart on the next request.
+
+### Fixed
+- Neural enhancement now embeds whole chunks for the static and Model2Vec profiles (16 KiB safety cap) and sizes the cut for transformer profiles from their token window, instead of truncating every chunk at 1,024 characters. Notes and long functions no longer embed only their first lines; the identity change re-enhances existing neural vectors.
+- Neural vector stores now build with USearch's default HNSW graph instead of the sparse hash-tier graph. The default 256-dimensional F16 neural profile matched the hash store's shape, which cut neural ANN recall@10 to about 0.24 on clustered vectors. Existing neural vectors re-enhance automatically through a neural identity bump.
+- Lowercase natural-language questions no longer return zero results on Markdown and notes corpora. The recommendation authority floor now adapts to the best authority that actually matched instead of assuming implementation files exist, and a sentence-initial capital letter no longer classifies a question as a precise identifier lookup.
+- Lexical retrieval no longer drops queries containing quotes, colons, parentheses, equals signs, or apostrophes. The indexed fields store no term positions, so Tantivy's query parser rejected every multi-token word in such queries and the primary BM25 variant (three quarters of the candidate budget) silently returned nothing; short punctuated queries (up to 24 distinct tokens: snippets, error strings, questions) are now built from analyzer tokens, with the parser reserved for explicit `AND`/`OR`/`NOT` syntax; long pasted prompts keep relying on their normalized expansions. Path-recall variants such as `error_handling` are built the same way instead of being rejected.
+- Hash-tier background enhancement no longer pauses on battery power, so semantic results are available on laptops instead of falling back to lexical-only search; `IVYGREP_ENHANCE_ON_BATTERY=1` keeps neural enhancement running on battery too.
+- MCP `ig_search` hits mode now defaults to 10 result files when `limit` is omitted, treats `limit` as a file count, caps hits per file (`hits_per_file`, default 3) with `more_hits_in_file`, and reports `total_matches` and `truncated`.
+- MCP search results no longer duplicate the full JSON payload in the text block; `structuredContent` stays machine-readable while text is a compact path, line-range, and preview rendering.
+- Fresh indexes skip the serial dependent-discovery pass, and incremental runs read only `Cargo.toml`/`go.mod`/`pubspec.yaml` for manifest resolution signatures instead of every changed file.
+- Symbol names come from the Tree-sitter parse when a grammar is available; annotated/decorated declarations (`@Override public void run()`, `@property def name`) no longer register `if` or body callees, and continuation windows register nothing.
+- Symbol rows persist the exact-case `name` (when it differs from the normalized name) and the enclosing `owner`, indexed by chunk for fast file removal; `--symbol Owner.method` / `Owner::method` / `Owner#method` / `Owner->method` and context-pack anchors filter by owner (exact case first) and rank exact-case names ahead of case-folded ones.
+- `--refs` / `--callers` only scan languages that define the symbol, so a Python `.resolve()` call is no longer reported as a reference to a Rust `fn resolve`.
+- Index format bumped to v22; existing indexes rebuild on first use.
+
+### Testing
+- Added `scripts/bench_file_localization.py` and a curated 30-task public set (`benchmarks/public/file_localization_tasks.jsonl`, issue text to files the merged fix touched across Python, Rust, and TypeScript repositories) reporting File Acc@k, Recall@k, MRR, and context-pack precision/recall with a lexical baseline delta; hash-only results are committed under `docs/benchmarks/file-localization-hash-2026-08-21.json`.
+- `scripts/bench_context_retrieval.py` now scores a label-derived `constant-topk` baseline next to ivygrep and reports it in the relevance workflow; `--min-margin-over-baseline` can enforce a margin once the 12-task fixture is large enough to make that gate stable.
+- Public code-retrieval and challenge reports state corpus sampling next to the headline numbers (documents indexed versus full CoIR corpus size per task).
+
 ## [1.2.12] - 2026-08-20
 
 ### Security

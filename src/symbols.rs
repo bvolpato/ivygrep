@@ -5,21 +5,113 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use rusqlite::{Connection, params, types::ToSql};
 
+use crate::chunking::ChunkDefinition;
 use crate::indexer::{
     IndexedChunk, open_sqlite_readonly, reconcile_worktree_overlay, try_decompress_text,
 };
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
 use crate::search::SearchOptions;
+use crate::text::strip_leading_annotations;
 use crate::workspace::{Workspace, WorkspaceScope};
 
 const SYMBOL_DEFINITION_LOOKUP_BATCH: usize = 128;
+/// Columns written per `symbols` row; keeps batched insert sizing in sync.
+pub(crate) const SYMBOL_ROW_COLUMNS: usize = 6;
+
+/// Owner tier used to rank qualified lookups: exact-case owner match,
+/// case-insensitive owner match, or no owner match (bare-name fallback).
+const OWNER_TIER_EXACT: u8 = 0;
+const OWNER_TIER_FOLDED: u8 = 1;
+const OWNER_TIER_NONE: u8 = 2;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum SymbolSearchMode {
     Definitions,
     References,
     Callers,
+}
+
+/// One persisted `symbols` row. Language and kind live on the chunk row and
+/// are joined when needed; `name` is stored only when its case differs from
+/// `normalized_name`, which keeps the table close to its pre-v22 footprint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SymbolRow {
+    pub normalized_name: String,
+    pub chunk_key: i64,
+    pub name: Option<String>,
+    pub owner: Option<String>,
+}
+
+impl SymbolRow {
+    pub(crate) fn push_params<'a>(&'a self, params: &mut Vec<&'a dyn ToSql>) {
+        params.push(&self.normalized_name);
+        params.push(&self.chunk_key);
+        params.push(&self.name);
+        params.push(&self.owner);
+    }
+}
+
+/// Display-case name column value: `None` when the name is already lowercase.
+pub(crate) fn stored_symbol_name(name: &str, normalized_name: &str) -> Option<String> {
+    (name != normalized_name).then(|| name.to_string())
+}
+
+/// A symbol lookup split into its bare name and optional owner qualifier
+/// (`Owner.method`, `Owner::method`, `Owner#method`, `Owner->method`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SymbolQuery<'a> {
+    pub name: &'a str,
+    pub owner: Option<&'a str>,
+}
+
+pub(crate) fn parse_symbol_query(raw: &str) -> SymbolQuery<'_> {
+    let candidate = canonical_symbol(raw);
+    let mut split = None;
+    for separator in [":", ".", "#", "->"] {
+        if let Some(index) = candidate.rfind(separator)
+            && split.is_none_or(|(best, _)| index > best)
+        {
+            split = Some((index, separator.len()));
+        }
+    }
+    let Some((index, width)) = split else {
+        return SymbolQuery {
+            name: candidate,
+            owner: None,
+        };
+    };
+    let name = &candidate[index + width..];
+    let owner = candidate[..index]
+        .rsplit([':', '.', '#', '-', '>'])
+        .find(|part| !part.is_empty());
+    match owner {
+        Some(owner) if !name.is_empty() && is_symbol_identifier(name) => SymbolQuery {
+            name,
+            owner: Some(owner),
+        },
+        _ => SymbolQuery {
+            name: candidate,
+            owner: None,
+        },
+    }
+}
+
+fn is_symbol_identifier(value: &str) -> bool {
+    value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '$'))
+}
+
+fn owner_tier(requested: Option<&str>, stored: Option<&str>) -> u8 {
+    match (requested, stored) {
+        (None, _) => OWNER_TIER_EXACT,
+        (Some(requested), Some(stored)) if requested == stored => OWNER_TIER_EXACT,
+        (Some(requested), Some(stored)) if requested.eq_ignore_ascii_case(stored) => {
+            OWNER_TIER_FOLDED
+        }
+        _ => OWNER_TIER_NONE,
+    }
 }
 
 pub fn index_chunk_definition(
@@ -30,12 +122,16 @@ pub fn index_chunk_definition(
     let mut rows = Vec::new();
     append_chunk_definition_rows(chunk, chunk_key, &mut rows);
     let mut stmt = conn.prepare_cached(
-        "INSERT OR REPLACE INTO symbols (
-            normalized_name, chunk_key
-         ) VALUES (?1, ?2)",
+        "INSERT OR REPLACE INTO symbols (normalized_name, chunk_key, name, owner)
+         VALUES (?1, ?2, ?3, ?4)",
     )?;
-    for (normalized_name, chunk_key) in rows {
-        stmt.execute(params![normalized_name, chunk_key])?;
+    for row in rows {
+        stmt.execute(params![
+            row.normalized_name,
+            row.chunk_key,
+            row.name,
+            row.owner
+        ])?;
     }
     Ok(())
 }
@@ -43,67 +139,26 @@ pub fn index_chunk_definition(
 pub(crate) fn append_chunk_definition_rows(
     chunk: &IndexedChunk,
     chunk_key: i64,
-    rows: &mut Vec<(String, i64)>,
+    rows: &mut Vec<SymbolRow>,
 ) {
-    for name in definition_names(chunk) {
-        rows.push((normalize_symbol(&name), chunk_key));
+    for definition in chunk_definitions(chunk) {
+        let name = canonical_symbol(&definition.name).to_string();
+        let normalized_name = name.to_ascii_lowercase();
+        rows.push(SymbolRow {
+            name: stored_symbol_name(&name, &normalized_name),
+            normalized_name,
+            chunk_key,
+            owner: definition.owner,
+        });
     }
 }
 
 pub fn remove_file_graph(conn: &Connection, file_path: &str) -> Result<()> {
-    let mut chunks = Vec::new();
-    {
-        let mut stmt = conn.prepare_cached(
-            "SELECT chunk_key, start_line, end_line, language, kind, text, vector_key, is_ignored
-             FROM chunks
-             WHERE file_path = ?1",
-        )?;
-        let rows = stmt.query_map([file_path], |row| {
-            let raw: Vec<u8> = row.get(5)?;
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)? as usize,
-                row.get::<_, i64>(2)? as usize,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                raw,
-                row.get::<_, i64>(6)? as u64,
-                row.get::<_, bool>(7)?,
-            ))
-        })?;
-        for row in rows {
-            let (chunk_key, start_line, end_line, language, kind, raw, vector_key, is_ignored) =
-                row?;
-            let text = try_decompress_text(raw).with_context(|| {
-                format!("failed to read stored symbol text for {file_path}:{start_line}-{end_line}")
-            })?;
-            chunks.push((
-                chunk_key,
-                IndexedChunk {
-                    chunk_id: String::new(),
-                    file_path: PathBuf::from(file_path),
-                    start_line,
-                    end_line,
-                    language,
-                    kind,
-                    text,
-                    content_hash: String::new(),
-                    vector_key,
-                    is_ignored,
-                },
-            ));
-        }
-    }
-
-    let mut delete = conn.prepare_cached(
+    conn.prepare_cached(
         "DELETE FROM symbols
-         WHERE normalized_name = ?1 AND chunk_key = ?2",
-    )?;
-    for (chunk_key, chunk) in chunks {
-        for name in definition_names(&chunk) {
-            delete.execute(params![normalize_symbol(&name), chunk_key])?;
-        }
-    }
+         WHERE chunk_key IN (SELECT chunk_key FROM chunks WHERE file_path = ?1)",
+    )?
+    .execute(params![file_path])?;
     Ok(())
 }
 
@@ -151,6 +206,8 @@ pub(crate) fn search_symbols_in_current_index(
         return search_call_sites(workspace, candidate_name, &normalized, mode, options);
     }
 
+    let query = parse_symbol_query(name);
+    let query_normalized = normalize_symbol(query.name);
     let primary_sqlite = if workspace.has_overlay() {
         workspace.overlay_sqlite_path()
     } else {
@@ -158,7 +215,8 @@ pub(crate) fn search_symbols_in_current_index(
     };
     let mut hits = query_workspace_db(
         &open_sqlite_readonly(&primary_sqlite)?,
-        &normalized,
+        &query,
+        &query_normalized,
         options,
         &path_matcher,
     )?;
@@ -171,8 +229,14 @@ pub(crate) fn search_symbols_in_current_index(
             let base = open_sqlite_readonly(&base_dir.join("metadata.sqlite3"))?;
             let mut base_options = options.clone();
             base_options.limit = remaining;
-            for hit in query_workspace_db(&base, &normalized, &base_options, &path_matcher)? {
-                let path = hit.file_path.to_string_lossy();
+            for hit in query_workspace_db(
+                &base,
+                &query,
+                &query_normalized,
+                &base_options,
+                &path_matcher,
+            )? {
+                let path = hit.1.file_path.to_string_lossy();
                 if !tombstones.contains(path.as_ref()) && !overlay_files.contains(path.as_ref()) {
                     hits.push(hit);
                 }
@@ -180,6 +244,16 @@ pub(crate) fn search_symbols_in_current_index(
         }
     }
 
+    // Qualified lookups keep only the best owner tier that exists anywhere in
+    // the workspace; bare-name rows are the fallback, never a supplement.
+    if query.owner.is_some()
+        && let Some(best_tier) = hits.iter().map(|(tier, _)| *tier).min()
+        && best_tier < OWNER_TIER_NONE
+    {
+        hits.retain(|(tier, _)| *tier == best_tier);
+    }
+
+    let mut hits = hits.into_iter().map(|(_, hit)| hit).collect::<Vec<_>>();
     hits.sort_by(|left, right| {
         right
             .score
@@ -205,14 +279,17 @@ pub fn definition_candidates(
         return Ok(Vec::new());
     }
 
-    let mut seen_normalized = HashSet::new();
+    let mut seen_requests = HashSet::new();
     let mut requested = Vec::new();
     for name in names {
-        let normalized = normalize_symbol(name);
-        if normalized.is_empty() || !seen_normalized.insert(normalized.clone()) {
+        let query = parse_symbol_query(name);
+        let normalized = normalize_symbol(query.name);
+        if normalized.is_empty()
+            || !seen_requests.insert((normalized.clone(), query.owner.map(str::to_ascii_lowercase)))
+        {
             continue;
         }
-        requested.push((normalized, name.as_str()));
+        requested.push((normalized, query));
     }
     if requested.is_empty() {
         return Ok(Vec::new());
@@ -220,7 +297,7 @@ pub fn definition_candidates(
 
     let mut by_name = (0..requested.len())
         .map(|_| Vec::new())
-        .collect::<Vec<Vec<(bool, bool, IndexedChunk)>>>();
+        .collect::<Vec<Vec<(u8, bool, bool, IndexedChunk)>>>();
     let mut per_name_seen = (0..requested.len())
         .map(|_| HashSet::new())
         .collect::<Vec<HashSet<u64>>>();
@@ -234,34 +311,54 @@ pub fn definition_candidates(
     for (batch_index, batch) in requested.chunks(SYMBOL_DEFINITION_LOOKUP_BATCH).enumerate() {
         let base_ordinal = batch_index * SYMBOL_DEFINITION_LOOKUP_BATCH;
         let values = (0..batch.len())
-            .map(|index| format!("(?{}, {index})", index + 1))
+            .map(|index| {
+                format!(
+                    "(?{}, ?{}, ?{}, {index})",
+                    index * 3 + 1,
+                    index * 3 + 2,
+                    index * 3 + 3
+                )
+            })
             .collect::<Vec<_>>()
             .join(",");
+        // Owner-qualified rows and exact-case names rank ahead of the
+        // alphabetical tail so common names do not crowd them out of the
+        // bounded candidate window.
         let sql = format!(
-            "WITH requested(name, ordinal) AS (VALUES {values}),
+            "WITH requested(name, exact_name, owner, ordinal) AS (VALUES {values}),
                   ranked AS (
                     SELECT r.ordinal,
                            c.file_path, c.start_line, c.end_line, c.language,
                            c.kind, c.text, c.vector_key, c.is_ignored,
+                           COALESCE(s.name, s.normalized_name) AS name, s.owner,
                            row_number() OVER (
                              PARTITION BY r.ordinal
-                             ORDER BY c.file_path, c.start_line
+                             ORDER BY CASE
+                                        WHEN r.owner IS NULL THEN 0
+                                        WHEN s.owner = r.owner THEN 0
+                                        WHEN s.owner = r.owner COLLATE NOCASE THEN 1
+                                        ELSE 2
+                                      END,
+                                      (COALESCE(s.name, s.normalized_name) = r.exact_name) DESC,
+                                      c.file_path, c.start_line
                            ) AS rn
                     FROM requested r
                     JOIN symbols s ON s.normalized_name = r.name
                     JOIN chunks c ON c.chunk_key = s.chunk_key
                   )
              SELECT ordinal, file_path, start_line, end_line, language,
-                    kind, text, vector_key, is_ignored
+                    kind, text, vector_key, is_ignored, name, owner
              FROM ranked
              WHERE rn <= ?{}
-             ORDER BY ordinal, file_path, start_line",
-            batch.len() + 1
+             ORDER BY ordinal, rn",
+            batch.len() * 3 + 1
         );
-        let mut params: Vec<&dyn ToSql> = batch
-            .iter()
-            .map(|(normalized, _)| normalized as &dyn ToSql)
-            .collect();
+        let mut params: Vec<&dyn ToSql> = Vec::with_capacity(batch.len() * 3 + 1);
+        for (normalized, query) in batch {
+            params.push(normalized as &dyn ToSql);
+            params.push(&query.name as &dyn ToSql);
+            params.push(&query.owner as &dyn ToSql);
+        }
         params.push(&candidate_limit_i64);
 
         let mut stmt = conn.prepare_cached(&sql)?;
@@ -276,6 +373,8 @@ pub fn definition_candidates(
                 row.get::<_, Vec<u8>>(6)?,
                 row.get::<_, i64>(7)? as u64,
                 row.get::<_, bool>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, Option<String>>(10)?,
             ))
         })?;
 
@@ -290,6 +389,8 @@ pub fn definition_candidates(
                 raw,
                 vector_key,
                 is_ignored,
+                stored_name,
+                stored_owner,
             ) = row?;
             let text = try_decompress_text(raw).with_context(|| {
                 format!(
@@ -308,6 +409,7 @@ pub fn definition_candidates(
                 content_hash: String::new(),
                 vector_key,
                 is_ignored,
+                definitions: None,
             };
             if ordinal >= by_name.len() {
                 continue;
@@ -315,29 +417,36 @@ pub fn definition_candidates(
             if !per_name_seen[ordinal].insert(chunk.vector_key) {
                 continue;
             }
-            let name = requested[ordinal].1;
-            let exact_case = chunk_defines_exact_name(&chunk, name);
-            let canonical_file = file_stem_matches_symbol(&chunk, name);
-            by_name[ordinal].push((exact_case, canonical_file, chunk));
+            let query = requested[ordinal].1;
+            let tier = owner_tier(query.owner, stored_owner.as_deref());
+            let exact_case = stored_name == query.name;
+            let canonical_file = file_stem_matches_symbol(&chunk, query.name);
+            by_name[ordinal].push((tier, exact_case, canonical_file, chunk));
         }
     }
 
     let mut seen_chunks = HashSet::new();
     let mut chunks = Vec::new();
-    for name_candidates in &mut by_name {
+    for (name_candidates, (_, query)) in by_name.iter_mut().zip(&requested) {
         let remaining = limit.saturating_sub(chunks.len());
         if remaining == 0 {
             break;
         }
+        if query.owner.is_some()
+            && let Some(best_tier) = name_candidates.iter().map(|(tier, ..)| *tier).min()
+            && best_tier < OWNER_TIER_NONE
+        {
+            name_candidates.retain(|(tier, ..)| *tier == best_tier);
+        }
         name_candidates.sort_by(|left, right| {
-            right
-                .0
-                .cmp(&left.0)
+            left.0
+                .cmp(&right.0)
                 .then_with(|| right.1.cmp(&left.1))
-                .then_with(|| left.2.file_path.cmp(&right.2.file_path))
-                .then_with(|| left.2.start_line.cmp(&right.2.start_line))
+                .then_with(|| right.2.cmp(&left.2))
+                .then_with(|| left.3.file_path.cmp(&right.3.file_path))
+                .then_with(|| left.3.start_line.cmp(&right.3.start_line))
         });
-        for (_, _, chunk) in name_candidates.drain(..).take(remaining) {
+        for (_, _, _, chunk) in name_candidates.drain(..).take(remaining) {
             if seen_chunks.insert(chunk.vector_key) {
                 chunks.push(chunk);
             }
@@ -348,18 +457,26 @@ pub fn definition_candidates(
 
 fn query_workspace_db(
     conn: &Connection,
+    query: &SymbolQuery<'_>,
     normalized: &str,
     options: &SearchOptions,
     path_matcher: &PathGlobMatcher,
-) -> Result<Vec<SearchHit>> {
+) -> Result<Vec<(u8, SearchHit)>> {
     let sql = "SELECT c.file_path, c.start_line, c.end_line, c.text,
-                      c.language, c.is_ignored
+                      c.language, c.is_ignored, COALESCE(s.name, s.normalized_name), s.owner
                FROM symbols s JOIN chunks c ON c.chunk_key = s.chunk_key
                WHERE s.normalized_name = ?1
-               ORDER BY c.file_path, c.start_line";
+               ORDER BY CASE
+                          WHEN ?3 IS NULL THEN 0
+                          WHEN s.owner = ?3 THEN 0
+                          WHEN s.owner = ?3 COLLATE NOCASE THEN 1
+                          ELSE 2
+                        END,
+                        (COALESCE(s.name, s.normalized_name) = ?2) DESC,
+                        c.file_path, c.start_line";
 
     let mut stmt = conn.prepare(sql)?;
-    let rows = stmt.query_map([normalized], |row| {
+    let rows = stmt.query_map(params![normalized, query.name, query.owner], |row| {
         Ok((
             PathBuf::from(row.get::<_, String>(0)?),
             row.get::<_, i64>(1)? as usize,
@@ -367,25 +484,40 @@ fn query_workspace_db(
             row.get::<_, Vec<u8>>(3)?,
             row.get::<_, String>(4)?,
             row.get::<_, bool>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, Option<String>>(7)?,
         ))
     })?;
 
     let mut hits = Vec::new();
+    let mut accepted_tier = None;
     for row in rows {
-        let (file_path, start_line, end_line, raw, language, is_ignored) = row?;
+        let (file_path, start_line, end_line, raw, language, is_ignored, name, owner) = row?;
+        let tier = owner_tier(query.owner, owner.as_deref());
+        // Rows arrive best owner tier first; once a qualified tier produced a
+        // hit, weaker tiers are the fallback and are skipped.
+        match accepted_tier {
+            Some(accepted) if tier > accepted && accepted < OWNER_TIER_NONE => break,
+            _ => {}
+        }
         let preview = try_decompress_text(raw).with_context(|| {
             format!(
                 "failed to read stored symbol text for {}:{start_line}-{end_line}",
                 file_path.display()
             )
         })?;
+        let exact_case = name == query.name;
+        let mut score = if exact_case { 10.0 } else { 9.0 };
+        if tier == OWNER_TIER_FOLDED {
+            score -= 0.5;
+        }
         let hit = SearchHit {
             file_path,
             start_line,
             end_line,
             preview,
             reason: "exact symbol match".to_string(),
-            score: 10.0,
+            score,
             sources: vec!["symbol".to_string()],
             neural_requested: false,
             neural_executed: false,
@@ -398,7 +530,8 @@ fn query_workspace_db(
             && path_matcher.matches(&hit.file_path)
             && (options.skip_gitignore || !is_ignored)
         {
-            hits.push(hit);
+            accepted_tier.get_or_insert(tier);
+            hits.push((tier, hit));
             if options.limit.is_some_and(|limit| hits.len() >= limit) {
                 break;
             }
@@ -436,6 +569,67 @@ pub(crate) fn search_symbol_relationships_in_current_index(
     search_call_sites_with_references(workspace, candidate_name, &normalized, options)
 }
 
+/// Languages that define the requested symbol, gathered from the overlay and
+/// base symbol tables. Owner-qualified lookups use the best owner tier that
+/// exists. Empty when the symbol has no known definition.
+fn definition_languages(workspace: &Workspace, name: &str) -> Result<HashSet<String>> {
+    let query = parse_symbol_query(name);
+    let normalized = normalize_symbol(query.name);
+    if normalized.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let primary = if workspace.has_overlay() {
+        workspace.overlay_sqlite_path()
+    } else {
+        workspace.sqlite_path()
+    };
+    // Base rows are visible only where the worktree neither deleted nor
+    // replaced the defining file, mirroring definition lookup.
+    let mut databases = vec![(primary, None)];
+    if let Some(base_dir) = &workspace.base_index_dir {
+        let shadowed = load_path_set(&workspace.overlay_sqlite_path(), "tombstones")?
+            .into_iter()
+            .chain(load_chunk_paths(&workspace.overlay_sqlite_path())?)
+            .collect::<HashSet<_>>();
+        databases.push((base_dir.join("metadata.sqlite3"), Some(shadowed)));
+    }
+
+    let mut tiers: [HashSet<String>; 3] = Default::default();
+    for (path, shadowed) in databases {
+        if !path.exists() {
+            continue;
+        }
+        let conn = open_sqlite_readonly(&path)?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT DISTINCT c.language, s.owner, c.file_path
+             FROM symbols s JOIN chunks c ON c.chunk_key = s.chunk_key
+             WHERE s.normalized_name = ?1",
+        )?;
+        let rows = stmt.query_map([&normalized], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (language, owner, file_path) = row?;
+            if shadowed
+                .as_ref()
+                .is_some_and(|shadowed| shadowed.contains(&file_path))
+            {
+                continue;
+            }
+            let tier = owner_tier(query.owner, owner.as_deref());
+            tiers[usize::from(tier)].insert(language.to_ascii_lowercase());
+        }
+    }
+    Ok(tiers
+        .into_iter()
+        .find(|languages| !languages.is_empty())
+        .unwrap_or_default())
+}
+
 fn search_call_sites_with_references(
     workspace: &Workspace,
     name: &str,
@@ -444,12 +638,25 @@ fn search_call_sites_with_references(
 ) -> Result<(Vec<SearchHit>, Vec<SearchHit>)> {
     let mut candidate_options = options.clone();
     candidate_options.limit = options.limit.map(|limit| limit.saturating_mul(4));
+    // Call sites are matched textually, so restrict them to the languages
+    // that actually define the symbol. An explicit --type filter wins.
+    let languages = if options.type_filter.is_none() {
+        definition_languages(workspace, name)?
+    } else {
+        HashSet::new()
+    };
+    if languages.len() == 1 {
+        candidate_options.type_filter = languages.iter().next().cloned();
+    }
     let query = format!("{}(", name.trim());
-    let candidates = if options.limit.is_some() {
+    let mut candidates = if options.limit.is_some() {
         crate::search::exact_literal_chunks(workspace, &query, &candidate_options)?
     } else {
         crate::search::exact_literal_chunks_unbounded(workspace, &query, &candidate_options)?
     };
+    if !languages.is_empty() {
+        candidates.retain(|chunk| languages.contains(&chunk.language.to_ascii_lowercase()));
+    }
     let mut callers = Vec::new();
     let mut references = Vec::new();
     let mut seen_call_sites = HashSet::new();
@@ -717,6 +924,11 @@ fn definition_name(chunk: &IndexedChunk) -> Option<String> {
     ) {
         return None;
     }
+    // Continuation windows repeat a definition body; their first code line
+    // is arbitrary and the function fallback would register a callee.
+    if is_continuation_text(&chunk.text) {
+        return None;
+    }
     if chunk.language.eq_ignore_ascii_case("haskell")
         && matches!(chunk.kind.as_str(), "Class" | "class")
         && let Some(name) = haskell_class_definition_name(&chunk.text)
@@ -760,6 +972,13 @@ fn definition_name(chunk: &IndexedChunk) -> Option<String> {
     )
 }
 
+/// Chunk windows after the first carry a `// continuation of ...` header.
+pub(crate) fn is_continuation_text(text: &str) -> bool {
+    text.lines()
+        .nth(1)
+        .is_some_and(|line| line.starts_with("// continuation of "))
+}
+
 fn first_definition_signature(text: &str) -> Option<&str> {
     let mut in_block_comment = false;
     for raw_line in text.lines() {
@@ -776,6 +995,9 @@ fn first_definition_signature(text: &str) -> Option<&str> {
             }
             continue;
         }
+        // `@Override public void run() {` keeps its declaration once the
+        // annotation prefix is removed; a bare decorator line is skipped.
+        let line = strip_leading_annotations(line);
         if line.is_empty()
             || line.starts_with("//")
             || line.starts_with('#')
@@ -789,8 +1011,58 @@ fn first_definition_signature(text: &str) -> Option<&str> {
     None
 }
 
-fn definition_names(chunk: &IndexedChunk) -> Vec<String> {
+/// Definitions a chunk registers in the symbol table: parser-derived names
+/// when the chunker captured them, otherwise the text heuristic, plus public
+/// re-exports in either case.
+fn chunk_definitions(chunk: &IndexedChunk) -> Vec<ChunkDefinition> {
+    let mut definitions = match &chunk.definitions {
+        Some(parsed) => parsed.clone(),
+        None => heuristic_definition_names(chunk)
+            .into_iter()
+            .map(|name| ChunkDefinition { name, owner: None })
+            .collect(),
+    };
+    definitions.extend(
+        public_reexport_names(chunk)
+            .into_iter()
+            .map(|name| ChunkDefinition { name, owner: None }),
+    );
+    attach_qualified_owners(&mut definitions);
     let mut seen = HashSet::new();
+    definitions.retain(|definition| seen.insert(normalize_symbol(&definition.name)));
+    definitions
+}
+
+/// Heuristic names such as Elixir's `Phoenix.Channel` also register the leaf
+/// `Channel`; give that leaf its qualifier as owner so `Phoenix.Channel`
+/// lookups stay precise.
+fn attach_qualified_owners(definitions: &mut [ChunkDefinition]) {
+    let qualified = definitions
+        .iter()
+        .filter_map(|definition| {
+            let (qualifier, leaf) = definition.name.rsplit_once('.')?;
+            let owner = qualifier.rsplit('.').find(|part| !part.is_empty())?;
+            Some((leaf.to_string(), owner.to_string()))
+        })
+        .collect::<Vec<_>>();
+    for (leaf, owner) in qualified {
+        if let Some(definition) = definitions
+            .iter_mut()
+            .find(|definition| definition.owner.is_none() && definition.name == leaf)
+        {
+            definition.owner = Some(owner);
+        }
+    }
+}
+
+fn definition_names(chunk: &IndexedChunk) -> Vec<String> {
+    chunk_definitions(chunk)
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect()
+}
+
+fn heuristic_definition_names(chunk: &IndexedChunk) -> Vec<String> {
     let is_module = matches!(chunk.kind.as_str(), "Module" | "module");
     let mut names = Vec::new();
     if chunk.language.eq_ignore_ascii_case("elixir") && is_module {
@@ -821,7 +1093,7 @@ fn definition_names(chunk: &IndexedChunk) -> Vec<String> {
                     .text
                     .lines()
                     .filter_map(|line| {
-                        let signature = line.trim();
+                        let signature = strip_leading_annotations(line.trim());
                         if signature.is_empty()
                             || signature.starts_with("//")
                             || signature.starts_with('#')
@@ -837,11 +1109,7 @@ fn definition_names(chunk: &IndexedChunk) -> Vec<String> {
     } else {
         names.extend(definition_name(chunk));
     }
-    names.extend(public_reexport_names(chunk));
     names
-        .into_iter()
-        .filter(|name| seen.insert(normalize_symbol(name)))
-        .collect()
 }
 
 pub(crate) fn likely_definition_names(text: &str) -> Vec<String> {
@@ -1164,6 +1432,7 @@ mod tests {
             content_hash: "hash".to_string(),
             vector_key: 1,
             is_ignored: false,
+            definitions: None,
         }
     }
 
@@ -1333,6 +1602,104 @@ mod tests {
     }
 
     #[test]
+    fn heuristic_names_skip_annotations_and_continuation_windows() {
+        assert_eq!(
+            definition_name(&chunk(
+                "java",
+                "Function",
+                "// src/Worker.java\n\n@Override public void run() {\n    if (ready()) { dispatch(); }\n}"
+            ))
+            .as_deref(),
+            Some("run")
+        );
+        assert_eq!(
+            definition_name(&chunk(
+                "java",
+                "Function",
+                "@Inject\n@SuppressWarnings(\"unchecked\")\npublic Worker(Repo repo) {"
+            ))
+            .as_deref(),
+            Some("Worker")
+        );
+        assert_eq!(
+            definition_name(&chunk(
+                "python",
+                "Function",
+                "@property\ndef name(self):\n    return normalize(self._name)"
+            ))
+            .as_deref(),
+            Some("name")
+        );
+        assert_eq!(
+            definition_name(&chunk(
+                "rust",
+                "Function",
+                "#[inline] pub fn method(&self) -> u32 { self.speed }"
+            ))
+            .as_deref(),
+            Some("method")
+        );
+        assert_eq!(
+            definition_name(&chunk(
+                "rust",
+                "Function",
+                "// src/pipeline.rs\n// continuation of pub fn long_pipeline() {\n\n    probe_callee(41);\n    probe_callee(42);"
+            )),
+            None,
+            "continuation windows must not register body callees"
+        );
+    }
+
+    #[test]
+    fn parser_definitions_take_precedence_over_the_heuristic() {
+        let mut parsed = chunk(
+            "java",
+            "Function",
+            "// src/Worker.java\n\n@Override public void run() {\n    if (ready()) { dispatch(); }\n}",
+        );
+        parsed.definitions = Some(vec![ChunkDefinition {
+            name: "run".to_string(),
+            owner: Some("Worker".to_string()),
+        }]);
+        let mut rows = Vec::new();
+        append_chunk_definition_rows(&parsed, 3, &mut rows);
+        assert_eq!(
+            rows,
+            [SymbolRow {
+                normalized_name: "run".to_string(),
+                chunk_key: 3,
+                name: None,
+                owner: Some("Worker".to_string()),
+            }]
+        );
+
+        let mut empty = parsed.clone();
+        empty.definitions = Some(Vec::new());
+        let mut rows = Vec::new();
+        append_chunk_definition_rows(&empty, 4, &mut rows);
+        assert!(rows.is_empty(), "{rows:?}");
+    }
+
+    #[test]
+    fn symbol_queries_split_owner_qualifiers() {
+        for (raw, owner, name) in [
+            ("Outer.method", Some("Outer"), "method"),
+            ("Outer::method", Some("Outer"), "method"),
+            ("Outer#method", Some("Outer"), "method"),
+            ("Outer->method", Some("Outer"), "method"),
+            ("a.b.Outer.method()", Some("Outer"), "method"),
+            ("method", None, "method"),
+            (" method( ", None, "method"),
+        ] {
+            assert_eq!(
+                parse_symbol_query(raw),
+                SymbolQuery { name, owner },
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
     fn haskell_modules_index_declared_and_reexported_names() {
         let module = chunk(
             "haskell",
@@ -1367,6 +1734,8 @@ mod tests {
             "CREATE TABLE symbols (
                 normalized_name TEXT NOT NULL,
                 chunk_key INTEGER NOT NULL,
+                name TEXT,
+                owner TEXT,
                 PRIMARY KEY (normalized_name, chunk_key)
              ) WITHOUT ROWID;",
         )
@@ -1412,6 +1781,8 @@ mod tests {
              CREATE TABLE symbols (
                 normalized_name TEXT NOT NULL,
                 chunk_key INTEGER NOT NULL,
+                name TEXT,
+                owner TEXT,
                 PRIMARY KEY (normalized_name, chunk_key)
              ) WITHOUT ROWID;",
         )
@@ -1472,6 +1843,8 @@ mod tests {
              CREATE TABLE symbols (
                 normalized_name TEXT NOT NULL,
                 chunk_key INTEGER NOT NULL,
+                name TEXT,
+                owner TEXT,
                 PRIMARY KEY (normalized_name, chunk_key)
              ) WITHOUT ROWID;",
         )
@@ -1523,6 +1896,8 @@ mod tests {
              CREATE TABLE symbols (
                 normalized_name TEXT NOT NULL,
                 chunk_key INTEGER NOT NULL,
+                name TEXT,
+                owner TEXT,
                 PRIMARY KEY (normalized_name, chunk_key)
              ) WITHOUT ROWID;",
         )
@@ -1570,6 +1945,8 @@ mod tests {
              CREATE TABLE symbols (
                 normalized_name TEXT NOT NULL,
                 chunk_key INTEGER NOT NULL,
+                name TEXT,
+                owner TEXT,
                 PRIMARY KEY (normalized_name, chunk_key)
              ) WITHOUT ROWID;",
         )
@@ -1585,7 +1962,7 @@ mod tests {
             [&corrupt],
         )
         .unwrap();
-        conn.execute("INSERT INTO symbols VALUES ('broken', 1)", [])
+        conn.execute("INSERT INTO symbols VALUES ('broken', 1, NULL, NULL)", [])
             .unwrap();
 
         let candidate_error = definition_candidates(&conn, &["broken".to_string()], 1)
@@ -1594,15 +1971,19 @@ mod tests {
         assert!(candidate_error.contains("failed to read stored symbol text"));
 
         let matcher = PathGlobMatcher::new(&[], &[]).unwrap();
-        let search_error = query_workspace_db(&conn, "broken", &SearchOptions::default(), &matcher)
-            .unwrap_err()
-            .to_string();
+        let query = parse_symbol_query("broken");
+        let search_error =
+            query_workspace_db(&conn, &query, "broken", &SearchOptions::default(), &matcher)
+                .unwrap_err()
+                .to_string();
         assert!(search_error.contains("failed to read stored symbol text"));
 
-        let removal_error = remove_file_graph(&conn, "src/broken.rs")
-            .unwrap_err()
-            .to_string();
-        assert!(removal_error.contains("failed to read stored symbol text"));
+        // Removal no longer re-derives names from stored text.
+        remove_file_graph(&conn, "src/broken.rs").unwrap();
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM symbols", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0);
     }
 
     #[test]

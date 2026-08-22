@@ -17,7 +17,8 @@ use tantivy::{TantivyDocument, Term};
 use crate::text::first_code_line_range;
 
 use crate::chunking::{
-    Chunk, RustDocInclude, chunk_rust_doc_include, chunk_source_with_metadata, is_indexable_file,
+    Chunk, ChunkDefinition, RustDocInclude, chunk_rust_doc_include, chunk_source_with_metadata,
+    is_indexable_file,
 };
 use crate::embedding::EmbeddingModel;
 use crate::jobs::{self, JobKind, JobUpdate};
@@ -38,8 +39,8 @@ use git_state::{
     record_indexed_git_state, refresh_clean_base_metadata,
 };
 use resources::{
-    NEURAL_BATCH_SIZE_REFRESH_INTERVAL, check_memory_before_index, check_system_constraints,
-    indexing_pool, neural_enhance_batch_size, tantivy_writer_settings,
+    EnhancementTier, NEURAL_BATCH_SIZE_REFRESH_INTERVAL, check_memory_before_index,
+    check_system_constraints, indexing_pool, neural_enhance_batch_size, tantivy_writer_settings,
 };
 use staging::FreshIndexStaging;
 pub use storage::{
@@ -58,7 +59,12 @@ const MAX_RUST_DOC_INCLUDES_PER_SOURCE: usize = 16;
 const MAX_RUST_DOC_INCLUDE_BYTES: u64 = MIB;
 const MAX_RUST_DOC_INCLUDE_TOTAL_BYTES: u64 = 2 * MIB;
 const MAX_RUST_DOC_INCLUDE_CHUNKS_PER_SOURCE: usize = 128;
-const SYMBOL_INSERT_BATCH_ROWS: usize = 256;
+// Six bind parameters per row keeps each batch under SQLite's conservative
+// 999-parameter limit.
+const SYMBOL_INSERT_BATCH_ROWS: usize = 160;
+const SYMBOL_INSERT_PREFIX: &str =
+    "INSERT OR REPLACE INTO symbols (normalized_name, chunk_key, name, owner) VALUES ";
+const SYMBOL_INSERT_ROW: &str = "(?, ?, ?, ?)";
 const INDEX_FILE_BATCH_SIZE: usize = 64;
 // Soft per-transaction target, checked after each file. One file's bounded
 // chunk-key batch may exceed it before the journal and SQLite commit checkpoint.
@@ -102,6 +108,10 @@ pub struct IndexedChunk {
     pub content_hash: String,
     pub vector_key: u64,
     pub is_ignored: bool,
+    /// Parser-derived definitions captured at chunk time. `None` when the
+    /// chunk was loaded from storage or the parser did not resolve it, in
+    /// which case symbol extraction falls back to the text heuristic.
+    pub definitions: Option<Vec<ChunkDefinition>>,
 }
 
 #[derive(Debug, Clone)]
@@ -450,7 +460,7 @@ fn clear_worktree_overlay_storage(workspace: &Workspace) {
     let _ = fs::remove_file(workspace.overlay_sqlite_path());
     let _ = fs::remove_dir_all(workspace.overlay_tantivy_dir());
     let _ = fs::remove_file(workspace.overlay_vector_path());
-    let _ = fs::remove_file(workspace.vector_neural_path());
+    crate::vector_store::remove_store_files(&workspace.vector_neural_path());
     let _ = fs::remove_file(workspace.neural_model_path());
     let _ = fs::remove_file(workspace.neural_profile_path());
     let _ = fs::remove_file(workspace.neural_backend_path());
@@ -1031,26 +1041,32 @@ fn index_workspace_inner(
             .ok()
             .map(Arc::new)
     });
+    // Determine which stores to write to: overlay or main
+    let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
+    let is_fresh_index = !workspace_is_indexed(workspace);
+    // A from-scratch main index has no prior stores or snapshot to consult:
+    // the diff already lists every file, so dependent discovery cannot add
+    // anything and only costs a serial read of the whole tree.
+    let builds_from_scratch = !use_overlay && is_fresh_index;
     add_included_file_dependents(
         workspace,
         &mut diff,
         &clear_overlay_paths,
         current_snapshot.as_deref(),
+        builds_from_scratch,
     )?;
     add_file_edge_dependents(
         workspace,
         &mut diff,
         &clear_overlay_paths,
         current_snapshot.as_deref(),
+        builds_from_scratch,
     )?;
 
     let discovery_ms = index_started.elapsed().as_secs_f64() * 1_000.0;
     let persist_started = std::time::Instant::now();
 
-    // Determine which stores to write to: overlay or main
-    let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
-    let is_fresh_index = !workspace_is_indexed(workspace);
-    let fresh_staging = if !use_overlay && is_fresh_index {
+    let fresh_staging = if builds_from_scratch {
         Some(FreshIndexStaging::create(workspace)?)
     } else {
         None
@@ -1538,10 +1554,16 @@ fn add_included_file_dependents(
     diff: &mut MerkleDiff,
     clear_overlay_paths: &[PathBuf],
     current_snapshot: Option<&MerkleSnapshot>,
+    builds_from_scratch: bool,
 ) -> Result<()> {
     let Some(current_snapshot) = current_snapshot else {
         return Ok(());
     };
+    // Fresh index: every owner in the snapshot is already in the changed set
+    // and no prior stores exist to query, so there is nothing to add.
+    if builds_from_scratch {
+        return Ok(());
+    }
 
     let mut changed_paths = diff
         .added_or_modified
@@ -1632,15 +1654,41 @@ fn add_included_file_dependents(
     Ok(())
 }
 
+/// Resolution signatures for the manifests among `paths`. Only paths that can
+/// carry a signature (`has_manifest_resolution_signature`) are read from disk;
+/// everything else is skipped without touching the filesystem.
+fn current_manifest_signatures<'a>(
+    root: &Path,
+    paths: impl IntoIterator<Item = &'a PathBuf>,
+) -> HashMap<String, String> {
+    paths
+        .into_iter()
+        .filter(|path| crate::context_graph::has_manifest_resolution_signature(path))
+        .filter_map(|path| {
+            let content = fs::read_to_string(root.join(path)).ok()?;
+            crate::context_graph::manifest_resolution_signature(path, &content)
+                .map(|signature| (index_path_string(path), signature))
+        })
+        .collect()
+}
+
 fn add_file_edge_dependents(
     workspace: &Workspace,
     diff: &mut MerkleDiff,
     clear_overlay_paths: &[PathBuf],
     current_snapshot: Option<&MerkleSnapshot>,
+    builds_from_scratch: bool,
 ) -> Result<()> {
     let Some(current_snapshot) = current_snapshot else {
         return Ok(());
     };
+    // Fresh index: `changed` covers every snapshot path (owners are a subset
+    // of it), no stored edges, signatures, or unresolved specs exist yet, and
+    // every manifest is indexed in this same run. Skipping avoids a serial
+    // read of the whole tree before the parallel producer starts.
+    if builds_from_scratch {
+        return Ok(());
+    }
     if diff.added_or_modified.is_empty()
         && diff.deleted.is_empty()
         && clear_overlay_paths.is_empty()
@@ -1669,17 +1717,13 @@ fn add_file_edge_dependents(
         .iter()
         .map(|(path, _)| index_path_string(path))
         .collect::<HashSet<_>>();
-    let current_manifest_signatures = diff
-        .added_or_modified
-        .iter()
-        .map(|(path, _)| path)
-        .chain(clear_overlay_paths)
-        .filter_map(|path| {
-            let content = fs::read_to_string(workspace.root.join(path)).ok()?;
-            crate::context_graph::manifest_resolution_signature(path, &content)
-                .map(|signature| (index_path_string(path), signature))
-        })
-        .collect::<HashMap<_, _>>();
+    let current_manifest_signatures = current_manifest_signatures(
+        &workspace.root,
+        diff.added_or_modified
+            .iter()
+            .map(|(path, _)| path)
+            .chain(clear_overlay_paths),
+    );
     let candidate_lookup_keys = diff
         .added_or_modified
         .iter()
@@ -2094,6 +2138,7 @@ pub fn enhance_workspace_hash(
         &vector_path,
         hash_model.dimensions(),
         HASH_VECTOR_QUANTIZATION,
+        crate::vector_store::VectorTier::Hash,
     )?;
     let claimed_tombstones = claim_vector_tombstones(
         &workspace.hash_tombstones_path(),
@@ -2161,7 +2206,7 @@ pub fn enhance_workspace_hash(
             .with_context(|| format!("failed to read stored text for vector key {key}"))?;
         batch.push((key, text));
         if batch.len() >= BATCH_SIZE {
-            while let Some(reason) = check_system_constraints() {
+            while let Some(reason) = check_system_constraints(EnhancementTier::Hash) {
                 let _ = fs::write(&paused_path, &reason);
                 std::thread::sleep(std::time::Duration::from_secs(10));
             }
@@ -2179,7 +2224,7 @@ pub fn enhance_workspace_hash(
 
     let tail_len = batch.len();
     while !batch.is_empty()
-        && let Some(reason) = check_system_constraints()
+        && let Some(reason) = check_system_constraints(EnhancementTier::Hash)
     {
         let _ = fs::write(&paused_path, &reason);
         std::thread::sleep(std::time::Duration::from_secs(10));
@@ -2193,6 +2238,7 @@ pub fn enhance_workspace_hash(
             &vector_path,
             hash_model.dimensions(),
             HASH_VECTOR_QUANTIZATION,
+            crate::vector_store::VectorTier::Hash,
         )?;
     } else if newly_processed > 0 || removed_tombstones {
         vector_index.save()?;
@@ -2260,7 +2306,7 @@ pub fn enhance_workspace_neural(
         _ => false,
     };
     if !identity_matches {
-        let _ = fs::remove_file(workspace.vector_neural_path());
+        crate::vector_store::remove_store_files(&workspace.vector_neural_path());
         let _ = fs::remove_file(workspace.neural_tombstones_path());
         let _ = fs::remove_file(workspace.neural_tombstones_processing_path());
         let _ = fs::remove_file(workspace.neural_enhanced_generation_path());
@@ -2289,6 +2335,7 @@ pub fn enhance_workspace_neural(
         &vector_path,
         neural_model.dimensions(),
         NEURAL_VECTOR_QUANTIZATION,
+        crate::vector_store::VectorTier::Neural,
     )?;
     let claimed_tombstones = claim_vector_tombstones(
         &workspace.neural_tombstones_path(),
@@ -2345,6 +2392,7 @@ pub fn enhance_workspace_neural(
             None
         };
 
+    let document_character_limit = neural_model.document_character_limit();
     let process_batch = |batch: &mut Vec<(u64, String)>,
                          count: &mut usize,
                          v_index: &mut VectorStore|
@@ -2355,16 +2403,8 @@ pub fn enhance_workspace_neural(
 
         let texts: Vec<&str> = batch
             .iter()
-            .map(|(_, t)| {
-                if t.len() > 1024 {
-                    let mut end = 1024;
-                    while !t.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    &t[..end]
-                } else {
-                    t.as_str()
-                }
+            .map(|(_, text)| {
+                crate::embedding::truncate_document_text(text, document_character_limit)
             })
             .collect();
 
@@ -2393,7 +2433,7 @@ pub fn enhance_workspace_neural(
 
             if batch.len() >= current_batch_size {
                 while neural_model.respects_system_constraints()
-                    && let Some(reason) = check_system_constraints()
+                    && let Some(reason) = check_system_constraints(EnhancementTier::Neural)
                 {
                     let _ = std::fs::write(&paused_path, &reason);
                     std::thread::sleep(std::time::Duration::from_secs(10));
@@ -2442,7 +2482,7 @@ pub fn enhance_workspace_neural(
     let tail_len = batch.len();
     while neural_model.respects_system_constraints()
         && !batch.is_empty()
-        && let Some(reason) = check_system_constraints()
+        && let Some(reason) = check_system_constraints(EnhancementTier::Neural)
     {
         let _ = std::fs::write(&paused_path, &reason);
         std::thread::sleep(std::time::Duration::from_secs(10));
@@ -2457,6 +2497,7 @@ pub fn enhance_workspace_neural(
             &vector_path,
             neural_model.dimensions(),
             NEURAL_VECTOR_QUANTIZATION,
+            crate::vector_store::VectorTier::Neural,
         )?;
     } else if newly_processed > 0 || removed_tombstones || !vector_store_existed {
         vector_index.save()?;
@@ -2508,6 +2549,7 @@ fn build_indexed_chunk_with_occurrence(
         content_hash: chunk.content_hash,
         vector_key,
         is_ignored,
+        definitions: chunk.definitions,
     }
 }
 
@@ -2964,7 +3006,7 @@ struct PersistStatements<'conn> {
     file_edge_insert: Statement<'conn>,
     unresolved_dependency_insert: Statement<'conn>,
     manifest_resolution_signature_insert: Statement<'conn>,
-    symbol_rows: Vec<(String, i64)>,
+    symbol_rows: Vec<crate::symbols::SymbolRow>,
     symbol_insert_sql: String,
 }
 
@@ -3007,8 +3049,7 @@ impl<'conn> PersistStatements<'conn> {
             )?,
             symbol_rows: Vec::with_capacity(SYMBOL_INSERT_BATCH_ROWS),
             symbol_insert_sql: String::with_capacity(
-                "INSERT OR REPLACE INTO symbols (normalized_name, chunk_key) VALUES ".len()
-                    + SYMBOL_INSERT_BATCH_ROWS * "(?, ?),".len(),
+                SYMBOL_INSERT_PREFIX.len() + SYMBOL_INSERT_BATCH_ROWS * SYMBOL_INSERT_ROW.len(),
             ),
         })
     }
@@ -3058,20 +3099,19 @@ impl<'conn> PersistStatements<'conn> {
         while !self.symbol_rows.is_empty() {
             let batch_len = self.symbol_rows.len().min(SYMBOL_INSERT_BATCH_ROWS);
             self.symbol_insert_sql.clear();
-            self.symbol_insert_sql
-                .push_str("INSERT OR REPLACE INTO symbols (normalized_name, chunk_key) VALUES ");
+            self.symbol_insert_sql.push_str(SYMBOL_INSERT_PREFIX);
             for index in 0..batch_len {
                 if index > 0 {
                     self.symbol_insert_sql.push(',');
                 }
-                self.symbol_insert_sql.push_str("(?, ?)");
+                self.symbol_insert_sql.push_str(SYMBOL_INSERT_ROW);
             }
 
             {
-                let mut params: Vec<&dyn ToSql> = Vec::with_capacity(batch_len * 2);
-                for (name, chunk_key) in &self.symbol_rows[..batch_len] {
-                    params.push(name);
-                    params.push(chunk_key);
+                let mut params: Vec<&dyn ToSql> =
+                    Vec::with_capacity(batch_len * crate::symbols::SYMBOL_ROW_COLUMNS);
+                for row in &self.symbol_rows[..batch_len] {
+                    row.push_params(&mut params);
                 }
                 self.conn
                     .execute(&self.symbol_insert_sql, params.as_slice())?;
@@ -3146,6 +3186,7 @@ pub fn fetch_chunk_by_vector_key(
             content_hash: String::new(),
             vector_key,
             is_ignored: row.get::<_, bool>(7)?,
+            definitions: None,
         };
 
         return Ok(Some(chunk));
@@ -3269,6 +3310,7 @@ fn fetch_chunks_by_vector_keys_batch_impl(
                 content_hash: String::new(),
                 vector_key,
                 is_ignored: row.get::<_, bool>(7)?,
+                definitions: None,
             };
             result.insert(vector_key, chunk);
         }
@@ -3343,6 +3385,7 @@ pub fn fetch_chunk_by_id(
         content_hash: String::new(),
         vector_key,
         is_ignored,
+        definitions: None,
     })
 }
 
@@ -3480,6 +3523,88 @@ mod tests {
         }
     }
 
+    /// Records every document text handed to the encoder.
+    struct TextRecordingEmbedding {
+        model: HashEmbeddingModel,
+        identity: crate::embedding::NeuralModelIdentity,
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl EmbeddingModel for TextRecordingEmbedding {
+        fn dimensions(&self) -> usize {
+            self.model.dimensions()
+        }
+
+        fn embed(&self, text: &str) -> Vec<f32> {
+            self.seen.lock().unwrap().push(text.to_string());
+            self.model.embed(text)
+        }
+
+        fn profile_info(&self) -> Option<&'static str> {
+            Some("static")
+        }
+
+        fn model_identity(&self) -> Option<&crate::embedding::NeuralModelIdentity> {
+            Some(&self.identity)
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn neural_enhancement_embeds_whole_chunks_up_to_the_profile_limit() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        // A prose note well past the old 1024-character cut; the decisive
+        // sentence sits near the end.
+        let filler = "The team reviewed the cache invalidation options at length. ".repeat(40);
+        let note = format!(
+            "# Cache decision\n\n{filler}\nFinal call: versioned keys replace TTL sweeps.\n"
+        );
+        assert!(note.len() > 2_000);
+        fs::write(root.path().join("decision.md"), &note).unwrap();
+
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let hash_model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &hash_model).unwrap();
+
+        let unwindowed = TextRecordingEmbedding {
+            model: HashEmbeddingModel::new(EMBEDDING_DIMENSIONS),
+            identity: crate::embedding::NeuralProfile::Static.identity(),
+            seen: std::sync::Mutex::new(Vec::new()),
+        };
+        enhance_workspace_neural(&workspace, &unwindowed).unwrap();
+        let seen = unwindowed.seen.lock().unwrap();
+        assert!(
+            seen.iter()
+                .any(|text| text.contains("versioned keys replace TTL sweeps")),
+            "static profile must embed the whole note, not its first 1024 characters"
+        );
+        assert!(
+            seen.iter().all(|text| {
+                text.len() <= crate::embedding::UNWINDOWED_DOCUMENT_CHARACTER_LIMIT
+            })
+        );
+        drop(seen);
+
+        let _ = fs::remove_file(workspace.vector_neural_path());
+        let windowed = TextRecordingEmbedding {
+            model: HashEmbeddingModel::new(EMBEDDING_DIMENSIONS),
+            identity: crate::embedding::NeuralProfile::General.identity(),
+            seen: std::sync::Mutex::new(Vec::new()),
+        };
+        enhance_workspace_neural(&workspace, &windowed).unwrap();
+        let limit = windowed.document_character_limit();
+        assert_eq!(limit, 256 * 4);
+        let seen = windowed.seen.lock().unwrap();
+        assert!(!seen.is_empty());
+        assert!(seen.iter().all(|text| text.len() <= limit));
+        assert!(
+            seen.iter().any(|text| text.len() == limit),
+            "a token-windowed profile is cut at its character budget"
+        );
+    }
+
     #[test]
     fn persist_statements_flushes_batched_symbols() {
         let mut conn = Connection::open_in_memory().unwrap();
@@ -3499,6 +3624,7 @@ mod tests {
             content_hash: "big".to_string(),
             vector_key: 1,
             is_ignored: false,
+            definitions: None,
         };
         let tail_chunk = IndexedChunk {
             chunk_id: String::new(),
@@ -3511,6 +3637,7 @@ mod tests {
             content_hash: "tail".to_string(),
             vector_key: 2,
             is_ignored: false,
+            definitions: None,
         };
 
         let tx = conn.transaction().unwrap();
@@ -3775,6 +3902,7 @@ mod tests {
             language: "rust".to_string(),
             kind: ChunkKind::Module,
             content_hash: "identical-hash".to_string(),
+            definitions: None,
         };
         let a = build_indexed_chunk(make("a.rs"), false);
         let b = build_indexed_chunk(make("b.rs"), false);
@@ -3797,6 +3925,7 @@ mod tests {
             language: "rust".to_string(),
             kind: ChunkKind::Function,
             content_hash: "stable-content-hash".to_string(),
+            definitions: None,
         };
 
         assert_eq!(
@@ -3817,6 +3946,7 @@ mod tests {
             language: "rust".to_string(),
             kind: ChunkKind::Function,
             content_hash: content_hash.to_string(),
+            definitions: None,
         };
 
         assert_eq!(
@@ -3837,6 +3967,7 @@ mod tests {
             language: "rust".to_string(),
             kind: ChunkKind::Function,
             content_hash: "same-content".to_string(),
+            definitions: None,
         };
 
         assert_ne!(
@@ -3877,6 +4008,7 @@ mod tests {
             language: "java".to_string(),
             kind: ChunkKind::Function,
             content_hash: "java-signature".to_string(),
+            definitions: None,
         };
         let indexed = build_indexed_chunk(chunk, false);
 
@@ -4406,6 +4538,77 @@ mod tests {
     }
 
     #[test]
+    fn current_manifest_signatures_only_reads_resolution_manifests() {
+        let root = tempdir().unwrap();
+        fs::create_dir_all(root.path().join("crates/core/src")).unwrap();
+        fs::create_dir_all(root.path().join("services/api")).unwrap();
+        fs::write(
+            root.path().join("Cargo.toml"),
+            "[workspace]\nmembers = ['crates/core']\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("crates/core/Cargo.toml"),
+            "[package]\nname = 'core'\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("services/api/go.mod"),
+            "module example.com/api\n",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("crates/core/src/lib.rs"),
+            "pub fn run() {}\n",
+        )
+        .unwrap();
+        fs::write(root.path().join("package.json"), "{\"name\": \"web\"}\n").unwrap();
+        // Non-manifest entries drop out regardless of readability: a source
+        // file, a directory, a missing path, and a non-UTF-8 blob.
+        fs::write(
+            root.path().join("services/api/blob.bin"),
+            [0xff, 0xfe, 0x00],
+        )
+        .unwrap();
+
+        let paths = [
+            "Cargo.toml",
+            "crates/core/Cargo.toml",
+            "services/api/go.mod",
+            "crates/core/src/lib.rs",
+            "package.json",
+            "services/api",
+            "missing/main.go",
+            "services/api/blob.bin",
+        ]
+        .map(PathBuf::from);
+        let signatures = current_manifest_signatures(root.path(), paths.iter());
+
+        let mut keys = signatures.keys().cloned().collect::<Vec<_>>();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "Cargo.toml".to_string(),
+                "crates/core/Cargo.toml".to_string(),
+                "services/api/go.mod".to_string(),
+            ]
+        );
+        assert_eq!(
+            signatures.get("crates/core/Cargo.toml").map(String::as_str),
+            crate::context_graph::manifest_resolution_signature(
+                Path::new("crates/core/Cargo.toml"),
+                "[package]\nname = 'core'\n",
+            )
+            .as_deref()
+        );
+        assert_eq!(
+            signatures.get("services/api/go.mod").map(String::as_str),
+            Some("go\0example.com/api")
+        );
+    }
+
+    #[test]
     #[serial]
     fn adding_manifest_reindexes_configured_sources() {
         let root = tempdir().unwrap();
@@ -4577,6 +4780,7 @@ mod tests {
             &workspace.vector_path(),
             EMBEDDING_DIMENSIONS,
             ScalarKind::F16,
+            crate::vector_store::VectorTier::Hash,
         )
         .unwrap();
         assert_eq!(
@@ -4606,6 +4810,7 @@ mod tests {
             &workspace.vector_path(),
             EMBEDDING_DIMENSIONS,
             ScalarKind::F16,
+            crate::vector_store::VectorTier::Hash,
         )
         .unwrap();
         assert_eq!(enriched.size(), summary.total_chunks);
@@ -4671,6 +4876,7 @@ mod tests {
             &workspace.vector_path(),
             EMBEDDING_DIMENSIONS,
             ScalarKind::F16,
+            crate::vector_store::VectorTier::Hash,
         )
         .unwrap();
         assert_eq!(hash_store.size(), vector_key_count);
@@ -4683,6 +4889,7 @@ mod tests {
             &workspace.vector_neural_path(),
             EMBEDDING_DIMENSIONS,
             crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
+            crate::vector_store::VectorTier::Neural,
         )
         .unwrap();
         assert_eq!(neural_store.size(), vector_key_count);
@@ -4869,6 +5076,7 @@ mod tests {
             &workspace.vector_neural_path(),
             EMBEDDING_DIMENSIONS,
             crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
+            crate::vector_store::VectorTier::Neural,
         )
         .unwrap();
         assert_eq!(store.size(), enhanced);
@@ -5213,19 +5421,21 @@ mod tests {
             next_key += 1;
         }
 
-        for (path, dimensions, quantization) in [
+        for (path, dimensions, quantization, tier) in [
             (
                 workspace.vector_path(),
                 hash_model.dimensions(),
                 HASH_VECTOR_QUANTIZATION,
+                crate::vector_store::VectorTier::Hash,
             ),
             (
                 workspace.vector_neural_path(),
                 neural_model.dimensions(),
                 NEURAL_VECTOR_QUANTIZATION,
+                crate::vector_store::VectorTier::Neural,
             ),
         ] {
-            let mut store = VectorStore::open(&path, dimensions, quantization).unwrap();
+            let mut store = VectorStore::open(&path, dimensions, quantization, tier).unwrap();
             store
                 .reserve_additional(VECTOR_COUNT.saturating_sub(store.size()))
                 .unwrap();
@@ -5273,6 +5483,7 @@ mod tests {
             &workspace.vector_path(),
             EMBEDDING_DIMENSIONS,
             HASH_VECTOR_QUANTIZATION,
+            crate::vector_store::VectorTier::Hash,
         )
         .unwrap();
         assert_eq!(hash_store.size(), 0);
@@ -5284,6 +5495,7 @@ mod tests {
             &workspace.vector_neural_path(),
             neural_model.dimensions(),
             NEURAL_VECTOR_QUANTIZATION,
+            crate::vector_store::VectorTier::Neural,
         )
         .unwrap();
         assert_eq!(neural_store.size(), 0);
@@ -5371,6 +5583,7 @@ mod tests {
                 language: "rust".to_string(),
                 kind: ChunkKind::Function,
                 content_hash: "prepared-content-hash".to_string(),
+                definitions: None,
             },
             false,
         );

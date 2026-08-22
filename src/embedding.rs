@@ -179,14 +179,18 @@ impl NeuralProfile {
             ),
         };
         NeuralModelIdentity {
-            schema_version: 1,
+            // Bump when persisted neural vectors must be rebuilt for reasons
+            // the other fields cannot express. v2: neural HNSW graphs built
+            // before the tier-aware vector store used the sparse hash-tier
+            // graph and must be re-enhanced.
+            schema_version: 2,
             profile: self.name().to_string(),
             model_id: model_id.to_string(),
             revision: self.model_revision().to_string(),
             architecture: architecture.to_string(),
             dimensions,
             max_input_tokens,
-            document_character_limit: 1024,
+            document_character_limit: self.document_character_limit(max_input_tokens),
             pooling: pooling.to_string(),
             normalize_embeddings: true,
             model_weight_dtype: "f32".to_string(),
@@ -197,6 +201,52 @@ impl NeuralProfile {
             model_weights_sha256: self.model_weights_sha256().to_string(),
         }
     }
+}
+
+/// Upper bound on the characters of one chunk handed to the document encoder.
+/// Models without a token window (static token-mean) embed the whole chunk up
+/// to a safety cap that covers every structural chunk and prose window while
+/// keeping pathological fallback chunks bounded. Token-windowed transformers get
+/// roughly four characters per token; the tokenizer truncates the remainder,
+/// so sending more only costs tokenization time.
+pub const UNWINDOWED_DOCUMENT_CHARACTER_LIMIT: usize = 16_384;
+const DOCUMENT_CHARACTERS_PER_TOKEN: usize = 4;
+
+impl NeuralProfile {
+    /// Static token-mean encoders (static-retrieval, Model2Vec) consume the
+    /// whole token sequence, so they are unwindowed regardless of the nominal
+    /// `max_input_tokens` their cards report. Transformer profiles are bounded
+    /// by their attention window.
+    fn document_character_limit(self, max_input_tokens: usize) -> usize {
+        match self {
+            Self::Static | Self::PotionCode => UNWINDOWED_DOCUMENT_CHARACTER_LIMIT,
+            Self::General | Self::Code | Self::CodeHighQuality => {
+                windowed_document_character_limit(max_input_tokens)
+            }
+        }
+    }
+}
+
+fn windowed_document_character_limit(max_input_tokens: usize) -> usize {
+    if max_input_tokens == 0 {
+        UNWINDOWED_DOCUMENT_CHARACTER_LIMIT
+    } else {
+        max_input_tokens
+            .saturating_mul(DOCUMENT_CHARACTERS_PER_TOKEN)
+            .min(UNWINDOWED_DOCUMENT_CHARACTER_LIMIT)
+    }
+}
+
+/// Truncate `text` to at most `limit` bytes on a char boundary.
+pub fn truncate_document_text(text: &str, limit: usize) -> &str {
+    if text.len() <= limit {
+        return text;
+    }
+    let mut end = limit;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 pub fn configured_neural_profile_name() -> &'static str {
@@ -233,6 +283,14 @@ pub trait EmbeddingModel: Send + Sync {
 
     fn model_identity(&self) -> Option<&NeuralModelIdentity> {
         None
+    }
+
+    /// Maximum characters of one document this backend should receive. Text
+    /// beyond the limit is cut before embedding.
+    fn document_character_limit(&self) -> usize {
+        self.model_identity()
+            .map(|identity| identity.document_character_limit)
+            .unwrap_or(UNWINDOWED_DOCUMENT_CHARACTER_LIMIT)
     }
 
     /// Whether background embedding should pause under load, thermal, or
@@ -1232,11 +1290,47 @@ mod tests {
     }
 
     #[test]
+    fn document_character_limits_follow_the_token_window() {
+        assert_eq!(
+            NeuralProfile::Static.identity().document_character_limit,
+            UNWINDOWED_DOCUMENT_CHARACTER_LIMIT
+        );
+        assert_eq!(
+            NeuralProfile::General.identity().document_character_limit,
+            1024
+        );
+        assert_eq!(
+            NeuralProfile::Code.identity().document_character_limit,
+            2048
+        );
+        assert_eq!(
+            NeuralProfile::PotionCode
+                .identity()
+                .document_character_limit,
+            UNWINDOWED_DOCUMENT_CHARACTER_LIMIT,
+            "Model2Vec averages the whole token sequence despite its nominal window"
+        );
+        assert_eq!(
+            windowed_document_character_limit(usize::MAX),
+            UNWINDOWED_DOCUMENT_CHARACTER_LIMIT
+        );
+    }
+
+    #[test]
+    fn truncate_document_text_respects_char_boundaries() {
+        assert_eq!(truncate_document_text("short", 10), "short");
+        assert_eq!(truncate_document_text("abcdef", 3), "abc");
+        // 'é' is two bytes; cutting inside it must back off to the boundary.
+        assert_eq!(truncate_document_text("aé", 2), "a");
+        assert_eq!(truncate_document_text("aé", 3), "aé");
+    }
+
+    #[test]
     fn neural_identity_covers_vector_compatibility_inputs() {
         let identity = NeuralProfile::CodeHighQuality.identity();
         assert_eq!(identity.dimensions, 384);
         assert_eq!(identity.max_input_tokens, 512);
-        assert_eq!(identity.document_character_limit, 1024);
+        assert_eq!(identity.document_character_limit, 2048);
         assert_eq!(identity.pooling, "attention-mask-mean");
         assert!(identity.normalize_embeddings);
         assert_eq!(identity.vector_quantization, "f16");

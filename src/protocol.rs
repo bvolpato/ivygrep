@@ -9,10 +9,14 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+fn is_zero(value: &usize) -> bool {
+    *value == 0
+}
+
 /// Compile-time version tag so the CLI can detect stale daemon processes.
 pub const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Wire protocol version for daemon request compatibility.
-pub const DAEMON_PROTOCOL_VERSION: u32 = 6;
+pub const DAEMON_PROTOCOL_VERSION: u32 = 7;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchHit {
@@ -45,6 +49,15 @@ pub enum DaemonRequest {
         initial_path: Option<PathBuf>,
     },
     Index {
+        path: PathBuf,
+        watch: bool,
+        #[serde(default)]
+        skip_gitignore: bool,
+    },
+    /// Enqueue an index run and return immediately. Joins any in-flight
+    /// `Index`/`StartIndex` run for the workspace instead of queuing another;
+    /// callers poll `RuntimeStatus` (`index_in_flight`) for completion.
+    StartIndex {
         path: PathBuf,
         watch: bool,
         #[serde(default)]
@@ -175,6 +188,14 @@ pub enum DaemonResponse {
         scanned: usize,
         total: usize,
     },
+    /// Reply to `StartIndex`: the run was enqueued (`already_running: false`)
+    /// or an in-flight run for the workspace will serve it.
+    IndexStarted {
+        accepted: bool,
+        already_running: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u64>,
+    },
     Error {
         message: String,
     },
@@ -185,13 +206,25 @@ pub struct WorkspaceRuntimeStatus {
     pub id: String,
     pub watch_enabled: bool,
     pub watcher_alive: bool,
+    /// An explicit `Index`/`StartIndex` run is queued or running on the daemon.
+    #[serde(default)]
+    pub index_in_flight: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FileSearchResult {
     pub file_path: PathBuf,
     pub total_score: f32,
+    /// Hits matched in this file before any per-file cap.
     pub hit_count: usize,
+    /// Hits dropped from `hits` by a per-file cap (MCP). Zero when no cap applied.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub more_hits_in_file: usize,
+    /// True when retrieval stopped at its candidate budget before this file was
+    /// fully enumerated, so `hit_count` and `more_hits_in_file` are lower
+    /// bounds rather than exact counts (MCP).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hit_count_is_lower_bound: bool,
     pub hits: Vec<SearchHit>,
 }
 
@@ -205,6 +238,8 @@ pub fn group_hits_by_file(hits: &[SearchHit], limit: Option<usize>) -> Vec<FileS
                 file_path: hit.file_path.clone(),
                 total_score: 0.0,
                 hit_count: 0,
+                more_hits_in_file: 0,
+                hit_count_is_lower_bound: false,
                 hits: vec![],
             });
         entry.total_score += hit.score;

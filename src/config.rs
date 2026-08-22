@@ -75,6 +75,46 @@ pub fn query_result_cache_enabled() -> bool {
     env::var_os("IVYGREP_DISABLE_QUERY_CACHE").is_none()
 }
 
+/// `IVYGREP_ENHANCE_ON_BATTERY=1` keeps background neural enhancement running
+/// while a laptop is on battery power instead of pausing it.
+pub fn enhance_on_battery() -> bool {
+    parse_bool_flag(env::var("IVYGREP_ENHANCE_ON_BATTERY").ok().as_deref())
+}
+
+fn parse_bool_flag(value: Option<&str>) -> bool {
+    matches!(
+        value
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+pub const DEFAULT_SEARCH_DEADLINE_SECS: u64 = 60;
+
+/// Server-side bound on a single daemon search. `IVYGREP_SEARCH_DEADLINE_SECS`
+/// overrides the default; `0` disables the deadline.
+pub fn search_deadline() -> Option<std::time::Duration> {
+    let secs = env::var("IVYGREP_SEARCH_DEADLINE_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_SEARCH_DEADLINE_SECS);
+    (secs > 0).then(|| std::time::Duration::from_secs(secs))
+}
+
+pub const DEFAULT_MCP_INDEX_WAIT_SECS: u64 = 20;
+
+/// How long an MCP tool call waits for the daemon to finish a first index
+/// before returning an `indexing` status payload. `IVYGREP_MCP_INDEX_WAIT_SECS`
+/// overrides the default; `0` returns immediately after enqueuing the run.
+pub fn mcp_index_wait() -> std::time::Duration {
+    let secs = env::var("IVYGREP_MCP_INDEX_WAIT_SECS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(DEFAULT_MCP_INDEX_WAIT_SECS);
+    std::time::Duration::from_secs(secs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,5 +129,17 @@ mod tests {
     fn parse_env_path_accepts_trimmed_path() {
         let path = parse_env_path("  /tmp/ivygrep-home  ").unwrap();
         assert_eq!(path, PathBuf::from("/tmp/ivygrep-home"));
+    }
+
+    #[test]
+    fn parse_bool_flag_accepts_common_truthy_values_only() {
+        assert!(parse_bool_flag(Some("1")));
+        assert!(parse_bool_flag(Some(" TRUE ")));
+        assert!(parse_bool_flag(Some("yes")));
+        assert!(parse_bool_flag(Some("on")));
+        assert!(!parse_bool_flag(Some("0")));
+        assert!(!parse_bool_flag(Some("false")));
+        assert!(!parse_bool_flag(Some("")));
+        assert!(!parse_bool_flag(None));
     }
 }
