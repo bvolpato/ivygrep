@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1787442561931,
+  "lastUpdate": 1787502132159,
   "repoUrl": "https://github.com/bvolpato/ivygrep",
   "entries": {
     "Rust Benchmark": [
@@ -47030,6 +47030,190 @@ window.BENCHMARK_DATA = {
           {
             "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
             "value": 2395.84,
+            "unit": "µs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brunocvcunha@gmail.com",
+            "name": "Bruno Volpato",
+            "username": "bvolpato"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5d58573c2cf5f9da3c7868cede45f5a3e8485133",
+          "message": "[fix] recover workspace watchers in the daemon instead of restarting it (#285)\n\n* [fix] recover workspace watchers in the daemon instead of restarting it\n\nThe CLI restarted the whole daemon whenever a workspace reported\nwatch_enabled without watcher_alive. That repeated on every query when\nthe watcher could not come back: an index rebuild wipes job.json and\n.watcher.pid (the liveness inputs) while the watcher keeps running, so\nafter the v22 format bump every watched workspace read as offline;\nwatcher restore also races the daemon's socket bind, and registration\nfails outright under inotify limits.\n\nDaemon: the heartbeat re-creates its ledger record when the ledger was\nwiped; a supervisor registers missing watchers at startup and every 30s,\nrecording failures in the ledger with exponential backoff (30s to 15min);\na new EnsureWatcher request acks immediately and registers in the\nbackground. RuntimeStatus and WorkspaceStatus carry watcher_error and\n`ig --status` prints it. The CLI sends EnsureWatcher instead of Restart;\nrestarts remain only for protocol version mismatch.\n\n* [fix] bump the daemon protocol for EnsureWatcher and persist unresolvable-root watcher failures\n\nA running v7 daemon rejects ensure_watcher as unknown; without a version\nbump the compatibility probe accepted it and the CLI repeated the failed\nrecovery request on every query. Protocol version 8 makes the existing\nrestart path replace it.\n\nWhen an enabled workspace root cannot be resolved, the supervisor now\nrecords the failure in that workspace's job ledger (built from the\nregistry entry) instead of only in memory, so ig --status shows it and\nit survives a daemon restart.",
+          "timestamp": "2026-08-23T11:41:18-04:00",
+          "tree_id": "cc03ca86dc46be66a43624c4b67a877c0073d3fa",
+          "url": "https://github.com/bvolpato/ivygrep/commit/5d58573c2cf5f9da3c7868cede45f5a3e8485133"
+        },
+        "date": 1787502131244,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "indexer/index_small_workspace",
+            "value": 52116.96,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/incremental_reindex_no_change",
+            "value": 3571.37,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer/worktree_overlay_one_file_delta",
+            "value": 57380.56,
+            "unit": "µs"
+          },
+          {
+            "name": "indexer_bulk/fresh_index_30k_chunks",
+            "value": 217573,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_small_file",
+            "value": 13.45,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_rust_100_fns",
+            "value": 1952.1,
+            "unit": "µs"
+          },
+          {
+            "name": "chunking/chunk_python_100_fns",
+            "value": 1584.99,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/scan_500_files",
+            "value": 11650.25,
+            "unit": "µs"
+          },
+          {
+            "name": "merkle/diff_500_files_no_change",
+            "value": 11257.44,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_single",
+            "value": 2.04,
+            "unit": "µs"
+          },
+          {
+            "name": "embedding/hash_embed_batch_100",
+            "value": 129.57,
+            "unit": "µs"
+          },
+          {
+            "name": "search/hybrid_search_200_files",
+            "value": 5505.8,
+            "unit": "µs"
+          },
+          {
+            "name": "search/literal_search_200_files",
+            "value": 1656.01,
+            "unit": "µs"
+          },
+          {
+            "name": "regex_search/regex_200_files",
+            "value": 1315.35,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_simple_symbol_1000_files",
+            "value": 3170.69,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/hybrid_complex_phrase_1000_files",
+            "value": 3389.21,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/bounded_rerank_100_candidates_1000_files",
+            "value": 3730.52,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/literal_simple_symbol_1000_files",
+            "value": 728.06,
+            "unit": "µs"
+          },
+          {
+            "name": "base_search_patterns/regex_symbol_1000_files",
+            "value": 2301.96,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/upsert_1000_vectors",
+            "value": 470805.95,
+            "unit": "µs"
+          },
+          {
+            "name": "vector_store/search_in_1000_vectors",
+            "value": 186.4,
+            "unit": "µs"
+          },
+          {
+            "name": "hash_vector_build/ingest_5k_hash_vectors",
+            "value": 99720.03,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_one_file_change_10k_chunks",
+            "value": 17449.51,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/incremental_100_file_burst_10k_chunks",
+            "value": 95623.89,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/quick_health_cached_10k_chunks",
+            "value": 334.66,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k",
+            "value": 825.45,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/vector_search_in_50k_hot",
+            "value": 22.02,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/neural_vector_search_in_50k_hot",
+            "value": 61.6,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_top_50_in_50k_hot",
+            "value": 4610.84,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/500",
+            "value": 100.77,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/5000",
+            "value": 501.84,
+            "unit": "µs"
+          },
+          {
+            "name": "critical_journeys/exact_filtered_vector_subset_top_50_in_50k_hot/25000",
+            "value": 2315.65,
             "unit": "µs"
           }
         ]
