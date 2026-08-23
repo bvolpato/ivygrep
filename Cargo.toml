@@ -74,7 +74,7 @@ syntect = { version = "5.3.0", default-features = false, features = [
 arboard = "3.4.0"
 libc = "0.2"
 lru = "0.18.2"
-# 0.26.12 changes malformed-source recovery and regresses public-code retrieval.
+# Keep exact-pinned because parser recovery changes can affect public-code retrieval.
 tree-sitter = "=0.26.12"
 tree-sitter-rust = "0.24.1"
 tree-sitter-python = "0.25.0"
