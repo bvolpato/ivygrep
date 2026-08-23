@@ -21,55 +21,63 @@ test("searches an indexed workspace and opens the result in the viewer", async (
 });
 
 test("ignores late search results after folder navigation", async ({ page }) => {
+  // Streams are told apart by URL, not by creation order, so the test does not
+  // depend on how quickly the runner processes the clicks:
+  // - the first search (no `scope`) holds its results until the test releases
+  //   them after navigation, standing in for a slow backend;
+  // - the re-run after navigating into `src` (`scope=src`) answers at once.
   await page.addInitScript(() => {
-    let streamCount = 0;
-    class LateEventSource extends EventTarget {
+    const hit = (filePath: string) => JSON.stringify({
+      hits: [{ file_path: filePath, start_line: 1, end_line: 1, score: 1, preview: `${filePath} result` }],
+      elapsed_ms: 1
+    });
+    class ScriptedEventSource extends EventTarget {
       onerror: ((event: Event) => void) | null = null;
 
-      constructor(_url: string | URL, _options?: EventSourceInit) {
+      constructor(url: string | URL, _options?: EventSourceInit) {
         super();
-        streamCount += 1;
-        if (streamCount === 1) {
+        const params = new URL(String(url), window.location.origin).searchParams;
+        if (params.get("q") !== "delayed result") {
           window.setTimeout(() => {
             this.dispatchEvent(new MessageEvent("done", { data: JSON.stringify({ ok: true }) }));
           }, 0);
           return;
         }
-        window.setTimeout(() => {
-          this.dispatchEvent(new MessageEvent("results", {
-            data: JSON.stringify({
-              hits: [{
-                file_path: "stale.ts",
-                start_line: 1,
-                end_line: 1,
-                score: 1,
-                preview: "stale result"
-              }],
-              elapsed_ms: 1
-            })
-          }));
-        }, 100);
+        if (params.get("scope") === "src") {
+          window.setTimeout(() => {
+            this.dispatchEvent(new MessageEvent("results", { data: hit("src/fresh.ts") }));
+            this.dispatchEvent(new MessageEvent("done", { data: JSON.stringify({ ok: true }) }));
+          }, 0);
+          return;
+        }
+        (window as unknown as { __releaseLateResults?: () => boolean }).__releaseLateResults = () => {
+          this.dispatchEvent(new MessageEvent("results", { data: hit("stale.ts") }));
+          this.dispatchEvent(new MessageEvent("done", { data: JSON.stringify({ ok: true }) }));
+          return true;
+        };
       }
 
       close(): void {}
     }
 
-    Object.defineProperty(window, "EventSource", { value: LateEventSource });
+    Object.defineProperty(window, "EventSource", { value: ScriptedEventSource });
   });
   await page.goto("/");
   await expect(page.locator("#tree .tree-row.folder").filter({ hasText: "src" })).toBeVisible();
-  await page.route("**/api/tree**", async (route) => {
-    const url = new URL(route.request().url());
-    if (url.searchParams.get("path") === "src") {
-      await new Promise((resolve) => setTimeout(resolve, 500));
-    }
-    await route.continue();
-  });
 
   await page.locator("#query").fill("delayed result");
   await page.getByRole("button", { name: "Search", exact: true }).click();
-  await page.locator("#tree .tree-row.folder").filter({ hasText: "src" }).click();
+  await expect(page.locator("#summary")).toHaveText("Searching...");
 
-  await page.waitForTimeout(200);
+  await page.locator("#tree .tree-row.folder").filter({ hasText: "src" }).click();
+  await expect(page.locator("#scope-label")).toHaveText("Scope: src");
+  await expect(page.locator("#results .file-path").filter({ hasText: "fresh.ts" })).toHaveCount(1);
+
+  // Only now does the superseded search deliver; the UI must drop it.
+  const released = await page.evaluate(() =>
+    (window as unknown as { __releaseLateResults?: () => boolean }).__releaseLateResults?.() ?? false
+  );
+  expect(released).toBe(true);
   await expect(page.locator("#results .file-path").filter({ hasText: "stale.ts" })).toHaveCount(0);
+  await expect(page.locator("#results .file-path").filter({ hasText: "fresh.ts" })).toHaveCount(1);
 });
