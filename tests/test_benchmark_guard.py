@@ -148,7 +148,10 @@ class BenchmarkGuardCheckoutTests(unittest.TestCase):
         self.assertEqual(measured, 17.0)
 
     def run_guard(
-        self, measurements: list[float], output_path: Path | None = None
+        self,
+        measurements: list[float],
+        output_path: Path | None = None,
+        extra_args: list[str] | None = None,
     ) -> tuple[int, mock.Mock]:
         measure = mock.Mock(side_effect=measurements)
         argv = [
@@ -157,6 +160,7 @@ class BenchmarkGuardCheckoutTests(unittest.TestCase):
             "baseline",
             "--threshold",
             "1.15",
+            *(extra_args or []),
         ]
         if output_path is not None:
             argv.extend(["--output", str(output_path)])
@@ -189,6 +193,33 @@ class BenchmarkGuardCheckoutTests(unittest.TestCase):
         result, _ = self.run_guard([20.0, 10.0, 10.0, 20.0])
 
         self.assertEqual(result, 1)
+
+    def test_budget_mode_ignores_the_paired_ratio(self) -> None:
+        # 1.79x on identical code is what shared runners produce for a 3 ms
+        # bench; under a budget the guard records it and passes.
+        result, measure = self.run_guard(
+            [5_200_000.0, 2_900_000.0], extra_args=["--max-median-ms", "25"]
+        )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(measure.call_count, 2)
+
+    def test_budget_mode_fails_only_when_the_head_confirms_over_budget(self) -> None:
+        confirmed, measure = self.run_guard(
+            [30_000_000.0, 3_000_000.0, 31_000_000.0],
+            extra_args=["--max-median-ms", "25"],
+        )
+        self.assertEqual(confirmed, 1)
+        self.assertEqual(
+            [call.args[1] for call in measure.call_args_list],
+            ["current", "baseline", "current"],
+        )
+
+        recovered, _ = self.run_guard(
+            [30_000_000.0, 3_000_000.0, 4_000_000.0],
+            extra_args=["--max-median-ms", "25"],
+        )
+        self.assertEqual(recovered, 0)
 
     def test_writes_machine_readable_result(self) -> None:
         output_path = self.repo / "artifacts" / "guard.json"

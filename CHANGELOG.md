@@ -29,6 +29,7 @@ All notable changes to ivygrep are documented in this file.
 - Index format bumped to v22; existing indexes rebuild on first use.
 
 ### Testing
+- The `incremental_reindex_no_change` guard uses an absolute budget (`benchmark_guard.py --max-median-ms 25`, confirmed by a second head measurement) instead of a paired ratio: identical code measured 1.5-1.8x apart within one shared-runner job for this 3 ms benchmark, so the ratio carried no signal, while a fast path that starts doing real work still blows the budget. The larger benches keep their ratio guards, and the neural-tier ANN graph (`neural_vector_search_in_50k_hot`) is guarded alongside the hash-tier one.
 - Added `scripts/bench_file_localization.py` and a curated 30-task public set (`benchmarks/public/file_localization_tasks.jsonl`, issue text to files the merged fix touched across Python, Rust, and TypeScript repositories) reporting File Acc@k, Recall@k, MRR, and context-pack precision/recall with a lexical baseline delta; hash-only results are committed under `docs/benchmarks/file-localization-hash-2026-08-21.json`.
 - `scripts/bench_context_retrieval.py` now scores a label-derived `constant-topk` baseline next to ivygrep and reports it in the relevance workflow; `--min-margin-over-baseline` can enforce a margin once the 12-task fixture is large enough to make that gate stable.
 - Public code-retrieval and challenge reports state corpus sampling next to the headline numbers (documents indexed versus full CoIR corpus size per task).
