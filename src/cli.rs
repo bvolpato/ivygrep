@@ -797,6 +797,9 @@ async fn run_status(json: bool) -> Result<()> {
                         "{prefix}  Watch:  {}",
                         "◐ configured, watcher offline".yellow().bold()
                     );
+                    if let Some(error) = &ws.watcher_error {
+                        println!("{prefix}          {}", error.dimmed());
+                    }
                 } else {
                     println!("{prefix}  Watch:  {}", "○ static".bright_black());
                 }
@@ -1426,23 +1429,44 @@ async fn run_query(cli: Cli, context_args: Option<ContextArgs>) -> Result<()> {
                                     && !status.watcher_alive
                             });
                         if watcher_offline {
-                            tracing::warn!(
-                                "daemon online but watcher offline for {}, restarting",
-                                workspace.root.display()
-                            );
-                            restart_daemon().await;
-                            search_via_daemon = daemon::request::<fn(String, usize, usize)>(
-                                &DaemonRequest::RuntimeStatus {
-                                    path: query_path_opt.clone(),
+                            // The daemon is healthy; only this workspace's
+                            // watcher is down. Ask the daemon to bring it
+                            // back rather than restarting the whole process:
+                            // a restart drops every other workspace's watcher
+                            // and in-flight work, and when the watcher cannot
+                            // start (inotify limits) or its ledger record was
+                            // wiped by a rebuild, it would repeat on every
+                            // query.
+                            let reason = runtime_status
+                                .as_ref()
+                                .and_then(|status| status.watcher_error.clone())
+                                .map(|error| format!(": {error}"))
+                                .unwrap_or_default();
+                            match daemon::request::<fn(String, usize, usize)>(
+                                &DaemonRequest::EnsureWatcher {
+                                    path: workspace.root.clone(),
                                 },
-                                true,
+                                false,
                                 None,
                             )
-                            .await?
-                            .is_some();
-                        } else {
-                            search_via_daemon = true;
+                            .await
+                            {
+                                Ok(Some(DaemonResponse::Error { message })) => tracing::warn!(
+                                    "watcher offline for {}: {message}",
+                                    workspace.root.display()
+                                ),
+                                Ok(Some(_)) => tracing::info!(
+                                    "watcher offline for {}{reason}; daemon is restarting it",
+                                    workspace.root.display()
+                                ),
+                                Ok(None) => {}
+                                Err(err) => tracing::warn!(
+                                    "could not ask the daemon to restart the watcher for {}: {err:#}",
+                                    workspace.root.display()
+                                ),
+                            }
                         }
+                        search_via_daemon = true;
                     } else {
                         tracing::warn!(
                             "daemon version mismatch: daemon={:?} cli={}, restarting",
