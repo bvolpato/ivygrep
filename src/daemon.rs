@@ -2196,7 +2196,7 @@ fn supervise_watchers(state: &DaemonState) {
         }
     };
 
-    for metadata in workspaces {
+    for (index_dir, metadata) in workspaces {
         if !metadata.watch_enabled
             || metadata.last_indexed_at_unix.is_none()
             || state.watcher_registered(&metadata.id)
@@ -2207,7 +2207,17 @@ fn supervise_watchers(state: &DaemonState) {
         let workspace = match Workspace::resolve(&metadata.root) {
             Ok(workspace) => workspace,
             Err(err) => {
+                // No resolved workspace (the root is missing or unreadable),
+                // but the ledger lives under the index directory: record the
+                // failure where `ig --status` and the next daemon read it.
                 let message = format!("{err:#}");
+                let ledger_workspace = Workspace::ledger_only(index_dir, &metadata);
+                let _ = jobs::finish_job(
+                    &ledger_workspace,
+                    JobKind::Watcher,
+                    "failed",
+                    Some(message.clone()),
+                );
                 state.record_watcher_failure(&metadata.id, message.clone());
                 warn!(
                     "failed to restore watcher for {}: {message}",
@@ -6449,6 +6459,46 @@ mod tests {
                 .map(|entry| entry.failures),
             Some(1)
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn supervisor_records_unresolvable_root_in_the_ledger() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn gone() {}\n").unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let metadata = WorkspaceMetadata {
+            id: workspace.id.clone(),
+            root: workspace.root.clone(),
+            created_at_unix: 1,
+            last_indexed_at_unix: Some(1),
+            watch_enabled: true,
+            skip_gitignore: false,
+            index_generation: 0,
+        };
+        workspace.ensure_dirs().unwrap();
+        workspace.write_metadata(&metadata).unwrap();
+        drop(repo);
+
+        let state = test_state();
+        supervise_watchers(&state);
+
+        let record = jobs::job_status(&workspace, JobKind::Watcher, 15)
+            .record
+            .expect("missing root recorded in the job ledger");
+        assert_eq!(record.phase, "failed");
+        assert!(record.last_error.is_some());
+        assert!(!workspace.is_watcher_alive());
+        assert!(state.watcher_backoff_error(&workspace.id).is_some());
+        let status = crate::workspace::list_workspaces()
+            .unwrap()
+            .into_iter()
+            .find(|status| status.id == workspace.id)
+            .expect("workspace listed");
+        assert_eq!(status.watcher_error, record.last_error);
     }
 
     #[tokio::test]

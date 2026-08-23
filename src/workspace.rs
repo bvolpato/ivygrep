@@ -299,6 +299,19 @@ impl Workspace {
         git_main_worktree_root(&self.root).filter(|main| *main != self.root)
     }
 
+    /// A workspace handle for job-ledger access only, built from a registry
+    /// entry without resolving the root (which may be missing). It carries no
+    /// repository or worktree information; do not index or search through it.
+    pub(crate) fn ledger_only(index_dir: PathBuf, metadata: &WorkspaceMetadata) -> Self {
+        Self {
+            id: metadata.id.clone(),
+            root: metadata.root.clone(),
+            index_dir,
+            repo_id: None,
+            base_index_dir: None,
+        }
+    }
+
     pub fn ensure_dirs(&self) -> Result<()> {
         fs::create_dir_all(&self.index_dir)?;
         Ok(())
@@ -1696,14 +1709,15 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
     Ok(by_id.into_values().collect())
 }
 
-/// Registered workspace metadata without the per-index size and count probes
-/// that `list_workspaces` performs; cheap enough for periodic daemon checks.
-pub(crate) fn list_workspace_metadata() -> Result<Vec<WorkspaceMetadata>> {
+/// Registered workspaces as `(index_dir, metadata)` without the per-index size
+/// and count probes that `list_workspaces` performs; cheap enough for periodic
+/// daemon checks.
+pub(crate) fn list_workspace_metadata() -> Result<Vec<(PathBuf, WorkspaceMetadata)>> {
     let WorkspaceRegistry { entries, warnings } = workspace_registry()?;
     for warning in warnings {
         tracing::warn!("{warning}");
     }
-    Ok(entries.into_iter().map(|(_, metadata)| metadata).collect())
+    Ok(entries)
 }
 
 pub fn list_workspace_roots() -> Result<Vec<PathBuf>> {

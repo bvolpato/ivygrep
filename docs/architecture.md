@@ -323,8 +323,8 @@ request IDs and explicit cancellation for hybrid, literal, and regex searches;
 version 7 adds the fire-and-forget `StartIndex` request (answered with
 `IndexStarted`) and the `index_in_flight` runtime-status field. Cancellation
 also removes queued searches from daemon CPU backpressure. Existing requests
-cover version/status, indexing, Web startup, workspace removal, restart,
-progress, and structured errors. A client that reaches a daemon speaking an
+cover version/status, indexing, Web startup, workspace removal, watcher
+recovery (`EnsureWatcher`), restart, progress, and structured errors. A client that reaches a daemon speaking an
 older protocol (for example a development build with the same build version)
 gets a structured version error from the `Version` probe and restarts it.
 
