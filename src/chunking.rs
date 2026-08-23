@@ -756,6 +756,52 @@ fn try_tree_sitter_chunk_source(
     )
 }
 
+/// Parse budget measured in this thread's CPU time where the platform exposes
+/// it, wall clock elsewhere. A thread that is descheduled on a busy machine
+/// (or under a parallel test run) must not lose its parse to the budget and
+/// silently degrade to heuristic chunks; a pathological input still hits the
+/// budget because it burns CPU the whole time.
+struct ParseBudget {
+    limit: std::time::Duration,
+    wall_start: std::time::Instant,
+    cpu_start: Option<std::time::Duration>,
+}
+
+impl ParseBudget {
+    fn start(limit: std::time::Duration) -> Self {
+        Self {
+            limit,
+            wall_start: std::time::Instant::now(),
+            cpu_start: thread_cpu_time(),
+        }
+    }
+
+    fn exhausted(&self) -> bool {
+        let elapsed = match (self.cpu_start, thread_cpu_time()) {
+            (Some(start), Some(now)) => now.saturating_sub(start),
+            _ => self.wall_start.elapsed(),
+        };
+        elapsed >= self.limit
+    }
+}
+
+#[cfg(unix)]
+fn thread_cpu_time() -> Option<std::time::Duration> {
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime only writes into the timespec we own for the
+    // duration of the call.
+    let rc = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    (rc == 0).then(|| std::time::Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32))
+}
+
+#[cfg(not(unix))]
+fn thread_cpu_time() -> Option<std::time::Duration> {
+    None
+}
+
 fn try_tree_sitter_chunk_source_with_timeout(
     rel_path: &Path,
     text: &str,
@@ -770,10 +816,10 @@ fn try_tree_sitter_chunk_source_with_timeout(
 
     // The production caller uses a 100ms budget to prevent hangs on massive
     // minified files. ParseOptions replaces timeout_micros in tree-sitter 0.26.
-    let start_time = std::time::Instant::now();
+    let budget = ParseBudget::start(parse_timeout);
     let mut parse_cancelled = false;
     let mut cb = |_state: &tree_sitter::ParseState| {
-        if start_time.elapsed() >= parse_timeout {
+        if budget.exhausted() {
             parse_cancelled = true;
             std::ops::ControlFlow::Break(())
         } else {
@@ -3306,7 +3352,9 @@ pub fn unsupported_dynamic_include() {}
         let chunks = chunk_source(Path::new("massive.json"), &pathological_json);
         let elapsed = start.elapsed().as_millis();
 
-        assert!(elapsed < 1000, "Chunking took too long: {}ms", elapsed);
+        // The budget is 100ms of CPU; the wall bound only has to prove the
+        // parse was cut short rather than hanging, even on a loaded runner.
+        assert!(elapsed < 5000, "Chunking took too long: {}ms", elapsed);
         assert!(
             !chunks.is_empty(),
             "Fallback chunker should have returned chunks"

@@ -394,6 +394,23 @@ mod tests {
         assert!(!daemon_pid_path().unwrap().exists());
     }
 
+    fn describe_lock_holders(path: &std::path::Path) -> String {
+        let lsof = std::process::Command::new("lsof")
+            .arg("--")
+            .arg(path)
+            .output()
+            .map(|output| {
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if stdout.is_empty() {
+                    format!("lsof reported no open handles (status {})", output.status)
+                } else {
+                    stdout
+                }
+            })
+            .unwrap_or_else(|err| format!("lsof unavailable: {err}"));
+        format!("pid {} in-process; {lsof}", std::process::id())
+    }
+
     #[test]
     #[serial]
     fn stale_socket_cleanup_requires_daemon_lock_ownership() {
@@ -411,7 +428,23 @@ mod tests {
         assert!(endpoint.exists(), "held daemon endpoint must be preserved");
 
         drop(daemon_lock);
-        assert!(cleanup_stale_socket().unwrap());
+        // The lock is only ever held briefly by a concurrent endpoint probe in
+        // this process (a failed connect runs the same cleanup); a holder that
+        // persists across the retries is the failure this test is about, and
+        // the failure names it so a CI flake is diagnosable from the log.
+        let mut cleaned = false;
+        for _ in 0..50 {
+            if cleanup_stale_socket().unwrap() {
+                cleaned = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            cleaned,
+            "released daemon lock must become acquirable; holders: {}",
+            describe_lock_holders(&crate::config::app_home().unwrap().join("daemon.lock"))
+        );
         assert!(
             !endpoint.exists(),
             "unowned stale endpoint should be removed"
