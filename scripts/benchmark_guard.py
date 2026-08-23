@@ -119,10 +119,23 @@ def main() -> int:
     parser.add_argument("--bench-target", default="indexer_bench")
     parser.add_argument("--bench-name", default="indexer/incremental_reindex_no_change")
     parser.add_argument("--threshold", type=float, default=1.15)
+    parser.add_argument(
+        "--max-median-ms",
+        type=float,
+        default=None,
+        help=(
+            "absolute budget for the head median; replaces the paired ratio for "
+            "benchmarks too small to compare reliably on shared runners (the "
+            "baseline is still measured for the report)"
+        ),
+    )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parent.parent
+    max_median_ns = (
+        args.max_median_ms * 1_000_000 if args.max_median_ms is not None else None
+    )
     ensure_clean_worktree(repo_root)
     original_checkout = current_checkout(repo_root)
     current_ref = output(["git", "rev-parse", "HEAD"], repo_root)
@@ -132,7 +145,27 @@ def main() -> int:
         baseline = measure(repo_root, args.baseline_ref, args.bench_target, args.bench_name)
         initial_ratio = ratio(current, baseline)
         confirmation = None
-        if initial_ratio > args.threshold:
+        if max_median_ns is not None:
+            # Budget mode: identical code has measured 1.5-1.8x apart within one
+            # job on shared runners for millisecond-scale benchmarks, so the
+            # paired ratio carries no signal there. The budget catches the
+            # regression class this guard exists for (the fast path doing real
+            # work) and a second head measurement rules out a single bad sample.
+            if current > max_median_ns:
+                print(
+                    f"{args.bench_name} exceeded its {args.max_median_ms:.2f} ms budget "
+                    "on the first pass; measuring the head again",
+                    file=sys.stderr,
+                )
+                confirmed_current = measure(
+                    repo_root, current_ref, args.bench_target, args.bench_name
+                )
+                confirmation = {
+                    "current_median_ns": confirmed_current,
+                    "baseline_median_ns": baseline,
+                    "ratio": ratio(confirmed_current, baseline),
+                }
+        elif initial_ratio > args.threshold:
             print(
                 f"{args.bench_name} exceeded the threshold on the first pass; "
                 "confirming in reverse order",
@@ -160,11 +193,30 @@ def main() -> int:
         "baseline_median_ns": baseline,
         "ratio": initial_ratio,
         "threshold": args.threshold,
+        "max_median_ms": args.max_median_ms,
         "confirmation": confirmation,
     }
     if args.output is not None:
         write_result(args.output, result)
     print(json.dumps(result, indent=2))
+
+    if max_median_ns is not None:
+        if confirmation is not None and confirmation["current_median_ns"] > max_median_ns:
+            print(
+                f"{args.bench_name} confirmed over budget at "
+                f"{confirmation['current_median_ns'] / 1_000_000:.2f} ms, exceeding "
+                f"{args.max_median_ms:.2f} ms",
+                file=sys.stderr,
+            )
+            return 1
+        if confirmation is not None:
+            print(
+                f"{args.bench_name} was not confirmed over budget "
+                f"({current / 1_000_000:.2f} ms then "
+                f"{confirmation['current_median_ns'] / 1_000_000:.2f} ms)",
+                file=sys.stderr,
+            )
+        return 0
 
     if confirmation is not None and confirmation["ratio"] > args.threshold:
         print(

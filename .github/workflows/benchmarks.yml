@@ -83,7 +83,7 @@ jobs:
             --baseline-ref "$BENCHMARK_BASE_REF" \
             --bench-target indexer_bench \
             --bench-name indexer/incremental_reindex_no_change \
-            --threshold 1.15 \
+            --max-median-ms 25 \
             --output "$PAIRED_BENCHMARK_DIR/incremental-no-change.json"
           python3 scripts/benchmark_guard.py \
             --baseline-ref "$BENCHMARK_BASE_REF" \
@@ -103,6 +103,12 @@ jobs:
             --bench-name critical_journeys/vector_search_in_50k_hot \
             --threshold 1.20 \
             --output "$PAIRED_BENCHMARK_DIR/vector-search-hot.json"
+          python3 scripts/benchmark_guard.py \
+            --baseline-ref "$BENCHMARK_BASE_REF" \
+            --bench-target indexer_bench \
+            --bench-name critical_journeys/neural_vector_search_in_50k_hot \
+            --threshold 1.20 \
+            --output "$PAIRED_BENCHMARK_DIR/neural-vector-search-hot.json"
           python3 scripts/benchmark_guard.py \
             --baseline-ref "$BENCHMARK_BASE_REF" \
             --bench-target indexer_bench \
@@ -201,7 +207,7 @@ jobs:
             echo "| Benchmark | Base | Head | Ratio | Limit |"
             echo "| --- | ---: | ---: | ---: | ---: |"
             for result in "$PAIRED_BENCHMARK_DIR"/*.json; do
-              jq -r '"| `\(.bench)` | \(.baseline_median_ns / 1000000 | . * 100 | round / 100) ms | \(.current_median_ns / 1000000 | . * 100 | round / 100) ms | \(.ratio * 1000 | round / 1000)x | \(.threshold)x |"' "$result"
+              jq -r '"| `\(.bench)` | \((.confirmation.baseline_median_ns // .baseline_median_ns) / 1000000 | . * 100 | round / 100) ms | \((.confirmation.current_median_ns // .current_median_ns) / 1000000 | . * 100 | round / 100) ms | \((.confirmation.ratio // .ratio) * 1000 | round / 1000)x | \(if .max_median_ms then "head <= \(.max_median_ms) ms" else "\(.threshold)x" end) |"' "$result"
             done
           } >> "$GITHUB_STEP_SUMMARY"
 
