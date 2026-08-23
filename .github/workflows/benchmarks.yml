@@ -207,7 +207,7 @@ jobs:
             echo "| Benchmark | Base | Head | Ratio | Limit |"
             echo "| --- | ---: | ---: | ---: | ---: |"
             for result in "$PAIRED_BENCHMARK_DIR"/*.json; do
-              jq -r '"| `\(.bench)` | \(.baseline_median_ns / 1000000 | . * 100 | round / 100) ms | \(.current_median_ns / 1000000 | . * 100 | round / 100) ms | \(.ratio * 1000 | round / 1000)x | \(if .max_median_ms then "head <= \(.max_median_ms) ms" else "\(.threshold)x" end) |"' "$result"
+              jq -r '"| `\(.bench)` | \((.confirmation.baseline_median_ns // .baseline_median_ns) / 1000000 | . * 100 | round / 100) ms | \((.confirmation.current_median_ns // .current_median_ns) / 1000000 | . * 100 | round / 100) ms | \((.confirmation.ratio // .ratio) * 1000 | round / 1000)x | \(if .max_median_ms then "head <= \(.max_median_ms) ms" else "\(.threshold)x" end) |"' "$result"
             done
           } >> "$GITHUB_STEP_SUMMARY"
 
