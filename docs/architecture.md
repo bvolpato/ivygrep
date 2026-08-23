@@ -287,6 +287,16 @@ Watchers coalesce bursts and cap continuous-event starvation. Successful changes
 invalidate only cache entries involving affected workspaces. No-op indexing
 preserves valid cache entries.
 
+Watcher health is the daemon's job, not the client's. At startup and every 30
+seconds a supervisor registers a watcher for each enabled, indexed workspace
+that has none; a registration that fails (inotify limits, a missing root) is
+recorded in the workspace job ledger and retried with exponential backoff (30 s
+doubling to 15 min). The watcher heartbeat re-creates its ledger record when an
+index rebuild wiped `job.json`, so a running watcher never reads as offline. A
+client that sees `watch_enabled` without `watcher_alive` sends `EnsureWatcher`;
+the daemon answers immediately and registers in the background. Clients only
+restart the daemon on a protocol version mismatch.
+
 Search responses never wait on background enhancement bookkeeping. After the
 hits are computed, the daemon schedules a blocking task that checks whether
 hash or neural enhancement is needed and triggers the worker, at most once per

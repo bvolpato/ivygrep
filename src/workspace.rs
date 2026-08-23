@@ -108,6 +108,9 @@ pub struct WorkspaceStatus {
     pub watch_enabled: bool,
     #[serde(default)]
     pub watcher_alive: bool,
+    /// Last watcher start failure recorded in the job ledger while offline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watcher_error: Option<String>,
     pub chunk_count: u64,
     pub file_count: u64,
     pub index_size_bytes: u64,
@@ -1547,6 +1550,14 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
         } else {
             is_active_pid_alive(&index_dir.join(".watcher.pid"))
         };
+        let watcher_error = (!watcher_alive)
+            .then(|| {
+                watcher_status
+                    .record
+                    .as_ref()
+                    .and_then(|record| record.last_error.clone())
+            })
+            .flatten();
 
         let enhancement_status = jobs::job_status_at(
             &ledger,
@@ -1645,6 +1656,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
                 last_indexed_at_unix: metadata.last_indexed_at_unix,
                 watch_enabled: metadata.watch_enabled,
                 watcher_alive,
+                watcher_error,
                 chunk_count,
                 file_count,
                 index_size_bytes,
@@ -1682,6 +1694,16 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
     }
 
     Ok(by_id.into_values().collect())
+}
+
+/// Registered workspace metadata without the per-index size and count probes
+/// that `list_workspaces` performs; cheap enough for periodic daemon checks.
+pub(crate) fn list_workspace_metadata() -> Result<Vec<WorkspaceMetadata>> {
+    let WorkspaceRegistry { entries, warnings } = workspace_registry()?;
+    for warning in warnings {
+        tracing::warn!("{warning}");
+    }
+    Ok(entries.into_iter().map(|(_, metadata)| metadata).collect())
 }
 
 pub fn list_workspace_roots() -> Result<Vec<PathBuf>> {

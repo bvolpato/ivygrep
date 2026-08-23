@@ -279,7 +279,6 @@ struct WatchRegistration {
     watcher: RecommendedWatcher,
     control: Arc<WatchControl>,
     event_filter: Arc<Mutex<WatchEventFilter>>,
-    job_nonce: Option<String>,
     external_git_common_dir: Option<PathBuf>,
     external_git_watch: Option<PathBuf>,
 }
@@ -317,6 +316,10 @@ struct WatchControl {
     pending_events: AtomicU64,
     coalesced_events: AtomicU64,
     pending_work: Mutex<PendingWatchWork>,
+    /// Nonce of this watcher's job-ledger record. Shared so the heartbeat can
+    /// re-create the record (and rotate the nonce) when the ledger is wiped
+    /// by an index rebuild while the watcher keeps running.
+    job_nonce: Mutex<Option<String>>,
 }
 
 impl WatchControl {
@@ -332,7 +335,16 @@ impl WatchControl {
             pending_events: AtomicU64::new(0),
             coalesced_events: AtomicU64::new(0),
             pending_work: Mutex::new(PendingWatchWork::default()),
+            job_nonce: Mutex::new(None),
         }
+    }
+
+    fn job_nonce(&self) -> Option<String> {
+        self.job_nonce.lock().clone()
+    }
+
+    fn set_job_nonce(&self, nonce: Option<String>) {
+        *self.job_nonce.lock() = nonce;
     }
 
     fn mark_paths_dirty(&self, paths: impl IntoIterator<Item = PathBuf>) {
@@ -1180,6 +1192,32 @@ pub(crate) struct DaemonState {
     /// with no backpressure. See #58.
     cpu_permits: Arc<tokio::sync::Semaphore>,
     web_server: Arc<Mutex<Option<WebServerRuntime>>>,
+    /// Watcher registrations that failed, per workspace id, with the retry
+    /// backoff that keeps a broken watcher from being retried on every
+    /// client request.
+    watcher_recovery: Arc<Mutex<HashMap<String, WatcherRecovery>>>,
+}
+
+/// First retry delay after a failed watcher registration; doubles per
+/// consecutive failure up to [`WATCHER_RETRY_MAX`].
+const WATCHER_RETRY_BASE: Duration = Duration::from_secs(30);
+const WATCHER_RETRY_MAX: Duration = Duration::from_secs(15 * 60);
+/// How often the daemon looks for enabled, indexed workspaces without a live
+/// watcher (startup failures, roots that reappeared, raised inotify limits).
+const WATCHER_SUPERVISOR_INTERVAL: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone)]
+struct WatcherRecovery {
+    failures: u32,
+    next_attempt_at: std::time::Instant,
+    last_error: String,
+}
+
+fn watcher_retry_delay(failures: u32) -> Duration {
+    let exponent = failures.saturating_sub(1).min(16);
+    WATCHER_RETRY_BASE
+        .checked_mul(1u32 << exponent)
+        .map_or(WATCHER_RETRY_MAX, |delay| delay.min(WATCHER_RETRY_MAX))
 }
 
 struct WebServerRuntime {
@@ -1199,6 +1237,52 @@ fn create_search_model() -> Arc<dyn EmbeddingModel> {
 }
 
 impl DaemonState {
+    fn watcher_registered(&self, workspace_id: &str) -> bool {
+        self.watchers.lock().contains_key(workspace_id)
+    }
+
+    /// The error to report instead of attempting another registration while
+    /// the workspace's watcher is inside its retry backoff window.
+    fn watcher_backoff_error(&self, workspace_id: &str) -> Option<String> {
+        let recovery = self.watcher_recovery.lock();
+        let entry = recovery.get(workspace_id)?;
+        let remaining = entry
+            .next_attempt_at
+            .checked_duration_since(std::time::Instant::now())?;
+        Some(format!(
+            "{} (next watcher retry in {}s)",
+            entry.last_error,
+            remaining.as_secs().max(1)
+        ))
+    }
+
+    fn watcher_last_error(&self, workspace_id: &str) -> Option<String> {
+        self.watcher_recovery
+            .lock()
+            .get(workspace_id)
+            .map(|entry| entry.last_error.clone())
+    }
+
+    fn record_watcher_failure(&self, workspace_id: &str, error: String) -> u32 {
+        let mut recovery = self.watcher_recovery.lock();
+        let failures = recovery
+            .get(workspace_id)
+            .map_or(1, |entry| entry.failures.saturating_add(1));
+        recovery.insert(
+            workspace_id.to_string(),
+            WatcherRecovery {
+                failures,
+                next_attempt_at: std::time::Instant::now() + watcher_retry_delay(failures),
+                last_error: error,
+            },
+        );
+        failures
+    }
+
+    fn clear_watcher_failure(&self, workspace_id: &str) {
+        self.watcher_recovery.lock().remove(workspace_id);
+    }
+
     pub(crate) async fn acquire_cpu_permit(&self) -> Option<tokio::sync::OwnedSemaphorePermit> {
         self.cpu_permits.clone().acquire_owned().await.ok()
     }
@@ -1957,6 +2041,7 @@ fn create_daemon_state() -> DaemonState {
         query_result_cache_enabled: config::query_result_cache_enabled(),
         cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
         web_server: Arc::new(Mutex::new(None)),
+        watcher_recovery: Arc::new(Mutex::new(HashMap::new())),
     }
 }
 
@@ -1989,9 +2074,8 @@ async fn run_daemon_inner() -> Result<()> {
     let state = create_daemon_state();
     if std::env::var_os("IVYGREP_SKIP_WATCHER_RESTORE").is_none() {
         let restore_state = state.clone();
-        tokio::spawn(async move {
-            restore_configured_watchers(&restore_state);
-        });
+        tokio::task::spawn_blocking(move || restore_configured_watchers(&restore_state));
+        spawn_watcher_supervisor(state.clone());
     }
 
     // Graceful shutdown on SIGTERM/SIGINT (e.g. service stop): stop watchers
@@ -2095,20 +2179,44 @@ fn active_web_addr(state: &DaemonState) -> Option<SocketAddr> {
 }
 
 fn restore_configured_watchers(state: &DaemonState) {
-    let workspaces = match list_workspaces() {
+    supervise_watchers(state);
+}
+
+/// Registers a watcher for every enabled, indexed workspace that has none,
+/// honoring each workspace's retry backoff. Runs at startup and then every
+/// [`WATCHER_SUPERVISOR_INTERVAL`], so a watcher that failed to start (inotify
+/// limits, a root that was temporarily missing) comes back without anyone
+/// restarting the daemon.
+fn supervise_watchers(state: &DaemonState) {
+    let workspaces = match crate::workspace::list_workspace_metadata() {
         Ok(workspaces) => workspaces,
         Err(err) => {
-            warn!("failed to enumerate workspaces for watcher restore: {err:#}");
+            warn!("failed to enumerate workspaces for watcher supervision: {err:#}");
             return;
         }
     };
 
-    for workspace in workspaces {
-        if !workspace.watch_enabled || workspace.last_indexed_at_unix.is_none() {
+    for metadata in workspaces {
+        if !metadata.watch_enabled
+            || metadata.last_indexed_at_unix.is_none()
+            || state.watcher_registered(&metadata.id)
+            || state.watcher_backoff_error(&metadata.id).is_some()
+        {
             continue;
         }
-
-        if let Err(err) = register_watcher(state, &workspace.root) {
+        let workspace = match Workspace::resolve(&metadata.root) {
+            Ok(workspace) => workspace,
+            Err(err) => {
+                let message = format!("{err:#}");
+                state.record_watcher_failure(&metadata.id, message.clone());
+                warn!(
+                    "failed to restore watcher for {}: {message}",
+                    metadata.root.display()
+                );
+                continue;
+            }
+        };
+        if let Err(err) = ensure_watcher(state, &workspace) {
             warn!(
                 "failed to restore watcher for {}: {err:#}",
                 workspace.root.display()
@@ -2117,11 +2225,46 @@ fn restore_configured_watchers(state: &DaemonState) {
     }
 }
 
+fn spawn_watcher_supervisor(state: DaemonState) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(WATCHER_SUPERVISOR_INTERVAL).await;
+            let state = state.clone();
+            let _ = tokio::task::spawn_blocking(move || supervise_watchers(&state)).await;
+        }
+    });
+}
+
+/// Registers (or refreshes) the watcher for `workspace`, recording a failure
+/// in the job ledger and the in-memory backoff so the next attempt waits.
+/// Callers already inside the backoff window get the last error back without
+/// touching the filesystem.
+fn ensure_watcher(state: &DaemonState, workspace: &Workspace) -> Result<()> {
+    if let Some(error) = state.watcher_backoff_error(&workspace.id) {
+        anyhow::bail!("{error}");
+    }
+    match register_watcher(state, &workspace.root) {
+        Ok(()) => {
+            state.clear_watcher_failure(&workspace.id);
+            Ok(())
+        }
+        Err(err) => {
+            let message = format!("{err:#}");
+            let failures = state.record_watcher_failure(&workspace.id, message.clone());
+            let _ = jobs::finish_job(workspace, JobKind::Watcher, "failed", Some(message));
+            Err(err.context(format!(
+                "watcher registration failed ({failures} consecutive attempt{})",
+                if failures == 1 { "" } else { "s" }
+            )))
+        }
+    }
+}
+
 fn stop_watcher(workspace: &Workspace, registration: WatchRegistration) {
     registration.control.active.store(false, Ordering::Relaxed);
     registration.control.notify.notify_waiters();
     registration.control.shutdown.notify_one();
-    if let Some(nonce) = registration.job_nonce {
+    if let Some(nonce) = registration.control.job_nonce() {
         let _ = jobs::finish_job_if_current(workspace, JobKind::Watcher, &nonce, "stopped", None);
     } else {
         let _ = jobs::finish_job(workspace, JobKind::Watcher, "stopped", None);
@@ -2507,10 +2650,25 @@ async fn handle_request_with_cancellation(
                             .ok()
                             .flatten()
                             .is_some_and(|metadata| metadata.watch_enabled);
+                        let watcher_alive = workspace.is_watcher_alive();
+                        let watcher_error = (!watcher_alive)
+                            .then(|| {
+                                state.watcher_last_error(&workspace.id).or_else(|| {
+                                    jobs::job_status(
+                                        &workspace,
+                                        JobKind::Watcher,
+                                        jobs::WATCHER_HEARTBEAT_TTL_SECS,
+                                    )
+                                    .record
+                                    .and_then(|record| record.last_error)
+                                })
+                            })
+                            .flatten();
                         Some(WorkspaceRuntimeStatus {
                             id: workspace.id.clone(),
                             watch_enabled,
-                            watcher_alive: workspace.is_watcher_alive(),
+                            watcher_alive,
+                            watcher_error,
                             index_in_flight: state.index_in_flight(&workspace.id),
                         })
                     }
@@ -3368,6 +3526,33 @@ async fn handle_request_with_cancellation(
                 message: err.to_string(),
             },
         },
+        DaemonRequest::EnsureWatcher { path } => match Workspace::resolve(&path) {
+            Ok(workspace) => {
+                if state.watcher_registered(&workspace.id) && workspace.is_watcher_alive() {
+                    return DaemonResponse::Ack {
+                        message: format!("already watching {}", workspace.root.display()),
+                    };
+                }
+                if let Some(error) = state.watcher_backoff_error(&workspace.id) {
+                    return DaemonResponse::Error { message: error };
+                }
+                // Registration walks the tree on inotify platforms; answer now
+                // and let the job ledger carry the outcome.
+                let ensure_state = state.clone();
+                let root = workspace.root.clone();
+                tokio::task::spawn_blocking(move || {
+                    if let Err(err) = ensure_watcher(&ensure_state, &workspace) {
+                        warn!("failed to restart watcher for {}: {err:#}", root.display());
+                    }
+                });
+                DaemonResponse::Ack {
+                    message: format!("restarting watcher for {}", path.display()),
+                }
+            }
+            Err(err) => DaemonResponse::Error {
+                message: err.to_string(),
+            },
+        },
         DaemonRequest::Restart => {
             info!("restart requested, shutting down");
             stop_all_watchers(&state);
@@ -3457,21 +3642,21 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
     let job_nonce = jobs::start_job(&workspace, JobKind::Watcher, "idle", 1)
         .ok()
         .and_then(|record| record.nonce);
+    control.set_job_nonce(job_nonce);
     watchers.insert(
         workspace.id.clone(),
         WatchRegistration {
             watcher,
             control: control.clone(),
             event_filter,
-            job_nonce: job_nonce.clone(),
             external_git_common_dir,
             external_git_watch,
         },
     );
     drop(watchers);
 
-    spawn_watch_heartbeat(control.clone(), job_nonce.clone());
-    spawn_watch_worker(state.clone(), control, job_nonce);
+    spawn_watch_heartbeat(control.clone());
+    spawn_watch_worker(state.clone(), control);
 
     if let Ok(Some(mut metadata)) = workspace.read_metadata()
         && !metadata.watch_enabled
@@ -3628,13 +3813,31 @@ fn reconcile_external_git_watch(state: &DaemonState, workspace: &Workspace) {
     registration.external_git_watch = Some(target);
 }
 
-fn update_watcher_job(control: &WatchControl, job_nonce: Option<&str>, update: JobUpdate) {
-    if let Some(nonce) = job_nonce {
-        let _ = jobs::heartbeat_job_if_current(&control.workspace, JobKind::Watcher, nonce, update);
+fn update_watcher_job(control: &WatchControl, update: JobUpdate) {
+    let refreshed = control.job_nonce().is_some_and(|nonce| {
+        jobs::heartbeat_job_if_current(&control.workspace, JobKind::Watcher, &nonce, update.clone())
+            .ok()
+            .flatten()
+            .is_some()
+    });
+    if refreshed || !control.active.load(Ordering::Relaxed) {
+        return;
+    }
+    // The ledger lost this watcher's record (an index rebuild wipes the
+    // index directory, including `job.json`) while the watcher kept running.
+    // Re-create it under a fresh nonce so status and clients see the watcher
+    // as alive instead of treating it as crashed on every query.
+    let phase = update.phase.clone().unwrap_or_else(|| "idle".to_string());
+    if let Ok(record) = jobs::start_job(&control.workspace, JobKind::Watcher, phase, 1) {
+        if let Some(nonce) = record.nonce.as_deref() {
+            let _ =
+                jobs::heartbeat_job_if_current(&control.workspace, JobKind::Watcher, nonce, update);
+        }
+        control.set_job_nonce(record.nonce);
     }
 }
 
-fn spawn_watch_heartbeat(control: Arc<WatchControl>, job_nonce: Option<String>) {
+fn spawn_watch_heartbeat(control: Arc<WatchControl>) {
     tokio::spawn(async move {
         loop {
             if !control.active.load(Ordering::Relaxed) {
@@ -3660,13 +3863,13 @@ fn spawn_watch_heartbeat(control: Arc<WatchControl>, job_nonce: Option<String>) 
             update
                 .details
                 .insert("coalesced_events".to_string(), coalesced_events.to_string());
-            update_watcher_job(&control, job_nonce.as_deref(), update);
+            update_watcher_job(&control, update);
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
     });
 }
 
-fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>, job_nonce: Option<String>) {
+fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
     tokio::spawn(async move {
         let mut consecutive_failures = 0u32;
         loop {
@@ -3705,7 +3908,7 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>, job_nonce:
                 if let Some(error) = &pending_work.backend_error {
                     update.last_error = Some(Some(error.clone()));
                 }
-                update_watcher_job(&control, job_nonce.as_deref(), update);
+                update_watcher_job(&control, update);
 
                 let workspace = control.workspace.clone();
                 if matches!(&pending_work.change, WatchChange::FullReconciliation) {
@@ -3791,7 +3994,7 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>, job_nonce:
                             last_error: Some(None),
                             ..Default::default()
                         };
-                        update_watcher_job(&control, job_nonce.as_deref(), success);
+                        update_watcher_job(&control, success);
                     }
                     Err(err) => {
                         let error = format!("{err:#}");
@@ -3809,7 +4012,7 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>, job_nonce:
                             last_error: Some(Some(error.clone())),
                             ..Default::default()
                         };
-                        update_watcher_job(&control, job_nonce.as_deref(), failed);
+                        update_watcher_job(&control, failed);
                         control.requeue_failed_index(error);
                         tokio::select! {
                             () = tokio::time::sleep(watch_retry_delay(consecutive_failures)) => {},
@@ -3835,7 +4038,7 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>, job_nonce:
                 }),
                 ..Default::default()
             };
-            update_watcher_job(&control, job_nonce.as_deref(), idle);
+            update_watcher_job(&control, idle);
         }
     });
 }
@@ -4515,6 +4718,7 @@ where
         | DaemonRequest::RuntimeStatus { .. }
         | DaemonRequest::Status
         | DaemonRequest::ServeWeb { .. }
+        | DaemonRequest::EnsureWatcher { .. }
         | DaemonRequest::Restart => 5, // quick
         DaemonRequest::Search { .. }
         | DaemonRequest::RegexSearch { .. }
@@ -4676,6 +4880,7 @@ mod tests {
             query_result_cache_enabled: true,
             cpu_permits: Arc::new(tokio::sync::Semaphore::new(num_cpus::get().max(1))),
             web_server: Arc::new(Mutex::new(None)),
+            watcher_recovery: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -6168,6 +6373,136 @@ mod tests {
 
         assert!(response.is_none());
         assert_eq!(server.await.unwrap(), ["version", "restart"]);
+    }
+
+    #[test]
+    fn watcher_retry_delay_doubles_and_caps() {
+        assert_eq!(watcher_retry_delay(0), WATCHER_RETRY_BASE);
+        assert_eq!(watcher_retry_delay(1), WATCHER_RETRY_BASE);
+        assert_eq!(watcher_retry_delay(2), WATCHER_RETRY_BASE * 2);
+        assert_eq!(watcher_retry_delay(4), WATCHER_RETRY_BASE * 8);
+        assert_eq!(watcher_retry_delay(6), WATCHER_RETRY_MAX);
+        assert_eq!(watcher_retry_delay(40), WATCHER_RETRY_MAX);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn ensure_watcher_records_failure_and_backs_off() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn gone() {}\n").unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let metadata = WorkspaceMetadata {
+            id: workspace.id.clone(),
+            root: workspace.root.clone(),
+            created_at_unix: 1,
+            last_indexed_at_unix: Some(1),
+            watch_enabled: true,
+            skip_gitignore: false,
+            index_generation: 0,
+        };
+        workspace.ensure_dirs().unwrap();
+        workspace.write_metadata(&metadata).unwrap();
+        // A root that vanished cannot be watched; registration must fail.
+        drop(repo);
+
+        let state = test_state();
+        let first = ensure_watcher(&state, &workspace).unwrap_err().to_string();
+        assert!(first.contains("1 consecutive attempt"), "{first}");
+        assert!(!workspace.is_watcher_alive());
+        assert!(!state.watcher_registered(&workspace.id));
+
+        let ledger = jobs::job_status(&workspace, JobKind::Watcher, 15)
+            .record
+            .expect("failure recorded in the job ledger");
+        assert_eq!(ledger.phase, "failed");
+        assert!(ledger.last_error.is_some());
+        let status = crate::workspace::list_workspaces()
+            .unwrap()
+            .into_iter()
+            .find(|status| status.id == workspace.id)
+            .expect("workspace listed");
+        assert!(!status.watcher_alive);
+        assert_eq!(status.watcher_error, ledger.last_error);
+
+        // Inside the backoff window nothing is retried: the failure count
+        // stays at one and the caller gets the pending retry instead.
+        let second = ensure_watcher(&state, &workspace).unwrap_err().to_string();
+        assert!(second.contains("next watcher retry in"), "{second}");
+        assert_eq!(
+            state
+                .watcher_recovery
+                .lock()
+                .get(&workspace.id)
+                .map(|entry| entry.failures),
+            Some(1)
+        );
+        // The supervisor pass also skips it without touching the count.
+        supervise_watchers(&state);
+        assert_eq!(
+            state
+                .watcher_recovery
+                .lock()
+                .get(&workspace.id)
+                .map(|entry| entry.failures),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn watcher_heartbeat_recreates_ledger_record_after_index_wipe() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("lib.rs"), "pub fn watched() {}\n").unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        workspace.ensure_dirs().unwrap();
+
+        let control = Arc::new(WatchControl::new(workspace.clone()));
+        let nonce = jobs::start_job(&workspace, JobKind::Watcher, "idle", 1)
+            .unwrap()
+            .nonce;
+        control.set_job_nonce(nonce.clone());
+        assert!(workspace.is_watcher_alive());
+
+        // An index rebuild removes job.json while the watcher keeps running.
+        std::fs::remove_file(workspace.job_ledger_path()).unwrap();
+        assert!(!workspace.is_watcher_alive());
+
+        update_watcher_job(
+            &control,
+            JobUpdate {
+                phase: Some("idle".to_string()),
+                active: Some(true),
+                ..Default::default()
+            },
+        );
+        assert!(
+            workspace.is_watcher_alive(),
+            "heartbeat must re-create the record"
+        );
+        assert_ne!(
+            control.job_nonce(),
+            nonce,
+            "the record carries a fresh nonce"
+        );
+
+        // A stopped watcher never resurrects its record.
+        control.active.store(false, Ordering::Relaxed);
+        std::fs::remove_file(workspace.job_ledger_path()).unwrap();
+        update_watcher_job(
+            &control,
+            JobUpdate {
+                phase: Some("idle".to_string()),
+                active: Some(true),
+                ..Default::default()
+            },
+        );
+        assert!(!workspace.is_watcher_alive());
     }
 
     #[tokio::test]

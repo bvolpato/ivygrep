@@ -123,6 +123,13 @@ pub enum DaemonRequest {
     Remove {
         path: PathBuf,
     },
+    /// Bring back the filesystem watcher of a workspace whose metadata enables
+    /// watching but whose watcher is not alive. The daemon answers at once and
+    /// registers in the background; failures land in the workspace job ledger
+    /// and back off, so clients never need to restart the daemon for this.
+    EnsureWatcher {
+        path: PathBuf,
+    },
     Restart,
 }
 
@@ -206,6 +213,10 @@ pub struct WorkspaceRuntimeStatus {
     pub id: String,
     pub watch_enabled: bool,
     pub watcher_alive: bool,
+    /// Why the watcher is offline when the daemon knows (its last registration
+    /// failure); `None` while it is alive or was never attempted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watcher_error: Option<String>,
     /// An explicit `Index`/`StartIndex` run is queued or running on the daemon.
     #[serde(default)]
     pub index_in_flight: bool,
