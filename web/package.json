@@ -9,10 +9,10 @@
   },
   "devDependencies": {
     "@playwright/test": "1.62.1",
-    "@types/markdown-it": "^14.1.2",
+    "@types/markdown-it": "^14.2.0",
     "typescript": "^7.0.2",
-    "vite": "^8.2.1",
-    "vitest": "^4.1.10"
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11"
   },
   "dependencies": {
     "highlight.js": "^11.12.0",
