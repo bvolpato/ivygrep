@@ -998,7 +998,7 @@ fn index_workspace_inner(
         }
         (d, Some(new), clear_overlay_paths)
     } else {
-        let old = MerkleSnapshot::load(&workspace.merkle_snapshot_path())?;
+        let mut old = MerkleSnapshot::load(&workspace.merkle_snapshot_path())?;
         // Watcher events already identify changed files. Apply those directly
         // when safe, keeping full scans as reconciliation fallback for ignore
         // edits, directories, overlays, and uncertain state.
@@ -1006,13 +1006,13 @@ fn index_workspace_inner(
             && workspace.merkle_snapshot_path().exists()
             && workspace_index_matches_skip_gitignore(workspace, skip_gitignore)
         {
-            old.refresh_paths(&workspace.root, paths, skip_gitignore)?
+            old.refresh_paths_in_place(&workspace.root, paths, skip_gitignore)?
         } else {
             None
         };
-        let (new, d) = if let Some((new, diff)) = targeted {
+        let (new, d) = if let Some(diff) = targeted {
             let _ = fs::write(workspace.indexing_progress_path(), "applying watcher delta");
-            (new, diff)
+            (old, diff)
         } else {
             let _ = fs::write(workspace.indexing_progress_path(), "scanning");
             let new = MerkleSnapshot::build(&workspace.root, skip_gitignore)?;

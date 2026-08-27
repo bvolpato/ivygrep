@@ -389,9 +389,25 @@ impl MerkleSnapshot {
         if skip_gitignore {
             return Ok(None);
         }
-
         let mut newer = self.clone();
-        let mut changed = false;
+        Ok(newer
+            .refresh_paths_in_place(root, rel_paths, skip_gitignore)?
+            .map(|diff| (newer, diff)))
+    }
+
+    /// Refresh an owned snapshot without cloning its unchanged paths. A full
+    /// scan fallback leaves the snapshot unchanged.
+    pub fn refresh_paths_in_place(
+        &mut self,
+        root: &Path,
+        rel_paths: &[PathBuf],
+        skip_gitignore: bool,
+    ) -> Result<Option<MerkleDiff>> {
+        if skip_gitignore {
+            return Ok(None);
+        }
+
+        let mut updates = BTreeMap::new();
         for rel_path in rel_paths {
             if rel_path.as_os_str().is_empty()
                 || rel_path
@@ -423,7 +439,7 @@ impl MerkleSnapshot {
                 Ok(metadata)
                     if metadata.is_file() && metadata.len() <= MAX_INDEXABLE_FILE_BYTES =>
                 {
-                    let is_ignored = newer
+                    let is_ignored = self
                         .files
                         .get(&key)
                         .is_some_and(|hash| hash.ends_with("-1"));
@@ -442,33 +458,42 @@ impl MerkleSnapshot {
                     // New files must pass through the full ignore-aware walker.
                     // Existing files already have a visibility classification
                     // in this snapshot, so metadata-only refresh is safe.
-                    if !newer.files.contains_key(&key) {
+                    if !self.files.contains_key(&key) {
                         return Ok(None);
                     }
-                    if newer.files.get(&key) != Some(&hash) {
-                        newer.files.insert(key, hash);
-                        changed = true;
-                    }
+                    updates.insert(key, Some(hash));
                 }
                 None => {
                     let dir_prefix = format!("{key}/");
-                    if newer
+                    if self
                         .files
-                        .keys()
-                        .any(|existing| existing.starts_with(&dir_prefix))
+                        .range(dir_prefix.clone()..)
+                        .next()
+                        .is_some_and(|(existing, _)| existing.starts_with(&dir_prefix))
                     {
                         return Ok(None);
                     }
-                    changed |= newer.files.remove(&key).is_some();
+                    updates.insert(key, None);
                 }
             }
         }
 
-        if changed {
-            newer.root_hash = root_hash(&newer.files);
+        let mut diff = MerkleDiff::default();
+        for (key, next_hash) in updates {
+            match next_hash {
+                Some(hash) if self.files.get(&key) != Some(&hash) => {
+                    diff.added_or_modified
+                        .push((PathBuf::from(&key), hash.ends_with("-1")));
+                    self.files.insert(key, hash);
+                }
+                None if self.files.remove(&key).is_some() => diff.deleted.push(PathBuf::from(key)),
+                _ => {}
+            }
         }
-        let diff = self.diff(&newer);
-        Ok(Some((newer, diff)))
+        if !diff.added_or_modified.is_empty() || !diff.deleted.is_empty() {
+            self.root_hash = root_hash(&self.files);
+        }
+        Ok(Some(diff))
     }
 }
 
@@ -669,6 +694,48 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(diff.added_or_modified, vec![(PathBuf::from("a.rs"), true)]);
+    }
+
+    #[test]
+    fn in_place_refresh_matches_full_scan_and_deduplicates_events() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.rs"), "fn old() {}\n").unwrap();
+        fs::write(dir.path().join("b.rs"), "fn removed() {}\n").unwrap();
+        let before = MerkleSnapshot::build(dir.path(), false).unwrap();
+        let mut snapshot = before.clone();
+        fs::write(dir.path().join("a.rs"), "fn updated() {}\n").unwrap();
+        fs::remove_file(dir.path().join("b.rs")).unwrap();
+        let full = MerkleSnapshot::build(dir.path(), false).unwrap();
+        let paths = ["a.rs".into(), "b.rs".into(), "a.rs".into(), "b.rs".into()];
+        let diff = snapshot
+            .refresh_paths_in_place(dir.path(), &paths, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(diff, before.diff(&full));
+        assert_eq!(snapshot, full);
+        assert_eq!(
+            snapshot
+                .refresh_paths_in_place(dir.path(), &paths, false)
+                .unwrap(),
+            Some(MerkleDiff::default())
+        );
+    }
+
+    #[test]
+    fn in_place_refresh_fallback_preserves_original_snapshot() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.rs"), "fn old() {}\n").unwrap();
+        let before = MerkleSnapshot::build(dir.path(), false).unwrap();
+        let mut snapshot = before.clone();
+        fs::write(dir.path().join("a.rs"), "fn updated() {}\n").unwrap();
+        fs::write(dir.path().join("new.rs"), "fn added() {}\n").unwrap();
+        assert!(
+            snapshot
+                .refresh_paths_in_place(dir.path(), &["a.rs".into(), "new.rs".into()], false)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(snapshot, before);
     }
 
     #[test]
