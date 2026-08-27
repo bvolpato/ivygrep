@@ -5,6 +5,7 @@ All notable changes to ivygrep are documented in this file.
 ## [Unreleased]
 
 ### Performance
+- Targeted watcher refreshes update the owned Merkle snapshot in place and build the diff from changed paths, avoiding a full-map clone and comparison. Snapshot format and atomic publication are unchanged.
 - Nearly complete hash enhancement fetches text only for missing vector keys, sharing the sparse-resume path with neural enhancement instead of reading every stored text blob after a small edit.
 - Search contexts share a 64 MiB, 256-file LRU preview cache instead of retaining separate full-file copies and clearing every entry at capacity. The byte budget includes line offsets; oversized previews remain usable without being cached.
 - Search responses no longer wait on background-enhancement bookkeeping: the needs check and worker trigger run after the hits are returned, at most once per workspace and mode every 10 seconds; verified worker identities are remembered for 30 seconds instead of forking `ps` on every liveness check; and the Merkle snapshot corruption check memoizes successful parses through a size/mtime sidecar instead of re-parsing the whole snapshot on every CLI query. Warm repeated CLI queries on a 205k-chunk index dropped from roughly 200-460 ms to 90-140 ms wall on the same host.
