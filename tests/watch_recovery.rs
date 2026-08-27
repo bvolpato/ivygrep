@@ -96,3 +96,67 @@ fn watcher_path_delta_updates_searchable_content() {
         "targeted watcher delta should update searchable contents, got {hits:#?}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn watcher_path_delta_excludes_replacement_symlinks() {
+    let home = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let repo = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let source = repo.path().join("lib.rs");
+    std::fs::write(&source, "pub fn original_marker() {}\n").unwrap();
+    let target = outside.path().join("external.rs");
+    std::fs::write(&target, "pub fn external_marker() {}\n").unwrap();
+    let workspace = Workspace::resolve(repo.path()).unwrap();
+    let model = create_hash_model();
+    index_workspace(&workspace, model.as_ref()).unwrap();
+
+    std::fs::remove_file(&source).unwrap();
+    std::os::unix::fs::symlink(&target, &source).unwrap();
+    let summary =
+        index_workspace_paths_for_watcher(&workspace, model.as_ref(), &["lib.rs".into()]).unwrap();
+    assert_eq!(summary.indexed_files, 0);
+    assert_eq!(summary.deleted_files, 1);
+    assert_eq!(summary.total_chunks, 0);
+    let snapshot =
+        ivygrep::merkle::MerkleSnapshot::load(&workspace.merkle_snapshot_path()).unwrap();
+    assert_eq!(
+        snapshot,
+        ivygrep::merkle::MerkleSnapshot::build(&workspace.root, false).unwrap()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn watcher_path_delta_excludes_symlinked_parent_directories() {
+    let home = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let repo = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::create_dir(repo.path().join("src")).unwrap();
+    std::fs::write(
+        repo.path().join("src/lib.rs"),
+        "pub fn original_marker() {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        outside.path().join("lib.rs"),
+        "pub fn external_marker() {}\n",
+    )
+    .unwrap();
+    let workspace = Workspace::resolve(repo.path()).unwrap();
+    let model = create_hash_model();
+    index_workspace(&workspace, model.as_ref()).unwrap();
+
+    std::fs::rename(repo.path().join("src"), outside.path().join("previous")).unwrap();
+    std::os::unix::fs::symlink(outside.path(), repo.path().join("src")).unwrap();
+    let summary =
+        index_workspace_paths_for_watcher(&workspace, model.as_ref(), &["src/lib.rs".into()])
+            .unwrap();
+    assert_eq!(summary.indexed_files, 0);
+    assert_eq!(summary.deleted_files, 1);
+    assert_eq!(summary.total_chunks, 0);
+}
