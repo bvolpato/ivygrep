@@ -2084,23 +2084,52 @@ fn rebuild_index_storage(
     Ok(())
 }
 
-fn vector_store_covers_all_keys(
+fn sparse_missing_vector_keys(
     sqlite: &Connection,
     vector_index: &VectorStore,
     total_chunks: usize,
-) -> Result<bool> {
-    if vector_index.size() != total_chunks {
-        return Ok(false);
+) -> Result<Option<Vec<u64>>> {
+    if vector_index.size().saturating_mul(4) < total_chunks.saturating_mul(3) {
+        return Ok(None);
     }
 
+    let mut missing = Vec::with_capacity(total_chunks.saturating_sub(vector_index.size()));
     let mut stmt = sqlite.prepare("SELECT DISTINCT vector_key FROM chunks")?;
     let rows = stmt.query_map([], |row| Ok(row.get::<_, i64>(0)? as u64))?;
     for row in rows {
-        if !vector_index.contains(row?) {
-            return Ok(false);
+        let key = row?;
+        if !vector_index.contains(key) {
+            missing.push(key);
         }
     }
-    Ok(true)
+    Ok(Some(missing))
+}
+
+fn visit_embedding_rows(
+    sqlite: &Connection,
+    missing_keys: Option<Vec<u64>>,
+    mut visit: impl FnMut(u64, Vec<u8>) -> Result<()>,
+) -> Result<()> {
+    if let Some(keys) = missing_keys {
+        let mut stmt = sqlite.prepare("SELECT text FROM chunks WHERE vector_key = ?1 LIMIT 1")?;
+        for key in keys {
+            match stmt.query_row(params![key as i64], |row| row.get(0)) {
+                Ok(raw) => visit(key, raw)?,
+                // Indexing can delete a pending key after the covering-index
+                // scan. The generation check schedules any new work afterward.
+                Err(rusqlite::Error::QueryReturnedNoRows) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+    } else {
+        let mut stmt = sqlite.prepare("SELECT vector_key, text FROM chunks")?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)? as u64, row.get(1)?)))?;
+        for row in rows {
+            let (key, raw) = row?;
+            visit(key, raw)?;
+        }
+    }
+    Ok(())
 }
 
 /// Compute lightweight hash embeddings for all chunks and save as the first
@@ -2184,22 +2213,10 @@ pub fn enhance_workspace_hash(
         Ok(())
     };
 
-    let scan_sql = if vector_store_covers_all_keys(&sqlite, &vector_index, total_chunks)? {
-        "SELECT vector_key, text FROM chunks WHERE 0"
-    } else {
-        "SELECT vector_key, text FROM chunks"
-    };
-    let mut stmt = sqlite.prepare(scan_sql)?;
-    let rows = stmt.query_map([], |row| {
-        let key = row.get::<_, i64>(0)? as u64;
-        let raw: Vec<u8> = row.get(1)?;
-        Ok((key, raw))
-    })?;
-
-    for row in rows {
-        let (key, raw) = row?;
+    let missing_keys = sparse_missing_vector_keys(&sqlite, &vector_index, total_chunks)?;
+    visit_embedding_rows(&sqlite, missing_keys, |key, raw| {
         if vector_index.contains(key) || !batch_keys.insert(key) {
-            continue;
+            return Ok(());
         }
 
         let text = try_decompress_text(raw)
@@ -2220,7 +2237,8 @@ pub fn enhance_workspace_hash(
                 vector_index.save()?;
             }
         }
-    }
+        Ok(())
+    })?;
 
     let tail_len = batch.len();
     while !batch.is_empty()
@@ -2376,21 +2394,7 @@ pub fn enhance_workspace_neural(
     // Discover missing keys from the covering index, then point-fetch text for
     // those keys. Keep the sequential scan for fresh or incomplete stores,
     // where indexed point lookups cost more than one table pass.
-    let sparse_missing_keys =
-        if total_chunks > 0 && existing.saturating_mul(4) >= total_chunks.saturating_mul(3) {
-            let mut missing = Vec::with_capacity(remaining);
-            let mut stmt = sqlite.prepare("SELECT DISTINCT vector_key FROM chunks")?;
-            let rows = stmt.query_map([], |row| Ok(row.get::<_, i64>(0)? as u64))?;
-            for row in rows {
-                let key = row?;
-                if !vector_index.contains(key) {
-                    missing.push(key);
-                }
-            }
-            Some(missing)
-        } else {
-            None
-        };
+    let sparse_missing_keys = sparse_missing_vector_keys(&sqlite, &vector_index, total_chunks)?;
 
     let document_character_limit = neural_model.document_character_limit();
     let process_batch = |batch: &mut Vec<(u64, String)>,
@@ -2422,7 +2426,7 @@ pub fn enhance_workspace_neural(
     };
 
     {
-        let mut process_row = |key: u64, raw: Vec<u8>| -> Result<()> {
+        visit_embedding_rows(&sqlite, sparse_missing_keys, |key, raw| {
             if vector_index.contains(key) || !batch_keys.insert(key) {
                 return Ok(());
             }
@@ -2455,27 +2459,7 @@ pub fn enhance_workspace_neural(
                 }
             }
             Ok(())
-        };
-
-        if let Some(missing_keys) = sparse_missing_keys {
-            let mut stmt =
-                sqlite.prepare("SELECT text FROM chunks WHERE vector_key = ?1 LIMIT 1")?;
-            for key in missing_keys {
-                let raw = stmt.query_row(params![key as i64], |row| row.get::<_, Vec<u8>>(0))?;
-                process_row(key, raw)?;
-            }
-        } else {
-            let mut stmt = sqlite.prepare("SELECT vector_key, text FROM chunks")?;
-            let rows = stmt.query_map([], |row| {
-                let key = row.get::<_, i64>(0)? as u64;
-                let raw: Vec<u8> = row.get(1)?;
-                Ok((key, raw))
-            })?;
-            for row in rows {
-                let (key, raw) = row?;
-                process_row(key, raw)?;
-            }
-        }
+        })?;
     }
 
     // Process any remaining tail
@@ -3414,6 +3398,58 @@ mod tests {
     use crate::workspace::Workspace;
 
     use super::*;
+
+    #[test]
+    fn sparse_embedding_resume_fetches_missing_keys_despite_stale_store_entries() {
+        let dir = tempdir().unwrap();
+        let sqlite = Connection::open_in_memory().unwrap();
+        sqlite
+            .execute_batch("CREATE TABLE chunks (vector_key INTEGER, text BLOB);")
+            .unwrap();
+        for key in [1, 2, 3, 4, 5, 5] {
+            sqlite
+                .execute(
+                    "INSERT INTO chunks VALUES (?1, ?2)",
+                    params![key, b"payload".as_slice()],
+                )
+                .unwrap();
+        }
+        let mut store = VectorStore::open(
+            &dir.path().join("vectors.usearch"),
+            256,
+            ScalarKind::F16,
+            crate::vector_store::VectorTier::Hash,
+        )
+        .unwrap();
+        for key in [1, 2, 3, 4, 99] {
+            store.upsert(key, vec![1.0; 256]).unwrap();
+        }
+        let missing = sparse_missing_vector_keys(&sqlite, &store, 5).unwrap();
+        assert_eq!(missing, Some(vec![5]));
+        let mut loaded = Vec::new();
+        visit_embedding_rows(&sqlite, missing, |key, text| {
+            loaded.push((key, text));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(loaded, vec![(5, b"payload".to_vec())]);
+        store.upsert(5, vec![1.0; 256]).unwrap();
+        assert_eq!(
+            sparse_missing_vector_keys(&sqlite, &store, 5).unwrap(),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            sparse_missing_vector_keys(&sqlite, &store, 100).unwrap(),
+            None
+        );
+        sqlite
+            .execute("DELETE FROM chunks WHERE vector_key = 5", [])
+            .unwrap();
+        visit_embedding_rows(&sqlite, Some(vec![5]), |_, _| {
+            panic!("a concurrently deleted chunk must not be embedded")
+        })
+        .unwrap();
+    }
 
     fn indexed_texts_for_file(workspace: &Workspace, file_path: &str) -> Vec<String> {
         let conn = open_sqlite(&workspace.sqlite_path()).unwrap();
