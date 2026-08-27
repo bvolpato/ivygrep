@@ -402,12 +402,24 @@ impl MerkleSnapshot {
             }
 
             let path = root.join(rel_path);
+            // A watcher can report a child after its parent was replaced by a
+            // symlink. Reconcile with the no-follow walker in either case.
+            if rel_path
+                .ancestors()
+                .take_while(|ancestor| !ancestor.as_os_str().is_empty())
+                .any(|ancestor| {
+                    fs::symlink_metadata(root.join(ancestor))
+                        .is_ok_and(|metadata| metadata.file_type().is_symlink())
+                })
+            {
+                return Ok(None);
+            }
             if path.is_dir() {
                 return Ok(None);
             }
 
             let key = index_path_string(rel_path);
-            let next_hash = match fs::metadata(&path) {
+            let next_hash = match fs::symlink_metadata(&path) {
                 Ok(metadata)
                     if metadata.is_file() && metadata.len() <= MAX_INDEXABLE_FILE_BYTES =>
                 {
