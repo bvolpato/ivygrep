@@ -222,6 +222,7 @@ pub struct SearchContext {
     pub tombstones: HashSet<String>,
     pub overlay_files: HashSet<String>,
     file_contents: Arc<parking_lot::Mutex<FileContentCache>>,
+    file_contents_epoch: u64,
     glob_path_filters: RefCell<HashMap<GlobPathFilterCacheKey, GlobPathQueryFilter>>,
 }
 
@@ -394,6 +395,8 @@ impl SearchContext {
                 }
             }
 
+            let file_contents_epoch =
+                FileContentCache::index_epoch(&[&overlay_searcher, &base_searcher]);
             Ok(Self {
                 sqlite: overlay_sqlite,
                 base_sqlite: Some(base_sqlite),
@@ -411,6 +414,7 @@ impl SearchContext {
                 tombstones,
                 overlay_files,
                 file_contents: FileContentCache::shared(),
+                file_contents_epoch,
                 glob_path_filters: RefCell::new(HashMap::new()),
             })
         } else {
@@ -438,6 +442,7 @@ impl SearchContext {
             )?;
             let neural_profile = read_optional_profile(&workspace.neural_profile_path())?;
 
+            let file_contents_epoch = FileContentCache::index_epoch(&[&searcher]);
             Ok(Self {
                 sqlite,
                 base_sqlite: None,
@@ -455,6 +460,7 @@ impl SearchContext {
                 tombstones: HashSet::new(),
                 overlay_files: HashSet::new(),
                 file_contents: FileContentCache::shared(),
+                file_contents_epoch,
                 glob_path_filters: RefCell::new(HashMap::new()),
             })
         }
@@ -597,7 +603,7 @@ impl SearchContext {
     }
 
     fn read_file_content(&self, path: &Path) -> Option<CachedFileContent> {
-        FileContentCache::read(&self.file_contents, path)
+        FileContentCache::read(&self.file_contents, path, self.file_contents_epoch)
     }
 }
 
