@@ -4,7 +4,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
 
 use anyhow::{Context, Result};
 use rayon::prelude::*;
@@ -28,10 +27,14 @@ use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
 #[path = "search_execution.rs"]
 mod execution;
+#[path = "search_file_cache.rs"]
+mod file_cache;
 #[path = "search_fusion.rs"]
 mod fusion;
 #[path = "search_presentation.rs"]
 mod presentation;
+
+use file_cache::{CachedFileContent, FileContentCache};
 
 use crate::search_routing::{
     QueryIntent, QueryRouting, corpus_candidate_multiplier, neural_fallback_needed, raw_query_terms,
@@ -44,11 +47,11 @@ use crate::workspace::{Workspace, WorkspaceScope, index_path_string};
 pub(crate) use execution::hybrid_search_with_context_and_neural_job;
 use fusion::fuse_rrf_with_context;
 use presentation::{
-    HitPresentation, LineSpan, PresentationQuery, line_spans,
-    should_use_compact_identifier_matching, snippet_bounds, to_hit,
+    HitPresentation, PresentationQuery, should_use_compact_identifier_matching, snippet_bounds,
+    to_hit,
 };
 #[cfg(test)]
-use presentation::{find_focus_line, line_at};
+use presentation::{find_focus_line, line_at, line_spans};
 
 pub(crate) const DEFAULT_SEARCH_LIMIT: usize = 50;
 pub const MAX_SEARCH_CONTEXT_LINES: usize = 100;
@@ -218,16 +221,8 @@ pub struct SearchContext {
 
     pub tombstones: HashSet<String>,
     pub overlay_files: HashSet<String>,
-    file_contents: RefCell<HashMap<PathBuf, CachedFileContent>>,
+    file_contents: Arc<parking_lot::Mutex<FileContentCache>>,
     glob_path_filters: RefCell<HashMap<GlobPathFilterCacheKey, GlobPathQueryFilter>>,
-}
-
-#[derive(Clone)]
-struct CachedFileContent {
-    len: u64,
-    modified_nanos: u128,
-    content: Arc<str>,
-    lines: Arc<[LineSpan]>,
 }
 
 type SemanticCandidatesById = HashMap<u64, (IndexedChunk, f32, HashSet<&'static str>)>;
@@ -415,7 +410,7 @@ impl SearchContext {
                 base_neural_model,
                 tombstones,
                 overlay_files,
-                file_contents: RefCell::new(HashMap::new()),
+                file_contents: FileContentCache::shared(),
                 glob_path_filters: RefCell::new(HashMap::new()),
             })
         } else {
@@ -459,7 +454,7 @@ impl SearchContext {
                 base_neural_model: None,
                 tombstones: HashSet::new(),
                 overlay_files: HashSet::new(),
-                file_contents: RefCell::new(HashMap::new()),
+                file_contents: FileContentCache::shared(),
                 glob_path_filters: RefCell::new(HashMap::new()),
             })
         }
@@ -602,44 +597,7 @@ impl SearchContext {
     }
 
     fn read_file_content(&self, path: &Path) -> Option<CachedFileContent> {
-        const MAX_CACHED_FILES: usize = 256;
-
-        let metadata = match fs::metadata(path) {
-            Ok(metadata) => metadata,
-            Err(_) => {
-                self.file_contents.borrow_mut().remove(path);
-                return None;
-            }
-        };
-        let modified_nanos = metadata
-            .modified()
-            .ok()?
-            .duration_since(UNIX_EPOCH)
-            .ok()?
-            .as_nanos();
-        let len = metadata.len();
-
-        if let Some(cached) = self.file_contents.borrow().get(path)
-            && cached.len == len
-            && cached.modified_nanos == modified_nanos
-        {
-            return Some(cached.clone());
-        }
-
-        let content = Arc::<str>::from(fs::read_to_string(path).ok()?);
-        let lines = line_spans(&content).into();
-        let cached = CachedFileContent {
-            len,
-            modified_nanos,
-            content,
-            lines,
-        };
-        let mut cache = self.file_contents.borrow_mut();
-        if cache.len() >= MAX_CACHED_FILES && !cache.contains_key(path) {
-            cache.clear();
-        }
-        cache.insert(path.to_path_buf(), cached.clone());
-        Some(cached)
+        FileContentCache::read(&self.file_contents, path)
     }
 }
 
@@ -6289,6 +6247,10 @@ mod tests {
         assert_eq!(&*first.content, "fn first() {}\n");
         assert_eq!(first.lines.len(), 1);
         assert_eq!(line_at(&first.content, &first.lines, 1), "fn first() {}");
+        let another_context = SearchContext::load(&workspace, None, false).unwrap();
+        let shared = another_context.read_file_content(&path).unwrap();
+        assert!(Arc::ptr_eq(&first.content, &shared.content));
+        assert!(Arc::ptr_eq(&first.lines, &shared.lines));
 
         std::fs::write(&path, "fn second_version() {}\n").unwrap();
         let second = context.read_file_content(&path).unwrap();
