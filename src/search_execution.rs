@@ -98,7 +98,8 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
             &glob_path_filter,
             options,
             (literal_limit, target_hits),
-        )?;
+        )?
+        .chunks;
         tracing::trace!(
             "literal_pass={:?} found={}",
             t0.elapsed(),

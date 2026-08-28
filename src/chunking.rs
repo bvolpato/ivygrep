@@ -802,18 +802,21 @@ fn thread_cpu_time() -> Option<std::time::Duration> {
     None
 }
 
-fn try_tree_sitter_chunk_source_with_timeout(
+/// Reuse the chunker's grammars and parse budget for source-level inspection.
+pub(crate) fn parse_source_tree(
     rel_path: &Path,
     text: &str,
     language: &str,
-    lines: &[&str],
+) -> Option<tree_sitter::Tree> {
+    let (grammar, _) = tree_sitter_query(rel_path, language, text.lines().count())?;
+    parse_source_tree_with_budget(text, &grammar, std::time::Duration::from_millis(100))
+}
+
+fn parse_source_tree_with_budget(
+    text: &str,
+    grammar: &tree_sitter::Language,
     parse_timeout: std::time::Duration,
-) -> Option<ChunkedSource> {
-    use streaming_iterator::StreamingIterator;
-    use tree_sitter::QueryCursor;
-
-    let (grammar, query) = tree_sitter_query(rel_path, language, lines.len())?;
-
+) -> Option<tree_sitter::Tree> {
     // The production caller uses a 100ms budget to prevent hangs on massive
     // minified files. ParseOptions replaces timeout_micros in tree-sitter 0.26.
     let budget = ParseBudget::start(parse_timeout);
@@ -832,7 +835,9 @@ fn try_tree_sitter_chunk_source_with_timeout(
     let len = bytes.len();
     let tree = TREE_SITTER_PARSER.with(|slot| {
         let mut parser = slot.borrow_mut();
-        parser.set_language(&grammar).ok()?;
+        parser.set_language(grammar).ok()?;
+        // A cancelled parse must not resume at an offset from another file.
+        parser.reset();
         parser.parse_with_options(
             &mut |i, _| {
                 if i < len {
@@ -845,9 +850,22 @@ fn try_tree_sitter_chunk_source_with_timeout(
             Some(options),
         )
     })?;
-    if parse_cancelled {
-        return None;
-    }
+    (!parse_cancelled).then_some(tree)
+}
+
+fn try_tree_sitter_chunk_source_with_timeout(
+    rel_path: &Path,
+    text: &str,
+    language: &str,
+    lines: &[&str],
+    parse_timeout: std::time::Duration,
+) -> Option<ChunkedSource> {
+    use streaming_iterator::StreamingIterator;
+    use tree_sitter::QueryCursor;
+
+    let (grammar, query) = tree_sitter_query(rel_path, language, lines.len())?;
+    let query = query?;
+    let tree = parse_source_tree_with_budget(text, &grammar, parse_timeout)?;
     let mut cursor = QueryCursor::new();
 
     let mut captured = Vec::new();
@@ -1649,12 +1667,13 @@ thread_local! {
 }
 
 /// Compiled queries are immutable and grammar-specific, so compile each one
-/// once rather than once per file on large initial indexes.
+/// once rather than once per file on large initial indexes. Source inspection
+/// can still use the grammar when a chunk-capture query is unavailable.
 fn tree_sitter_query(
     rel_path: &Path,
     language: &str,
     line_count: usize,
-) -> Option<(tree_sitter::Language, &'static tree_sitter::Query)> {
+) -> Option<(tree_sitter::Language, Option<&'static tree_sitter::Query>)> {
     use std::sync::OnceLock;
 
     macro_rules! cached_query {
@@ -1663,7 +1682,7 @@ fn tree_sitter_query(
             let grammar: tree_sitter::Language = $grammar.into();
             let query = $cell
                 .get_or_init(|| tree_sitter::Query::new(&grammar, $query).ok())
-                .as_ref()?;
+                .as_ref();
             Some((grammar, query))
         }};
     }

@@ -909,13 +909,19 @@ fn substring_candidate_files(
     Ok(Some(paths))
 }
 
+pub(crate) struct LiteralChunkBatch {
+    pub chunks: Vec<IndexedChunk>,
+    pub exhausted: bool,
+}
+
 pub(crate) fn exact_literal_chunks(
     workspace: &Workspace,
     query: &str,
     options: &SearchOptions,
-) -> Result<Vec<IndexedChunk>> {
+    candidate_budget: usize,
+) -> Result<LiteralChunkBatch> {
     let ctx = SearchContext::load(workspace, None, false)?;
-    exact_literal_chunks_with_context(&ctx, query, options, false)
+    exact_literal_chunks_with_context(&ctx, query, options, Some(candidate_budget))
 }
 
 pub(crate) fn exact_literal_chunks_unbounded(
@@ -924,15 +930,15 @@ pub(crate) fn exact_literal_chunks_unbounded(
     options: &SearchOptions,
 ) -> Result<Vec<IndexedChunk>> {
     let ctx = SearchContext::load(workspace, None, false)?;
-    exact_literal_chunks_with_context(&ctx, query, options, true)
+    Ok(exact_literal_chunks_with_context(&ctx, query, options, None)?.chunks)
 }
 
 fn exact_literal_chunks_with_context(
     ctx: &SearchContext,
     query: &str,
     options: &SearchOptions,
-    unbounded: bool,
-) -> Result<Vec<IndexedChunk>> {
+    candidate_budget: Option<usize>,
+) -> Result<LiteralChunkBatch> {
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
     let glob_path_filter = build_glob_path_query_filter(ctx, &path_matcher, options)?;
     collect_literal_candidates(
@@ -941,7 +947,7 @@ fn exact_literal_chunks_with_context(
         &path_matcher,
         &glob_path_filter,
         options,
-        unbounded,
+        candidate_budget,
     )
 }
 
@@ -954,28 +960,22 @@ fn collect_literal_candidates(
     path_matcher: &PathGlobMatcher,
     glob_path_filter: &GlobPathQueryFilter,
     options: &SearchOptions,
-    unbounded: bool,
-) -> Result<Vec<IndexedChunk>> {
-    let candidate_limit = if unbounded {
+    candidate_budget: Option<usize>,
+) -> Result<LiteralChunkBatch> {
+    // Internal candidate budgets must not pass through bounded_limit(), which
+    // caps public result counts at 1,000 before symbol syntax verification.
+    let candidate_limit = if let Some(budget) = candidate_budget {
+        budget.saturating_mul(5).clamp(200, budget.max(25_000))
+    } else {
         ctx.searchers
             .iter()
             .map(|searcher| searcher.num_docs() as usize)
             .sum::<usize>()
             .max(1)
-    } else if let Some(limit) = options.bounded_limit() {
-        if limit == usize::MAX {
-            50_000
-        } else {
-            limit.saturating_mul(5).clamp(200, 25_000)
-        }
-    } else {
-        250
     };
-    let target_hits = if unbounded {
-        candidate_limit
-    } else {
-        options.bounded_limit().unwrap_or(100).min(candidate_limit)
-    };
+    let target_hits = candidate_budget
+        .unwrap_or(candidate_limit)
+        .min(candidate_limit);
     let candidate_queries = build_lexical_queries(query);
     let matcher = LiteralMatcher::from_queries(
         std::iter::once(query),
@@ -1001,9 +1001,10 @@ fn collect_literal_candidates_for_queries(
     glob_path_filter: &GlobPathQueryFilter,
     options: &SearchOptions,
     limits: (usize, usize),
-) -> Result<Vec<IndexedChunk>> {
+) -> Result<LiteralChunkBatch> {
     let (candidate_limit, target_hits) = limits;
     if literal_queries_allow_incremental_verification(candidate_queries) {
+        let mut exhausted = true;
         for query in candidate_queries {
             let candidates = collect_literal_candidate_chunks(
                 ctx,
@@ -1015,13 +1016,17 @@ fn collect_literal_candidates_for_queries(
                 false,
             )?;
             let verified =
-                verify_literal_candidates(candidates, candidate_queries, matcher, target_hits);
-            if !verified.is_empty() {
+                verify_literal_batch(candidates, candidate_queries, matcher, target_hits);
+            if !verified.chunks.is_empty() {
                 return Ok(verified);
             }
+            exhausted &= verified.exhausted;
         }
         if !literal_queries_have_relaxed_variant(candidate_queries) {
-            return Ok(Vec::new());
+            return Ok(LiteralChunkBatch {
+                chunks: Vec::new(),
+                exhausted,
+            });
         }
     }
 
@@ -1034,8 +1039,8 @@ fn collect_literal_candidates_for_queries(
         candidate_limit,
         false,
     )?;
-    let verified = verify_literal_candidates(candidates, candidate_queries, matcher, target_hits);
-    if !verified.is_empty() || !literal_queries_have_relaxed_variant(candidate_queries) {
+    let verified = verify_literal_batch(candidates, candidate_queries, matcher, target_hits);
+    if !verified.chunks.is_empty() || !literal_queries_have_relaxed_variant(candidate_queries) {
         return Ok(verified);
     }
 
@@ -1048,7 +1053,7 @@ fn collect_literal_candidates_for_queries(
         candidate_limit,
         true,
     )?;
-    Ok(verify_literal_candidates(
+    Ok(verify_literal_batch(
         candidates,
         candidate_queries,
         matcher,
@@ -1064,8 +1069,9 @@ fn collect_literal_candidate_chunks(
     options: &SearchOptions,
     candidate_limit: usize,
     relaxed: bool,
-) -> Result<Vec<IndexedChunk>> {
+) -> Result<LiteralChunkBatch> {
     let mut found_ids = HashSet::<u64>::new();
+    let mut exhausted = true;
 
     let mut candidates: Vec<IndexedChunk> = Vec::new();
     'outer: for lexical_query in candidate_queries {
@@ -1083,6 +1089,9 @@ fn collect_literal_candidate_chunks(
                 &parsed_query,
                 &TopDocs::with_limit(candidate_limit).order_by_score(),
             )?;
+            // Filtered chunk count cannot establish exhaustion: top-ranked
+            // documents may belong to another language or a shadowed file.
+            exhausted &= docs.len() < candidate_limit;
 
             for (_score, addr) in docs {
                 let doc: TantivyDocument = searcher.doc(addr)?;
@@ -1096,6 +1105,7 @@ fn collect_literal_candidate_chunks(
                 {
                     candidates.push(chunk);
                     if candidates.len() >= candidate_limit {
+                        exhausted = false;
                         break 'outer;
                     }
                 }
@@ -1119,7 +1129,24 @@ fn collect_literal_candidate_chunks(
         }
     }
 
-    Ok(candidates)
+    Ok(LiteralChunkBatch {
+        chunks: candidates,
+        exhausted,
+    })
+}
+
+fn verify_literal_batch(
+    candidates: LiteralChunkBatch,
+    candidate_queries: &[String],
+    matcher: &LiteralMatcher,
+    target_hits: usize,
+) -> LiteralChunkBatch {
+    let chunks =
+        verify_literal_candidates(candidates.chunks, candidate_queries, matcher, target_hits);
+    LiteralChunkBatch {
+        exhausted: candidates.exhausted && chunks.len() < target_hits,
+        chunks,
+    }
 }
 
 fn verify_literal_candidates(

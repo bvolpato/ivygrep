@@ -236,6 +236,21 @@ and falling back to the bare name; reference and caller scans are restricted
 to the languages that define the symbol. Adding these columns bumped the index
 format to v22.
 
+Reference searches use indexed identifier candidates, then verify source syntax.
+`--refs` includes non-call uses such as callbacks and function values; `--callers`
+returns chunks containing calls. Whitespace, newlines, and generic arguments do
+not need to be adjacent to the name. Tree-sitter excludes declaration names,
+comments, and literal text; files without a usable parse use quote/comment
+masking and a conservative declaration/call heuristic. Qualified references
+match the immediate textual receiver name (ignoring scoped generic arguments),
+not an inferred receiver type. This is best-effort syntax lookup, not compiler
+resolution of imports, aliases, overloads, or shadowed bindings. Bounded requests
+widen indexed candidate batches after
+rejected matches, up to 25,000 chunks. CLI `--no-limit` retains its 50,000-candidate
+ceiling; unbounded API requests (`limit: None`) scan all indexed literal candidates.
+Each candidate file is parsed at most once per request with the chunker's 100 ms
+parse budget.
+
 ## Context-pack pipeline
 
 Context packs answer a different question from ranked search: which bounded set
