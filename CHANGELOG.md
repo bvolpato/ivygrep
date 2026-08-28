@@ -18,6 +18,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 - Worktree symbol definitions apply path visibility before counting results and rank owner and exact-case matches across both indexes before the final limit, so shadowed base rows and lower-ranked overlay definitions no longer hide valid matches.
+- Full and targeted index scans abort on filesystem traversal, metadata, or content-read failures instead of treating unreadable paths as deleted. The last healthy index and snapshot remain available until a complete scan succeeds.
 - Shared previews invalidate when the lexical index changes, including forced rebuilds that preserve source timestamps. Contexts on the same indexed snapshot still share the byte-bounded cache.
 - Targeted watcher refreshes reconcile with the full no-follow scan when a source file or parent directory becomes a symlink, removing stale chunks instead of indexing the link target.
 - Tree-sitter chunking measures its 100 ms parse budget in thread CPU time (wall clock only where the platform has no thread clock), so a thread descheduled on a busy machine or under a parallel test run no longer loses the parse and silently degrades to heuristic chunks without symbol definitions; pathological inputs still hit the budget because they burn CPU. The `stale_socket_cleanup_requires_daemon_lock_ownership` test tolerates a concurrent endpoint probe briefly holding the daemon lock.
