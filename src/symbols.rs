@@ -840,7 +840,7 @@ fn matching_symbol_lines(
                 .chars()
                 .next()
                 .is_some_and(is_identifier_character)
-            || !qualifier_matches(source, start, query.owner)
+            || !qualifier_matches(source, start, query.owner, node)
         {
             continue;
         }
@@ -876,10 +876,23 @@ fn is_identifier_character(character: char) -> bool {
     character.is_alphanumeric() || matches!(character, '_' | '$')
 }
 
-fn qualifier_matches(source: &str, name_start: usize, owner: Option<&str>) -> bool {
+fn qualifier_matches(
+    source: &str,
+    name_start: usize,
+    owner: Option<&str>,
+    node: Option<tree_sitter::Node<'_>>,
+) -> bool {
     let Some(owner) = owner else {
         return true;
     };
+    if let Some(qualifier) = node.and_then(parsed_scope_qualifier) {
+        // `Router::<Nested<T>>::method` is owned by Router, not by its type
+        // arguments. The parse also keeps comments and newlines out of names.
+        let qualifier = qualifier.child_by_field_name("type").unwrap_or(qualifier);
+        return terminal_name(qualifier)
+            .and_then(|name| name.utf8_text(source.as_bytes()).ok())
+            .is_some_and(|name| name.eq_ignore_ascii_case(owner));
+    }
     let prefix = source[..name_start].trim_end();
     let Some(prefix) = ["::", ".", "->", "#"]
         .into_iter()
@@ -894,6 +907,28 @@ fn qualifier_matches(source: &str, name_start: usize, owner: Option<&str>) -> bo
             offset + qualifier[offset..].chars().next().unwrap().len_utf8()
         });
     qualifier[start..].eq_ignore_ascii_case(owner)
+}
+
+fn parsed_scope_qualifier(mut node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
+    loop {
+        let parent = node.parent()?;
+        if parent
+            .child_by_field_name("name")
+            .is_some_and(|name| contains_node(name, node))
+            && let Some(qualifier) = parent
+                .child_by_field_name("path")
+                .or_else(|| parent.child_by_field_name("scope"))
+        {
+            return Some(qualifier);
+        }
+        if !matches!(
+            parent.kind(),
+            "generic_function" | "template_function" | "template_method"
+        ) {
+            return None;
+        }
+        node = parent;
+    }
 }
 
 fn is_code_reference(node: tree_sitter::Node<'_>, text: &str) -> bool {
@@ -1032,7 +1067,10 @@ fn is_call_reference(node: tree_sitter::Node<'_>) -> bool {
                 .or_else(|| parent.child_by_field_name("method"))
                 .or_else(|| parent.child_by_field_name("target"))
                 .or_else(|| parent.named_child(0)),
-            "method_invocation" | "member_call_expression" | "scoped_call_expression" => parent
+            "method_invocation"
+            | "member_call_expression"
+            | "nullsafe_member_call_expression"
+            | "scoped_call_expression" => parent
                 .child_by_field_name("name")
                 .or_else(|| parent.child_by_field_name("function_name")),
             "new_expression" => parent.child_by_field_name("constructor"),

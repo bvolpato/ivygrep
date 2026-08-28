@@ -135,6 +135,66 @@ fn qualified_relationships_preserve_owners_across_spacing_and_generics() {
 
 #[test]
 #[serial]
+fn qualified_relationships_match_generic_receiver_names() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let source = "struct Router<T>(T);\n\
+        impl<T> Router<T> { fn audit_target<U>() {} }\n\
+        struct Other<T>(T);\n\
+        impl<T> Other<T> { fn audit_target<U>() {} }\n\
+        fn single() { Router::<u8>::audit_target(); }\n\
+        fn nested() { Router::<Vec<Vec<u8>>>::audit_target(); }\n\
+        fn generic_method() { crate::Router::<Vec<u8>>::audit_target::<Option<u8>>(); }\n\
+        fn trivia() {\n\
+            Router /* > is comment text */ :: < Vec<u8> > /* receiver */ ::\n\
+            /* name */ audit_target /* method */ ::<u8> ();\n\
+        }\n\
+        fn callback() { let cb = Router::<Vec<u8>>::audit_target::<u8>; }\n\
+        fn wrong_owner() { Other::<Router<u8>>::audit_target::<u8>(); }\n\
+        fn wrong_nested() { Other::<Vec<Router<u8>>>::audit_target(); }\n\
+        fn nested_owner() { Router::<u8>::Other::audit_target(); }\n\
+        fn wrong_prefix() { NotRouter::<u8>::audit_target(); }\n\
+        // Router::<u8>::audit_target();\n\
+        fn noise() { let text = \"Router::<u8>::audit_target()\"; }\n";
+    fs::write(root.path().join("owners.rs"), source).unwrap();
+    let workspace = index(root.path(), home.path());
+    for (mode, expected) in [
+        (SymbolSearchMode::References, vec![5, 6, 7, 10, 12]),
+        (SymbolSearchMode::Callers, vec![5, 6, 7, 8]),
+    ] {
+        let hits = search_symbols(&workspace, "Router::audit_target", mode, None, None).unwrap();
+        let mut lines = hits.iter().map(|hit| hit.start_line).collect::<Vec<_>>();
+        lines.sort_unstable();
+        assert_eq!(lines, expected, "{mode:?}: {hits:?}");
+    }
+}
+
+#[test]
+#[serial]
+fn php_nullsafe_method_calls_are_callers() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::write(
+        root.path().join("calls.php"),
+        "<?php\n\
+         class Service { public function audit_target() {} }\n\
+         function ordinary($service) { $service->audit_target(); }\n\
+         function nullsafe($service) { $service?->audit_target(); }\n\
+         function noise() { $text = '$service?->audit_target()'; }\n\
+         // $service?->audit_target();\n",
+    )
+    .unwrap();
+    let workspace = index(root.path(), home.path());
+    for mode in [SymbolSearchMode::References, SymbolSearchMode::Callers] {
+        let hits = search_symbols(&workspace, "audit_target", mode, None, None).unwrap();
+        let mut lines = hits.iter().map(|hit| hit.start_line).collect::<Vec<_>>();
+        lines.sort_unstable();
+        assert_eq!(lines, [3, 4], "{mode:?}: {hits:?}");
+    }
+}
+
+#[test]
+#[serial]
 fn bounded_relationships_refill_after_language_filtering() {
     let root = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();

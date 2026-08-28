@@ -242,9 +242,10 @@ returns chunks containing calls. Whitespace, newlines, and generic arguments do
 not need to be adjacent to the name. Tree-sitter excludes declaration names,
 comments, and literal text; files without a usable parse use quote/comment
 masking and a conservative declaration/call heuristic. Qualified references
-match the immediate textual qualifier, not an inferred receiver type. This is
-best-effort syntax lookup, not compiler resolution of imports, aliases, overloads,
-or shadowed bindings. Bounded requests widen indexed candidate batches after
+match the immediate textual receiver name (ignoring scoped generic arguments),
+not an inferred receiver type. This is best-effort syntax lookup, not compiler
+resolution of imports, aliases, overloads, or shadowed bindings. Bounded requests
+widen indexed candidate batches after
 rejected matches, up to 25,000 chunks. CLI `--no-limit` retains its 50,000-candidate
 ceiling; unbounded API requests (`limit: None`) scan all indexed literal candidates.
 Each candidate file is parsed at most once per request with the chunker's 100 ms
