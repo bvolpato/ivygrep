@@ -864,6 +864,7 @@ fn try_tree_sitter_chunk_source_with_timeout(
     use tree_sitter::QueryCursor;
 
     let (grammar, query) = tree_sitter_query(rel_path, language, lines.len())?;
+    let query = query?;
     let tree = parse_source_tree_with_budget(text, &grammar, parse_timeout)?;
     let mut cursor = QueryCursor::new();
 
@@ -1666,12 +1667,13 @@ thread_local! {
 }
 
 /// Compiled queries are immutable and grammar-specific, so compile each one
-/// once rather than once per file on large initial indexes.
+/// once rather than once per file on large initial indexes. Source inspection
+/// can still use the grammar when a chunk-capture query is unavailable.
 fn tree_sitter_query(
     rel_path: &Path,
     language: &str,
     line_count: usize,
-) -> Option<(tree_sitter::Language, &'static tree_sitter::Query)> {
+) -> Option<(tree_sitter::Language, Option<&'static tree_sitter::Query>)> {
     use std::sync::OnceLock;
 
     macro_rules! cached_query {
@@ -1680,7 +1682,7 @@ fn tree_sitter_query(
             let grammar: tree_sitter::Language = $grammar.into();
             let query = $cell
                 .get_or_init(|| tree_sitter::Query::new(&grammar, $query).ok())
-                .as_ref()?;
+                .as_ref();
             Some((grammar, query))
         }};
     }

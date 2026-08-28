@@ -918,6 +918,21 @@ fn parsed_scope_qualifier(mut node: tree_sitter::Node<'_>) -> Option<tree_sitter
             && let Some(qualifier) = parent
                 .child_by_field_name("path")
                 .or_else(|| parent.child_by_field_name("scope"))
+                .or_else(|| {
+                    // PHP's variable-name node separates the receiver sigil
+                    // from its identifier for both ordinary and nullsafe access.
+                    matches!(
+                        parent.kind(),
+                        "member_call_expression"
+                            | "nullsafe_member_call_expression"
+                            | "member_access_expression"
+                            | "nullsafe_member_access_expression"
+                    )
+                    .then(|| parent.child_by_field_name("object"))
+                    .flatten()
+                    .filter(|receiver| receiver.kind() == "variable_name")
+                    .and_then(|receiver| receiver.named_child(0))
+                })
         {
             return Some(qualifier);
         }
@@ -936,7 +951,10 @@ fn is_code_reference(node: tree_sitter::Node<'_>, text: &str) -> bool {
     let mut in_interpolation = false;
     loop {
         let kind = current.kind();
-        if matches!(kind, "interpolation" | "template_substitution") {
+        if matches!(
+            kind,
+            "interpolation" | "interpolated_expression" | "template_substitution"
+        ) {
             in_interpolation = true;
         }
         if kind.contains("comment")
@@ -1067,6 +1085,9 @@ fn is_call_reference(node: tree_sitter::Node<'_>) -> bool {
                 .or_else(|| parent.child_by_field_name("method"))
                 .or_else(|| parent.child_by_field_name("target"))
                 .or_else(|| parent.named_child(0)),
+            "cascade_call_expression" => parent
+                .child_by_field_name("property")
+                .or_else(|| parent.child_by_field_name("function")),
             "method_invocation"
             | "member_call_expression"
             | "nullsafe_member_call_expression"
@@ -1097,6 +1118,8 @@ fn terminal_name(mut node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_
             "field_expression"
                 | "selector_expression"
                 | "member_expression"
+                | "cascade_member_expression"
+                | "cascade_null_aware_member_expression"
                 | "member_access_expression"
                 | "member_binding_expression"
                 | "attribute"

@@ -195,6 +195,102 @@ fn php_nullsafe_method_calls_are_callers() {
 
 #[test]
 #[serial]
+fn swift_interpolation_preserves_calls_and_function_values() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let source = r##"func audit_target() -> String { "ok" }
+func ordinary() { audit_target() }
+func line() { let s = "\(audit_target())" }
+func raw() { let s = #"\#(audit_target())"# }
+func multi() { let s = """
+\(audit_target())
+""" }
+func callback() { let cb = audit_target }
+func interpolated_callback() { let s = "\(audit_target)" }
+func plain() { let s = "audit_target()" }
+func raw_plain() { let s = #"audit_target()"# }
+func nested_plain() { let s = "\("audit_target()")" }
+// audit_target()
+/* audit_target() */
+"##;
+    fs::write(root.path().join("calls.swift"), source).unwrap();
+    let workspace = index(root.path(), home.path());
+    for (mode, expected) in [
+        (SymbolSearchMode::References, vec![2, 3, 4, 6, 8, 9]),
+        (SymbolSearchMode::Callers, vec![2, 3, 4, 5]),
+    ] {
+        let hits = search_symbols(&workspace, "audit_target", mode, None, None).unwrap();
+        let mut lines = hits.iter().map(|hit| hit.start_line).collect::<Vec<_>>();
+        lines.sort_unstable();
+        assert_eq!(lines, expected, "{mode:?}: {hits:?}");
+    }
+}
+
+#[test]
+#[serial]
+fn dart_cascade_calls_exclude_properties_arguments_and_computed_callees() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let source = "class Service { void audit_target() {} }\n\
+        void ordinary(Service s) { s.audit_target(); }\n\
+        void cascade(Service s) { s..audit_target(); }\n\
+        void nullaware(Service? s) { s?..audit_target(); }\n\
+        void property(Service s) { s..audit_target; }\n\
+        void callback(Service s) { var cb = s.audit_target; }\n\
+        void argument(Service s) { s..invoke(s.audit_target); }\n\
+        void chained(Service s) { s..other.audit_target(); }\n\
+        void receiver(Service s) { s..audit_target.toString(); }\n\
+        void indexed(Service s) { s..callbacks[audit_target](); }\n\
+        void nullaware_property(Service? s) { s?..audit_target; }\n\
+        void nullaware_chained(Service s) { s..other?.audit_target(); }\n\
+        void plain() { var text = 's..audit_target()'; }\n\
+        // s..audit_target();\n\
+        /* s..audit_target(); */\n";
+    fs::write(root.path().join("calls.dart"), source).unwrap();
+    let workspace = index(root.path(), home.path());
+    for (mode, expected) in [
+        (SymbolSearchMode::References, (2..=12).collect::<Vec<_>>()),
+        (SymbolSearchMode::Callers, vec![2, 3, 4, 8, 12]),
+    ] {
+        let hits = search_symbols(&workspace, "audit_target", mode, None, None).unwrap();
+        let mut lines = hits.iter().map(|hit| hit.start_line).collect::<Vec<_>>();
+        lines.sort_unstable();
+        assert_eq!(lines, expected, "{mode:?}: {hits:?}");
+    }
+}
+
+#[test]
+#[serial]
+fn php_qualified_relationships_match_sigiled_receivers() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let source = "<?php\n\
+        class Service { public function audit_target() {} }\n\
+        function ordinary($service) { $service->audit_target(); }\n\
+        function nullsafe($service) { $service?->audit_target(); }\n\
+        function property($service) { $cb = $service->audit_target; }\n\
+        function nullsafe_property($service) { $cb = $service?->audit_target; }\n\
+        function wrong($other) { $other->audit_target(); }\n\
+        function wrong_nullsafe($other) { $other?->audit_target(); }\n\
+        function noise() { $text = '$service?->audit_target()'; }\n\
+        // $service->audit_target();\n";
+    fs::write(root.path().join("calls.php"), source).unwrap();
+    let workspace = index(root.path(), home.path());
+    for name in ["service->audit_target", "$service->audit_target"] {
+        for (mode, expected) in [
+            (SymbolSearchMode::References, vec![3, 4, 5, 6]),
+            (SymbolSearchMode::Callers, vec![3, 4]),
+        ] {
+            let hits = search_symbols(&workspace, name, mode, None, None).unwrap();
+            let mut lines = hits.iter().map(|hit| hit.start_line).collect::<Vec<_>>();
+            lines.sort_unstable();
+            assert_eq!(lines, expected, "{name}, {mode:?}: {hits:?}");
+        }
+    }
+}
+
+#[test]
+#[serial]
 fn bounded_relationships_refill_after_language_filtering() {
     let root = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
