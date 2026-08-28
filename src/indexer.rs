@@ -28,6 +28,8 @@ use crate::workspace::{Workspace, WorkspaceMetadata, index_path_string};
 
 mod compression;
 mod git_state;
+#[cfg(test)]
+mod recovery_tests;
 mod resources;
 mod staging;
 mod storage;
@@ -929,7 +931,8 @@ fn index_workspace_inner(
     let path_exists_in_base = |rel_path: &Path| base_ignored_status(rel_path).is_some();
     // Save the Merkle snapshot only after every store commits. An earlier
     // snapshot could claim that files exist in a partial index after a crash.
-    let (mut diff, pending_snapshot, clear_overlay_paths) = if let Some(overlay_diff) = overlay_mode
+    let (mut diff, mut pending_snapshot, clear_overlay_paths) = if let Some(overlay_diff) =
+        overlay_mode
     {
         (overlay_diff, None, Vec::new())
     } else if workspace.has_overlay() {
@@ -1037,15 +1040,41 @@ fn index_workspace_inner(
         (d, Some(new), Vec::new())
     };
 
+    // Validation stays after the no-op paths, but before planning a write
+    // against existing stores. A failed validation requires every current
+    // source file, not the delta calculated from the previous index.
+    let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
+    let mut is_fresh_index = !workspace_is_indexed(workspace);
+    if !use_overlay
+        && !is_fresh_index
+        && let Err(err) = open_storage_with_options(workspace, crate::EMBEDDING_DIMENSIONS, true)
+    {
+        tracing::warn!(
+            "storage verification failed for {}: {err:#}; rebuilding complete index in staging",
+            workspace.root.display()
+        );
+        is_fresh_index = true;
+    }
+    if !use_overlay && is_fresh_index {
+        // A snapshot can outlive another store or an interrupted recovery.
+        // Never use its incremental delta to populate a fresh store. Ordinary
+        // initial indexing already performed a full walk and has no old file.
+        if workspace.merkle_snapshot_path().exists() {
+            pending_snapshot = Some(MerkleSnapshot::build(&workspace.root, skip_gitignore)?);
+        }
+        diff = MerkleSnapshot::empty().diff(
+            pending_snapshot
+                .as_ref()
+                .context("a complete main-index rebuild requires a source snapshot")?,
+        );
+    }
+
     let pending_snapshot = pending_snapshot.map(Arc::new);
     let current_snapshot = pending_snapshot.clone().or_else(|| {
         MerkleSnapshot::load(&workspace.merkle_snapshot_path())
             .ok()
             .map(Arc::new)
     });
-    // Determine which stores to write to: overlay or main
-    let use_overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
-    let is_fresh_index = !workspace_is_indexed(workspace);
     // A from-scratch main index has no prior stores or snapshot to consult:
     // the diff already lists every file, so dependent discovery cannot add
     // anything and only costs a serial read of the whole tree.
@@ -1094,27 +1123,6 @@ fn index_workspace_inner(
     };
 
     let defer_secondary_indexes = !use_overlay && is_fresh_index;
-    if !use_overlay && fresh_staging.is_none() {
-        let preserved_metadata = workspace.read_metadata().ok().flatten();
-        if let Err(err) = open_storage_with_options(
-            workspace,
-            crate::EMBEDDING_DIMENSIONS,
-            !defer_secondary_indexes,
-        ) {
-            tracing::warn!(
-                "storage verification failed for {}: {err:#}; rebuilding index storage",
-                workspace.root.display()
-            );
-            rebuild_index_storage(workspace, preserved_metadata.as_ref())?;
-            let _ = open_storage_with_options(workspace, crate::EMBEDDING_DIMENSIONS, false)
-                .with_context(|| {
-                    format!(
-                        "failed to reopen index storage after rebuild for {}",
-                        workspace.root.display()
-                    )
-                })?;
-        }
-    }
 
     let mut sqlite = Connection::open(&sqlite_path)?;
     if fresh_staging.is_some() {

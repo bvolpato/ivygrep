@@ -94,6 +94,7 @@ where
                 .commit_failure
                 .as_ref()
                 .is_some_and(|enabled| enabled.load(std::sync::atomic::Ordering::SeqCst))
+            && matches!(self.inner.exists(path), Ok(true))
         {
             return Err(std::io::Error::other(
                 "injected Tantivy metadata publication failure",
@@ -512,7 +513,9 @@ pub(crate) mod test_support {
     }
 
     pub(super) fn commit_failure(path: &Path) -> Option<Arc<AtomicBool>> {
-        FAILED_COMMITS.lock().get(path).cloned()
+        let failures = FAILED_COMMITS.lock();
+        path.ancestors()
+            .find_map(|ancestor| failures.get(ancestor).cloned())
     }
 }
 

@@ -126,15 +126,31 @@ fn remove_path_if_exists(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn main_store_artifacts(workspace: &Workspace) -> [PathBuf; 6] {
+fn main_store_artifacts(workspace: &Workspace) -> Vec<PathBuf> {
     let sqlite_path = workspace.sqlite_path();
-    [
+    vec![
         sqlite_path.clone(),
         sqlite_sidecar_path(&sqlite_path, "-wal"),
         sqlite_sidecar_path(&sqlite_path, "-shm"),
         workspace.tantivy_dir(),
         workspace.vector_path(),
         workspace.vector_path().with_extension("usearch.bak"),
+        workspace.vector_path().with_extension("usearch.tmp"),
+        // A complete replacement invalidates derived vectors and deletion
+        // journals too. Back them up with the stores so a failed promotion
+        // restores the entire previous generation.
+        workspace.vector_neural_path(),
+        workspace.vector_neural_path().with_extension("usearch.bak"),
+        workspace.vector_neural_path().with_extension("usearch.tmp"),
+        workspace.neural_model_path(),
+        workspace.neural_profile_path(),
+        workspace.neural_backend_path(),
+        workspace.hash_tombstones_path(),
+        workspace.hash_tombstones_processing_path(),
+        workspace.hash_enhanced_generation_path(),
+        workspace.neural_tombstones_path(),
+        workspace.neural_tombstones_processing_path(),
+        workspace.neural_enhanced_generation_path(),
     ]
 }
 
