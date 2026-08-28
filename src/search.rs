@@ -6434,23 +6434,23 @@ mod tests {
                 .filter_map(|(_, _, document)| fetch_chunk_by_id(document, &context.fields))
                 .map(|chunk| chunk.file_path)
                 .collect::<Vec<_>>();
-            let indexed_literal_paths =
-                exact_literal_chunks_with_context(&context, "OrchidRetryBudget", &options, false)
-                    .unwrap()
-                    .into_iter()
-                    .map(|chunk| chunk.file_path)
-                    .collect::<Vec<_>>();
-            let hybrid_paths = hybrid_search_with_context(
+            let hybrid_hits = hybrid_search_with_context(
                 &context,
                 &workspace,
                 "OrchidRetryBudget",
                 None,
                 &options,
             )
-            .unwrap()
-            .into_iter()
-            .map(|hit| hit.file_path)
-            .collect::<Vec<_>>();
+            .unwrap();
+            let indexed_literal_paths = hybrid_hits
+                .iter()
+                .filter(|hit| hit.sources.iter().any(|source| source == "literal"))
+                .map(|hit| hit.file_path.clone())
+                .collect::<Vec<_>>();
+            let hybrid_paths = hybrid_hits
+                .into_iter()
+                .map(|hit| hit.file_path)
+                .collect::<Vec<_>>();
             let literal_paths =
                 literal_search_with_context(&context, &workspace, "OrchidRetryBudget", &options)
                     .unwrap()
