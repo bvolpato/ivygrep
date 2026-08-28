@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -16,6 +16,9 @@ use crate::text::strip_leading_annotations;
 use crate::workspace::{Workspace, WorkspaceScope};
 
 const SYMBOL_DEFINITION_LOOKUP_BATCH: usize = 128;
+/// Match the bounded literal-search ceiling; never turn a small relationship
+/// request into an unbounded repository scan when every candidate is rejected.
+const SYMBOL_RELATIONSHIP_CANDIDATE_LIMIT: usize = 25_000;
 /// Columns written per `symbols` row; keeps batched insert sizing in sync.
 pub(crate) const SYMBOL_ROW_COLUMNS: usize = 6;
 
@@ -203,7 +206,7 @@ pub(crate) fn search_symbols_in_current_index(
     let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
 
     if mode != SymbolSearchMode::Definitions {
-        return search_call_sites(workspace, candidate_name, &normalized, mode, options);
+        return search_call_sites(workspace, candidate_name, mode, options);
     }
 
     let query = parse_symbol_query(name);
@@ -546,12 +549,11 @@ fn query_workspace_db(
 fn search_call_sites(
     workspace: &Workspace,
     name: &str,
-    normalized: &str,
     mode: SymbolSearchMode,
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
     let (callers, references) =
-        search_call_sites_with_references(workspace, name, normalized, options)?;
+        search_call_sites_with_references(workspace, name, options, Some(mode))?;
     match mode {
         SymbolSearchMode::Callers => Ok(callers),
         SymbolSearchMode::References => Ok(references),
@@ -569,7 +571,7 @@ pub(crate) fn search_symbol_relationships_in_current_index(
     if normalized.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
-    search_call_sites_with_references(workspace, candidate_name, &normalized, options)
+    search_call_sites_with_references(workspace, candidate_name, options, None)
 }
 
 /// Languages that define the requested symbol, gathered from the overlay and
@@ -636,13 +638,26 @@ fn definition_languages(workspace: &Workspace, name: &str) -> Result<HashSet<Str
 fn search_call_sites_with_references(
     workspace: &Workspace,
     name: &str,
-    normalized: &str,
     options: &SearchOptions,
+    requested_mode: Option<SymbolSearchMode>,
 ) -> Result<(Vec<SearchHit>, Vec<SearchHit>)> {
+    if options.limit == Some(0) {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let query = parse_symbol_query(name);
     let mut candidate_options = options.clone();
-    candidate_options.limit = options.limit.map(|limit| limit.saturating_mul(4));
-    // Call sites are matched textually, so restrict them to the languages
-    // that actually define the symbol. An explicit --type filter wins.
+    // The CLI's --no-limit sentinel historically allows 50,000 literal
+    // candidates. API callers using None retain fully unbounded lookup.
+    let candidate_ceiling = if options.limit == Some(usize::MAX) {
+        50_000
+    } else {
+        SYMBOL_RELATIONSHIP_CANDIDATE_LIMIT
+    };
+    candidate_options.limit = options
+        .limit
+        .map(|limit| limit.saturating_mul(4).clamp(32, candidate_ceiling));
+    // Syntax does not resolve types or imports, so retain the definition
+    // language restriction. An explicit --type filter wins.
     let languages = if options.type_filter.is_none() {
         definition_languages(workspace, name)?
     } else {
@@ -651,112 +666,566 @@ fn search_call_sites_with_references(
     if languages.len() == 1 {
         candidate_options.type_filter = languages.iter().next().cloned();
     }
-    let query = format!("{}(", name.trim());
-    let mut candidates = if options.limit.is_some() {
-        crate::search::exact_literal_chunks(workspace, &query, &candidate_options)?
-    } else {
-        crate::search::exact_literal_chunks_unbounded(workspace, &query, &candidate_options)?
-    };
-    if !languages.is_empty() {
-        candidates.retain(|chunk| languages.contains(&chunk.language.to_ascii_lowercase()));
-    }
     let mut callers = Vec::new();
     let mut references = Vec::new();
     let mut seen_call_sites = HashSet::new();
-    let mut chunks_by_file = BTreeMap::<PathBuf, Vec<IndexedChunk>>::new();
-    for chunk in candidates {
-        chunks_by_file
-            .entry(chunk.file_path.clone())
-            .or_default()
-            .push(chunk);
-    }
-    for (file_path, mut chunks) in chunks_by_file {
-        let Ok(text) = fs::read_to_string(workspace.root.join(&file_path)) else {
-            continue;
-        };
-        chunks.sort_by_key(|chunk| {
+    let mut seen_references = HashSet::new();
+    let mut seen_chunks = HashSet::new();
+    let mut file_matches = HashMap::new();
+    loop {
+        // Search the identifier, not `name(`: values, whitespace, comments,
+        // and generic arguments are distinguished during source verification.
+        let (candidates, exhausted) = if let Some(budget) = candidate_options.limit {
+            let batch = crate::search::exact_literal_chunks(
+                workspace,
+                query.name,
+                &candidate_options,
+                budget,
+            )?;
+            (batch.chunks, batch.exhausted)
+        } else {
             (
-                chunk.end_line.saturating_sub(chunk.start_line),
-                chunk.start_line,
+                crate::search::exact_literal_chunks_unbounded(
+                    workspace,
+                    query.name,
+                    &candidate_options,
+                )?,
+                true,
             )
-        });
-        for chunk in chunks {
-            let call_lines =
-                matching_call_lines(&text, normalized, chunk.start_line, chunk.end_line)
-                    .into_iter()
-                    .filter(|(line, _)| seen_call_sites.insert((file_path.clone(), *line)))
-                    .collect::<Vec<_>>();
-            if call_lines.is_empty() {
-                continue;
+        };
+        let mut chunks_by_file = BTreeMap::<PathBuf, Vec<IndexedChunk>>::new();
+        for chunk in candidates {
+            if (languages.is_empty() || languages.contains(&chunk.language.to_ascii_lowercase()))
+                && seen_chunks.insert(chunk.vector_key)
+            {
+                chunks_by_file
+                    .entry(chunk.file_path.clone())
+                    .or_default()
+                    .push(chunk);
             }
-            if options.limit.is_none_or(|limit| callers.len() < limit) {
-                callers.push(SearchHit {
-                    file_path: chunk.file_path.clone(),
-                    start_line: chunk.start_line,
-                    end_line: chunk.end_line,
-                    preview: chunk.text.clone(),
-                    reason: "exact caller match".to_string(),
-                    score: 8.0,
-                    sources: vec!["caller".to_string()],
-                    neural_requested: false,
-                    neural_executed: false,
-                });
-            }
-            for (line, preview) in call_lines {
-                if options.limit.is_none_or(|limit| references.len() < limit) {
-                    references.push(SearchHit {
-                        file_path: chunk.file_path.clone(),
-                        start_line: line,
-                        end_line: line,
-                        preview,
-                        reason: "exact reference match".to_string(),
-                        score: 6.0,
-                        sources: vec!["reference".to_string()],
+        }
+        for (file_path, mut chunks) in chunks_by_file {
+            let matches = file_matches.entry(file_path.clone()).or_insert_with(|| {
+                fs::read_to_string(workspace.root.join(&file_path))
+                    .map(|text| {
+                        matching_symbol_lines(&file_path, &text, &chunks[0].language, &query)
+                    })
+                    .unwrap_or_default()
+            });
+            chunks.sort_by_key(|chunk| {
+                (
+                    chunk.end_line.saturating_sub(chunk.start_line),
+                    chunk.start_line,
+                )
+            });
+            for chunk in chunks {
+                let mut has_call = false;
+                for occurrence in matches.iter().filter(|occurrence| {
+                    (chunk.start_line..=chunk.end_line).contains(&occurrence.line)
+                }) {
+                    if occurrence.is_call
+                        && seen_call_sites.insert((file_path.clone(), occurrence.line))
+                    {
+                        has_call = true;
+                    }
+                    if options.limit.is_none_or(|limit| references.len() < limit)
+                        && seen_references.insert((file_path.clone(), occurrence.line))
+                    {
+                        references.push(SearchHit {
+                            file_path: file_path.clone(),
+                            start_line: occurrence.line,
+                            end_line: occurrence.line,
+                            preview: occurrence.preview.clone(),
+                            reason: "exact reference match".to_string(),
+                            score: 6.0,
+                            sources: vec!["reference".to_string()],
+                            neural_requested: false,
+                            neural_executed: false,
+                        });
+                    }
+                }
+                if has_call && options.limit.is_none_or(|limit| callers.len() < limit) {
+                    callers.push(SearchHit {
+                        file_path: file_path.clone(),
+                        start_line: chunk.start_line,
+                        end_line: chunk.end_line,
+                        preview: chunk.text,
+                        reason: "exact caller match".to_string(),
+                        score: 8.0,
+                        sources: vec!["caller".to_string()],
                         neural_requested: false,
                         neural_executed: false,
                     });
                 }
-            }
-            if options
-                .limit
-                .is_some_and(|limit| callers.len() >= limit && references.len() >= limit)
-            {
-                return Ok((callers, references));
+                if options.limit.is_some_and(|limit| match requested_mode {
+                    Some(SymbolSearchMode::References) => references.len() >= limit,
+                    Some(SymbolSearchMode::Callers) => callers.len() >= limit,
+                    _ => callers.len() >= limit && references.len() >= limit,
+                }) {
+                    return Ok((callers, references));
+                }
             }
         }
+        if exhausted
+            || candidate_options
+                .limit
+                .is_none_or(|limit| limit >= candidate_ceiling)
+        {
+            break;
+        }
+        // Definitions and non-code occurrences do not spend the result
+        // budget. Widen only when needed, and parse each candidate file once.
+        candidate_options.limit = candidate_options
+            .limit
+            .map(|limit| limit.saturating_mul(4).min(candidate_ceiling));
     }
     Ok((callers, references))
 }
 
+struct SymbolLine {
+    line: usize,
+    preview: String,
+    is_call: bool,
+}
+
+fn matching_symbol_lines(
+    path: &std::path::Path,
+    text: &str,
+    language: &str,
+    query: &SymbolQuery<'_>,
+) -> Vec<SymbolLine> {
+    let tree = crate::chunking::parse_source_tree(path, text, language);
+    let fallback;
+    let source = if tree.is_some() {
+        text
+    } else {
+        fallback = mask_non_code(text, language);
+        &fallback
+    };
+    let normalized = query.name.to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Vec::new();
+    }
+    let lower = source.to_ascii_lowercase();
+    let line_starts = std::iter::once(0)
+        .chain(text.match_indices('\n').map(|(offset, _)| offset + 1))
+        .collect::<Vec<_>>();
+    let mut matches = BTreeMap::<usize, SymbolLine>::new();
+    for (start, _) in lower.match_indices(&normalized) {
+        let end = start + normalized.len();
+        let node = if let Some(tree) = &tree {
+            let Some(node) = tree.root_node().descendant_for_byte_range(start, end) else {
+                continue;
+            };
+            // Definition lookup canonicalizes sigils, including JavaScript
+            // `$name`/`name$`. Verify the whole syntax token, not its substring.
+            if !node.is_named()
+                || !node
+                    .utf8_text(text.as_bytes())
+                    .is_ok_and(|value| canonical_symbol(value).eq_ignore_ascii_case(&normalized))
+                || !is_code_reference(node, text)
+            {
+                continue;
+            }
+            Some(node)
+        } else {
+            None
+        };
+        let (start, end) = node.map_or((start, end), |node| (node.start_byte(), node.end_byte()));
+        if source[..start]
+            .chars()
+            .next_back()
+            .is_some_and(is_identifier_character)
+            || source[end..]
+                .chars()
+                .next()
+                .is_some_and(is_identifier_character)
+            || !qualifier_matches(source, start, query.owner)
+        {
+            continue;
+        }
+        let line = line_starts.partition_point(|offset| *offset <= start);
+        let line_start = line_starts[line - 1];
+        let is_call = if let Some(node) = node {
+            is_call_reference(node)
+        } else {
+            let line_end = line_starts.get(line).copied().unwrap_or(source.len());
+            if looks_like_definition(&lower[line_start..line_end], start - line_start) {
+                continue;
+            }
+            follows_call_arguments(&source[end..])
+        };
+        matches
+            .entry(line)
+            .and_modify(|occurrence| occurrence.is_call |= is_call)
+            .or_insert_with(|| SymbolLine {
+                line,
+                preview: text[line_start..]
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string(),
+                is_call,
+            });
+    }
+    matches.into_values().collect()
+}
+
+fn is_identifier_character(character: char) -> bool {
+    character.is_alphanumeric() || matches!(character, '_' | '$')
+}
+
+fn qualifier_matches(source: &str, name_start: usize, owner: Option<&str>) -> bool {
+    let Some(owner) = owner else {
+        return true;
+    };
+    let prefix = source[..name_start].trim_end();
+    let Some(prefix) = ["::", ".", "->", "#"]
+        .into_iter()
+        .find_map(|separator| prefix.strip_suffix(separator))
+    else {
+        return false;
+    };
+    let qualifier = prefix.trim_end();
+    let start = qualifier
+        .rfind(|character| !is_identifier_character(character))
+        .map_or(0, |offset| {
+            offset + qualifier[offset..].chars().next().unwrap().len_utf8()
+        });
+    qualifier[start..].eq_ignore_ascii_case(owner)
+}
+
+fn is_code_reference(node: tree_sitter::Node<'_>, text: &str) -> bool {
+    let mut current = node;
+    let mut in_interpolation = false;
+    loop {
+        let kind = current.kind();
+        if matches!(kind, "interpolation" | "template_substitution") {
+            in_interpolation = true;
+        }
+        if kind.contains("comment")
+            || (!in_interpolation
+                && (kind.contains("string")
+                    || kind.contains("regex")
+                    || matches!(
+                        kind,
+                        "char_literal"
+                            | "character_literal"
+                            | "heredoc_body"
+                            | "charlist"
+                            | "sigil"
+                    )))
+        {
+            return false;
+        }
+        let Some(parent) = current.parent() else {
+            return true;
+        };
+        let kind = parent.kind();
+        // Declaration names are not references. The declarator chain matters
+        // for C/C++ prototypes; looking for a keyword on one line is not enough.
+        if (kind.contains("declaration")
+            || kind.contains("definition")
+            || kind.ends_with("_item")
+            || kind.ends_with("_signature")
+            || matches!(
+                kind,
+                "function" | "method" | "singleton_method" | "class" | "module"
+            ))
+            && parent
+                .child_by_field_name("name")
+                .is_some_and(|name| contains_node(name, node))
+        {
+            return false;
+        }
+        // Elixir represents `def name(...)` as a call with a declaration
+        // argument rather than a declaration node. Its body remains code.
+        if kind == "call"
+            && parent
+                .child_by_field_name("target")
+                .and_then(|target| target.utf8_text(text.as_bytes()).ok())
+                .is_some_and(|target| {
+                    matches!(
+                        target,
+                        "def"
+                            | "defp"
+                            | "defmacro"
+                            | "defmacrop"
+                            | "defdelegate"
+                            | "defguard"
+                            | "defguardp"
+                            | "defn"
+                            | "defnp"
+                    )
+                })
+            && parent
+                .named_children(&mut parent.walk())
+                .find(|child| child.kind() == "arguments")
+                .and_then(|arguments| arguments.named_child(0))
+                .is_some_and(|head| contains_node(head, node))
+        {
+            return false;
+        }
+        if matches!(
+            kind,
+            "function_declarator" | "variable_declarator" | "init_declarator"
+        ) && parent
+            .child_by_field_name("declarator")
+            .or_else(|| parent.child_by_field_name("name"))
+            .is_some_and(|name| contains_node(name, node))
+        {
+            return false;
+        }
+        if matches!(
+            kind,
+            "let_declaration" | "let_binding" | "parameter" | "required_parameter"
+        ) && parent
+            .child_by_field_name("pattern")
+            .or_else(|| parent.child_by_field_name("name"))
+            .is_some_and(|name| contains_node(name, node))
+        {
+            return false;
+        }
+        current = parent;
+    }
+}
+
+fn contains_node(container: tree_sitter::Node<'_>, node: tree_sitter::Node<'_>) -> bool {
+    container.start_byte() <= node.start_byte() && node.end_byte() <= container.end_byte()
+}
+
+fn is_call_reference(node: tree_sitter::Node<'_>) -> bool {
+    let mut current = node;
+    while let Some(parent) = current.parent() {
+        if parent.kind() == "call_expression_with_bareword"
+            && parent
+                .parent()
+                .is_some_and(|parent| parent.kind() == "to_reference")
+        {
+            return false;
+        }
+        if matches!(
+            parent.kind(),
+            "type_arguments"
+                | "type_argument_list"
+                | "template_argument_list"
+                | "arguments"
+                | "argument_list"
+                | "value_arguments"
+        ) {
+            return false;
+        }
+        let callee = match parent.kind() {
+            "call_expression"
+            | "call"
+            | "invocation_expression"
+            | "function_call_expression"
+            | "function_call"
+            | "application_expression"
+            | "apply"
+            | "call_expression_with_args_with_brackets"
+            | "call_expression_with_bareword" => parent
+                .child_by_field_name("function")
+                .or_else(|| parent.child_by_field_name("function_name"))
+                .or_else(|| parent.child_by_field_name("name"))
+                .or_else(|| parent.child_by_field_name("method"))
+                .or_else(|| parent.child_by_field_name("target"))
+                .or_else(|| parent.named_child(0)),
+            "method_invocation" | "member_call_expression" | "scoped_call_expression" => parent
+                .child_by_field_name("name")
+                .or_else(|| parent.child_by_field_name("function_name")),
+            "new_expression" => parent.child_by_field_name("constructor"),
+            "object_creation_expression" => parent.child_by_field_name("type"),
+            _ => None,
+        };
+        if let Some(callee) = callee {
+            return terminal_name(callee).is_some_and(|name| name.id() == node.id());
+        }
+        current = parent;
+    }
+    false
+}
+
+fn terminal_name(mut node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
+    loop {
+        if node.named_child_count() == 0 {
+            return Some(node);
+        }
+        // Descend only through name wrappers. An index, conditional, or
+        // closure body can contain the identifier without invoking it.
+        if !matches!(
+            node.kind(),
+            "field_expression"
+                | "selector_expression"
+                | "member_expression"
+                | "member_access_expression"
+                | "member_binding_expression"
+                | "attribute"
+                | "scoped_identifier"
+                | "scoped_type_identifier"
+                | "qualified_identifier"
+                | "qualified_name"
+                | "qualified"
+                | "scope_resolution"
+                | "value_path"
+                | "navigation_expression"
+                | "navigation_suffix"
+                | "dot"
+                | "generic_function"
+                | "template_function"
+                | "template_type"
+                | "generic_name"
+                | "generic_type"
+                | "instantiation_expression"
+                | "parenthesized_expression"
+                | "parens"
+                | "variable"
+                | "dot_index_expression"
+                | "method_index_expression"
+                | "call_expression_with_bareword"
+                | "null_assertion_expression"
+                | "non_null_expression"
+                | "conditional_access_expression"
+                | "unary_expression"
+                | "pointer_expression"
+        ) {
+            return None;
+        }
+        let named = [
+            "field",
+            "attribute",
+            "name",
+            "function",
+            "function_name",
+            "member",
+        ]
+        .into_iter()
+        .find_map(|field| node.child_by_field_name(field));
+        let next = named.or_else(|| {
+            let mut cursor = node.walk();
+            node.named_children(&mut cursor)
+                .filter(|child| {
+                    !matches!(
+                        child.kind(),
+                        "type_arguments" | "type_argument_list" | "template_argument_list"
+                    )
+                })
+                .last()
+        })?;
+        node = next;
+    }
+}
+
+fn follows_call_arguments(suffix: &str) -> bool {
+    let mut suffix = suffix.trim_start();
+    if let Some(rest) = suffix.strip_prefix("::") {
+        suffix = rest.trim_start();
+    }
+    if suffix.starts_with('<') {
+        let mut depth = 0;
+        for (offset, character) in suffix.char_indices() {
+            match character {
+                '<' => depth += 1,
+                '>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return suffix[offset + 1..].trim_start().starts_with('(');
+                    }
+                }
+                ';' | '{' | '}' => return false,
+                _ => {}
+            }
+        }
+        return false;
+    }
+    suffix.starts_with('(')
+}
+
+/// Conservative fallback for files without a usable grammar. Preserve byte
+/// offsets and line breaks while excluding quoted text and language comments.
+fn mask_non_code(text: &str, language: &str) -> String {
+    let mut masked = text.as_bytes().to_vec();
+    let bytes = text.as_bytes();
+    let hash_comments = matches!(
+        language,
+        "python" | "ruby" | "shell" | "bash" | "perl" | "r" | "julia" | "elixir" | "starlark"
+    );
+    let dash_comments = matches!(language, "sql" | "lua" | "haskell" | "ada");
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let start = offset;
+        if bytes[offset..].starts_with(b"//")
+            || (hash_comments && bytes[offset] == b'#')
+            || (dash_comments && bytes[offset..].starts_with(b"--"))
+        {
+            while offset < bytes.len() && bytes[offset] != b'\n' {
+                offset += 1;
+            }
+        } else if bytes[offset..].starts_with(b"/*") {
+            offset += 2;
+            let mut depth = 1;
+            while offset < bytes.len() && depth > 0 {
+                if bytes[offset..].starts_with(b"/*") {
+                    depth += 1;
+                    offset += 2;
+                } else if bytes[offset..].starts_with(b"*/") {
+                    depth -= 1;
+                    offset += 2;
+                } else {
+                    offset += 1;
+                }
+            }
+        } else if matches!(bytes[offset], b'\'' | b'"' | b'`') {
+            let quote = bytes[offset];
+            let width = if bytes[offset..].starts_with(&[quote; 3]) {
+                3
+            } else {
+                1
+            };
+            offset += width;
+            while offset < bytes.len() {
+                if bytes[offset] == b'\\' {
+                    offset = (offset + 2).min(bytes.len());
+                } else if bytes[offset..].starts_with(&[quote; 3][..width]) {
+                    offset += width;
+                    break;
+                } else {
+                    offset += 1;
+                }
+            }
+        } else {
+            offset += 1;
+            continue;
+        }
+        for byte in &mut masked[start..offset] {
+            if !matches!(*byte, b'\n' | b'\r') {
+                *byte = b' ';
+            }
+        }
+    }
+    // Every non-ASCII sequence is either untouched or entirely inside a
+    // masked range, so masking cannot split a UTF-8 code point.
+    String::from_utf8(masked).expect("masking preserves UTF-8")
+}
+
+#[cfg(test)]
 fn matching_call_lines(
     text: &str,
     normalized: &str,
     start_line: usize,
     end_line: usize,
 ) -> Vec<(usize, String)> {
-    let mut matches = Vec::new();
-    let needle = format!("{normalized}(");
-    for (offset, line) in text
-        .lines()
-        .enumerate()
-        .skip(start_line.saturating_sub(1))
-        .take(end_line.saturating_sub(start_line).saturating_add(1))
-    {
-        let lower = line.to_ascii_lowercase();
-        let mut from = 0;
-        while let Some(relative) = lower[from..].find(&needle) {
-            let index = from + relative;
-            let boundary_ok = index == 0
-                || !lower.as_bytes()[index - 1].is_ascii_alphanumeric()
-                    && lower.as_bytes()[index - 1] != b'_';
-            if boundary_ok && !looks_like_definition(&lower, index) {
-                matches.push((offset + 1, line.trim().to_string()));
-                break;
-            }
-            from = index + needle.len();
-        }
-    }
-    matches
+    matching_symbol_lines(
+        std::path::Path::new("fallback"),
+        text,
+        "",
+        &parse_symbol_query(normalized),
+    )
+    .into_iter()
+    .filter(|occurrence| occurrence.is_call && (start_line..=end_line).contains(&occurrence.line))
+    .map(|occurrence| (occurrence.line, occurrence.preview))
+    .collect()
 }
 
 fn looks_like_definition(line: &str, name_offset: usize) -> bool {
@@ -2064,6 +2533,181 @@ mod tests {
             matching_call_lines("let service = UserService(7);", "userservice", 1, 1),
             [(1, "let service = UserService(7);".to_string())]
         );
+    }
+
+    #[test]
+    fn parsed_relationships_preserve_language_call_syntax() {
+        for (path, language, source, expected_line) in [
+            (
+                "calls.go",
+                "go",
+                "package fixture\nfunc audit_target() {}\nfunc run() { audit_target () }\n",
+                3,
+            ),
+            (
+                "Calls.cs",
+                "csharp",
+                "class Calls {\nvoid audit_target<T>() {}\nvoid run() { audit_target<int> (); }\n}\n",
+                3,
+            ),
+            (
+                "calls.swift",
+                "swift",
+                "func audit_target() {}\nfunc run() { audit_target () }\n",
+                2,
+            ),
+            (
+                "calls.kt",
+                "kotlin",
+                "fun audit_target() {}\nfun run() { audit_target () }\n",
+                2,
+            ),
+            (
+                "calls.dart",
+                "dart",
+                "void audit_target() {}\nvoid run() { audit_target (); }\n",
+                2,
+            ),
+            (
+                "calls.lua",
+                "lua",
+                "function audit_target() end\nfunction run() audit_target () end\n",
+                2,
+            ),
+            (
+                "calls.rb",
+                "ruby",
+                "def audit_target(); end\ndef run(); audit_target (); end\n",
+                2,
+            ),
+            (
+                "calls.ex",
+                "elixir",
+                "defmodule Calls do\ndef audit_target(), do: :ok\ndef run(), do: audit_target()\nend\n",
+                3,
+            ),
+            (
+                "calls.zig",
+                "zig",
+                "fn audit_target() void {}\nfn run() void { audit_target (); }\n",
+                2,
+            ),
+            (
+                "calls.ml",
+                "ocaml",
+                "let audit_target () = ()\nlet run () = audit_target()\n",
+                2,
+            ),
+            (
+                "calls.hs",
+                "haskell",
+                "audit_target () = ()\nrun () = audit_target()\n",
+                2,
+            ),
+            (
+                "calls.pl",
+                "perl",
+                "sub audit_target {}\nsub run { audit_target(); }\n",
+                2,
+            ),
+            (
+                "calls.pl",
+                "perl",
+                "sub audit_target {}\nsub run { $obj->audit_target(); }\n",
+                2,
+            ),
+        ] {
+            let hits = matching_symbol_lines(
+                std::path::Path::new(path),
+                source,
+                language,
+                &parse_symbol_query("audit_target"),
+            );
+            let lines = hits
+                .iter()
+                .map(|hit| (hit.line, hit.is_call))
+                .collect::<Vec<_>>();
+            assert_eq!(lines, [(expected_line, true)], "{path}");
+        }
+    }
+
+    #[test]
+    fn fallback_relationships_mask_comments_and_multiline_strings() {
+        let source = "function audit_target() {}\nresult = audit_target /* gap */\n ();\ncb = audit_target;\n# audit_target()\ntext = \"audit_target()\\\" audit_target()\";\ntext = '''audit_target()\naudit_target()''';\nother_audit_target();\n";
+        let hits = matching_symbol_lines(
+            std::path::Path::new("calls.r"),
+            source,
+            "r",
+            &parse_symbol_query("audit_target"),
+        );
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.line, hit.is_call))
+                .collect::<Vec<_>>(),
+            [(2, true), (4, false)]
+        );
+    }
+
+    #[test]
+    fn interpolation_is_code_but_regex_literals_are_not() {
+        let source = "function audit_target() {}\nconst text = `${audit_target ()}`;\nconst regex = /audit_target()/;\n";
+        let hits = matching_symbol_lines(
+            std::path::Path::new("calls.js"),
+            source,
+            "javascript",
+            &parse_symbol_query("audit_target"),
+        );
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.line, hit.is_call))
+                .collect::<Vec<_>>(),
+            [(2, true)]
+        );
+    }
+
+    #[test]
+    fn relationship_tokens_preserve_sigiled_symbol_lookup() {
+        let source = "function $audit_target() {}\nfunction run() { $audit_target (); }\nconst cb = $audit_target;\nconst different = audit_target$suffix;\n";
+        let hits = matching_symbol_lines(
+            std::path::Path::new("calls.js"),
+            source,
+            "javascript",
+            &parse_symbol_query("$audit_target"),
+        );
+        assert_eq!(
+            hits.iter()
+                .map(|hit| (hit.line, hit.is_call))
+                .collect::<Vec<_>>(),
+            [(2, true), (3, false)]
+        );
+    }
+
+    #[test]
+    fn computed_callees_do_not_call_their_index_or_receiver() {
+        for (path, language, source) in [
+            (
+                "calls.rs",
+                "rust",
+                "fn run() { callbacks[audit_target](); }",
+            ),
+            ("calls.py", "python", "callbacks[audit_target]()"),
+            ("calls.js", "javascript", "callbacks[audit_target]();"),
+            ("calls.py", "python", "(lambda: audit_target)()"),
+            ("calls.rs", "rust", "fn run() { (|| audit_target)(); }"),
+            ("calls.pl", "perl", "my $cb = \\&audit_target;"),
+        ] {
+            let hits = matching_symbol_lines(
+                std::path::Path::new(path),
+                source,
+                language,
+                &parse_symbol_query("audit_target"),
+            );
+            assert_eq!(
+                hits.iter().map(|hit| hit.is_call).collect::<Vec<_>>(),
+                [false],
+                "{path}"
+            );
+        }
     }
 
     #[test]
