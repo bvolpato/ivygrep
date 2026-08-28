@@ -1368,9 +1368,8 @@ fn simple_lexical_query(
 /// whose every token carries signal. A long pasted prompt is different: as a
 /// flat disjunction its hundreds of common tokens flood the fused ranking
 /// with long documents and bury the hits the normalized, stopword-free
-/// expansions find. Those prompts keep relying on the expansions, which is
-/// also what happened before token queries existed (the parser rejected the
-/// raw variant and it contributed nothing).
+/// expansions find. Keep successfully parsed queries at any length; apply
+/// this bound only when parser-invalid text needs the analyzer fallback.
 const MAX_PUNCTUATED_TOKEN_QUERY_TERMS: usize = 24;
 
 /// BM25 query built directly from code-analyzer tokens. This never fails on
@@ -1436,39 +1435,37 @@ impl LexicalQueryExecutor<'_> {
         {
             query
         } else {
-            let explicit_boolean = has_explicit_boolean_operators(lexical_query)
-                .then(|| self.parser.parse_query(lexical_query))
-                .and_then(|parsed| match parsed {
-                    Ok(query) => Some(query),
-                    Err(err) => {
+            let terms = literal_candidate_terms(lexical_query);
+            if terms.is_empty() {
+                return Ok(Vec::new());
+            }
+            match self.parser.parse_query(lexical_query) {
+                Ok(query) => query,
+                Err(err) => {
+                    tracing::debug!(
+                        query_variant = lexical_query,
+                        error = %err,
+                        "lexical query rejected by Tantivy parser"
+                    );
+                    if has_explicit_boolean_operators(lexical_query) {
+                        return Ok(Vec::new());
+                    }
+                    if terms.len() > MAX_PUNCTUATED_TOKEN_QUERY_TERMS {
                         tracing::debug!(
                             query_variant = lexical_query,
-                            error = %err,
-                            "boolean lexical query rejected by Tantivy parser; using term query"
+                            terms = terms.len(),
+                            "long invalid punctuated variant left to its expansions"
                         );
-                        None
+                        return Ok(Vec::new());
                     }
-                });
-            let token_query = || {
-                let terms = literal_candidate_terms(lexical_query);
-                if terms.len() > MAX_PUNCTUATED_TOKEN_QUERY_TERMS {
-                    tracing::debug!(
-                        query_variant = lexical_query,
-                        terms = terms.len(),
-                        "long punctuated variant left to its expansions"
-                    );
-                    return None;
-                }
-                lexical_terms_query(self.fields, lexical_query, self.conjunctive_numeric_query)
-            };
-            match explicit_boolean.or_else(token_query) {
-                Some(query) => query,
-                None => {
-                    tracing::debug!(
-                        query_variant = lexical_query,
-                        "skipping lexical expansion without indexable terms"
-                    );
-                    return Ok(Vec::new());
+                    let Some(query) = lexical_terms_query(
+                        self.fields,
+                        lexical_query,
+                        self.conjunctive_numeric_query,
+                    ) else {
+                        return Ok(Vec::new());
+                    };
+                    query
                 }
             }
         };
@@ -9378,14 +9375,21 @@ export function registerCommands(p: Plugin) {
     /// Executes one raw lexical variant the way the hybrid pipeline does and
     /// returns the matched file paths.
     fn lexical_variant_paths(ctx: &SearchContext, variant: &str) -> Vec<PathBuf> {
-        let mut search_fields = vec![ctx.fields.text, ctx.fields.file_path];
+        let mut search_fields = vec![ctx.fields.text];
         if let Some(field) = ctx.fields.file_path_text {
             search_fields.push(field);
         }
         if let Some(field) = ctx.fields.signature {
             search_fields.push(field);
         }
-        let parser = QueryParser::for_index(&ctx.indexes[0], search_fields);
+        let mut parser = QueryParser::for_index(&ctx.indexes[0], search_fields);
+        parser.set_field_boost(ctx.fields.file_path, 2.0);
+        if let Some(field) = ctx.fields.file_path_text {
+            parser.set_field_boost(field, 5.0);
+        }
+        if let Some(field) = ctx.fields.signature {
+            parser.set_field_boost(field, 5.0);
+        }
         let glob_path_filter = GlobPathQueryFilter {
             included_paths: None,
             excluded_paths: None,
@@ -9413,6 +9417,50 @@ export function registerCommands(p: Plugin) {
         paths.sort();
         paths.dedup();
         paths
+    }
+
+    #[test]
+    #[serial]
+    fn long_valid_punctuated_lexical_variant_still_produces_bm25_candidates() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(root.path().join("primary.txt"), "code\n").unwrap();
+
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        let ctx = SearchContext::load(&workspace, None, false).unwrap();
+        let query = "Please show code that processes customer payment records safely while preserving audit history validating account balances rejecting malformed invoices recording settlement failures and notifying operators.";
+
+        assert!(literal_candidate_terms(query).len() > MAX_PUNCTUATED_TOKEN_QUERY_TERMS);
+        assert_eq!(
+            lexical_variant_paths(&ctx, query),
+            vec![PathBuf::from("primary.txt")],
+            "valid long queries must retain their raw BM25 candidates"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn partial_phrase_punctuated_lexical_variant_keeps_all_content_candidates() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(root.path().join("a.txt"), "alpha\n").unwrap();
+        std::fs::write(root.path().join("b.txt"), "hello world\n").unwrap();
+
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        let ctx = SearchContext::load(&workspace, None, false).unwrap();
+
+        assert_eq!(
+            lexical_variant_paths(&ctx, "alpha \"hello world\""),
+            vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")]
+        );
+        assert!(lexical_variant_paths(&ctx, "alpha AND \"hello world\"").is_empty());
+        assert!(lexical_variant_paths(&ctx, "*").is_empty());
     }
 
     #[test]
@@ -9452,6 +9500,10 @@ export function registerCommands(p: Plugin) {
             vec![PathBuf::from("src/greeter.py")]
         );
         assert_eq!(
+            lexical_variant_paths(&ctx, "\"hello world\""),
+            vec![PathBuf::from("src/greeter.py")]
+        );
+        assert_eq!(
             lexical_variant_paths(&ctx, "what's the retry policy for POST requests?"),
             vec![PathBuf::from("src/retry_policy.md")]
         );
@@ -9465,6 +9517,10 @@ export function registerCommands(p: Plugin) {
             vec![PathBuf::from("src/greeter.py")]
         );
         assert!(lexical_variant_paths(&ctx, "greet AND refused").is_empty());
+        assert_eq!(
+            lexical_variant_paths(&ctx, "file_path:\"src/greeter.py\""),
+            vec![PathBuf::from("src/greeter.py")]
+        );
 
         // A long pasted prompt with punctuation is not turned into a flat
         // disjunction of every token; its normalized expansions carry it.
