@@ -8590,6 +8590,16 @@ mod tests {
     #[tokio::test]
     #[serial]
     async fn failed_watch_index_recovers_without_another_repository_event() {
+        assert_failed_watch_index_recovers(false).await;
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn failed_tantivy_publication_watch_update_recovers_without_new_event() {
+        assert_failed_watch_index_recovers(true).await;
+    }
+
+    async fn assert_failed_watch_index_recovers(fail_tantivy_publication: bool) {
         let home = tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
         let repo = tempdir().unwrap();
@@ -8602,6 +8612,7 @@ mod tests {
         let state = test_state();
         register_watcher(&state, repo.path()).unwrap();
         let metadata = std::fs::read(workspace.metadata_path()).unwrap();
+        let generation = workspace.read_metadata().unwrap().unwrap().index_generation;
         let control = state
             .watchers
             .lock()
@@ -8610,7 +8621,14 @@ mod tests {
             .control
             .clone();
 
-        std::fs::write(workspace.metadata_path(), "invalid metadata").unwrap();
+        let publication_failure = if fail_tantivy_publication {
+            Some(crate::indexer::fail_tantivy_commits(
+                &workspace.tantivy_dir(),
+            ))
+        } else {
+            std::fs::write(workspace.metadata_path(), "invalid metadata").unwrap();
+            None
+        };
         std::fs::write(&source, "pub fn recovered_watch_marker() {}\n").unwrap();
         control.mark_paths_dirty([PathBuf::from("lib.rs")]);
 
@@ -8622,13 +8640,34 @@ mod tests {
         }
         assert!(control.retrying.load(Ordering::Relaxed));
         assert_eq!(control.snapshot_phase().0, "error");
+        if fail_tantivy_publication {
+            assert!(
+                control
+                    .pending_work
+                    .lock()
+                    .backend_error
+                    .as_ref()
+                    .is_some_and(|error| {
+                        error.contains("injected Tantivy metadata publication failure")
+                    })
+            );
+        }
 
+        drop(publication_failure);
         std::fs::write(workspace.metadata_path(), metadata).unwrap();
-        let recovered =
-            wait_for_literal_visibility(&workspace, "recovered_watch_marker", true).await;
+        let mut recovered = false;
+        for _ in 0..60 {
+            if workspace.read_metadata().unwrap().unwrap().index_generation > generation
+                && indexed_literal_visible(&workspace, "recovered_watch_marker") == Some(true)
+            {
+                recovered = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         stop_all_watchers(&state);
 
-        assert!(recovered, "failed watcher update was not retried");
+        assert!(recovered, "failed watcher update did not recover");
     }
 
     #[tokio::test]

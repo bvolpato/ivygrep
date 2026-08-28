@@ -46,11 +46,17 @@ pub struct StorageHandles {
 #[derive(Debug, Clone)]
 struct RetryingDirectory<D> {
     inner: D,
+    #[cfg(test)]
+    commit_failure: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl<D> RetryingDirectory<D> {
     fn new(inner: D) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            #[cfg(test)]
+            commit_failure: None,
+        }
     }
 }
 
@@ -82,6 +88,17 @@ where
     }
 
     fn atomic_write(&self, path: &Path, data: &[u8]) -> std::io::Result<()> {
+        #[cfg(test)]
+        if path == Path::new("meta.json")
+            && self
+                .commit_failure
+                .as_ref()
+                .is_some_and(|enabled| enabled.load(std::sync::atomic::Ordering::SeqCst))
+        {
+            return Err(std::io::Error::other(
+                "injected Tantivy metadata publication failure",
+            ));
+        }
         self.inner.atomic_write(path, data)
     }
 
@@ -419,6 +436,11 @@ pub fn open_tantivy_index(path: &Path) -> Result<(TantivyIndex, TantivyFields)> 
 
     let schema = build_schema();
     let directory = RetryingDirectory::new(MmapDirectory::open(path)?);
+    #[cfg(test)]
+    let directory = RetryingDirectory {
+        commit_failure: test_support::commit_failure(path),
+        ..directory
+    };
     let index = if path.join("meta.json").exists() {
         TantivyIndex::open(directory)?
     } else {
@@ -448,6 +470,50 @@ pub fn open_tantivy_index(path: &Path) -> Result<(TantivyIndex, TantivyFields)> 
     };
 
     Ok((index, fields))
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, LazyLock};
+
+    use parking_lot::Mutex;
+
+    use super::*;
+
+    static FAILED_COMMITS: LazyLock<Mutex<HashMap<PathBuf, Arc<AtomicBool>>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    pub(crate) struct CommitFailure {
+        path: PathBuf,
+        enabled: Arc<AtomicBool>,
+    }
+
+    impl Drop for CommitFailure {
+        fn drop(&mut self) {
+            self.enabled.store(false, Ordering::SeqCst);
+            FAILED_COMMITS.lock().remove(&self.path);
+        }
+    }
+
+    pub(crate) fn fail_tantivy_commits(path: &Path) -> CommitFailure {
+        let enabled = Arc::new(AtomicBool::new(true));
+        assert!(
+            FAILED_COMMITS
+                .lock()
+                .insert(path.to_owned(), enabled.clone())
+                .is_none()
+        );
+        CommitFailure {
+            path: path.to_owned(),
+            enabled,
+        }
+    }
+
+    pub(super) fn commit_failure(path: &Path) -> Option<Arc<AtomicBool>> {
+        FAILED_COMMITS.lock().get(path).cloned()
+    }
 }
 
 #[cfg(test)]

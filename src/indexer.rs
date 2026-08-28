@@ -43,6 +43,8 @@ use resources::{
     check_system_constraints, indexing_pool, neural_enhance_batch_size, tantivy_writer_settings,
 };
 use staging::FreshIndexStaging;
+#[cfg(test)]
+pub(crate) use storage::test_support::fail_tantivy_commits;
 pub use storage::{
     StorageHandles, TantivyFields, open_sqlite, open_sqlite_readonly, open_storage,
     open_tantivy_index,
@@ -1165,6 +1167,14 @@ fn index_workspace_inner(
         }
     }
     let mut writer = writer.context("writer must be acquired after retries")?;
+    // A failed commit can leave managed deletion files ahead of meta.json.
+    // A fresh writer reuses that commit's opstamp, so collect abandoned files
+    // before replaying any changes. Tantivy retains all committed segment
+    // files and takes its metadata lock; arbitrary .del files are not removed.
+    writer
+        .garbage_collect_files()
+        .wait()
+        .context("failed to collect abandoned Tantivy files before indexing")?;
 
     ensure_hash_vector_store(&vector_path, crate::EMBEDDING_DIMENSIONS)?;
     let mut vector_tombstones = VectorTombstoneJournals::new(
@@ -3923,6 +3933,138 @@ mod tests {
         let error = commit_with_vector_tombstones(tx, &mut journals).unwrap_err();
         assert!(error.to_string().contains("FOREIGN KEY constraint failed"));
         assert_eq!(fs::read_to_string(hash_path).unwrap(), "42\n");
+    }
+
+    #[test]
+    #[serial]
+    fn failed_tantivy_publication_recovers_without_losing_committed_deletions() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let root = tempdir().unwrap();
+        for (path, text) in [
+            ("lib.rs", "pub fn original_marker() {}\n"),
+            ("stable.rs", "pub fn stable_marker() {}\n"),
+            ("removed.rs", "pub fn removed_marker() {}\n"),
+        ] {
+            fs::write(root.path().join(path), text).unwrap();
+        }
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        // Keep removed.rs in a segment with live documents, regardless of
+        // which indexing worker received each source file.
+        let (index, _) = open_tantivy_index(&workspace.tantivy_dir()).unwrap();
+        let mut writer = index
+            .writer_with_num_threads::<TantivyDocument>(1, 50_000_000)
+            .unwrap();
+        writer
+            .merge(&index.searchable_segment_ids().unwrap())
+            .wait()
+            .unwrap();
+        writer.wait_merging_threads().unwrap();
+        drop(index);
+        fs::remove_file(root.path().join("removed.rs")).unwrap();
+        index_workspace_for_watcher(&workspace, &model).unwrap();
+
+        let (committed, fields) = open_tantivy_index(&workspace.tantivy_dir()).unwrap();
+        let reader = committed.reader().unwrap();
+        let old_searcher = reader.searcher();
+        let live_files = committed
+            .load_metas()
+            .unwrap()
+            .segments
+            .iter()
+            .flat_map(|segment| segment.list_files())
+            .filter(|path| workspace.tantivy_dir().join(path).is_file())
+            .map(|path| {
+                let bytes = fs::read(workspace.tantivy_dir().join(&path)).unwrap();
+                (path, bytes)
+            })
+            .collect::<HashMap<_, _>>();
+        assert!(
+            live_files
+                .keys()
+                .any(|path| path.extension().unwrap() == "del")
+        );
+        let metadata = fs::read(workspace.tantivy_dir().join("meta.json")).unwrap();
+        let snapshot = fs::read(workspace.merkle_snapshot_path()).unwrap();
+        let generation = workspace.read_metadata().unwrap().unwrap().index_generation;
+        let unmanaged = workspace.tantivy_dir().join("unmanaged.del");
+        fs::write(&unmanaged, "not managed by Tantivy").unwrap();
+
+        fs::write(root.path().join("lib.rs"), "pub fn recovered_marker() {}\n").unwrap();
+        let failure = fail_tantivy_commits(&workspace.tantivy_dir());
+        for _ in 0..2 {
+            let error = index_workspace_for_watcher(&workspace, &model).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("injected Tantivy metadata publication failure"),
+                "{error:#}"
+            );
+        }
+        assert_eq!(
+            fs::read(workspace.tantivy_dir().join("meta.json")).unwrap(),
+            metadata
+        );
+        assert_eq!(
+            fs::read(workspace.merkle_snapshot_path()).unwrap(),
+            snapshot
+        );
+        assert_eq!(
+            workspace.read_metadata().unwrap().unwrap().index_generation,
+            generation
+        );
+        assert!(
+            fs::read_dir(workspace.tantivy_dir()).unwrap().any(|entry| {
+                let path = entry.unwrap().path();
+                path.extension().is_some_and(|extension| extension == "del")
+                    && path != unmanaged
+                    && !live_files.contains_key(Path::new(path.file_name().unwrap()))
+            }),
+            "failed publication did not leave an uncommitted deletion file"
+        );
+        for (path, bytes) in &live_files {
+            assert_eq!(
+                fs::read(workspace.tantivy_dir().join(path)).unwrap(),
+                *bytes
+            );
+        }
+        drop(failure);
+
+        index_workspace_for_watcher(&workspace, &model).unwrap();
+        assert_eq!(
+            workspace.read_metadata().unwrap().unwrap().index_generation,
+            generation + 1
+        );
+        let (recovered, _) = open_tantivy_index(&workspace.tantivy_dir()).unwrap();
+        let new_reader = recovered.reader().unwrap();
+        let searcher = new_reader.searcher();
+        let count_path = |searcher: &tantivy::Searcher, path: &str| {
+            searcher
+                .search(
+                    &tantivy::query::TermQuery::new(
+                        Term::from_field_text(fields.file_path, path),
+                        tantivy::schema::IndexRecordOption::Basic,
+                    ),
+                    &tantivy::collector::Count,
+                )
+                .unwrap()
+        };
+        assert_eq!(searcher.num_docs(), 2);
+        assert_eq!(count_path(&searcher, "lib.rs"), 1);
+        assert_eq!(count_path(&searcher, "stable.rs"), 1);
+        assert_eq!(count_path(&searcher, "removed.rs"), 0);
+        assert_eq!(old_searcher.num_docs(), 2);
+        assert_eq!(count_path(&old_searcher, "removed.rs"), 0);
+        assert!(indexed_texts_for_file(&workspace, "lib.rs")[0].contains("recovered_marker"));
+        assert_eq!(count_chunks(&workspace.sqlite_path()).unwrap(), 2);
+        assert_eq!(
+            fs::read_to_string(unmanaged).unwrap(),
+            "not managed by Tantivy"
+        );
+        let noop = index_workspace_for_watcher(&workspace, &model).unwrap();
+        assert_eq!(noop.indexed_files + noop.deleted_files, 0);
     }
 
     #[test]
