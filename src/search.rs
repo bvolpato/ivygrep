@@ -9,7 +9,8 @@ use anyhow::{Context, Result};
 use rayon::prelude::*;
 use rusqlite::Connection;
 use tantivy::TantivyDocument;
-use tantivy::collector::TopDocs;
+use tantivy::collector::sort_key::NaturalComparator;
+use tantivy::collector::{Collector, SegmentCollector, TopDocs, TopNComputer};
 use tantivy::query::{
     BooleanQuery, BoostQuery, Occur, Query, QueryParser, RegexQuery, TermQuery, TermSetQuery,
 };
@@ -1083,11 +1084,21 @@ fn collect_literal_candidate_chunks(
             constrain_query_to_scope(parsed_query, &ctx.fields, options.scope_filter.as_ref())?;
         let parsed_query =
             constrain_query_to_glob_paths(parsed_query, &ctx.fields, glob_path_filter);
+        let parsed_query = constrain_query_to_broad_extension_globs(
+            parsed_query,
+            &ctx.fields,
+            glob_path_filter,
+            &options.include_globs,
+        )?;
 
         for (i, searcher) in ctx.searchers.iter().enumerate() {
-            let docs = searcher.search(
-                &parsed_query,
-                &TopDocs::with_limit(candidate_limit).order_by_score(),
+            let docs = collect_top_docs_with_glob_filter(
+                searcher,
+                parsed_query.as_ref(),
+                &ctx.fields,
+                glob_path_filter,
+                candidate_limit,
+                options.cancel_token.as_ref(),
             )?;
             // Filtered chunk count cannot establish exhaustion: top-ranked
             // documents may belong to another language or a shadowed file.
@@ -1411,6 +1422,7 @@ struct LexicalQueryExecutor<'a> {
     can_pushdown_languages: bool,
     allowed_languages: &'a [String],
     searchers: &'a [tantivy::Searcher],
+    cancel_token: Option<&'a Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl LexicalQueryExecutor<'_> {
@@ -1490,9 +1502,13 @@ impl LexicalQueryExecutor<'_> {
 
         let mut docs = Vec::new();
         for (searcher_index, searcher) in self.searchers.iter().enumerate() {
-            for (score, address) in searcher.search(
-                &parsed_query,
-                &TopDocs::with_limit(query_candidate_limit).order_by_score(),
+            for (score, address) in collect_top_docs_with_glob_filter(
+                searcher,
+                parsed_query.as_ref(),
+                self.fields,
+                self.glob_path_filter,
+                query_candidate_limit,
+                self.cancel_token,
             )? {
                 docs.push((
                     searcher_index,
@@ -2478,6 +2494,177 @@ const MAX_GLOB_PATH_TERMS: usize = 10_000;
 struct GlobPathQueryFilter {
     included_paths: Option<Vec<String>>,
     excluded_paths: Option<Vec<String>>,
+    residual_matcher: Option<PathGlobMatcher>,
+}
+
+/// Keep overflow glob matches inside TopDocs' bounded heap. Only this fallback
+/// reads competitive documents during collection; unfiltered and exact-path
+/// queries retain Tantivy's ordinary collector.
+fn collect_top_docs_with_glob_filter(
+    searcher: &tantivy::Searcher,
+    query: &dyn Query,
+    fields: &TantivyFields,
+    filter: &GlobPathQueryFilter,
+    limit: usize,
+    cancel_token: Option<&Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<Vec<(f32, tantivy::DocAddress)>> {
+    let collector = TopDocs::with_limit(limit).order_by_score();
+    if let Some(matcher) = &filter.residual_matcher {
+        Ok(searcher.search(
+            query,
+            &GlobFilterCollector {
+                limit,
+                path_field: fields.file_path,
+                matcher,
+                cancel_token,
+            },
+        )?)
+    } else {
+        Ok(searcher.search(query, &collector)?)
+    }
+}
+
+struct GlobFilterCollector<'a> {
+    limit: usize,
+    path_field: tantivy::schema::Field,
+    matcher: &'a PathGlobMatcher,
+    cancel_token: Option<&'a Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl Collector for GlobFilterCollector<'_> {
+    type Fruit = Vec<(f32, tantivy::DocAddress)>;
+    type Child = GlobFilterSegmentCollector;
+
+    fn for_segment(
+        &self,
+        segment_ord: u32,
+        reader: &tantivy::SegmentReader,
+    ) -> tantivy::Result<Self::Child> {
+        Ok(GlobFilterSegmentCollector {
+            top_docs: TopNComputer::new_with_comparator(self.limit, NaturalComparator),
+            segment_ord,
+            store: reader.get_store_reader(1)?,
+            path_field: self.path_field,
+            matcher: self.matcher.clone(),
+            cancel_token: self.cancel_token.cloned(),
+            error: None,
+        })
+    }
+
+    fn requires_scoring(&self) -> bool {
+        true
+    }
+
+    fn merge_fruits(
+        &self,
+        fruits: Vec<<Self::Child as SegmentCollector>::Fruit>,
+    ) -> tantivy::Result<Self::Fruit> {
+        let mut fruits = fruits.into_iter().collect::<tantivy::Result<Vec<_>>>()?;
+        // TopNComputer requires ascending addresses for deterministic ties.
+        // Sort only the bounded segment results before merging into its heap.
+        fruits.sort_unstable_by_key(|docs| docs.first().map(|(_, doc)| doc.segment_ord));
+        let mut top_docs = TopNComputer::new_with_comparator(self.limit, NaturalComparator);
+        for mut docs in fruits {
+            docs.sort_unstable_by_key(|(_, address)| *address);
+            for (score, address) in docs {
+                top_docs.push(score, address);
+            }
+        }
+        Ok(top_docs
+            .into_sorted_vec()
+            .into_iter()
+            .map(|doc| (doc.sort_key, doc.doc))
+            .collect())
+    }
+
+    fn collect_segment(
+        &self,
+        weight: &dyn tantivy::query::Weight,
+        segment_ord: u32,
+        reader: &tantivy::SegmentReader,
+    ) -> tantivy::Result<<Self::Child as SegmentCollector>::Fruit> {
+        let mut collector = self.for_segment(segment_ord, reader)?;
+        let alive = reader.alive_bitset();
+        // Only accepted paths raise the threshold. Rejected high scores must
+        // never prune lower-scoring matches of the requested glob.
+        weight.for_each_pruning(f32::MIN, reader, &mut |doc, score| {
+            if alive.is_none_or(|alive| alive.is_alive(doc)) {
+                collector.collect(doc, score);
+            }
+            if collector.error.is_some() || collector.is_cancelled() {
+                f32::MAX
+            } else {
+                collector.top_docs.threshold.unwrap_or(f32::MIN)
+            }
+        })?;
+        Ok(collector.harvest())
+    }
+}
+
+struct GlobFilterSegmentCollector {
+    top_docs: TopNComputer<f32, u32, NaturalComparator>,
+    segment_ord: u32,
+    store: tantivy::store::StoreReader,
+    path_field: tantivy::schema::Field,
+    matcher: PathGlobMatcher,
+    cancel_token: Option<Arc<std::sync::atomic::AtomicBool>>,
+    error: Option<tantivy::TantivyError>,
+}
+
+impl GlobFilterSegmentCollector {
+    fn is_cancelled(&self) -> bool {
+        self.cancel_token
+            .as_ref()
+            .is_some_and(|token| token.load(std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+impl SegmentCollector for GlobFilterSegmentCollector {
+    type Fruit = tantivy::Result<Vec<(f32, tantivy::DocAddress)>>;
+
+    fn collect(&mut self, doc: u32, score: f32) {
+        if self.error.is_some()
+            || self.is_cancelled()
+            || self
+                .top_docs
+                .threshold
+                .is_some_and(|threshold| score <= threshold)
+        {
+            return;
+        }
+        match self.store.get::<TantivyDocument>(doc) {
+            Ok(document) => {
+                if document
+                    .get_first(self.path_field)
+                    .and_then(|value| tantivy::schema::Value::as_str(&value))
+                    .is_some_and(|path| self.matcher.matches(Path::new(path)))
+                {
+                    self.top_docs.push(score, doc);
+                }
+            }
+            Err(error) => self.error = Some(error),
+        }
+    }
+
+    fn harvest(self) -> Self::Fruit {
+        if let Some(error) = self.error {
+            Err(error)
+        } else if self.is_cancelled() {
+            Ok(Vec::new())
+        } else {
+            Ok(self
+                .top_docs
+                .into_sorted_vec()
+                .into_iter()
+                .map(|doc| {
+                    (
+                        doc.sort_key,
+                        tantivy::DocAddress::new(self.segment_ord, doc.doc),
+                    )
+                })
+                .collect())
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -2493,7 +2680,8 @@ struct GlobPathFilterCacheKey {
 ///
 /// Globset supports patterns richer than Tantivy regexes. Streaming distinct
 /// indexed paths keeps matching semantics identical to the final Rust filter.
-/// Broad globs fall back to post-filtering once the bounded term set overflows.
+/// Broad globs fall back to filtering inside the bounded collector, so rejected
+/// paths cannot displace matching candidates when the term set overflows.
 fn build_glob_path_query_filter(
     ctx: &SearchContext,
     path_matcher: &PathGlobMatcher,
@@ -2502,6 +2690,7 @@ fn build_glob_path_query_filter(
     let mut filter = GlobPathQueryFilter {
         included_paths: (!options.include_globs.is_empty()).then(Vec::new),
         excluded_paths: (!options.exclude_globs.is_empty()).then(Vec::new),
+        residual_matcher: None,
     };
     if filter.included_paths.is_none() && filter.excluded_paths.is_none() {
         return Ok(filter);
@@ -2562,6 +2751,15 @@ fn build_glob_path_query_filter(
         visit_distinct_file_paths(&ctx.sqlite, options, |path| collect_path(path, 0))?;
     if should_continue && let Some(base_sqlite) = &ctx.base_sqlite {
         visit_distinct_file_paths(base_sqlite, options, |path| collect_path(path, 1))?;
+    }
+
+    // An exact include set already incorporates every exclusion. Otherwise,
+    // either overflowing set needs the complete matcher during collection.
+    if filter.included_paths.is_none()
+        && (!options.include_globs.is_empty()
+            || (!options.exclude_globs.is_empty() && filter.excluded_paths.is_none()))
+    {
+        filter.residual_matcher = Some(path_matcher.clone());
     }
 
     let cached_terms = filter.included_paths.as_ref().map_or(0, Vec::len)
@@ -2732,7 +2930,7 @@ fn constrain_query_to_broad_extension_globs(
         let Some(extension) = glob.trim().strip_prefix("*.") else {
             return Ok(query);
         };
-        let pattern = format!(r".*\.{}", regex::escape(extension));
+        let pattern = format!(r"(?s:.*)\.{}", regex::escape(extension));
         extensions.push((
             Occur::Should,
             Box::new(RegexQuery::from_pattern(&pattern, fields.file_path)?) as Box<dyn Query>,
@@ -6045,6 +6243,251 @@ mod tests {
     }
 
     #[test]
+    fn overflow_glob_collector_preserves_topdocs_order_and_live_documents() {
+        let root = tempfile::tempdir().unwrap();
+        let (index, fields) = open_tantivy_index(root.path()).unwrap();
+        let mut writer = index
+            .writer_with_num_threads::<TantivyDocument>(1, 15_000_000)
+            .unwrap();
+        writer.set_merge_policy(Box::new(tantivy::merge_policy::NoMergePolicy));
+        for segment in 0..3 {
+            for ordinal in 0..30 {
+                let directory = if ordinal % 3 == 0 {
+                    "outside"
+                } else {
+                    "selected"
+                };
+                let name = if ordinal % 5 == 0 { "skip" } else { "keep" };
+                let path = format!("{directory}/{name}_{segment}_{ordinal}.rs");
+                let text = if ordinal % 4 == 0 {
+                    "needle needle"
+                } else {
+                    "needle in a longer piece of text"
+                };
+                writer
+                    .add_document(tantivy::doc!(fields.file_path => path, fields.text => text))
+                    .unwrap();
+            }
+            writer.commit().unwrap();
+        }
+        writer.delete_term(tantivy::Term::from_field_text(
+            fields.file_path,
+            "selected/keep_1_4.rs",
+        ));
+        writer.commit().unwrap();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let matcher = PathGlobMatcher::new(
+            &["selected/**".to_string()],
+            &["selected/skip*".to_string()],
+        )
+        .unwrap();
+        let filter = GlobPathQueryFilter {
+            residual_matcher: Some(matcher.clone()),
+            ..GlobPathQueryFilter::default()
+        };
+        let query = TermQuery::new(
+            tantivy::Term::from_field_text(fields.text, "needle"),
+            IndexRecordOption::WithFreqs,
+        );
+        let expected = searcher
+            .search(
+                &query,
+                &TopDocs::with_limit(searcher.num_docs() as usize).order_by_score(),
+            )
+            .unwrap()
+            .into_iter()
+            .filter(|(_, address)| {
+                let document = searcher.doc::<TantivyDocument>(*address).unwrap();
+                let path = document
+                    .get_first(fields.file_path)
+                    .and_then(|value| tantivy::schema::Value::as_str(&value))
+                    .unwrap();
+                matcher.matches(Path::new(path))
+            })
+            .collect::<Vec<_>>();
+        for limit in [1, 7, 100] {
+            let actual =
+                collect_top_docs_with_glob_filter(&searcher, &query, &fields, &filter, limit, None)
+                    .unwrap();
+            assert_eq!(actual, expected[..expected.len().min(limit)]);
+        }
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        assert!(
+            collect_top_docs_with_glob_filter(
+                &searcher,
+                &query,
+                &fields,
+                &filter,
+                7,
+                Some(&cancelled),
+            )
+            .unwrap()
+            .is_empty()
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn broad_globs_filter_before_candidate_limits() {
+        const TARGET_PATH: &str = "selected/deep/path/to/the/target.rs";
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        for directory in ["selected", "outside", "alternate"] {
+            std::fs::create_dir(root.path().join(directory)).unwrap();
+        }
+        std::fs::create_dir_all(root.path().join(TARGET_PATH).parent().unwrap()).unwrap();
+        for index in 0..MAX_GLOB_PATH_TERMS {
+            std::fs::write(
+                root.path().join(format!("selected/filler_{index:05}.rs")),
+                format!("fn filler_{index}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        let padding = (0..40)
+            .map(|index| format!("    let padding_{index} = {index};\n"))
+            .collect::<String>();
+        std::fs::write(
+            root.path().join(TARGET_PATH),
+            format!(
+                "fn selected_implementation() {{\n{padding}    let marker = \"OrchidRetryBudget\";\n}}\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            root.path().join("alternate/target.md"),
+            format!("# Alternate implementation\n\n{padding}\nOrchidRetryBudget\n"),
+        )
+        .unwrap();
+        for index in 0..400 {
+            std::fs::write(
+                root.path().join(format!("outside/target_{index:04}.rs")),
+                format!("fn distraction_{index}() {{ let marker = \"OrchidRetryBudget\"; }}\n"),
+            )
+            .unwrap();
+        }
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        let context = SearchContext::load(&workspace, None, false).unwrap();
+        let parser = QueryParser::for_index(&context.indexes[0], vec![context.fields.text]);
+        let mut failures = Vec::new();
+        for (label, includes, excludes, expected) in [
+            (
+                "10000 included paths",
+                vec!["selected/**"],
+                vec!["selected/filler_09999.rs"],
+                TARGET_PATH,
+            ),
+            (
+                "10001 included paths",
+                vec!["selected/**"],
+                vec![],
+                TARGET_PATH,
+            ),
+            (
+                "complex include overflow",
+                vec!["s[ae]lected/**"],
+                vec![],
+                TARGET_PATH,
+            ),
+            (
+                "exclude overflow",
+                vec![],
+                vec!["selected/filler_*.rs", "outside/**", "alternate/**"],
+                TARGET_PATH,
+            ),
+            (
+                "mixed include alternatives",
+                vec!["selected/**", "alternate/*.md"],
+                vec![TARGET_PATH],
+                "alternate/target.md",
+            ),
+        ] {
+            let options = SearchOptions {
+                limit: Some(1),
+                context: 0,
+                include_globs: includes.into_iter().map(str::to_string).collect(),
+                exclude_globs: excludes.into_iter().map(str::to_string).collect(),
+                ..SearchOptions::default()
+            };
+            let matcher =
+                PathGlobMatcher::new(&options.include_globs, &options.exclude_globs).unwrap();
+            let filter = build_glob_path_query_filter(&context, &matcher, &options).unwrap();
+            let executor = LexicalQueryExecutor {
+                fields: &context.fields,
+                parser: &parser,
+                conjunctive_numeric_query: false,
+                scope_filter: None,
+                glob_path_filter: &filter,
+                include_globs: &options.include_globs,
+                can_pushdown_languages: false,
+                allowed_languages: &[],
+                searchers: &context.searchers,
+                cancel_token: None,
+            };
+            let lexical_paths = executor
+                .collect_docs("OrchidRetryBudget", 1)
+                .unwrap()
+                .into_iter()
+                .filter_map(|(_, _, document)| fetch_chunk_by_id(document, &context.fields))
+                .map(|chunk| chunk.file_path)
+                .collect::<Vec<_>>();
+            let indexed_literal_paths =
+                exact_literal_chunks_with_context(&context, "OrchidRetryBudget", &options, false)
+                    .unwrap()
+                    .into_iter()
+                    .map(|chunk| chunk.file_path)
+                    .collect::<Vec<_>>();
+            let hybrid_paths = hybrid_search_with_context(
+                &context,
+                &workspace,
+                "OrchidRetryBudget",
+                None,
+                &options,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|hit| hit.file_path)
+            .collect::<Vec<_>>();
+            let literal_paths =
+                literal_search_with_context(&context, &workspace, "OrchidRetryBudget", &options)
+                    .unwrap()
+                    .into_iter()
+                    .map(|hit| hit.file_path)
+                    .collect::<Vec<_>>();
+            for (pass, paths) in [
+                ("lexical", lexical_paths),
+                ("indexed literal", indexed_literal_paths),
+                ("hybrid", hybrid_paths),
+                ("standalone literal", literal_paths),
+            ] {
+                if paths != [PathBuf::from(expected)] {
+                    failures.push(format!("{label}, {pass}: {paths:?}, expected {expected}"));
+                }
+            }
+            let path_hits = hybrid_search_with_context(
+                &context,
+                &workspace,
+                "where target processing behavior happens",
+                None,
+                &options,
+            )
+            .unwrap();
+            if !path_hits.iter().any(|hit| {
+                hit.file_path == Path::new(expected)
+                    && hit.sources.iter().any(|source| source == "path")
+            }) {
+                failures.push(format!(
+                    "{label}, missing path-pass evidence: {path_hits:?}"
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
     #[serial]
     fn broad_extension_globs_filter_override_languages_before_topdocs() {
         let root = tempfile::tempdir().unwrap();
@@ -6059,6 +6502,12 @@ mod tests {
         std::fs::write(
             root.path().join("match.rs"),
             "pub fn relevant() { let _ = \"targettoken\"; }\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        std::fs::write(
+            root.path().join("line\nfile.rs"),
+            "pub fn newline_path() { let _ = \"targettoken\"; }\n",
         )
         .unwrap();
         for index in 0..8 {
@@ -6081,8 +6530,11 @@ mod tests {
             .collect::<Vec<_>>();
         // Broad globs deliberately discard the exact-path term set once it
         // overflows. Simulate that state without indexing 10,001 fixture files.
-        let glob_path_filter = GlobPathQueryFilter::default();
         let include_globs = vec!["*.rs".to_string()];
+        let glob_path_filter = GlobPathQueryFilter {
+            residual_matcher: Some(PathGlobMatcher::new(&include_globs, &[]).unwrap()),
+            ..GlobPathQueryFilter::default()
+        };
         let executor = LexicalQueryExecutor {
             fields: &context.fields,
             parser: &parser,
@@ -6093,6 +6545,7 @@ mod tests {
             can_pushdown_languages: true,
             allowed_languages: &allowed_languages,
             searchers: &context.searchers,
+            cancel_token: None,
         };
 
         let mut paths = executor
@@ -6106,10 +6559,11 @@ mod tests {
             })
             .collect::<Vec<_>>();
         paths.sort();
-        assert_eq!(
-            paths,
-            [PathBuf::from("Dockerfile.rs"), PathBuf::from("match.rs")]
-        );
+        let mut expected = vec![PathBuf::from("Dockerfile.rs"), PathBuf::from("match.rs")];
+        #[cfg(unix)]
+        expected.push(PathBuf::from("line\nfile.rs"));
+        expected.sort();
+        assert_eq!(paths, expected);
     }
 
     #[test]
@@ -8791,6 +9245,7 @@ export function registerCommands(p: Plugin) {
         let glob_path_filter = GlobPathQueryFilter {
             included_paths: None,
             excluded_paths: None,
+            residual_matcher: None,
         };
         let executor = LexicalQueryExecutor {
             fields: &ctx.fields,
@@ -8802,6 +9257,7 @@ export function registerCommands(p: Plugin) {
             can_pushdown_languages: false,
             allowed_languages: &[],
             searchers: &ctx.searchers,
+            cancel_token: None,
         };
         let mut paths = executor
             .collect_docs(variant, 20)

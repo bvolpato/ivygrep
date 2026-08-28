@@ -27,8 +27,8 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     }
     let corpus_multiplier =
         corpus_candidate_multiplier(ctx.searchers.iter().map(tantivy::Searcher::num_docs).sum());
-    // Tantivy lexical candidates: enough headroom for post-hoc filters
-    // (gitignore, scope, globs) without blowing up on huge repos.
+    // Tantivy lexical candidates: enough headroom for remaining post-hoc
+    // visibility filters without blowing up on huge repos.
     // Default natural-language query: 50 → 250, --limit 500 → 2.5K.
     let candidate_limit = if output_limit == usize::MAX {
         50_000
@@ -184,6 +184,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
         can_pushdown_languages,
         allowed_languages: &allowed_languages,
         searchers: &ctx.searchers,
+        cancel_token: options.cancel_token.as_ref(),
     };
     let collect_docs = |(lexical_query, query_candidate_limit): (&String, usize)| {
         executor.collect_docs(lexical_query, query_candidate_limit)
@@ -402,9 +403,13 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
                 constrain_query_to_scope(parsed, &ctx.fields, options.scope_filter.as_ref())?;
             let parsed = constrain_query_to_glob_paths(parsed, &ctx.fields, &glob_path_filter);
             for (i, searcher) in ctx.searchers.iter().enumerate() {
-                let docs = searcher.search(
-                    &parsed,
-                    &TopDocs::with_limit(path_candidate_limit).order_by_score(),
+                let docs = collect_top_docs_with_glob_filter(
+                    searcher,
+                    parsed.as_ref(),
+                    &ctx.fields,
+                    &glob_path_filter,
+                    path_candidate_limit,
+                    options.cancel_token.as_ref(),
                 )?;
                 for (score, addr) in docs {
                     let doc = searcher.doc::<TantivyDocument>(addr)?;
