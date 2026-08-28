@@ -254,7 +254,8 @@ pub(crate) fn search_symbols_in_current_index(
         right
             .score
             .total_cmp(&left.score)
-            .then_with(|| left.file_path.cmp(&right.file_path))
+            // Match SQLite's serialized path order, not component order.
+            .then_with(|| left.file_path.as_os_str().cmp(right.file_path.as_os_str()))
             .then_with(|| left.start_line.cmp(&right.start_line))
     });
     hits.dedup_by(|left, right| {

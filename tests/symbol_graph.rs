@@ -451,6 +451,8 @@ fn worktree_symbol_limits_preserve_global_owner_and_name_order() {
     git(root.path(), &["init"]);
     git(root.path(), &["symbolic-ref", "HEAD", "refs/heads/main"]);
     fs::write(root.path().join("a.rs"), "pub fn same_name() {}\n").unwrap();
+    fs::create_dir(root.path().join("a")).unwrap();
+    fs::write(root.path().join("a/inner.rs"), "pub fn same_name() {}\n").unwrap();
     fs::write(
         root.path().join("z.rs"),
         "pub struct Expected;\nimpl Expected {\n    pub fn run() {}\n    pub fn folded_run() {}\n}\n\
@@ -494,7 +496,7 @@ fn worktree_symbol_limits_preserve_global_owner_and_name_order() {
         ("Missing::run", vec!["new.rs", "z.rs"]),
         ("Flow", vec!["z.rs", "new.rs"]),
         ("flow", vec!["new.rs", "z.rs"]),
-        ("same_name", vec!["a.rs", "new.rs"]),
+        ("same_name", vec!["a.rs", "a/inner.rs", "new.rs"]),
         ("shared_name", vec!["new.rs", "z.rs"]),
     ] {
         for limit in [Some(0), Some(1), Some(2), None] {
