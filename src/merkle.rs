@@ -2,10 +2,10 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::chunking::is_indexable_file;
@@ -205,6 +205,10 @@ impl MerkleSnapshot {
     }
 
     fn build_inner(root: &Path, content_based: bool, skip_gitignore: bool) -> Result<Self> {
+        validate_workspace_root(root)?;
+        // An incomplete walk cannot establish which old paths were deleted.
+        // Keep the first error without adding contention to successful entries.
+        let mut scan_error = OnceLock::new();
         // If skip_gitignore is true, do a fast standard walk first to record which files WOULD have been included properly.
         let unignored_paths = Arc::new(if skip_gitignore {
             let standard_walker = crate::walker::source_walker(root, false);
@@ -213,16 +217,32 @@ impl MerkleSnapshot {
             standard_walker.build_parallel().run(|| {
                 let paths_ref = &paths;
                 let root_ref = &root_owned;
+                let error_ref = &scan_error;
                 Box::new(move |entry| {
-                    if let Ok(e) = entry
-                        && e.file_type().is_some_and(|ft| ft.is_file())
-                        && let Ok(rel) = e.path().strip_prefix(root_ref)
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(error) if is_ignore_pattern_warning(&error) => {
+                            return ignore::WalkState::Continue;
+                        }
+                        Err(error) => {
+                            let _ = error_ref.set(anyhow::Error::new(error).context(format!(
+                                "failed walking workspace {}",
+                                root_ref.display()
+                            )));
+                            return ignore::WalkState::Quit;
+                        }
+                    };
+                    if entry.file_type().is_some_and(|ft| ft.is_file())
+                        && let Ok(rel) = entry.path().strip_prefix(root_ref)
                     {
                         paths_ref.lock().unwrap().insert(index_path_string(rel));
                     }
                     ignore::WalkState::Continue
                 })
             });
+            if let Some(error) = scan_error.take() {
+                return Err(error);
+            }
             paths.into_inner().unwrap()
         } else {
             std::collections::HashSet::new()
@@ -257,6 +277,7 @@ impl MerkleSnapshot {
             let root_ref = &root_owned;
             let scanned_ref = &scanned;
             let pairs_ref = &all_pairs;
+            let error_ref = &scan_error;
             let unignored_paths_clone = Arc::clone(&unignored_paths);
             let mut guard = FlushGuard {
                 buf: Vec::with_capacity(512),
@@ -264,10 +285,23 @@ impl MerkleSnapshot {
             };
 
             Box::new(move |entry| {
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(_) => return ignore::WalkState::Continue,
+                let fail = |error| {
+                    let _ = error_ref.set(error);
+                    ignore::WalkState::Quit
                 };
+                let entry =
+                    match entry {
+                        Ok(e) => e,
+                        Err(error) if is_ignore_pattern_warning(&error) => {
+                            return ignore::WalkState::Continue;
+                        }
+                        Err(error) => {
+                            return fail(anyhow::Error::new(error).context(format!(
+                                "failed walking workspace {}",
+                                root_ref.display()
+                            )));
+                        }
+                    };
                 if !entry.file_type().is_some_and(|ft| ft.is_file()) {
                     return ignore::WalkState::Continue;
                 }
@@ -280,7 +314,12 @@ impl MerkleSnapshot {
 
                 let metadata = match fs::metadata(path) {
                     Ok(m) => m,
-                    Err(_) => return ignore::WalkState::Continue,
+                    Err(error) => {
+                        return fail(
+                            anyhow::Error::new(error)
+                                .context(format!("failed reading metadata for {}", path.display())),
+                        );
+                    }
                 };
                 if metadata.len() > MAX_INDEXABLE_FILE_BYTES {
                     return ignore::WalkState::Continue;
@@ -294,7 +333,12 @@ impl MerkleSnapshot {
                 let file_hash = if content_based {
                     let content = match fs::read(path) {
                         Ok(c) => c,
-                        Err(_) => return ignore::WalkState::Continue,
+                        Err(error) => {
+                            return fail(anyhow::Error::new(error).context(format!(
+                                "failed reading source file {}",
+                                path.display()
+                            )));
+                        }
                     };
                     let rel_str = index_path_string(&rel);
                     let content = normalized_indexable_content(path, &content);
@@ -321,6 +365,9 @@ impl MerkleSnapshot {
 
         if show_progress {
             eprint!("\r\x1b[K");
+        }
+        if let Some(error) = scan_error.into_inner() {
+            return Err(error);
         }
 
         let files: BTreeMap<String, String> = all_pairs.into_inner().unwrap().into_iter().collect();
@@ -396,7 +443,7 @@ impl MerkleSnapshot {
     }
 
     /// Refresh an owned snapshot without cloning its unchanged paths. A full
-    /// scan fallback leaves the snapshot unchanged.
+    /// scan fallback or I/O error leaves the snapshot unchanged.
     pub fn refresh_paths_in_place(
         &mut self,
         root: &Path,
@@ -407,6 +454,7 @@ impl MerkleSnapshot {
             return Ok(None);
         }
 
+        validate_workspace_root(root)?;
         let mut updates = BTreeMap::new();
         for rel_path in rel_paths {
             if rel_path.as_os_str().is_empty()
@@ -417,26 +465,34 @@ impl MerkleSnapshot {
                 return Ok(None);
             }
 
-            let path = root.join(rel_path);
             // A watcher can report a child after its parent was replaced by a
-            // symlink. Reconcile with the no-follow walker in either case.
-            if rel_path
-                .ancestors()
-                .take_while(|ancestor| !ancestor.as_os_str().is_empty())
-                .any(|ancestor| {
-                    fs::symlink_metadata(root.join(ancestor))
-                        .is_ok_and(|metadata| metadata.file_type().is_symlink())
-                })
-            {
-                return Ok(None);
-            }
-            if path.is_dir() {
-                return Ok(None);
+            // symlink. Inspect parents first, without touching link targets.
+            let mut path = root.to_path_buf();
+            let mut components = rel_path.components().peekable();
+            let mut metadata = None;
+            while let Some(component) = components.next() {
+                path.push(component);
+                match fs::symlink_metadata(&path) {
+                    Ok(current) if current.file_type().is_symlink() => return Ok(None),
+                    Ok(current) if components.peek().is_some() && !current.is_dir() => {
+                        return Ok(None);
+                    }
+                    Ok(current) => metadata = Some(current),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        metadata = None;
+                        break;
+                    }
+                    Err(error) => {
+                        return Err(error).with_context(|| {
+                            format!("failed reading metadata for {}", path.display())
+                        });
+                    }
+                }
             }
 
             let key = index_path_string(rel_path);
-            let next_hash = match fs::symlink_metadata(&path) {
-                Ok(metadata)
+            let next_hash = match metadata {
+                Some(metadata)
                     if metadata.is_file() && metadata.len() <= MAX_INDEXABLE_FILE_BYTES =>
                 {
                     let is_ignored = self
@@ -449,7 +505,7 @@ impl MerkleSnapshot {
                         u8::from(is_ignored)
                     ))
                 }
-                Ok(metadata) if metadata.is_dir() => return Ok(None),
+                Some(metadata) if metadata.is_dir() => return Ok(None),
                 _ => None,
             };
 
@@ -497,6 +553,35 @@ impl MerkleSnapshot {
     }
 }
 
+fn is_ignore_pattern_warning(error: &ignore::Error) -> bool {
+    // The walker reports malformed parent ignore patterns through the same
+    // callback as traversal failures. Only pure pattern warnings are harmless;
+    // a partial error containing any filesystem failure must still abort.
+    match error {
+        ignore::Error::Glob { .. } => true,
+        ignore::Error::Partial(errors) => {
+            !errors.is_empty() && errors.iter().all(is_ignore_pattern_warning)
+        }
+        ignore::Error::WithLineNumber { err, .. }
+        | ignore::Error::WithPath { err, .. }
+        | ignore::Error::WithDepth { err, .. } => is_ignore_pattern_warning(err),
+        _ => false,
+    }
+}
+
+fn validate_workspace_root(root: &Path) -> Result<()> {
+    // A missing workspace is not evidence that its individual files were
+    // deleted. Follow an explicit root symlink, as the full walker does.
+    let metadata = fs::metadata(root)
+        .with_context(|| format!("failed reading workspace root {}", root.display()))?;
+    anyhow::ensure!(
+        metadata.is_dir(),
+        "workspace root {} is not a directory",
+        root.display()
+    );
+    Ok(())
+}
+
 fn metadata_file_hash(metadata: &fs::Metadata) -> String {
     // The relative path is already the map key and participates in root_hash(),
     // so the per-file value only needs metadata.
@@ -538,6 +623,234 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[cfg(unix)]
+    struct RestorePermissions(PathBuf, fs::Permissions);
+
+    #[cfg(unix)]
+    impl RestorePermissions {
+        fn revoke(path: &Path) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let restore = Self(
+                path.to_path_buf(),
+                fs::metadata(path).unwrap().permissions(),
+            );
+            fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+            restore
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for RestorePermissions {
+        fn drop(&mut self) {
+            fs::set_permissions(&self.0, self.1.clone()).unwrap();
+        }
+    }
+
+    #[test]
+    fn unavailable_root_is_not_a_complete_snapshot() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("file.rs"), "fn not_a_directory() {}\n").unwrap();
+        for root in [dir.path().join("missing"), dir.path().join("file.rs")] {
+            for content_based in [false, true] {
+                for skip_gitignore in [false, true] {
+                    assert!(
+                        MerkleSnapshot::build_inner(&root, content_based, skip_gitignore).is_err(),
+                        "invalid workspace root: {}",
+                        root.display()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unavailable_root_refresh_preserves_original_snapshot() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("kept.rs"), "fn retained() {}\n").unwrap();
+        let before = MerkleSnapshot::build(&root, false).unwrap();
+        let mut snapshot = before.clone();
+        fs::remove_dir_all(&root).unwrap();
+        for replace_with_file in [false, true] {
+            if replace_with_file {
+                fs::write(&root, "not a directory").unwrap();
+            }
+            assert!(
+                snapshot
+                    .refresh_paths_in_place(&root, &["kept.rs".into()], false)
+                    .is_err()
+            );
+            assert_eq!(snapshot, before);
+        }
+    }
+
+    #[test]
+    fn malformed_parent_ignore_patterns_preserve_valid_rules() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        fs::write(dir.path().join(".ignore"), "ignored.rs\n[z-a]\n[u-b]\n").unwrap();
+        fs::write(root.join("visible.rs"), "fn visible() {}\n").unwrap();
+        fs::write(root.join("ignored.rs"), "fn ignored() {}\n").unwrap();
+
+        for content_based in [false, true] {
+            for skip_gitignore in [false, true] {
+                let snapshot =
+                    MerkleSnapshot::build_inner(&root, content_based, skip_gitignore).unwrap();
+                assert!(snapshot.files["visible.rs"].ends_with("-0"));
+                if skip_gitignore {
+                    assert!(snapshot.files["ignored.rs"].ends_with("-1"));
+                } else {
+                    assert!(!snapshot.files.contains_key("ignored.rs"));
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_workspace_root_symlink_remains_supported() {
+        let dir = tempdir().unwrap();
+        let alias = tempdir().unwrap();
+        let link = alias.path().join("workspace");
+        std::os::unix::fs::symlink(dir.path(), &link).unwrap();
+        fs::write(dir.path().join("lib.rs"), "fn original() {}\n").unwrap();
+        let mut snapshot = MerkleSnapshot::build(dir.path(), false).unwrap();
+        assert_eq!(MerkleSnapshot::build(&link, false).unwrap(), snapshot);
+
+        fs::write(dir.path().join("lib.rs"), "fn updated() {}\n").unwrap();
+        snapshot
+            .refresh_paths_in_place(&link, &["lib.rs".into()], false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot, MerkleSnapshot::build(dir.path(), false).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_directory_aborts_snapshot_build() {
+        let dir = tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::write(locked.join("kept.rs"), "fn retained() {}\n").unwrap();
+        fs::write(dir.path().join("other.rs"), "fn other() {}\n").unwrap();
+        let _restore = RestorePermissions::revoke(&locked);
+        if fs::read_dir(&locked).is_ok() {
+            return; // Privileged users can bypass Unix permission bits.
+        }
+        assert_eq!(
+            fs::read_dir(&locked).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        for content_based in [false, true] {
+            for skip_gitignore in [false, true] {
+                let error = MerkleSnapshot::build_inner(dir.path(), content_based, skip_gitignore)
+                    .unwrap_err();
+                assert!(format!("{error:#}").contains("locked"), "{error:#}");
+            }
+        }
+        // Intentional exclusion is still a complete scan. With ignore rules
+        // disabled, the second walk must reject that same unreadable directory.
+        fs::write(dir.path().join(".ignore"), "locked/\n").unwrap();
+        for content_based in [false, true] {
+            let snapshot = MerkleSnapshot::build_inner(dir.path(), content_based, false).unwrap();
+            assert!(snapshot.files.contains_key("other.rs"));
+            assert!(!snapshot.files.contains_key("locked/kept.rs"));
+            assert!(MerkleSnapshot::build_inner(dir.path(), content_based, true).is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_file_aborts_content_snapshot_build() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("kept.rs");
+        fs::write(&file, "fn retained() {}\n").unwrap();
+        let _restore = RestorePermissions::revoke(&file);
+        if fs::read(&file).is_ok() {
+            return;
+        }
+        assert_eq!(
+            fs::read(&file).unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        for skip_gitignore in [false, true] {
+            let error =
+                MerkleSnapshot::build_content_based(dir.path(), skip_gitignore).unwrap_err();
+            assert!(format!("{error:#}").contains("kept.rs"), "{error:#}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_path_refresh_preserves_original_snapshot() {
+        let dir = tempdir().unwrap();
+        let locked = dir.path().join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::write(locked.join("kept.rs"), "fn retained() {}\n").unwrap();
+        fs::write(dir.path().join("a.rs"), "fn old() {}\n").unwrap();
+        fs::write(dir.path().join("b.rs"), "fn removed() {}\n").unwrap();
+        let before = MerkleSnapshot::build(dir.path(), false).unwrap();
+        let mut snapshot = before.clone();
+        fs::write(dir.path().join("a.rs"), "fn updated() {}\n").unwrap();
+        fs::remove_file(dir.path().join("b.rs")).unwrap();
+        let restore = RestorePermissions::revoke(&locked);
+        if fs::symlink_metadata(locked.join("kept.rs")).is_ok() {
+            return;
+        }
+        let paths = ["a.rs".into(), "b.rs".into(), "locked/kept.rs".into()];
+        let error = snapshot
+            .refresh_paths_in_place(dir.path(), &paths, false)
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<std::io::Error>().unwrap().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        assert!(format!("{error:#}").contains("locked/kept.rs"));
+        assert_eq!(
+            snapshot, before,
+            "earlier staged changes must not be applied"
+        );
+
+        drop(restore);
+        let diff = snapshot
+            .refresh_paths_in_place(dir.path(), &paths, false)
+            .unwrap()
+            .unwrap();
+        let full = MerkleSnapshot::build(dir.path(), false).unwrap();
+        assert_eq!(diff, before.diff(&full));
+        assert_eq!(snapshot, full);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn targeted_refresh_does_not_probe_unreadable_symlink_targets() {
+        let dir = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "fn original() {}\n").unwrap();
+        let before = MerkleSnapshot::build(dir.path(), false).unwrap();
+        let mut snapshot = before.clone();
+        fs::write(outside.path().join("lib.rs"), "fn external() {}\n").unwrap();
+        fs::remove_dir_all(dir.path().join("src")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("src")).unwrap();
+        let _restore = RestorePermissions::revoke(outside.path());
+
+        assert!(
+            snapshot
+                .refresh_paths_in_place(dir.path(), &["src/lib.rs".into()], false)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(snapshot, before);
+        let full = MerkleSnapshot::build(dir.path(), false).unwrap();
+        assert_eq!(
+            before.diff(&full).deleted,
+            vec![PathBuf::from("src/lib.rs")]
+        );
+    }
 
     #[test]
     fn streaming_root_hash_matches_contiguous_hash() {
