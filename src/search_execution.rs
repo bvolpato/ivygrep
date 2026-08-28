@@ -124,7 +124,9 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     // BM25F: search across text, tokenized file path, and definition signature.
     // Boosts on path/signature fields implement Sourcegraph-style BM25F where
     // matches on filenames and symbol definitions count 5× more than body text.
-    let mut search_fields = vec![ctx.fields.text, ctx.fields.file_path];
+    // A raw STRING path match can mask phrase errors in analyzed fields.
+    // Keep it available through explicit file_path: queries, not defaults.
+    let mut search_fields = vec![ctx.fields.text];
     if let Some(f) = ctx.fields.file_path_text {
         search_fields.push(f);
     }

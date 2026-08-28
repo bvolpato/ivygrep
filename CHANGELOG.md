@@ -17,6 +17,7 @@ All notable changes to ivygrep are documented in this file.
 - MCP no longer blocks a tool call on a whole first index. `ig_search` enqueues the run on the daemon (`StartIndex`), waits at most `IVYGREP_MCP_INDEX_WAIT_SECS` (default 20), and otherwise returns a non-error `status: indexing` payload with progress and `retry_after_secs`; the MCP process never indexes locally while a daemon answers (including after a lost reply), and `ig_status` reports runs still queued on the daemon. Daemon protocol version 7; older daemons restart on the next request.
 
 ### Fixed
+- Lexical retrieval preserves valid parsed queries at any length while retaining bounded analyzer fallback for punctuation. Raw filename fields no longer hide content-phrase parse errors, and invalid Boolean clauses do not fall back to an OR search.
 - Worktree symbol definitions apply path visibility before counting results and rank owner and exact-case matches across both indexes before the final limit, so shadowed base rows and lower-ranked overlay definitions no longer hide valid matches.
 - Full and targeted index scans abort on filesystem traversal, metadata, or content-read failures instead of treating unreadable paths as deleted. The last healthy index and snapshot remain available until a complete scan succeeds.
 - Indexing recovers after failed Tantivy metadata publication by collecting abandoned managed files before replaying changes, preventing deletion-file collisions from trapping watcher retries while preserving committed segments.
