@@ -2585,6 +2585,34 @@ impl Collector for GlobFilterCollector<'_> {
     ) -> tantivy::Result<<Self::Child as SegmentCollector>::Fruit> {
         let mut collector = self.for_segment(segment_ord, reader)?;
         let alive = reader.alive_bitset();
+        if self.cancel_token.is_some() {
+            // Tantivy's generic for_each_pruning keeps advancing after the
+            // callback raises its threshold to MAX. Own the scorer loop when
+            // a token is present so even noncompetitive postings can stop.
+            // Stored reads still respect the top-k score threshold, but this
+            // cancellable path cannot use native Block-WAND block skipping.
+            if !collector.is_cancelled() {
+                let mut scorer = weight.scorer(reader, 1.0)?;
+                while !collector.is_cancelled() && collector.error.is_none() {
+                    let doc = scorer.doc();
+                    if doc == tantivy::TERMINATED {
+                        break;
+                    }
+                    if alive.is_none_or(|alive| alive.is_alive(doc)) {
+                        let score = scorer.score();
+                        if score > collector.top_docs.threshold.unwrap_or(f32::MIN) {
+                            collector.collect(doc, score);
+                        }
+                    }
+                    if collector.is_cancelled() || collector.error.is_some() {
+                        break;
+                    }
+                    scorer.advance();
+                }
+            }
+            return Ok(collector.harvest());
+        }
+        // Without a cancellation token, retain native Block-WAND traversal.
         // Only accepted paths raise the threshold. Rejected high scores must
         // never prune lower-scoring matches of the requested glob.
         weight.for_each_pruning(f32::MIN, reader, &mut |doc, score| {
@@ -6243,6 +6271,113 @@ mod tests {
     }
 
     #[test]
+    fn overflow_glob_cancellation_stops_postings_traversal() {
+        struct CountingScorer {
+            doc: u32,
+            max_doc: u32,
+            advances: Arc<std::sync::atomic::AtomicUsize>,
+            cancelled: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl tantivy::DocSet for CountingScorer {
+            fn advance(&mut self) -> u32 {
+                let advances = self.advances.fetch_add(1, Ordering::Relaxed) + 1;
+                if advances == 7 {
+                    self.cancelled.store(true, Ordering::Relaxed);
+                }
+                self.doc = if self.doc + 1 < self.max_doc {
+                    self.doc + 1
+                } else {
+                    tantivy::TERMINATED
+                };
+                self.doc
+            }
+
+            fn doc(&self) -> u32 {
+                self.doc
+            }
+
+            fn size_hint(&self) -> u32 {
+                self.max_doc
+            }
+        }
+        impl tantivy::query::Scorer for CountingScorer {
+            fn score(&mut self) -> f32 {
+                1.0
+            }
+        }
+        struct CountingWeight {
+            advances: Arc<std::sync::atomic::AtomicUsize>,
+            cancelled: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl tantivy::query::Weight for CountingWeight {
+            fn scorer(
+                &self,
+                reader: &tantivy::SegmentReader,
+                _boost: f32,
+            ) -> tantivy::Result<Box<dyn tantivy::query::Scorer>> {
+                Ok(Box::new(CountingScorer {
+                    doc: 0,
+                    max_doc: reader.max_doc(),
+                    advances: self.advances.clone(),
+                    cancelled: self.cancelled.clone(),
+                }))
+            }
+
+            fn explain(
+                &self,
+                _reader: &tantivy::SegmentReader,
+                _doc: u32,
+            ) -> tantivy::Result<tantivy::query::Explanation> {
+                Ok(tantivy::query::Explanation::new("counting scorer", 1.0))
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let (index, fields) = open_tantivy_index(root.path()).unwrap();
+        let mut writer = index
+            .writer_with_num_threads::<TantivyDocument>(1, 15_000_000)
+            .unwrap();
+        for ordinal in 0..100 {
+            writer
+                .add_document(tantivy::doc!(fields.file_path => format!("selected/{ordinal}.rs")))
+                .unwrap();
+        }
+        writer.commit().unwrap();
+        let reader = index.reader().unwrap();
+        let searcher = reader.searcher();
+        let mut observed = Vec::new();
+        for (pattern, pre_cancelled) in [
+            ("selected/**", false),
+            ("outside/**", false),
+            ("selected/**", true),
+        ] {
+            let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(pre_cancelled));
+            let advances = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let matcher = PathGlobMatcher::new(&[pattern.to_string()], &[]).unwrap();
+            let collector = GlobFilterCollector {
+                limit: 1,
+                path_field: fields.file_path,
+                matcher: &matcher,
+                cancel_token: Some(&cancelled),
+            };
+            let weight = CountingWeight {
+                advances: advances.clone(),
+                cancelled: cancelled.clone(),
+            };
+            let result = collector
+                .collect_segment(&weight, 0, &searcher.segment_readers()[0])
+                .unwrap()
+                .unwrap();
+            assert!(result.is_empty());
+            observed.push(advances.load(Ordering::Relaxed));
+        }
+        assert_eq!(
+            observed,
+            [7, 7, 0],
+            "cancellation must stop advancing, including after scores fall below the heap threshold"
+        );
+    }
+
+    #[test]
     fn overflow_glob_collector_preserves_topdocs_order_and_live_documents() {
         let root = tempfile::tempdir().unwrap();
         let (index, fields) = open_tantivy_index(root.path()).unwrap();
@@ -6306,11 +6441,20 @@ mod tests {
                 matcher.matches(Path::new(path))
             })
             .collect::<Vec<_>>();
-        for limit in [1, 7, 100] {
-            let actual =
-                collect_top_docs_with_glob_filter(&searcher, &query, &fields, &filter, limit, None)
-                    .unwrap();
-            assert_eq!(actual, expected[..expected.len().min(limit)]);
+        let active = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        for cancel_token in [None, Some(&active)] {
+            for limit in [1, 7, 100] {
+                let actual = collect_top_docs_with_glob_filter(
+                    &searcher,
+                    &query,
+                    &fields,
+                    &filter,
+                    limit,
+                    cancel_token,
+                )
+                .unwrap();
+                assert_eq!(actual, expected[..expected.len().min(limit)]);
+            }
         }
         let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(true));
         assert!(
