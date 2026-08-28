@@ -219,29 +219,25 @@ pub(crate) fn search_symbols_in_current_index(
         &query_normalized,
         options,
         &path_matcher,
+        None,
     )?;
 
     if let Some(base_dir) = &workspace.base_index_dir {
-        let tombstones = load_path_set(&workspace.overlay_sqlite_path(), "tombstones")?;
-        let overlay_files = load_chunk_paths(&workspace.overlay_sqlite_path())?;
-        let remaining = options.limit.map(|limit| limit.saturating_sub(hits.len()));
-        if remaining != Some(0) {
-            let base = open_sqlite_readonly(&base_dir.join("metadata.sqlite3"))?;
-            let mut base_options = options.clone();
-            base_options.limit = remaining;
-            for hit in query_workspace_db(
-                &base,
-                &query,
-                &query_normalized,
-                &base_options,
-                &path_matcher,
-            )? {
-                let path = hit.1.file_path.to_string_lossy();
-                if !tombstones.contains(path.as_ref()) && !overlay_files.contains(path.as_ref()) {
-                    hits.push(hit);
-                }
-            }
-        }
+        let shadowed_paths = load_path_set(&workspace.overlay_sqlite_path(), "tombstones")?
+            .into_iter()
+            .chain(load_chunk_paths(&workspace.overlay_sqlite_path())?)
+            .collect::<HashSet<_>>();
+        let base = open_sqlite_readonly(&base_dir.join("metadata.sqlite3"))?;
+        // Either store can contain the best owner or exact-case match. Keep
+        // each store's best visible `limit` hits, then rank and limit globally.
+        hits.extend(query_workspace_db(
+            &base,
+            &query,
+            &query_normalized,
+            options,
+            &path_matcher,
+            Some(&shadowed_paths),
+        )?);
     }
 
     // Qualified lookups keep only the best owner tier that exists anywhere in
@@ -461,7 +457,11 @@ fn query_workspace_db(
     normalized: &str,
     options: &SearchOptions,
     path_matcher: &PathGlobMatcher,
+    shadowed_paths: Option<&HashSet<String>>,
 ) -> Result<Vec<(u8, SearchHit)>> {
+    if options.limit == Some(0) {
+        return Ok(Vec::new());
+    }
     let sql = "SELECT c.file_path, c.start_line, c.end_line, c.text,
                       c.language, c.is_ignored, COALESCE(s.name, s.normalized_name), s.owner
                FROM symbols s JOIN chunks c ON c.chunk_key = s.chunk_key
@@ -500,6 +500,17 @@ fn query_workspace_db(
             Some(accepted) if tier > accepted && accepted < OWNER_TIER_NONE => break,
             _ => {}
         }
+        if shadowed_paths.is_some_and(|paths| paths.contains(file_path.to_string_lossy().as_ref()))
+            || options
+                .scope_filter
+                .as_ref()
+                .is_some_and(|scope| !scope.matches(&file_path))
+            || !type_matches(&language, options.type_filter.as_deref())
+            || !path_matcher.matches(&file_path)
+            || (!options.skip_gitignore && is_ignored)
+        {
+            continue;
+        }
         let preview = try_decompress_text(raw).with_context(|| {
             format!(
                 "failed to read stored symbol text for {}:{start_line}-{end_line}",
@@ -522,19 +533,10 @@ fn query_workspace_db(
             neural_requested: false,
             neural_executed: false,
         };
-        if options
-            .scope_filter
-            .as_ref()
-            .is_none_or(|scope| scope.matches(&hit.file_path))
-            && type_matches(&language, options.type_filter.as_deref())
-            && path_matcher.matches(&hit.file_path)
-            && (options.skip_gitignore || !is_ignored)
-        {
-            accepted_tier.get_or_insert(tier);
-            hits.push((tier, hit));
-            if options.limit.is_some_and(|limit| hits.len() >= limit) {
-                break;
-            }
+        accepted_tier.get_or_insert(tier);
+        hits.push((tier, hit));
+        if options.limit.is_some_and(|limit| hits.len() >= limit) {
+            break;
         }
     }
     Ok(hits)
@@ -1972,10 +1974,16 @@ mod tests {
 
         let matcher = PathGlobMatcher::new(&[], &[]).unwrap();
         let query = parse_symbol_query("broken");
-        let search_error =
-            query_workspace_db(&conn, &query, "broken", &SearchOptions::default(), &matcher)
-                .unwrap_err()
-                .to_string();
+        let search_error = query_workspace_db(
+            &conn,
+            &query,
+            "broken",
+            &SearchOptions::default(),
+            &matcher,
+            None,
+        )
+        .unwrap_err()
+        .to_string();
         assert!(search_error.contains("failed to read stored symbol text"));
 
         // Removal no longer re-derives names from stored text.

@@ -358,12 +358,19 @@ fn worktree_overlay_hides_shadowed_base_symbols() {
     git(root.path(), &["symbolic-ref", "HEAD", "refs/heads/main"]);
     fs::write(
         root.path().join("service.rs"),
-        "pub fn shadowed_base_symbol() {}\n",
+        "pub fn shadowed_base_symbol() {}\npub fn shared_name() {}\n\
+         pub struct Expected;\nimpl Expected { pub fn run() {} }\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("a_deleted.rs"),
+        "pub fn deleted_name() {}\n",
     )
     .unwrap();
     fs::write(
         root.path().join("shared.rs"),
-        "pub fn inherited_symbol() {}\n",
+        "pub fn inherited_symbol() {}\npub fn shared_name() {}\npub fn deleted_name() {}\n\
+         pub struct Unrelated;\nimpl Unrelated { pub fn run() {} }\n",
     )
     .unwrap();
     git(root.path(), &["add", "."]);
@@ -374,6 +381,7 @@ fn worktree_overlay_hides_shadowed_base_symbols() {
         "pub fn replacement_symbol() {}\n",
     )
     .unwrap();
+    fs::remove_file(root.path().join("a_deleted.rs")).unwrap();
     git(root.path(), &["add", "."]);
     git(root.path(), &["commit", "-m", "replace symbol"]);
     git(root.path(), &["checkout", "main"]);
@@ -412,7 +420,98 @@ fn worktree_overlay_hides_shadowed_base_symbols() {
             "worktree should find {symbol}"
         );
     }
+    for symbol in ["shared_name", "deleted_name", "Expected::run"] {
+        for limit in [Some(0), Some(1), Some(2), None] {
+            let hits = search_symbols(&overlay, symbol, SymbolSearchMode::Definitions, limit, None)
+                .unwrap();
+            let paths = hits
+                .iter()
+                .map(|hit| hit.file_path.as_path())
+                .collect::<Vec<_>>();
+            let expected = if limit == Some(0) {
+                vec![]
+            } else {
+                vec![Path::new("shared.rs")]
+            };
+            assert_eq!(paths, expected, "{symbol}, limit {limit:?}");
+        }
+    }
 
+    git(
+        root.path(),
+        &["worktree", "remove", worktree.to_str().unwrap(), "--force"],
+    );
+}
+
+#[test]
+#[serial]
+fn worktree_symbol_limits_preserve_global_owner_and_name_order() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    git(root.path(), &["init"]);
+    git(root.path(), &["symbolic-ref", "HEAD", "refs/heads/main"]);
+    fs::write(root.path().join("a.rs"), "pub fn same_name() {}\n").unwrap();
+    fs::write(
+        root.path().join("z.rs"),
+        "pub struct Expected;\nimpl Expected {\n    pub fn run() {}\n    pub fn folded_run() {}\n}\n\
+         pub struct Flow;\npub fn shared_name() {}\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-m", "base"]);
+    index(root.path(), home.path());
+
+    let worktree_parent = tempfile::tempdir().unwrap();
+    let worktree = worktree_parent.path().join("feature");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature",
+            worktree.to_str().unwrap(),
+        ],
+    );
+    fs::write(
+        worktree.join("new.rs"),
+        "pub struct Unrelated;\nimpl Unrelated { pub fn run() {} }\n\
+         pub fn flow() {}\npub fn shared_name() {}\npub fn same_name() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        worktree.join("folded.rs"),
+        "pub struct expected;\nimpl expected { pub fn folded_run() {} }\n",
+    )
+    .unwrap();
+    let overlay = index(&worktree, home.path());
+
+    for (symbol, expected) in [
+        ("Expected::run", vec!["z.rs"]),
+        ("Expected::folded_run", vec!["z.rs"]),
+        ("expected::folded_run", vec!["folded.rs"]),
+        ("EXPECTED::folded_run", vec!["folded.rs", "z.rs"]),
+        ("Missing::run", vec!["new.rs", "z.rs"]),
+        ("Flow", vec!["z.rs", "new.rs"]),
+        ("flow", vec!["new.rs", "z.rs"]),
+        ("same_name", vec!["a.rs", "new.rs"]),
+        ("shared_name", vec!["new.rs", "z.rs"]),
+    ] {
+        for limit in [Some(0), Some(1), Some(2), None] {
+            let hits = search_symbols(&overlay, symbol, SymbolSearchMode::Definitions, limit, None)
+                .unwrap();
+            let paths = hits
+                .iter()
+                .map(|hit| hit.file_path.as_path())
+                .collect::<Vec<_>>();
+            let expected = expected
+                .iter()
+                .take(limit.unwrap_or(usize::MAX))
+                .map(Path::new)
+                .collect::<Vec<_>>();
+            assert_eq!(paths, expected, "{symbol}, limit {limit:?}");
+        }
+    }
     git(
         root.path(),
         &["worktree", "remove", worktree.to_str().unwrap(), "--force"],
