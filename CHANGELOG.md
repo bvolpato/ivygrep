@@ -7,6 +7,7 @@ All notable changes to ivygrep are documented in this file.
 ### Performance
 - Vector count and availability checks read native headers and stream node levels without allocating native views or key lookup tables, reducing bookkeeping memory. The fast path checks structural bounds, not full payload integrity; deep health checks and USearch serialization are unchanged. Hash enhancement rebuilds dimension-mismatched stores before filling missing keys.
 - Reference and caller searches reuse one search context across bounded candidate-widening passes, avoiding repeated store setup when early matches are rejected. The existing per-request source-matching cache is unchanged.
+- Daemon startup-readiness checks reuse bounded, metadata-stamped watch policies for workspaces without registered watchers, avoiding repeated JSON parsing on warm queries.
 - Targeted watcher refreshes update the owned Merkle snapshot in place and build the diff from changed paths, avoiding a full-map clone and comparison. Snapshot format and atomic publication are unchanged.
 - Nearly complete hash enhancement fetches text only for missing vector keys, sharing the sparse-resume path with neural enhancement instead of reading every stored text blob after a small edit.
 - Search contexts share a 64 MiB, 256-file LRU preview cache instead of retaining separate full-file copies and clearing every entry at capacity. The byte budget includes line offsets; oversized previews remain usable without being cached.

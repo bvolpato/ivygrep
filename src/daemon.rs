@@ -74,6 +74,7 @@ const MAX_ENHANCEMENT_TRIGGERS: usize = 256;
 /// while a worker is already running or paused.
 const ENHANCEMENT_TRIGGER_INTERVAL: Duration = Duration::from_secs(10);
 const MAX_READY_WORKSPACES: usize = 256;
+const MAX_WATCH_POLICIES: usize = 256;
 const MAX_SEARCH_CANCELLATION_TOMBSTONES: usize = 256;
 const MAX_MEMORY_PROBE_LIMIT: usize = 80;
 const MAX_MEMORY_PROBE_QUERY_CHARS: usize = 512;
@@ -454,6 +455,12 @@ struct SearchContextSignature {
 struct FileStamp {
     len: u64,
     modified_nanos: u128,
+}
+
+#[derive(Clone, Copy)]
+struct CachedWatchPolicy {
+    metadata: FileStamp,
+    requires_watcher: bool,
 }
 
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
@@ -1183,6 +1190,7 @@ pub(crate) struct DaemonState {
     lazy_model: Arc<std::sync::OnceLock<Arc<dyn EmbeddingModel>>>,
     model_loading: Arc<AtomicBool>,
     watchers: Arc<Mutex<HashMap<String, WatchRegistration>>>,
+    watch_policies: Arc<Mutex<LruCache<String, CachedWatchPolicy>>>,
     resolved_workspaces: Arc<Mutex<LruCache<PathBuf, Workspace>>>,
     neural_statuses: Arc<Mutex<LruCache<String, CachedNeuralStatus>>>,
     /// Last background enhancement trigger attempt per (workspace, mode).
@@ -1485,14 +1493,7 @@ impl DaemonState {
                 .map(|watch| watch.control.clone());
             let control = match control {
                 Some(control) => Some(control),
-                None if workspace
-                    .read_metadata()
-                    .ok()
-                    .flatten()
-                    .is_some_and(|metadata| {
-                        metadata.watch_enabled && metadata.last_indexed_at_unix.is_some()
-                    }) =>
-                {
+                None if self.workspace_requires_watcher(workspace) => {
                     let state = self.clone();
                     let workspace = workspace.clone();
                     let registration = tokio::task::spawn_blocking(move || {
@@ -2042,6 +2043,51 @@ impl DaemonState {
         Ok(())
     }
 
+    fn workspace_requires_watcher(&self, workspace: &Workspace) -> bool {
+        let path = workspace.metadata_path();
+        let mut before = file_stamp(&path);
+        if let Some(stamp) = before
+            && let Some(policy) = self.watch_policies.lock().get(&workspace.id)
+            && policy.metadata == stamp
+        {
+            return policy.requires_watcher;
+        }
+        self.watch_policies.lock().pop(&workspace.id);
+
+        // Policy changes and the first completed index must be visible before
+        // a cached query can return. Cache only valid metadata read between
+        // matching stamps, never an absent, corrupt, or raced negative result.
+        let mut retried = false;
+        loop {
+            let metadata = workspace.read_metadata().ok().flatten();
+            let requires_watcher = metadata.as_ref().is_some_and(|metadata| {
+                metadata.watch_enabled && metadata.last_indexed_at_unix.is_some()
+            });
+            let after = file_stamp(&path);
+            if before == after {
+                if let Some(stamp) = after
+                    && metadata.is_some()
+                {
+                    self.watch_policies.lock().put(
+                        workspace.id.clone(),
+                        CachedWatchPolicy {
+                            metadata: stamp,
+                            requires_watcher,
+                        },
+                    );
+                }
+                return requires_watcher;
+            }
+            if retried {
+                // Keep the existing uncached read behavior if another writer
+                // keeps replacing metadata; do not retain that raced policy.
+                return requires_watcher;
+            }
+            before = after;
+            retried = true;
+        }
+    }
+
     fn workspace_is_ready(
         &self,
         workspace: &Workspace,
@@ -2078,6 +2124,7 @@ impl DaemonState {
             }
         }
         self.neural_statuses.lock().pop(&workspace.id);
+        self.watch_policies.lock().pop(&workspace.id);
         {
             let mut ready = self.ready_workspaces.lock();
             let keys = ready
@@ -2152,6 +2199,7 @@ fn create_daemon_state() -> DaemonState {
         lazy_model: lazy_model.clone(),
         model_loading: Arc::new(AtomicBool::new(false)),
         watchers: Arc::new(Mutex::new(HashMap::new())),
+        watch_policies: Arc::new(Mutex::new(bounded_lru(MAX_WATCH_POLICIES))),
         resolved_workspaces: Arc::new(Mutex::new(bounded_lru(MAX_RESOLVED_WORKSPACES))),
         neural_statuses: Arc::new(Mutex::new(bounded_lru(MAX_NEURAL_STATUSES))),
         enhancement_triggers: Arc::new(Mutex::new(bounded_lru(MAX_ENHANCEMENT_TRIGGERS))),
@@ -5122,6 +5170,7 @@ mod tests {
             lazy_model: Arc::new(std::sync::OnceLock::new()),
             model_loading: Arc::new(AtomicBool::new(false)),
             watchers: Arc::new(Mutex::new(HashMap::new())),
+            watch_policies: Arc::new(Mutex::new(bounded_lru(MAX_WATCH_POLICIES))),
             resolved_workspaces: Arc::new(Mutex::new(bounded_lru(MAX_RESOLVED_WORKSPACES))),
             neural_statuses: Arc::new(Mutex::new(bounded_lru(MAX_NEURAL_STATUSES))),
             enhancement_triggers: Arc::new(Mutex::new(bounded_lru(MAX_ENHANCEMENT_TRIGGERS))),
@@ -6803,6 +6852,194 @@ mod tests {
             },
         );
         assert!(!workspace.is_watcher_alive());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn enabling_watch_policy_reconciles_before_cached_search() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        let source = repo.path().join("policy.rs");
+        std::fs::write(&source, "pub fn policy_previous_marker() {}\n").unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
+        let state = test_state();
+        let request = DaemonRequest::Search {
+            path: Some(workspace.root.clone()),
+            query: "policy".to_string(),
+            limit: Some(5),
+            context: 0,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_path: None,
+            scope_is_file: false,
+            skip_gitignore: false,
+            force_neural: false,
+            disable_memory_expansion: true,
+        };
+        let before = handle_request(state.clone(), request.clone()).await;
+        assert!(matches!(before, DaemonResponse::SearchResults { hits, .. }
+            if hits.iter().any(|hit| hit.preview.contains("policy_previous_marker"))));
+        assert!(!state.watcher_registered(&workspace.id));
+
+        // Change policy without clearing any daemon cache. The repeated query
+        // must register and reconcile before it can reuse its old cached hits.
+        let held = state.acquire_workspace_mutations(std::slice::from_ref(&workspace));
+        std::fs::write(&source, "pub fn policy_current_marker() {}\n").unwrap();
+        let mut metadata = workspace.read_metadata().unwrap().unwrap();
+        metadata.watch_enabled = true;
+        workspace.write_metadata(&metadata).unwrap();
+        let mut searching = tokio::spawn(handle_request(state.clone(), request));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !state.watcher_registered(&workspace.id) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("enabling watch policy did not register the watcher");
+        assert!(!workspace.is_watcher_alive());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut searching)
+                .await
+                .is_err()
+        );
+        drop(held);
+        let after = tokio::time::timeout(Duration::from_secs(10), searching)
+            .await
+            .unwrap()
+            .unwrap();
+        let alive = workspace.is_watcher_alive();
+        stop_all_watchers(&state);
+        assert!(
+            matches!(after, DaemonResponse::SearchResults { hits, warnings }
+            if warnings.is_empty()
+                && hits.iter().any(|hit| hit.preview.contains("policy_current_marker"))
+                && hits.iter().all(|hit| !hit.preview.contains("policy_previous_marker")))
+        );
+        assert!(alive);
+        assert!(indexed_file_contains(
+            &workspace,
+            "policy.rs",
+            "policy_current_marker"
+        ));
+        assert!(!indexed_file_contains(
+            &workspace,
+            "policy.rs",
+            "policy_previous_marker"
+        ));
+    }
+
+    async fn acquire_search_lease_without_watcher(state: &DaemonState, workspace: &Workspace) {
+        let leases = tokio::time::timeout(
+            Duration::from_secs(5),
+            state.acquire_search_leases(std::slice::from_ref(workspace), false, None),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        drop(leases);
+        assert!(!state.watcher_registered(&workspace.id));
+        assert!(!workspace.is_watcher_alive());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn completed_first_index_rechecks_cached_watch_policy() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        std::fs::write(
+            repo.path().join("policy.rs"),
+            "pub fn first_policy_index() {}\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        workspace.ensure_dirs().unwrap();
+        workspace
+            .write_metadata(&WorkspaceMetadata {
+                id: workspace.id.clone(),
+                root: workspace.root.clone(),
+                created_at_unix: 1,
+                last_indexed_at_unix: None,
+                watch_enabled: true,
+                skip_gitignore: false,
+                index_generation: 0,
+            })
+            .unwrap();
+        let state = test_state();
+        acquire_search_lease_without_watcher(&state, &workspace).await;
+
+        index_workspace_for_watcher(&workspace, create_hash_model().as_ref()).unwrap();
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            handle_request(
+                state.clone(),
+                literal_request_for(&workspace, "first_policy_index"),
+            ),
+        )
+        .await
+        .unwrap();
+        let alive = workspace.is_watcher_alive();
+        stop_all_watchers(&state);
+        assert!(
+            matches!(response, DaemonResponse::SearchResults { hits, warnings }
+            if hits.len() == 1 && warnings.is_empty())
+        );
+        assert!(
+            alive,
+            "completing the first index must enable startup reconciliation"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn repaired_metadata_rechecks_cached_watch_policy() {
+        for corrupt in [false, true] {
+            let home = tempdir().unwrap();
+            unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+            let repo = tempdir().unwrap();
+            std::fs::write(
+                repo.path().join("policy.rs"),
+                "pub fn repaired_policy_marker() {}\n",
+            )
+            .unwrap();
+            let workspace = Workspace::resolve(repo.path()).unwrap();
+            index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
+            let mut metadata = workspace.read_metadata().unwrap().unwrap();
+            let state = test_state();
+            acquire_search_lease_without_watcher(&state, &workspace).await;
+
+            if corrupt {
+                std::fs::write(workspace.metadata_path(), "invalid metadata").unwrap();
+            } else {
+                std::fs::remove_file(workspace.metadata_path()).unwrap();
+            }
+            acquire_search_lease_without_watcher(&state, &workspace).await;
+            metadata.watch_enabled = true;
+            workspace.write_metadata(&metadata).unwrap();
+            let response = tokio::time::timeout(
+                Duration::from_secs(10),
+                handle_request(
+                    state.clone(),
+                    literal_request_for(&workspace, "repaired_policy_marker"),
+                ),
+            )
+            .await
+            .unwrap();
+            let alive = workspace.is_watcher_alive();
+            stop_all_watchers(&state);
+            assert!(
+                matches!(response, DaemonResponse::SearchResults { hits, warnings }
+                if hits.len() == 1 && warnings.is_empty())
+            );
+            assert!(
+                alive,
+                "repaired watch policy must not inherit a missing/corrupt result"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
