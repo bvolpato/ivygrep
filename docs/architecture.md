@@ -236,6 +236,11 @@ and falling back to the bare name; reference and caller scans are restricted
 to the languages that define the symbol. Adding these columns bumped the index
 format to v22.
 
+Format v23 rebuilds existing indexes so unchanged Swift and Objective-C files
+receive corrected structural chunks and parser-derived symbol names/owners.
+This uses the normal full-index rebuild path, including vector regeneration;
+there is no parser-specific partial migration.
+
 Reference searches use indexed identifier candidates, then verify source syntax.
 `--refs` includes non-call uses such as callbacks and function values; `--callers`
 returns chunks containing calls. Whitespace, newlines, and generic arguments do

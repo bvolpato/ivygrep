@@ -2517,6 +2517,63 @@ mod tests {
 
     #[test]
     #[serial]
+    fn swift_and_objc_symbol_definitions_use_parsed_names_and_owners() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let long_example = format!(
+            "let example = \"\"\"\n{}func stringOnlyTask() {{}}\n\"\"\"\n",
+            "example text\n".repeat(256)
+        );
+        for (path, source) in [
+            (
+                "Workers.swift",
+                "struct Alpha { func executeTask() -> Int { return 1 }; func inlineTask() {} }; struct Beta { func executeTask() -> Int { return 2 } }\nlet example = \"\"\"\nfunc counterfeitTask() {}\n\"\"\"\n/*\nstruct CommentOnly {}\n*/\n",
+            ),
+            ("Examples.swift", long_example.as_str()),
+            (
+                "Client.m",
+                "@interface Client\n- (void)dispatchTask;\n@end\n@implementation Client\n- (void)dispatchTask { dispatch_work(); } - (void)inlineTask {}\n@end\n/*\nstruct CommentOnly {};\n*/\n",
+            ),
+            ("Examples.m", "/*\nstruct CommentOnly {};\n*/\n"),
+        ] {
+            std::fs::write(root.path().join(path), source).unwrap();
+        }
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        crate::indexer::index_workspace(&workspace, &model).unwrap();
+
+        for (name, expected) in [
+            ("Alpha.executeTask", vec![("Workers.swift", 1)]),
+            ("Beta.executeTask", vec![("Workers.swift", 1)]),
+            ("Alpha.inlineTask", vec![("Workers.swift", 1)]),
+            (
+                "Client.dispatchTask",
+                vec![("Client.m", 2), ("Client.m", 5)],
+            ),
+            ("Client.inlineTask", vec![("Client.m", 5)]),
+            ("counterfeitTask", vec![]),
+            ("stringOnlyTask", vec![]),
+            ("CommentOnly", vec![]),
+        ] {
+            let hits = search_symbols(
+                &workspace,
+                name,
+                SymbolSearchMode::Definitions,
+                Some(10),
+                None,
+            )
+            .unwrap();
+            let actual = hits
+                .iter()
+                .map(|hit| (hit.file_path.to_str().unwrap(), hit.start_line))
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "{name}");
+        }
+    }
+
+    #[test]
+    #[serial]
     fn references_are_resolved_from_the_lexical_index() {
         let root = tempdir().unwrap();
         let home = tempdir().unwrap();
