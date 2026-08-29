@@ -577,12 +577,14 @@ impl Workspace {
         self.index_dir.join(".watcher.pid")
     }
 
-    /// Trust-but-verify: check if a filesystem watcher daemon is alive for this workspace.
-    /// Returns true only if the PID file exists AND the process is still running.
+    /// A live watcher is trusted only after reconciling its initial snapshot.
+    /// Legacy records fall back to checking the watcher PID.
     pub fn is_watcher_alive(&self) -> bool {
         let status = jobs::job_status(self, JobKind::Watcher, WATCHER_HEARTBEAT_TTL_SECS);
-        if status.record.is_some() {
-            status.active()
+        if let Some(record) = status.record.as_ref() {
+            // start_job publishes an active record before the first heartbeat
+            // can mark startup reconciliation as not yet ready.
+            status.active() && record.phase != "reconciling"
         } else {
             is_active_pid_alive(&self.watcher_pid_path())
         }
@@ -1524,8 +1526,8 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
             WATCHER_HEARTBEAT_TTL_SECS,
             observed_at_unix,
         );
-        let watcher_alive = if watcher_status.record.is_some() {
-            watcher_status.active()
+        let watcher_alive = if let Some(record) = watcher_status.record.as_ref() {
+            watcher_status.active() && record.phase != "reconciling"
         } else {
             is_active_pid_alive(&index_dir.join(".watcher.pid"))
         };

@@ -15,6 +15,16 @@ pub const INDEXING_HEARTBEAT_TTL_SECS: u64 = 20;
 pub const ENHANCEMENT_HEARTBEAT_TTL_SECS: u64 = 20;
 pub const ENHANCEMENT_PAUSE_WARN_SECS: u64 = 300;
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_WATCHER_HEARTBEAT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_watcher_heartbeat() {
+    FAIL_NEXT_WATCHER_HEARTBEAT.with(|fail| fail.set(true));
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
@@ -183,6 +193,10 @@ pub fn heartbeat_job_if_current(
     expected_nonce: &str,
     update: JobUpdate,
 ) -> Result<Option<JobRecord>> {
+    #[cfg(test)]
+    if kind == JobKind::Watcher && FAIL_NEXT_WATCHER_HEARTBEAT.with(|fail| fail.replace(false)) {
+        anyhow::bail!("injected watcher heartbeat failure");
+    }
     let now = now_unix();
     update_job(workspace, move |ledger| {
         let record = ledger
@@ -437,7 +451,7 @@ pub fn now_unix() -> u64 {
         .as_secs()
 }
 
-fn update_job<T>(workspace: &Workspace, updater: impl FnOnce(&mut JobLedger) -> T) -> Result<T> {
+pub(crate) fn lock_job_ledger(workspace: &Workspace) -> Result<fs::File> {
     workspace.ensure_dirs()?;
     let lock_path = workspace.job_lock_path();
     let lock = fs::OpenOptions::new()
@@ -448,7 +462,11 @@ fn update_job<T>(workspace: &Workspace, updater: impl FnOnce(&mut JobLedger) -> 
         .with_context(|| format!("failed to open job lock {}", lock_path.display()))?;
     lock.lock_exclusive()
         .with_context(|| format!("failed to lock job ledger {}", lock_path.display()))?;
+    Ok(lock)
+}
 
+fn update_job<T>(workspace: &Workspace, updater: impl FnOnce(&mut JobLedger) -> T) -> Result<T> {
+    let lock = lock_job_ledger(workspace)?;
     let mut ledger = read_job_ledger(workspace);
     let record = updater(&mut ledger);
     write_job_ledger_locked(workspace.job_ledger_path(), &ledger)?;

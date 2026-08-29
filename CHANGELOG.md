@@ -7,6 +7,7 @@ All notable changes to ivygrep are documented in this file.
 ### Performance
 - Vector count and availability checks read native headers and stream node levels without allocating native views or key lookup tables, reducing bookkeeping memory. The fast path checks structural bounds, not full payload integrity; deep health checks and USearch serialization are unchanged. Hash enhancement rebuilds dimension-mismatched stores before filling missing keys.
 - Reference and caller searches reuse one search context across bounded candidate-widening passes, avoiding repeated store setup when early matches are rejected. The existing per-request source-matching cache is unchanged.
+- Daemon startup-readiness checks reuse bounded, metadata-stamped watch policies for workspaces without registered watchers, avoiding repeated JSON parsing on warm queries.
 - Targeted watcher refreshes update the owned Merkle snapshot in place and build the diff from changed paths, avoiding a full-map clone and comparison. Snapshot format and atomic publication are unchanged.
 - Nearly complete hash enhancement fetches text only for missing vector keys, sharing the sparse-resume path with neural enhancement instead of reading every stored text blob after a small edit.
 - Search contexts share a 64 MiB, 256-file LRU preview cache instead of retaining separate full-file copies and clearing every entry at capacity. The byte budget includes line offsets; oversized previews remain usable without being cached.
@@ -20,6 +21,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 - Swift and Objective-C use valid Tree-sitter capture queries, preserving method bodies, inline declarations, and nested/extension/category owners. Parsed strings and comments no longer create heuristic symbols in these languages. Index format v23 rebuilds existing indexes, including unchanged files and their vectors.
+- Restored filesystem watchers reconcile edits, additions, and deletions made while the daemon was stopped against the persisted Merkle snapshot before searches trust the index. Watches are registered before reconciliation, preserving edits made during the scan without rebuilding unchanged files.
 - Lexical retrieval preserves valid parsed queries at any length while retaining bounded analyzer fallback for punctuation. Raw filename fields no longer hide content-phrase parse errors, and invalid Boolean clauses do not fall back to an OR search.
 - Worktree symbol definitions apply path visibility before counting results and rank owner and exact-case matches across both indexes before the final limit, so shadowed base rows and lower-ranked overlay definitions no longer hide valid matches.
 - Full and targeted index scans abort on filesystem traversal, metadata, or content-read failures instead of treating unreadable paths as deleted. The last healthy index and snapshot remain available until a complete scan succeeds.

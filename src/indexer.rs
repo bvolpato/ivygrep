@@ -376,17 +376,16 @@ pub fn remove_workspace_index(workspace: &Workspace) -> Result<()> {
     unlock_result
 }
 
-/// Remove all index contents EXCEPT `index.lock`. This is safe to call while
-/// holding the flock because the lock file's inode is preserved, keeping the
-/// advisory lock valid.
+/// Preserve both lock inodes while clearing stores and the job ledger. A
+/// watcher can heartbeat during a rebuild, including its initial index.
 fn remove_workspace_index_contents(workspace: &Workspace) -> Result<()> {
     if !workspace.index_dir.exists() {
         return Ok(());
     }
-    let lock_name = std::ffi::OsStr::new("index.lock");
+    let _job_lock = jobs::lock_job_ledger(workspace)?;
     for entry in fs::read_dir(&workspace.index_dir)? {
         let entry = entry?;
-        if entry.file_name() == lock_name {
+        if entry.file_name() == "index.lock" || entry.file_name() == "job.lock" {
             continue;
         }
         let path = entry.path();
@@ -3427,6 +3426,63 @@ mod tests {
     use super::*;
 
     #[test]
+    #[serial]
+    fn index_cleanup_waits_for_job_writer_and_preserves_its_lock() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let root = tempdir().unwrap();
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        workspace.ensure_dirs().unwrap();
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(workspace.job_lock_path())
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&lock).unwrap();
+        fs::write(workspace.job_ledger_path(), "old ledger").unwrap();
+        #[cfg(unix)]
+        let original_inode = {
+            use std::os::unix::fs::MetadataExt;
+            lock.metadata().unwrap().ino()
+        };
+
+        let (started, waiting) = std::sync::mpsc::channel();
+        let (finished, result) = std::sync::mpsc::channel();
+        let worker_workspace = workspace.clone();
+        let worker = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            finished
+                .send(remove_workspace_index_contents(&worker_workspace))
+                .unwrap();
+        });
+        waiting.recv().unwrap();
+        let early = result.recv_timeout(std::time::Duration::from_millis(50));
+        let waited = matches!(early, Err(std::sync::mpsc::RecvTimeoutError::Timeout));
+        drop(lock);
+        let cleanup = early.unwrap_or_else(|_| {
+            result
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("index cleanup did not finish after the ledger writer released its lock")
+        });
+        worker.join().unwrap();
+        assert!(waited, "index cleanup bypassed an active job-ledger writer");
+        cleanup.unwrap();
+        assert!(workspace.job_lock_path().is_file());
+        assert!(!workspace.job_ledger_path().exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                fs::metadata(workspace.job_lock_path()).unwrap().ino(),
+                original_inode
+            );
+        }
+        jobs::start_job(&workspace, JobKind::Watcher, "idle", 1).unwrap();
+        assert!(jobs::read_job_ledger(&workspace).contains(JobKind::Watcher));
+    }
+
+    #[test]
     fn sparse_embedding_resume_fetches_missing_keys_despite_stale_store_entries() {
         let dir = tempdir().unwrap();
         let sqlite = Connection::open_in_memory().unwrap();
@@ -5993,11 +6049,18 @@ mod tests {
 
         remove_workspace_index(&workspace).unwrap();
 
-        let entries = fs::read_dir(&workspace.index_dir)
+        let mut entries = fs::read_dir(&workspace.index_dir)
             .unwrap()
             .map(|entry| entry.unwrap().file_name())
             .collect::<Vec<_>>();
-        assert_eq!(entries, vec![std::ffi::OsString::from("index.lock")]);
+        entries.sort();
+        assert_eq!(
+            entries,
+            vec![
+                std::ffi::OsString::from("index.lock"),
+                std::ffi::OsString::from("job.lock"),
+            ]
+        );
     }
 
     #[test]
