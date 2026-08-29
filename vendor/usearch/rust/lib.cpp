@@ -216,3 +216,50 @@ std::unique_ptr<NativeIndex> new_native_index(IndexOptions const& options) {
     index.reserve(index_limits_t{});
     return wrap(std::move(index));
 }
+
+SerializedIndexMetadata inspect_serialized_header(rust::Slice<uint8_t const> dense,
+                                                  rust::Slice<uint8_t const> graph) {
+    if (dense.size() != sizeof(index_dense_head_buffer_t) || graph.size() != sizeof(index_serialized_header_t))
+        throw std::invalid_argument("Truncated vector metadata header");
+
+    index_dense_head_buffer_t buffer;
+    std::memcpy(buffer, dense.data(), sizeof(buffer));
+    index_dense_head_t head{buffer};
+    if (std::memcmp(buffer, default_magic(), std::strlen(default_magic())) != 0)
+        throw std::invalid_argument("Invalid vector store header magic");
+    if (head.version_major != USEARCH_VERSION_MAJOR)
+        throw std::invalid_argument("Unsupported vector store version");
+    fix_pre_2_10_metadata(head);
+    if (head.kind_key != scalar_kind<index_dense_t::vector_key_t>() ||
+        head.kind_compressed_slot != scalar_kind<index_dense_t::compressed_slot_t>())
+        throw std::invalid_argument("Unsupported vector store key or slot type");
+    if (head.kind_metric != metric_kind_t::cos_k ||
+        (head.kind_scalar != scalar_kind_t::f16_k && head.kind_scalar != scalar_kind_t::f32_k))
+        throw std::invalid_argument("Unsupported vector store metric or scalar type");
+    if (*head.multi.ptr() != 0)
+        throw std::invalid_argument("Multiple vectors per key are not supported");
+
+    index_serialized_header_t graph_head;
+    std::memcpy(&graph_head, graph.data(), sizeof(graph_head));
+    // Bound before the native layout multiplies these values by slot width.
+    auto max_connectivity = (std::numeric_limits<std::size_t>::max() - 64) /
+                            sizeof(index_dense_t::compressed_slot_t);
+    if (graph_head.connectivity < 2 || graph_head.connectivity_base < graph_head.connectivity ||
+        graph_head.connectivity_base > max_connectivity)
+        throw std::invalid_argument("Invalid vector store connectivity");
+
+    index_config_t config(static_cast<std::size_t>(graph_head.connectivity),
+                          static_cast<std::size_t>(graph_head.connectivity_base));
+    index_gt<float, index_dense_t::vector_key_t, index_dense_t::compressed_slot_t> layout(config);
+    SerializedIndexMetadata result;
+    result.dimensions = head.dimensions;
+    result.scalar_bytes = head.kind_scalar == scalar_kind_t::f16_k ? 2 : 4;
+    result.count_present = head.count_present;
+    result.count_deleted = head.count_deleted;
+    result.graph_size = graph_head.size;
+    result.max_level = graph_head.max_level;
+    result.entry_slot = graph_head.entry_slot;
+    result.node_base_bytes = layout.memory_usage_per_node(0);
+    result.node_level_bytes = layout.neighbors_bytes();
+    return result;
+}

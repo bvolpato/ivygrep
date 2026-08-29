@@ -93,6 +93,7 @@ fn top_vector_matches(
     matches
 }
 
+mod metadata;
 mod optimized;
 #[cfg(test)]
 #[cfg_attr(test, allow(dead_code))]

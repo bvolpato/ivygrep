@@ -2179,6 +2179,23 @@ pub fn enhance_workspace_hash(
         HASH_VECTOR_QUANTIZATION,
         crate::vector_store::VectorTier::Hash,
     )?;
+    // Native loading adopts the stored dimensions. Existing keys must not
+    // suppress re-embedding when that store belongs to a different model shape.
+    if vector_index.dimensions() != hash_model.dimensions() {
+        drop(vector_index);
+        VectorStore::reset(
+            &vector_path,
+            hash_model.dimensions(),
+            HASH_VECTOR_QUANTIZATION,
+            crate::vector_store::VectorTier::Hash,
+        )?;
+        vector_index = VectorStore::open(
+            &vector_path,
+            hash_model.dimensions(),
+            HASH_VECTOR_QUANTIZATION,
+            crate::vector_store::VectorTier::Hash,
+        )?;
+    }
     let claimed_tombstones = claim_vector_tombstones(
         &workspace.hash_tombstones_path(),
         &workspace.hash_tombstones_processing_path(),
@@ -4997,6 +5014,86 @@ mod tests {
             fs::read_to_string(workspace.enhancing_progress_path()).unwrap(),
             summary.total_chunks.to_string(),
             "resumed enhancement progress must not count persisted vectors twice"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn hash_enhancement_repairs_complete_wrong_dimension_store() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        for name in ["first", "second"] {
+            fs::write(
+                root.path().join(format!("{name}.rs")),
+                format!("pub fn {name}() {{}}\n"),
+            )
+            .unwrap();
+        }
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        let sqlite = open_sqlite(&workspace.sqlite_path()).unwrap();
+        let keys = sqlite
+            .prepare("SELECT DISTINCT vector_key FROM chunks")
+            .unwrap()
+            .query_map([], |row| Ok(row.get::<_, i64>(0)? as u64))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(keys.len(), 2);
+
+        let vector_path = workspace.vector_path();
+        let tier = crate::vector_store::VectorTier::Hash;
+        VectorStore::reset(&vector_path, 384, HASH_VECTOR_QUANTIZATION, tier).unwrap();
+        let mut incompatible =
+            VectorStore::open(&vector_path, 384, HASH_VECTOR_QUANTIZATION, tier).unwrap();
+        for &key in &keys {
+            incompatible.add_unchecked(key, vec![1.0; 384]).unwrap();
+        }
+        incompatible.save().unwrap();
+        drop(incompatible);
+        let generation = workspace.read_metadata().unwrap().unwrap().index_generation;
+        fs::write(
+            workspace.hash_enhanced_generation_path(),
+            generation.to_string(),
+        )
+        .unwrap();
+        assert!(workspace.needs_hash_enhancement());
+
+        assert_eq!(
+            enhance_workspace_hash(&workspace, &model).unwrap(),
+            keys.len(),
+            "all existing keys must be re-embedded after a dimension mismatch"
+        );
+        assert!(!workspace.needs_hash_enhancement());
+        let repaired = VectorStore::open_readonly(
+            &vector_path,
+            EMBEDDING_DIMENSIONS,
+            HASH_VECTOR_QUANTIZATION,
+            tier,
+        )
+        .unwrap();
+        assert_eq!(repaired.dimensions(), EMBEDDING_DIMENSIONS);
+        assert_eq!(repaired.size(), keys.len());
+        assert!(keys.iter().all(|&key| repaired.contains(key)));
+        drop(repaired);
+
+        let original_bytes = fs::read(&vector_path).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&vector_path)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000))
+            .unwrap();
+        let original_modified = fs::metadata(&vector_path).unwrap().modified().unwrap();
+        assert_eq!(enhance_workspace_hash(&workspace, &model).unwrap(), 0);
+        assert!(!workspace.needs_hash_enhancement());
+        assert_eq!(fs::read(&vector_path).unwrap(), original_bytes);
+        assert_eq!(
+            fs::metadata(&vector_path).unwrap().modified().unwrap(),
+            original_modified,
+            "healthy hash enhancement must not rewrite the repaired store"
         );
     }
 

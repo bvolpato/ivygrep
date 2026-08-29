@@ -138,14 +138,12 @@ fn neural_model_identity_from_index_dir(
 ) -> Option<crate::embedding::NeuralModelIdentity> {
     let contents = fs::read_to_string(index_dir.join("neural_model.json")).ok()?;
     let identity = serde_json::from_str::<crate::embedding::NeuralModelIdentity>(&contents).ok()?;
-    let store = VectorStore::open_readonly(
+    let count = VectorStore::read_count(
         &index_dir.join("vectors_neural.usearch"),
         identity.dimensions,
-        NEURAL_VECTOR_QUANTIZATION,
-        crate::vector_store::VectorTier::Neural,
     )
     .ok()?;
-    (store.size() > 0).then_some(identity)
+    (count > 0).then_some(identity)
 }
 
 impl Default for SearchOptions {

@@ -5552,7 +5552,7 @@ mod tests {
 
     impl EmbeddingModel for TestNeuralModel {
         fn dimensions(&self) -> usize {
-            384
+            self.model_identity().unwrap().dimensions
         }
 
         fn embed(&self, _text: &str) -> Vec<f32> {
@@ -5575,7 +5575,7 @@ mod tests {
 
     impl EmbeddingModel for BlockingNeuralModel {
         fn dimensions(&self) -> usize {
-            384
+            TestNeuralModel.dimensions()
         }
 
         fn embed(&self, _text: &str) -> Vec<f32> {

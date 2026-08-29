@@ -8,6 +8,18 @@ keep reserve operations monotonic, and use renamed CXX bridge include. Package
 name is distinct so crates.io installs reproduce release behavior without a
 consumer-side Cargo patch.
 
+The Rust/CXX bridge also exposes `inspect_serialized_header`. It interprets
+header fields and graph layout sizes using the pinned native definitions,
+including the existing pre-2.10 scalar-type conversion. ivygrep checks matrix
+dimensions and population fields, then streams the node-level table through an
+8 KiB buffer to validate levels and serialized-length bounds. Count and
+availability queries can read the header's live count without constructing a
+native view or allocating its per-node lookup arrays and key table.
+
+This metadata path does not validate full vector or node payload integrity.
+Search and deep health checks still open the native store. The serialized
+USearch format is unchanged.
+
 Upstream drafts cover reserve sizing in
 [unum-cloud/USearch#777](https://github.com/unum-cloud/USearch/pull/777) and
 Cargo-selected Windows CRT linkage in
