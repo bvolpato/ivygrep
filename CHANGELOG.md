@@ -19,6 +19,7 @@ All notable changes to ivygrep are documented in this file.
 - MCP no longer blocks a tool call on a whole first index. `ig_search` enqueues the run on the daemon (`StartIndex`), waits at most `IVYGREP_MCP_INDEX_WAIT_SECS` (default 20), and otherwise returns a non-error `status: indexing` payload with progress and `retry_after_secs`; the MCP process never indexes locally while a daemon answers (including after a lost reply), and `ig_status` reports runs still queued on the daemon. Daemon protocol version 7; older daemons restart on the next request.
 
 ### Fixed
+- Swift and Objective-C use valid Tree-sitter capture queries, preserving method bodies, inline declarations, and nested/extension/category owners. Parsed strings and comments no longer create heuristic symbols in these languages. Index format v23 rebuilds existing indexes, including unchanged files and their vectors.
 - Lexical retrieval preserves valid parsed queries at any length while retaining bounded analyzer fallback for punctuation. Raw filename fields no longer hide content-phrase parse errors, and invalid Boolean clauses do not fall back to an OR search.
 - Worktree symbol definitions apply path visibility before counting results and rank owner and exact-case matches across both indexes before the final limit, so shadowed base rows and lower-ranked overlay definitions no longer hide valid matches.
 - Full and targeted index scans abort on filesystem traversal, metadata, or content-read failures instead of treating unreadable paths as deleted. The last healthy index and snapshot remain available until a complete scan succeeds.
@@ -40,7 +41,7 @@ All notable changes to ivygrep are documented in this file.
 - Symbol names come from the Tree-sitter parse when a grammar is available; annotated/decorated declarations (`@Override public void run()`, `@property def name`) no longer register `if` or body callees, and continuation windows register nothing.
 - Symbol rows persist the exact-case `name` (when it differs from the normalized name) and the enclosing `owner`, indexed by chunk for fast file removal; `--symbol Owner.method` / `Owner::method` / `Owner#method` / `Owner->method` and context-pack anchors filter by owner (exact case first) and rank exact-case names ahead of case-folded ones.
 - `--refs` / `--callers` only scan languages that define the symbol, so a Python `.resolve()` call is no longer reported as a reference to a Rust `fn resolve`.
-- Index format bumped to v22; existing indexes rebuild on first use.
+- Index format bumped to v23; existing indexes rebuild on first use.
 
 ### Testing
 - The Web UI "late search results" browser test tells its scripted streams apart by URL and releases the superseded search's results only after navigation completed, instead of racing a 100 ms timer against the runner.

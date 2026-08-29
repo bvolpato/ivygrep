@@ -55,7 +55,8 @@ pub struct Workspace {
 ///  20 — File-level trigram postings support exact substring candidate search
 ///  21 — Relevance-preserving structural chunks and duplicate capture suppression
 ///  22 — Symbols persist parser-derived names, owners, language, and kind
-pub const INDEX_FORMAT_VERSION: u32 = 22;
+///  23 — Swift and Objective-C structural chunks use valid grammar captures
+pub const INDEX_FORMAT_VERSION: u32 = 23;
 const COMPACTION_FREE_BYTES_THRESHOLD: u64 = 16 * 1024 * 1024;
 const COMPACTION_FREE_PERCENT_THRESHOLD: f64 = 20.0;
 

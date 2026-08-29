@@ -8,7 +8,7 @@
 //!    or use [`detect_text_only`] for languages without structural boundaries.
 //! 4. Done — indexing, search, and MCP pick it up automatically.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
@@ -865,6 +865,12 @@ fn try_tree_sitter_chunk_source_with_timeout(
 
     let (grammar, query) = tree_sitter_query(rel_path, language, lines.len())?;
     let query = query?;
+    let objcxx_started = (language == "objc"
+        && rel_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("mm")))
+    .then(|| (std::time::Instant::now(), thread_cpu_time()));
     let tree = parse_source_tree_with_budget(text, &grammar, parse_timeout)?;
     let mut cursor = QueryCursor::new();
 
@@ -882,6 +888,11 @@ fn try_tree_sitter_chunk_source_with_timeout(
                 continue;
             }
             if capture_name.starts_with('_') {
+                continue;
+            }
+            // Objective-C's C grammar can call C++ namespaces/classes functions.
+            // In mixed files, only the C++ parse may supply C-like declarations.
+            if objcxx_started.is_some() && capture.node.kind() == "function_definition" {
                 continue;
             }
 
@@ -936,17 +947,35 @@ fn try_tree_sitter_chunk_source_with_timeout(
         }
     }
 
-    if captured.is_empty() && rust_doc_includes.is_empty() {
+    // These grammars identify the declarations we index. Uncaptured strings,
+    // comments, and expressions must not become heuristic symbol definitions.
+    let uncaptured_definitions: Option<&[ChunkDefinition]> =
+        matches!(language, "swift" | "objc").then_some(&[]);
+    if captured.is_empty() && rust_doc_includes.is_empty() && uncaptured_definitions.is_none() {
         return None;
     }
 
-    let mut ranges = captured_definition_ranges(captured, language, text.as_bytes());
+    let mut ranges = if let Some((wall_start, cpu_start)) = objcxx_started {
+        let elapsed = cpu_start
+            .and_then(|start| thread_cpu_time().map(|now| now.saturating_sub(start)))
+            .unwrap_or_else(|| wall_start.elapsed());
+        // All grammar passes share the existing per-file budget. If any fails,
+        // retain the normal whole-file fallback, never a partial AST result.
+        let remaining = parse_timeout.checked_sub(elapsed)?;
+        objective_cpp_definition_ranges(rel_path, text, captured, remaining)?
+    } else {
+        captured_definition_ranges(captured, language, text.as_bytes())
+    };
 
     // Multiple Tree-sitter captures can describe the exact same malformed
     // source span. Keep overlapping parent/child definitions, but never let
     // duplicate captures become extra lexical documents or embedding vectors.
-    let mut unique_ranges = HashSet::with_capacity(ranges.len());
-    ranges.retain(|(start, end, kind, _)| unique_ranges.insert((*start, *end, kind.clone())));
+    if uncaptured_definitions.is_some() {
+        ranges = coalesce_inline_definition_ranges(ranges);
+    } else {
+        let mut unique_ranges = HashSet::with_capacity(ranges.len());
+        ranges.retain(|(start, end, kind, _)| unique_ranges.insert((*start, *end, kind.clone())));
+    }
 
     // Sort by start line; keep overlapping structural chunks (impl+fn).
     ranges.sort_by_key(|r| r.0);
@@ -1069,7 +1098,7 @@ fn try_tree_sitter_chunk_source_with_timeout(
                         language,
                         kind,
                         context,
-                        None,
+                        uncaptured_definitions,
                     );
                 }
                 parent_start = parent_start.max(nested_end.saturating_add(1));
@@ -1083,7 +1112,7 @@ fn try_tree_sitter_chunk_source_with_timeout(
                     language,
                     kind,
                     context,
-                    None,
+                    uncaptured_definitions,
                 );
             }
         }
@@ -1108,7 +1137,7 @@ fn try_tree_sitter_chunk_source_with_timeout(
                     language,
                     &ChunkKind::Module,
                     lines[gs - 1].trim(),
-                    None,
+                    uncaptured_definitions,
                 );
             }
             gap_start = None;
@@ -1125,7 +1154,7 @@ fn try_tree_sitter_chunk_source_with_timeout(
             language,
             &ChunkKind::Module,
             lines[gs - 1].trim(),
-            None,
+            uncaptured_definitions,
         );
     }
 
@@ -1184,9 +1213,8 @@ fn push_bounded_structural_chunks(
             )
         } else {
             // Continuation windows repeat the body of the definition above;
-            // they never define a symbol of their own. Module gaps are
-            // collections of declarations, so every window keeps the text
-            // heuristic.
+            // they never define a symbol of their own. Module gaps retain
+            // text inference only when the parser did not classify them.
             (
                 format!(
                     "// {}\n// continuation of {}\n\n{}",
@@ -1194,7 +1222,7 @@ fn push_bounded_structural_chunks(
                     context,
                     block
                 ),
-                (!matches!(kind, ChunkKind::Module)).then(Vec::new),
+                (definitions.is_some() || !matches!(kind, ChunkKind::Module)).then(Vec::new),
             )
         };
         chunks.push(make_chunk(
@@ -1335,6 +1363,218 @@ enum ParsedName {
 
 type CapturedRange = (usize, usize, ChunkKind, Option<Vec<ChunkDefinition>>);
 
+fn objective_cpp_definition_ranges(
+    rel_path: &Path,
+    text: &str,
+    mut objc_captured: Vec<(tree_sitter::Node<'_>, ChunkKind)>,
+    parse_timeout: std::time::Duration,
+) -> Option<Vec<CapturedRange>> {
+    use streaming_iterator::StreamingIterator;
+
+    let (grammar, query) = tree_sitter_query(rel_path, "cpp", text.lines().count())?;
+    let query = query?;
+    let wall_start = std::time::Instant::now();
+    let cpu_start = thread_cpu_time();
+    let tree = parse_source_tree_with_budget(text, &grammar, parse_timeout)?;
+    let non_code = cpp_non_code_ranges(&tree);
+    // The ObjC grammar does not understand C++ raw strings. Its apparent
+    // @interface/method captures inside those strings are not declarations.
+    objc_captured.retain(|(node, _)| !contains_byte(&non_code, node.start_byte()));
+    let mut objc_headers = objc_captured
+        .iter()
+        .map(|(node, _)| {
+            let mut cursor = node.walk();
+            let body_start = node
+                .named_children(&mut cursor)
+                .find(|child| {
+                    matches!(
+                        child.kind(),
+                        "compound_statement"
+                            | "instance_variables"
+                            | "implementation_definition"
+                            | "method_declaration"
+                            | "method_definition"
+                            | "declaration"
+                            | "property_declaration"
+                            | "type_definition"
+                            | "struct_specifier"
+                            | "qualified_protocol_interface_declaration"
+                    ) || child.kind().starts_with("preproc_")
+                })
+                .map_or(node.end_byte(), |child| child.start_byte());
+            node.start_byte()..body_start
+        })
+        .collect::<Vec<_>>();
+    objc_headers.sort_unstable_by_key(|range| range.start);
+    // Prefix maxima keep the binary lookup correct for overlapping headers
+    // produced during error recovery, without rescanning every declaration.
+    for index in 1..objc_headers.len() {
+        objc_headers[index].end = objc_headers[index].end.max(objc_headers[index - 1].end);
+    }
+
+    let tree = if objc_headers.is_empty() {
+        tree
+    } else {
+        // ObjC signatures can swallow a following C helper during C++ error
+        // recovery. Mask only validated headers/end markers, keeping bodies,
+        // free functions, byte offsets, and the original chunk text intact.
+        let mut masks = objc_headers.clone();
+        for (node, _) in &objc_captured {
+            let mut cursor = node.walk();
+            masks.extend(
+                node.children(&mut cursor)
+                    .filter(|child| child.kind() == "@end")
+                    .map(|child| child.byte_range()),
+            );
+        }
+        let mut masked = text.as_bytes().to_vec();
+        for range in masks {
+            for byte in masked.get_mut(range)? {
+                if !matches!(*byte, b'\n' | b'\r') {
+                    *byte = b' ';
+                }
+            }
+        }
+        let elapsed = cpu_start
+            .and_then(|start| thread_cpu_time().map(|now| now.saturating_sub(start)))
+            .unwrap_or_else(|| wall_start.elapsed());
+        let remaining = parse_timeout.checked_sub(elapsed)?;
+        parse_source_tree_with_budget(std::str::from_utf8(&masked).ok()?, &grammar, remaining)?
+    };
+
+    let mut cpp_captured = Vec::new();
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
+    while let Some(matched) = matches.next() {
+        for capture in matched.captures {
+            let node = capture.node;
+            let start = node.start_byte();
+            let prefix_end = text[..start].trim_end().len();
+            let objc_directive = text.as_bytes().get(start) == Some(&b'@')
+                || (prefix_end > 0
+                    && text.as_bytes()[prefix_end - 1] == b'@'
+                    && !contains_byte(&non_code, prefix_end - 1));
+            if objc_directive
+                || contains_byte(&objc_headers, start)
+                || (node.kind() == "function_definition" && !has_function_declarator(node))
+            {
+                continue;
+            }
+            let kind = if query.capture_names()[capture.index as usize] == "class" {
+                ChunkKind::Class
+            } else {
+                ChunkKind::Function
+            };
+            cpp_captured.push((node, kind));
+        }
+    }
+
+    // Resolve owners separately: ObjC methods belong to their @implementation,
+    // while C++ members belong to C++ classes and C helpers remain free functions.
+    let mut ranges = captured_definition_ranges(objc_captured, "objc", text.as_bytes());
+    ranges.extend(captured_definition_ranges(
+        cpp_captured,
+        "cpp",
+        text.as_bytes(),
+    ));
+    Some(ranges)
+}
+
+fn contains_byte(ranges: &[std::ops::Range<usize>], byte: usize) -> bool {
+    let end = ranges.partition_point(|range| range.start <= byte);
+    end > 0 && byte < ranges[end - 1].end
+}
+
+fn cpp_non_code_ranges(tree: &tree_sitter::Tree) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut cursor = tree.walk();
+    loop {
+        let node = cursor.node();
+        if matches!(
+            node.kind(),
+            "comment" | "string_literal" | "raw_string_literal" | "char_literal"
+        ) {
+            ranges.push(node.byte_range());
+        } else if cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                return ranges;
+            }
+        }
+    }
+}
+
+fn has_function_declarator(node: tree_sitter::Node<'_>) -> bool {
+    let mut declarator = node.child_by_field_name("declarator");
+    while let Some(node) = declarator {
+        if node.kind() == "function_declarator" {
+            return true;
+        }
+        declarator = if node.kind() == "parenthesized_declarator" {
+            first_named_child(node, None)
+        } else {
+            node.child_by_field_name("declarator")
+        };
+    }
+    false
+}
+
+/// Share one physical chunk for coincident-line declarations when their symbol
+/// rows can coexist. The symbols key is (normalized_name, chunk_key), so a name
+/// with distinct owners or casing still needs separate chunks.
+fn coalesce_inline_definition_ranges(ranges: Vec<CapturedRange>) -> Vec<CapturedRange> {
+    let mut groups = HashMap::<(usize, usize, ChunkKind), Vec<usize>>::new();
+    let mut merged = Vec::<CapturedRange>::new();
+    let mut names = Vec::<Option<HashMap<String, ChunkDefinition>>>::new();
+    for range in ranges {
+        let group = groups
+            .entry((range.0, range.1, range.2.clone()))
+            .or_default();
+        let merge_index = group
+            .iter()
+            .copied()
+            .find(|&index| match (&names[index], &range.3) {
+                (None, None) => true,
+                (Some(existing), Some(incoming)) => incoming.iter().all(|definition| {
+                    existing
+                        .get(&definition.name.to_ascii_lowercase())
+                        .is_none_or(|existing| existing == definition)
+                }),
+                _ => false,
+            });
+        if let Some(index) = merge_index {
+            if let (Some(existing), Some(incoming), Some(names)) =
+                (&mut merged[index].3, range.3, &mut names[index])
+            {
+                for definition in incoming {
+                    if names
+                        .insert(definition.name.to_ascii_lowercase(), definition.clone())
+                        .is_none()
+                    {
+                        existing.push(definition);
+                    }
+                }
+            }
+        } else {
+            let definitions = range.3.as_ref().map(|definitions| {
+                definitions
+                    .iter()
+                    .map(|definition| (definition.name.to_ascii_lowercase(), definition.clone()))
+                    .collect()
+            });
+            group.push(merged.len());
+            merged.push(range);
+            names.push(definitions);
+        }
+    }
+    merged
+}
+
 /// Converts captured nodes into 1-indexed line ranges with parser-derived
 /// definitions. Owners come from the innermost captured class-like node that
 /// contains a definition, tracked with a containment stack in document order
@@ -1364,6 +1604,9 @@ fn captured_definition_ranges(
         }
         let enclosing = if language == "go" && node.kind() == "method_declaration" {
             go_receiver_type(node, source)
+        } else if language == "objc" && node.kind() == "function_definition" {
+            // A C helper inside @implementation is still a free function.
+            None
         } else {
             owners.last().map(|(_, owner)| owner.clone())
         };
@@ -1394,6 +1637,15 @@ fn parser_definitions(
     enclosing_owner: Option<String>,
 ) -> Option<Vec<ChunkDefinition>> {
     match node.kind() {
+        "class_declaration"
+            if language == "swift"
+                && node
+                    .child_by_field_name("declaration_kind")
+                    .is_some_and(|kind| kind.kind() == "extension") =>
+        {
+            // An extension owns its methods but does not declare a new type.
+            return Some(Vec::new());
+        }
         // Elixir definitions and Starlark target calls are `call` nodes whose
         // shape the text heuristic already handles.
         "call" => return None,
@@ -1435,12 +1687,16 @@ fn parsed_name(node: tree_sitter::Node<'_>, language: &str, source: &[u8]) -> Pa
     };
     match node.kind() {
         "impl_item" => ParsedName::NotADefinition,
-        "function_definition" if matches!(language, "c" | "cpp") => {
+        "function_definition" if matches!(language, "c" | "cpp" | "objc") => {
             c_function_declarator_name(node)
                 .map(text)
                 .unwrap_or(ParsedName::Unknown)
         }
         "init_declaration" | "initializer_declaration" => ParsedName::Found("init".to_string()),
+        "deinit_declaration" if language == "swift" => ParsedName::Found("deinit".to_string()),
+        "subscript_declaration" if language == "swift" => {
+            ParsedName::Found("subscript".to_string())
+        }
         // `type Foo struct{}` and grouped `type ( Foo ...; Bar ... )` alike.
         "type_declaration" if language == "go" => {
             let mut cursor = node.walk();
@@ -1501,6 +1757,19 @@ fn parsed_name(node: tree_sitter::Node<'_>, language: &str, source: &[u8]) -> Pa
             first_named_child(node, Some("identifier"))
                 .map(text)
                 .unwrap_or(ParsedName::Unknown)
+        }
+        "method_definition" | "method_declaration" if language == "objc" => {
+            let mut cursor = node.walk();
+            // The bare name is the first selector piece, before any parameter.
+            // Return types, parameter names, and later selector pieces are not
+            // separate method definitions.
+            node.named_children(&mut cursor)
+                .take_while(|child| {
+                    !matches!(child.kind(), "method_parameter" | "compound_statement")
+                })
+                .find(|child| child.kind() == "identifier")
+                .map(text)
+                .unwrap_or(ParsedName::NotADefinition)
         }
         _ => node
             .child_by_field_name("name")
@@ -1748,7 +2017,7 @@ fn tree_sitter_query(
         "swift" => cached_query!(
             SWIFT_QUERY,
             tree_sitter_swift::LANGUAGE,
-            "(class_declaration) @class (struct_declaration) @class (protocol_declaration) @class (extension_declaration) @class (function_declaration) @fn (initializer_declaration) @fn"
+            "(class_declaration) @class (protocol_declaration) @class (function_declaration) @fn (protocol_function_declaration) @fn (init_declaration) @fn (deinit_declaration) @fn (subscript_declaration) @fn"
         ),
         "c" => cached_query!(
             C_QUERY,
@@ -1808,7 +2077,7 @@ fn tree_sitter_query(
         "objc" => cached_query!(
             OBJC_QUERY,
             tree_sitter_objc::LANGUAGE,
-            "(class_interface) @class (class_implementation) @class (protocol_declaration) @class (category_interface) @class (category_implementation) @class"
+            "(class_interface) @class (class_implementation) @class (protocol_declaration) @class (method_declaration) @fn (method_definition) @fn (function_definition) @fn"
         ),
         "perl" => cached_query!(
             PERL_QUERY,
@@ -2573,6 +2842,178 @@ mod tests {
             .iter()
             .map(|(name, owner)| (name.to_string(), owner.map(str::to_string)))
             .collect()
+    }
+
+    #[test]
+    fn all_supported_tree_sitter_capture_queries_compile() {
+        let cases = [
+            ("file.rs", "rust"),
+            ("file.py", "python"),
+            ("file.go", "go"),
+            ("file.js", "javascript"),
+            ("file.ts", "typescript"),
+            ("file.tsx", "typescript"),
+            ("File.java", "java"),
+            ("File.cs", "csharp"),
+            ("file.php", "php"),
+            ("file.rb", "ruby"),
+            ("File.swift", "swift"),
+            ("file.c", "c"),
+            ("file.cpp", "cpp"),
+            ("File.scala", "scala"),
+            ("File.kt", "kotlin"),
+            ("file.ex", "elixir"),
+            ("file.zig", "zig"),
+            ("file.sh", "shell"),
+            ("File.hs", "haskell"),
+            ("file.ml", "ocaml"),
+            ("file.lua", "lua"),
+            ("file.dart", "dart"),
+            ("File.m", "objc"),
+            ("file.pl", "perl"),
+            ("defs.bzl", "starlark"),
+            ("BUILD", "starlark"),
+        ];
+        let failed = cases
+            .into_iter()
+            .filter_map(|(path, language)| {
+                let (_, query) = tree_sitter_query(
+                    Path::new(path),
+                    language,
+                    STARLARK_TARGET_AST_LINE_THRESHOLD + 1,
+                )
+                .unwrap();
+                query.is_none().then_some(path)
+            })
+            .collect::<Vec<_>>();
+        assert!(failed.is_empty(), "invalid capture queries: {failed:?}");
+    }
+
+    #[test]
+    fn swift_parser_preserves_nested_owners_and_complete_method_bodies() {
+        let source = "struct Outer {\n    struct Inner {\n        init() {}\n        func executeTask() -> Int {\n            return 41\n        }\n        var status: Int { return 0 }\n    }\n}\n\nextension Outer.Inner {\n    func extraTask() -> Int { return 42 }\n}\n\nstruct Other { func executeTask() -> Int { return 0 } }\nclass Lifetime { init() {}; subscript(index: Int) -> Int { return index }; deinit {} }\n\nprotocol Worker {\n    func requiredTask()\n}\n";
+        let chunks = chunk_source(Path::new("Workers.swift"), source);
+        let definitions = chunks
+            .iter()
+            .filter_map(|chunk| chunk.definitions.as_ref())
+            .flatten()
+            .map(|definition| (definition.name.clone(), definition.owner.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            definitions,
+            pairs(&[
+                ("Outer", None),
+                ("Inner", Some("Outer")),
+                ("init", Some("Inner")),
+                ("executeTask", Some("Inner")),
+                ("extraTask", Some("Inner")),
+                ("Other", None),
+                ("executeTask", Some("Other")),
+                ("Lifetime", None),
+                ("init", Some("Lifetime")),
+                ("subscript", Some("Lifetime")),
+                ("deinit", Some("Lifetime")),
+                ("Worker", None),
+                ("requiredTask", Some("Worker")),
+            ])
+        );
+        let method = chunks
+            .iter()
+            .find(|chunk| {
+                chunk.definitions.as_ref().is_some_and(|definitions| {
+                    definitions.iter().any(|definition| {
+                        definition.name == "executeTask"
+                            && definition.owner.as_deref() == Some("Inner")
+                    })
+                })
+            })
+            .unwrap();
+        assert_eq!((method.start_line, method.end_line), (4, 6));
+        assert_eq!(method.kind, ChunkKind::Function);
+        let inline_methods = chunks
+            .iter()
+            .filter(|chunk| {
+                chunk.kind == ChunkKind::Function
+                    && chunk.definitions.as_ref().is_some_and(|definitions| {
+                        definitions
+                            .iter()
+                            .any(|definition| definition.owner.as_deref() == Some("Lifetime"))
+                    })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(inline_methods.len(), 1);
+        assert_eq!(inline_methods[0].definitions.as_ref().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn objc_parser_preserves_class_category_and_protocol_method_owners() {
+        let source = "@interface Client\n- (void)executeTask;\n@end\n\n@implementation Client\n- (void)executeTask {\n    dispatch_work();\n}\n+ (int)buildWithValue:(int)value { return value; }\n- (void)sendValue:(int)value toTarget:(int)target {}\nstatic int helper(int value) { return value; }\n@end\n\n@interface Client (Extras)\n@property (nonatomic) int count;\n- (void)extraTask;\n@end\n\n@implementation Client (Extras)\n- (void)extraTask { dispatch_extra(); }\n@end\n\n@protocol Worker\n- (void)requiredTask;\n@end\n";
+        let chunks = chunk_source(Path::new("Client.m"), source);
+        let definitions = chunks
+            .iter()
+            .filter_map(|chunk| chunk.definitions.as_ref())
+            .flatten()
+            .map(|definition| (definition.name.clone(), definition.owner.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            definitions,
+            pairs(&[
+                ("Client", None),
+                ("executeTask", Some("Client")),
+                ("Client", None),
+                ("executeTask", Some("Client")),
+                ("buildWithValue", Some("Client")),
+                ("sendValue", Some("Client")),
+                ("helper", None),
+                ("Client", None),
+                ("extraTask", Some("Client")),
+                ("Client", None),
+                ("extraTask", Some("Client")),
+                ("Worker", None),
+                ("requiredTask", Some("Worker")),
+            ])
+        );
+        let method = chunks
+            .iter()
+            .find(|chunk| chunk.kind == ChunkKind::Function && chunk.start_line == 6)
+            .unwrap();
+        assert_eq!(method.end_line, 8);
+    }
+
+    #[test]
+    fn objcxx_parser_preserves_short_trailing_return_functions() {
+        let source = "auto lostTrailing() -> int {\n    return 7;\n}\n";
+        for path in ["Minimal.mm", "Minimal.MM"] {
+            let chunks = chunk_source(Path::new(path), source);
+            assert_eq!(chunks.len(), 1);
+            assert_eq!(chunks[0].language, "objc");
+            assert_eq!(chunks[0].kind, ChunkKind::Function);
+            assert_eq!((chunks[0].start_line, chunks[0].end_line), (1, 3));
+            assert_eq!(
+                chunks[0].definitions.as_deref(),
+                Some(
+                    [ChunkDefinition {
+                        name: "lostTrailing".into(),
+                        owner: None
+                    }]
+                    .as_slice()
+                )
+            );
+        }
+        let source = "@implementation Helpers\nstatic int onlyHelper(int value) {\n    return value;\n}\n@end\n";
+        let path = Path::new("Helpers.mm");
+        let chunks = chunk_source(path, source);
+        let helper = chunks.iter().find(|chunk| {
+            chunk.definitions.as_ref().is_some_and(|definitions| {
+                definitions
+                    .iter()
+                    .any(|definition| definition.name == "onlyHelper" && definition.owner.is_none())
+            })
+        });
+        assert!(helper.is_some(), "missing free helper: {chunks:#?}");
+        let helper = helper.unwrap();
+        assert_eq!(helper.kind, ChunkKind::Function);
+        assert_eq!((helper.start_line, helper.end_line), (2, 4));
     }
 
     #[test]
