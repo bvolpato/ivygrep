@@ -322,6 +322,7 @@ struct WatchControl {
     retrying: AtomicBool,
     active: AtomicBool,
     initial_scan_required: AtomicBool,
+    initial_reconciliation_pending: AtomicBool,
     readiness: tokio::sync::watch::Sender<WatchReadiness>,
     pending_events: AtomicU64,
     coalesced_events: AtomicU64,
@@ -344,6 +345,7 @@ impl WatchControl {
             retrying: AtomicBool::new(false),
             active: AtomicBool::new(true),
             initial_scan_required: AtomicBool::new(true),
+            initial_reconciliation_pending: AtomicBool::new(true),
             readiness,
             pending_events: AtomicU64::new(0),
             coalesced_events: AtomicU64::new(0),
@@ -395,6 +397,9 @@ impl WatchControl {
         if matches!(pending.change, WatchChange::None) {
             return None;
         }
+        // Readiness checks the queue under this same lock. Claimed work must
+        // remain visible even before the worker acquires its workspace lease.
+        self.indexing.store(true, Ordering::Relaxed);
         let work = std::mem::take(&mut *pending);
         self.dirty.store(false, Ordering::Relaxed);
         Some(work)
@@ -2392,6 +2397,8 @@ fn ensure_watcher(state: &DaemonState, workspace: &Workspace) -> Result<()> {
 }
 
 fn stop_watcher(workspace: &Workspace, registration: WatchRegistration) {
+    // Serialize stopping with the initial readiness/liveness publication.
+    let _pending = registration.control.pending_work.lock();
     registration.control.active.store(false, Ordering::Relaxed);
     registration
         .control
@@ -3961,10 +3968,41 @@ fn reconcile_external_git_watch(state: &DaemonState, workspace: &Workspace) {
 
 fn complete_initial_watch_reconciliation(control: &WatchControl) {
     if !control.active.load(Ordering::Relaxed)
-        || !control.initial_scan_required.swap(false, Ordering::Relaxed)
+        || !control
+            .initial_reconciliation_pending
+            .load(Ordering::Relaxed)
     {
         return;
     }
+    // A successful full scan satisfies only the scan itself. Events delivered
+    // after it read their paths still need the ordinary targeted Merkle update.
+    control
+        .initial_scan_required
+        .store(false, Ordering::Relaxed);
+    publish_initial_watch_readiness_if_caught_up(control);
+}
+
+fn publish_initial_watch_readiness_if_caught_up(control: &WatchControl) {
+    if !control
+        .initial_reconciliation_pending
+        .load(Ordering::Relaxed)
+    {
+        return;
+    }
+    let pending = control.pending_work.lock();
+    if !control.active.load(Ordering::Relaxed)
+        || control.initial_scan_required.load(Ordering::Relaxed)
+        || !matches!(pending.change, WatchChange::None)
+        || control.indexing.load(Ordering::Relaxed)
+        || !control
+            .initial_reconciliation_pending
+            .swap(false, Ordering::Relaxed)
+    {
+        return;
+    }
+    // Keep the queue lock through publication. An event is either accounted for
+    // above, including already-claimed work, or arrives after the startup barrier
+    // and follows steady-state debounce. The callback queues directly here.
     update_watcher_job(
         control,
         JobUpdate {
@@ -3987,7 +4025,9 @@ fn complete_initial_watch_reconciliation(control: &WatchControl) {
 }
 
 fn update_watcher_job(control: &WatchControl, mut update: JobUpdate) {
-    let reconciling = control.initial_scan_required.load(Ordering::Relaxed);
+    let reconciling = control
+        .initial_reconciliation_pending
+        .load(Ordering::Relaxed);
     update.active = Some(control.active.load(Ordering::Relaxed) && !reconciling);
     if reconciling && update.phase.as_deref() != Some("error") {
         update.phase = Some("reconciling".to_string());
@@ -4216,10 +4256,17 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                             ..Default::default()
                         };
                         update_watcher_job(&control, failed);
-                        if control.initial_scan_required.load(Ordering::Relaxed) {
-                            control
-                                .readiness
-                                .send_replace(WatchReadiness::Failed(error.clone()));
+                        if control
+                            .initial_reconciliation_pending
+                            .load(Ordering::Relaxed)
+                        {
+                            control.readiness.send_if_modified(|readiness| {
+                                if matches!(readiness, WatchReadiness::Stopped) {
+                                    return false;
+                                }
+                                *readiness = WatchReadiness::Failed(error.clone());
+                                true
+                            });
                         }
                         control.requeue_failed_index(error);
                         tokio::select! {
@@ -4235,6 +4282,7 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
             }
 
             control.indexing.store(false, Ordering::Relaxed);
+            publish_initial_watch_readiness_if_caught_up(&control);
             if !control.active.load(Ordering::Relaxed) {
                 break;
             }
@@ -6934,7 +6982,6 @@ mod tests {
             matches!(response, DaemonResponse::Ack { .. }),
             "{response:?}"
         );
-        assert!(workspace.is_watcher_alive());
         let control = state
             .watchers
             .lock()
@@ -6955,6 +7002,7 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(response, DaemonResponse::SearchResults { hits, .. } if hits.len() == 1));
+        assert!(workspace.is_watcher_alive());
         assert_eq!(
             jobs::read_job_ledger(&workspace)
                 .jobs
@@ -6967,18 +7015,199 @@ mod tests {
         stop_all_watchers(&state);
     }
 
-    #[test]
-    #[serial]
-    fn initial_reconciliation_preserves_events_queued_during_scan() {
+    fn queued_startup_watch_change() -> (tempfile::TempDir, tempfile::TempDir, Arc<WatchControl>) {
         let home = tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
         let repo = tempdir().unwrap();
-        let control = WatchControl::new(Workspace::resolve(repo.path()).unwrap());
-        control.mark_paths_dirty([PathBuf::from("edited_during_scan.rs")]);
+        let source = repo.path().join("edited.rs");
+        std::fs::write(&source, "pub fn before_startup_marker() {}\n").unwrap();
+        std::fs::write(
+            repo.path().join("stable.rs"),
+            "pub fn stable_startup_marker() {}\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        index_workspace_for_watcher(&workspace, create_hash_model().as_ref()).unwrap();
+        let control = Arc::new(WatchControl::new(workspace.clone()));
+        let filter = Mutex::new(WatchEventFilter::new(&workspace));
+
+        // The scan has already read this file. Deliver the later edit through
+        // the real notify callback path before that scan publishes readiness.
+        std::fs::write(&source, "pub fn after_startup_marker() {}\n").unwrap();
+        handle_watch_result(
+            &control,
+            &filter,
+            Ok(
+                notify::Event::new(notify::EventKind::Modify(notify::event::ModifyKind::Data(
+                    notify::event::DataChange::Content,
+                )))
+                .add_path(source),
+            ),
+        );
+        (home, repo, control)
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn initial_reconciliation_waits_for_queued_startup_change() {
+        let (_home, _repo, control) = queued_startup_watch_change();
+        let workspace = &control.workspace;
+        let before =
+            crate::merkle::MerkleSnapshot::load(&workspace.merkle_snapshot_path()).unwrap();
+        let mut readiness = control.readiness.subscribe();
         complete_initial_watch_reconciliation(&control);
         assert!(
-            matches!(control.take_pending_work().unwrap().change, WatchChange::Paths(paths) if paths.contains(Path::new("edited_during_scan.rs")))
+            matches!(*readiness.borrow(), WatchReadiness::Reconciling),
+            "a successful scan must not publish Ready before its queued edit is indexed"
         );
+        assert!(!workspace.is_watcher_alive());
+        assert!(!control.initial_scan_required.load(Ordering::Relaxed));
+        assert!(indexed_file_contains(
+            workspace,
+            "edited.rs",
+            "before_startup_marker"
+        ));
+
+        spawn_watch_worker(test_state(), control.clone());
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(10),
+            readiness.wait_for(|value| !matches!(value, WatchReadiness::Reconciling)),
+        )
+        .await
+        .expect("queued startup change did not finish")
+        .unwrap()
+        .clone();
+        let alive_when_ready = workspace.is_watcher_alive();
+        control.active.store(false, Ordering::Relaxed);
+        control.notify.notify_one();
+        assert!(matches!(outcome, WatchReadiness::Ready));
+        assert!(!control.indexing.load(Ordering::Relaxed));
+        assert!(indexed_file_contains(
+            workspace,
+            "edited.rs",
+            "after_startup_marker"
+        ));
+        assert!(!indexed_file_contains(
+            workspace,
+            "edited.rs",
+            "before_startup_marker"
+        ));
+        let after = crate::merkle::MerkleSnapshot::load(&workspace.merkle_snapshot_path()).unwrap();
+        assert_eq!(before.files["stable.rs"], after.files["stable.rs"]);
+        assert!(alive_when_ready);
+    }
+
+    #[test]
+    #[serial]
+    fn initial_reconciliation_waits_for_claimed_startup_change() {
+        let (_home, _repo, control) = queued_startup_watch_change();
+        let workspace = &control.workspace;
+        let pending = control.take_pending_work().unwrap();
+        assert!(control.take_pending_work().is_none());
+
+        // An explicit Index may finish while the worker has removed the event
+        // from the queue but is still waiting for that Index's workspace lease.
+        complete_initial_watch_reconciliation(&control);
+        assert!(
+            matches!(*control.readiness.borrow(), WatchReadiness::Reconciling),
+            "an empty queue does not certify work already claimed by the worker"
+        );
+        assert!(!workspace.is_watcher_alive());
+        let WatchChange::Paths(paths) = pending.change else {
+            panic!("expected a targeted startup change");
+        };
+        let summary = index_workspace_paths_for_watcher(
+            workspace,
+            create_hash_model().as_ref(),
+            &paths.into_iter().collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert_eq!(summary.indexed_files, 1);
+        complete_initial_watch_reconciliation(&control);
+        assert!(matches!(
+            *control.readiness.borrow(),
+            WatchReadiness::Reconciling
+        ));
+
+        control.indexing.store(false, Ordering::Relaxed);
+        complete_initial_watch_reconciliation(&control);
+        assert!(matches!(*control.readiness.borrow(), WatchReadiness::Ready));
+        assert!(indexed_file_contains(
+            workspace,
+            "edited.rs",
+            "after_startup_marker"
+        ));
+        assert!(!indexed_file_contains(
+            workspace,
+            "edited.rs",
+            "before_startup_marker"
+        ));
+        assert!(workspace.is_watcher_alive());
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn initial_reconciliation_reports_startup_catchup_failure_and_recovers() {
+        let (_home, _repo, control) = queued_startup_watch_change();
+        let workspace = &control.workspace;
+        // The full scan succeeded, but its queued delta has not. A later error
+        // must still release readiness waiters, rather than leaving them hung.
+        control
+            .initial_scan_required
+            .store(false, Ordering::Relaxed);
+        let metadata = std::fs::read(workspace.metadata_path()).unwrap();
+        std::fs::write(workspace.metadata_path(), "invalid metadata").unwrap();
+        let mut readiness = control.readiness.subscribe();
+        spawn_watch_worker(test_state(), control.clone());
+        let failed = tokio::time::timeout(
+            Duration::from_secs(5),
+            readiness.wait_for(|value| !matches!(value, WatchReadiness::Reconciling)),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .map(|value| value.clone());
+        let alive_after_failure = workspace.is_watcher_alive();
+        std::fs::write(workspace.metadata_path(), metadata).unwrap();
+        let recovered = if matches!(failed, Some(WatchReadiness::Failed(_))) {
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                readiness.wait_for(|value| matches!(value, WatchReadiness::Ready)),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .is_some()
+        } else {
+            false
+        };
+        control.active.store(false, Ordering::Relaxed);
+        control.notify.notify_one();
+        control.shutdown.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while control.indexing.load(Ordering::Relaxed) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("startup worker failed to stop");
+
+        assert!(matches!(failed, Some(WatchReadiness::Failed(message)) if !message.is_empty()));
+        assert!(!alive_after_failure);
+        assert!(
+            recovered,
+            "startup catch-up did not recover after the failure cleared"
+        );
+        assert!(indexed_file_contains(
+            workspace,
+            "edited.rs",
+            "after_startup_marker"
+        ));
+        assert!(!indexed_file_contains(
+            workspace,
+            "edited.rs",
+            "before_startup_marker"
+        ));
     }
 
     #[tokio::test]
