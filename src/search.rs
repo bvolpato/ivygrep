@@ -915,26 +915,7 @@ pub(crate) struct LiteralChunkBatch {
     pub exhausted: bool,
 }
 
-pub(crate) fn exact_literal_chunks(
-    workspace: &Workspace,
-    query: &str,
-    options: &SearchOptions,
-    candidate_budget: usize,
-) -> Result<LiteralChunkBatch> {
-    let ctx = SearchContext::load(workspace, None, false)?;
-    exact_literal_chunks_with_context(&ctx, query, options, Some(candidate_budget))
-}
-
-pub(crate) fn exact_literal_chunks_unbounded(
-    workspace: &Workspace,
-    query: &str,
-    options: &SearchOptions,
-) -> Result<Vec<IndexedChunk>> {
-    let ctx = SearchContext::load(workspace, None, false)?;
-    Ok(exact_literal_chunks_with_context(&ctx, query, options, None)?.chunks)
-}
-
-fn exact_literal_chunks_with_context(
+pub(crate) fn exact_literal_chunks_with_context(
     ctx: &SearchContext,
     query: &str,
     options: &SearchOptions,

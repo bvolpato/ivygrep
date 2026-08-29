@@ -5,6 +5,7 @@ All notable changes to ivygrep are documented in this file.
 ## [Unreleased]
 
 ### Performance
+- Reference and caller searches reuse one search context across bounded candidate-widening passes, avoiding repeated store setup when early matches are rejected. The existing per-request source-matching cache is unchanged.
 - Targeted watcher refreshes update the owned Merkle snapshot in place and build the diff from changed paths, avoiding a full-map clone and comparison. Snapshot format and atomic publication are unchanged.
 - Nearly complete hash enhancement fetches text only for missing vector keys, sharing the sparse-resume path with neural enhancement instead of reading every stored text blob after a small edit.
 - Search contexts share a 64 MiB, 256-file LRU preview cache instead of retaining separate full-file copies and clearing every entry at capacity. The byte budget includes line offsets; oversized previews remain usable without being cached.

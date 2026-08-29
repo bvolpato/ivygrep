@@ -11,7 +11,7 @@ use crate::indexer::{
 };
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
-use crate::search::SearchOptions;
+use crate::search::{SearchContext, SearchOptions};
 use crate::text::strip_leading_annotations;
 use crate::workspace::{Workspace, WorkspaceScope};
 
@@ -666,6 +666,7 @@ fn search_call_sites_with_references(
     if languages.len() == 1 {
         candidate_options.type_filter = languages.iter().next().cloned();
     }
+    let search_context = SearchContext::load(workspace, None, false)?;
     let mut callers = Vec::new();
     let mut references = Vec::new();
     let mut seen_call_sites = HashSet::new();
@@ -675,26 +676,15 @@ fn search_call_sites_with_references(
     loop {
         // Search the identifier, not `name(`: values, whitespace, comments,
         // and generic arguments are distinguished during source verification.
-        let (candidates, exhausted) = if let Some(budget) = candidate_options.limit {
-            let batch = crate::search::exact_literal_chunks(
-                workspace,
-                query.name,
-                &candidate_options,
-                budget,
-            )?;
-            (batch.chunks, batch.exhausted)
-        } else {
-            (
-                crate::search::exact_literal_chunks_unbounded(
-                    workspace,
-                    query.name,
-                    &candidate_options,
-                )?,
-                true,
-            )
-        };
+        let batch = crate::search::exact_literal_chunks_with_context(
+            &search_context,
+            query.name,
+            &candidate_options,
+            candidate_options.limit,
+        )?;
+        let exhausted = candidate_options.limit.is_none() || batch.exhausted;
         let mut chunks_by_file = BTreeMap::<PathBuf, Vec<IndexedChunk>>::new();
-        for chunk in candidates {
+        for chunk in batch.chunks {
             if (languages.is_empty() || languages.contains(&chunk.language.to_ascii_lowercase()))
                 && seen_chunks.insert(chunk.vector_key)
             {
