@@ -14,38 +14,47 @@ enum PublicationFailure {
     Completion,
 }
 
+fn git(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
 fn linked_workspace(parent: &Path) -> (PathBuf, PathBuf) {
     let base = parent.join("base");
     let linked = parent.join("linked");
     fs::create_dir_all(&base).unwrap();
     fs::create_dir_all(&linked).unwrap();
-    let output = Command::new("git")
-        .args(["init", "--quiet", "-b", "main"])
-        .current_dir(&base)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    git(&base, &["init", "--quiet", "-b", "main"]);
 
-    // An unborn linked worktree exercises Git discovery without fixture
-    // commits or dependencies on the user's signing configuration.
+    // Keep the fixture unborn without requiring newer Git worktree flags.
+    // Use a relative gitfile and Git's own path spelling for the backlink,
+    // never canonical Windows verbatim paths from Path::display().
+    let git_root = git(&base, &["rev-parse", "--show-toplevel"]);
+    let git_parent = Path::new(git_root.trim()).parent().unwrap();
     let admin = base.join(".git/worktrees/linked");
     fs::create_dir_all(&admin).unwrap();
     fs::write(admin.join("commondir"), "../..\n").unwrap();
     fs::write(admin.join("HEAD"), "ref: refs/heads/linked\n").unwrap();
     fs::write(
         admin.join("gitdir"),
-        format!("{}\n", linked.join(".git").display()),
+        format!("{}/linked/.git\n", git_parent.display()),
     )
     .unwrap();
     fs::write(
         linked.join(".git"),
-        format!("gitdir: {}\n", admin.display()),
+        "gitdir: ../base/.git/worktrees/linked\n",
     )
     .unwrap();
+    git(&linked, &["worktree", "list", "--porcelain"]);
     for (path, content) in [
         ("lib.rs", "pub fn base_overlay_marker() {}\n"),
         ("stable.rs", "pub fn shared_overlay_marker() {}\n"),
@@ -132,7 +141,10 @@ fn assert_overlay_publication_recovers(recreated: bool, failure_stage: Publicati
     let (base_root, linked_root) = linked_workspace(&parent.path().canonicalize().unwrap());
     let base = Workspace::resolve(&base_root).unwrap();
     let workspace = Workspace::resolve(&linked_root).unwrap();
-    assert!(workspace.is_worktree());
+    assert!(
+        workspace.is_worktree(),
+        "fixture was not discovered as a linked worktree: {workspace:?}"
+    );
     assert_eq!(workspace.main_worktree_root().unwrap(), base.root);
     let model = HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
     index_workspace_for_watcher(&base, &model).unwrap();
