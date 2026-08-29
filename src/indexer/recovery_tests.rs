@@ -127,7 +127,7 @@ fn corrupt_store_recovery_rebuilds_all_sources_and_preserves_settings() {
             let mut incomplete = before.clone();
             incomplete.last_indexed_at_unix = None;
             workspace.write_metadata(&incomplete).unwrap();
-            index_workspace_inner(workspace, &fixture.model, false, None, true).unwrap()
+            index_workspace_inner(workspace, &fixture.model, false, None, true, false).unwrap()
         };
 
         assert_eq!(
