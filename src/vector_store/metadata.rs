@@ -79,8 +79,8 @@ pub(super) fn read_count(path: &Path, dimensions: usize) -> Result<u64> {
     while remaining > 0 {
         let count = remaining.min((buffer.len() / LEVEL_BYTES) as u64) as usize;
         file.read_exact(&mut buffer[..count * LEVEL_BYTES])?;
-        for encoded in buffer[..count * LEVEL_BYTES].chunks_exact(LEVEL_BYTES) {
-            let level = i16::from_le_bytes(encoded.try_into().unwrap());
+        for encoded in buffer[..count * LEVEL_BYTES].as_chunks::<LEVEL_BYTES>().0 {
+            let level = i16::from_le_bytes(*encoded);
             ensure!(
                 level >= 0 && level as u64 <= metadata.max_level,
                 "invalid vector store node level"
