@@ -865,6 +865,12 @@ fn try_tree_sitter_chunk_source_with_timeout(
 
     let (grammar, query) = tree_sitter_query(rel_path, language, lines.len())?;
     let query = query?;
+    let objcxx_started = (language == "objc"
+        && rel_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("mm")))
+    .then(|| (std::time::Instant::now(), thread_cpu_time()));
     let tree = parse_source_tree_with_budget(text, &grammar, parse_timeout)?;
     let mut cursor = QueryCursor::new();
 
@@ -882,6 +888,11 @@ fn try_tree_sitter_chunk_source_with_timeout(
                 continue;
             }
             if capture_name.starts_with('_') {
+                continue;
+            }
+            // Objective-C's C grammar can call C++ namespaces/classes functions.
+            // In mixed files, only the C++ parse may supply C-like declarations.
+            if objcxx_started.is_some() && capture.node.kind() == "function_definition" {
                 continue;
             }
 
@@ -944,7 +955,17 @@ fn try_tree_sitter_chunk_source_with_timeout(
         return None;
     }
 
-    let mut ranges = captured_definition_ranges(captured, language, text.as_bytes());
+    let mut ranges = if let Some((wall_start, cpu_start)) = objcxx_started {
+        let elapsed = cpu_start
+            .and_then(|start| thread_cpu_time().map(|now| now.saturating_sub(start)))
+            .unwrap_or_else(|| wall_start.elapsed());
+        // All grammar passes share the existing per-file budget. If any fails,
+        // retain the normal whole-file fallback, never a partial AST result.
+        let remaining = parse_timeout.checked_sub(elapsed)?;
+        objective_cpp_definition_ranges(rel_path, text, captured, remaining)?
+    } else {
+        captured_definition_ranges(captured, language, text.as_bytes())
+    };
 
     // Multiple Tree-sitter captures can describe the exact same malformed
     // source span. Keep overlapping parent/child definitions, but never let
@@ -1341,6 +1362,167 @@ enum ParsedName {
 }
 
 type CapturedRange = (usize, usize, ChunkKind, Option<Vec<ChunkDefinition>>);
+
+fn objective_cpp_definition_ranges(
+    rel_path: &Path,
+    text: &str,
+    mut objc_captured: Vec<(tree_sitter::Node<'_>, ChunkKind)>,
+    parse_timeout: std::time::Duration,
+) -> Option<Vec<CapturedRange>> {
+    use streaming_iterator::StreamingIterator;
+
+    let (grammar, query) = tree_sitter_query(rel_path, "cpp", text.lines().count())?;
+    let query = query?;
+    let wall_start = std::time::Instant::now();
+    let cpu_start = thread_cpu_time();
+    let tree = parse_source_tree_with_budget(text, &grammar, parse_timeout)?;
+    let non_code = cpp_non_code_ranges(&tree);
+    // The ObjC grammar does not understand C++ raw strings. Its apparent
+    // @interface/method captures inside those strings are not declarations.
+    objc_captured.retain(|(node, _)| !contains_byte(&non_code, node.start_byte()));
+    let mut objc_headers = objc_captured
+        .iter()
+        .map(|(node, _)| {
+            let mut cursor = node.walk();
+            let body_start = node
+                .named_children(&mut cursor)
+                .find(|child| {
+                    matches!(
+                        child.kind(),
+                        "compound_statement"
+                            | "instance_variables"
+                            | "implementation_definition"
+                            | "method_declaration"
+                            | "method_definition"
+                            | "declaration"
+                            | "property_declaration"
+                            | "type_definition"
+                            | "struct_specifier"
+                            | "qualified_protocol_interface_declaration"
+                    ) || child.kind().starts_with("preproc_")
+                })
+                .map_or(node.end_byte(), |child| child.start_byte());
+            node.start_byte()..body_start
+        })
+        .collect::<Vec<_>>();
+    objc_headers.sort_unstable_by_key(|range| range.start);
+    // Prefix maxima keep the binary lookup correct for overlapping headers
+    // produced during error recovery, without rescanning every declaration.
+    for index in 1..objc_headers.len() {
+        objc_headers[index].end = objc_headers[index].end.max(objc_headers[index - 1].end);
+    }
+
+    let tree = if objc_headers.is_empty() {
+        tree
+    } else {
+        // ObjC signatures can swallow a following C helper during C++ error
+        // recovery. Mask only validated headers/end markers, keeping bodies,
+        // free functions, byte offsets, and the original chunk text intact.
+        let mut masks = objc_headers.clone();
+        for (node, _) in &objc_captured {
+            let mut cursor = node.walk();
+            masks.extend(
+                node.children(&mut cursor)
+                    .filter(|child| child.kind() == "@end")
+                    .map(|child| child.byte_range()),
+            );
+        }
+        let mut masked = text.as_bytes().to_vec();
+        for range in masks {
+            for byte in masked.get_mut(range)? {
+                if !matches!(*byte, b'\n' | b'\r') {
+                    *byte = b' ';
+                }
+            }
+        }
+        let elapsed = cpu_start
+            .and_then(|start| thread_cpu_time().map(|now| now.saturating_sub(start)))
+            .unwrap_or_else(|| wall_start.elapsed());
+        let remaining = parse_timeout.checked_sub(elapsed)?;
+        parse_source_tree_with_budget(std::str::from_utf8(&masked).ok()?, &grammar, remaining)?
+    };
+
+    let mut cpp_captured = Vec::new();
+    let mut cursor = tree_sitter::QueryCursor::new();
+    let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
+    while let Some(matched) = matches.next() {
+        for capture in matched.captures {
+            let node = capture.node;
+            let start = node.start_byte();
+            let prefix_end = text[..start].trim_end().len();
+            let objc_directive = text.as_bytes().get(start) == Some(&b'@')
+                || (prefix_end > 0
+                    && text.as_bytes()[prefix_end - 1] == b'@'
+                    && !contains_byte(&non_code, prefix_end - 1));
+            if objc_directive
+                || contains_byte(&objc_headers, start)
+                || (node.kind() == "function_definition" && !has_function_declarator(node))
+            {
+                continue;
+            }
+            let kind = if query.capture_names()[capture.index as usize] == "class" {
+                ChunkKind::Class
+            } else {
+                ChunkKind::Function
+            };
+            cpp_captured.push((node, kind));
+        }
+    }
+
+    // Resolve owners separately: ObjC methods belong to their @implementation,
+    // while C++ members belong to C++ classes and C helpers remain free functions.
+    let mut ranges = captured_definition_ranges(objc_captured, "objc", text.as_bytes());
+    ranges.extend(captured_definition_ranges(
+        cpp_captured,
+        "cpp",
+        text.as_bytes(),
+    ));
+    Some(ranges)
+}
+
+fn contains_byte(ranges: &[std::ops::Range<usize>], byte: usize) -> bool {
+    let end = ranges.partition_point(|range| range.start <= byte);
+    end > 0 && byte < ranges[end - 1].end
+}
+
+fn cpp_non_code_ranges(tree: &tree_sitter::Tree) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut cursor = tree.walk();
+    loop {
+        let node = cursor.node();
+        if matches!(
+            node.kind(),
+            "comment" | "string_literal" | "raw_string_literal" | "char_literal"
+        ) {
+            ranges.push(node.byte_range());
+        } else if cursor.goto_first_child() {
+            continue;
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                return ranges;
+            }
+        }
+    }
+}
+
+fn has_function_declarator(node: tree_sitter::Node<'_>) -> bool {
+    let mut declarator = node.child_by_field_name("declarator");
+    while let Some(node) = declarator {
+        if node.kind() == "function_declarator" {
+            return true;
+        }
+        declarator = if node.kind() == "parenthesized_declarator" {
+            first_named_child(node, None)
+        } else {
+            node.child_by_field_name("declarator")
+        };
+    }
+    false
+}
 
 /// Share one physical chunk for coincident-line declarations when their symbol
 /// rows can coexist. The symbols key is (normalized_name, chunk_key), so a name
@@ -2796,6 +2978,42 @@ mod tests {
             .find(|chunk| chunk.kind == ChunkKind::Function && chunk.start_line == 6)
             .unwrap();
         assert_eq!(method.end_line, 8);
+    }
+
+    #[test]
+    fn objcxx_parser_preserves_short_trailing_return_functions() {
+        let source = "auto lostTrailing() -> int {\n    return 7;\n}\n";
+        for path in ["Minimal.mm", "Minimal.MM"] {
+            let chunks = chunk_source(Path::new(path), source);
+            assert_eq!(chunks.len(), 1);
+            assert_eq!(chunks[0].language, "objc");
+            assert_eq!(chunks[0].kind, ChunkKind::Function);
+            assert_eq!((chunks[0].start_line, chunks[0].end_line), (1, 3));
+            assert_eq!(
+                chunks[0].definitions.as_deref(),
+                Some(
+                    [ChunkDefinition {
+                        name: "lostTrailing".into(),
+                        owner: None
+                    }]
+                    .as_slice()
+                )
+            );
+        }
+        let source = "@implementation Helpers\nstatic int onlyHelper(int value) {\n    return value;\n}\n@end\n";
+        let path = Path::new("Helpers.mm");
+        let chunks = chunk_source(path, source);
+        let helper = chunks.iter().find(|chunk| {
+            chunk.definitions.as_ref().is_some_and(|definitions| {
+                definitions
+                    .iter()
+                    .any(|definition| definition.name == "onlyHelper" && definition.owner.is_none())
+            })
+        });
+        assert!(helper.is_some(), "missing free helper: {chunks:#?}");
+        let helper = helper.unwrap();
+        assert_eq!(helper.kind, ChunkKind::Function);
+        assert_eq!((helper.start_line, helper.end_line), (2, 4));
     }
 
     #[test]

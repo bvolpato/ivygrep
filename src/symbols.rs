@@ -2574,6 +2574,112 @@ mod tests {
 
     #[test]
     #[serial]
+    fn objcxx_symbol_definitions_merge_cpp_and_objc_owners() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let source = r###"namespace demo {
+class Widget {
+public:
+    void multilineRun() {
+    }
+    void inlineRun() {}
+};
+auto trailingReturn() -> int {
+    return 1;
+}
+}
+@class ForwardOnly;
+@interface Client
+- (int)dispatchTask;
++ (Class)class;
+@end
+@implementation Client
+- (int)dispatchTask {
+    return demo::trailingReturn();
+}
++ (Class)class { return self; }
+static int bridgeHelper(Client *client) {
+    return [client dispatchTask];
+}
+@end
+const char *example = R"example(
+@interface StringOnly
+- (void)counterfeit;
+@end
+void phantomCpp() {}
+)example";
+/*
+@implementation CommentOnly
+- (void)commentTask {}
+@end
+*/
+"###;
+        std::fs::write(root.path().join("Mixed.mm"), source).unwrap();
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        crate::indexer::index_workspace(&workspace, &model).unwrap();
+
+        for (query, count) in [
+            ("demo", 1),
+            ("demo.Widget", 1),
+            ("Widget.multilineRun", 1),
+            ("Widget.inlineRun", 1),
+            ("demo.trailingReturn", 1),
+            ("Client.dispatchTask", 2),
+            ("Client.class", 2),
+            ("bridgeHelper", 1),
+            ("ForwardOnly", 0),
+            ("StringOnly", 0),
+            ("counterfeit", 0),
+            ("phantomCpp", 0),
+            ("CommentOnly", 0),
+            ("commentTask", 0),
+        ] {
+            let hits = search_symbols_with_options(
+                &workspace,
+                query,
+                SymbolSearchMode::Definitions,
+                &SearchOptions {
+                    limit: Some(10),
+                    type_filter: Some("objc".into()),
+                    ..SearchOptions::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(hits.len(), count, "{query}: {hits:?}");
+        }
+        let conn = crate::indexer::open_sqlite_readonly(&workspace.sqlite_path()).unwrap();
+        let mut statement = conn
+            .prepare("SELECT DISTINCT c.kind, s.owner FROM symbols s JOIN chunks c ON s.chunk_key = c.chunk_key WHERE s.normalized_name = ?1")
+            .unwrap();
+        for (name, kind, owner) in [
+            ("demo", "Class", None),
+            ("widget", "Class", Some("demo")),
+            ("multilinerun", "Function", Some("Widget")),
+            ("inlinerun", "Function", Some("Widget")),
+            ("trailingreturn", "Function", Some("demo")),
+            ("bridgehelper", "Function", None),
+            ("dispatchtask", "Function", Some("Client")),
+            ("class", "Function", Some("Client")),
+        ] {
+            let definitions = statement
+                .query_map([name], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(
+                definitions,
+                vec![(kind.to_string(), owner.map(str::to_string))],
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
     fn references_are_resolved_from_the_lexical_index() {
         let root = tempdir().unwrap();
         let home = tempdir().unwrap();
