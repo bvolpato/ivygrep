@@ -162,6 +162,16 @@ fn validate_existing_index_file(path: &Path) -> Result<()> {
 }
 
 impl VectorStore {
+    /// Read the durable live count without constructing native lookup tables.
+    /// Structural bounds are checked, but deep health checks must still open
+    /// the store to validate native node payloads.
+    pub(crate) fn read_count(path: &Path, dimensions: usize) -> Result<u64> {
+        let Some(path) = existing_index_path(path) else {
+            return Ok(0);
+        };
+        super::metadata::read_count(&path, dimensions)
+    }
+
     pub fn open(
         path: &Path,
         dimensions: usize,

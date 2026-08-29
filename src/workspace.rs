@@ -383,13 +383,7 @@ impl Workspace {
         let Some(identity) = self.neural_model_identity() else {
             return 0;
         };
-        vector_store_size(
-            &path,
-            identity.dimensions,
-            crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
-            crate::vector_store::VectorTier::Neural,
-        )
-        .unwrap_or(0)
+        vector_store_size(&path, identity.dimensions).unwrap_or(0)
     }
 
     pub fn hash_vector_count(&self) -> u64 {
@@ -397,13 +391,7 @@ impl Workspace {
         if !path.exists() {
             return 0;
         }
-        vector_store_size(
-            &path,
-            crate::EMBEDDING_DIMENSIONS,
-            crate::vector_store::HASH_VECTOR_QUANTIZATION,
-            crate::vector_store::VectorTier::Hash,
-        )
-        .unwrap_or(0)
+        vector_store_size(&path, crate::EMBEDDING_DIMENSIONS).unwrap_or(0)
     }
 
     pub fn hash_coverage_percent(&self) -> f64 {
@@ -634,13 +622,8 @@ impl Workspace {
         }
 
         let vector_key_count = read_sqlite_vector_key_count(&self.index_dir);
-        vector_store_size(
-            &hash_path,
-            crate::EMBEDDING_DIMENSIONS,
-            crate::vector_store::HASH_VECTOR_QUANTIZATION,
-            crate::vector_store::VectorTier::Hash,
-        )
-        .is_none_or(|enhanced| enhanced < vector_key_count)
+        vector_store_size(&hash_path, crate::EMBEDDING_DIMENSIONS)
+            .is_none_or(|enhanced| enhanced < vector_key_count)
     }
 
     /// Checks if background hash or neural enhancement still has work to do.
@@ -700,13 +683,8 @@ impl Workspace {
         if !hash_generation_current {
             return true;
         }
-        if vector_store_size(
-            &hash_path,
-            crate::EMBEDDING_DIMENSIONS,
-            crate::vector_store::HASH_VECTOR_QUANTIZATION,
-            crate::vector_store::VectorTier::Hash,
-        )
-        .is_none_or(|enhanced| enhanced < vector_key_count)
+        if vector_store_size(&hash_path, crate::EMBEDDING_DIMENSIONS)
+            .is_none_or(|enhanced| enhanced < vector_key_count)
         {
             return true;
         }
@@ -737,16 +715,12 @@ impl Workspace {
             return true;
         }
 
-        // Open the persisted store for an exact count. Unix memory-maps this
-        // path; Windows retains a Rust-owned serialized buffer for the view.
-        if let Ok(store) = crate::vector_store::VectorStore::open_readonly(
+        // Read the durable count without constructing native lookup tables.
+        if let Ok(enhanced) = crate::vector_store::VectorStore::read_count(
             &neural_path,
             crate::embedding::configured_neural_model_identity().dimensions,
-            crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
-            crate::vector_store::VectorTier::Neural,
         ) {
-            let enhanced = store.size();
-            return (enhanced as u64) < vector_key_count;
+            return enhanced < vector_key_count;
         }
 
         // An unreadable store must be rebuilt.
@@ -1498,8 +1472,6 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
         let hash_vector_count = vector_store_size(
             &hash_vector_store_path(&index_dir),
             crate::EMBEDDING_DIMENSIONS,
-            crate::vector_store::HASH_VECTOR_QUANTIZATION,
-            crate::vector_store::VectorTier::Hash,
         )
         .unwrap_or(0);
         let hash_coverage_percent = if vector_key_count > 0 {
@@ -1515,14 +1487,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
         let neural_dimensions = persisted_or_configured_neural_dimensions(neural_model.as_ref());
         let neural_path = index_dir.join("vectors_neural.usearch");
         let neural_vector_count = if neural_path.exists() {
-            crate::vector_store::VectorStore::open_readonly(
-                &neural_path,
-                neural_dimensions,
-                crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
-                crate::vector_store::VectorTier::Neural,
-            )
-            .map(|store| store.size() as u64)
-            .unwrap_or(0)
+            vector_store_size(&neural_path, neural_dimensions).unwrap_or(0)
         } else {
             0
         };
@@ -2058,24 +2023,15 @@ fn neural_store_has_vectors(index_dir: &Path) -> bool {
     else {
         return false;
     };
-    crate::vector_store::VectorStore::open_readonly(
+    crate::vector_store::VectorStore::read_count(
         &index_dir.join("vectors_neural.usearch"),
         dimensions,
-        crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
-        crate::vector_store::VectorTier::Neural,
     )
-    .is_ok_and(|store| store.size() > 0)
+    .is_ok_and(|count| count > 0)
 }
 
-fn vector_store_size(
-    path: &Path,
-    dimensions: usize,
-    scalar_kind: crate::vector_store::ScalarKind,
-    tier: crate::vector_store::VectorTier,
-) -> Option<u64> {
-    crate::vector_store::VectorStore::open_readonly(path, dimensions, scalar_kind, tier)
-        .ok()
-        .map(|store| store.size() as u64)
+fn vector_store_size(path: &Path, dimensions: usize) -> Option<u64> {
+    crate::vector_store::VectorStore::read_count(path, dimensions).ok()
 }
 
 /// Fast index size estimate by stat-ing known index files instead of

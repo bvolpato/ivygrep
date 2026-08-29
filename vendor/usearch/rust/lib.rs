@@ -315,9 +315,29 @@ pub mod ffi {
         multi: bool,
     }
 
+    /// Structural metadata for a serialized floating-point cosine index.
+    /// Reading this header does not validate node payloads or allocate index storage.
+    #[derive(Debug)]
+    struct SerializedIndexMetadata {
+        dimensions: u64,
+        scalar_bytes: u64,
+        count_present: u64,
+        count_deleted: u64,
+        graph_size: u64,
+        max_level: u64,
+        entry_slot: u64,
+        node_base_bytes: u64,
+        node_level_bytes: u64,
+    }
+
     // C++ types and signatures exposed to Rust.
     unsafe extern "C++" {
         include!("lib.hpp");
+
+        pub fn inspect_serialized_header(
+            dense: &[u8],
+            graph: &[u8],
+        ) -> Result<SerializedIndexMetadata>;
 
         /// Low-level C++ interface that is further wrapped into the high-level `Index`
         type NativeIndex;
@@ -432,7 +452,7 @@ pub mod ffi {
 }
 
 // Re-export the FFI structs and enums at the crate root for easy access
-pub use ffi::{IndexOptions, MetricKind, ScalarKind};
+pub use ffi::{inspect_serialized_header, IndexOptions, MetricKind, ScalarKind};
 
 /// Represents custom metric functions for calculating distances between vectors in various formats.
 ///

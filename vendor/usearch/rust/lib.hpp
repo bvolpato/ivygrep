@@ -4,6 +4,7 @@
 // We don't have to forward declare all of those:
 struct Matches;
 struct IndexOptions;
+struct SerializedIndexMetadata;
 enum class MetricKind;
 enum class ScalarKind;
 
@@ -94,3 +95,5 @@ class NativeIndex {
 };
 
 std::unique_ptr<NativeIndex> new_native_index(IndexOptions const& options);
+SerializedIndexMetadata inspect_serialized_header(rust::Slice<uint8_t const> dense,
+                                                  rust::Slice<uint8_t const> graph);
