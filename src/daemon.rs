@@ -463,6 +463,34 @@ struct CachedWatchPolicy {
     requires_watcher: bool,
 }
 
+struct WatchRegistry {
+    registrations: HashMap<String, WatchRegistration>,
+    policies: LruCache<String, CachedWatchPolicy>,
+}
+
+impl WatchRegistry {
+    fn new() -> Self {
+        Self {
+            registrations: HashMap::new(),
+            policies: bounded_lru(MAX_WATCH_POLICIES),
+        }
+    }
+}
+
+impl std::ops::Deref for WatchRegistry {
+    type Target = HashMap<String, WatchRegistration>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.registrations
+    }
+}
+
+impl std::ops::DerefMut for WatchRegistry {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.registrations
+    }
+}
+
 #[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
 struct DirStamp {
     files: u64,
@@ -1092,6 +1120,11 @@ struct WorkspaceModeLease {
     exclusive: bool,
 }
 
+struct SearchLeaseSet {
+    leases: Vec<WorkspaceModeLease>,
+    metadata_stamps: Vec<Option<FileStamp>>,
+}
+
 impl Drop for WorkspaceModeLease {
     fn drop(&mut self) {
         let mut state = self.coordinator.state.lock();
@@ -1189,8 +1222,7 @@ impl EmbeddingModel for ModeLeasedEmbeddingModel {
 pub(crate) struct DaemonState {
     lazy_model: Arc<std::sync::OnceLock<Arc<dyn EmbeddingModel>>>,
     model_loading: Arc<AtomicBool>,
-    watchers: Arc<Mutex<HashMap<String, WatchRegistration>>>,
-    watch_policies: Arc<Mutex<LruCache<String, CachedWatchPolicy>>>,
+    watchers: Arc<Mutex<WatchRegistry>>,
     resolved_workspaces: Arc<Mutex<LruCache<PathBuf, Workspace>>>,
     neural_statuses: Arc<Mutex<LruCache<String, CachedNeuralStatus>>>,
     /// Last background enhancement trigger attempt per (workspace, mode).
@@ -1482,18 +1514,30 @@ impl DaemonState {
         workspaces: &[Workspace],
         skip_gitignore: bool,
         cancellation: Option<&SearchCancellation>,
-    ) -> std::result::Result<Option<Vec<WorkspaceModeLease>>, DaemonResponse> {
+    ) -> std::result::Result<Option<SearchLeaseSet>, DaemonResponse> {
+        let mut metadata_stamps = vec![None; workspaces.len()];
         // A live watch only covers changes since registration. Catch up with
         // the persisted snapshot before taking search leases or CPU capacity.
-        for workspace in workspaces {
-            let control = self
-                .watchers
-                .lock()
-                .get(&workspace.id)
-                .map(|watch| watch.control.clone());
+        for (index, workspace) in workspaces.iter().enumerate() {
+            let (control, cached_policy) = {
+                let mut registry = self.watchers.lock();
+                (
+                    registry
+                        .registrations
+                        .get(&workspace.id)
+                        .map(|watch| watch.control.clone()),
+                    registry.policies.get(&workspace.id).copied(),
+                )
+            };
             let control = match control {
                 Some(control) => Some(control),
-                None if self.workspace_requires_watcher(workspace) => {
+                None => {
+                    let (requires_watcher, metadata_stamp) =
+                        self.workspace_requires_watcher(workspace, cached_policy);
+                    metadata_stamps[index] = metadata_stamp;
+                    if !requires_watcher {
+                        continue;
+                    }
                     let state = self.clone();
                     let workspace = workspace.clone();
                     let registration = tokio::task::spawn_blocking(move || {
@@ -1513,7 +1557,6 @@ impl DaemonState {
                     // registration failure, preserving partial all-index results.
                     registration.ok().flatten()
                 }
-                None => None,
             };
             if let Some(control) = control {
                 let mut readiness = control.readiness.subscribe();
@@ -1547,12 +1590,15 @@ impl DaemonState {
         if !cancellation.is_some_and(SearchCancellation::is_cancelled)
             && let Some(leases) = self.try_acquire_search_leases_inline(workspaces, skip_gitignore)
         {
-            return Ok(Some(leases));
+            return Ok(Some(SearchLeaseSet {
+                leases,
+                metadata_stamps,
+            }));
         }
         let lease_state = self.clone();
         let lease_workspaces = workspaces.to_vec();
         let cancel_flag = cancellation.map(|cancellation| cancellation.flag.clone());
-        tokio::task::spawn_blocking(move || {
+        let leases = tokio::task::spawn_blocking(move || {
             lease_state.acquire_workspace_modes_cancellable(
                 &lease_workspaces,
                 skip_gitignore,
@@ -1562,7 +1608,11 @@ impl DaemonState {
         .await
         .map_err(|join_err| DaemonResponse::Error {
             message: format!("workspace lease task panicked: {join_err:#}"),
-        })
+        })?;
+        Ok(leases.map(|leases| SearchLeaseSet {
+            leases,
+            metadata_stamps,
+        }))
     }
 
     /// Take the exclusive mutation lease for an index run on the blocking
@@ -1991,8 +2041,17 @@ impl DaemonState {
         workspace: &Workspace,
         skip_gitignore: bool,
     ) -> Result<bool> {
+        self.prepare_workspace_for_hybrid_query_with_metadata_stamp(workspace, skip_gitignore, None)
+    }
+
+    fn prepare_workspace_for_hybrid_query_with_metadata_stamp(
+        &self,
+        workspace: &Workspace,
+        skip_gitignore: bool,
+        metadata_stamp: Option<FileStamp>,
+    ) -> Result<bool> {
         self.check_watcher_reconciliation(workspace)?;
-        let signature = workspace_readiness_signature(workspace);
+        let signature = workspace_readiness_signature_with_metadata(workspace, metadata_stamp);
         if self.workspace_is_ready(workspace, skip_gitignore, &signature) {
             return Ok(false);
         }
@@ -2043,16 +2102,20 @@ impl DaemonState {
         Ok(())
     }
 
-    fn workspace_requires_watcher(&self, workspace: &Workspace) -> bool {
+    fn workspace_requires_watcher(
+        &self,
+        workspace: &Workspace,
+        cached_policy: Option<CachedWatchPolicy>,
+    ) -> (bool, Option<FileStamp>) {
         let path = workspace.metadata_path();
         let mut before = file_stamp(&path);
         if let Some(stamp) = before
-            && let Some(policy) = self.watch_policies.lock().get(&workspace.id)
+            && let Some(policy) = cached_policy
             && policy.metadata == stamp
         {
-            return policy.requires_watcher;
+            return (policy.requires_watcher, before);
         }
-        self.watch_policies.lock().pop(&workspace.id);
+        self.watchers.lock().policies.pop(&workspace.id);
 
         // Policy changes and the first completed index must be visible before
         // a cached query can return. Cache only valid metadata read between
@@ -2068,7 +2131,7 @@ impl DaemonState {
                 if let Some(stamp) = after
                     && metadata.is_some()
                 {
-                    self.watch_policies.lock().put(
+                    self.watchers.lock().policies.put(
                         workspace.id.clone(),
                         CachedWatchPolicy {
                             metadata: stamp,
@@ -2076,12 +2139,12 @@ impl DaemonState {
                         },
                     );
                 }
-                return requires_watcher;
+                return (requires_watcher, after);
             }
             if retried {
                 // Keep the existing uncached read behavior if another writer
                 // keeps replacing metadata; do not retain that raced policy.
-                return requires_watcher;
+                return (requires_watcher, after);
             }
             before = after;
             retried = true;
@@ -2124,7 +2187,7 @@ impl DaemonState {
             }
         }
         self.neural_statuses.lock().pop(&workspace.id);
-        self.watch_policies.lock().pop(&workspace.id);
+        self.watchers.lock().policies.pop(&workspace.id);
         {
             let mut ready = self.ready_workspaces.lock();
             let keys = ready
@@ -2198,8 +2261,7 @@ fn create_daemon_state() -> DaemonState {
     DaemonState {
         lazy_model: lazy_model.clone(),
         model_loading: Arc::new(AtomicBool::new(false)),
-        watchers: Arc::new(Mutex::new(HashMap::new())),
-        watch_policies: Arc::new(Mutex::new(bounded_lru(MAX_WATCH_POLICIES))),
+        watchers: Arc::new(Mutex::new(WatchRegistry::new())),
         resolved_workspaces: Arc::new(Mutex::new(bounded_lru(MAX_RESOLVED_WORKSPACES))),
         neural_statuses: Arc::new(Mutex::new(bounded_lru(MAX_NEURAL_STATUSES))),
         enhancement_triggers: Arc::new(Mutex::new(bounded_lru(MAX_ENHANCEMENT_TRIGGERS))),
@@ -3115,7 +3177,7 @@ async fn handle_request_with_cancellation(
 
             // Workspace leases come before the CPU permit: a search parked
             // behind an exclusive index lease must not pin CPU capacity.
-            let mode_leases = match state_clone
+            let search_leases = match state_clone
                 .acquire_search_leases(&workspaces, options.skip_gitignore, cancellation.as_ref())
                 .await
             {
@@ -3125,6 +3187,10 @@ async fn handle_request_with_cancellation(
                 }
                 Err(response) => return response,
             };
+            let SearchLeaseSet {
+                leases: mode_leases,
+                metadata_stamps,
+            } = search_leases;
             tracing::trace!("daemon_search_lease={:?}", request_started.elapsed());
             // Bound concurrent heavy search work (see #58). The permit is held
             // for the whole blocking task and released when it completes.
@@ -3155,13 +3221,15 @@ async fn handle_request_with_cancellation(
                 let mut all_errors = workspace_warnings;
                 let mut successful_workspaces = 0usize;
                 let mut prepared_workspaces = Vec::with_capacity(workspaces.len());
-                for workspace in workspaces {
+                for (workspace, metadata_stamp) in workspaces.into_iter().zip(metadata_stamps) {
                     if options.is_cancelled() {
                         break;
                     }
-                    match state_clone
-                        .prepare_workspace_for_hybrid_query(&workspace, options.skip_gitignore)
-                    {
+                    match state_clone.prepare_workspace_for_hybrid_query_with_metadata_stamp(
+                        &workspace,
+                        options.skip_gitignore,
+                        metadata_stamp,
+                    ) {
                         Ok(_) => {
                             prepared_workspaces.push(workspace);
                         }
@@ -4564,9 +4632,16 @@ fn workspace_readiness_key(
 }
 
 fn workspace_readiness_signature(workspace: &Workspace) -> WorkspaceReadinessSignature {
+    workspace_readiness_signature_with_metadata(workspace, None)
+}
+
+fn workspace_readiness_signature_with_metadata(
+    workspace: &Workspace,
+    metadata: Option<FileStamp>,
+) -> WorkspaceReadinessSignature {
     let base_dir = workspace.base_index_dir.as_ref();
     WorkspaceReadinessSignature {
-        metadata: file_stamp(&workspace.metadata_path()),
+        metadata: metadata.or_else(|| file_stamp(&workspace.metadata_path())),
         indexed_skip_gitignore: indexed_skip_gitignore(workspace),
         index_format: file_stamp(&workspace.index_format_version_path()),
         sqlite: file_stamp(&workspace.sqlite_path()),
@@ -5175,8 +5250,7 @@ mod tests {
         DaemonState {
             lazy_model: Arc::new(std::sync::OnceLock::new()),
             model_loading: Arc::new(AtomicBool::new(false)),
-            watchers: Arc::new(Mutex::new(HashMap::new())),
-            watch_policies: Arc::new(Mutex::new(bounded_lru(MAX_WATCH_POLICIES))),
+            watchers: Arc::new(Mutex::new(WatchRegistry::new())),
             resolved_workspaces: Arc::new(Mutex::new(bounded_lru(MAX_RESOLVED_WORKSPACES))),
             neural_statuses: Arc::new(Mutex::new(bounded_lru(MAX_NEURAL_STATUSES))),
             enhancement_triggers: Arc::new(Mutex::new(bounded_lru(MAX_ENHANCEMENT_TRIGGERS))),
