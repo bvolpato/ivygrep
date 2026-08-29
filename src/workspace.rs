@@ -1526,8 +1526,8 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
             WATCHER_HEARTBEAT_TTL_SECS,
             observed_at_unix,
         );
-        let watcher_alive = if watcher_status.record.is_some() {
-            watcher_status.active()
+        let watcher_alive = if let Some(record) = watcher_status.record.as_ref() {
+            watcher_status.active() && record.phase != "reconciling"
         } else {
             is_active_pid_alive(&index_dir.join(".watcher.pid"))
         };

@@ -6867,6 +6867,18 @@ mod tests {
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
         let repo = tempdir().unwrap();
         let workspace = Workspace::resolve(repo.path()).unwrap();
+        workspace.ensure_dirs().unwrap();
+        workspace
+            .write_metadata(&WorkspaceMetadata {
+                id: workspace.id.clone(),
+                root: workspace.root.clone(),
+                created_at_unix: 1,
+                last_indexed_at_unix: Some(1),
+                watch_enabled: true,
+                skip_gitignore: false,
+                index_generation: 1,
+            })
+            .unwrap();
         let control = WatchControl::new(workspace.clone());
         // The scan completed, but startup catch-up is still pending.
         control
@@ -6892,6 +6904,15 @@ mod tests {
         assert!(
             !workspace.is_watcher_alive(),
             "an error during startup must not publish watcher liveness when the inactive heartbeat fails"
+        );
+        let listed = crate::workspace::list_workspaces()
+            .unwrap()
+            .into_iter()
+            .find(|status| status.id == workspace.id)
+            .unwrap();
+        assert!(
+            !listed.watcher_alive,
+            "workspace status must not publish startup liveness"
         );
 
         // A later successful heartbeat retains the error without certifying the
