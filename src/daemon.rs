@@ -305,6 +305,14 @@ struct PendingWatchWork {
     backend_error: Option<String>,
 }
 
+#[derive(Clone)]
+enum WatchReadiness {
+    Reconciling,
+    Ready,
+    Failed(String),
+    Stopped,
+}
+
 struct WatchControl {
     workspace: Workspace,
     notify: Notify,
@@ -313,6 +321,8 @@ struct WatchControl {
     indexing: AtomicBool,
     retrying: AtomicBool,
     active: AtomicBool,
+    initial_scan_required: AtomicBool,
+    readiness: tokio::sync::watch::Sender<WatchReadiness>,
     pending_events: AtomicU64,
     coalesced_events: AtomicU64,
     pending_work: Mutex<PendingWatchWork>,
@@ -324,6 +334,7 @@ struct WatchControl {
 
 impl WatchControl {
     fn new(workspace: Workspace) -> Self {
+        let (readiness, _) = tokio::sync::watch::channel(WatchReadiness::Reconciling);
         Self {
             workspace,
             notify: Notify::new(),
@@ -332,6 +343,8 @@ impl WatchControl {
             indexing: AtomicBool::new(false),
             retrying: AtomicBool::new(false),
             active: AtomicBool::new(true),
+            initial_scan_required: AtomicBool::new(true),
+            readiness,
             pending_events: AtomicU64::new(0),
             coalesced_events: AtomicU64::new(0),
             pending_work: Mutex::new(PendingWatchWork::default()),
@@ -1457,6 +1470,74 @@ impl DaemonState {
         skip_gitignore: bool,
         cancellation: Option<&SearchCancellation>,
     ) -> std::result::Result<Option<Vec<WorkspaceModeLease>>, DaemonResponse> {
+        // A live watch only covers changes since registration. Catch up with
+        // the persisted snapshot before taking search leases or CPU capacity.
+        for workspace in workspaces {
+            let control = self
+                .watchers
+                .lock()
+                .get(&workspace.id)
+                .map(|watch| watch.control.clone());
+            let control = match control {
+                Some(control) => Some(control),
+                None if workspace
+                    .read_metadata()
+                    .ok()
+                    .flatten()
+                    .is_some_and(|metadata| {
+                        metadata.watch_enabled && metadata.last_indexed_at_unix.is_some()
+                    }) =>
+                {
+                    let state = self.clone();
+                    let workspace = workspace.clone();
+                    let registration = tokio::task::spawn_blocking(move || {
+                        ensure_watcher(&state, &workspace)?;
+                        let control = state
+                            .watchers
+                            .lock()
+                            .get(&workspace.id)
+                            .map(|watch| watch.control.clone());
+                        Ok::<_, anyhow::Error>(control)
+                    })
+                    .await
+                    .map_err(|err| DaemonResponse::Error {
+                        message: format!("watcher readiness task failed: {err}"),
+                    })?;
+                    // The per-workspace preparation path reports a recorded
+                    // registration failure, preserving partial all-index results.
+                    registration.ok().flatten()
+                }
+                None => None,
+            };
+            if let Some(control) = control {
+                let mut readiness = control.readiness.subscribe();
+                loop {
+                    let current = readiness.borrow().clone();
+                    match current {
+                        WatchReadiness::Ready => break,
+                        WatchReadiness::Failed(_) => break,
+                        WatchReadiness::Stopped => {
+                            return Err(DaemonResponse::Error {
+                                message: format!(
+                                    "watcher stopped while reconciling {}",
+                                    workspace.root.display()
+                                ),
+                            });
+                        }
+                        WatchReadiness::Reconciling => {}
+                    }
+                    if let Some(cancellation) = cancellation {
+                        tokio::select! {
+                            biased;
+                            () = cancellation.cancelled() => return Ok(None),
+                            changed = readiness.changed() => if changed.is_err() { return Ok(None); },
+                        }
+                    } else if readiness.changed().await.is_err() {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
         if !cancellation.is_some_and(SearchCancellation::is_cancelled)
             && let Some(leases) = self.try_acquire_search_leases_inline(workspaces, skip_gitignore)
         {
@@ -1624,6 +1705,15 @@ impl DaemonState {
         workspace: &Workspace,
         skip_gitignore: bool,
     ) -> Result<Arc<dyn EmbeddingModel>> {
+        if workspace
+            .read_metadata()?
+            .is_some_and(|metadata| metadata.watch_enabled)
+        {
+            if !self.watcher_registered(&workspace.id) {
+                ensure_watcher(self, workspace)?;
+            }
+            self.check_watcher_reconciliation(workspace)?;
+        }
         let leases = self.acquire_workspace_modes(std::slice::from_ref(workspace), skip_gitignore);
         self.prepare_workspace_for_hybrid_query(workspace, skip_gitignore)?;
         let inner = if self.cached_neural_identity(workspace).is_none() {
@@ -1895,6 +1985,7 @@ impl DaemonState {
         workspace: &Workspace,
         skip_gitignore: bool,
     ) -> Result<bool> {
+        self.check_watcher_reconciliation(workspace)?;
         let signature = workspace_readiness_signature(workspace);
         if self.workspace_is_ready(workspace, skip_gitignore, &signature) {
             return Ok(false);
@@ -1914,6 +2005,36 @@ impl DaemonState {
             workspace_readiness_signature(workspace),
         );
         Ok(changed)
+    }
+
+    fn check_watcher_reconciliation(&self, workspace: &Workspace) -> Result<()> {
+        let control = self
+            .watchers
+            .lock()
+            .get(&workspace.id)
+            .map(|watch| watch.control.clone());
+        if let Some(control) = control {
+            let readiness = control.readiness.borrow().clone();
+            match readiness {
+                WatchReadiness::Ready => {}
+                WatchReadiness::Failed(message) => {
+                    anyhow::bail!("watcher reconciliation failed: {message}")
+                }
+                WatchReadiness::Reconciling => anyhow::bail!(
+                    "workspace watcher is reconciling offline changes; retry when indexing completes"
+                ),
+                WatchReadiness::Stopped => {
+                    anyhow::bail!("workspace watcher stopped during reconciliation")
+                }
+            }
+        } else if let Some(error) = self.watcher_last_error(&workspace.id)
+            && workspace
+                .read_metadata()?
+                .is_some_and(|metadata| metadata.watch_enabled)
+        {
+            anyhow::bail!("watcher unavailable: {error}");
+        }
+        Ok(())
     }
 
     fn workspace_is_ready(
@@ -2272,6 +2393,10 @@ fn ensure_watcher(state: &DaemonState, workspace: &Workspace) -> Result<()> {
 
 fn stop_watcher(workspace: &Workspace, registration: WatchRegistration) {
     registration.control.active.store(false, Ordering::Relaxed);
+    registration
+        .control
+        .readiness
+        .send_replace(WatchReadiness::Stopped);
     registration.control.notify.notify_waiters();
     registration.control.shutdown.notify_one();
     if let Some(nonce) = registration.control.job_nonce() {
@@ -2482,7 +2607,6 @@ fn register_workspace_for_index(workspace: &Workspace, watch: bool, skip_gitigno
 async fn run_index_request(
     state: DaemonState,
     workspace: Workspace,
-    path: PathBuf,
     watch: bool,
     skip_gitignore: bool,
     lead: Option<InflightIndexLead>,
@@ -2533,38 +2657,60 @@ async fn run_index_request(
         metadata.skip_gitignore = skip_gitignore;
         metadata.watch_enabled = watch;
         index_workspace_target.write_metadata(&metadata)?;
+        if !watch
+            && let Some(registration) = index_state
+                .watchers
+                .lock()
+                .remove(&index_workspace_target.id)
+        {
+            stop_watcher(&index_workspace_target, registration);
+        }
         index_state.refresh_workspace_watcher(&index_workspace_target)?;
-        if already_current {
+        // Register before the scan so filesystem edits made during it remain
+        // queued. A newly registered watcher cannot certify the old index.
+        let watcher_error = watch
+            .then(|| register_watcher(&index_state, &index_workspace_target.root))
+            .and_then(Result::err)
+            .map(|err| format!("indexed but failed to watch: {err:#}"));
+        let control = index_state
+            .watchers
+            .lock()
+            .get(&index_workspace_target.id)
+            .map(|watch| watch.control.clone());
+        let reconcile_startup = control
+            .as_ref()
+            .is_some_and(|control| control.initial_scan_required.load(Ordering::Relaxed));
+        if already_current && !reconcile_startup {
             daemon_log(&format!(
                 "index already current for {} (generation {}); skipping redundant rescan",
                 index_workspace_target.root.display(),
                 metadata.index_generation
             ));
-            return Result::<_, anyhow::Error>::Ok(None);
+            return Result::<_, anyhow::Error>::Ok((None, watcher_error));
         }
         let hash_model = cached_hash_model();
         index_state.note_full_index_run_start(&index_workspace_target.id);
-        let summary = index_workspace(&index_workspace_target, hash_model.as_ref())?;
-        Result::<_, anyhow::Error>::Ok(Some(summary))
+        let summary = if reconcile_startup {
+            index_workspace_for_watcher(&index_workspace_target, hash_model.as_ref())?
+        } else {
+            index_workspace(&index_workspace_target, hash_model.as_ref())?
+        };
+        if summary.indexed_files > 0 || summary.deleted_files > 0 {
+            index_state.clear_workspace_contexts(&index_workspace_target);
+        }
+        if let Some(control) = control {
+            complete_initial_watch_reconciliation(&control);
+        }
+        Result::<_, anyhow::Error>::Ok((Some(summary), watcher_error))
     })
     .await
     .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
 
     let response = match index_result {
-        Ok(summary) => {
-            if summary
-                .as_ref()
-                .is_some_and(|summary| summary.indexed_files > 0 || summary.deleted_files > 0)
-            {
-                state.clear_workspace_contexts(&workspace);
-            }
+        Ok((summary, watcher_error)) => {
             let watcher_result = if watch {
-                register_watcher(&state, &path)
-                    .map_err(|err| format!("indexed but failed to watch: {err:#}"))
+                watcher_error.map_or(Ok(()), Err)
             } else {
-                if let Some(registration) = state.watchers.lock().remove(&workspace.id) {
-                    stop_watcher(&workspace, registration);
-                }
                 Ok(())
             };
             match (watcher_result, summary) {
@@ -2760,16 +2906,7 @@ async fn handle_request_with_cancellation(
                 None => None,
             };
             register_workspace_for_index(&workspace, watch, skip_gitignore);
-            run_index_request(
-                state,
-                workspace,
-                path,
-                watch,
-                skip_gitignore,
-                lead,
-                arrived_at,
-            )
-            .await
+            run_index_request(state, workspace, watch, skip_gitignore, lead, arrived_at).await
         }
         DaemonRequest::StartIndex {
             path,
@@ -2802,7 +2939,6 @@ async fn handle_request_with_cancellation(
                             let response = run_index_request(
                                 state,
                                 workspace,
-                                path,
                                 watch,
                                 skip_gitignore,
                                 Some(lead),
@@ -3649,10 +3785,11 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
                 )
             })?;
     }
-    let job_nonce = jobs::start_job(&workspace, JobKind::Watcher, "idle", 1)
+    let job_nonce = jobs::start_job(&workspace, JobKind::Watcher, "reconciling", 1)
         .ok()
         .and_then(|record| record.nonce);
     control.set_job_nonce(job_nonce);
+    update_watcher_job(&control, JobUpdate::default());
     watchers.insert(
         workspace.id.clone(),
         WatchRegistration {
@@ -3666,7 +3803,10 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
     drop(watchers);
 
     spawn_watch_heartbeat(control.clone());
-    spawn_watch_worker(state.clone(), control);
+    spawn_watch_worker(state.clone(), control.clone());
+    // Separate startup work from actual events: an explicit Index can satisfy
+    // this scan without consuming events delivered while its scan was running.
+    control.notify.notify_one();
 
     if let Ok(Some(mut metadata)) = workspace.read_metadata()
         && !metadata.watch_enabled
@@ -3674,10 +3814,6 @@ fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
         metadata.watch_enabled = true;
         let _ = workspace.write_metadata(&metadata);
     }
-
-    // Write the daemon PID so the CLI can verify the watcher is alive
-    // and skip expensive Merkle scans ("trust but verify").
-    let _ = std::fs::write(workspace.watcher_pid_path(), std::process::id().to_string());
 
     daemon_log(&format!("watching {}", workspace.root.display()));
 
@@ -3823,7 +3959,39 @@ fn reconcile_external_git_watch(state: &DaemonState, workspace: &Workspace) {
     registration.external_git_watch = Some(target);
 }
 
-fn update_watcher_job(control: &WatchControl, update: JobUpdate) {
+fn complete_initial_watch_reconciliation(control: &WatchControl) {
+    if !control.active.load(Ordering::Relaxed)
+        || !control.initial_scan_required.swap(false, Ordering::Relaxed)
+    {
+        return;
+    }
+    update_watcher_job(
+        control,
+        JobUpdate {
+            phase: Some("idle".to_string()),
+            last_error: Some(None),
+            ..Default::default()
+        },
+    );
+    let _ = std::fs::write(
+        control.workspace.watcher_pid_path(),
+        std::process::id().to_string(),
+    );
+    control.readiness.send_if_modified(|readiness| {
+        if matches!(readiness, WatchReadiness::Stopped) {
+            return false;
+        }
+        *readiness = WatchReadiness::Ready;
+        true
+    });
+}
+
+fn update_watcher_job(control: &WatchControl, mut update: JobUpdate) {
+    let reconciling = control.initial_scan_required.load(Ordering::Relaxed);
+    update.active = Some(control.active.load(Ordering::Relaxed) && !reconciling);
+    if reconciling && update.phase.as_deref() != Some("error") {
+        update.phase = Some("reconciling".to_string());
+    }
     let refreshed = control.job_nonce().is_some_and(|nonce| {
         jobs::heartbeat_job_if_current(&control.workspace, JobKind::Watcher, &nonce, update.clone())
             .ok()
@@ -3888,7 +4056,9 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                 break;
             }
 
-            wait_for_watch_quiet(&control).await;
+            if !control.initial_scan_required.load(Ordering::Relaxed) {
+                wait_for_watch_quiet(&control).await;
+            }
             if !control.active.load(Ordering::Relaxed) {
                 break;
             }
@@ -3898,7 +4068,12 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
             }
 
             while control.active.load(Ordering::Relaxed) {
-                let Some(pending_work) = control.take_pending_work() else {
+                let Some(pending_work) = control.take_pending_work().or_else(|| {
+                    control
+                        .initial_scan_required
+                        .load(Ordering::Relaxed)
+                        .then(PendingWatchWork::default)
+                }) else {
                     break;
                 };
                 control.retrying.store(false, Ordering::Relaxed);
@@ -3921,13 +4096,16 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                 update_watcher_job(&control, update);
 
                 let workspace = control.workspace.clone();
-                if matches!(&pending_work.change, WatchChange::FullReconciliation) {
+                if matches!(&pending_work.change, WatchChange::FullReconciliation)
+                    || control.initial_scan_required.load(Ordering::Relaxed)
+                {
                     reconcile_external_git_watch(&state, &workspace);
                 }
+                let startup_only = matches!(&pending_work.change, WatchChange::None);
                 let changed_paths = match pending_work.change {
                     WatchChange::Paths(paths) => paths.into_iter().collect(),
                     WatchChange::FullReconciliation => Vec::new(),
-                    WatchChange::None => unreachable!("pending watcher work cannot be empty"),
+                    WatchChange::None => Vec::new(),
                 };
                 // Gate watcher-triggered indexing behind the same CPU semaphore
                 // as client requests (#58). A multi-repo branch switch / build
@@ -3939,7 +4117,12 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                 // behind an explicit index must not pin CPU capacity.
                 let lease_state = state.clone();
                 let lease_workspace = workspace.clone();
+                let lease_control = control.clone();
                 let mode_leases = tokio::task::spawn_blocking(move || {
+                    if lease_control.initial_scan_required.load(Ordering::Relaxed) {
+                        return Ok(lease_state
+                            .acquire_workspace_mutations(std::slice::from_ref(&lease_workspace)));
+                    }
                     let skip_gitignore = lease_workspace
                         .read_metadata()?
                         .is_some_and(|metadata| metadata.skip_gitignore);
@@ -3955,11 +4138,20 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                     Ok(mode_leases) => {
                         let permit = state.cpu_permits.clone().acquire_owned().await.ok();
                         let watcher_state = state.clone();
+                        let index_control = control.clone();
                         tokio::task::spawn_blocking(move || {
                             let _permit = permit;
                             let _mode_leases = mode_leases;
+                            if !index_control.active.load(Ordering::Relaxed)
+                                || (startup_only
+                                    && !index_control.initial_scan_required.load(Ordering::Relaxed))
+                            {
+                                return Ok(false);
+                            }
                             let hash_model = cached_hash_model();
-                            let summary = if changed_paths.is_empty() {
+                            let summary = if changed_paths.is_empty()
+                                || index_control.initial_scan_required.load(Ordering::Relaxed)
+                            {
                                 watcher_state.note_full_index_run_start(&workspace.id);
                                 index_workspace_for_watcher(&workspace, hash_model.as_ref())?
                             } else {
@@ -3984,6 +4176,7 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                         if changed {
                             state.clear_workspace_contexts(&control.workspace);
                         }
+                        complete_initial_watch_reconciliation(&control);
                         if crate::config::background_enhancement_enabled()
                             && control.workspace.needs_search_enhancement(false)
                         {
@@ -4023,6 +4216,11 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                             ..Default::default()
                         };
                         update_watcher_job(&control, failed);
+                        if control.initial_scan_required.load(Ordering::Relaxed) {
+                            control
+                                .readiness
+                                .send_replace(WatchReadiness::Failed(error.clone()));
+                        }
                         control.requeue_failed_index(error);
                         tokio::select! {
                             () = tokio::time::sleep(watch_retry_delay(consecutive_failures)) => {},
@@ -4109,6 +4307,7 @@ fn ensure_queryable_workspace(
     workspace: &Workspace,
     skip_gitignore: bool,
 ) -> Result<bool> {
+    state.check_watcher_reconciliation(workspace)?;
     let indexed_filter_is_current =
         workspace_index_matches_skip_gitignore(workspace, skip_gitignore);
     if let Some(mut metadata) = workspace.read_metadata()?
@@ -6517,10 +6716,13 @@ mod tests {
             .unwrap()
             .nonce;
         control.set_job_nonce(nonce.clone());
+        complete_initial_watch_reconciliation(&control);
         assert!(workspace.is_watcher_alive());
 
-        // An index rebuild removes job.json while the watcher keeps running.
+        // An index rebuild removes both liveness artifacts while the watcher
+        // keeps running. Its next heartbeat must recreate the job record.
         std::fs::remove_file(workspace.job_ledger_path()).unwrap();
+        std::fs::remove_file(workspace.watcher_pid_path()).unwrap();
         assert!(!workspace.is_watcher_alive());
 
         update_watcher_job(
@@ -6553,6 +6755,230 @@ mod tests {
             },
         );
         assert!(!workspace.is_watcher_alive());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn restored_watcher_reconciles_offline_changes_before_search() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        for (name, marker) in [
+            ("changed.rs", "offline_original_marker"),
+            ("deleted.rs", "offline_deleted_marker"),
+            ("stable.rs", "offline_stable_marker"),
+        ] {
+            std::fs::write(repo.path().join(name), format!("pub fn {marker}() {{}}\n")).unwrap();
+        }
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
+        let before =
+            crate::merkle::MerkleSnapshot::load(&workspace.merkle_snapshot_path()).unwrap();
+        let mut metadata = workspace.read_metadata().unwrap().unwrap();
+        metadata.watch_enabled = true;
+        workspace.write_metadata(&metadata).unwrap();
+
+        // Keep the same daemon state so the first post-restore request also
+        // exercises a preexisting query-result cache, not just a cold restart.
+        let state = test_state();
+        let cached_request = DaemonRequest::Search {
+            path: Some(workspace.root.clone()),
+            query: "offline_added_marker".to_string(),
+            limit: Some(5),
+            context: 0,
+            type_filter: None,
+            include_globs: Vec::new(),
+            exclude_globs: Vec::new(),
+            scope_path: None,
+            scope_is_file: false,
+            skip_gitignore: false,
+            force_neural: false,
+            disable_memory_expansion: true,
+        };
+        let before_search = handle_request(state.clone(), cached_request.clone()).await;
+        assert!(
+            matches!(before_search, DaemonResponse::SearchResults { hits, .. } if hits.iter().all(|hit| hit.file_path != Path::new("added.rs")))
+        );
+        assert!(!state.query_results.lock().results.is_empty());
+        stop_all_watchers(&state);
+
+        std::fs::write(
+            repo.path().join("changed.rs"),
+            "pub fn offline_updated_marker() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.path().join("added.rs"),
+            "pub fn offline_added_marker() {}\n",
+        )
+        .unwrap();
+        std::fs::remove_file(repo.path().join("deleted.rs")).unwrap();
+
+        let held = state.acquire_workspace_mutations(std::slice::from_ref(&workspace));
+        restore_configured_watchers(&state);
+        assert!(state.watcher_registered(&workspace.id));
+        assert!(
+            !workspace.is_watcher_alive(),
+            "registration is not proof that offline changes were reconciled"
+        );
+        let control = state
+            .watchers
+            .lock()
+            .get(&workspace.id)
+            .unwrap()
+            .control
+            .clone();
+
+        // Events observed after registration must survive startup bookkeeping.
+        std::fs::write(
+            repo.path().join("queued.rs"),
+            "pub fn queued_startup_marker() {}\n",
+        )
+        .unwrap();
+        control.mark_paths_dirty([PathBuf::from("queued.rs")]);
+        let mut searching = tokio::spawn(handle_request(state.clone(), cached_request));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut searching)
+                .await
+                .is_err()
+        );
+        drop(held);
+        let response = tokio::time::timeout(Duration::from_secs(10), searching)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(response, DaemonResponse::SearchResults { hits, warnings } if hits.iter().any(|hit| hit.file_path == Path::new("added.rs")) && warnings.is_empty())
+        );
+        for marker in [
+            "offline_updated_marker",
+            "offline_added_marker",
+            "offline_stable_marker",
+            "queued_startup_marker",
+        ] {
+            let response =
+                handle_request(state.clone(), literal_request_for(&workspace, marker)).await;
+            assert!(
+                matches!(response, DaemonResponse::SearchResults { hits, .. } if hits.len() == 1),
+                "missing {marker}"
+            );
+        }
+        assert!(!indexed_file_contains(
+            &workspace,
+            "changed.rs",
+            "offline_original_marker"
+        ));
+        assert!(!indexed_file_contains(
+            &workspace,
+            "deleted.rs",
+            "offline_deleted_marker"
+        ));
+        let after = crate::merkle::MerkleSnapshot::load(&workspace.merkle_snapshot_path()).unwrap();
+        assert_eq!(before.files["stable.rs"], after.files["stable.rs"]);
+        assert!(!after.files.contains_key("deleted.rs"));
+        assert!(after.files.contains_key("added.rs"));
+        assert!(after.files.contains_key("queued.rs"));
+        assert!(workspace.is_watcher_alive());
+        stop_all_watchers(&state);
+
+        // A second restart without source edits is a real no-op, not a fresh
+        // rebuild or an unconditional recomputation of the unchanged files.
+        let generation = workspace.read_metadata().unwrap().unwrap().index_generation;
+        let snapshot = std::fs::read(workspace.merkle_snapshot_path()).unwrap();
+        let state = test_state();
+        restore_configured_watchers(&state);
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            handle_request(
+                state.clone(),
+                literal_request_for(&workspace, "offline_stable_marker"),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(response, DaemonResponse::SearchResults { hits, .. } if hits.len() == 1));
+        assert_eq!(
+            workspace.read_metadata().unwrap().unwrap().index_generation,
+            generation
+        );
+        assert_eq!(
+            std::fs::read(workspace.merkle_snapshot_path()).unwrap(),
+            snapshot
+        );
+        stop_all_watchers(&state);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn explicit_index_satisfies_initial_watcher_reconciliation() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        std::fs::write(
+            repo.path().join("lib.rs"),
+            "pub fn initial_index_marker() {}\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let state = test_state();
+        let response = handle_request(
+            state.clone(),
+            DaemonRequest::Index {
+                path: workspace.root.clone(),
+                watch: true,
+                skip_gitignore: false,
+            },
+        )
+        .await;
+        assert!(
+            matches!(response, DaemonResponse::Ack { .. }),
+            "{response:?}"
+        );
+        assert!(workspace.is_watcher_alive());
+        let control = state
+            .watchers
+            .lock()
+            .get(&workspace.id)
+            .unwrap()
+            .control
+            .clone();
+        assert!(!control.initial_scan_required.load(Ordering::Relaxed));
+        // Wake the startup worker even if it had not yet observed its notify.
+        control.notify.notify_one();
+        let response = tokio::time::timeout(
+            Duration::from_secs(10),
+            handle_request(
+                state.clone(),
+                literal_request_for(&workspace, "initial_index_marker"),
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(response, DaemonResponse::SearchResults { hits, .. } if hits.len() == 1));
+        assert_eq!(
+            jobs::read_job_ledger(&workspace)
+                .jobs
+                .into_iter()
+                .find(|job| job.kind == JobKind::Indexing)
+                .unwrap()
+                .generation,
+            1
+        );
+        stop_all_watchers(&state);
+    }
+
+    #[test]
+    #[serial]
+    fn initial_reconciliation_preserves_events_queued_during_scan() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        let control = WatchControl::new(Workspace::resolve(repo.path()).unwrap());
+        control.mark_paths_dirty([PathBuf::from("edited_during_scan.rs")]);
+        complete_initial_watch_reconciliation(&control);
+        assert!(
+            matches!(control.take_pending_work().unwrap().change, WatchChange::Paths(paths) if paths.contains(Path::new("edited_during_scan.rs")))
+        );
     }
 
     #[tokio::test]
@@ -7374,6 +7800,13 @@ mod tests {
         index_workspace(&workspace, model.as_ref()).unwrap();
         let state = test_state();
         register_watcher(&state, repo.path()).unwrap();
+        drop(
+            state
+                .acquire_search_leases(std::slice::from_ref(&workspace), false, None)
+                .await
+                .unwrap()
+                .unwrap(),
+        );
         assert!(!indexed_file_contains(
             &workspace,
             "ignored.rs",
@@ -7690,6 +8123,19 @@ mod tests {
         drop(second_leases);
         acquired.recv_timeout(Duration::from_secs(2)).unwrap();
         drop(writer.join().unwrap());
+    }
+
+    async fn wait_for_initial_watch_reconciliation(state: &DaemonState, workspace: &Workspace) {
+        let skip_gitignore = workspace.read_metadata().unwrap().unwrap().skip_gitignore;
+        let leases = tokio::time::timeout(
+            Duration::from_secs(10),
+            state.acquire_search_leases(std::slice::from_ref(workspace), skip_gitignore, None),
+        )
+        .await
+        .expect("initial watcher reconciliation timed out")
+        .expect("initial watcher reconciliation failed")
+        .expect("initial watcher reconciliation was cancelled");
+        drop(leases);
     }
 
     fn literal_request_for(workspace: &Workspace, query: &str) -> DaemonRequest {
@@ -8611,6 +9057,7 @@ mod tests {
         index_workspace(&workspace, model.as_ref()).unwrap();
         let state = test_state();
         register_watcher(&state, repo.path()).unwrap();
+        wait_for_initial_watch_reconciliation(&state, &workspace).await;
         let metadata = std::fs::read(workspace.metadata_path()).unwrap();
         let generation = workspace.read_metadata().unwrap().unwrap().index_generation;
         let control = state
@@ -8683,6 +9130,7 @@ mod tests {
         index_workspace(&workspace, model.as_ref()).unwrap();
         let state = test_state();
         register_watcher(&state, repo.path()).unwrap();
+        wait_for_initial_watch_reconciliation(&state, &workspace).await;
         let control = state
             .watchers
             .lock()

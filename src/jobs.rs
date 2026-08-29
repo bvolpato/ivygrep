@@ -437,7 +437,7 @@ pub fn now_unix() -> u64 {
         .as_secs()
 }
 
-fn update_job<T>(workspace: &Workspace, updater: impl FnOnce(&mut JobLedger) -> T) -> Result<T> {
+pub(crate) fn lock_job_ledger(workspace: &Workspace) -> Result<fs::File> {
     workspace.ensure_dirs()?;
     let lock_path = workspace.job_lock_path();
     let lock = fs::OpenOptions::new()
@@ -448,7 +448,11 @@ fn update_job<T>(workspace: &Workspace, updater: impl FnOnce(&mut JobLedger) -> 
         .with_context(|| format!("failed to open job lock {}", lock_path.display()))?;
     lock.lock_exclusive()
         .with_context(|| format!("failed to lock job ledger {}", lock_path.display()))?;
+    Ok(lock)
+}
 
+fn update_job<T>(workspace: &Workspace, updater: impl FnOnce(&mut JobLedger) -> T) -> Result<T> {
+    let lock = lock_job_ledger(workspace)?;
     let mut ledger = read_job_ledger(workspace);
     let record = updater(&mut ledger);
     write_job_ledger_locked(workspace.job_ledger_path(), &ledger)?;
