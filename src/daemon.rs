@@ -4093,7 +4093,13 @@ fn update_watcher_job(control: &WatchControl, mut update: JobUpdate) {
     // index directory, including `job.json`) while the watcher kept running.
     // Re-create it under a fresh nonce so status and clients see the watcher
     // as alive instead of treating it as crashed on every query.
-    let phase = update.phase.clone().unwrap_or_else(|| "idle".to_string());
+    // start_job publishes an active record before the follow-up heartbeat can
+    // make it inactive. Keep startup non-live even if that second write fails.
+    let phase = if reconciling {
+        "reconciling".to_string()
+    } else {
+        update.phase.clone().unwrap_or_else(|| "idle".to_string())
+    };
     if let Ok(record) = jobs::start_job(&control.workspace, JobKind::Watcher, phase, 1) {
         if let Some(nonce) = record.nonce.as_deref() {
             let _ =
@@ -6852,6 +6858,56 @@ mod tests {
             },
         );
         assert!(!workspace.is_watcher_alive());
+    }
+
+    #[test]
+    #[serial]
+    fn recreated_startup_error_stays_non_live_when_heartbeat_fails() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repo = tempdir().unwrap();
+        let workspace = Workspace::resolve(repo.path()).unwrap();
+        let control = WatchControl::new(workspace.clone());
+        // The scan completed, but startup catch-up is still pending.
+        control
+            .initial_scan_required
+            .store(false, Ordering::Relaxed);
+        let failed = JobUpdate {
+            phase: Some("error".to_string()),
+            last_error: Some(Some("startup reconciliation failed".to_string())),
+            ..Default::default()
+        };
+
+        // There is no nonce to refresh. The fault hits the follow-up heartbeat
+        // after start_job has persisted its initially active replacement record.
+        jobs::fail_next_watcher_heartbeat();
+        update_watcher_job(&control, failed.clone());
+        let recreated = jobs::job_status(&workspace, JobKind::Watcher, 15)
+            .record
+            .expect("the replacement record must have been persisted");
+        assert!(
+            recreated.active,
+            "the injected heartbeat must leave the initial record untouched"
+        );
+        assert!(
+            !workspace.is_watcher_alive(),
+            "an error during startup must not publish watcher liveness when the inactive heartbeat fails"
+        );
+
+        // A later successful heartbeat retains the error without certifying the
+        // index. Only completing reconciliation may make the watcher live.
+        update_watcher_job(&control, failed);
+        let recovered = jobs::job_status(&workspace, JobKind::Watcher, 15)
+            .record
+            .unwrap();
+        assert_eq!(
+            recovered.last_error.as_deref(),
+            Some("startup reconciliation failed")
+        );
+        assert!(!recovered.active);
+        assert!(!workspace.is_watcher_alive());
+        complete_initial_watch_reconciliation(&control);
+        assert!(workspace.is_watcher_alive());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

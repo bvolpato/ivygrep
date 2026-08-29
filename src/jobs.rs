@@ -15,6 +15,16 @@ pub const INDEXING_HEARTBEAT_TTL_SECS: u64 = 20;
 pub const ENHANCEMENT_HEARTBEAT_TTL_SECS: u64 = 20;
 pub const ENHANCEMENT_PAUSE_WARN_SECS: u64 = 300;
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_NEXT_WATCHER_HEARTBEAT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn fail_next_watcher_heartbeat() {
+    FAIL_NEXT_WATCHER_HEARTBEAT.with(|fail| fail.set(true));
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum JobKind {
@@ -183,6 +193,10 @@ pub fn heartbeat_job_if_current(
     expected_nonce: &str,
     update: JobUpdate,
 ) -> Result<Option<JobRecord>> {
+    #[cfg(test)]
+    if kind == JobKind::Watcher && FAIL_NEXT_WATCHER_HEARTBEAT.with(|fail| fail.replace(false)) {
+        anyhow::bail!("injected watcher heartbeat failure");
+    }
     let now = now_unix();
     update_job(workspace, move |ledger| {
         let record = ledger
