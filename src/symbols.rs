@@ -275,6 +275,19 @@ pub fn definition_candidates(
     names: &[String],
     limit: usize,
 ) -> Result<Vec<IndexedChunk>> {
+    definition_candidates_eligible(conn, names, limit, true, None, None)
+}
+
+/// Apply hard eligibility before each name's candidate window. The optional
+/// predicate sees metadata only, before stored text is decompressed.
+pub(crate) fn definition_candidates_eligible(
+    conn: &Connection,
+    names: &[String],
+    limit: usize,
+    skip_gitignore: bool,
+    include: Option<&dyn Fn(&IndexedChunk) -> bool>,
+    cancel_token: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<Vec<IndexedChunk>> {
     if limit == 0 || names.is_empty() {
         return Ok(Vec::new());
     }
@@ -309,6 +322,9 @@ pub fn definition_candidates(
     let candidate_limit_i64 = candidate_limit as i64;
 
     for (batch_index, batch) in requested.chunks(SYMBOL_DEFINITION_LOOKUP_BATCH).enumerate() {
+        if cancel_token.is_some_and(|token| token.load(std::sync::atomic::Ordering::Relaxed)) {
+            return Ok(Vec::new());
+        }
         let base_ordinal = batch_index * SYMBOL_DEFINITION_LOOKUP_BATCH;
         let values = (0..batch.len())
             .map(|index| {
@@ -324,6 +340,11 @@ pub fn definition_candidates(
         // Owner-qualified rows and exact-case names rank ahead of the
         // alphabetical tail so common names do not crowd them out of the
         // bounded candidate window.
+        let window = if include.is_some() {
+            String::new()
+        } else {
+            format!("WHERE rn <= ?{}", batch.len() * 3 + 2)
+        };
         let sql = format!(
             "WITH requested(name, exact_name, owner, ordinal) AS (VALUES {values}),
                   ranked AS (
@@ -345,11 +366,12 @@ pub fn definition_candidates(
                     FROM requested r
                     JOIN symbols s ON s.normalized_name = r.name
                     JOIN chunks c ON c.chunk_key = s.chunk_key
+                    WHERE (?{} OR c.is_ignored = 0)
                   )
              SELECT ordinal, file_path, start_line, end_line, language,
                     kind, text, vector_key, is_ignored, name, owner
              FROM ranked
-             WHERE rn <= ?{}
+             {window}
              ORDER BY ordinal, rn",
             batch.len() * 3 + 1
         );
@@ -359,7 +381,10 @@ pub fn definition_candidates(
             params.push(&query.name as &dyn ToSql);
             params.push(&query.owner as &dyn ToSql);
         }
-        params.push(&candidate_limit_i64);
+        params.push(&skip_gitignore);
+        if include.is_none() {
+            params.push(&candidate_limit_i64);
+        }
 
         let mut stmt = conn.prepare_cached(&sql)?;
         let rows = stmt.query_map(params.as_slice(), |row| {
@@ -379,6 +404,9 @@ pub fn definition_candidates(
         })?;
 
         for row in rows {
+            if cancel_token.is_some_and(|token| token.load(std::sync::atomic::Ordering::Relaxed)) {
+                return Ok(Vec::new());
+            }
             let (
                 ordinal,
                 file_path,
@@ -392,36 +420,44 @@ pub fn definition_candidates(
                 stored_name,
                 stored_owner,
             ) = row?;
-            let text = try_decompress_text(raw).with_context(|| {
-                format!(
-                    "failed to read stored symbol text for {}:{start_line}-{end_line}",
-                    file_path.display()
-                )
-            })?;
-            let chunk = IndexedChunk {
+            if ordinal >= by_name.len() || by_name[ordinal].len() >= candidate_limit {
+                continue;
+            }
+            let mut chunk = IndexedChunk {
                 chunk_id: String::new(),
                 file_path,
                 start_line,
                 end_line,
                 language,
                 kind,
-                text,
+                text: String::new(),
                 content_hash: String::new(),
                 vector_key,
                 is_ignored,
                 definitions: None,
             };
-            if ordinal >= by_name.len() {
+            if include.is_some_and(|include| !include(&chunk)) {
                 continue;
             }
             if !per_name_seen[ordinal].insert(chunk.vector_key) {
                 continue;
             }
+            chunk.text = try_decompress_text(raw).with_context(|| {
+                format!(
+                    "failed to read stored symbol text for {}:{start_line}-{end_line}",
+                    chunk.file_path.display()
+                )
+            })?;
             let query = requested[ordinal].1;
             let tier = owner_tier(query.owner, stored_owner.as_deref());
             let exact_case = stored_name == query.name;
             let canonical_file = file_stem_matches_symbol(&chunk, query.name);
             by_name[ordinal].push((tier, exact_case, canonical_file, chunk));
+            if ordinal == base_ordinal + batch.len() - 1
+                && by_name[ordinal].len() == candidate_limit
+            {
+                break;
+            }
         }
     }
 

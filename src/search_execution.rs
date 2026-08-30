@@ -66,6 +66,20 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     if options.is_cancelled() {
         return Ok(Vec::new());
     }
+    let (boolean_docs, boolean_keys) = match boolean_candidates(
+        ctx,
+        query_text,
+        options,
+        &path_matcher,
+        &glob_path_filter,
+        candidate_limit,
+    )? {
+        Some(pool) => (Some(pool.documents), Some(pool.keys)),
+        None => (None, None),
+    };
+    if boolean_keys.as_ref().is_some_and(|keys| keys.is_empty()) {
+        return Ok(Vec::new());
+    }
 
     // ── Literal pass ────────────────────────────────────────────────────
     // Always run a fast index-backed literal substring scan so exact matches
@@ -98,6 +112,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
             &glob_path_filter,
             options,
             (literal_limit, target_hits),
+            boolean_keys.as_ref(),
         )?
         .chunks;
         tracing::trace!(
@@ -126,25 +141,8 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     // matches on filenames and symbol definitions count 5× more than body text.
     // A raw STRING path match can mask phrase errors in analyzed fields.
     // Keep it available through explicit file_path: queries, not defaults.
-    let mut search_fields = vec![ctx.fields.text];
-    if let Some(f) = ctx.fields.file_path_text {
-        search_fields.push(f);
-    }
-    if let Some(f) = ctx.fields.signature {
-        search_fields.push(f);
-    }
-    let mut parser = QueryParser::for_index(&ctx.indexes[0], search_fields);
-    parser.set_field_boost(ctx.fields.file_path, 2.0);
-    if let Some(f) = ctx.fields.file_path_text {
-        parser.set_field_boost(f, 5.0);
-    }
-    if let Some(f) = ctx.fields.signature {
-        parser.set_field_boost(f, 5.0);
-    }
     let conjunctive_numeric_query = should_use_conjunctive_numeric_query(trimmed);
-    if conjunctive_numeric_query {
-        parser.set_conjunction_by_default();
-    }
+    let parser = lexical_query_parser(ctx, conjunctive_numeric_query);
 
     let mut allowed_languages = Vec::new();
     let mut can_pushdown_languages = options.include_globs.is_empty();
@@ -186,25 +184,30 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
         can_pushdown_languages,
         allowed_languages: &allowed_languages,
         searchers: &ctx.searchers,
+        eligibility: [
+            CandidateEligibility::new(ctx, 0, options, &path_matcher, boolean_keys.as_ref()),
+            CandidateEligibility::new(ctx, 1, options, &path_matcher, boolean_keys.as_ref()),
+        ],
         cancel_token: options.cancel_token.as_ref(),
     };
     let collect_docs = |(lexical_query, query_candidate_limit): (&String, usize)| {
         executor.collect_docs(lexical_query, query_candidate_limit)
     };
-    let lexical_doc_batches =
-        if lexical_search_queries.len() > 1 && rayon::current_num_threads() > 1 {
-            lexical_search_queries
-                .par_iter()
-                .zip(lexical_query_limits)
-                .map(collect_docs)
-                .collect::<Result<Vec<_>>>()?
-        } else {
-            lexical_search_queries
-                .iter()
-                .zip(lexical_query_limits)
-                .map(collect_docs)
-                .collect::<Result<Vec<_>>>()?
-        };
+    let lexical_doc_batches = if let Some(documents) = boolean_docs {
+        vec![documents]
+    } else if lexical_search_queries.len() > 1 && rayon::current_num_threads() > 1 {
+        lexical_search_queries
+            .par_iter()
+            .zip(lexical_query_limits)
+            .map(collect_docs)
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        lexical_search_queries
+            .iter()
+            .zip(lexical_query_limits)
+            .map(collect_docs)
+            .collect::<Result<Vec<_>>>()?
+    };
     for docs in lexical_doc_batches {
         for (i, score, doc) in docs {
             if let Some(chunk) = fetch_chunk_by_id(doc, &ctx.fields)
@@ -248,29 +251,27 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     // Exact persisted symbol definitions provide a separate bounded rank
     // signal. This avoids inferring every definition solely from text while
     // keeping symbol lookup independent from the main candidate volume.
-    let exact_symbol_names = exact_symbol_query_names(trimmed);
-    let mut exact_symbol_chunks = crate::symbols::definition_candidates(
-        &ctx.sqlite,
-        &exact_symbol_names,
-        symbol_candidate_limit,
-    )?;
-    if let Some(base_sqlite) = &ctx.base_sqlite {
-        let remaining = symbol_candidate_limit.saturating_sub(exact_symbol_chunks.len());
-        if remaining > 0 {
-            exact_symbol_chunks.extend(
-                crate::symbols::definition_candidates(base_sqlite, &exact_symbol_names, remaining)?
-                    .into_iter()
-                    .filter(|chunk| !ctx.is_shadowed_base_file(1, &chunk.file_path)),
-            );
+    let symbol_candidates = |names: &[String],
+                             limit: usize,
+                             excluded: &HashSet<u64>|
+     -> Result<Vec<IndexedChunk>> {
+        let mut chunks =
+            executor.eligibility[0].definition_candidates(&ctx.sqlite, names, limit, excluded)?;
+        if chunks.len() < limit
+            && let Some(base) = &ctx.base_sqlite
+        {
+            chunks.extend(executor.eligibility[1].definition_candidates(
+                base,
+                names,
+                limit - chunks.len(),
+                excluded,
+            )?);
         }
-    }
-    exact_symbol_chunks.retain(|chunk| {
-        type_matches(chunk, options.type_filter.as_deref())
-            && scope_matches(chunk, options.scope_filter.as_ref())
-            && path_matches(chunk, &path_matcher)
-            && (options.skip_gitignore || !chunk.is_ignored)
-    });
-    exact_symbol_chunks.truncate(symbol_candidate_limit);
+        Ok(chunks)
+    };
+    let exact_symbol_names = exact_symbol_query_names(trimmed);
+    let exact_symbol_chunks =
+        symbol_candidates(&exact_symbol_names, symbol_candidate_limit, &HashSet::new())?;
     let exact_symbol_ids = exact_symbol_chunks
         .iter()
         .map(|chunk| chunk.vector_key)
@@ -278,67 +279,19 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
 
     let remaining = symbol_candidate_limit.saturating_sub(exact_symbol_chunks.len());
     let inferred_symbol_names = natural_language_symbol_queries(trimmed);
-    let mut inferred_symbol_chunks = if remaining > 0 && !inferred_symbol_names.is_empty() {
-        crate::symbols::definition_candidates(&ctx.sqlite, &inferred_symbol_names, remaining)?
-    } else {
-        Vec::new()
-    };
-    if let Some(base_sqlite) = &ctx.base_sqlite {
-        let base_remaining = remaining.saturating_sub(inferred_symbol_chunks.len());
-        if base_remaining > 0 {
-            inferred_symbol_chunks.extend(
-                crate::symbols::definition_candidates(
-                    base_sqlite,
-                    &inferred_symbol_names,
-                    base_remaining,
-                )?
-                .into_iter()
-                .filter(|chunk| !ctx.is_shadowed_base_file(1, &chunk.file_path)),
-            );
-        }
-    }
-    inferred_symbol_chunks.retain(|chunk| {
-        !exact_symbol_ids.contains(&chunk.vector_key)
-            && type_matches(chunk, options.type_filter.as_deref())
-            && scope_matches(chunk, options.scope_filter.as_ref())
-            && path_matches(chunk, &path_matcher)
-            && (options.skip_gitignore || !chunk.is_ignored)
-    });
-    inferred_symbol_chunks.truncate(remaining);
+    let inferred_symbol_chunks =
+        symbol_candidates(&inferred_symbol_names, remaining, &exact_symbol_ids)?;
     let inferred_symbol_ids = inferred_symbol_chunks
         .iter()
         .map(|chunk| chunk.vector_key)
         .collect::<HashSet<_>>();
 
     let remaining = remaining.saturating_sub(inferred_symbol_chunks.len());
-    let mut alias_symbol_chunks = if remaining > 0 {
-        crate::symbols::definition_candidates(&ctx.sqlite, &lexical_queries, remaining)?
-    } else {
-        Vec::new()
-    };
-    if let Some(base_sqlite) = &ctx.base_sqlite {
-        let base_remaining = remaining.saturating_sub(alias_symbol_chunks.len());
-        if base_remaining > 0 {
-            alias_symbol_chunks.extend(
-                crate::symbols::definition_candidates(
-                    base_sqlite,
-                    &lexical_queries,
-                    base_remaining,
-                )?
-                .into_iter()
-                .filter(|chunk| !ctx.is_shadowed_base_file(1, &chunk.file_path)),
-            );
-        }
-    }
-    alias_symbol_chunks.retain(|chunk| {
-        !exact_symbol_ids.contains(&chunk.vector_key)
-            && !inferred_symbol_ids.contains(&chunk.vector_key)
-            && type_matches(chunk, options.type_filter.as_deref())
-            && scope_matches(chunk, options.scope_filter.as_ref())
-            && path_matches(chunk, &path_matcher)
-            && (options.skip_gitignore || !chunk.is_ignored)
-    });
-    alias_symbol_chunks.truncate(remaining);
+    let excluded_symbol_ids = exact_symbol_ids
+        .union(&inferred_symbol_ids)
+        .copied()
+        .collect();
+    let alias_symbol_chunks = symbol_candidates(&lexical_queries, remaining, &excluded_symbol_ids)?;
 
     let symbol_chunks = exact_symbol_chunks
         .into_iter()
@@ -405,11 +358,18 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
                 constrain_query_to_scope(parsed, &ctx.fields, options.scope_filter.as_ref())?;
             let parsed = constrain_query_to_glob_paths(parsed, &ctx.fields, &glob_path_filter);
             for (i, searcher) in ctx.searchers.iter().enumerate() {
-                let docs = collect_top_docs_with_glob_filter(
+                let docs = collect_top_docs_with_eligibility(
                     searcher,
                     parsed.as_ref(),
                     &ctx.fields,
                     &glob_path_filter,
+                    CandidateEligibility::new(
+                        ctx,
+                        i,
+                        options,
+                        &path_matcher,
+                        boolean_keys.as_ref(),
+                    ),
                     path_candidate_limit,
                     options.cancel_token.as_ref(),
                 )?;
@@ -551,8 +511,39 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
         let mut semantic_by_id = SemanticCandidatesById::new();
         let semantic_filters_active = has_semantic_filters(options);
 
-        if !semantic_filters_active {
+        if let Some(keys) = boolean_keys.as_ref() {
+            if has_hash_vectors {
+                let query = embed_hash_query(trimmed);
+                let hits = score_constrained_semantic_keys(
+                    ctx,
+                    keys,
+                    &query,
+                    semantic_limit,
+                    (ctx.hash_vectors.as_ref(), ctx.base_hash_vectors.as_ref()),
+                    options,
+                )?;
+                merge_semantic_candidates(&mut semantic_by_id, hits, hash_weight, "hash");
+            }
+            if let Some(model) = neural_model {
+                neural_executed = true;
+                let query = neural_query_vector(model, query_text, &mut neural_query_vector_job);
+                let hits = score_constrained_semantic_keys(
+                    ctx,
+                    keys,
+                    &query,
+                    semantic_limit,
+                    (
+                        ctx.neural_vectors.as_ref(),
+                        ctx.base_neural_vectors.as_ref(),
+                    ),
+                    options,
+                )?;
+                merge_semantic_candidates(&mut semantic_by_id, hits, 1.08, "neural");
+            }
+        } else if !semantic_filters_active {
             let mut sources = Vec::with_capacity(2);
+            let mut neural_query_for_refill = None;
+            let mut hash_query_for_refill = None;
             let neural_matches = if let Some(model) = neural_model {
                 neural_executed = true;
                 let neural_query_vector =
@@ -565,6 +556,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
                     ctx.base_neural_vectors.as_ref(),
                 );
                 tracing::trace!("semantic_neural_ann={:?}", semantic_started.elapsed());
+                neural_query_for_refill = Some(neural_query_vector);
                 Some(matches)
             } else {
                 None
@@ -584,11 +576,42 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
                     "hash",
                 ));
                 tracing::trace!("semantic_hash_ann={:?}", semantic_started.elapsed());
+                hash_query_for_refill = Some(hash_query_vector);
             }
             if let Some(neural_matches) = neural_matches {
                 sources.push((neural_matches, 1.08, "neural"));
             }
-            semantic_by_id = collect_unfiltered_semantic_candidates(ctx, options, sources)?;
+            semantic_by_id = collect_unfiltered_semantic_candidates_with_refill(
+                ctx,
+                options,
+                sources,
+                |source| {
+                    let (query, stores) = match source {
+                        "hash" => (
+                            hash_query_for_refill.as_deref(),
+                            (ctx.hash_vectors.as_ref(), ctx.base_hash_vectors.as_ref()),
+                        ),
+                        "neural" => (
+                            neural_query_for_refill.as_deref(),
+                            (
+                                ctx.neural_vectors.as_ref(),
+                                ctx.base_neural_vectors.as_ref(),
+                            ),
+                        ),
+                        _ => anyhow::bail!(
+                            "unknown semantic source for eligibility refill: {source}"
+                        ),
+                    };
+                    Ok(Some(refill_semantic_matches(
+                        ctx,
+                        &path_matcher,
+                        options,
+                        query.context("missing query vector for eligibility refill")?,
+                        semantic_limit,
+                        stores,
+                    )?))
+                },
+            )?;
             tracing::trace!("semantic_hydrate={:?}", semantic_started.elapsed());
         } else {
             let filter_plan = build_semantic_filter_plan(ctx, &path_matcher, options)?;

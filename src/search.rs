@@ -26,6 +26,10 @@ use crate::indexer::{
 };
 use crate::path_glob::PathGlobMatcher;
 use crate::protocol::SearchHit;
+#[path = "search_boolean.rs"]
+mod boolean;
+#[path = "search_eligibility.rs"]
+mod eligibility;
 #[path = "search_execution.rs"]
 mod execution;
 #[path = "search_file_cache.rs"]
@@ -34,8 +38,13 @@ mod file_cache;
 mod fusion;
 #[path = "search_presentation.rs"]
 mod presentation;
+#[path = "search_semantic_visibility.rs"]
+mod semantic_visibility;
 
+use boolean::{boolean_candidates, has_explicit_boolean_operators, lexical_query_parser};
+use eligibility::CandidateEligibility;
 use file_cache::{CachedFileContent, FileContentCache};
+use semantic_visibility::{refill_semantic_matches, score_constrained_semantic_keys};
 
 use crate::search_routing::{
     QueryIntent, QueryRouting, corpus_candidate_multiplier, neural_fallback_needed, raw_query_terms,
@@ -53,6 +62,10 @@ use presentation::{
 };
 #[cfg(test)]
 use presentation::{find_focus_line, line_at, line_spans};
+
+#[cfg(test)]
+#[path = "search_constraints_tests.rs"]
+mod constraint_tests;
 
 pub(crate) const DEFAULT_SEARCH_LIMIT: usize = 50;
 pub const MAX_SEARCH_CONTEXT_LINES: usize = 100;
@@ -218,8 +231,8 @@ pub struct SearchContext {
     pub neural_model: Option<crate::embedding::NeuralModelIdentity>,
     pub base_neural_model: Option<crate::embedding::NeuralModelIdentity>,
 
-    pub tombstones: HashSet<String>,
-    pub overlay_files: HashSet<String>,
+    pub tombstones: Arc<HashSet<String>>,
+    pub overlay_files: Arc<HashSet<String>>,
     file_contents: Arc<parking_lot::Mutex<FileContentCache>>,
     file_contents_epoch: u64,
     glob_path_filters: RefCell<HashMap<GlobPathFilterCacheKey, GlobPathQueryFilter>>,
@@ -425,8 +438,8 @@ impl SearchContext {
                 base_neural_profile,
                 neural_model: overlay_neural_model,
                 base_neural_model,
-                tombstones,
-                overlay_files,
+                tombstones: Arc::new(tombstones),
+                overlay_files: Arc::new(overlay_files),
                 file_contents: FileContentCache::shared(),
                 file_contents_epoch,
                 glob_path_filters: RefCell::new(HashMap::new()),
@@ -477,8 +490,8 @@ impl SearchContext {
                 base_neural_profile: None,
                 neural_model,
                 base_neural_model: None,
-                tombstones: HashSet::new(),
-                overlay_files: HashSet::new(),
+                tombstones: Arc::default(),
+                overlay_files: Arc::default(),
                 file_contents: FileContentCache::shared(),
                 file_contents_epoch,
                 glob_path_filters: RefCell::new(HashMap::new()),
@@ -991,9 +1004,11 @@ fn collect_literal_candidates(
         glob_path_filter,
         options,
         (candidate_limit, target_hits),
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_literal_candidates_for_queries(
     ctx: &SearchContext,
     candidate_queries: &[String],
@@ -1002,6 +1017,7 @@ fn collect_literal_candidates_for_queries(
     glob_path_filter: &GlobPathQueryFilter,
     options: &SearchOptions,
     limits: (usize, usize),
+    allowed_keys: Option<&Arc<HashSet<u64>>>,
 ) -> Result<LiteralChunkBatch> {
     let (candidate_limit, target_hits) = limits;
     if literal_queries_allow_incremental_verification(candidate_queries) {
@@ -1015,6 +1031,7 @@ fn collect_literal_candidates_for_queries(
                 options,
                 candidate_limit,
                 false,
+                allowed_keys,
             )?;
             let verified =
                 verify_literal_batch(candidates, candidate_queries, matcher, target_hits);
@@ -1039,6 +1056,7 @@ fn collect_literal_candidates_for_queries(
         options,
         candidate_limit,
         false,
+        allowed_keys,
     )?;
     let verified = verify_literal_batch(candidates, candidate_queries, matcher, target_hits);
     if !verified.chunks.is_empty() || !literal_queries_have_relaxed_variant(candidate_queries) {
@@ -1053,6 +1071,7 @@ fn collect_literal_candidates_for_queries(
         options,
         candidate_limit,
         true,
+        allowed_keys,
     )?;
     Ok(verify_literal_batch(
         candidates,
@@ -1062,6 +1081,7 @@ fn collect_literal_candidates_for_queries(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn collect_literal_candidate_chunks(
     ctx: &SearchContext,
     candidate_queries: &[String],
@@ -1070,6 +1090,7 @@ fn collect_literal_candidate_chunks(
     options: &SearchOptions,
     candidate_limit: usize,
     relaxed: bool,
+    allowed_keys: Option<&Arc<HashSet<u64>>>,
 ) -> Result<LiteralChunkBatch> {
     let mut found_ids = HashSet::<u64>::new();
     let mut exhausted = true;
@@ -1092,11 +1113,12 @@ fn collect_literal_candidate_chunks(
         )?;
 
         for (i, searcher) in ctx.searchers.iter().enumerate() {
-            let docs = collect_top_docs_with_glob_filter(
+            let docs = collect_top_docs_with_eligibility(
                 searcher,
                 parsed_query.as_ref(),
                 &ctx.fields,
                 glob_path_filter,
+                CandidateEligibility::new(ctx, i, options, path_matcher, allowed_keys),
                 candidate_limit,
                 options.cancel_token.as_ref(),
             )?;
@@ -1340,12 +1362,6 @@ fn literal_candidate_terms(query: &str) -> Vec<String> {
     terms
 }
 
-fn has_explicit_boolean_operators(query: &str) -> bool {
-    query
-        .split_ascii_whitespace()
-        .any(|term| matches!(term, "AND" | "OR" | "NOT"))
-}
-
 fn simple_lexical_query(
     fields: &TantivyFields,
     query: &str,
@@ -1421,6 +1437,7 @@ struct LexicalQueryExecutor<'a> {
     can_pushdown_languages: bool,
     allowed_languages: &'a [String],
     searchers: &'a [tantivy::Searcher],
+    eligibility: [CandidateEligibility; 2],
     cancel_token: Option<&'a Arc<std::sync::atomic::AtomicBool>>,
 }
 
@@ -1499,11 +1516,12 @@ impl LexicalQueryExecutor<'_> {
 
         let mut docs = Vec::new();
         for (searcher_index, searcher) in self.searchers.iter().enumerate() {
-            for (score, address) in collect_top_docs_with_glob_filter(
+            for (score, address) in collect_top_docs_with_eligibility(
                 searcher,
                 parsed_query.as_ref(),
                 self.fields,
                 self.glob_path_filter,
+                self.eligibility[searcher_index.min(1)].clone(),
                 query_candidate_limit,
                 self.cancel_token,
             )? {
@@ -2494,9 +2512,9 @@ struct GlobPathQueryFilter {
     residual_matcher: Option<PathGlobMatcher>,
 }
 
-/// Keep overflow glob matches inside TopDocs' bounded heap. Only this fallback
-/// reads competitive documents during collection; unfiltered and exact-path
-/// queries retain Tantivy's ordinary collector.
+/// Compatibility wrapper for the glob collector's standalone tests. Search
+/// execution also supplies request eligibility before admitting heap entries.
+#[cfg(test)]
 fn collect_top_docs_with_glob_filter(
     searcher: &tantivy::Searcher,
     query: &dyn Query,
@@ -2505,44 +2523,98 @@ fn collect_top_docs_with_glob_filter(
     limit: usize,
     cancel_token: Option<&Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<Vec<(f32, tantivy::DocAddress)>> {
-    let collector = TopDocs::with_limit(limit).order_by_score();
-    if let Some(matcher) = &filter.residual_matcher {
-        Ok(searcher.search(
-            query,
-            &GlobFilterCollector {
-                limit,
-                path_field: fields.file_path,
-                matcher,
-                cancel_token,
-            },
-        )?)
-    } else {
-        Ok(searcher.search(query, &collector)?)
-    }
+    collect_top_docs_with_eligibility(
+        searcher,
+        query,
+        fields,
+        filter,
+        CandidateEligibility::default(),
+        limit,
+        cancel_token,
+    )
 }
 
-struct GlobFilterCollector<'a> {
+fn collect_top_docs_with_eligibility(
+    searcher: &tantivy::Searcher,
+    query: &dyn Query,
+    fields: &TantivyFields,
+    filter: &GlobPathQueryFilter,
+    eligibility: CandidateEligibility,
     limit: usize,
-    path_field: tantivy::schema::Field,
-    matcher: &'a PathGlobMatcher,
+    cancel_token: Option<&Arc<std::sync::atomic::AtomicBool>>,
+) -> Result<Vec<(f32, tantivy::DocAddress)>> {
+    let is_cancelled =
+        || cancel_token.is_some_and(|token| token.load(std::sync::atomic::Ordering::Relaxed));
+    if limit == 0 || is_cancelled() {
+        return Ok(Vec::new());
+    }
+    if filter.residual_matcher.is_none() {
+        // Preserve native Block-WAND on ordinary requests, including daemon
+        // requests carrying cancellation tokens. If the bounded top-k already
+        // passes every hard predicate, it is also the eligible top-k. Otherwise
+        // discard this probe and refill with eligibility before heap admission.
+        // Native traversal keeps the ordinary path's pre/post cancellation;
+        // the filtered fallback below checks cancellation per posting.
+        let docs = searcher.search(query, &TopDocs::with_limit(limit).order_by_score())?;
+        if is_cancelled() {
+            return Ok(Vec::new());
+        }
+        let mut all_eligible = true;
+        if !eligibility.unrestricted(fields) {
+            for (_, address) in &docs {
+                if is_cancelled() {
+                    return Ok(Vec::new());
+                }
+                let document = searcher.doc::<TantivyDocument>(*address)?;
+                if !eligibility.matches_document(&document, fields) {
+                    all_eligible = false;
+                    break;
+                }
+            }
+        }
+        if is_cancelled() {
+            return Ok(Vec::new());
+        }
+        if all_eligible {
+            return Ok(docs);
+        }
+    }
+    Ok(searcher.search(
+        query,
+        &EligibilityCollector {
+            limit,
+            fields: fields.clone(),
+            matcher: filter.residual_matcher.as_ref(),
+            eligibility,
+            cancel_token,
+        },
+    )?)
+}
+
+struct EligibilityCollector<'a> {
+    limit: usize,
+    fields: TantivyFields,
+    matcher: Option<&'a PathGlobMatcher>,
+    eligibility: CandidateEligibility,
     cancel_token: Option<&'a Arc<std::sync::atomic::AtomicBool>>,
 }
 
-impl Collector for GlobFilterCollector<'_> {
+impl Collector for EligibilityCollector<'_> {
     type Fruit = Vec<(f32, tantivy::DocAddress)>;
-    type Child = GlobFilterSegmentCollector;
+    type Child = EligibilitySegmentCollector;
 
     fn for_segment(
         &self,
         segment_ord: u32,
         reader: &tantivy::SegmentReader,
     ) -> tantivy::Result<Self::Child> {
-        Ok(GlobFilterSegmentCollector {
+        Ok(EligibilitySegmentCollector {
             top_docs: TopNComputer::new_with_comparator(self.limit, NaturalComparator),
             segment_ord,
             store: reader.get_store_reader(1)?,
-            path_field: self.path_field,
-            matcher: self.matcher.clone(),
+            fields: self.fields.clone(),
+            matcher: self.matcher.cloned(),
+            eligibility: self.eligibility.clone(),
             cancel_token: self.cancel_token.cloned(),
             error: None,
         })
@@ -2610,8 +2682,8 @@ impl Collector for GlobFilterCollector<'_> {
             return Ok(collector.harvest());
         }
         // Without a cancellation token, retain native Block-WAND traversal.
-        // Only accepted paths raise the threshold. Rejected high scores must
-        // never prune lower-scoring matches of the requested glob.
+        // Only eligible documents raise the threshold. Rejected high scores
+        // must never prune lower-scoring visible matches.
         weight.for_each_pruning(f32::MIN, reader, &mut |doc, score| {
             if alive.is_none_or(|alive| alive.is_alive(doc)) {
                 collector.collect(doc, score);
@@ -2626,17 +2698,18 @@ impl Collector for GlobFilterCollector<'_> {
     }
 }
 
-struct GlobFilterSegmentCollector {
+struct EligibilitySegmentCollector {
     top_docs: TopNComputer<f32, u32, NaturalComparator>,
     segment_ord: u32,
     store: tantivy::store::StoreReader,
-    path_field: tantivy::schema::Field,
-    matcher: PathGlobMatcher,
+    fields: TantivyFields,
+    matcher: Option<PathGlobMatcher>,
+    eligibility: CandidateEligibility,
     cancel_token: Option<Arc<std::sync::atomic::AtomicBool>>,
     error: Option<tantivy::TantivyError>,
 }
 
-impl GlobFilterSegmentCollector {
+impl EligibilitySegmentCollector {
     fn is_cancelled(&self) -> bool {
         self.cancel_token
             .as_ref()
@@ -2644,7 +2717,7 @@ impl GlobFilterSegmentCollector {
     }
 }
 
-impl SegmentCollector for GlobFilterSegmentCollector {
+impl SegmentCollector for EligibilitySegmentCollector {
     type Fruit = tantivy::Result<Vec<(f32, tantivy::DocAddress)>>;
 
     fn collect(&mut self, doc: u32, score: f32) {
@@ -2659,10 +2732,13 @@ impl SegmentCollector for GlobFilterSegmentCollector {
         }
         match self.store.get::<TantivyDocument>(doc) {
             Ok(document) => {
-                if document
-                    .get_first(self.path_field)
-                    .and_then(|value| tantivy::schema::Value::as_str(&value))
-                    .is_some_and(|path| self.matcher.matches(Path::new(path)))
+                if self.eligibility.matches_document(&document, &self.fields)
+                    && self.matcher.as_ref().is_none_or(|matcher| {
+                        document
+                            .get_first(self.fields.file_path)
+                            .and_then(|value| tantivy::schema::Value::as_str(&value))
+                            .is_some_and(|path| matcher.matches(Path::new(path)))
+                    })
                 {
                     self.top_docs.push(score, doc);
                 }
@@ -3042,6 +3118,23 @@ fn query_filtered_chunks(
     query: FilteredChunkQuery<'_>,
     include_chunk: impl Fn(&RawIndexedChunk) -> bool,
 ) -> Result<Vec<RawIndexedChunk>> {
+    let mut chunks = Vec::new();
+    if query.max_results != 0 {
+        visit_filtered_chunks(conn, query, include_chunk, None, |chunk| {
+            chunks.push(chunk);
+            Ok(chunks.len() < query.max_results)
+        })?;
+    }
+    Ok(chunks)
+}
+
+fn visit_filtered_chunks(
+    conn: &Connection,
+    query: FilteredChunkQuery<'_>,
+    include_chunk: impl Fn(&RawIndexedChunk) -> bool,
+    cancel_token: Option<&std::sync::atomic::AtomicBool>,
+    mut visit: impl FnMut(RawIndexedChunk) -> Result<bool>,
+) -> Result<()> {
     // Build a SQL query that pushes as much filtering as possible into SQLite.
     let mut sql = String::from(
         "SELECT file_path, start_line, end_line,
@@ -3132,20 +3225,20 @@ fn query_filtered_chunks(
     })?;
 
     // Apply full glob filtering in Rust for complex patterns
-    let mut chunks = Vec::new();
     for row in rows {
+        if cancel_token.is_some_and(|token| token.load(std::sync::atomic::Ordering::Relaxed)) {
+            break;
+        }
         let chunk = row?;
         if scope_path_matches(&chunk.file_path, query.scope_filter)
             && query.path_matcher.matches(&chunk.file_path)
             && include_chunk(&chunk)
+            && !visit(chunk)?
         {
-            chunks.push(chunk);
-            if chunks.len() == query.max_results {
-                break;
-            }
+            break;
         }
     }
-    Ok(chunks)
+    Ok(())
 }
 
 enum IndexedIncludePath {
@@ -3244,27 +3337,23 @@ fn collect_semantic_candidates(
     // Batch-fetch all candidate chunks in one SQL round-trip.
     let keys: Vec<u64> = matches.iter().map(|m| m.key).collect();
     let mut batch_result = ctx.fetch_chunks_by_vector_keys_batch(&keys)?;
-
+    let mut rejected = false;
     for vector_match in matches {
-        if let Some(chunk) = batch_result.remove(&vector_match.key)
-            && (options.skip_gitignore || !chunk.is_ignored)
+        let Some(chunk) = batch_result.remove(&vector_match.key) else {
+            rejected = true;
+            continue;
+        };
+        if (!options.skip_gitignore && chunk.is_ignored)
+            || !type_matches(&chunk, options.type_filter.as_deref())
+            || !scope_matches(&chunk, options.scope_filter.as_ref())
+            || !path_matches(&chunk, path_matcher)
         {
-            // Post-filter: apply type/scope/glob filters in Rust.
-            if has_filters {
-                if !type_matches(&chunk, options.type_filter.as_deref()) {
-                    continue;
-                }
-                if !scope_matches(&chunk, options.scope_filter.as_ref()) {
-                    continue;
-                }
-                if !path_matches(&chunk, path_matcher) {
-                    continue;
-                }
-            }
-            semantic_chunks.push((chunk, vector_match.score));
-            if semantic_chunks.len() >= candidate_limit {
-                break;
-            }
+            rejected = true;
+            continue;
+        }
+        semantic_chunks.push((chunk, vector_match.score));
+        if semantic_chunks.len() >= candidate_limit {
+            break;
         }
     }
 
@@ -3297,9 +3386,33 @@ fn collect_semantic_candidates(
                     if semantic_chunks.len() >= candidate_limit {
                         break;
                     }
+                } else {
+                    rejected = true;
                 }
             }
         }
+    }
+
+    if rejected && semantic_chunks.len() < candidate_limit {
+        let matches = refill_semantic_matches(
+            ctx,
+            path_matcher,
+            options,
+            query_vector,
+            candidate_limit,
+            (primary_store, base_store),
+        )?;
+        let keys = matches.iter().map(|hit| hit.key).collect::<Vec<_>>();
+        let chunks = ctx.fetch_chunks_by_vector_keys_batch(&keys)?;
+        semantic_chunks = matches
+            .into_iter()
+            .filter_map(|hit| {
+                chunks
+                    .get(&hit.key)
+                    .cloned()
+                    .map(|chunk| (chunk, hit.score))
+            })
+            .collect();
     }
 
     Ok(semantic_chunks)
@@ -3440,24 +3553,53 @@ fn collect_unfiltered_semantic_candidates(
     options: &SearchOptions,
     sources: Vec<(Vec<VectorMatch>, f32, &'static str)>,
 ) -> Result<SemanticCandidatesById> {
+    collect_unfiltered_semantic_candidates_with_refill(ctx, options, sources, |_| Ok(None))
+}
+
+fn collect_unfiltered_semantic_candidates_with_refill(
+    ctx: &SearchContext,
+    options: &SearchOptions,
+    mut sources: Vec<(Vec<VectorMatch>, f32, &'static str)>,
+    mut refill: impl FnMut(&str) -> Result<Option<Vec<VectorMatch>>>,
+) -> Result<SemanticCandidatesById> {
     debug_assert!(!has_semantic_filters(options));
 
     let mut by_key = HashMap::<u64, (f32, HashSet<&'static str>)>::new();
-    for (matches, multiplier, source) in sources {
+    for (matches, multiplier, source) in &sources {
         for vector_match in matches {
-            let adjusted = vector_match.score * multiplier;
+            let adjusted = vector_match.score * *multiplier;
             by_key
                 .entry(vector_match.key)
                 .and_modify(|(score, source_set)| {
                     *score = score.max(adjusted);
-                    source_set.insert(source);
+                    source_set.insert(*source);
                 })
-                .or_insert_with(|| (adjusted, HashSet::from([source])));
+                .or_insert_with(|| (adjusted, HashSet::from([*source])));
         }
     }
 
     let keys = by_key.keys().copied().collect::<Vec<_>>();
     let chunks = ctx.fetch_chunk_metadata_by_vector_keys_batch(&keys)?;
+    let mut refilled = false;
+    for (matches, _, source) in &mut sources {
+        if options.is_cancelled() {
+            return Ok(HashMap::new());
+        }
+        if matches.iter().any(|hit| {
+            chunks
+                .get(&hit.key)
+                .is_none_or(|chunk| !options.skip_gitignore && chunk.is_ignored)
+        }) && let Some(replacement) = refill(source)?
+        {
+            *matches = replacement;
+            refilled = true;
+        }
+    }
+    if refilled {
+        // Only the underfill path repeats hydration. Ordinary
+        // hash/neural requests retain their shared single metadata fetch.
+        return collect_unfiltered_semantic_candidates(ctx, options, sources);
+    }
     Ok(by_key
         .into_iter()
         .filter_map(|(key, (score, sources))| {
@@ -6350,10 +6492,11 @@ mod tests {
             let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(pre_cancelled));
             let advances = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let matcher = PathGlobMatcher::new(&[pattern.to_string()], &[]).unwrap();
-            let collector = GlobFilterCollector {
+            let collector = EligibilityCollector {
                 limit: 1,
-                path_field: fields.file_path,
-                matcher: &matcher,
+                fields: fields.clone(),
+                matcher: Some(&matcher),
+                eligibility: CandidateEligibility::default(),
                 cancel_token: Some(&cancelled),
             };
             let weight = CountingWeight {
@@ -6566,6 +6709,7 @@ mod tests {
                 can_pushdown_languages: false,
                 allowed_languages: &[],
                 searchers: &context.searchers,
+                eligibility: Default::default(),
                 cancel_token: None,
             };
             let lexical_paths = executor
@@ -6686,6 +6830,7 @@ mod tests {
             can_pushdown_languages: true,
             allowed_languages: &allowed_languages,
             searchers: &context.searchers,
+            eligibility: Default::default(),
             cancel_token: None,
         };
 
@@ -9405,6 +9550,7 @@ export function registerCommands(p: Plugin) {
             can_pushdown_languages: false,
             allowed_languages: &[],
             searchers: &ctx.searchers,
+            eligibility: Default::default(),
             cancel_token: None,
         };
         let mut paths = executor

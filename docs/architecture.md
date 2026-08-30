@@ -233,6 +233,27 @@ and lexical results remain available while neural vectors are incomplete.
 `--force-neural` requires compatible persisted neural vectors and makes neural
 execution observable in structured output.
 
+Hard visibility and request filters apply before bounded candidate admission.
+Without a residual glob, native TopDocs first collects the normal bounded pool,
+retaining Block-WAND even for daemon requests with cancellation tokens. If every
+returned document is eligible, that pool is final. A rejected document triggers
+a second traversal with eligibility checked before heap admission. This fallback
+reads competitive stored metadata, retains bounded memory, and checks cancellation
+per posting; the native probe retains ordinary pre/post cancellation checks.
+Residual-glob requests use the cancellable filtered collector directly. If invisible or
+missing ANN keys underfill a candidate pool, a cancellation-aware fallback
+streams eligible SQLite keys and exactly scores fixed-size batches. This can
+scan the eligible corpus, but does not allocate a corpus-sized ANN result set.
+Ordinary ANN requests retain shared metadata hydration when no keys are rejected.
+
+Explicit Boolean requests are parsed before expansion. All retrieval signals
+are restricted to a request-local pool of raw-query matches bounded by the
+normal lexical candidate budget. Semantic scoring ranks only keys in that pool;
+it cannot introduce an otherwise similar document that violates the constraint.
+Unsupported structured queries, including phrases requiring unindexed positions,
+fail explicitly. Quoted or escaped operator words and ordinary natural-language
+input keep their existing expansion behavior.
+
 ### Fusion and presentation
 
 `src/search_fusion.rs` combines candidates, source provenance, path and role

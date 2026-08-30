@@ -1,3 +1,5 @@
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashSet};
 use std::fs;
 #[cfg(target_os = "windows")]
 use std::io::Write;
@@ -494,6 +496,78 @@ impl VectorStore {
         }
     }
 
+    /// Fallible, cancellation-aware scoring for eligibility refills. Missing
+    /// keys in a partially enhanced store are normal; native read errors are
+    /// not. Keep only top-k scores rather than retaining a scored row per key.
+    pub(crate) fn score_many_top_k_checked(
+        &self,
+        keys: &[u64],
+        query: &[f32],
+        count: usize,
+        cancelled: Option<&std::sync::atomic::AtomicBool>,
+    ) -> Result<Vec<VectorMatch>> {
+        let is_cancelled =
+            || cancelled.is_some_and(|token| token.load(std::sync::atomic::Ordering::Relaxed));
+        if count == 0 || is_cancelled() {
+            return Ok(Vec::new());
+        }
+        self.validate_vector(query)?;
+        let query_norm = query.iter().map(|value| value * value).sum::<f32>().sqrt();
+        let dot_and_norm_squared = select_dot_and_norm_squared();
+        let mut stored = vec![0.0; query.len()];
+        let mut top =
+            BinaryHeap::<Reverse<super::RankedVectorMatch>>::with_capacity(count.min(keys.len()));
+        let mut retained = HashSet::with_capacity(count.min(keys.len()));
+        for &key in keys {
+            if is_cancelled() {
+                return Ok(Vec::new());
+            }
+            if retained.contains(&key) {
+                continue;
+            }
+            if self
+                .index
+                .get(key, &mut stored)
+                .with_context(|| format!("failed to read vector key {key}"))?
+                == 0
+            {
+                continue;
+            }
+            let (dot, stored_norm_squared) = dot_and_norm_squared(&stored, query);
+            let stored_norm = stored_norm_squared.sqrt();
+            let score = if stored_norm > 0.0 && query_norm > 0.0 {
+                dot / (stored_norm * query_norm)
+            } else {
+                0.0
+            };
+            let ranked = super::RankedVectorMatch { key, score };
+            if top.len() < count {
+                top.push(Reverse(ranked));
+                retained.insert(key);
+            } else if top.peek().is_some_and(|worst| ranked > worst.0) {
+                if let Some(Reverse(removed)) = top.pop() {
+                    retained.remove(&removed.key);
+                }
+                top.push(Reverse(ranked));
+                retained.insert(key);
+            }
+        }
+        let mut matches = top
+            .into_iter()
+            .map(|Reverse(hit)| VectorMatch {
+                key: hit.key,
+                score: hit.score,
+            })
+            .collect::<Vec<_>>();
+        matches.sort_by(|left, right| {
+            right
+                .score
+                .total_cmp(&left.score)
+                .then(left.key.cmp(&right.key))
+        });
+        Ok(matches)
+    }
+
     fn validate_vector(&self, vector: &[f32]) -> Result<()> {
         anyhow::ensure!(
             vector.len() == self.index.dimensions(),
@@ -910,6 +984,54 @@ mod tests {
         let matches = store.score_many_top_k(&[1, 999], &[1.0, 0.0, 0.0, 0.0], 2);
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].key, 1);
+    }
+
+    #[test]
+    fn checked_batch_scoring_preserves_ranking_missing_keys_and_cancellation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut store = VectorStore::open(
+            &tmp.path().join("vectors.bin"),
+            4,
+            ScalarKind::F32,
+            VectorTier::Neural,
+        )
+        .unwrap();
+        for key in 1..=8 {
+            store
+                .add_unchecked(key, vec![1.0, (key % 3) as f32, 0.0, 0.0])
+                .unwrap();
+        }
+        let query = [1.0, 0.0, 0.0, 0.0];
+        let unique = [8, 7, 6, 5, 4, 3, 2, 1, 999];
+        let repeated = [8, 7, 7, 6, 5, 4, 3, 2, 1, 3, 999];
+        for limit in [0, 1, 3, 7, 100] {
+            let expected = store.score_many_top_k(&unique, &query, limit);
+            let actual = store
+                .score_many_top_k_checked(&repeated, &query, limit, None)
+                .unwrap();
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(|hit| (hit.key, hit.score))
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|hit| (hit.key, hit.score))
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert!(
+            store
+                .score_many_top_k_checked(&unique, &[1.0], 2, None)
+                .is_err()
+        );
+        let cancelled = std::sync::atomic::AtomicBool::new(true);
+        assert!(
+            store
+                .score_many_top_k_checked(&unique, &query, 2, Some(&cancelled))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
