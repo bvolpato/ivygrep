@@ -726,6 +726,8 @@ def evaluate(args: argparse.Namespace) -> dict:
         env["IVYGREP_DISABLE_BACKGROUND_ENHANCEMENT"] = "1"
         if capture_enabled:
             env["IVYGREP_RERANKER_CAPTURE"] = "1"
+        else:
+            env.pop("IVYGREP_RERANKER_CAPTURE", None)
 
         started = time.perf_counter()
         subprocess.run(

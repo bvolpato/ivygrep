@@ -34,7 +34,9 @@ for native training features.
 
 New training collection requires a capture-capable binary and explicit
 `--capture-reranker`. This opt-in uses fresh local processes, canonical C2
-evidence and the normal learned candidate budget. The native implementation
+evidence and the normal learned candidate budget. Inherited
+`IVYGREP_RERANKER_CAPTURE` values are ignored; only the explicit CLI flag enables
+capture in the evaluator. The native implementation
 emits one versioned `IVYGREP_RERANKER_CAPTURE` record to stderr before learned
 score remapping, from the actual accepted pre-backfill pool. Normal stdout is
 unchanged. Keep learned mode enabled; deterministic mode is reported as a

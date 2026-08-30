@@ -1504,6 +1504,132 @@ class PublicBenchmarkTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "binary changed"):
                     evaluator.evaluate(args)
 
+    def test_capture_cli_flag_controls_spawn_environment_and_fingerprint(self):
+        fingerprints = {}
+        for enabled in (False, True):
+            for inherited in (None, "1", "0", "not-a-boolean"):
+                with (
+                    self.subTest(enabled=enabled, inherited=inherited),
+                    tempfile.TemporaryDirectory() as temporary,
+                ):
+                    root = Path(temporary)
+                    dataset, _, _ = cached_result_fixture(root)
+                    binary = root / "fixture-binary"
+                    binary.write_bytes(b"fixture binary\n")
+                    args = evaluator.argparse.Namespace(
+                        dataset=dataset,
+                        binary=binary,
+                        mode="hash",
+                        output=root / "result.json",
+                        source_commit="a" * 40,
+                        **{
+                            **contracts.EVALUATION_DEFAULTS,
+                            "capture_reranker": enabled,
+                        },
+                    )
+                    spawned = []
+
+                    def run(command, **kwargs):
+                        env = kwargs.get("env")
+                        if env is not None:
+                            spawned.append((list(command), dict(env)))
+                        output = "fixture version\n" if "--version" in command else "[]"
+                        if "--status" in command:
+                            output = json.dumps(
+                                [
+                                    {
+                                        "root": str(kwargs["cwd"]),
+                                        "index_size_bytes": 1,
+                                        "reranker_mode": "learned",
+                                        "reranker_model": "public-linear-reranker-v2",
+                                    }
+                                ]
+                            )
+                        return evaluator.subprocess.CompletedProcess(
+                            command, 0, stdout=output, stderr=""
+                        )
+
+                    def popen(command, **kwargs):
+                        env = kwargs["env"]
+                        spawned.append((list(command), dict(env)))
+                        process = mock.Mock(pid=123, returncode=0)
+                        if "--daemon" in command:
+                            endpoint = evaluator.daemon_endpoint_path(
+                                Path(env["IVYGREP_HOME"])
+                            )
+                            endpoint.parent.mkdir(parents=True, exist_ok=True)
+                            endpoint.touch()
+                            process.poll.return_value = None
+                            process.wait.return_value = 0
+                        else:
+                            record = native_capture_record(query=command[-1])
+                            record.update(
+                                status="skipped",
+                                reason="route-not-learned",
+                                candidates=[],
+                            )
+                            process.communicate.return_value = (
+                                b"[]\n",
+                                (
+                                    contracts.CAPTURE_PREFIX + json.dumps(record) + "\n"
+                                ).encode(),
+                            )
+                        return process
+
+                    environment = (
+                        {}
+                        if inherited is None
+                        else {"IVYGREP_RERANKER_CAPTURE": inherited}
+                    )
+                    with (
+                        mock.patch.dict(evaluator.os.environ, environment, clear=True),
+                        mock.patch.object(
+                            evaluator,
+                            "runtime_metadata",
+                            return_value={"machine": "fixture"},
+                        ),
+                        mock.patch.object(evaluator.subprocess, "run", side_effect=run),
+                        mock.patch.object(
+                            evaluator.subprocess, "Popen", side_effect=popen
+                        ),
+                    ):
+                        result = evaluator.evaluate(args)
+
+                    request = result["execution_provenance"]["request"]
+                    digest = result["execution_provenance"]["request_sha256"]
+                    reference = fingerprints.setdefault(enabled, digest)
+                    query_spawns = [
+                        (command, env)
+                        for command, env in spawned
+                        if command[-1] == "query"
+                    ]
+                    self.assertTrue(query_spawns)
+                    for command, env in query_spawns + spawned:
+                        self.assertEqual(
+                            env.get("IVYGREP_RERANKER_CAPTURE"),
+                            "1" if enabled else None,
+                            command,
+                        )
+                    self.assertEqual(
+                        any("--daemon" in command for command, _ in spawned),
+                        not enabled,
+                    )
+                    self.assertEqual(
+                        result["measurement_scope"],
+                        "native-training-capture" if enabled else "retrieval-benchmark",
+                    )
+                    self.assertEqual(
+                        result["warm_query_path"],
+                        "local-process-native-capture" if enabled else "daemon",
+                    )
+                    self.assertIs(
+                        request["environment"]["settings"]["IVYGREP_RERANKER_CAPTURE"],
+                        enabled,
+                    )
+                    self.assertEqual(digest, reference)
+                    contracts.validate_execution(result, request)
+        self.assertNotEqual(fingerprints[False], fingerprints[True])
+
     def test_public_selection_rejects_changed_profile_sampling(self):
         with tempfile.TemporaryDirectory() as temporary:
             dataset, _, result = cached_result_fixture(Path(temporary))

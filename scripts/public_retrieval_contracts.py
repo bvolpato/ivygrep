@@ -230,7 +230,6 @@ INTEGER_ENVIRONMENT = (
 )
 FLAG_ENVIRONMENT = (
     "IVYGREP_ENHANCE_ON_BATTERY",
-    "IVYGREP_RERANKER_CAPTURE",
     "TOKENIZERS_PARALLELISM",
     "HF_HUB_OFFLINE",
     "TRANSFORMERS_OFFLINE",
@@ -292,6 +291,7 @@ def safe_environment(
         if reranker in {"deterministic", "disabled", "off"}
         else "learned",
         "IVYGREP_ENHANCE_MAX_LOAD_RATIO": 0.0,
+        "IVYGREP_RERANKER_CAPTURE": capture_reranker,
         "IVYGREP_DISABLE_QUERY_CACHE": "IVYGREP_DISABLE_QUERY_CACHE" in environment,
         "IVYGREP_NEURAL_FOREGROUND_ACCELERATOR": (
             "cpu"
@@ -311,11 +311,7 @@ def safe_environment(
             raise ValueError(f"invalid numeric benchmark setting: {name}")
         values[name] = int(raw)
     for name in FLAG_ENVIRONMENT:
-        raw = (
-            "1"
-            if name == "IVYGREP_RERANKER_CAPTURE" and capture_reranker
-            else environment.get(name)
-        )
+        raw = environment.get(name)
         if raw is not None and raw.strip().lower() not in {
             "",
             "0",
