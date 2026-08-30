@@ -11,6 +11,11 @@
       "commit": "106e827405c968597da938f6b373d30183918869"
     }
   },
+  "reranker_fit_ledger": {
+    "model": "reranker_model.json",
+    "path": "reranker_fit_query_ids.json",
+    "sha256": "9922bf01e102a8a0b3d680c555d2ce3452f02657e2228a22e1ea1e91d7d105d3"
+  },
   "profiles": {
     "model-bakeoff": {
       "description": "Deterministic 100-query, approximately 1,000-document screening sample for comparing local embedding profiles before full-matrix promotion.",
@@ -77,6 +82,7 @@
       }
     },
     "reranker-fit": {
+      "query_role": "fit",
       "description": "Deterministic half of public-core queries used to fit the learned reranker; query IDs in reranker-eval are disjoint.",
       "minimum_queries": 450,
       "tasks": [
@@ -115,7 +121,8 @@
       }
     },
     "reranker-eval": {
-      "description": "Held-out deterministic half of public-core queries used only for final learned-reranker acceptance.",
+      "query_role": "fit-disjoint-diagnostic",
+      "description": "Separately named model-fit-disjoint query diagnostic. Actual IDs are checked against the model-bound fit ledger; it does not replace the public-core release gate.",
       "minimum_queries": 450,
       "tasks": [
         "codetrans-dl",
@@ -153,7 +160,8 @@
       }
     },
     "public-core": {
-      "description": "Four compact public CoIR tasks with 1,000 held-out queries across natural-language, code-to-code, and multilingual retrieval.",
+      "query_role": "regression",
+      "description": "Four compact public CoIR tasks with 1,000 regression queries across natural-language, code-to-code, and multilingual retrieval. Includes model-fit queries; not an unseen-query generalization set.",
       "minimum_queries": 1000,
       "tasks": [
         "codetrans-dl",

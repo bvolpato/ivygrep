@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import hashlib
 import json
 import math
@@ -12,51 +13,10 @@ import random
 import subprocess
 
 import eval_code_retrieval
+import public_retrieval_contracts as contracts
 
 
-FEATURE_NAMES = (
-    "log_total_score",
-    "reciprocal_rank",
-    "hit_count",
-    "source_count",
-    "source_lexical",
-    "source_semantic",
-    "source_literal",
-    "source_path",
-    "source_symbol",
-    "query_preview_coverage",
-    "query_path_coverage",
-    "exact_query_preview",
-    "exact_query_path",
-    "support_path",
-    "primary_source",
-    "shallow_path",
-    "query_length",
-    "preview_length",
-    "lexical_semantic",
-    "literal_exact",
-    "semantic_only",
-    "score_preview_coverage",
-    "rank_preview_coverage",
-    "short_preview_coverage",
-    "medium_preview_coverage",
-    "long_preview_coverage",
-    "short_semantic",
-    "long_semantic",
-    "short_literal",
-    "long_literal",
-    "preview_term_precision",
-    "preview_term_f1",
-    "weighted_preview_coverage",
-    "informative_preview_coverage",
-    "long_term_preview_coverage",
-    "numeric_preview_coverage",
-    "query_bigram_preview_coverage",
-    "query_line_preview_coverage",
-    "path_term_f1",
-    "natural_language_preview_f1",
-    "code_query_line_coverage",
-)
+FEATURE_NAMES = contracts.RERANK_FEATURE_SCHEMA
 
 UNINFORMATIVE_TERMS = {
     "and",
@@ -251,7 +211,26 @@ def query_shape(terms: list[str], query: str) -> tuple[float, float]:
 
 
 def is_support_path(path: str) -> bool:
-    return eval_code_retrieval.is_support_path(path)
+    # This is the native model feature, not the broader benchmark spam metric.
+    return any(
+        part
+        in {
+            "tools",
+            "tooling",
+            "scripts",
+            "script",
+            "examples",
+            "example",
+            "samples",
+            "sample",
+            "demos",
+            "demo",
+            "bench",
+            "benches",
+            "benchmarks",
+        }
+        for part in path.split("/")
+    )
 
 
 def feature_vector(query: str, candidate: dict, rank: int) -> list[float]:
@@ -344,47 +323,253 @@ def parse_pair(value: str) -> tuple[Path, Path]:
 def load_examples(pairs: list[tuple[Path, Path]]) -> tuple[list[dict], list[dict]]:
     examples = []
     provenance = []
+    datasets_seen = set()
     for dataset, result_path in pairs:
         result = json.loads(result_path.read_text(encoding="utf-8"))
-        queries = {
-            str(query["_id"]): str(query.get("text") or query.get("query") or "")
-            for query in eval_code_retrieval.load_jsonl(dataset / "queries.jsonl")
-        }
+        if dataset.name in datasets_seen:
+            raise ValueError("training requires one native capture result per dataset")
+        datasets_seen.add(dataset.name)
+        capture_contract = result.get("native_capture_contract") or {}
+        if (
+            type(capture_contract.get("schema_version")) is not int
+            or capture_contract.get("schema_version") != 1
+            or capture_contract.get("stage") != contracts.CAPTURE_STAGE
+            or capture_contract.get("transport") != "fresh-process-stderr"
+            or capture_contract.get("ranking_context_lines") != 2
+            or capture_contract.get("feature_schema") != list(FEATURE_NAMES)
+        ):
+            raise ValueError(
+                "native pre-learned capture is required; legacy deterministic or learned grouped scores "
+                "are ambiguous. Recollect with --capture-reranker and a capture-capable binary"
+            )
+        request = result.get("execution_provenance", {}).get("request", {})
+        if (
+            not request.get("options", {}).get("capture_reranker")
+            or result.get("query_expansion") != "none"
+            or result.get("measurement_scope") != "native-training-capture"
+        ):
+            raise ValueError(
+                "training requires explicit native capture without query expansion"
+            )
+        contracts.validate_execution(result, request)
+        if (
+            result.get("dataset") != dataset.name
+            or request.get("dataset") != dataset.name
+            or contracts.dataset_fingerprint(dataset) != request.get("dataset_content")
+        ):
+            raise ValueError("training dataset differs from the native capture inputs")
+        if result.get("query_text_limit") != request["options"]["max_query_chars"]:
+            raise ValueError("training query limit differs from native execution")
+        query_rows = eval_code_retrieval.selected_queries(
+            eval_code_retrieval.load_jsonl(dataset / "queries.jsonl"),
+            request["options"]["query_id"],
+        )
+        queries = {str(query["_id"]): query for query in query_rows}
+        details = result.get("details", [])
+        detail_ids = [str(detail["query_id"]) for detail in details]
+        if (
+            len(queries) != len(query_rows)
+            or len(detail_ids) != len(set(detail_ids))
+            or set(detail_ids) != set(queries)
+            or result.get("queries") != len(details)
+        ):
+            raise ValueError(
+                "native capture query records are incomplete or duplicated"
+            )
+        receipt_name = capture_contract.get("receipt_directory", "")
+        if (
+            not receipt_name
+            or Path(receipt_name).name != receipt_name
+            or receipt_name in {".", ".."}
+        ):
+            raise ValueError(
+                "native capture receipt directory must be a sibling basename"
+            )
+        receipts = result_path.parent / receipt_name
+        path_to_id = eval_code_retrieval.corpus_path_map(dataset)
+        source_provenance = json.loads(
+            (dataset / "provenance.json").read_text(encoding="utf-8")
+        )
+        query_repository = (source_provenance.get("query_corpus") or {}).get(
+            "repository", f"dataset:{dataset.name}"
+        )
         qrels = eval_code_retrieval.load_qrels(dataset / "qrels.tsv")
-        for detail in result["details"]:
+        skipped = []
+        fit_ids = []
+        for query_number, detail in enumerate(details):
             query_id = str(detail["query_id"])
+            text = eval_code_retrieval.query_text(
+                queries[query_id], result.get("query_text_limit")
+            )
+            capture = detail.get("native_capture") or {}
+            name = capture.get("receipt_name", "")
+            if name != f"q{query_number:06d}":
+                raise ValueError("native capture receipt name is invalid")
+            receipt = receipts / name
+            command = json.loads(
+                receipt.with_suffix(".command.json").read_text(encoding="utf-8")
+            )
+            exit_status = json.loads(
+                receipt.with_suffix(".exit.json").read_text(encoding="utf-8")
+            )
+            stderr_path = receipt.with_suffix(".stderr.log")
+            stdout_path = receipt.with_suffix(".stdout.json")
+            if (
+                command.get("process_id") != capture.get("process_id")
+                or command.get("query") != text
+                or exit_status
+                != {"process_id": capture.get("process_id"), "returncode": 0}
+                or sha256_file(stderr_path) != capture.get("stderr_sha256")
+                or sha256_file(stdout_path) != capture.get("stdout_sha256")
+            ):
+                raise ValueError(
+                    "native capture process/raw-output provenance is missing or inconsistent"
+                )
+            record = contracts.parse_native_capture(
+                stderr_path.read_text(encoding="utf-8"), text, capture["process_id"]
+            )
+            if record != capture.get("record"):
+                raise ValueError(
+                    "native capture features differ from the original stderr record"
+                )
+            document_ids = eval_code_retrieval.captured_document_ids(
+                record, Path(command["cwd"]), path_to_id
+            )
+            if document_ids != capture.get("candidate_document_ids"):
+                raise ValueError(
+                    "native capture document mapping differs from the indexed corpus"
+                )
+            if record["status"] == "skipped":
+                skipped.append({"query_id": query_id, "reason": record["reason"]})
+                continue
+            if record["model_id"] != result["index_configuration"].get(
+                "reranker_model"
+            ):
+                raise ValueError(
+                    "native capture model differs from observed runtime identity"
+                )
             candidates = []
-            for rank, candidate in enumerate(detail.get("ranked_hits", [])):
+            for candidate, document_id in zip(
+                record["candidates"], document_ids, strict=True
+            ):
                 candidates.append(
                     {
-                        "document_id": str(candidate["document_id"]),
-                        "features": feature_vector(queries[query_id], candidate, rank),
-                        "grade": qrels.get(query_id, {}).get(
-                            str(candidate["document_id"]), 0
-                        ),
-                        "rank": rank,
+                        "document_id": document_id,
+                        "features": list(candidate["native_features"]),
+                        "grade": qrels.get(query_id, {}).get(document_id, 0),
+                        "rank": candidate["baseline_rank"],
                     }
                 )
             if candidates:
                 examples.append(
                     {
                         "dataset": dataset.name,
+                        "query_repository": query_repository,
                         "query_id": query_id,
-                        "query": queries[query_id],
+                        "query": text,
                         "candidates": candidates,
                         "judgments": qrels.get(query_id, {}),
                     }
                 )
+                fit_ids.append(query_id)
+        if (
+            capture_contract.get("applied_queries") != len(fit_ids)
+            or capture_contract.get("skipped_queries") != len(skipped)
+            or capture_contract.get("skip_reasons")
+            != dict(Counter(row["reason"] for row in skipped))
+        ):
+            raise ValueError(
+                "native capture eligibility totals differ from recorded queries"
+            )
         provenance.append(
             {
                 "dataset": dataset.name,
                 "dataset_provenance_sha256": sha256_file(dataset / "provenance.json"),
+                "dataset_provenance_canonical_sha256": contracts.pretty_json_sha256(
+                    source_provenance
+                ),
                 "result_sha256": sha256_file(result_path),
                 "binary": result["binary"],
-                "queries": result["queries"],
+                "queries": len(fit_ids),
+                "query_repository": query_repository,
+                "observed_queries": result["queries"],
+                "fit_query_ids": sorted(fit_ids),
+                "skipped_queries": skipped,
+                "native_capture_schema_version": 1,
             }
         )
     return examples, provenance
+
+
+def ensure_fit_disjoint(training: list[dict], evaluation: list[dict]) -> None:
+    def key(example):
+        return (
+            example.get("query_repository", example["dataset"]),
+            example["query_id"],
+        )
+
+    overlap = {key(example) for example in training} & {
+        key(example) for example in evaluation
+    }
+    if overlap:
+        raise ValueError(
+            f"evaluation overlaps {len(overlap)} actual native model-fit query IDs"
+        )
+
+
+def write_training_json(path: Path, value: dict) -> None:
+    """Keep checksum-bound model and ledger bytes identical across platforms."""
+    path.write_text(
+        json.dumps(value, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+
+def write_fit_ledger(
+    report: dict, model_path: Path, pairs: list[tuple[Path, Path]], output: Path
+) -> None:
+    sources = {source["dataset"]: source for source in report["training"]["sources"]}
+    records = []
+    for dataset, _ in pairs:
+        source = sources[dataset.name]
+        provenance = json.loads(
+            (dataset / "provenance.json").read_text(encoding="utf-8")
+        )
+        if not (provenance.get("query_corpus") or {}).get("repository"):
+            raise ValueError(
+                "fit-ledger output requires repository-qualified query provenance"
+            )
+        if (
+            sha256_file(dataset / "provenance.json")
+            != source["dataset_provenance_sha256"]
+            or contracts.pretty_json_sha256(provenance)
+            != source["dataset_provenance_canonical_sha256"]
+        ):
+            raise ValueError(
+                "training dataset provenance changed before fit-ledger output"
+            )
+        ids = source["fit_query_ids"]
+        records.append(
+            {
+                "dataset": dataset.name,
+                "dataset_provenance_sha256": source["dataset_provenance_sha256"],
+                "result_sha256": source["result_sha256"],
+                "provenance": provenance,
+                "query_ids": ids,
+                "query_ids_sha256": contracts.pretty_json_sha256(ids),
+            }
+        )
+    ledger = {
+        "schema_version": 1,
+        "model_id": report["model_id"],
+        "model_sha256": sha256_file(model_path),
+        "model_training_commit": report["training"]["ivygrep_commit"],
+        "queries": report["training"]["queries"],
+        "sources": records,
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    write_training_json(output, ledger)
 
 
 def split_examples(examples: list[dict]) -> tuple[list[dict], list[dict]]:
@@ -534,9 +719,25 @@ def main() -> int:
     parser.add_argument("--minimum-relative-gain", type=float, default=0.05)
     parser.add_argument("--maximum-task-loss", type=float, default=0.02)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--fit-ledger-output",
+        type=Path,
+        help="Write the exact native fit-ID ledger bound to the newly written model.",
+    )
     args = parser.parse_args()
     pairs = [parse_pair(value) for value in args.pair]
     examples, provenance = load_examples(pairs)
+    if not examples:
+        raise ValueError(
+            "native captures contain no applied pre-learned candidate pools; inspect recorded skipped reasons"
+        )
+    evaluation_examples = None
+    evaluation_provenance = None
+    if args.evaluation_pair:
+        evaluation_examples, evaluation_provenance = load_examples(
+            [parse_pair(value) for value in args.evaluation_pair]
+        )
+        ensure_fit_disjoint(examples, evaluation_examples)
     train, validation = split_examples(examples)
     if not train or not validation:
         raise ValueError("training and validation splits must both be non-empty")
@@ -579,6 +780,7 @@ def main() -> int:
             "train_queries": len(train),
             "validation_queries": len(validation),
             "sources": provenance,
+            "candidate_scope": "native pre-learned accepted files; skipped runtime routes are recorded, not reconstructed",
             "selected_hyperparameters": {
                 "learning_rate": selected["learning_rate"],
                 "regularization": selected["regularization"],
@@ -590,11 +792,7 @@ def main() -> int:
             "learned_all": evaluate(examples, weights),
         },
     }
-    if args.evaluation_pair:
-        evaluation_pairs = [
-            parse_pair(value) for value in args.evaluation_pair
-        ]
-        evaluation_examples, evaluation_provenance = load_examples(evaluation_pairs)
+    if evaluation_examples is not None:
         report["evaluation"] = evaluation_report(
             evaluation_examples,
             evaluation_provenance,
@@ -602,10 +800,9 @@ def main() -> int:
             args.minimum_relative_gain,
             args.maximum_task_loss,
         )
-    args.output.write_text(
-        json.dumps(report, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    write_training_json(args.output, report)
+    if args.fit_ledger_output:
+        write_fit_ledger(report, args.output, pairs, args.fit_ledger_output)
     summary = {"training": report["training"]}
     if "evaluation" in report:
         summary["evaluation"] = report["evaluation"]

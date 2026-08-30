@@ -22,6 +22,7 @@ import sys
 
 import eval_code_retrieval
 import export_public_retrieval
+import public_retrieval_contracts as contracts
 
 
 QUALITY_METRICS = (
@@ -136,7 +137,9 @@ def validate_profile_query_count(
     minimum = manifest["profiles"][profile]["minimum_queries"]
     query_count = sum(item["counts"]["queries"] for item in provenances)
     if query_count < minimum:
-        raise ValueError(f"profile {profile} has {query_count} queries, below {minimum}")
+        raise ValueError(
+            f"profile {profile} has {query_count} queries, below {minimum}"
+        )
 
 
 def run_evaluation(
@@ -146,6 +149,7 @@ def run_evaluation(
     mode: str,
     output: Path,
     max_query_chars: int | None,
+    source_commit: str | None = None,
 ) -> dict:
     command = [
         sys.executable,
@@ -161,6 +165,8 @@ def run_evaluation(
     ]
     if max_query_chars is not None:
         command.extend(["--max-query-chars", str(max_query_chars)])
+    if source_commit:
+        command.extend(["--source-commit", source_commit])
     subprocess.run(
         command,
         cwd=root,
@@ -292,7 +298,13 @@ def validate_reused_result(
     mode: str,
     binary_sha256: str,
     max_query_chars: int | None,
+    *,
+    expected_request: dict | None = None,
 ) -> None:
+    if not isinstance(result.get("execution_provenance"), dict):
+        raise ValueError(
+            "legacy result lacks an execution fingerprint; rerun instead of relabeling it"
+        )
     provenance = json.loads((dataset / "provenance.json").read_text(encoding="utf-8"))
     if result.get("dataset") != dataset.name or result.get("mode") != mode:
         raise ValueError(f"reused result does not match {dataset.name}/{mode}")
@@ -308,6 +320,28 @@ def validate_reused_result(
         raise ValueError(
             f"reused result has different query text limit for {dataset.name}/{mode}"
         )
+    request = expected_request or eval_code_retrieval.expected_execution_request(
+        dataset, binary_sha256, mode, max_query_chars
+    )
+    contracts.validate_execution(result, request)
+    details = result.get("details")
+    queries = eval_code_retrieval.selected_queries(
+        eval_code_retrieval.load_jsonl(dataset / "queries.jsonl"),
+        request["options"]["query_id"],
+    )
+    expected_ids = [str(query["_id"]) for query in queries]
+    actual_ids = (
+        [str(detail.get("query_id")) for detail in details]
+        if isinstance(details, list)
+        else []
+    )
+    if (
+        not isinstance(details, list)
+        or result.get("queries") != len(details)
+        or len(expected_ids) != len(set(expected_ids))
+        or sorted(actual_ids) != sorted(expected_ids)
+    ):
+        raise ValueError("reused result lacks complete, unambiguous per-query records")
 
 
 def main() -> int:
@@ -365,6 +399,11 @@ def main() -> int:
         for dataset in dataset_paths
     ]
     validate_profile_query_count(manifest, args.profile, provenances)
+    for dataset, provenance in zip(dataset_paths, provenances, strict=True):
+        contracts.validate_public_selection(manifest, args.profile, dataset, provenance)
+    fit_query_audit = contracts.audit_public_profile(
+        manifest, args.profile, dataset_paths, args.manifest
+    )
     subprocess.run(
         [
             sys.executable,
@@ -376,9 +415,30 @@ def main() -> int:
     )
 
     results = []
+    execution_source = benchmark_revision(root, args.source_commit)
+    runtime = eval_code_retrieval.runtime_metadata()
+    harness = contracts.execution_harness(root)
+    dataset_content = {
+        dataset.name: contracts.dataset_fingerprint(dataset)
+        for dataset in dataset_paths
+    }
+    requests = {
+        (dataset.name, mode): eval_code_retrieval.expected_execution_request(
+            dataset,
+            binary_sha256,
+            mode,
+            max_query_chars,
+            runtime=runtime,
+            harness=harness,
+            dataset_content=dataset_content[dataset.name],
+        )
+        for dataset in dataset_paths
+        for mode in modes
+    }
     for run_number in range(1, args.runs + 1):
         for task, dataset in zip(tasks, dataset_paths, strict=True):
             for mode in modes:
+                expected_request = requests[(dataset.name, mode)]
                 result_path = args.work_root / f"{task}-{mode}-run-{run_number}.json"
                 if args.reuse_results and result_path.is_file():
                     result = json.loads(result_path.read_text(encoding="utf-8"))
@@ -388,7 +448,16 @@ def main() -> int:
                         mode,
                         binary_sha256,
                         max_query_chars,
+                        expected_request=expected_request,
                     )
+                    if (
+                        args.source_commit
+                        and result["execution_provenance"]["source_commit"]
+                        != args.source_commit
+                    ):
+                        raise ValueError(
+                            "reused execution source differs from explicit --source-commit; cached provenance cannot be relabeled"
+                        )
                 else:
                     result = run_evaluation(
                         root,
@@ -397,25 +466,31 @@ def main() -> int:
                         mode,
                         result_path,
                         max_query_chars,
+                        execution_source,
                     )
+                    contracts.validate_execution(result, expected_request)
                 result["run"] = run_number
                 results.append(result)
 
-    matrix = {
-        "schema_version": 1,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "ivygrep_commit": benchmark_revision(root, args.source_commit),
-        "manifest_sha256": sha256_file(args.manifest),
+    if contracts.execution_harness(root) != harness:
+        raise ValueError("execution harness changed during matrix assembly")
+    for dataset in dataset_paths:
+        if contracts.dataset_fingerprint(dataset) != dataset_content[dataset.name]:
+            raise ValueError("dataset content changed during matrix assembly")
+    aggregation = {
+        "source_commit": benchmark_revision(root, None),
         "runtime": eval_code_retrieval.runtime_metadata(),
-        "harness_sha256": {
-            path.name: sha256_file(path)
-            for path in (
-                root / "scripts" / "eval_code_retrieval.py",
-                root / "scripts" / "export_public_retrieval.py",
-                root / "scripts" / "run_public_benchmark_matrix.py",
-            )
-        },
+        "harness_sha256": contracts.execution_harness(root),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    matrix = {
+        "schema_version": 2,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        **contracts.execution_summary(results),
+        "aggregation_provenance": aggregation,
+        "manifest_sha256": sha256_file(args.manifest),
         "profile": args.profile,
+        "fit_query_audit": fit_query_audit,
         "query_text_limit": max_query_chars,
         "tasks": tasks,
         "modes": modes,
@@ -468,6 +543,8 @@ def main() -> int:
         ],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    if sha256_file(binary) != binary_sha256:
+        raise ValueError("binary changed during matrix assembly")
     args.output.write_text(
         json.dumps(matrix, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",

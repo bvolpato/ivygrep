@@ -1,1 +1,3 @@
 web/dist/** -whitespace
+benchmarks/public/reranker_model.json text eol=lf
+benchmarks/public/reranker_fit_query_ids.json text eol=lf

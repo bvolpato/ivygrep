@@ -18,6 +18,8 @@ import random
 import shutil
 from typing import Iterable
 
+import public_retrieval_contracts as contracts
+
 
 LANGUAGE_EXTENSIONS = {
     "c": "c",
@@ -338,6 +340,13 @@ def main() -> int:
         "queries": sum(item["counts"]["queries"] for item in exported),
         "qrels": sum(item["counts"]["qrels"] for item in exported),
     }
+    if args.profile:
+        summary["fit_query_audit"] = contracts.audit_public_profile(
+            manifest,
+            args.profile,
+            [args.output / task for task in tasks],
+            args.manifest,
+        )
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0
 

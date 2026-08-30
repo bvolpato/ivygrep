@@ -1,11 +1,13 @@
 import importlib.util
 from unittest import mock
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "eval_code_retrieval.py"
+sys.path.insert(0, str(SCRIPT.parent))
 SPEC = importlib.util.spec_from_file_location("eval_code_retrieval", SCRIPT)
 eval_code_retrieval = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader is not None
@@ -146,6 +148,26 @@ class RetrievalMetricsTest(unittest.TestCase):
             ]
         )
         self.assertEqual(fused[0]["file_path"], "b.md")
+
+    def test_single_query_keeps_native_file_score(self):
+        native = {"file_path": "src/request.rs", "total_score": 3.0, "hit_count": 2}
+        output = eval_code_retrieval.fuse_search_outputs([[native]])
+        self.assertEqual(output[0]["total_score"], 3.0)
+        self.assertEqual(native["total_score"], 3.0)
+
+    def test_expansion_ranking_does_not_replace_native_score(self):
+        output = eval_code_retrieval.fuse_search_outputs(
+            [
+                [
+                    {"file_path": "a.rs", "total_score": 8.0},
+                    {"file_path": "b.rs", "total_score": 3.0},
+                ],
+                [{"file_path": "b.rs", "total_score": 9.0}],
+            ]
+        )
+        self.assertEqual(output[0]["file_path"], "b.rs")
+        self.assertEqual(output[0]["total_score"], 3.0)
+        self.assertAlmostEqual(output[0]["fusion_score"], 1 / 62 + 1 / 61)
 
     def test_fuse_search_outputs_can_anchor_original_ranking(self):
         outputs = [
