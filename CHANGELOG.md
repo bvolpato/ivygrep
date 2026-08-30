@@ -4,6 +4,10 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in `IVYGREP_RERANKER_CAPTURE=1` emits versioned native pre-learned candidates and features to stderr for diagnostics and training. Records include query text and source previews; normal search output is unchanged.
+
 ### Performance
 - Vector count and availability checks read native headers and stream node levels without allocating native views or key lookup tables, reducing bookkeeping memory. The fast path checks structural bounds, not full payload integrity; deep health checks and USearch serialization are unchanged. Hash enhancement rebuilds dimension-mismatched stores before filling missing keys.
 - Reference and caller searches reuse one search context across bounded candidate-widening passes, avoiding repeated store setup when early matches are rejected. The existing per-request source-matching cache is unchanged.
@@ -25,6 +29,7 @@ All notable changes to ivygrep are documented in this file.
 - Malformed optional neural metadata no longer disables literal/hash searches or makes empty queries rebuild healthy primary stores. Doctor reports the problem and removes only the invalid neural tier under its locks; metadata publication uses atomic replacement.
 - Neural enhancement checkpoints after crossing the 16,384-chunk interval even when the batch size does not divide it, preserving progress for interrupted runs with custom batch sizes.
 - Search candidate limits count eligible chunks before ignored, shadowed, or filtered rows can displace visible matches. Explicit Boolean queries constrain every retrieval source to a bounded pool satisfying the original parsed query; unsupported structured syntax returns an error instead of relaxed results. Ordinary query expansion is unchanged.
+- Learned file ranking uses fixed two-line context evidence, so `-C` changes display previews and spans without changing learned order. Default-context results, model weights, routing, candidate budgets, and rerank gates are unchanged.
 - Swift and Objective-C use valid Tree-sitter capture queries, preserving method bodies, inline declarations, and nested/extension/category owners. Parsed strings and comments no longer create heuristic symbols in these languages. Index format v23 rebuilds existing indexes, including unchanged files and their vectors.
 - Restored filesystem watchers reconcile edits, additions, and deletions made while the daemon was stopped against the persisted Merkle snapshot before searches trust the index. Watches are registered before reconciliation, preserving edits made during the scan without rebuilding unchanged files.
 - Fresh and recreated worktree overlays publish their stores, base reference, and snapshot together, with completion metadata last. Failed publication retains the prior overlay and retries the full cross-base delta instead of reporting a successful no-op with missing lexical results.

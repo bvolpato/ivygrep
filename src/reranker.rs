@@ -1,8 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::protocol::SearchHit;
 
@@ -92,6 +93,24 @@ const NATURAL_LANGUAGE_TERMS: &[&str] = &[
 ];
 
 const MAX_RERANK_PREVIEW_BYTES: usize = 12_000;
+// Keep the existing default-context feature distribution independent of the
+// number of surrounding lines requested for display.
+pub(crate) const RANKING_CONTEXT_LINES: usize = 2;
+
+pub(crate) trait RerankInput {
+    fn ranking_hit(&self) -> &SearchHit;
+    fn ranking_hit_mut(&mut self) -> &mut SearchHit;
+}
+
+impl RerankInput for SearchHit {
+    fn ranking_hit(&self) -> &SearchHit {
+        self
+    }
+
+    fn ranking_hit_mut(&mut self) -> &mut SearchHit {
+        self
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct LearnedModel {
@@ -125,6 +144,71 @@ struct FileCandidate {
     baseline_rank: usize,
     learned_score: f32,
     target_score: f32,
+}
+
+#[derive(Serialize)]
+struct CapturedCandidate<'a> {
+    file_path: &'a Path,
+    total_score: f32,
+    hit_count: usize,
+    sources: Vec<&'a str>,
+    canonical_preview: &'a str,
+    baseline_rank: usize,
+    native_features: Vec<f32>,
+}
+
+#[derive(Serialize)]
+struct RerankerCapture<'a> {
+    schema_version: u32,
+    process_id: u32,
+    stage: &'static str,
+    status: &'static str,
+    reason: Option<&'static str>,
+    query: &'a str,
+    model_id: Option<&'a str>,
+    ranking_context_lines: usize,
+    feature_schema: &'static [&'static str],
+    candidates: Vec<CapturedCandidate<'a>>,
+}
+
+impl<'a> RerankerCapture<'a> {
+    fn new(query: &'a str) -> Self {
+        Self {
+            schema_version: 1,
+            process_id: std::process::id(),
+            stage: "pre-learned-accepted-files",
+            status: "skipped",
+            reason: None,
+            query,
+            model_id: None,
+            ranking_context_lines: RANKING_CONTEXT_LINES,
+            feature_schema: FEATURE_SCHEMA,
+            candidates: Vec::new(),
+        }
+    }
+
+    fn emit(&self) {
+        // One opt-in diagnostic record, separate from normal search output.
+        // A collector must reject a missing or incomplete record, not reuse an
+        // earlier query's evidence. Search itself remains best effort here.
+        let mut record = b"IVYGREP_RERANKER_CAPTURE\t".to_vec();
+        if serde_json::to_writer(&mut record, self).is_ok() {
+            record.push(b'\n');
+            let _ = std::io::stderr().lock().write_all(&record);
+        }
+    }
+}
+
+fn capture_requested() -> bool {
+    std::env::var_os("IVYGREP_RERANKER_CAPTURE").is_some_and(|value| value == "1")
+}
+
+pub(crate) fn capture_skipped(query: &str, reason: &'static str) {
+    if capture_requested() {
+        let mut record = RerankerCapture::new(query);
+        record.reason = Some(reason);
+        record.emit();
+    }
 }
 
 static MODEL: OnceLock<Result<LearnedModel, String>> = OnceLock::new();
@@ -211,27 +295,36 @@ pub(crate) fn cache_identity() -> String {
     }
 }
 
-pub(crate) fn rerank_hits(query: &str, hits: &mut [SearchHit]) {
+pub(crate) fn rerank_hits<T: RerankInput>(query: &str, hits: &mut [T]) {
     if configured_mode().0 == Mode::Deterministic {
+        capture_skipped(query, "deterministic-mode");
         return;
     }
     let file_count = hits
         .iter()
-        .map(|hit| &hit.file_path)
+        .map(|hit| &hit.ranking_hit().file_path)
         .collect::<HashSet<_>>()
         .len();
     if file_count < 5 {
+        capture_skipped(query, "fewer-than-five-files");
         return;
     }
     let Ok(model) = load_model() else {
+        capture_skipped(query, "model-unavailable");
         return;
     };
-    rerank_hits_with_model(query, hits, model);
+    rerank_hits_with_model(query, hits, model, capture_requested());
 }
 
-fn rerank_hits_with_model(query: &str, hits: &mut [SearchHit], model: &LearnedModel) {
+fn rerank_hits_with_model<T: RerankInput>(
+    query: &str,
+    hits: &mut [T],
+    model: &LearnedModel,
+    capture: bool,
+) {
     let mut grouped = HashMap::<PathBuf, FileCandidate>::new();
     for (index, hit) in hits.iter().enumerate() {
+        let hit = hit.ranking_hit();
         let entry = grouped
             .entry(hit.file_path.clone())
             .or_insert_with(|| FileCandidate {
@@ -265,15 +358,46 @@ fn rerank_hits_with_model(query: &str, hits: &mut [SearchHit], model: &LearnedMo
             .then_with(|| left.path.cmp(&right.path))
     });
 
+    let mut captured_features = capture.then(|| Vec::with_capacity(files.len()));
     for (rank, candidate) in files.iter_mut().enumerate() {
         candidate.baseline_rank = rank;
         let features = feature_vector(query, candidate);
         candidate.learned_score = model
             .weights
             .iter()
-            .zip(features)
+            .zip(&features)
             .map(|(weight, feature)| weight * feature)
             .sum();
+        if let Some(captured_features) = &mut captured_features {
+            captured_features.push(features);
+        }
+    }
+    if let Some(captured_features) = captured_features {
+        let mut record = RerankerCapture::new(query);
+        record.status = "applied";
+        record.model_id = Some(&model.model_id);
+        record.candidates = files
+            .iter()
+            .zip(captured_features)
+            .map(|(candidate, native_features)| {
+                let mut sources = candidate
+                    .sources
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>();
+                sources.sort_unstable();
+                CapturedCandidate {
+                    file_path: &candidate.path,
+                    total_score: candidate.total_score,
+                    hit_count: candidate.hit_count,
+                    sources,
+                    canonical_preview: &candidate.preview,
+                    baseline_rank: candidate.baseline_rank,
+                    native_features,
+                }
+            })
+            .collect();
+        record.emit();
     }
 
     let baseline_scores = files
@@ -295,17 +419,19 @@ fn rerank_hits_with_model(query: &str, hits: &mut [SearchHit], model: &LearnedMo
         if candidate.total_score > f32::EPSILON {
             let scale = candidate.target_score / candidate.total_score;
             for index in candidate.hit_indices {
-                hits[index].score *= scale;
+                hits[index].ranking_hit_mut().score *= scale;
             }
         } else if let Some((first, rest)) = candidate.hit_indices.split_first() {
-            hits[*first].score = candidate.target_score;
+            hits[*first].ranking_hit_mut().score = candidate.target_score;
             for index in rest {
-                hits[*index].score = 0.0;
+                hits[*index].ranking_hit_mut().score = 0.0;
             }
         }
     }
 
     hits.sort_by(|left, right| {
+        let left = left.ranking_hit();
+        let right = right.ranking_hit();
         right
             .score
             .total_cmp(&left.score)
@@ -584,71 +710,59 @@ mod tests {
 
     #[test]
     fn rust_features_match_public_trainer_fixture() {
-        let candidate = FileCandidate {
-            path: PathBuf::from("src/search.rs"),
-            hit_indices: vec![0, 1],
-            total_score: 0.5,
-            hit_count: 2,
-            sources: ["lexical".to_string(), "semantic".to_string()]
-                .into_iter()
-                .collect(),
-            preview: "fn route_query() { learned_rerank(); }".to_string(),
-            baseline_rank: 0,
-            learned_score: 0.0,
-            target_score: 0.0,
-        };
-        let actual = feature_vector("route learned query", &candidate);
-        let expected = [
-            0.10136628,
-            1.0,
-            0.5,
-            0.4,
-            1.0,
-            1.0,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            1.0,
-            0.5,
-            0.15,
-            0.0031666667,
-            1.0,
-            0.0,
-            0.0,
-            0.10136628,
-            1.0,
-            1.0,
-            0.0,
-            0.0,
-            1.0,
-            0.0,
-            0.0,
-            0.0,
-            0.6,
-            0.75,
-            1.0,
-            1.0,
-            1.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-        ];
-        assert_eq!(actual.len(), expected.len());
-        for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
-            assert!(
-                (actual - expected).abs() < 1e-6,
-                "feature {} ({}) differs: {actual} != {expected}",
-                index,
-                FEATURE_SCHEMA[index],
-            );
+        #[derive(Deserialize)]
+        struct FixtureCandidate {
+            file_path: PathBuf,
+            total_score: f32,
+            hit_count: usize,
+            sources: HashSet<String>,
+            preview: String,
+        }
+        #[derive(Deserialize)]
+        struct Case {
+            name: String,
+            query: String,
+            candidate: FixtureCandidate,
+            baseline_rank: usize,
+            expected_features: Vec<f32>,
+        }
+        #[derive(Deserialize)]
+        struct Fixture {
+            schema_version: u32,
+            feature_schema: Vec<String>,
+            cases: Vec<Case>,
+        }
+        let fixture: Fixture = serde_json::from_str(include_str!(
+            "../tests/fixtures/reranker_feature_contract.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture.schema_version, 1);
+        assert_eq!(fixture.feature_schema, FEATURE_SCHEMA);
+        assert!(!fixture.cases.is_empty());
+        for case in fixture.cases {
+            let candidate = FileCandidate {
+                path: case.candidate.file_path,
+                hit_indices: Vec::new(),
+                total_score: case.candidate.total_score,
+                hit_count: case.candidate.hit_count,
+                sources: case.candidate.sources,
+                preview: case.candidate.preview,
+                baseline_rank: case.baseline_rank,
+                learned_score: 0.0,
+                target_score: 0.0,
+            };
+            let actual = feature_vector(&case.query, &candidate);
+            assert_eq!(actual.len(), case.expected_features.len());
+            for (index, (actual, expected)) in actual.iter().zip(case.expected_features).enumerate()
+            {
+                assert!(
+                    (actual - expected).abs() < 1e-6,
+                    "case {} feature {} ({}) differs: {actual} != {expected}",
+                    case.name,
+                    index,
+                    FEATURE_SCHEMA[index],
+                );
+            }
         }
     }
 
@@ -664,7 +778,7 @@ mod tests {
             ),
         ];
         let model = load_model().as_ref().expect("model should load");
-        rerank_hits_with_model("route learned query", &mut hits, model);
+        rerank_hits_with_model("route learned query", &mut hits, model, false);
         assert!(
             hits.iter()
                 .all(|hit| hit.score.is_finite() && hit.score > 0.0)
@@ -679,7 +793,7 @@ mod tests {
 
         let mut hits = vec![hit("src/unicode.rs", 1.0, &preview, &["lexical"])];
         let model = load_model().as_ref().expect("model should load");
-        rerank_hits_with_model("unicode", &mut hits, model);
+        rerank_hits_with_model("unicode", &mut hits, model, false);
 
         assert!(hits[0].score.is_finite() && hits[0].score > 0.0);
     }
@@ -710,7 +824,7 @@ mod tests {
         let started = std::time::Instant::now();
         for _ in 0..100 {
             let mut hits = template.clone();
-            rerank_hits_with_model("route learned semantic query", &mut hits, model);
+            rerank_hits_with_model("route learned semantic query", &mut hits, model, false);
         }
         let average = started.elapsed() / 100;
         assert!(

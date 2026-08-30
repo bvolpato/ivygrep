@@ -4,6 +4,7 @@ use anyhow::Result;
 
 use crate::indexer::IndexedChunk;
 use crate::protocol::SearchHit;
+use crate::reranker::RerankInput;
 use crate::search_routing::QueryRouting;
 use crate::workspace::Workspace;
 
@@ -22,6 +23,40 @@ pub(super) struct HitPresentation<'a> {
     pub(super) query: &'a PresentationQuery,
     pub(super) routing: QueryRouting,
     pub(super) neural_executed: bool,
+}
+
+// The display window travels with its canonical hit through every reorder.
+// Only the canonical fields are visible to the reranker and its tie breakers.
+pub(super) struct PreparedHit {
+    pub(super) hit: SearchHit,
+    display: Option<HitDisplay>,
+}
+
+struct HitDisplay {
+    start_line: usize,
+    end_line: usize,
+    preview: String,
+}
+
+impl PreparedHit {
+    pub(super) fn into_hit(mut self) -> SearchHit {
+        if let Some(display) = self.display {
+            self.hit.start_line = display.start_line;
+            self.hit.end_line = display.end_line;
+            self.hit.preview = display.preview;
+        }
+        self.hit
+    }
+}
+
+impl RerankInput for PreparedHit {
+    fn ranking_hit(&self) -> &SearchHit {
+        &self.hit
+    }
+
+    fn ranking_hit_mut(&mut self) -> &mut SearchHit {
+        &mut self.hit
+    }
 }
 
 pub(super) struct PresentationQuery {
@@ -50,14 +85,15 @@ impl PresentationQuery {
     }
 }
 
-pub(super) fn to_hit(
+pub(super) fn prepare_hit(
     workspace: &Workspace,
     chunk: IndexedChunk,
     score: f32,
     sources: Vec<String>,
     pre_read_file: Option<&CachedFileContent>,
     presentation: HitPresentation<'_>,
-) -> Result<SearchHit> {
+    ranking_context: Option<usize>,
+) -> Result<PreparedHit> {
     if let Some(file) = pre_read_file {
         return Ok(to_hit_from_file(
             chunk,
@@ -66,6 +102,7 @@ pub(super) fn to_hit(
             &file.content,
             &file.lines,
             presentation,
+            ranking_context,
         ));
     }
 
@@ -80,23 +117,27 @@ pub(super) fn to_hit(
                 &content,
                 &lines,
                 presentation,
+                ranking_context,
             ))
         }
-        Err(_) => Ok(SearchHit {
-            file_path: chunk.file_path,
-            start_line: chunk.start_line,
-            end_line: chunk.end_line,
-            preview: chunk.text,
-            reason: format!(
-                "route={} neural_requested={} neural_executed={}; file no longer on disk",
-                presentation.routing.intent.name(),
-                presentation.routing.use_neural,
-                presentation.neural_executed
-            ),
-            score,
-            sources,
-            neural_requested: presentation.routing.use_neural,
-            neural_executed: presentation.neural_executed,
+        Err(_) => Ok(PreparedHit {
+            hit: SearchHit {
+                file_path: chunk.file_path,
+                start_line: chunk.start_line,
+                end_line: chunk.end_line,
+                preview: chunk.text,
+                reason: format!(
+                    "route={} neural_requested={} neural_executed={}; file no longer on disk",
+                    presentation.routing.intent.name(),
+                    presentation.routing.use_neural,
+                    presentation.neural_executed
+                ),
+                score,
+                sources,
+                neural_requested: presentation.routing.use_neural,
+                neural_executed: presentation.neural_executed,
+            },
+            display: None,
         }),
     }
 }
@@ -108,7 +149,8 @@ fn to_hit_from_file(
     content: &str,
     lines: &[LineSpan],
     presentation: HitPresentation<'_>,
-) -> SearchHit {
+    ranking_context: Option<usize>,
+) -> PreparedHit {
     let HitPresentation {
         context_lines,
         query,
@@ -116,27 +158,39 @@ fn to_hit_from_file(
         neural_executed,
     } = presentation;
     if lines.is_empty() {
-        return SearchHit {
-            file_path: chunk.file_path,
-            start_line: chunk.start_line,
-            end_line: chunk.start_line,
-            preview: String::new(),
-            reason: format!(
-                "route={} neural_requested={} neural_executed={}; empty file",
-                routing.intent.name(),
-                routing.use_neural,
-                neural_executed
-            ),
-            score,
-            sources,
-            neural_requested: routing.use_neural,
-            neural_executed,
+        return PreparedHit {
+            hit: SearchHit {
+                file_path: chunk.file_path,
+                start_line: chunk.start_line,
+                end_line: chunk.start_line,
+                preview: String::new(),
+                reason: format!(
+                    "route={} neural_requested={} neural_executed={}; empty file",
+                    routing.intent.name(),
+                    routing.use_neural,
+                    neural_executed
+                ),
+                score,
+                sources,
+                neural_requested: routing.use_neural,
+                neural_executed,
+            },
+            display: None,
         };
     }
 
     let focus_line = find_focus_line(&chunk, query, content, lines);
-    let (snippet_start, snippet_end) = snippet_bounds(focus_line, context_lines, lines.len());
+    let evidence_context = ranking_context.unwrap_or(context_lines);
+    let (snippet_start, snippet_end) = snippet_bounds(focus_line, evidence_context, lines.len());
     let preview = preview_from_lines(content, lines, snippet_start, snippet_end);
+    let display = (evidence_context != context_lines).then(|| {
+        let (start_line, end_line) = snippet_bounds(focus_line, context_lines, lines.len());
+        HitDisplay {
+            start_line,
+            end_line,
+            preview: preview_from_lines(content, lines, start_line, end_line),
+        }
+    });
     let ranking_reason = summarize_reason(query, line_at(content, lines, focus_line));
     let reason = format!(
         "route={} neural_requested={} neural_executed={}; {ranking_reason}",
@@ -145,16 +199,19 @@ fn to_hit_from_file(
         neural_executed
     );
 
-    SearchHit {
-        file_path: chunk.file_path,
-        start_line: snippet_start,
-        end_line: snippet_end,
-        preview,
-        reason,
-        score,
-        sources,
-        neural_requested: routing.use_neural,
-        neural_executed,
+    PreparedHit {
+        hit: SearchHit {
+            file_path: chunk.file_path,
+            start_line: snippet_start,
+            end_line: snippet_end,
+            preview,
+            reason,
+            score,
+            sources,
+            neural_requested: routing.use_neural,
+            neural_executed,
+        },
+        display,
     }
 }
 

@@ -1,5 +1,6 @@
 // Search execution composes bounded retrieval passes. Candidate algorithms remain
 // in the parent module so each pass stays independently testable.
+use super::presentation::{PreparedHit, prepare_hit};
 use super::*;
 
 pub(crate) fn hybrid_search_with_context_and_neural_job(
@@ -692,6 +693,9 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     tracing::trace!("fuse_rrf={:?} merged={}", t0.elapsed(), merged.len());
 
     let presentation_query = PresentationQuery::from_fusion(&fusion_query);
+    let ranking_context = (matches!(routing.intent, QueryIntent::LiteralOrError)
+        && learned_reranker_enabled_by_env())
+    .then_some(crate::reranker::RANKING_CONTEXT_LINES);
 
     // Group hits by file path so we read and index each source file only once.
     let merged_len = merged.len();
@@ -708,7 +712,7 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     for (file_path, file_hits) in hits_by_file {
         let file_content = ctx.read_file_content(&file_path);
         for (chunk, score, sources) in file_hits {
-            hits.push(to_hit(
+            hits.push(prepare_hit(
                 workspace,
                 chunk,
                 score,
@@ -720,11 +724,14 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
                     routing,
                     neural_executed,
                 },
+                ranking_context,
             )?);
         }
     }
     // Re-sort since grouping by file changed the order
     hits.sort_by(|left, right| {
+        let left = &left.hit;
+        let right = &right.hit;
         right
             .score
             .total_cmp(&left.score)
@@ -735,9 +742,11 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
     if matches!(routing.intent, QueryIntent::LiteralOrError) {
         let accepted_len = hits
             .iter()
-            .position(|hit| hit.sources.iter().any(|source| source == "backfill"))
+            .position(|hit| hit.hit.sources.iter().any(|source| source == "backfill"))
             .unwrap_or(hits.len());
         crate::reranker::rerank_hits(query_text, &mut hits[..accepted_len]);
+    } else {
+        crate::reranker::capture_skipped(query_text, "route-not-learned");
     }
     tracing::trace!(
         "to_hit={:?} hits={} files_read={}",
@@ -746,5 +755,5 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
         file_count
     );
 
-    Ok(hits)
+    Ok(hits.into_iter().map(PreparedHit::into_hit).collect())
 }
