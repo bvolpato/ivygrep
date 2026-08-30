@@ -28,7 +28,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
-fn linked_workspace(parent: &Path) -> (PathBuf, PathBuf) {
+pub(super) fn linked_workspace(parent: &Path) -> (PathBuf, PathBuf) {
     let base = parent.join("base");
     let linked = parent.join("linked");
     fs::create_dir_all(&base).unwrap();
@@ -69,7 +69,7 @@ fn linked_workspace(parent: &Path) -> (PathBuf, PathBuf) {
     (base, linked)
 }
 
-fn stored_state(workspace: &Workspace, overlay: bool) -> BTreeMap<PathBuf, Vec<u8>> {
+pub(super) fn stored_state(workspace: &Workspace, overlay: bool) -> BTreeMap<PathBuf, Vec<u8>> {
     let (sqlite, tantivy, vectors) = if overlay {
         (
             workspace.overlay_sqlite_path(),

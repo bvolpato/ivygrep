@@ -142,6 +142,13 @@ safe. New directories, ignore-file changes, uncertain Git state, and similar
 cases fall back to a full walk. A clean Git workspace whose recorded repository
 state still matches can return without scanning every file.
 
+No-op shortcuts still verify primary storage: SQLite and Tantivy chunk counts
+must agree, and hash-vector headers and bounds must be readable. Worktree
+indexing checks both overlay and inherited base stores. Failed validation forces
+complete staged recovery, not a replay of an empty or partial Merkle delta.
+These checks add store-opening/counting work even when source discovery is skipped;
+they do not validate every vector payload or compare concurrent enhancement markers.
+
 Hash and neural vector deletion journals prevent stale embeddings from becoming
 visible when another store fails. Merkle state is saved only after committed
 stores and metadata agree.
@@ -170,6 +177,19 @@ vector store with an explicit `VectorTier`: the hash tier uses a sparse HNSW
 graph for cheap background builds, and the neural tier keeps USearch quality
 defaults. Vector shape cannot select the tier because the default neural profile
 shares the hash store's 256-dimensional F16 layout.
+
+Neural metadata is optional for literal and hash retrieval. Unreadable identity
+or profile metadata is reported but does not prevent those modes from loading
+healthy primary stores. Neural requests still require readable, compatible
+metadata. Doctor diagnoses malformed identities and, with `--fix`, removes only
+their derived neural artifacts after acquiring index/job locks and checking that
+enhancement is inactive. It keeps an invalid identity until cleanup finishes so
+an interrupted repair remains retryable. Neural metadata files publish through
+atomic replacement; this is not a power-loss durability guarantee.
+
+Neural enhancement saves a checkpoint after at least 16,384 new chunks since
+the previous checkpoint. A non-divisor batch size crosses that boundary rather
+than waiting to land on an exact multiple.
 
 The current on-disk format version is defined by `INDEX_FORMAT_VERSION` in
 `src/workspace.rs`. Incompatible schema, chunking, or vector-identity changes

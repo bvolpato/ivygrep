@@ -29,6 +29,8 @@ use crate::workspace::{Workspace, WorkspaceMetadata, index_path_string};
 mod compression;
 mod git_state;
 #[cfg(test)]
+mod integrity_tests;
+#[cfg(test)]
 mod overlay_tests;
 #[cfg(test)]
 mod recovery_tests;
@@ -56,7 +58,7 @@ pub use storage::{
 use storage::{
     apply_bulk_write_pragmas, apply_default_write_pragmas, apply_fresh_staging_pragmas,
     create_secondary_indexes, create_tables, create_tables_schema, ensure_hash_vector_store,
-    finalize_graph_indexes, open_storage_with_options,
+    finalize_graph_indexes,
 };
 const TANTIVY_INDEX_RETRY_ATTEMPTS: u32 = 3;
 const TANTIVY_INDEX_RETRY_BASE_DELAY_MS: u64 = 250;
@@ -492,10 +494,38 @@ fn index_workspace_with_options(
     let indexed_filter_is_current =
         workspace_index_matches_skip_gitignore(workspace, skip_gitignore);
     let index_health = workspace.quick_index_health();
-    let reset_worktree_overlay =
+    let mut reset_worktree_overlay =
         reset_worktree_overlay || (workspace.is_worktree() && index_health.needs_rebuild());
     if index_health.needs_rebuild() && (!workspace.is_worktree() || preserved_metadata.is_none()) {
         rebuild_index_storage(workspace, preserved_metadata.as_ref())?;
+    }
+    let mut rebuild_main = false;
+    if index_health.is_queryable()
+        && let Err(error) = validate_existing_index_storage(workspace)
+    {
+        tracing::warn!(
+            "storage verification failed for {}: {error:#}; rebuilding in staging",
+            workspace.root.display()
+        );
+        if workspace.has_overlay() || workspace.base_ref_path().exists() {
+            reset_worktree_overlay = true;
+        } else {
+            rebuild_main = true;
+        }
+    }
+    if workspace.base_index_dir.is_some()
+        && (workspace.has_overlay() || workspace.base_ref_path().exists())
+    {
+        let main_root = workspace
+            .main_worktree_root()
+            .context("cannot find base workspace while verifying the overlay")?;
+        let base = Workspace::resolve(&main_root)?;
+        if !base.quick_index_health().is_queryable()
+            || validate_existing_index_storage(&base).is_err()
+        {
+            index_workspace_for_watcher(&base, embedding_model)?;
+            reset_worktree_overlay = true;
+        }
     }
     let tracks_reusable_base_state =
         workspace.repo_id.is_some() && workspace.base_index_dir.is_none();
@@ -504,6 +534,8 @@ fn index_workspace_with_options(
         .flatten();
     let reusable_index_is_current = clean_git_state_before.as_deref().is_some_and(|state| {
         index_health.is_queryable()
+            && !rebuild_main
+            && !reset_worktree_overlay
             && !skip_gitignore
             && indexed_filter_is_current
             && fs::read_to_string(indexed_git_state_path(workspace))
@@ -578,6 +610,7 @@ fn index_workspace_with_options(
             watcher_paths,
             skip_gitignore,
             reset_worktree_overlay,
+            rebuild_main,
         )
     });
     let result = result.and_then(|summary| {
@@ -661,6 +694,44 @@ fn is_retryable_tantivy_write_error(error: &anyhow::Error) -> bool {
     })
 }
 
+fn validate_existing_index_storage(workspace: &Workspace) -> Result<()> {
+    let overlay = workspace.has_overlay() || workspace.base_ref_path().exists();
+    let (sqlite_path, tantivy_path, vector_path) = if overlay {
+        (
+            workspace.overlay_sqlite_path(),
+            workspace.overlay_tantivy_dir(),
+            workspace.overlay_vector_path(),
+        )
+    } else {
+        (
+            workspace.sqlite_path(),
+            workspace.tantivy_dir(),
+            workspace.vector_path(),
+        )
+    };
+    let sqlite = open_sqlite_readonly(&sqlite_path)?;
+    let chunks: i64 = sqlite.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))?;
+    anyhow::ensure!(
+        tantivy_path.join("meta.json").is_file(),
+        "Tantivy metadata is missing for {}",
+        workspace.root.display()
+    );
+    let (index, _) = open_tantivy_index(&tantivy_path)?;
+    let reader: tantivy::IndexReader = index
+        .reader_builder()
+        .reload_policy(tantivy::ReloadPolicy::Manual)
+        .try_into()?;
+    anyhow::ensure!(
+        reader.searcher().num_docs() == u64::try_from(chunks)?,
+        "Tantivy/SQLite chunk count mismatch ({} != {chunks})",
+        reader.searcher().num_docs()
+    );
+    // Enhancement can publish a new vector file concurrently. Validate its
+    // structure, not a count/marker pair sampled across two publications.
+    VectorStore::read_count(&vector_path, crate::EMBEDDING_DIMENSIONS)?;
+    Ok(())
+}
+
 fn index_workspace_inner(
     workspace: &Workspace,
     embedding_model: &dyn EmbeddingModel,
@@ -668,6 +739,7 @@ fn index_workspace_inner(
     watcher_paths: Option<&[PathBuf]>,
     skip_gitignore: bool,
     reset_worktree_overlay: bool,
+    rebuild_main: bool,
 ) -> Result<IndexingSummary> {
     let index_started = std::time::Instant::now();
 
@@ -696,6 +768,7 @@ fn index_workspace_inner(
     // expensive Merkle rebuild entirely. The watcher already triggered
     // re-indexing for any changed files through filesystem events.
     if trust_live_watcher
+        && !rebuild_main
         && !recreate_overlay
         && workspace.is_watcher_alive()
         && workspace_is_indexed(workspace)
@@ -967,7 +1040,8 @@ fn index_workspace_inner(
                 let diff = old.diff(&new);
                 (new, diff)
             };
-            if d.added_or_modified.is_empty()
+            if !rebuild_main
+                && d.added_or_modified.is_empty()
                 && d.deleted.is_empty()
                 && workspace_is_indexed(workspace)
             {
@@ -985,22 +1059,11 @@ fn index_workspace_inner(
             (d, Some(new), Vec::new())
         };
 
-    // Validation stays after the no-op paths, but before planning a write
-    // against existing stores. A failed validation requires every current
-    // source file, not the delta calculated from the previous index.
+    // A failed storage validation requires every current source file, not the
+    // delta calculated from the previous index.
     let use_overlay =
         initializing_overlay || workspace.has_overlay() || workspace.base_ref_path().exists();
-    let mut is_fresh_index = initializing_overlay || !workspace_is_indexed(workspace);
-    if !use_overlay
-        && !is_fresh_index
-        && let Err(err) = open_storage_with_options(workspace, crate::EMBEDDING_DIMENSIONS, true)
-    {
-        tracing::warn!(
-            "storage verification failed for {}: {err:#}; rebuilding complete index in staging",
-            workspace.root.display()
-        );
-        is_fresh_index = true;
-    }
+    let is_fresh_index = initializing_overlay || rebuild_main || !workspace_is_indexed(workspace);
     if !use_overlay && is_fresh_index {
         // A snapshot can outlive another store or an interrupted recovery.
         // Never use its incremental delta to populate a fresh store. Ordinary
@@ -2343,11 +2406,11 @@ pub fn enhance_workspace_neural(
         let _ = fs::remove_file(workspace.neural_tombstones_processing_path());
         let _ = fs::remove_file(workspace.neural_enhanced_generation_path());
     }
-    fs::write(workspace.neural_profile_path(), profile)?;
+    crate::neural_metadata::write_atomic(&workspace.neural_profile_path(), profile.as_bytes())?;
     if let Some(identity) = model_identity {
-        fs::write(
-            workspace.neural_model_path(),
-            serde_json::to_vec_pretty(identity)?,
+        crate::neural_metadata::write_atomic(
+            &workspace.neural_model_path(),
+            &serde_json::to_vec_pretty(identity)?,
         )?;
     }
 
@@ -2386,6 +2449,7 @@ pub fn enhance_workspace_neural(
     vector_index.reserve_additional(remaining)?;
 
     let mut newly_processed = 0;
+    let mut checkpointed = 0;
     let mut progress_count = existing;
 
     let progress_path = workspace.enhancing_progress_path();
@@ -2468,8 +2532,9 @@ pub fn enhance_workspace_neural(
                     last_batch_size_refresh = Instant::now();
                 }
 
-                if newly_processed.is_multiple_of(16_384) {
+                if newly_processed.saturating_sub(checkpointed) >= 16_384 {
                     vector_index.save()?;
+                    checkpointed = newly_processed;
                 }
             }
             Ok(())
@@ -2506,7 +2571,7 @@ pub fn enhance_workspace_neural(
     if newly_processed > 0
         && let Some(backend) = neural_model.backend_info()
     {
-        fs::write(workspace.neural_backend_path(), backend)?;
+        crate::neural_metadata::write_atomic(&workspace.neural_backend_path(), backend.as_bytes())?;
     }
     if workspace
         .read_metadata()?

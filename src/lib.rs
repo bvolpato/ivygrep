@@ -15,6 +15,7 @@ pub mod jobs;
 pub(crate) mod launcher;
 pub mod mcp;
 pub mod merkle;
+pub(crate) mod neural_metadata;
 pub mod path_glob;
 pub mod protocol;
 pub(crate) mod query_aliases;

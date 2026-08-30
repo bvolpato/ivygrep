@@ -41,6 +41,9 @@ pub(super) fn record_indexed_git_state(
 }
 
 pub(super) fn refresh_clean_base_metadata(workspace: &Workspace) -> Result<bool> {
+    if super::validate_existing_index_storage(workspace).is_err() {
+        return Ok(false);
+    }
     match base_index_checkout_state(workspace) {
         BaseIndexCheckoutState::Current => return Ok(true),
         BaseIndexCheckoutState::Stale => return Ok(false),
