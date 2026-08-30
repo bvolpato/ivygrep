@@ -518,6 +518,71 @@ fn public_boolean_constraints_reject_unsupported_syntax_without_relaxing() {
 
 #[test]
 #[serial]
+fn public_boolean_constraints_reject_unterminated_operator_quotes() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    fs::write(
+        root.path().join("alpha.txt"),
+        "alpha beta gamma\nrock AND roll\nToken::OR\n",
+    )
+    .unwrap();
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    index_workspace(
+        &workspace,
+        &HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS),
+    )
+    .unwrap();
+    // Both delimiters are rejected by the pinned parser. Public dispatch must
+    // not hide these malformed Boolean requests from that strict parser.
+    let ctx = SearchContext::load(&workspace, None, false).unwrap();
+    let parser = lexical_query_parser(&ctx, false);
+    assert!(parser.parse_query("\"alpha AND beta").is_err());
+    assert!(parser.parse_query("'alpha AND beta").is_err());
+    for query in [r#""NOT(beta)"#, "'NOT(beta)"] {
+        assert!(
+            hybrid_search(&workspace, query, None, &SearchOptions::default()).is_err(),
+            "quoted no-space negation bypassed strict parsing: {query}"
+        );
+    }
+    for delimiter in ['"', '\''] {
+        for clause in ["alpha AND beta", "alpha OR beta", "NOT beta"] {
+            let query = format!("{delimiter}{clause}");
+            assert!(
+                hybrid_search(&workspace, &query, None, &SearchOptions::default()).is_err(),
+                "unterminated quote hid an explicit Boolean operator: {query}"
+            );
+        }
+        let query = format!("alpha AND {delimiter}beta");
+        assert!(
+            hybrid_search(&workspace, &query, None, &SearchOptions::default()).is_err(),
+            "Boolean query accepted an unterminated operand quote: {query}"
+        );
+    }
+    for query in [
+        r#""alpha beta"#,
+        "'alpha beta",
+        r#""rock AND roll""#,
+        "'rock AND roll'",
+        r#""NOT(beta)""#,
+        "'NOT(beta)'",
+        r#""rock AND roll" "unfinished"#,
+        r#""rock \" AND roll""#,
+        r#""alpha \AND beta"#,
+        r"'alpha \OR beta",
+        r"alpha \AND beta",
+        "AND",
+        "Token::OR",
+    ] {
+        assert!(
+            hybrid_search(&workspace, query, None, &SearchOptions::default()).is_ok(),
+            "ordinary or escaped source text was rejected as Boolean syntax: {query}"
+        );
+    }
+}
+
+#[test]
+#[serial]
 fn public_boolean_constraints_gate_symbol_and_path_variants() {
     let home = tempdir().unwrap();
     unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };

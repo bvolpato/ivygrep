@@ -9,17 +9,33 @@ pub(super) struct BooleanCandidates {
 }
 
 /// Keep identifier-like input and quoted/escaped operator words on the ordinary
-/// expansion path. The parser, not this recognizer, validates Boolean grammar.
+/// expansion path. An unfinished quote must not hide a Boolean operator from
+/// the strict parser, which validates the remaining grammar.
 pub(super) fn has_explicit_boolean_operators(query: &str) -> bool {
     let query = query.trim();
+    let syntax_prefix = query
+        .strip_prefix('"')
+        .or_else(|| query.strip_prefix('\''))
+        .unwrap_or(query);
     if !query.chars().any(char::is_whitespace)
-        && !query.starts_with('(')
-        && !query.starts_with("NOT(")
+        && !syntax_prefix.starts_with('(')
+        && !syntax_prefix.starts_with("NOT(")
     {
         return false;
     }
     let mut quote = None;
     let mut escaped = false;
+    let mut quoted_operator = false;
+    let operator_at = |index: usize, boundary: bool| {
+        boundary
+            && ["AND", "OR", "NOT"].iter().any(|operator| {
+                query[index..].strip_prefix(*operator).is_some_and(|tail| {
+                    tail.chars()
+                        .next()
+                        .is_none_or(|value| value.is_whitespace() || value == '(' || value == ')')
+                })
+            })
+    };
     for (index, character) in query.char_indices() {
         if escaped {
             escaped = false;
@@ -29,32 +45,28 @@ pub(super) fn has_explicit_boolean_operators(query: &str) -> bool {
             escaped = true;
             continue;
         }
-        if let Some(delimiter) = quote {
-            if character == delimiter {
-                quote = None;
-            }
-            continue;
-        }
         let previous = query[..index].chars().next_back();
         let boundary =
             previous.is_none_or(|value| value.is_whitespace() || value == '(' || value == ')');
-        if character == '"' || (character == '\'' && boundary) {
-            quote = Some(character);
+        if let Some((delimiter, start)) = quote {
+            if character == delimiter {
+                quote = None;
+                quoted_operator = false;
+            } else if operator_at(index, boundary || index == start + 1) {
+                quoted_operator = true;
+            }
             continue;
         }
-        if boundary
-            && ["AND", "OR", "NOT"].iter().any(|operator| {
-                query[index..].strip_prefix(*operator).is_some_and(|tail| {
-                    tail.chars()
-                        .next()
-                        .is_none_or(|value| value.is_whitespace() || value == '(' || value == ')')
-                })
-            })
-        {
+        if character == '"' || (character == '\'' && boundary) {
+            quote = Some((character, index));
+            quoted_operator = false;
+            continue;
+        }
+        if operator_at(index, boundary) {
             return true;
         }
     }
-    false
+    quote.is_some() && quoted_operator
 }
 
 pub(super) fn lexical_query_parser(ctx: &SearchContext, conjunction: bool) -> QueryParser {
