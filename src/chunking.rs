@@ -1485,7 +1485,7 @@ fn contains_byte(ranges: &[std::ops::Range<usize>], byte: usize) -> bool {
     end > 0 && byte < ranges[end - 1].end
 }
 
-fn cpp_non_code_ranges(tree: &tree_sitter::Tree) -> Vec<std::ops::Range<usize>> {
+pub(crate) fn cpp_non_code_ranges(tree: &tree_sitter::Tree) -> Vec<std::ops::Range<usize>> {
     let mut ranges = Vec::new();
     let mut cursor = tree.walk();
     loop {

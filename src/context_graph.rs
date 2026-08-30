@@ -6,7 +6,9 @@ use std::process::Command;
 use anyhow::Result;
 use rusqlite::{Connection, params};
 
-use crate::chunking::{language_for_path, resolve_type_alias};
+use crate::chunking::{
+    cpp_non_code_ranges, language_for_path, parse_source_tree, resolve_type_alias,
+};
 use crate::indexer::open_sqlite_readonly;
 use crate::merkle::MerkleSnapshot;
 use crate::path_glob::PathGlobMatcher;
@@ -181,7 +183,7 @@ pub(crate) fn extract_file_graph(
         .flatten();
 
     if supports_dependency_scan(language) {
-        for spec in dependency_specs(language, content) {
+        for spec in dependency_specs(rel_path, language, content) {
             if is_javascript_package_specifier(language, &spec)
                 || is_external_go_specifier(language, &spec, local_go_module.as_ref())
             {
@@ -466,12 +468,18 @@ fn insert_edge(
     }
 }
 
-fn dependency_specs(language: &str, content: &str) -> Vec<String> {
+fn dependency_specs(rel_path: &Path, language: &str, content: &str) -> Vec<String> {
+    if matches!(language, "python" | "objc") {
+        return syntax_dependency_specs(rel_path, language, content)
+            .unwrap_or_default()
+            .into_iter()
+            .take(128)
+            .collect();
+    }
     let mut specs = BTreeSet::new();
     let mut go_import_block = false;
     let mut javascript_static_declaration = false;
     let mut php_import_declaration: Option<String> = None;
-    let mut python_import_module: Option<String> = None;
     let mut rust_grouped_import: Option<(String, usize)> = None;
     let mut rust_module_path: Option<String> = None;
     let mut scala_grouped_import: Option<(String, usize)> = None;
@@ -543,28 +551,6 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                     rust_module_path = None;
                 }
             }
-            "python" => {
-                if let Some(module) = python_import_module.as_deref() {
-                    if !line.starts_with('#') {
-                        insert_python_import_specs(&mut specs, module, line);
-                    }
-                    if line.contains(')') {
-                        python_import_module = None;
-                    }
-                } else if let Some(value) = line.strip_prefix("from ") {
-                    if let Some((module, members)) = value.split_once(" import ") {
-                        let module = module.trim();
-                        insert_python_import_specs(&mut specs, module, members);
-                        if members.trim_start().starts_with('(') && !members.contains(')') {
-                            python_import_module = Some(module.to_string());
-                        }
-                    }
-                } else if let Some(value) = line.strip_prefix("import ") {
-                    for part in value.split(',') {
-                        specs.insert(part.split_whitespace().next().unwrap_or("").to_string());
-                    }
-                }
-            }
             "javascript" | "typescript" => {
                 if line.starts_with("import ")
                     || line.starts_with("export {")
@@ -599,7 +585,7 @@ fn dependency_specs(language: &str, content: &str) -> Vec<String> {
                     specs.insert(spec);
                 }
             }
-            "c" | "cpp" | "objc" => {
+            "c" | "cpp" => {
                 if line.starts_with("#include")
                     && let Some(spec) = first_quoted_value(line)
                 {
@@ -810,26 +796,123 @@ fn strip_rust_visibility(line: &str) -> &str {
         .unwrap_or(line)
 }
 
-fn python_import_members(value: &str) -> impl Iterator<Item = &str> {
-    value
-        .trim_matches(['(', ')'])
-        .split(',')
-        .filter_map(|member| member.split_whitespace().next())
-        .filter(|member| !member.is_empty() && *member != "*")
+fn syntax_dependency_specs(
+    rel_path: &Path,
+    language: &str,
+    content: &str,
+) -> Option<BTreeSet<String>> {
+    // Parse the complete source, not a line-truncated prefix that could turn
+    // an unfinished string into code. The existing parser bounds each pass;
+    // failed parses must not fall back to treating examples as dependencies.
+    let tree = parse_source_tree(rel_path, content, language)?;
+    let non_code = if language == "objc"
+        && rel_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("mm"))
+    {
+        // Objective-C's grammar does not recognize C++ raw strings. Reuse the
+        // mixed-language chunker's veto instead of accepting fake directives.
+        cpp_non_code_ranges(&parse_source_tree(rel_path, content, "cpp")?)
+    } else {
+        Vec::new()
+    };
+    let source = content.as_bytes();
+    let mut specs = BTreeSet::new();
+    let mut cursor = tree.walk();
+    loop {
+        let node = cursor.node();
+        if node.start_position().row >= 20_000 {
+            break;
+        }
+        match node.kind() {
+            "import_statement" | "import_from_statement" if language == "python" => {
+                if !node.has_error() {
+                    insert_python_syntax_imports(&mut specs, node, source);
+                }
+            }
+            "preproc_include" if language == "objc" => {
+                let end = non_code.partition_point(|range| range.start <= node.start_byte());
+                let in_non_code = end > 0 && node.start_byte() < non_code[end - 1].end;
+                if !in_non_code
+                    && let Some(path) = node.child_by_field_name("path")
+                    && path.kind() == "string_literal"
+                    && !path.has_error()
+                    && let Ok(value) = path.utf8_text(source)
+                    && let Some(value) = value.strip_prefix('"').and_then(|v| v.strip_suffix('"'))
+                    && !value.is_empty()
+                {
+                    specs.insert(value.to_string());
+                }
+            }
+            "comment" | "string" | "string_literal" | "char_literal" => {}
+            _ if cursor.goto_first_child() => continue,
+            _ => {}
+        }
+        loop {
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() {
+                return Some(specs);
+            }
+        }
+    }
+    Some(specs)
 }
 
-fn insert_python_import_specs(specs: &mut BTreeSet<String>, module: &str, members: &str) {
-    let relative_members = !module.is_empty() && module.chars().all(|character| character == '.');
-    if !relative_members {
+fn insert_python_syntax_imports(
+    specs: &mut BTreeSet<String>,
+    node: tree_sitter::Node<'_>,
+    source: &[u8],
+) {
+    let module = node
+        .child_by_field_name("module_name")
+        .and_then(|module| python_syntax_import_name(module, source));
+    let module = module.as_deref();
+    let relative_members = module.is_some_and(|module| module.chars().all(|ch| ch == '.'));
+    if let Some(module) = module
+        && !relative_members
+    {
         specs.insert(module.to_string());
     }
-    for member in python_import_members(members) {
-        specs.insert(if relative_members {
-            format!("{module}{member}")
-        } else {
-            format!("{module}.{member}")
+    let mut cursor = node.walk();
+    for member in node.children_by_field_name("name", &mut cursor) {
+        let Some(name) = python_syntax_import_name(member, source) else {
+            continue;
+        };
+        specs.insert(match module {
+            Some(module) if relative_members => format!("{module}{name}"),
+            Some(module) => format!("{module}.{name}"),
+            None => name,
         });
     }
+}
+
+fn python_syntax_import_name(node: tree_sitter::Node<'_>, source: &[u8]) -> Option<String> {
+    let node = node.child_by_field_name("name").unwrap_or(node);
+    let mut name = String::new();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        match child.kind() {
+            "import_prefix" => name.extend(
+                child
+                    .utf8_text(source)
+                    .ok()?
+                    .chars()
+                    .filter(|ch| *ch == '.'),
+            ),
+            "dotted_name" => name.push_str(&python_syntax_import_name(child, source)?),
+            "identifier" => {
+                if !name.is_empty() && !name.ends_with('.') {
+                    name.push('.');
+                }
+                name.push_str(child.utf8_text(source).ok()?);
+            }
+            _ => {}
+        }
+    }
+    (!name.is_empty()).then_some(name)
 }
 
 fn import_target_without_alias<'a>(language: &str, value: &'a str) -> &'a str {
@@ -3409,6 +3492,150 @@ mod tests {
         assert!(edges.iter().any(|edge| {
             edge.kind == FileEdgeKind::Dependency && edge.target_path == Path::new("app/helper.py")
         }));
+    }
+
+    #[test]
+    fn syntax_aware_python_dependencies_ignore_examples_and_preserve_import_forms() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("app/auth")).unwrap();
+        for path in [
+            "app/auth/live.py",
+            "app/auth/helper.py",
+            "app/common.py",
+            "app/worker.py",
+            "app/extra.py",
+            "app/old.py",
+            "app/raw.py",
+            "app/template.py",
+            "app/escaped.py",
+        ] {
+            fs::write(root.path().join(path), "def execute(): pass\n").unwrap();
+        }
+        let source = r#""""Migration example:
+from app.old import execute
+"""
+raw = r'''
+import app.raw
+'''
+template = f"""
+from app.template import execute
+{1 + 1}
+"""
+escaped = "a continued string \
+import app.escaped"
+# from app.old import execute
+from .live import execute as run
+from . import (
+    helper as helper_alias, # an alias is not a module
+)
+from .. import common
+import app.worker as worker, \
+    app.extra as extra
+def load():
+    from app . worker import execute
+"#;
+        let graph = extract_file_graph(root.path(), None, Path::new("app/auth/service.py"), source);
+        let targets = graph
+            .edges
+            .iter()
+            .filter(|edge| edge.kind == FileEdgeKind::Dependency)
+            .map(|edge| edge.target_path.as_path())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            targets,
+            BTreeSet::from([
+                Path::new("app/auth/live.py"),
+                Path::new("app/auth/helper.py"),
+                Path::new("app/common.py"),
+                Path::new("app/worker.py"),
+                Path::new("app/extra.py"),
+            ])
+        );
+        assert!(graph.unresolved_dependencies.iter().all(|dependency| {
+            !["old", "raw", "template", "escaped", "helper_alias"]
+                .iter()
+                .any(|name| dependency.spec.contains(name))
+        }));
+    }
+
+    #[test]
+    fn syntax_aware_python_dependencies_keep_valid_imports_around_syntax_errors() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("before.py"), "value = 1\n").unwrap();
+        fs::write(root.path().join("after.py"), "value = 2\n").unwrap();
+        let source = "import before\nvalue = )\nfrom after import value\n";
+        let edges = extract_file_edges(root.path(), None, Path::new("service.py"), source);
+        let targets = edges
+            .iter()
+            .filter(|edge| edge.kind == FileEdgeKind::Dependency)
+            .map(|edge| edge.target_path.as_path())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            targets,
+            BTreeSet::from([Path::new("before.py"), Path::new("after.py")])
+        );
+    }
+
+    #[test]
+    fn syntax_aware_objc_dependencies_follow_local_directives_not_examples() {
+        let root = tempfile::tempdir().unwrap();
+        for header in [
+            "Imported.h",
+            "Included.h",
+            "Comment.h",
+            "String.h",
+            "Raw.h",
+            "System.h",
+        ] {
+            fs::write(root.path().join(header), "int execute(void);\n").unwrap();
+        }
+        let source = r#"# import "Imported.h"
+#include "Included.h"
+#import <System.h>
+/*
+#import "Comment.h"
+#include "Comment.h"
+*/
+// #import "Comment.h"
+const char *example = "\
+#import \"String.h\"";
+@interface Client
+- (void)run;
+@end
+@implementation Client
+- (void)run {}
+@end
+"#;
+        for (path, content) in [
+            ("Client.m", source.to_string()),
+            (
+                "EndOfFile.m",
+                "#import \"Imported.h\"\n#include \"Included.h\"".to_string(),
+            ),
+            (
+                "Client.mm",
+                format!(
+                    "{source}\nconst char *raw = R\"tag(\n#import \"Raw.h\"\n#include \"Raw.h\"\n)tag\";\n"
+                ),
+            ),
+        ] {
+            let graph = extract_file_graph(root.path(), None, Path::new(path), &content);
+            let targets = graph
+                .edges
+                .iter()
+                .filter(|edge| edge.kind == FileEdgeKind::Dependency)
+                .map(|edge| edge.target_path.as_path())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                targets,
+                BTreeSet::from([Path::new("Imported.h"), Path::new("Included.h"),]),
+                "{path}"
+            );
+            assert!(
+                graph.unresolved_dependencies.is_empty(),
+                "{path}: {graph:?}"
+            );
+        }
     }
 
     #[test]
