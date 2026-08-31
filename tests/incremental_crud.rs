@@ -22,6 +22,7 @@ use serial_test::serial;
 use tempfile::tempdir;
 
 use ivygrep::EMBEDDING_DIMENSIONS;
+use ivygrep::context::{ContextRole, build_context_bundle};
 use ivygrep::embedding::HashEmbeddingModel;
 use ivygrep::indexer::{index_workspace, open_sqlite};
 use ivygrep::merkle::MerkleSnapshot;
@@ -50,6 +51,175 @@ fn setup_and_index(
 
 fn workspace_for(root: &std::path::Path) -> Workspace {
     Workspace::resolve(root).unwrap()
+}
+
+#[test]
+#[serial]
+fn syntax_aware_dependencies_survive_index_and_context_refresh() {
+    let home = tempdir().unwrap();
+    let root = tempdir().unwrap();
+    for (path, source) in [
+        ("live_backend.py", "def execute(): return 'active'\n"),
+        ("obsolete_backend.py", "def execute(): return 'legacy'\n"),
+        ("Opaque.h", "int first_api(void);\n"),
+        ("Other.h", "int second_api(void);\n"),
+    ] {
+        fs::write(root.path().join(path), source).unwrap();
+    }
+    for (stage, python, objc, python_target, objc_target) in [
+        (
+            0,
+            "\"\"\"Example:\nfrom obsolete_backend import execute\n\"\"\"\nfrom live_backend import execute\ndef process_workflow():\n    return execute()\n",
+            "/*\n#import \"Other.h\"\n*/\n#import \"Opaque.h\"\nint process_client(void) { return first_api(); }\n",
+            "live_backend.py",
+            "Opaque.h",
+        ),
+        (
+            1,
+            "\"\"\"Old example:\nfrom live_backend import execute\n\"\"\"\nfrom obsolete_backend import execute\ndef process_workflow():\n    return execute()\n",
+            "/*\n#import \"Opaque.h\"\n*/\n#include \"Other.h\"\nint process_client(void) { return second_api(); }\n",
+            "obsolete_backend.py",
+            "Other.h",
+        ),
+    ] {
+        fs::write(root.path().join("workflow.py"), python).unwrap();
+        fs::write(root.path().join("Client.m"), objc).unwrap();
+        let summary = setup_and_index(root.path(), home.path());
+        assert_eq!(summary.indexed_files, if stage == 0 { 6 } else { 2 });
+        let workspace = workspace_for(root.path());
+        let conn = open_sqlite(&workspace.sqlite_path()).unwrap();
+        let mut statement = conn.prepare(
+            "SELECT source_path, target_path FROM file_edges WHERE kind = 1 ORDER BY source_path"
+        ).unwrap();
+        let edges = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            edges,
+            vec![
+                ("Client.m".to_string(), objc_target.to_string()),
+                ("workflow.py".to_string(), python_target.to_string()),
+            ]
+        );
+        for (task, target) in [
+            ("fix process_workflow in workflow.py", python_target),
+            ("fix process_client in Client.m", objc_target),
+        ] {
+            let bundle =
+                build_context_bundle(&workspace, task, None, &SearchOptions::default(), 4000)
+                    .unwrap();
+            let dependencies = bundle
+                .items
+                .iter()
+                .filter(|item| item.roles.contains(&ContextRole::Dependency))
+                .map(|item| item.file_path.to_string_lossy().into_owned())
+                .collect::<HashSet<_>>();
+            assert_eq!(
+                dependencies,
+                HashSet::from([target.to_string()]),
+                "{task}, stage {stage}"
+            );
+        }
+    }
+}
+
+#[test]
+#[serial]
+fn syntax_aware_dependencies_rebuild_legacy_graph_without_source_changes() {
+    let home = tempdir().unwrap();
+    let root = tempdir().unwrap();
+    let sources = [
+        (
+            "workflow.py",
+            "\"\"\"Example:\nfrom obsolete_backend import execute\n\"\"\"\nfrom live_backend import execute\ndef process_workflow():\n    return execute()\n",
+        ),
+        (
+            "Client.m",
+            "#import \"Opaque.h\"\nint process_client(void) { return first_api(); }\n",
+        ),
+        ("live_backend.py", "def execute(): return 'active'\n"),
+        ("obsolete_backend.py", "def execute(): return 'legacy'\n"),
+        ("Opaque.h", "int first_api(void);\n"),
+    ];
+    for (path, source) in sources {
+        fs::write(root.path().join(path), source).unwrap();
+    }
+    setup_and_index(root.path(), home.path());
+    let workspace = workspace_for(root.path());
+    let snapshot_before = fs::read(workspace.merkle_snapshot_path()).unwrap();
+    {
+        let conn = open_sqlite(&workspace.sqlite_path()).unwrap();
+        // Reproduce graph rows written by the old line-based extractor.
+        assert_eq!(
+            conn.execute(
+                "INSERT INTO file_edges VALUES ('workflow.py', 'obsolete_backend.py', 1)",
+                [],
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(conn.execute(
+            "DELETE FROM file_edges WHERE source_path = 'Client.m' AND target_path = 'Opaque.h' AND kind = 1", [],
+        ).unwrap(), 1);
+    }
+    fs::write(workspace.index_format_version_path(), "23").unwrap();
+    assert_eq!(
+        fs::read(workspace.merkle_snapshot_path()).unwrap(),
+        snapshot_before
+    );
+    for (path, source) in sources {
+        assert_eq!(fs::read(root.path().join(path)).unwrap(), source.as_bytes());
+    }
+
+    // No source edit or force flag: the format transition must invalidate the
+    // unchanged snapshot's old graph facts and regenerate both dependencies.
+    let summary = setup_and_index(root.path(), home.path());
+    let conn = open_sqlite(&workspace.sqlite_path()).unwrap();
+    let mut statement = conn
+        .prepare(
+            "SELECT source_path, target_path FROM file_edges WHERE kind = 1 ORDER BY source_path",
+        )
+        .unwrap();
+    let edges = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        edges,
+        vec![
+            ("Client.m".to_string(), "Opaque.h".to_string()),
+            ("workflow.py".to_string(), "live_backend.py".to_string()),
+        ]
+    );
+    assert_eq!(summary.indexed_files, sources.len());
+    assert_eq!(
+        workspace.read_index_format_version(),
+        ivygrep::workspace::INDEX_FORMAT_VERSION
+    );
+    for (path, source) in sources {
+        assert_eq!(fs::read(root.path().join(path)).unwrap(), source.as_bytes());
+    }
+    for (task, target) in [
+        ("fix process_workflow in workflow.py", "live_backend.py"),
+        ("fix process_client in Client.m", "Opaque.h"),
+    ] {
+        let bundle =
+            build_context_bundle(&workspace, task, None, &SearchOptions::default(), 4000).unwrap();
+        let dependencies = bundle
+            .items
+            .iter()
+            .filter(|item| item.roles.contains(&ContextRole::Dependency))
+            .map(|item| item.file_path.to_string_lossy().into_owned())
+            .collect::<HashSet<_>>();
+        assert_eq!(dependencies, HashSet::from([target.to_string()]), "{task}");
+    }
 }
 
 #[cfg(unix)]

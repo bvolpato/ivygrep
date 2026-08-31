@@ -175,6 +175,10 @@ The current on-disk format version is defined by `INDEX_FORMAT_VERSION` in
 `src/workspace.rs`. Incompatible schema, chunking, or vector-identity changes
 must bump it and provide rebuild or migration behavior.
 
+Format v25 refreshes Python and Objective-C dependency facts through a one-time
+full index rebuild, including unchanged files. This is not a graph-only migration;
+existing indexes pay the normal indexing and subsequent vector-enhancement costs.
+
 ## Search pipeline
 
 ### Workspace selection
@@ -276,6 +280,10 @@ of evidence helps an agent implement a task safely?
 Dependency extraction is deliberately bounded. Unresolved imports are stored so
 later file or manifest changes can resolve them incrementally. Missing an edge
 does not prove no relationship exists.
+
+Python imports and Objective-C quoted local `#import`/`#include` directives are
+extracted from parsed syntax. Strings, docstrings, and comments do not create
+dependency facts; Objective-C++ also excludes directives inside C++ raw strings.
 
 ## Worktree overlays
 
