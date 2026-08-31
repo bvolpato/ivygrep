@@ -7062,6 +7062,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let alive = workspace.is_watcher_alive();
+        let diagnostic = (!alive).then(|| watcher_test_diagnostic(&state, &workspace));
         stop_all_watchers(&state);
         assert!(
             matches!(after, DaemonResponse::SearchResults { hits, warnings }
@@ -7069,7 +7070,7 @@ mod tests {
                 && hits.iter().any(|hit| hit.preview.contains("policy_current_marker"))
                 && hits.iter().all(|hit| !hit.preview.contains("policy_previous_marker")))
         );
-        assert!(alive);
+        assert!(alive, "{diagnostic:?}");
         assert!(indexed_file_contains(
             &workspace,
             "policy.rs",
@@ -7134,6 +7135,7 @@ mod tests {
         .await
         .unwrap();
         let alive = workspace.is_watcher_alive();
+        let diagnostic = (!alive).then(|| watcher_test_diagnostic(&state, &workspace));
         stop_all_watchers(&state);
         assert!(
             matches!(response, DaemonResponse::SearchResults { hits, warnings }
@@ -7141,7 +7143,7 @@ mod tests {
         );
         assert!(
             alive,
-            "completing the first index must enable startup reconciliation"
+            "completing the first index must enable startup reconciliation: {diagnostic:?}"
         );
     }
 
@@ -7181,6 +7183,7 @@ mod tests {
             .await
             .unwrap();
             let alive = workspace.is_watcher_alive();
+            let diagnostic = (!alive).then(|| watcher_test_diagnostic(&state, &workspace));
             stop_all_watchers(&state);
             assert!(
                 matches!(response, DaemonResponse::SearchResults { hits, warnings }
@@ -7188,7 +7191,7 @@ mod tests {
             );
             assert!(
                 alive,
-                "repaired watch policy must not inherit a missing/corrupt result"
+                "repaired watch policy must not inherit a missing/corrupt result: {diagnostic:?}"
             );
         }
     }
@@ -8742,6 +8745,35 @@ mod tests {
         drop(writer.join().unwrap());
     }
 
+    fn watcher_test_diagnostic(state: &DaemonState, workspace: &Workspace) -> String {
+        let control = state
+            .watchers
+            .lock()
+            .get(&workspace.id)
+            .map(|registration| registration.control.clone());
+        let Some(control) = control else {
+            return "watcher is not registered".to_string();
+        };
+        let readiness = match &*control.readiness.borrow() {
+            WatchReadiness::Reconciling => "reconciling",
+            WatchReadiness::Ready => "ready",
+            WatchReadiness::Failed(_) => "failed",
+            WatchReadiness::Stopped => "stopped",
+        };
+        format!(
+            "readiness={readiness}, active={}, initial_scan={}, initial_pending={}, phase={:?}, pending={:?}, cpu_permits={}, status={:?}",
+            control.active.load(Ordering::Relaxed),
+            control.initial_scan_required.load(Ordering::Relaxed),
+            control
+                .initial_reconciliation_pending
+                .load(Ordering::Relaxed),
+            control.snapshot_phase(),
+            control.pending_work.lock(),
+            state.cpu_permits.available_permits(),
+            jobs::job_status(workspace, JobKind::Watcher, 15),
+        )
+    }
+
     async fn wait_for_initial_watch_reconciliation(state: &DaemonState, workspace: &Workspace) {
         let skip_gitignore = workspace.read_metadata().unwrap().unwrap().skip_gitignore;
         let leases = tokio::time::timeout(
@@ -9702,7 +9734,11 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert!(control.retrying.load(Ordering::Relaxed));
+        assert!(
+            control.retrying.load(Ordering::Relaxed),
+            "{}",
+            watcher_test_diagnostic(&state, &workspace),
+        );
         assert_eq!(control.snapshot_phase().0, "error");
         if fail_tantivy_publication {
             assert!(
@@ -9729,9 +9765,13 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+        let diagnostic = (!recovered).then(|| watcher_test_diagnostic(&state, &workspace));
         stop_all_watchers(&state);
 
-        assert!(recovered, "failed watcher update did not recover");
+        assert!(
+            recovered,
+            "failed watcher update did not recover: {diagnostic:?}"
+        );
     }
 
     #[tokio::test]
