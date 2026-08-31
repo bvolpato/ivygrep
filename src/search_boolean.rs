@@ -8,7 +8,7 @@ pub(super) struct BooleanCandidates {
     pub keys: Arc<HashSet<u64>>,
 }
 
-/// Keep identifier-like input and quoted/escaped operator words on the ordinary
+/// Keep identifier-like input and quoted/escaped/code-span words on the ordinary
 /// expansion path. An unfinished quote must not hide a Boolean operator from
 /// the strict parser, which validates the remaining grammar.
 pub(super) fn has_explicit_boolean_operators(query: &str) -> bool {
@@ -26,6 +26,8 @@ pub(super) fn has_explicit_boolean_operators(query: &str) -> bool {
     let mut quote = None;
     let mut escaped = false;
     let mut quoted_operator = false;
+    let mut backticks = None;
+    let mut skip_until = 0;
     let operator_at = |index: usize, boundary: bool| {
         boundary
             && ["AND", "OR", "NOT"].iter().any(|operator| {
@@ -37,6 +39,9 @@ pub(super) fn has_explicit_boolean_operators(query: &str) -> bool {
             })
     };
     for (index, character) in query.char_indices() {
+        if index < skip_until {
+            continue;
+        }
         if escaped {
             escaped = false;
             continue;
@@ -57,6 +62,27 @@ pub(super) fn has_explicit_boolean_operators(query: &str) -> bool {
             }
             continue;
         }
+        if character == '`' {
+            let width = query[index..]
+                .bytes()
+                .take_while(|byte| *byte == b'`')
+                .count();
+            // Never pair a delimiter run with one of its own characters.
+            // Only closed spans are opaque; an unmatched run leaves later
+            // operators and differently sized spans available to the scanner.
+            skip_until = index + width;
+            let runs = backticks.get_or_insert_with(|| backtick_runs(query));
+            if let Some(starts) = runs.get_mut(&width) {
+                while starts.front().is_some_and(|start| *start <= index) {
+                    starts.pop_front();
+                }
+                if let Some(closing) = starts.front() {
+                    // Backslashes and quote characters inside code are literal.
+                    skip_until = closing + width;
+                }
+            }
+            continue;
+        }
         let quote_boundary = boundary || matches!(previous, Some(':' | '+' | '-'));
         if character == '"' || (character == '\'' && quote_boundary) {
             quote = Some((character, index));
@@ -68,6 +94,19 @@ pub(super) fn has_explicit_boolean_operators(query: &str) -> bool {
         }
     }
     quote.is_some() && quoted_operator
+}
+
+fn backtick_runs(query: &str) -> HashMap<usize, VecDeque<usize>> {
+    let mut runs: HashMap<usize, VecDeque<usize>> = HashMap::new();
+    let mut ticks = query.match_indices('`').peekable();
+    while let Some((start, _)) = ticks.next() {
+        let mut end = start + 1;
+        while ticks.next_if(|(position, _)| *position == end).is_some() {
+            end += 1;
+        }
+        runs.entry(end - start).or_default().push_back(start);
+    }
+    runs
 }
 
 pub(super) fn lexical_query_parser(ctx: &SearchContext, conjunction: bool) -> QueryParser {

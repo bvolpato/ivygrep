@@ -518,6 +518,64 @@ fn public_boolean_constraints_reject_unsupported_syntax_without_relaxing() {
 
 #[test]
 #[serial]
+fn public_boolean_constraints_ignore_operators_in_closed_backtick_code() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    fs::write(
+        root.path().join("pivot.rs"),
+        "pub fn filter_pivot_table_rows() { /* filter empty rows and columns in a pivot table */ }\n",
+    )
+    .unwrap();
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    index_workspace(
+        &workspace,
+        &HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS),
+    )
+    .unwrap();
+    let options = SearchOptions::default();
+    for snippet in [
+        "`=NOT(AND(ISBLANK(E4); (N4=0)))`",
+        "``=NOT(AND(ISBLANK(E4); (N4=0))) `literal` ``",
+        "```excel\n=NOT(AND(ISBLANK(E4); (N4=0)))\n```",
+        r"`=NOT(AND(ISBLANK(E4); (N4=0)))\`",
+        r#"`let label = "alpha AND beta`"#,
+        "``unmatched opener `=NOT(AND(ISBLANK(E4); (N4=0)))`",
+    ] {
+        let query = format!("How can I filter empty rows from a pivot table?\n{snippet}");
+        let hits = hybrid_search(&workspace, &query, None, &options)
+            .unwrap_or_else(|error| panic!("code span became Boolean syntax {snippet}: {error:#}"));
+        assert!(
+            paths(&hits).contains(Path::new("pivot.rs")),
+            "ordinary pivot-table request lost its source match: {snippet}"
+        );
+    }
+    for query in [
+        "alpha AND (beta `AND`",
+        "`AND` alpha OR (beta",
+        "`AND` \"alpha AND beta",
+        "`unclosed alpha AND (beta",
+        "``unmatched alpha AND (beta `NOT(x)`",
+    ] {
+        assert!(
+            hybrid_search(&workspace, query, None, &options).is_err(),
+            "code formatting hid an outside or unfinished Boolean constraint: {query}"
+        );
+    }
+    assert!(
+        hybrid_search(
+            &workspace,
+            r"filter pivot rows \AND `NOT(x)`",
+            None,
+            &options
+        )
+        .is_ok(),
+        "escaped outside operator was treated as Boolean syntax"
+    );
+}
+
+#[test]
+#[serial]
 fn public_boolean_constraints_preserve_prefixed_quoted_operator_words() {
     let home = tempdir().unwrap();
     unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
