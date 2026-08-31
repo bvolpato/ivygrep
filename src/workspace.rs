@@ -583,21 +583,6 @@ impl Workspace {
     /// Legacy records fall back to checking the watcher PID.
     pub fn is_watcher_alive(&self) -> bool {
         let status = jobs::job_status(self, JobKind::Watcher, WATCHER_HEARTBEAT_TTL_SECS);
-        #[cfg(test)]
-        if status
-            .record
-            .as_ref()
-            .is_none_or(|record| !status.active() || record.phase == "reconciling")
-        {
-            let pid = status.record.as_ref().and_then(|record| record.pid);
-            eprintln!(
-                "watcher ledger: status={status:?}, pid_only_alive={:?}, actual_start={:?}, observed_at={}, legacy_pid={:?}",
-                pid.map(|pid| jobs::process_is_alive(pid, None)),
-                pid.and_then(jobs::process_start_time_token),
-                jobs::now_unix(),
-                fs::read_to_string(self.watcher_pid_path()),
-            );
-        }
         if let Some(record) = status.record.as_ref() {
             // start_job publishes an active record before the first heartbeat
             // can mark startup reconciliation as not yet ready.

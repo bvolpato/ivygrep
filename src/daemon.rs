@@ -7062,7 +7062,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let alive = workspace.is_watcher_alive();
-        let diagnostic = (!alive).then(|| watcher_test_diagnostic(&state, &workspace));
+        let diagnostic = (!alive).then(|| jobs::job_status(&workspace, JobKind::Watcher, 15));
         stop_all_watchers(&state);
         assert!(
             matches!(after, DaemonResponse::SearchResults { hits, warnings }
@@ -7135,7 +7135,7 @@ mod tests {
         .await
         .unwrap();
         let alive = workspace.is_watcher_alive();
-        let diagnostic = (!alive).then(|| watcher_test_diagnostic(&state, &workspace));
+        let diagnostic = (!alive).then(|| jobs::job_status(&workspace, JobKind::Watcher, 15));
         stop_all_watchers(&state);
         assert!(
             matches!(response, DaemonResponse::SearchResults { hits, warnings }
@@ -7183,7 +7183,7 @@ mod tests {
             .await
             .unwrap();
             let alive = workspace.is_watcher_alive();
-            let diagnostic = (!alive).then(|| watcher_test_diagnostic(&state, &workspace));
+            let diagnostic = (!alive).then(|| jobs::job_status(&workspace, JobKind::Watcher, 15));
             stop_all_watchers(&state);
             assert!(
                 matches!(response, DaemonResponse::SearchResults { hits, warnings }
@@ -8745,35 +8745,6 @@ mod tests {
         drop(writer.join().unwrap());
     }
 
-    fn watcher_test_diagnostic(state: &DaemonState, workspace: &Workspace) -> String {
-        let control = state
-            .watchers
-            .lock()
-            .get(&workspace.id)
-            .map(|registration| registration.control.clone());
-        let Some(control) = control else {
-            return "watcher is not registered".to_string();
-        };
-        let readiness = match &*control.readiness.borrow() {
-            WatchReadiness::Reconciling => "reconciling",
-            WatchReadiness::Ready => "ready",
-            WatchReadiness::Failed(_) => "failed",
-            WatchReadiness::Stopped => "stopped",
-        };
-        format!(
-            "readiness={readiness}, active={}, initial_scan={}, initial_pending={}, phase={:?}, pending={:?}, cpu_permits={}, status={:?}",
-            control.active.load(Ordering::Relaxed),
-            control.initial_scan_required.load(Ordering::Relaxed),
-            control
-                .initial_reconciliation_pending
-                .load(Ordering::Relaxed),
-            control.snapshot_phase(),
-            control.pending_work.lock(),
-            state.cpu_permits.available_permits(),
-            jobs::job_status(workspace, JobKind::Watcher, 15),
-        )
-    }
-
     async fn wait_for_initial_watch_reconciliation(state: &DaemonState, workspace: &Workspace) {
         let skip_gitignore = workspace.read_metadata().unwrap().unwrap().skip_gitignore;
         let leases = tokio::time::timeout(
@@ -9694,6 +9665,14 @@ mod tests {
         assert_failed_watch_index_recovers(true).await;
     }
 
+    struct WatcherCleanup<'a>(&'a DaemonState);
+
+    impl Drop for WatcherCleanup<'_> {
+        fn drop(&mut self) {
+            stop_all_watchers(self.0);
+        }
+    }
+
     async fn assert_failed_watch_index_recovers(fail_tantivy_publication: bool) {
         let home = tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
@@ -9705,26 +9684,32 @@ mod tests {
         let model = create_hash_model();
         index_workspace(&workspace, model.as_ref()).unwrap();
         let state = test_state();
+        // On panic, stop workers before releasing an active publication failure.
+        let mut publication_failure = None;
+        let watcher_cleanup = WatcherCleanup(&state);
         register_watcher(&state, repo.path()).unwrap();
         wait_for_initial_watch_reconciliation(&state, &workspace).await;
+        let control = {
+            let mut watchers = state.watchers.lock();
+            let registration = watchers.get_mut(&workspace.id).unwrap();
+            // The retry must recover from only the manually queued event below.
+            registration.watcher.unwatch(&workspace.root).unwrap();
+            // Windows queues unwatch asynchronously. The configuration response
+            // acknowledges all preceding commands, even when it returns false.
+            registration
+                .watcher
+                .configure(notify::Config::default())
+                .unwrap();
+            registration.control.clone()
+        };
         let metadata = std::fs::read(workspace.metadata_path()).unwrap();
         let generation = workspace.read_metadata().unwrap().unwrap().index_generation;
-        let control = state
-            .watchers
-            .lock()
-            .get(&workspace.id)
-            .unwrap()
-            .control
-            .clone();
 
-        let publication_failure = if fail_tantivy_publication {
-            Some(crate::indexer::fail_tantivy_commits(
-                &workspace.tantivy_dir(),
-            ))
+        if fail_tantivy_publication {
+            publication_failure = Some(crate::indexer::fail_tantivy_commits(&workspace.index_dir));
         } else {
             std::fs::write(workspace.metadata_path(), "invalid metadata").unwrap();
-            None
-        };
+        }
         std::fs::write(&source, "pub fn recovered_watch_marker() {}\n").unwrap();
         control.mark_paths_dirty([PathBuf::from("lib.rs")]);
 
@@ -9736,8 +9721,8 @@ mod tests {
         }
         assert!(
             control.retrying.load(Ordering::Relaxed),
-            "{}",
-            watcher_test_diagnostic(&state, &workspace),
+            "watcher did not enter retry: {:?}",
+            control.snapshot_phase(),
         );
         assert_eq!(control.snapshot_phase().0, "error");
         if fail_tantivy_publication {
@@ -9765,8 +9750,8 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        let diagnostic = (!recovered).then(|| watcher_test_diagnostic(&state, &workspace));
-        stop_all_watchers(&state);
+        let diagnostic = control.snapshot_phase();
+        drop(watcher_cleanup);
 
         assert!(
             recovered,
