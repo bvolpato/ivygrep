@@ -57,7 +57,8 @@ pub(super) fn has_explicit_boolean_operators(query: &str) -> bool {
             }
             continue;
         }
-        if character == '"' || (character == '\'' && boundary) {
+        let quote_boundary = boundary || matches!(previous, Some(':' | '+' | '-'));
+        if character == '"' || (character == '\'' && quote_boundary) {
             quote = Some((character, index));
             quoted_operator = false;
             continue;

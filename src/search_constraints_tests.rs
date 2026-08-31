@@ -518,6 +518,63 @@ fn public_boolean_constraints_reject_unsupported_syntax_without_relaxing() {
 
 #[test]
 #[serial]
+fn public_boolean_constraints_preserve_prefixed_quoted_operator_words() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    fs::write(
+        root.path().join("music.rs"),
+        "pub fn rock_and_roll() { println!(\"rock AND roll\"); }\n// Token::OR rock\n",
+    )
+    .unwrap();
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    index_workspace(
+        &workspace,
+        &HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS),
+    )
+    .unwrap();
+    for prefix in ["text:", "+", "-", "+text:", "-text:"] {
+        let double = format!("{prefix}\"rock AND roll\"");
+        let single = format!("{prefix}'rock AND roll'");
+        assert!(tantivy::query_grammar::parse_query(&double).is_ok());
+        assert!(tantivy::query_grammar::parse_query(&single).is_ok());
+        let expected = hybrid_search(&workspace, &double, None, &SearchOptions::default())
+            .unwrap_or_else(|error| panic!("double-quote control {double}: {error:#}"));
+        if prefix == "text:" {
+            assert!(
+                !expected.is_empty(),
+                "field quote control lost the indexed fixture"
+            );
+        }
+        let actual = hybrid_search(&workspace, &single, None, &SearchOptions::default())
+            .unwrap_or_else(|error| {
+                panic!("single quote became Boolean syntax {single}: {error:#}")
+            });
+        assert_eq!(
+            paths(&actual),
+            paths(&expected),
+            "quote forms disagree for {prefix}"
+        );
+        let unfinished = format!("{prefix}'rock AND roll");
+        assert!(
+            hybrid_search(&workspace, &unfinished, None, &SearchOptions::default()).is_err(),
+            "unfinished prefixed quote hid an operator: {unfinished}"
+        );
+    }
+    assert!(
+        hybrid_search(
+            &workspace,
+            "Token::OR rock",
+            None,
+            &SearchOptions::default()
+        )
+        .is_ok(),
+        "field/unary quote prefixes changed operator boundaries"
+    );
+}
+
+#[test]
+#[serial]
 fn public_boolean_constraints_reject_unterminated_operator_quotes() {
     let home = tempdir().unwrap();
     unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
