@@ -283,14 +283,17 @@ fn open_optional_vector_store(
 fn read_optional_neural_identity(
     path: &Path,
 ) -> Result<Option<crate::embedding::NeuralModelIdentity>> {
-    if !path.exists() {
-        return Ok(None);
+    crate::neural_metadata::read_identity(path)
+}
+
+fn optional_neural_metadata<T>(value: Result<Option<T>>, required: bool) -> Result<Option<T>> {
+    match value {
+        Err(error) if !required => {
+            tracing::warn!("ignoring unavailable optional neural metadata: {error:#}");
+            Ok(None)
+        }
+        value => value,
     }
-    let contents = fs::read_to_string(path)
-        .with_context(|| format!("read neural model metadata {}", path.display()))?;
-    serde_json::from_str(&contents)
-        .with_context(|| format!("parse neural model metadata {}", path.display()))
-        .map(Some)
 }
 
 fn read_optional_profile(path: &Path) -> Result<Option<String>> {
@@ -343,8 +346,10 @@ impl SearchContext {
                 HASH_VECTOR_QUANTIZATION,
                 crate::vector_store::VectorTier::Hash,
             )?;
-            let base_neural_model =
-                read_optional_neural_identity(&base_dir.join("neural_model.json"))?;
+            let base_neural_model = optional_neural_metadata(
+                read_optional_neural_identity(&base_dir.join("neural_model.json")),
+                wants_neural_vectors,
+            )?;
             let base_neural_dimensions = base_neural_model
                 .as_ref()
                 .map_or(384, |identity: &crate::embedding::NeuralModelIdentity| {
@@ -357,13 +362,20 @@ impl SearchContext {
                 NEURAL_VECTOR_QUANTIZATION,
                 crate::vector_store::VectorTier::Neural,
             )?;
-            let base_neural_profile = read_optional_profile(&base_dir.join("neural_profile"))?;
-            let overlay_neural_model =
-                read_optional_neural_identity(&workspace.neural_model_path())?;
+            let base_neural_profile = optional_neural_metadata(
+                read_optional_profile(&base_dir.join("neural_profile")),
+                wants_neural_vectors,
+            )?;
+            let overlay_neural_model = optional_neural_metadata(
+                read_optional_neural_identity(&workspace.neural_model_path()),
+                wants_neural_vectors,
+            )?;
             let overlay_neural_dimensions = overlay_neural_model
                 .as_ref()
                 .map_or(base_neural_dimensions, |identity| identity.dimensions);
-            if let (Some(overlay), Some(base)) = (&overlay_neural_model, &base_neural_model) {
+            if wants_neural_vectors
+                && let (Some(overlay), Some(base)) = (&overlay_neural_model, &base_neural_model)
+            {
                 anyhow::ensure!(
                     overlay == base,
                     "worktree neural model does not match the base workspace"
@@ -376,7 +388,10 @@ impl SearchContext {
                 NEURAL_VECTOR_QUANTIZATION,
                 crate::vector_store::VectorTier::Neural,
             )?;
-            let overlay_neural_profile = read_optional_profile(&workspace.neural_profile_path())?;
+            let overlay_neural_profile = optional_neural_metadata(
+                read_optional_profile(&workspace.neural_profile_path()),
+                wants_neural_vectors,
+            )?;
 
             let mut tombstones = HashSet::new();
             let mut overlay_files = HashSet::new();
@@ -428,7 +443,10 @@ impl SearchContext {
                 HASH_VECTOR_QUANTIZATION,
                 crate::vector_store::VectorTier::Hash,
             )?;
-            let neural_model = read_optional_neural_identity(&workspace.neural_model_path())?;
+            let neural_model = optional_neural_metadata(
+                read_optional_neural_identity(&workspace.neural_model_path()),
+                wants_neural_vectors,
+            )?;
             let neural_dimensions = neural_model
                 .as_ref()
                 .map_or(384, |identity| identity.dimensions);
@@ -439,7 +457,10 @@ impl SearchContext {
                 NEURAL_VECTOR_QUANTIZATION,
                 crate::vector_store::VectorTier::Neural,
             )?;
-            let neural_profile = read_optional_profile(&workspace.neural_profile_path())?;
+            let neural_profile = optional_neural_metadata(
+                read_optional_profile(&workspace.neural_profile_path()),
+                wants_neural_vectors,
+            )?;
 
             let file_contents_epoch = FileContentCache::index_epoch(&[&searcher]);
             Ok(Self {

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::Serialize;
 
 use crate::embedding::{NeuralModelIdentity, create_hash_model};
@@ -11,7 +11,7 @@ use crate::jobs::{
 };
 use crate::workspace::{
     IndexCompactionHealth, IndexComponentSizes, Workspace, WorkspaceIndexHealth,
-    WorkspaceIndexState,
+    WorkspaceIndexState, WorkspaceMetadata,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -47,6 +47,22 @@ impl DoctorReport {
         repaired: bool,
         mut findings: Vec<String>,
     ) -> Self {
+        for issue in &health.issues {
+            if !findings.contains(issue) {
+                findings.push(issue.clone());
+            }
+        }
+        let mut neural_metadata_invalid = false;
+        for index_dir in
+            std::iter::once(&workspace.index_dir).chain(workspace.base_index_dir.iter())
+        {
+            if let Err(error) =
+                crate::neural_metadata::read_identity(&index_dir.join("neural_model.json"))
+            {
+                neural_metadata_invalid = true;
+                findings.push(format!("{error:#}"));
+            }
+        }
         if findings.is_empty() {
             findings = default_findings(&health);
         }
@@ -54,8 +70,12 @@ impl DoctorReport {
         let reranker = crate::reranker::runtime_status();
         Self {
             workspace_root: workspace.root.clone(),
-            state: health.state,
-            healthy: health.is_queryable(),
+            state: if neural_metadata_invalid && health.is_queryable() {
+                WorkspaceIndexState::Unhealthy
+            } else {
+                health.state
+            },
+            healthy: health.is_queryable() && !neural_metadata_invalid,
             chunk_count: health.chunk_count,
             file_count: health.file_count,
             vector_key_count: workspace.vector_key_count(),
@@ -95,11 +115,14 @@ pub fn inspect_workspace_quick(workspace: &Workspace) -> DoctorReport {
 }
 
 pub fn inspect_and_maybe_fix(workspace: &Workspace, fix: bool, deep: bool) -> Result<DoctorReport> {
-    let cleanup_actions = if fix {
+    let mut cleanup_actions = if fix {
         workspace.cleanup_stale_legacy_runtime_files()
     } else {
         Vec::new()
     };
+    if fix {
+        cleanup_actions.extend(repair_invalid_neural_metadata(workspace)?);
+    }
     let initial = if fix || deep {
         workspace.index_health()
     } else {
@@ -239,6 +262,83 @@ fn rebuild_workspace_index(workspace: &Workspace) -> Result<()> {
     let model = create_hash_model();
     let _ = index_workspace(workspace, model.as_ref())?;
     Ok(())
+}
+
+fn invalid_neural_identity(workspace: &Workspace) -> Result<bool> {
+    match crate::neural_metadata::read_identity(&workspace.neural_model_path()) {
+        Ok(_) => Ok(false),
+        Err(error) if error.downcast_ref::<serde_json::Error>().is_some() => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
+fn repair_invalid_neural_metadata(workspace: &Workspace) -> Result<Vec<String>> {
+    let mut targets = vec![workspace.clone()];
+    if let Some(base_dir) = &workspace.base_index_dir
+        && base_dir != &workspace.index_dir
+        && crate::neural_metadata::read_identity(&base_dir.join("neural_model.json")).is_err()
+    {
+        let metadata: WorkspaceMetadata =
+            serde_json::from_slice(&std::fs::read(base_dir.join("workspace.json"))?)?;
+        targets.push(Workspace {
+            id: metadata.id,
+            root: metadata.root,
+            index_dir: base_dir.clone(),
+            repo_id: None,
+            base_index_dir: None,
+        });
+    }
+
+    let mut actions = Vec::new();
+    for target in targets {
+        if !invalid_neural_identity(&target)? {
+            continue;
+        }
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(target.lock_path())?;
+        fs2::FileExt::lock_exclusive(&lock)?;
+        let _jobs = jobs::lock_job_ledger(&target)?;
+        if !invalid_neural_identity(&target)? {
+            continue;
+        }
+        anyhow::ensure!(
+            !target.is_enhancing_active(),
+            "cannot repair neural metadata while enhancement is active for {}; retry after it finishes",
+            target.root.display()
+        );
+        // Keep the invalid identity until all dependent artifacts are removed,
+        // so an interrupted repair remains diagnosable and retryable.
+        let vector = target.vector_neural_path();
+        for path in [
+            vector.clone(),
+            vector.with_extension("usearch.bak"),
+            vector.with_extension("usearch.tmp"),
+            target.neural_profile_path(),
+            target.neural_backend_path(),
+            target.neural_tombstones_path(),
+            target.neural_tombstones_processing_path(),
+            target.neural_enhanced_generation_path(),
+            target.neural_model_path(),
+        ] {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("remove invalid neural artifact {}", path.display())
+                    });
+                }
+            }
+        }
+        actions.push(format!(
+            "invalid neural metadata and derived vectors removed for {}; re-enhancement is needed",
+            target.root.display()
+        ));
+    }
+    Ok(actions)
 }
 
 fn default_findings(health: &WorkspaceIndexHealth) -> Vec<String> {

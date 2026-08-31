@@ -363,8 +363,9 @@ impl Workspace {
     }
 
     pub fn neural_model_identity(&self) -> Option<crate::embedding::NeuralModelIdentity> {
-        let contents = fs::read_to_string(self.neural_model_path()).ok()?;
-        serde_json::from_str(&contents).ok()
+        crate::neural_metadata::read_identity(&self.neural_model_path())
+            .ok()
+            .flatten()
     }
 
     /// Returns whether a neural vector store is available for query-time use.
@@ -1137,11 +1138,11 @@ impl Workspace {
 
                 if !is_overlay
                     && self.vector_neural_path().exists()
+                    && let Ok(identity) =
+                        crate::neural_metadata::read_identity(&self.neural_model_path())
                     && let Err(err) = crate::vector_store::VectorStore::open_readonly(
                         &self.vector_neural_path(),
-                        self.neural_model_identity()
-                            .map(|identity| identity.dimensions)
-                            .unwrap_or(384),
+                        identity.map(|identity| identity.dimensions).unwrap_or(384),
                         crate::vector_store::NEURAL_VECTOR_QUANTIZATION,
                         crate::vector_store::VectorTier::Neural,
                     )

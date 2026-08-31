@@ -21,6 +21,9 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 - Python dependency extraction uses parsed imports, excluding examples in docstrings and strings while preserving relative, multiline, and aliased imports. Objective-C graphs follow quoted local `#import` and `#include` directives without treating strings or comments as dependencies, including C++ raw strings in `.mm` files.
+- Indexing validates primary store structure and SQLite/Tantivy counts before no-op shortcuts, including worktree base stores. Invalid stores trigger complete staged recovery even when no source file changed.
+- Malformed optional neural metadata no longer disables literal/hash searches or makes empty queries rebuild healthy primary stores. Doctor reports the problem and removes only the invalid neural tier under its locks; metadata publication uses atomic replacement.
+- Neural enhancement checkpoints after crossing the 16,384-chunk interval even when the batch size does not divide it, preserving progress for interrupted runs with custom batch sizes.
 - Swift and Objective-C use valid Tree-sitter capture queries, preserving method bodies, inline declarations, and nested/extension/category owners. Parsed strings and comments no longer create heuristic symbols in these languages. Index format v23 rebuilds existing indexes, including unchanged files and their vectors.
 - Restored filesystem watchers reconcile edits, additions, and deletions made while the daemon was stopped against the persisted Merkle snapshot before searches trust the index. Watches are registered before reconciliation, preserving edits made during the scan without rebuilding unchanged files.
 - Fresh and recreated worktree overlays publish their stores, base reference, and snapshot together, with completion metadata last. Failed publication retains the prior overlay and retries the full cross-base delta instead of reporting a successful no-op with missing lexical results.
