@@ -7062,6 +7062,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let alive = workspace.is_watcher_alive();
+        let diagnostic = (!alive).then(|| jobs::job_status(&workspace, JobKind::Watcher, 15));
         stop_all_watchers(&state);
         assert!(
             matches!(after, DaemonResponse::SearchResults { hits, warnings }
@@ -7069,7 +7070,7 @@ mod tests {
                 && hits.iter().any(|hit| hit.preview.contains("policy_current_marker"))
                 && hits.iter().all(|hit| !hit.preview.contains("policy_previous_marker")))
         );
-        assert!(alive);
+        assert!(alive, "{diagnostic:?}");
         assert!(indexed_file_contains(
             &workspace,
             "policy.rs",
@@ -7134,6 +7135,7 @@ mod tests {
         .await
         .unwrap();
         let alive = workspace.is_watcher_alive();
+        let diagnostic = (!alive).then(|| jobs::job_status(&workspace, JobKind::Watcher, 15));
         stop_all_watchers(&state);
         assert!(
             matches!(response, DaemonResponse::SearchResults { hits, warnings }
@@ -7141,7 +7143,7 @@ mod tests {
         );
         assert!(
             alive,
-            "completing the first index must enable startup reconciliation"
+            "completing the first index must enable startup reconciliation: {diagnostic:?}"
         );
     }
 
@@ -7181,6 +7183,7 @@ mod tests {
             .await
             .unwrap();
             let alive = workspace.is_watcher_alive();
+            let diagnostic = (!alive).then(|| jobs::job_status(&workspace, JobKind::Watcher, 15));
             stop_all_watchers(&state);
             assert!(
                 matches!(response, DaemonResponse::SearchResults { hits, warnings }
@@ -7188,7 +7191,7 @@ mod tests {
             );
             assert!(
                 alive,
-                "repaired watch policy must not inherit a missing/corrupt result"
+                "repaired watch policy must not inherit a missing/corrupt result: {diagnostic:?}"
             );
         }
     }
@@ -7217,6 +7220,7 @@ mod tests {
         // Keep the same daemon state so the first post-restore request also
         // exercises a preexisting query-result cache, not just a cold restart.
         let state = test_state();
+        let watcher_cleanup = WatcherCleanup(&state);
         let cached_request = DaemonRequest::Search {
             path: Some(workspace.root.clone()),
             query: "offline_added_marker".to_string(),
@@ -7279,9 +7283,13 @@ mod tests {
                 .is_err()
         );
         drop(held);
-        let response = tokio::time::timeout(Duration::from_secs(10), searching)
+        let response = tokio::time::timeout(Duration::from_secs(10), &mut searching)
             .await
-            .unwrap()
+            .unwrap_or_else(|error| {
+                let diagnostic = restored_watcher_timeout_diagnostic(&state, &workspace);
+                searching.abort();
+                panic!("restored watcher search timed out: {error}; {diagnostic}");
+            })
             .unwrap();
         assert!(
             matches!(response, DaemonResponse::SearchResults { hits, warnings } if hits.iter().any(|hit| hit.file_path == Path::new("added.rs")) && warnings.is_empty())
@@ -7315,13 +7323,14 @@ mod tests {
         assert!(after.files.contains_key("added.rs"));
         assert!(after.files.contains_key("queued.rs"));
         assert!(workspace.is_watcher_alive());
-        stop_all_watchers(&state);
+        drop(watcher_cleanup);
 
         // A second restart without source edits is a real no-op, not a fresh
         // rebuild or an unconditional recomputation of the unchanged files.
         let generation = workspace.read_metadata().unwrap().unwrap().index_generation;
         let snapshot = std::fs::read(workspace.merkle_snapshot_path()).unwrap();
         let state = test_state();
+        let watcher_cleanup = WatcherCleanup(&state);
         restore_configured_watchers(&state);
         let response = tokio::time::timeout(
             Duration::from_secs(10),
@@ -7331,7 +7340,12 @@ mod tests {
             ),
         )
         .await
-        .unwrap();
+        .unwrap_or_else(|error| {
+            panic!(
+                "unchanged watcher restart search timed out: {error}; {}",
+                restored_watcher_timeout_diagnostic(&state, &workspace)
+            );
+        });
         assert!(matches!(response, DaemonResponse::SearchResults { hits, .. } if hits.len() == 1));
         assert_eq!(
             workspace.read_metadata().unwrap().unwrap().index_generation,
@@ -7341,7 +7355,48 @@ mod tests {
             std::fs::read(workspace.merkle_snapshot_path()).unwrap(),
             snapshot
         );
-        stop_all_watchers(&state);
+        drop(watcher_cleanup);
+    }
+
+    fn restored_watcher_timeout_diagnostic(state: &DaemonState, workspace: &Workspace) -> String {
+        let control = state.watchers.try_lock().and_then(|watchers| {
+            watchers
+                .get(&workspace.id)
+                .map(|registration| registration.control.clone())
+        });
+        let watcher = control.map_or_else(
+            || "watcher unavailable (registry locked or unregistered)".to_string(),
+            |control| {
+                format!(
+                    "active={}, indexing={}, retrying={}, initial_scan={}, initial_pending={}, pending={:?}",
+                    control.active.load(Ordering::Relaxed),
+                    control.indexing.load(Ordering::Relaxed),
+                    control.retrying.load(Ordering::Relaxed),
+                    control.initial_scan_required.load(Ordering::Relaxed),
+                    control.initial_reconciliation_pending.load(Ordering::Relaxed),
+                    control.pending_work.try_lock().as_deref(),
+                )
+            },
+        );
+        let coordinator = state
+            .workspace_modes
+            .try_lock()
+            .and_then(|coordinators| coordinators.get(&workspace.id).and_then(Weak::upgrade));
+        let leases = coordinator
+            .as_ref()
+            .and_then(|coordinator| coordinator.state.try_lock())
+            .map(|mode| {
+                (
+                    mode.active_mode,
+                    mode.active_leases,
+                    mode.exclusive_active,
+                    mode.exclusive_waiters,
+                )
+            });
+        format!(
+            "{watcher}, cpu_permits={}, coordinator(mode, leases, exclusive, waiters)={leases:?}",
+            state.cpu_permits.available_permits(),
+        )
     }
 
     #[tokio::test]
@@ -9662,6 +9717,14 @@ mod tests {
         assert_failed_watch_index_recovers(true).await;
     }
 
+    struct WatcherCleanup<'a>(&'a DaemonState);
+
+    impl Drop for WatcherCleanup<'_> {
+        fn drop(&mut self) {
+            stop_all_watchers(self.0);
+        }
+    }
+
     async fn assert_failed_watch_index_recovers(fail_tantivy_publication: bool) {
         let home = tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
@@ -9673,26 +9736,32 @@ mod tests {
         let model = create_hash_model();
         index_workspace(&workspace, model.as_ref()).unwrap();
         let state = test_state();
+        // On panic, stop workers before releasing an active publication failure.
+        let mut publication_failure = None;
+        let watcher_cleanup = WatcherCleanup(&state);
         register_watcher(&state, repo.path()).unwrap();
         wait_for_initial_watch_reconciliation(&state, &workspace).await;
+        let control = {
+            let mut watchers = state.watchers.lock();
+            let registration = watchers.get_mut(&workspace.id).unwrap();
+            // The retry must recover from only the manually queued event below.
+            registration.watcher.unwatch(&workspace.root).unwrap();
+            // Windows queues unwatch asynchronously. The configuration response
+            // acknowledges all preceding commands, even when it returns false.
+            registration
+                .watcher
+                .configure(notify::Config::default())
+                .unwrap();
+            registration.control.clone()
+        };
         let metadata = std::fs::read(workspace.metadata_path()).unwrap();
         let generation = workspace.read_metadata().unwrap().unwrap().index_generation;
-        let control = state
-            .watchers
-            .lock()
-            .get(&workspace.id)
-            .unwrap()
-            .control
-            .clone();
 
-        let publication_failure = if fail_tantivy_publication {
-            Some(crate::indexer::fail_tantivy_commits(
-                &workspace.tantivy_dir(),
-            ))
+        if fail_tantivy_publication {
+            publication_failure = Some(crate::indexer::fail_tantivy_commits(&workspace.index_dir));
         } else {
             std::fs::write(workspace.metadata_path(), "invalid metadata").unwrap();
-            None
-        };
+        }
         std::fs::write(&source, "pub fn recovered_watch_marker() {}\n").unwrap();
         control.mark_paths_dirty([PathBuf::from("lib.rs")]);
 
@@ -9702,7 +9771,11 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        assert!(control.retrying.load(Ordering::Relaxed));
+        assert!(
+            control.retrying.load(Ordering::Relaxed),
+            "watcher did not enter retry: {:?}",
+            control.snapshot_phase(),
+        );
         assert_eq!(control.snapshot_phase().0, "error");
         if fail_tantivy_publication {
             assert!(
@@ -9729,9 +9802,13 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        stop_all_watchers(&state);
+        let diagnostic = control.snapshot_phase();
+        drop(watcher_cleanup);
 
-        assert!(recovered, "failed watcher update did not recover");
+        assert!(
+            recovered,
+            "failed watcher update did not recover: {diagnostic:?}"
+        );
     }
 
     #[tokio::test]

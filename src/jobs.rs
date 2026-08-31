@@ -412,7 +412,12 @@ fn forget_verified_process(pid: u32) {
 pub fn process_start_time_token(pid: u32) -> Option<String> {
     #[cfg(target_os = "linux")]
     {
-        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // User-mode emulators can synthesize /proc/<pid>/stat from the
+        // calling thread. Select the process leader for a stable identity.
+        // The task directory can disappear after the leader exits.
+        let stat = fs::read_to_string(format!("/proc/{pid}/task/{pid}/stat"))
+            .or_else(|_| fs::read_to_string(format!("/proc/{pid}/stat")))
+            .ok()?;
         let (_, rest) = stat.rsplit_once(") ")?;
         let fields: Vec<&str> = rest.split_whitespace().collect();
         let start_time = fields.get(19)?;
@@ -487,6 +492,23 @@ fn write_job_ledger_locked(path: impl AsRef<Path>, ledger: &JobLedger) -> Result
 mod tests {
     use super::*;
     use serial_test::serial;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_start_token_is_independent_of_calling_thread() {
+        let pid = std::process::id();
+        let expected = process_start_time_token(pid).expect("own process start time");
+        let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        assert!(ticks_per_second > 0);
+        // Distinct thread births must not compare equal by clock-tick rounding.
+        std::thread::sleep(std::time::Duration::from_secs_f64(
+            2.0 / ticks_per_second as f64,
+        ));
+        let observed = std::thread::spawn(move || process_start_time_token(pid))
+            .join()
+            .expect("identity reader thread");
+        assert_eq!(observed, Some(expected));
+    }
 
     #[test]
     #[serial]
