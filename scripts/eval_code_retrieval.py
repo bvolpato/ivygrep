@@ -8,22 +8,62 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 import hashlib
 import json
 import math
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import platform
 import signal
 import subprocess
 import tempfile
 import time
 
+import public_retrieval_contracts as contracts
+
 try:
     import resource
 except ImportError:  # pragma: no cover - unavailable on Windows
     resource = None
+
+RERANK_CONTEXT_LINES = 2
+RERANK_PREVIEW_HITS = 3
+RERANK_PREVIEW_BYTES = 12_000
+
+
+def candidate_preview(hits: list[dict]) -> str:
+    """Match the runtime reranker's first-three-hit UTF-8 byte budget."""
+    preview = ""
+    for hit in hits[:RERANK_PREVIEW_HITS]:
+        if preview:
+            preview = (
+                (preview + "\n")
+                .encode()[:RERANK_PREVIEW_BYTES]
+                .decode("utf-8", errors="ignore")
+            )
+        remaining = RERANK_PREVIEW_BYTES - len(preview.encode())
+        preview += (
+            str(hit.get("preview", ""))
+            .encode()[:remaining]
+            .decode("utf-8", errors="ignore")
+        )
+    return preview
+
+
+def candidate_trace_contract(query_expansion: str, reranker_mode: str | None) -> dict:
+    return {
+        "schema_version": 1,
+        "stage": "grouped-runtime-output-not-training",
+        "score_semantics": "native_file_total",
+        "query_expansion": query_expansion,
+        "reranker_mode": reranker_mode or "unknown",
+        "context_lines": RERANK_CONTEXT_LINES,
+        "preview_max_hits": RERANK_PREVIEW_HITS,
+        "preview_max_bytes": RERANK_PREVIEW_BYTES,
+    }
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -170,6 +210,44 @@ def runtime_metadata() -> dict:
     }
 
 
+def expected_execution_request(
+    dataset: Path,
+    binary_sha256: str,
+    mode: str,
+    max_query_chars: int | None,
+    *,
+    runtime: dict | None = None,
+    harness: dict | None = None,
+    dataset_content: dict | None = None,
+    **options,
+) -> dict:
+    return contracts.execution_request(
+        dataset,
+        binary_sha256,
+        mode,
+        {**options, "max_query_chars": max_query_chars},
+        os.environ,
+        runtime if runtime is not None else runtime_metadata(),
+        harness
+        if harness is not None
+        else contracts.execution_harness(Path(__file__).resolve().parents[1]),
+        dataset_content=dataset_content,
+    )
+
+
+def source_revision(override: str | None) -> str:
+    if override:
+        return override
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=Path(__file__).resolve().parents[1],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    ).stdout.strip()
+
+
 def peak_child_rss_bytes() -> int | None:
     if resource is None:
         return None
@@ -199,12 +277,8 @@ def materialize_corpus(dataset: Path, repo: Path) -> dict[str, str]:
     path_to_id: dict[str, str] = {}
     for position, document in enumerate(load_jsonl(dataset / "corpus.jsonl")):
         doc_id = str(document["_id"])
-        metadata = document.get("metadata") or {}
-        relative = metadata.get("path") or f"documents/{position:06d}-{doc_id}.txt"
-        relative_path = Path(str(relative))
-        if relative_path.is_absolute() or ".." in relative_path.parts:
-            relative_path = Path("documents") / f"{position:06d}-{doc_id}.txt"
-        relative = relative_path.as_posix()
+        relative = document_relative_path(document, position)
+        relative_path = Path(relative)
         target = repo / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
         title = document.get("title") or ""
@@ -212,6 +286,24 @@ def materialize_corpus(dataset: Path, repo: Path) -> dict[str, str]:
         target.write_text(f"{title}\n{text}".lstrip(), encoding="utf-8")
         path_to_id[relative] = doc_id
     return path_to_id
+
+
+def document_relative_path(document: dict, position: int) -> str:
+    doc_id = str(document["_id"])
+    relative = (document.get("metadata") or {}).get(
+        "path"
+    ) or f"documents/{position:06d}-{doc_id}.txt"
+    path = Path(str(relative))
+    if path.is_absolute() or ".." in path.parts:
+        path = Path("documents") / f"{position:06d}-{doc_id}.txt"
+    return path.as_posix()
+
+
+def corpus_path_map(dataset: Path) -> dict[str, str]:
+    return {
+        document_relative_path(document, position): str(document["_id"])
+        for position, document in enumerate(load_jsonl(dataset / "corpus.jsonl"))
+    }
 
 
 def is_support_path(path: str) -> bool:
@@ -282,6 +374,102 @@ def run_json(
             + (f"\n{stderr}" if stderr else "")
         )
     return json.loads(completed.stdout), elapsed_ms
+
+
+def run_captured_query(
+    command: list[str], cwd: Path, env: dict[str, str], query: str, receipt: Path
+) -> tuple[list[dict], float, dict]:
+    """Collect one local process's opt-in native record, preserving raw failures."""
+    home = Path(env["IVYGREP_HOME"])
+    if daemon_endpoint_path(home).exists():
+        raise ValueError(
+            "native capture requires a fresh local process, not an existing daemon"
+        )
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    started = time.perf_counter()
+    process = subprocess.Popen(
+        command,
+        cwd=cwd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=os.name != "nt",
+    )
+    try:
+        receipt.with_suffix(".command.json").write_text(
+            json.dumps(
+                {
+                    "argv": command,
+                    "process_id": process.pid,
+                    "query": query,
+                    "cwd": str(cwd),
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        stdout, stderr = process.communicate(timeout=600)
+    except BaseException:
+        stop_process(process)
+        stdout, stderr = process.communicate()
+        receipt.with_suffix(".stdout.json").write_bytes(stdout)
+        receipt.with_suffix(".stderr.log").write_bytes(stderr)
+        raise
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+    receipt.with_suffix(".stdout.json").write_bytes(stdout)
+    receipt.with_suffix(".stderr.log").write_bytes(stderr)
+    receipt.with_suffix(".exit.json").write_text(
+        json.dumps({"process_id": process.pid, "returncode": process.returncode}) + "\n"
+    )
+    if process.returncode:
+        raise RuntimeError(
+            f"native capture query failed ({process.returncode}); see {receipt}.stderr.log"
+        )
+    if daemon_endpoint_path(home).exists():
+        raise ValueError(
+            "native capture unexpectedly created or used a daemon endpoint"
+        )
+    record = contracts.parse_native_capture(stderr.decode("utf-8"), query, process.pid)
+    output = json.loads(stdout.decode("utf-8"))
+    if not isinstance(output, list):
+        raise ValueError(
+            "native capture query did not return the normal grouped JSON array"
+        )
+    capture = {
+        "record": record,
+        "process_id": process.pid,
+        "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
+        "stderr_sha256": hashlib.sha256(stderr).hexdigest(),
+        "receipt_name": receipt.name,
+    }
+    return output, elapsed_ms, capture
+
+
+def captured_document_ids(
+    record: dict, repo: Path, path_to_id: dict[str, str]
+) -> list[str]:
+    document_ids = []
+    base = str(repo).replace("\\", "/").removeprefix("//?/").rstrip("/")
+    for candidate in record["candidates"]:
+        value = candidate["file_path"].replace("\\", "/").removeprefix("//?/")
+        path = PurePosixPath(value)
+        if ".." in path.parts:
+            raise ValueError("native capture candidate escapes the indexed corpus")
+        if value.startswith(base + "/"):
+            relative = value[len(base) + 1 :]
+        elif path.is_absolute() or (len(value) >= 3 and value[1:3] == ":/"):
+            raise ValueError("native capture candidate escapes the indexed corpus")
+        else:
+            relative = path.as_posix()
+        if relative not in path_to_id:
+            raise ValueError(
+                "native capture candidate is not mapped to a corpus document"
+            )
+        document_ids.append(path_to_id[relative])
+    if len(document_ids) != len(set(document_ids)):
+        raise ValueError("native capture has ambiguous duplicate corpus document IDs")
+    return document_ids
 
 
 def run_search_commands(
@@ -374,6 +562,8 @@ def fuse_search_outputs(
     rrf_k: float = 60.0,
     original_weight: float = 1.0,
 ) -> list[dict]:
+    if len(outputs) == 1:
+        return [dict(item) for item in outputs[0]]
     scores: dict[str, float] = {}
     selected: dict[str, dict] = {}
     for output_index, output in enumerate(outputs):
@@ -382,15 +572,13 @@ def fuse_search_outputs(
             path = str(item.get("file_path", ""))
             if not path:
                 continue
-            scores[path] = scores.get(path, 0.0) + weight / (
-                rrf_k + rank + 1.0
-            )
+            scores[path] = scores.get(path, 0.0) + weight / (rrf_k + rank + 1.0)
             selected.setdefault(path, item)
     ranked = sorted(scores, key=lambda path: (-scores[path], path))
     fused = []
     for path in ranked:
         item = dict(selected[path])
-        item["total_score"] = scores[path]
+        item["fusion_score"] = scores[path]
         fused.append(item)
     return fused
 
@@ -433,6 +621,8 @@ def search_command(
     command = [
         str(binary),
         "--json",
+        "--context",
+        str(RERANK_CONTEXT_LINES),
         "-n",
         str(limit),
         *query_args(mode),
@@ -494,6 +684,30 @@ def evaluate(args: argparse.Namespace) -> dict:
     binary = args.binary.resolve()
     provenance = load_provenance(dataset)
     identity = binary_identity(binary)
+    request = expected_execution_request(
+        dataset,
+        identity["sha256"],
+        args.mode,
+        args.max_query_chars,
+        **{
+            key: getattr(args, key, default)
+            for key, default in contracts.EVALUATION_DEFAULTS.items()
+            if key != "max_query_chars"
+        },
+    )
+    execution_source = source_revision(getattr(args, "source_commit", None))
+    executed_at = datetime.now(timezone.utc).isoformat()
+    capture_enabled = getattr(args, "capture_reranker", False)
+    capture_directory = None
+    if capture_enabled:
+        if args.query_expansion != "none" or args.output is None:
+            raise ValueError(
+                "--capture-reranker requires --output and no query expansion"
+            )
+        capture_directory = args.output.with_suffix(
+            args.output.suffix + ".native-captures"
+        )
+        capture_directory.mkdir(parents=True, exist_ok=False)
     with tempfile.TemporaryDirectory(prefix="ivygrep-retrieval-") as temp:
         temp_path = Path(temp)
         repo = temp_path / "repo"
@@ -510,6 +724,10 @@ def evaluate(args: argparse.Namespace) -> dict:
         env["IVYGREP_NO_AUTOSPAWN"] = "1"
         env["IVYGREP_ENHANCE_MAX_LOAD_RATIO"] = "0"
         env["IVYGREP_DISABLE_BACKGROUND_ENHANCEMENT"] = "1"
+        if capture_enabled:
+            env["IVYGREP_RERANKER_CAPTURE"] = "1"
+        else:
+            env.pop("IVYGREP_RERANKER_CAPTURE", None)
 
         started = time.perf_counter()
         subprocess.run(
@@ -558,7 +776,9 @@ def evaluate(args: argparse.Namespace) -> dict:
                 )
 
         cold_latencies: dict[str, float] = {}
-        for query in process_cold_queries(args.mode, queries):
+        for query in (
+            [] if capture_enabled else process_cold_queries(args.mode, queries)
+        ):
             query_id = str(query["_id"])
             text = query_text(query, args.max_query_chars)
             cold_ms = 0.0
@@ -580,41 +800,47 @@ def evaluate(args: argparse.Namespace) -> dict:
                     expanded_text,
                     query_scope(query, repo),
                     query_exclude_globs(query, repo),
-                    args.disable_memory_expansion
-                    or args.query_expansion != "none",
+                    args.disable_memory_expansion or args.query_expansion != "none",
                 )
                 _, elapsed_ms = run_json(command, repo, env)
                 cold_ms += elapsed_ms
             cold_latencies[query_id] = cold_ms
 
         daemon_env = env.copy()
-        daemon_env.pop("IVYGREP_NO_AUTOSPAWN", None)
         daemon_log_path = temp_path / "daemon.log"
-        daemon_log = daemon_log_path.open("wb")
-        popen_options = {"start_new_session": True} if os.name != "nt" else {}
-        daemon_started = time.perf_counter()
-        daemon = subprocess.Popen(
-            [str(binary), "--daemon"],
-            cwd=repo,
-            env=daemon_env,
-            stdout=daemon_log,
-            stderr=subprocess.STDOUT,
-            **popen_options,
-        )
+        daemon = None
+        daemon_log = None
+        daemon_startup_ms = 0.0
+        neural_model_ready_ms = 0.0
+        if not capture_enabled:
+            daemon_env.pop("IVYGREP_NO_AUTOSPAWN", None)
+            daemon_log = daemon_log_path.open("wb")
+            popen_options = {"start_new_session": True} if os.name != "nt" else {}
+            daemon_started = time.perf_counter()
+            daemon = subprocess.Popen(
+                [str(binary), "--daemon"],
+                cwd=repo,
+                env=daemon_env,
+                stdout=daemon_log,
+                stderr=subprocess.STDOUT,
+                **popen_options,
+            )
         result = None
         try:
-            endpoint = daemon_endpoint_path(home)
-            deadline = time.time() + 10
-            while not endpoint.exists() and time.time() < deadline:
-                if daemon.poll() is not None:
-                    raise RuntimeError("ivygrep daemon exited before becoming ready")
-                time.sleep(0.05)
-            if not endpoint.exists():
-                raise TimeoutError("timed out waiting for ivygrep daemon")
-            daemon_startup_ms = (time.perf_counter() - daemon_started) * 1000.0
+            if daemon is not None:
+                endpoint = daemon_endpoint_path(home)
+                deadline = time.time() + 10
+                while not endpoint.exists() and time.time() < deadline:
+                    if daemon.poll() is not None:
+                        raise RuntimeError(
+                            "ivygrep daemon exited before becoming ready"
+                        )
+                    time.sleep(0.05)
+                if not endpoint.exists():
+                    raise TimeoutError("timed out waiting for ivygrep daemon")
+                daemon_startup_ms = (time.perf_counter() - daemon_started) * 1000.0
 
-            neural_model_ready_ms = 0.0
-            if args.mode in {"blended", "neural"}:
+            if daemon is not None and args.mode in {"blended", "neural"}:
                 model_started = time.perf_counter()
                 run_json(
                     search_command(binary, args.mode, 1, "neural model warmup"),
@@ -651,7 +877,7 @@ def evaluate(args: argparse.Namespace) -> dict:
             queries_with_neural_execution = 0
             queries_with_unobservable_neural_execution = 0
             missing_neural_execution = []
-            for query in queries:
+            for query_number, query in enumerate(queries):
                 query_id = str(query["_id"])
                 text = query_text(query, args.max_query_chars)
                 cold_ms = cold_latencies.get(query_id)
@@ -667,8 +893,7 @@ def evaluate(args: argparse.Namespace) -> dict:
                         expanded_text,
                         query_scope(query, repo),
                         query_exclude_globs(query, repo),
-                        args.disable_memory_expansion
-                        or args.query_expansion != "none",
+                        args.disable_memory_expansion or args.query_expansion != "none",
                     )
                     for expansion_index, expanded_text in enumerate(
                         expanded_query_texts(
@@ -678,12 +903,26 @@ def evaluate(args: argparse.Namespace) -> dict:
                         )
                     )
                 ]
-                warm_outputs, warm_ms = run_search_commands(
-                    commands,
-                    repo,
-                    daemon_env,
-                    args.query_expansion_workers,
-                )
+                native_capture = None
+                if capture_enabled:
+                    output, warm_ms, native_capture = run_captured_query(
+                        commands[0],
+                        repo,
+                        daemon_env,
+                        text,
+                        capture_directory / f"q{query_number:06d}",
+                    )
+                    native_capture["candidate_document_ids"] = captured_document_ids(
+                        native_capture["record"], repo, path_to_id
+                    )
+                    warm_outputs = [output]
+                else:
+                    warm_outputs, warm_ms = run_search_commands(
+                        commands,
+                        repo,
+                        daemon_env,
+                        args.query_expansion_workers,
+                    )
                 warm_output = fuse_search_outputs(
                     warm_outputs,
                     rrf_k=args.rrf_k,
@@ -741,9 +980,12 @@ def evaluate(args: argparse.Namespace) -> dict:
                                     "total_score": float(item.get("total_score", 0.0)),
                                     "hit_count": int(item.get("hit_count", len(hits))),
                                     "sources": sources,
-                                    "preview": "\n".join(
-                                        str(hit.get("preview", "")) for hit in hits[:3]
-                                    )[:12000],
+                                    "preview": candidate_preview(hits),
+                                    **(
+                                        {"fusion_score": item["fusion_score"]}
+                                        if "fusion_score" in item
+                                        else {}
+                                    ),
                                 }
                             )
                 query_score = score_query(ranked, qrels.get(query_id, {}))
@@ -757,7 +999,9 @@ def evaluate(args: argparse.Namespace) -> dict:
                         for document_id in ranked[:10]
                         if document_id in id_to_path
                     ]
-                    query_support_hits = sum(is_support_path(path) for path in top_paths)
+                    query_support_hits = sum(
+                        is_support_path(path) for path in top_paths
+                    )
                     support_file_candidates += len(top_paths)
                     support_file_hits += query_support_hits
                 scores.append(query_score)
@@ -774,6 +1018,11 @@ def evaluate(args: argparse.Namespace) -> dict:
                         "warm_latency_ms": warm_ms,
                         "no_hit": not ranked,
                         "support_file_hits_at_10": query_support_hits,
+                        **(
+                            {"native_capture": native_capture}
+                            if native_capture is not None
+                            else {}
+                        ),
                         **query_score,
                     }
                 )
@@ -813,12 +1062,15 @@ def evaluate(args: argparse.Namespace) -> dict:
                 "mode": args.mode,
                 "queries": len(queries),
                 "binary": identity,
-                "runtime": runtime_metadata(),
+                "runtime": request["runtime"],
                 "index_ms": index_ms,
                 "hash_enhancement_ms": hash_enhancement_ms,
                 "neural_enhancement_ms": neural_enhancement_ms,
                 "index_size_bytes": workspace["index_size_bytes"],
                 "index_configuration": index_configuration,
+                "candidate_trace": candidate_trace_contract(
+                    args.query_expansion, index_configuration.get("reranker_mode")
+                ),
                 "cold_latency_samples": len(cold_latencies),
                 "cold_latency_p50_ms": percentile(list(cold_latencies.values()), 0.50),
                 "cold_latency_p95_ms": percentile(list(cold_latencies.values()), 0.95),
@@ -826,7 +1078,12 @@ def evaluate(args: argparse.Namespace) -> dict:
                 "warm_latency_p95_ms": percentile(warm_latencies, 0.95),
                 "daemon_startup_ms": daemon_startup_ms,
                 "neural_model_ready_ms": neural_model_ready_ms,
-                "warm_query_path": warm_query_path(args.mode),
+                "warm_query_path": "local-process-native-capture"
+                if capture_enabled
+                else warm_query_path(args.mode),
+                "measurement_scope": "native-training-capture"
+                if capture_enabled
+                else "retrieval-benchmark",
                 "query_text_limit": args.max_query_chars,
                 "query_expansion": args.query_expansion,
                 "query_expansion_workers": args.query_expansion_workers,
@@ -860,10 +1117,64 @@ def evaluate(args: argparse.Namespace) -> dict:
                 **aggregate(scores),
                 "details": details,
             }
+            if capture_enabled:
+                records = [detail["native_capture"]["record"] for detail in details]
+                if any(
+                    record["status"] == "applied"
+                    and record["model_id"] != index_configuration.get("reranker_model")
+                    for record in records
+                ):
+                    raise ValueError(
+                        "native capture model does not match observed runtime identity"
+                    )
+                result["native_capture_contract"] = {
+                    "schema_version": 1,
+                    "stage": contracts.CAPTURE_STAGE,
+                    "transport": "fresh-process-stderr",
+                    "ranking_context_lines": 2,
+                    "feature_schema": list(contracts.RERANK_FEATURE_SCHEMA),
+                    "receipt_directory": capture_directory.name,
+                    "applied_queries": sum(
+                        record["status"] == "applied" for record in records
+                    ),
+                    "skipped_queries": sum(
+                        record["status"] == "skipped" for record in records
+                    ),
+                    "skip_reasons": dict(
+                        Counter(
+                            record["reason"]
+                            for record in records
+                            if record["status"] == "skipped"
+                        )
+                    ),
+                }
         finally:
-            peak_rss = stop_daemon_and_measure_peak_rss(daemon, daemon_log)
+            peak_rss = (
+                stop_daemon_and_measure_peak_rss(daemon, daemon_log)
+                if daemon is not None
+                else peak_child_rss_bytes()
+            )
 
         result["peak_child_rss_bytes"] = peak_rss
+        if contracts.dataset_fingerprint(dataset) != request["dataset_content"]:
+            raise ValueError("dataset inputs changed during evaluation")
+        if (
+            contracts.execution_harness(Path(__file__).resolve().parents[1])
+            != request["harness_sha256"]
+        ):
+            raise ValueError("execution harness changed during evaluation")
+        observed = contracts.observed_configuration(result["index_configuration"])
+        contracts.validate_observed_configuration(request, observed)
+        result["execution_provenance"] = {
+            "schema_version": contracts.EXECUTION_SCHEMA_VERSION,
+            "request": request,
+            "request_sha256": contracts.canonical_sha256(request),
+            "source_commit": execution_source,
+            "executed_at": executed_at,
+            "observed_configuration": observed,
+        }
+        if sha256_file(binary) != identity["sha256"]:
+            raise ValueError("binary changed during evaluation")
         return result
 
 
@@ -871,6 +1182,15 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", type=Path, required=True)
     parser.add_argument("--binary", type=Path, default=Path("target/release/ig"))
+    parser.add_argument(
+        "--source-commit",
+        help="Commit used to build --binary; retained as original execution provenance.",
+    )
+    parser.add_argument(
+        "--capture-reranker",
+        action="store_true",
+        help="Explicit training diagnostic: collect native pre-learned features from fresh local process stderr. Requires a capture-capable binary, --output and no expansion; latency includes process/model startup and is not the normal warm benchmark path.",
+    )
     parser.add_argument(
         "--mode",
         choices=["lexical", "hash", "hybrid", "blended", "neural"],
@@ -919,6 +1239,10 @@ def main() -> int:
         parser.error("--original-weight must be positive")
     if args.max_query_chars is not None and args.max_query_chars < 1:
         raise SystemExit("--max-query-chars must be positive")
+    if args.capture_reranker and (
+        args.query_expansion != "none" or args.output is None
+    ):
+        parser.error("--capture-reranker requires --output and --query-expansion none")
 
     result = evaluate(args)
     payload = json.dumps(result, indent=2, sort_keys=True)

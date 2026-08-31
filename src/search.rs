@@ -58,7 +58,6 @@ pub(crate) use execution::hybrid_search_with_context_and_neural_job;
 use fusion::fuse_rrf_with_context;
 use presentation::{
     HitPresentation, PresentationQuery, should_use_compact_identifier_matching, snippet_bounds,
-    to_hit,
 };
 #[cfg(test)]
 use presentation::{find_focus_line, line_at, line_spans};

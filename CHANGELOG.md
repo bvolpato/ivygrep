@@ -4,6 +4,10 @@ All notable changes to ivygrep are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in `IVYGREP_RERANKER_CAPTURE=1` emits versioned native pre-learned candidates and features to stderr for diagnostics and training. Records include query text and source previews; normal search output is unchanged.
+
 ### Performance
 - Vector count and availability checks read native headers and stream node levels without allocating native views or key lookup tables, reducing bookkeeping memory. The fast path checks structural bounds, not full payload integrity; deep health checks and USearch serialization are unchanged. Hash enhancement rebuilds dimension-mismatched stores before filling missing keys.
 - Reference and caller searches reuse one search context across bounded candidate-widening passes, avoiding repeated store setup when early matches are rejected. The existing per-request source-matching cache is unchanged.
@@ -25,6 +29,7 @@ All notable changes to ivygrep are documented in this file.
 - Malformed optional neural metadata no longer disables literal/hash searches or makes empty queries rebuild healthy primary stores. Doctor reports the problem and removes only the invalid neural tier under its locks; metadata publication uses atomic replacement.
 - Neural enhancement checkpoints after crossing the 16,384-chunk interval even when the batch size does not divide it, preserving progress for interrupted runs with custom batch sizes.
 - Search candidate limits count eligible chunks before ignored, shadowed, or filtered rows can displace visible matches. Explicit Boolean queries constrain every retrieval source to a bounded pool satisfying the original parsed query; unsupported structured syntax returns an error instead of relaxed results. Ordinary query expansion is unchanged.
+- Learned file ranking uses fixed two-line context evidence, so `-C` changes display previews and spans without changing learned order. Default-context results, model weights, routing, candidate budgets, and rerank gates are unchanged.
 - Swift and Objective-C use valid Tree-sitter capture queries, preserving method bodies, inline declarations, and nested/extension/category owners. Parsed strings and comments no longer create heuristic symbols in these languages. Index format v23 rebuilds existing indexes, including unchanged files and their vectors.
 - Restored filesystem watchers reconcile edits, additions, and deletions made while the daemon was stopped against the persisted Merkle snapshot before searches trust the index. Watches are registered before reconciliation, preserving edits made during the scan without rebuilding unchanged files.
 - Fresh and recreated worktree overlays publish their stores, base reference, and snapshot together, with completion metadata last. Failed publication retains the prior overlay and retries the full cross-base delta instead of reporting a successful no-op with missing lexical results.
@@ -53,6 +58,8 @@ All notable changes to ivygrep are documented in this file.
 - Index format bumped to v25; existing indexes rebuild once on first use so unchanged files also receive corrected dependency graphs. This is a full index rebuild, with the usual indexing and subsequent vector-enhancement costs.
 
 ### Testing
+- Public retrieval records the checkout-reference model's 481 fit-query IDs and labels public-core as regression evidence (431 of its unchanged 1,000 queries overlap). Declared fit-disjoint diagnostics check actual repository-qualified IDs against that reference; applicability to the executed model remains unverified. Model weights and acceptance gates are unchanged.
+- Reranker training consumes captured native feature vectors instead of reconstructing grouped search output. Benchmark reuse verifies dataset, binary, harness, configuration, and runtime fingerprints while retaining original execution provenance; legacy or incompatible results require a fresh run.
 - The Web UI "late search results" browser test tells its scripted streams apart by URL and releases the superseded search's results only after navigation completed, instead of racing a 100 ms timer against the runner.
 - The `incremental_reindex_no_change` guard uses an absolute budget (`benchmark_guard.py --max-median-ms 25`, confirmed by a second head measurement) instead of a paired ratio: identical code measured 1.5-1.8x apart within one shared-runner job for this 3 ms benchmark, so the ratio carried no signal, while a fast path that starts doing real work still blows the budget. The larger benches keep their ratio guards, and the neural-tier ANN graph (`neural_vector_search_in_50k_hot`) is guarded alongside the hash-tier one.
 - Added `scripts/bench_file_localization.py` and a curated 30-task public set (`benchmarks/public/file_localization_tasks.jsonl`, issue text to files the merged fix touched across Python, Rust, and TypeScript repositories) reporting File Acc@k, Recall@k, MRR, and context-pack precision/recall with a lexical baseline delta; hash-only results are committed under `docs/benchmarks/file-localization-hash-2026-08-21.json`.

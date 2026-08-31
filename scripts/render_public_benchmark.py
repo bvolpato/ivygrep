@@ -64,6 +64,39 @@ def default_output_name(matrix: dict) -> str:
     return f"{report_slug(matrix)}-results.json"
 
 
+def query_evidence_label(matrix: dict) -> str:
+    if matrix["profile"] == "public-core":
+        return "regression queries"
+    if matrix["profile"] == "reranker-fit":
+        return "checkout-reference model-fit queries"
+    audit = matrix.get("fit_query_audit") or {}
+    reference = audit.get("reference", {}) if audit.get("schema_version") == 2 else {}
+    if reference.get("verified") is True and audit.get("overlap_queries") == 0:
+        return "checkout-reference fit-disjoint queries (executed model unverified)"
+    if reference.get("verified") is True:
+        return "public regression queries (checkout-reference fit IDs)"
+    return "public queries (executed model unverified)"
+
+
+def query_evidence_note(matrix: dict) -> str:
+    if matrix["profile"] == "public-core":
+        return (
+            "Public-core is regression evidence, not an unseen-query generalization set: "
+            "it overlaps the checkout-reference reranker's fit data. "
+            "Fit-ID applicability to the executed model is unverified without model-checksum attestation. "
+            "Its query set and acceptance gates are unchanged."
+        )
+    audit = matrix.get("fit_query_audit") or {}
+    reference = audit.get("reference", {}) if audit.get("schema_version") == 2 else {}
+    applicability = (
+        "Executed-model fit disjointness is unverified: no model-checksum attestation binds the binary to the reference. "
+        "Matching model IDs do not identify model bytes. This diagnostic does not replace the public-core release gate."
+    )
+    if reference.get("verified") is True:
+        return f"The checkout-reference fit ledger overlaps {audit['overlap_queries']} query IDs. {applicability}"
+    return f"This artifact does not record verified checkout-reference fit-ID disjointness. {applicability}"
+
+
 def dataset_scope_note(matrix: dict) -> str:
     """Describe sampling and licensing without implying redistribution rights."""
     records = {}
@@ -170,11 +203,19 @@ def markdown(matrix: dict, baseline: dict | None = None) -> str:
         f"- Profile: `{matrix['profile']}`",
         f"- Tasks: {len(matrix['tasks'])}",
         f"- Languages: {len(matrix.get('languages', []))}",
-        f"- Held-out queries: {matrix['queries']}",
+        f"- {query_evidence_label(matrix).capitalize()}: {matrix['queries']}",
         f"- Repetitions: {matrix['repetitions']}",
         f"- {corpus_sampling_note(matrix)}",
         f"- Dataset scope: {dataset_scope_note(matrix)}",
     ]
+    if matrix.get("aggregation_provenance"):
+        aggregation = matrix["aggregation_provenance"]
+        lines.extend(
+            [
+                f"- Aggregation checkout: `{aggregation['source_commit']}` (separate from original execution)",
+                f"- Aggregated at: `{aggregation['generated_at']}`",
+            ]
+        )
     if matrix.get("query_text_limit") is not None:
         lines.append(f"- Query text limit: {matrix['query_text_limit']} characters")
     lines.extend(
@@ -323,7 +364,9 @@ def markdown(matrix: dict, baseline: dict | None = None) -> str:
             "",
             "## Scope",
             "",
-            "Matrix covers held-out natural-language and code-to-code retrieval. "
+            "Matrix covers natural-language and code-to-code retrieval. "
+            + query_evidence_note(matrix)
+            + " "
             "Exact-search tools require a separate exact-query workload.",
             "",
             "## Reproduce",
@@ -428,11 +471,11 @@ def html(matrix: dict, baseline: dict | None = None) -> str:
         <section class="report-hero">
             <div class="report-eyebrow">Public benchmark</div>
             <h1>Code-retrieval quality and cost</h1>
-            <p>Profile <code>{escape(matrix["profile"])}</code>: {matrix["queries"]} held-out queries across {len(matrix["tasks"])} public CoIR tasks, repeated {matrix["repetitions"]} times. No private corpus or local path is included.</p>
+            <p>Profile <code>{escape(matrix["profile"])}</code>: {matrix["queries"]} {escape(query_evidence_label(matrix))} across {len(matrix["tasks"])} public CoIR tasks, repeated {matrix["repetitions"]} times. No private corpus or local path is included.</p>
             <p><strong>{escape(corpus_sampling_note(matrix))}</strong></p>
         </section>
         <section class="report-grid">
-            <div class="report-stat"><strong>{matrix["queries"]}</strong><span>held-out queries</span></div>
+            <div class="report-stat"><strong>{matrix["queries"]}</strong><span>{escape(query_evidence_label(matrix))}</span></div>
             <div class="report-stat"><strong>{len(matrix["tasks"])}</strong><span>public tasks</span></div>
             <div class="report-stat"><strong>{len(matrix.get("languages", []))}</strong><span>languages</span></div>
             <div class="report-stat"><strong>{matrix["repetitions"]}</strong><span>repetitions</span></div>
@@ -458,7 +501,8 @@ def html(matrix: dict, baseline: dict | None = None) -> str:
         </section>
         <section class="report-card">
             <h2>Scope</h2>
-            <p>Matrix covers held-out natural-language and code-to-code retrieval. Exact-search tools require a separate exact-query workload.</p>
+            <p>Matrix covers natural-language and code-to-code retrieval. Exact-search tools require a separate exact-query workload.</p>
+            <p>{escape(query_evidence_note(matrix))}</p>
             <p>{escape(corpus_sampling_note(matrix))}</p>
             <p>{escape(dataset_scope_note(matrix))}</p>
         </section>

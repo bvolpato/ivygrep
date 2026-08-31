@@ -264,6 +264,25 @@ module because ordering and score interactions form one relevance contract.
 and builds explanations. Output records source signals and whether neural
 retrieval was requested and executed.
 
+Learned file reranking uses canonical two-line context (`-C 2`) for features
+and line-based tie breaks. Requested display previews and spans are applied
+after ranking, preserving the existing default-context results. Nondefault
+context requests retain a second snippet until rendering; both snippets come
+from the same file read, with no additional file I/O. Model weights, routing,
+candidate budgets, and rerank gates are unchanged.
+
+Setting `IVYGREP_RERANKER_CAPTURE=1` enables an opt-in diagnostic record at the
+hybrid search rerank decision point. A single JSON line prefixed with
+`IVYGREP_RERANKER_CAPTURE` and a tab is written to stderr, separate from normal
+stdout. It includes the schema version, process ID, query, model identity,
+feature schema, and actual accepted pre-learned file candidates with canonical
+previews and native feature vectors. Ineligible routes and rerank gates emit
+an explicit skipped status. Records contain query text and source content,
+including canonical context even when display context is zero. Training
+collectors must verify a fresh matching process/query record and reject
+missing, skipped, or ambiguous captures. With capture unset, no diagnostic
+records or feature copies are allocated or written.
+
 Literal, regex, symbol, and caller commands have specialized paths where their
 contracts differ from hybrid semantic search. They still reuse workspace,
 filtering, grouping, and output types where appropriate.
