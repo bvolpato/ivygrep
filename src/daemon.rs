@@ -7220,6 +7220,7 @@ mod tests {
         // Keep the same daemon state so the first post-restore request also
         // exercises a preexisting query-result cache, not just a cold restart.
         let state = test_state();
+        let watcher_cleanup = WatcherCleanup(&state);
         let cached_request = DaemonRequest::Search {
             path: Some(workspace.root.clone()),
             query: "offline_added_marker".to_string(),
@@ -7282,9 +7283,13 @@ mod tests {
                 .is_err()
         );
         drop(held);
-        let response = tokio::time::timeout(Duration::from_secs(10), searching)
+        let response = tokio::time::timeout(Duration::from_secs(10), &mut searching)
             .await
-            .unwrap()
+            .unwrap_or_else(|error| {
+                let diagnostic = restored_watcher_timeout_diagnostic(&state, &workspace);
+                searching.abort();
+                panic!("restored watcher search timed out: {error}; {diagnostic}");
+            })
             .unwrap();
         assert!(
             matches!(response, DaemonResponse::SearchResults { hits, warnings } if hits.iter().any(|hit| hit.file_path == Path::new("added.rs")) && warnings.is_empty())
@@ -7318,13 +7323,14 @@ mod tests {
         assert!(after.files.contains_key("added.rs"));
         assert!(after.files.contains_key("queued.rs"));
         assert!(workspace.is_watcher_alive());
-        stop_all_watchers(&state);
+        drop(watcher_cleanup);
 
         // A second restart without source edits is a real no-op, not a fresh
         // rebuild or an unconditional recomputation of the unchanged files.
         let generation = workspace.read_metadata().unwrap().unwrap().index_generation;
         let snapshot = std::fs::read(workspace.merkle_snapshot_path()).unwrap();
         let state = test_state();
+        let watcher_cleanup = WatcherCleanup(&state);
         restore_configured_watchers(&state);
         let response = tokio::time::timeout(
             Duration::from_secs(10),
@@ -7334,7 +7340,12 @@ mod tests {
             ),
         )
         .await
-        .unwrap();
+        .unwrap_or_else(|error| {
+            panic!(
+                "unchanged watcher restart search timed out: {error}; {}",
+                restored_watcher_timeout_diagnostic(&state, &workspace)
+            );
+        });
         assert!(matches!(response, DaemonResponse::SearchResults { hits, .. } if hits.len() == 1));
         assert_eq!(
             workspace.read_metadata().unwrap().unwrap().index_generation,
@@ -7344,7 +7355,48 @@ mod tests {
             std::fs::read(workspace.merkle_snapshot_path()).unwrap(),
             snapshot
         );
-        stop_all_watchers(&state);
+        drop(watcher_cleanup);
+    }
+
+    fn restored_watcher_timeout_diagnostic(state: &DaemonState, workspace: &Workspace) -> String {
+        let control = state.watchers.try_lock().and_then(|watchers| {
+            watchers
+                .get(&workspace.id)
+                .map(|registration| registration.control.clone())
+        });
+        let watcher = control.map_or_else(
+            || "watcher unavailable (registry locked or unregistered)".to_string(),
+            |control| {
+                format!(
+                    "active={}, indexing={}, retrying={}, initial_scan={}, initial_pending={}, pending={:?}",
+                    control.active.load(Ordering::Relaxed),
+                    control.indexing.load(Ordering::Relaxed),
+                    control.retrying.load(Ordering::Relaxed),
+                    control.initial_scan_required.load(Ordering::Relaxed),
+                    control.initial_reconciliation_pending.load(Ordering::Relaxed),
+                    control.pending_work.try_lock().as_deref(),
+                )
+            },
+        );
+        let coordinator = state
+            .workspace_modes
+            .try_lock()
+            .and_then(|coordinators| coordinators.get(&workspace.id).and_then(Weak::upgrade));
+        let leases = coordinator
+            .as_ref()
+            .and_then(|coordinator| coordinator.state.try_lock())
+            .map(|mode| {
+                (
+                    mode.active_mode,
+                    mode.active_leases,
+                    mode.exclusive_active,
+                    mode.exclusive_waiters,
+                )
+            });
+        format!(
+            "{watcher}, cpu_permits={}, coordinator(mode, leases, exclusive, waiters)={leases:?}",
+            state.cpu_permits.available_permits(),
+        )
     }
 
     #[tokio::test]
