@@ -20,11 +20,11 @@
         <section class="report-hero">
             <div class="report-eyebrow">Public benchmark</div>
             <h1>Code-retrieval quality and cost</h1>
-            <p>Profile <code>sota-challenge</code>: 600 public queries (fit disjointness unverified) across 6 public CoIR tasks, repeated 3 times. No private corpus or local path is included.</p>
+            <p>Profile <code>sota-challenge</code>: 600 public queries (executed model unverified) across 6 public CoIR tasks, repeated 3 times. No private corpus or local path is included.</p>
             <p><strong>Corpus sampling: 6 of 6 corpora sampled to 5,000 documents (qrel documents retained, remainder dropped deterministically). Full CoIR corpora: stackoverflow-qa 19,931 documents (5,000 indexed), apps 8,765 documents (5,000 indexed), codefeedback-mt 66,383 documents (5,000 indexed), synthetic-text2sql 105,851 documents (5,000 indexed), CodeSearchNet-python 280,310 documents (5,000 indexed), CodeSearchNet-java 180,866 documents (5,000 indexed). Scores on sampled corpora are not comparable to full-corpus CoIR leaderboard numbers.</strong></p>
         </section>
         <section class="report-grid">
-            <div class="report-stat"><strong>600</strong><span>public queries (fit disjointness unverified)</span></div>
+            <div class="report-stat"><strong>600</strong><span>public queries (executed model unverified)</span></div>
             <div class="report-stat"><strong>6</strong><span>public tasks</span></div>
             <div class="report-stat"><strong>3</strong><span>languages</span></div>
             <div class="report-stat"><strong>3</strong><span>repetitions</span></div>
@@ -51,7 +51,7 @@
         <section class="report-card">
             <h2>Scope</h2>
             <p>Matrix covers natural-language and code-to-code retrieval. Exact-search tools require a separate exact-query workload.</p>
-            <p>This artifact does not record verified disjointness from model-fit query IDs.</p>
+            <p>This artifact does not record verified checkout-reference fit-ID disjointness. Executed-model fit disjointness is unverified: no model-checksum attestation binds the binary to the reference. Matching model IDs do not identify model bytes. This diagnostic does not replace the public-core release gate.</p>
             <p>Corpus sampling: 6 of 6 corpora sampled to 5,000 documents (qrel documents retained, remainder dropped deterministically). Full CoIR corpora: stackoverflow-qa 19,931 documents (5,000 indexed), apps 8,765 documents (5,000 indexed), codefeedback-mt 66,383 documents (5,000 indexed), synthetic-text2sql 105,851 documents (5,000 indexed), CodeSearchNet-python 280,310 documents (5,000 indexed), CodeSearchNet-java 180,866 documents (5,000 indexed). Scores on sampled corpora are not comparable to full-corpus CoIR leaderboard numbers.</p>
             <p>Artifacts use pinned public datasets and retain source revisions and checksums in raw JSON. Deterministic samples: stackoverflow-qa (100 queries, 5000 documents), apps (100 queries, 5000 documents), codefeedback-mt (100 queries, 5000 documents), synthetic-text2sql (100 queries, 5000 documents), CodeSearchNet-python (100 queries, 5000 documents), CodeSearchNet-java (100 queries, 5000 documents). Dataset cards do not declare licenses for: stackoverflow-qa, apps, codefeedback-mt, synthetic-text2sql. Treat downloaded corpora as evaluation inputs; do not redistribute them without checking upstream terms.</p>
         </section>

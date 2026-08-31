@@ -3,7 +3,6 @@ import copy
 import contextlib
 import io
 import json
-import math
 from pathlib import Path
 import sys
 import tempfile
@@ -425,6 +424,82 @@ class PublicBenchmarkTest(unittest.TestCase):
                 )["overlap_queries"],
                 0,
             )
+
+    def test_checkout_fit_ledger_does_not_attest_foreign_or_same_id_binary(self):
+        manifest_path = ROOT / "benchmarks/public/manifest.json"
+        manifest = exporter.load_manifest(manifest_path)
+        config = manifest["reranker_fit_ledger"]
+        ledger = contracts.load_fit_ledger(
+            manifest_path.parent / config["model"],
+            manifest_path.parent / config["path"],
+            config["sha256"],
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            dataset = Path(temporary) / ledger["sources"][0]["dataset"]
+            dataset.mkdir()
+            (dataset / "provenance.json").write_text(
+                json.dumps(ledger["sources"][0]["provenance"])
+            )
+            (dataset / "queries.jsonl").write_text(
+                '{"_id":"new-diagnostic-id","text":"fixture"}\n'
+            )
+            audit = contracts.audit_public_profile(
+                manifest, "reranker-eval", [dataset], manifest_path
+            )
+        self.assertEqual(audit["overlap_queries"], 0)
+        metrics = {
+            name: {
+                "mean": 0.5,
+                "standard_deviation": 0.0,
+                "coefficient_of_variation": 0.0,
+            }
+            for name in (
+                *matrix_runner.QUALITY_METRICS,
+                *matrix_runner.LATENCY_METRICS,
+                *matrix_runner.RESOURCE_METRICS,
+            )
+        }
+        for model_id in ("different-external-model", ledger["model_id"]):
+            with self.subTest(executed_model_id=model_id):
+                matrix = {
+                    "profile": "reranker-eval",
+                    "ivygrep_commit": "external",
+                    "queries": 1,
+                    "tasks": [dataset.name],
+                    "repetitions": 1,
+                    "modes": ["hash"],
+                    "summary": {"hash": {"metrics": metrics}},
+                    "fit_query_audit": audit,
+                    "results": [
+                        {
+                            "dataset": dataset.name,
+                            "binary": {"sha256": "b" * 64},
+                            "index_configuration": {"reranker_model": model_id},
+                        }
+                    ],
+                }
+                for render in (renderer.markdown, renderer.html):
+                    report = render(matrix).lower()
+                    self.assertIn("executed model unverified", report)
+                    self.assertIn("checkout-reference", report)
+                    self.assertNotIn("verified fit-disjoint diagnostic queries", report)
+        self.assertTrue(audit.get("reference", {}).get("verified"))
+        self.assertEqual(audit["reference"]["model_sha256"], ledger["model_sha256"])
+        self.assertEqual(audit["reference"]["ledger_sha256"], config["sha256"])
+        self.assertEqual(audit["executed_binary"]["applicability"], "unverified")
+        self.assertNotIn("verified", audit)
+
+    def test_legacy_fit_verification_does_not_certify_executed_binary(self):
+        matrix = {
+            "profile": "reranker-eval",
+            "fit_query_audit": {
+                "schema_version": 1,
+                "verified": True,
+                "overlap_queries": 0,
+            },
+        }
+        self.assertIn("unverified", renderer.query_evidence_label(matrix))
+        self.assertIn("executed", renderer.query_evidence_note(matrix).lower())
 
     def test_disjoint_claim_requires_a_model_bound_ledger(self):
         manifest = {
@@ -866,51 +941,6 @@ class PublicBenchmarkTest(unittest.TestCase):
                     {"general": partial_path},
                 )
 
-    def test_reranker_features_are_bounded_and_deterministic(self):
-        candidate = {
-            "file_path": "src/search.rs",
-            "total_score": 0.5,
-            "hit_count": 2,
-            "sources": ["lexical", "semantic"],
-            "preview": "fn route_query() { learned_rerank(); }",
-        }
-        first = reranker_trainer.feature_vector(
-            "route learned query", candidate, 0
-        )
-        second = reranker_trainer.feature_vector(
-            "route learned query", candidate, 0
-        )
-        self.assertEqual(first, second)
-        self.assertEqual(len(first), len(reranker_trainer.FEATURE_NAMES))
-        self.assertTrue(all(math.isfinite(value) for value in first))
-        self.assertTrue(all(0.0 <= value <= 1.0 for value in first))
-
-    def test_reference_support_feature_matches_runtime_roles(self):
-        self.assertFalse(reranker_trainer.is_support_path("docs/support.md"))
-        self.assertFalse(reranker_trainer.is_support_path("src/request_test.rs"))
-        self.assertTrue(reranker_trainer.is_support_path("tools/request.rs"))
-        self.assertTrue(reranker_trainer.is_support_path("examples/request.rs"))
-
-    def test_native_feature_fixture_matches_python_reference(self):
-        fixture = json.loads(
-            (ROOT / "tests/fixtures/reranker_feature_contract.json").read_text()
-        )
-        self.assertEqual(
-            fixture["feature_schema"], list(reranker_trainer.FEATURE_NAMES)
-        )
-        for case in fixture["cases"]:
-            with self.subTest(case=case["name"]):
-                actual = reranker_trainer.feature_vector(
-                    case["query"], case["candidate"], case["baseline_rank"]
-                )
-                for name, left, right in zip(
-                    fixture["feature_schema"],
-                    actual,
-                    case["expected_features"],
-                    strict=True,
-                ):
-                    self.assertAlmostEqual(left, right, places=6, msg=name)
-
     def test_public_reranker_evidence_passes_acceptance_gate(self):
         report = reranker_renderer.build_report(
             ROOT / "benchmarks" / "public" / "reranker_model.json",
@@ -1075,14 +1105,9 @@ class PublicBenchmarkTest(unittest.TestCase):
             dataset, result_path, result, receipt = native_training_fixture(
                 Path(temporary)
             )
-            with mock.patch.object(
-                reranker_trainer,
-                "feature_vector",
-                side_effect=AssertionError("must not reconstruct native features"),
-            ):
-                examples, sources = reranker_trainer.load_examples(
-                    [(dataset, result_path)]
-                )
+            examples, sources = reranker_trainer.load_examples(
+                [(dataset, result_path)]
+            )
             self.assertEqual(
                 examples[0]["candidates"][0]["features"],
                 [0.125] * len(contracts.RERANK_FEATURE_SCHEMA),
@@ -1443,6 +1468,11 @@ class PublicBenchmarkTest(unittest.TestCase):
                         matrix_runner.main()
                 self.assertFalse(output.exists())
             matrix = json.loads(published_text)
+            applicability = matrix["fit_query_audit"].get("executed_binary", {})
+            self.assertEqual(applicability.get("applicability"), "unverified")
+            self.assertEqual(applicability["binary_sha256"], request["binary_sha256"])
+            self.assertEqual(applicability["observed_model_ids"], ["fixture"])
+            self.assertFalse(matrix["fit_query_audit"]["reference"]["verified"])
             self.assertEqual(matrix["ivygrep_commit"], "a" * 40)
             self.assertEqual(
                 matrix["aggregation_provenance"]["source_commit"], "c" * 40

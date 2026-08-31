@@ -68,29 +68,33 @@ def query_evidence_label(matrix: dict) -> str:
     if matrix["profile"] == "public-core":
         return "regression queries"
     if matrix["profile"] == "reranker-fit":
-        return "model-fit queries"
+        return "checkout-reference model-fit queries"
     audit = matrix.get("fit_query_audit") or {}
-    if audit.get("verified") is True and audit.get("overlap_queries") == 0:
-        return "verified fit-disjoint diagnostic queries"
-    if audit.get("verified") is True:
-        return "public regression queries (includes model-fit IDs)"
-    return "public queries (fit disjointness unverified)"
+    reference = audit.get("reference", {}) if audit.get("schema_version") == 2 else {}
+    if reference.get("verified") is True and audit.get("overlap_queries") == 0:
+        return "checkout-reference fit-disjoint queries (executed model unverified)"
+    if reference.get("verified") is True:
+        return "public regression queries (checkout-reference fit IDs)"
+    return "public queries (executed model unverified)"
 
 
 def query_evidence_note(matrix: dict) -> str:
     if matrix["profile"] == "public-core":
         return (
             "Public-core is regression evidence, not an unseen-query generalization set: "
-            "it overlaps the embedded reranker's fit data. Its query set and acceptance gates are unchanged."
+            "it overlaps the checkout-reference reranker's fit data. "
+            "Fit-ID applicability to the executed model is unverified without model-checksum attestation. "
+            "Its query set and acceptance gates are unchanged."
         )
     audit = matrix.get("fit_query_audit") or {}
-    if audit.get("verified") is True and audit.get("overlap_queries") == 0:
-        return "Query IDs were checked against the recorded model-fit ledger; this diagnostic does not replace the public-core release gate."
-    if audit.get("verified") is True:
-        return f"The recorded model-fit ledger overlaps {audit['overlap_queries']} query IDs; no held-out claim is made."
-    return (
-        "This artifact does not record verified disjointness from model-fit query IDs."
+    reference = audit.get("reference", {}) if audit.get("schema_version") == 2 else {}
+    applicability = (
+        "Executed-model fit disjointness is unverified: no model-checksum attestation binds the binary to the reference. "
+        "Matching model IDs do not identify model bytes. This diagnostic does not replace the public-core release gate."
     )
+    if reference.get("verified") is True:
+        return f"The checkout-reference fit ledger overlaps {audit['overlap_queries']} query IDs. {applicability}"
+    return f"This artifact does not record verified checkout-reference fit-ID disjointness. {applicability}"
 
 
 def dataset_scope_note(matrix: dict) -> str:

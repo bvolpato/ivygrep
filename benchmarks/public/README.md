@@ -2,26 +2,34 @@
 
 `public-core` is the existing 1,000-query regression panel. Its query sets,
 dataset limits, relevance thresholds and release-CI role are unchanged. It is
-not an unseen-query generalization set for the embedded learned reranker.
+not an unseen-query generalization set for the checkout-reference learned reranker.
 
 ## Actual model-fit query IDs
 
-`reranker_fit_query_ids.json` records all 481 fit IDs for the unchanged embedded
-model. The manifest pins this ledger's checksum. The ledger binds the model
-bytes, each training source's recorded provenance and result checksums, and the
+`reranker_fit_query_ids.json` records all 481 fit IDs for the unchanged
+checkout-reference model. The manifest pins this ledger's checksum. The ledger
+binds the model bytes, each training source's provenance and result checksums, and the
 exact query IDs. The four original source-provenance hashes were reconstructed
 from pinned data, including the sampled codefeedback source.
 
-Every public matrix records a fit-ID audit. Regression profiles report overlap
-without dropping queries. The separately named `reranker-eval` diagnostic
-requires zero overlap against this actual ledger. It does not replace the
+Every public matrix records a checkout-reference fit-ID audit. Regression
+profiles report overlap without dropping queries. The separately named `reranker-eval` diagnostic
+requires zero overlap against this reference ledger. It does not replace the
 public-core release gate. IDs are qualified by query repository; this is not a
 claim that semantically similar questions or corpus documents are disjoint.
 Overlap alone does not prove model overfitting.
 
+Schema 2 separates verified `reference` model/ledger checksums from
+`executed_binary.applicability`, which remains `unverified`. A supplied binary
+can embed different weights, including weights with the same model ID. Neither
+that ID nor the binary's own checksum binds its embedded model to the checkout
+reference. No executed-model checksum attestation is currently available, so
+even zero reference-ID overlap does not certify fit disjointness for the
+evaluated binary. Observed binary checksums and model IDs are informational only.
+
 Existing public artifacts remain readable. The renderer labels public-core as
-regression evidence and does not invent verified disjointness for legacy
-artifacts lacking an audit.
+regression evidence and does not upgrade legacy `verified` flags into
+executed-model certification.
 
 ## Native reranker training capture
 

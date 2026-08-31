@@ -83,7 +83,7 @@
     },
     "reranker-fit": {
       "query_role": "fit",
-      "description": "Deterministic half of public-core queries used to fit the learned reranker; query IDs in reranker-eval are disjoint.",
+      "description": "Deterministic half of public-core queries used to fit the checkout-reference reranker; query IDs in reranker-eval are disjoint from that reference.",
       "minimum_queries": 450,
       "tasks": [
         "codetrans-dl",
@@ -122,7 +122,7 @@
     },
     "reranker-eval": {
       "query_role": "fit-disjoint-diagnostic",
-      "description": "Separately named model-fit-disjoint query diagnostic. Actual IDs are checked against the model-bound fit ledger; it does not replace the public-core release gate.",
+      "description": "Separately named checkout-reference query-ID diagnostic. IDs are checked against the checksum-bound reference fit ledger; executed-model applicability remains unverified. This does not replace the public-core release gate.",
       "minimum_queries": 450,
       "tasks": [
         "codetrans-dl",

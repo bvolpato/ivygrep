@@ -592,7 +592,9 @@ def load_fit_ledger(model_path: Path, ledger_path: Path, expected_sha256: str) -
         ledger.get("model_sha256") != sha256_file(model_path)
         or ledger.get("model_id") != model["model_id"]
     ):
-        raise ValueError("model-fit ledger is not bound to the current embedded model")
+        raise ValueError(
+            "model-fit ledger is not bound to the checkout-reference model"
+        )
     expected = {source["dataset"]: source for source in model["training"]["sources"]}
     sources = ledger.get("sources", [])
     if len(sources) != len(expected) or {
@@ -680,18 +682,25 @@ def audit_fit_queries(ledger: dict, datasets: list[Path], role: str) -> dict:
     total_overlap = sum(row["overlap_queries"] for row in records)
     if role == "fit-disjoint-diagnostic" and total_overlap:
         raise ValueError(
-            f"declared fit-disjoint diagnostic overlaps {total_overlap} actual model-fit query IDs"
+            f"declared fit-disjoint diagnostic overlaps {total_overlap} actual checkout-reference model-fit query IDs"
         )
     return {
-        "schema_version": 1,
-        "verified": True,
+        "schema_version": 2,
         "query_role": role,
-        "model_id": ledger["model_id"],
-        "model_sha256": ledger["model_sha256"],
+        "reference": {
+            "scope": "checkout-model",
+            "verified": True,
+            "model_id": ledger["model_id"],
+            "model_sha256": ledger["model_sha256"],
+        },
+        "executed_binary": {
+            "applicability": "unverified",
+            "reason": "No executed-model checksum attestation binds the binary to the checkout-reference model.",
+        },
         "queries": sum(row["queries"] for row in records),
         "overlap_queries": total_overlap,
         "datasets": records,
-        "scope": "repository-qualified query-ID overlap, not proof of overfitting or semantic independence",
+        "scope": "repository-qualified query-ID overlap against the checkout-reference model, not proof of executed-model disjointness, overfitting or semantic independence",
     }
 
 
@@ -705,13 +714,21 @@ def audit_public_profile(
             raise ValueError(
                 "declared fit-disjoint diagnostic requires a model-bound fit ledger"
             )
-        return {"schema_version": 1, "verified": False, "query_role": role}
+        return {
+            "schema_version": 2,
+            "query_role": role,
+            "reference": {"scope": "checkout-model", "verified": False},
+            "executed_binary": {
+                "applicability": "unverified",
+                "reason": "No executed-model checksum attestation binds the binary to a checkout-reference model.",
+            },
+        }
     base = manifest_path.resolve().parent
     model_path = base / config["model"]
     ledger_path = base / config["path"]
     ledger = load_fit_ledger(model_path, ledger_path, config["sha256"])
     audit = audit_fit_queries(ledger, datasets, role)
-    audit["ledger_sha256"] = config["sha256"]
+    audit["reference"]["ledger_sha256"] = config["sha256"]
     return audit
 
 

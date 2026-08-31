@@ -477,6 +477,24 @@ def main() -> int:
     for dataset in dataset_paths:
         if contracts.dataset_fingerprint(dataset) != dataset_content[dataset.name]:
             raise ValueError("dataset content changed during matrix assembly")
+    # Observed IDs and binary bytes do not attest which model bytes it embeds.
+    fit_query_audit["executed_binary"].update(
+        {
+            "binary_sha256": binary_sha256,
+            "observed_model_ids": sorted(
+                {
+                    model_id
+                    for result in results
+                    if isinstance(
+                        model_id := result.get("index_configuration", {}).get(
+                            "reranker_model"
+                        ),
+                        str,
+                    )
+                }
+            ),
+        }
+    )
     aggregation = {
         "source_commit": benchmark_revision(root, None),
         "runtime": eval_code_retrieval.runtime_metadata(),
