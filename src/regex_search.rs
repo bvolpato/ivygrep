@@ -257,7 +257,7 @@ fn index_prefilter_files(
             && path_matcher.matches(rel)
             && type_match != PathTypeFilterMatch::Reject
             && (type_match != PathTypeFilterMatch::ValidateText
-                || unknown_file_is_indexable_text(&workspace.root.join(rel)))
+                || unknown_file_is_indexable_text(&workspace.root, rel))
         {
             candidate_files.insert(rel.clone());
         }
@@ -412,17 +412,16 @@ fn regex_search_parallel(
             return;
         }
 
-        let full_path = workspace.root.join(rel_path);
-        if !full_path.is_file() {
+        let Ok(file) = crate::workspace_file::open(&workspace.root, rel_path) else {
             return;
-        }
+        };
 
         let mut searcher: Searcher = SearcherBuilder::new().line_number(true).build();
 
         let mut local_hits = Vec::new();
-        let _ = searcher.search_path(
+        let _ = searcher.search_file(
             &matcher,
-            &full_path,
+            &file,
             UTF8(|line_num, line| {
                 if options.is_cancelled() {
                     return Ok(false);
@@ -525,9 +524,12 @@ fn regex_search_walk(
             break;
         }
         let mut local_hits = Vec::new();
-        searcher.search_path(
+        let Ok(file) = crate::workspace_file::open(&workspace.root, &rel_path) else {
+            continue;
+        };
+        searcher.search_file(
             &matcher,
-            &full_path,
+            &file,
             UTF8(|line_num, line| {
                 if options.is_cancelled() {
                     return Ok(false);
@@ -554,7 +556,7 @@ fn regex_search_walk(
 
         if type_filter_match == PathTypeFilterMatch::ValidateText
             && !local_hits.is_empty()
-            && !unknown_file_is_indexable_text(&full_path)
+            && !unknown_file_is_indexable_text(&workspace.root, &rel_path)
         {
             continue;
         }
@@ -598,8 +600,8 @@ fn type_filter_match_for_path(
     }
 }
 
-fn unknown_file_is_indexable_text(path: &std::path::Path) -> bool {
-    let Ok(mut file) = fs::File::open(path) else {
+fn unknown_file_is_indexable_text(root: &std::path::Path, path: &std::path::Path) -> bool {
+    let Ok(mut file) = crate::workspace_file::open(root, path) else {
         return false;
     };
     crate::chunking::is_indexable_file_reader(path, &mut file).unwrap_or(false)
@@ -612,27 +614,52 @@ fn expand_regex_context(
     options: &SearchOptions,
 ) {
     expand_regex_context_with_paths(hits, context, Some(options), |path| {
-        workspace.root.join(path)
+        crate::workspace_file::open(&workspace.root, path)
     });
 }
 
-pub(crate) fn expand_regex_context_absolute(hits: &mut [SearchHit], context: usize) {
-    expand_regex_context_with_paths(hits, context, None, |path| path.to_path_buf());
+pub(crate) fn expand_regex_context_absolute(
+    hits: &mut [SearchHit],
+    context: usize,
+    roots: &[PathBuf],
+) {
+    expand_regex_context_with_paths(hits, context, None, |path| {
+        open_absolute_workspace_file(path, roots)
+    });
 }
 
 pub(crate) fn expand_regex_context_absolute_with_options(
     hits: &mut [SearchHit],
     context: usize,
+    roots: &[PathBuf],
     options: &SearchOptions,
 ) {
-    expand_regex_context_with_paths(hits, context, Some(options), |path| path.to_path_buf());
+    expand_regex_context_with_paths(hits, context, Some(options), |path| {
+        open_absolute_workspace_file(path, roots)
+    });
+}
+
+fn open_absolute_workspace_file(
+    path: &std::path::Path,
+    roots: &[PathBuf],
+) -> std::io::Result<fs::File> {
+    let root = roots
+        .iter()
+        .find(|root| path.starts_with(root))
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "path is outside searched workspaces",
+            )
+        })?;
+    crate::workspace_file::open(root, path)
 }
 
 fn expand_regex_context_with_paths(
     hits: &mut [SearchHit],
     context: usize,
     options: Option<&SearchOptions>,
-    resolve_path: impl Fn(&std::path::Path) -> PathBuf,
+    open_file: impl Fn(&std::path::Path) -> std::io::Result<fs::File>,
 ) {
     if context == 0 || hits.is_empty() {
         return;
@@ -650,17 +677,16 @@ fn expand_regex_context_with_paths(
         if options.is_some_and(SearchOptions::is_cancelled) {
             return;
         }
-        let path = resolve_path(&rel_path);
-        if path
+        let Ok(file) = open_file(&rel_path) else {
+            continue;
+        };
+        if file
             .metadata()
             .ok()
             .is_none_or(|metadata| metadata.len() > MAX_CONTEXT_FILE_BYTES)
         {
             continue;
         }
-        let Ok(file) = fs::File::open(path) else {
-            continue;
-        };
         let mut content = String::new();
         let Ok(bytes_read) = file
             .take(MAX_CONTEXT_FILE_BYTES.saturating_add(1))

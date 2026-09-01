@@ -1,12 +1,9 @@
-use std::fs;
-
 use anyhow::Result;
 
 use crate::indexer::IndexedChunk;
 use crate::protocol::SearchHit;
 use crate::reranker::RerankInput;
 use crate::search_routing::QueryRouting;
-use crate::workspace::Workspace;
 
 use super::{
     CachedFileContent, FusionQuery, compact_identifier, is_definition_kind, truncate_for_reason,
@@ -86,7 +83,6 @@ impl PresentationQuery {
 }
 
 pub(super) fn prepare_hit(
-    workspace: &Workspace,
     chunk: IndexedChunk,
     score: f32,
     sources: Vec<String>,
@@ -106,40 +102,27 @@ pub(super) fn prepare_hit(
         ));
     }
 
-    let file_path = workspace.root.join(&chunk.file_path);
-    match fs::read_to_string(&file_path) {
-        Ok(content) => {
-            let lines = line_spans(&content);
-            Ok(to_hit_from_file(
-                chunk,
-                score,
-                sources,
-                &content,
-                &lines,
-                presentation,
-                ranking_context,
-            ))
-        }
-        Err(_) => Ok(PreparedHit {
-            hit: SearchHit {
-                file_path: chunk.file_path,
-                start_line: chunk.start_line,
-                end_line: chunk.end_line,
-                preview: chunk.text,
-                reason: format!(
-                    "route={} neural_requested={} neural_executed={}; file no longer on disk",
-                    presentation.routing.intent.name(),
-                    presentation.routing.use_neural,
-                    presentation.neural_executed
-                ),
-                score,
-                sources,
-                neural_requested: presentation.routing.use_neural,
-                neural_executed: presentation.neural_executed,
-            },
-            display: None,
-        }),
-    }
+    // The cache already attempted a contained live read. Do not reopen its
+    // rejected path here; the indexed source remains safe to present.
+    Ok(PreparedHit {
+        hit: SearchHit {
+            file_path: chunk.file_path,
+            start_line: chunk.start_line,
+            end_line: chunk.end_line,
+            preview: chunk.text,
+            reason: format!(
+                "route={} neural_requested={} neural_executed={}; live file unavailable; using indexed text",
+                presentation.routing.intent.name(),
+                presentation.routing.use_neural,
+                presentation.neural_executed
+            ),
+            score,
+            sources,
+            neural_requested: presentation.routing.use_neural,
+            neural_executed: presentation.neural_executed,
+        },
+        display: None,
+    })
 }
 
 fn to_hit_from_file(

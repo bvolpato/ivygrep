@@ -1,6 +1,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::io::Read;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -125,16 +126,18 @@ impl FileContentCache {
 
     pub(super) fn read(
         cache: &Mutex<Self>,
+        root: &Path,
         path: &Path,
         index_epoch: u64,
     ) -> Option<CachedFileContent> {
-        let metadata = match fs::metadata(path) {
-            Ok(metadata) => metadata,
+        let mut file = match crate::workspace_file::open(root, path) {
+            Ok(file) => file,
             Err(_) => {
                 cache.lock().remove(path);
                 return None;
             }
         };
+        let metadata = file.metadata().ok()?;
         let stamp = FileStamp::from_metadata(&metadata);
         {
             let mut cache = cache.lock();
@@ -148,7 +151,9 @@ impl FileContentCache {
         }
 
         // Disk reads and line indexing stay outside the shared cache lock.
-        let content = Arc::<str>::from(fs::read_to_string(path).ok()?);
+        let mut content = String::new();
+        file.read_to_string(&mut content).ok()?;
+        let content = Arc::<str>::from(content);
         let lines = line_spans(&content).into();
         let cached = CachedFileContent {
             stamp,
@@ -164,6 +169,40 @@ impl FileContentCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn unsafe_replacement_evicts_cached_previews() {
+        use std::os::unix::fs::symlink;
+        for parent in [false, true] {
+            let fixture = tempfile::tempdir().unwrap();
+            let fixture_root = fixture.path().canonicalize().unwrap();
+            let root = fixture_root.join("root");
+            let outside = fixture_root.join("outside");
+            fs::create_dir_all(root.join("src")).unwrap();
+            fs::create_dir(&outside).unwrap();
+            let path = root.join("src/source.rs");
+            fs::write(&path, "inside").unwrap();
+            fs::write(outside.join("source.rs"), "outside").unwrap();
+            let cache = Mutex::new(FileContentCache::new(NonZeroUsize::new(2).unwrap(), 1024));
+            assert_eq!(
+                &*FileContentCache::read(&cache, &root, &path, 0)
+                    .unwrap()
+                    .content,
+                "inside"
+            );
+            if parent {
+                fs::rename(root.join("src"), root.join("original")).unwrap();
+                symlink(&outside, root.join("src")).unwrap();
+            } else {
+                fs::rename(&path, root.join("original.rs")).unwrap();
+                symlink(outside.join("source.rs"), &path).unwrap();
+            }
+            assert!(FileContentCache::read(&cache, &root, &path, 0).is_none());
+            assert!(!cache.lock().entries.contains(&path));
+            assert_eq!(cache.lock().bytes, 0);
+        }
+    }
 
     #[test]
     #[serial_test::serial]
@@ -220,25 +259,26 @@ mod tests {
 
     #[test]
     fn byte_budget_counts_line_spans_and_evicts_the_least_recent_file() {
-        let root = tempfile::tempdir().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
         for name in ["a", "b", "c"] {
-            fs::write(root.path().join(name), "line\n".repeat(100)).unwrap();
+            fs::write(root.join(name), "line\n".repeat(100)).unwrap();
         }
         let cache = Mutex::new(FileContentCache::new(
             NonZeroUsize::new(3).unwrap(),
             usize::MAX,
         ));
-        let a = root.path().join("a");
-        let b = root.path().join("b");
-        let c = root.path().join("c");
-        let first = FileContentCache::read(&cache, &a, 0).unwrap();
+        let a = root.join("a");
+        let b = root.join("b");
+        let c = root.join("c");
+        let first = FileContentCache::read(&cache, &root, &a, 0).unwrap();
         let entry_bytes = first.bytes(&a);
         assert!(entry_bytes > first.content.len());
         cache.lock().max_bytes = entry_bytes * 2;
-        FileContentCache::read(&cache, &b, 0).unwrap();
-        let hit = FileContentCache::read(&cache, &a, 0).unwrap();
+        FileContentCache::read(&cache, &root, &b, 0).unwrap();
+        let hit = FileContentCache::read(&cache, &root, &a, 0).unwrap();
         assert!(Arc::ptr_eq(&first.content, &hit.content));
-        FileContentCache::read(&cache, &c, 0).unwrap();
+        FileContentCache::read(&cache, &root, &c, 0).unwrap();
         let cache = cache.lock();
         assert!(cache.entries.contains(&a));
         assert!(!cache.entries.contains(&b));
@@ -248,13 +288,14 @@ mod tests {
 
     #[test]
     fn oversized_replacement_is_returned_without_retaining_stale_content() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("source.rs");
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let path = root.join("source.rs");
         fs::write(&path, "fn original() {}\n").unwrap();
         let cache = Mutex::new(FileContentCache::new(NonZeroUsize::new(2).unwrap(), 1024));
-        FileContentCache::read(&cache, &path, 0).unwrap();
+        FileContentCache::read(&cache, &root, &path, 0).unwrap();
         fs::write(&path, "large\n".repeat(1024)).unwrap();
-        let updated = FileContentCache::read(&cache, &path, 0).unwrap();
+        let updated = FileContentCache::read(&cache, &root, &path, 0).unwrap();
         assert_eq!(updated.lines.len(), 1024);
         assert!(cache.lock().entries.is_empty());
         assert_eq!(cache.lock().bytes, 0);
@@ -263,13 +304,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn replacement_with_preserved_mtime_invalidates_shared_content() {
-        let root = tempfile::tempdir().unwrap();
-        let path = root.path().join("source.rs");
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let path = root.join("source.rs");
         fs::write(&path, "old\n").unwrap();
         let cache = Mutex::new(FileContentCache::new(NonZeroUsize::new(2).unwrap(), 1024));
-        FileContentCache::read(&cache, &path, 0).unwrap();
+        FileContentCache::read(&cache, &root, &path, 0).unwrap();
         let modified = fs::metadata(&path).unwrap().modified().unwrap();
-        let replacement = root.path().join("replacement");
+        let replacement = root.join("replacement");
         fs::write(&replacement, "new\n").unwrap();
         fs::File::open(&replacement)
             .unwrap()
@@ -277,7 +319,9 @@ mod tests {
             .unwrap();
         fs::rename(replacement, &path).unwrap();
         assert_eq!(
-            &*FileContentCache::read(&cache, &path, 0).unwrap().content,
+            &*FileContentCache::read(&cache, &root, &path, 0)
+                .unwrap()
+                .content,
             "new\n"
         );
     }

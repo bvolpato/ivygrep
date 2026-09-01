@@ -713,7 +713,6 @@ pub(crate) fn hybrid_search_with_context_and_neural_job(
         let file_content = ctx.read_file_content(&file_path);
         for (chunk, score, sources) in file_hits {
             hits.push(prepare_hit(
-                workspace,
                 chunk,
                 score,
                 sources,

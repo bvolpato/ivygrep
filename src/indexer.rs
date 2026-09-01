@@ -230,9 +230,10 @@ fn spawn_index_batch_producer(
                         };
 
                         let abs_path = root.join(rel_path);
-                        let content_bytes = fs::read(&abs_path).with_context(|| {
-                            format!("failed reading source file {}", abs_path.display())
-                        })?;
+                        let content_bytes = crate::workspace_file::read(&root, rel_path)
+                            .with_context(|| {
+                                format!("failed reading source file {}", abs_path.display())
+                            })?;
                         if !is_indexable_file(rel_path, &content_bytes) {
                             progress_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             return Ok(empty_incremental_file(rel_path));
@@ -471,6 +472,8 @@ fn index_workspace_with_options(
     reset_worktree_overlay: bool,
 ) -> Result<IndexingSummary> {
     let indexing_started = Instant::now();
+    crate::workspace_file::validate_root(&workspace.root)
+        .context("selected workspace root is no longer a safe directory")?;
     workspace.ensure_dirs()?;
 
     check_memory_before_index()?;
@@ -1725,7 +1728,7 @@ fn current_manifest_signatures<'a>(
         .into_iter()
         .filter(|path| crate::context_graph::has_manifest_resolution_signature(path))
         .filter_map(|path| {
-            let content = fs::read_to_string(root.join(path)).ok()?;
+            let content = crate::workspace_file::read_to_string(root, path).ok()?;
             crate::context_graph::manifest_resolution_signature(path, &content)
                 .map(|signature| (index_path_string(path), signature))
         })
@@ -2071,7 +2074,7 @@ fn load_rust_doc_includes(
         {
             continue;
         }
-        let Ok(bytes) = fs::read(&canonical_target) else {
+        let Ok(bytes) = crate::workspace_file::read(root, &canonical_target) else {
             continue;
         };
         if !is_indexable_file(&included_rel_path, &bytes) {
@@ -3480,6 +3483,97 @@ mod tests {
 
     #[test]
     #[serial]
+    fn legacy_source_policy_rebuilds_unchanged_indexed_payloads() {
+        use crate::search::{SearchContext, SearchOptions, hybrid_search};
+        use crate::symbols::{SymbolSearchMode, search_symbols};
+
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let root = tempdir().unwrap();
+        let source = "pub fn safe_source() {}\n";
+        fs::write(root.path().join("source.rs"), source).unwrap();
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        index_workspace(&workspace, &model).unwrap();
+        let snapshot = fs::read(workspace.merkle_snapshot_path()).unwrap();
+        let conn = open_sqlite(&workspace.sqlite_path()).unwrap();
+        // A legacy source-read race could leave derived text unrelated to the
+        // unchanged source snapshot. Rebuild it before indexed fallback is used.
+        assert_eq!(
+            conn.execute(
+                "UPDATE chunks SET text = ?1 WHERE file_path = 'source.rs'",
+                rusqlite::params![compress_text("LEGACY_UNTRUSTED_PAYLOAD")],
+            )
+            .unwrap(),
+            1
+        );
+        drop(conn);
+        fs::write(workspace.index_format_version_path(), "25").unwrap();
+
+        // Library entrypoints do not pass through CLI readiness checks. They
+        // must reject legacy stored text before a caller requests its fallback.
+        let expected = format!(
+            "index format incompatible (v25 != v{}); rebuild required",
+            crate::workspace::INDEX_FORMAT_VERSION
+        );
+        let error = SearchContext::load(&workspace, None, false)
+            .err()
+            .expect("legacy source text must not enter a search context");
+        assert_eq!(error.to_string(), expected);
+        let error =
+            hybrid_search(&workspace, "safe_source", None, &SearchOptions::default()).unwrap_err();
+        assert_eq!(error.to_string(), expected);
+        let error = search_symbols(
+            &workspace,
+            "safe_source",
+            SymbolSearchMode::Definitions,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), expected);
+        assert_eq!(
+            fs::read(workspace.merkle_snapshot_path()).unwrap(),
+            snapshot
+        );
+
+        let summary = index_workspace(&workspace, &model).unwrap();
+        assert_eq!(summary.indexed_files, 1);
+        assert_eq!(
+            workspace.read_index_format_version(),
+            crate::workspace::INDEX_FORMAT_VERSION
+        );
+        SearchContext::load(&workspace, None, false).unwrap();
+        let hits = search_symbols(
+            &workspace,
+            "safe_source",
+            SymbolSearchMode::Definitions,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].preview.contains("safe_source"));
+        assert!(!hits[0].preview.contains("LEGACY_UNTRUSTED_PAYLOAD"));
+        let conn = open_sqlite(&workspace.sqlite_path()).unwrap();
+        let raw: Vec<u8> = conn
+            .query_row(
+                "SELECT text FROM chunks WHERE file_path = 'source.rs' LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let restored = decompress_text(raw);
+        assert!(restored.contains("safe_source"));
+        assert!(!restored.contains("LEGACY_UNTRUSTED_PAYLOAD"));
+        assert_eq!(
+            fs::read_to_string(workspace.root.join("source.rs")).unwrap(),
+            source
+        );
+    }
+
+    #[test]
+    #[serial]
     fn index_cleanup_waits_for_job_writer_and_preserves_its_lock() {
         let home = tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
@@ -3533,6 +3627,47 @@ mod tests {
         }
         jobs::start_job(&workspace, JobKind::Watcher, "idle", 1).unwrap();
         assert!(jobs::read_job_ledger(&workspace).contains(JobKind::Watcher));
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn source_payload_reads_reject_symlinks_replaced_after_discovery() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let fixture = tempdir().unwrap();
+        let root = fixture.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        let source = root.join("source.rs");
+        let outside = fixture.path().join("outside.rs");
+        fs::write(&source, "fn inside_payload() {}\n").unwrap();
+        fs::write(&outside, "fn outside_payload() {}\n").unwrap();
+        let workspace = Workspace::resolve(&root).unwrap();
+        workspace.ensure_dirs().unwrap();
+        let snapshot = MerkleSnapshot::build(&workspace.root, false).unwrap();
+        let diff = MerkleSnapshot::empty().diff(&snapshot);
+        let (_, fields) = open_tantivy_index(&workspace.tantivy_dir()).unwrap();
+        fs::remove_file(&source).unwrap();
+        std::os::unix::fs::symlink(&outside, &source).unwrap();
+
+        let producer = spawn_index_batch_producer(
+            &workspace,
+            &diff,
+            Some(Arc::new(snapshot)),
+            &fields,
+            true,
+            false,
+        );
+        let batch = producer.recv().expect("discovered file must be processed");
+        assert!(
+            batch.is_err(),
+            "source replacement was read after discovery"
+        );
+        producer.finish().unwrap();
+        assert_eq!(
+            fs::read_to_string(outside).unwrap(),
+            "fn outside_payload() {}\n"
+        );
     }
 
     #[test]
@@ -4886,7 +5021,8 @@ mod tests {
             "services/api/blob.bin",
         ]
         .map(PathBuf::from);
-        let signatures = current_manifest_signatures(root.path(), paths.iter());
+        let signatures =
+            current_manifest_signatures(&root.path().canonicalize().unwrap(), paths.iter());
 
         let mut keys = signatures.keys().cloned().collect::<Vec<_>>();
         keys.sort();

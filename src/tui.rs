@@ -347,7 +347,16 @@ impl App {
                 return;
             }
 
-            let content = match std::fs::read_to_string(&abs) {
+            let live_content = (|| -> Result<String> {
+                let selected = select_search_workspaces(&self.workspace, self.cli.all_indices)?;
+                let owner = selected
+                    .workspaces
+                    .iter()
+                    .find(|workspace| abs.starts_with(&workspace.root))
+                    .ok_or_else(|| anyhow::anyhow!("path is outside searched workspaces"))?;
+                Ok(crate::workspace_file::read_to_string(&owner.root, &abs)?)
+            })();
+            let content = match live_content {
                 Ok(c) => c,
                 Err(e) => format!("(error reading file: {e})"),
             };

@@ -659,11 +659,8 @@ fn build_context_pack(
         .filter(|workspace| !workspace.is_empty() && *workspace != "__all__")
         .context("select one workspace for context mode")?;
     let selected = Workspace::resolve(Path::new(selected))?;
-    let selected_root = selected.root.canonicalize()?;
-    if !tracked_roots()?
-        .iter()
-        .any(|root| root.canonicalize().is_ok_and(|root| root == selected_root))
-    {
+    let selected_root = selected.root;
+    if !tracked_roots()?.contains(&selected_root) {
         bail!("workspace is not tracked");
     }
     let scoped_path = param(params, "scope")
@@ -671,7 +668,7 @@ fn build_context_pack(
         .filter(|scope| !scope.is_empty())
         .map_or_else(|| selected_root.clone(), |scope| selected_root.join(scope));
     let (workspace, scope_filter) = crate::workspace::resolve_workspace_and_scope(&scoped_path)?;
-    if workspace.root.canonicalize()? != selected_root {
+    if workspace.root != selected_root {
         bail!("scope is outside selected workspace");
     }
     let query = param(params, "q").unwrap_or_default().trim();
@@ -896,11 +893,8 @@ fn resolve_tracked_path(
 
     let root = if let Some(workspace) = workspace_param {
         let workspace = Workspace::resolve(&PathBuf::from(workspace))?;
-        let root = workspace.root.canonicalize()?;
-        if !roots
-            .iter()
-            .any(|tracked| tracked.canonicalize().is_ok_and(|tracked| tracked == root))
-        {
+        let root = workspace.root;
+        if !roots.iter().any(|tracked| tracked == &root) {
             bail!("workspace is not tracked");
         }
         root
@@ -912,8 +906,8 @@ fn resolve_tracked_path(
         let canonical = candidate.canonicalize()?;
         roots
             .iter()
-            .filter_map(|root| root.canonicalize().ok())
             .find(|root| canonical.starts_with(root))
+            .cloned()
             .ok_or_else(|| anyhow!("path is outside tracked workspaces"))?
     };
 
@@ -938,7 +932,7 @@ fn resolve_tracked_path(
 
 fn read_tracked_file(params: &HashMap<String, Vec<String>>) -> Result<Value> {
     let (root, path) = resolve_tracked_path(params, false)?;
-    let mut file = std::fs::File::open(&path)?;
+    let mut file = crate::workspace_file::open(&root, &path)?;
     let mut limited = (&mut file).take(MAX_FILE_BYTES + 1);
     let mut bytes = Vec::new();
     limited.read_to_end(&mut bytes)?;

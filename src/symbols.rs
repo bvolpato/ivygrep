@@ -1,5 +1,4 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -209,6 +208,7 @@ pub(crate) fn search_symbols_in_current_index(
         return search_call_sites(workspace, candidate_name, mode, options);
     }
 
+    workspace.ensure_current_index_format()?;
     let query = parse_symbol_query(name);
     let query_normalized = normalize_symbol(query.name);
     let primary_sqlite = if workspace.has_overlay() {
@@ -732,7 +732,7 @@ fn search_call_sites_with_references(
         }
         for (file_path, mut chunks) in chunks_by_file {
             let matches = file_matches.entry(file_path.clone()).or_insert_with(|| {
-                fs::read_to_string(workspace.root.join(&file_path))
+                crate::workspace_file::read_to_string(&workspace.root, &file_path)
                     .map(|text| {
                         matching_symbol_lines(&file_path, &text, &chunks[0].language, &query)
                     })

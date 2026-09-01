@@ -1685,7 +1685,7 @@ fn rust_crate_context(
 ) -> Option<RustCrateContext> {
     let manifest = nearest_manifest(root, snapshot, rel_path, "rust")?;
     let package_root = manifest.parent().unwrap_or_else(|| Path::new(""));
-    let content = fs::read_to_string(root.join(&manifest)).ok()?;
+    let content = crate::workspace_file::read_to_string(root, &manifest).ok()?;
     let (name, source_root) = rust_manifest_resolution(&content)?;
     Some(RustCrateContext {
         name,
@@ -1722,7 +1722,7 @@ fn dart_package_context(
 ) -> Option<DartPackageContext> {
     let manifest = nearest_manifest(root, snapshot, rel_path, "dart")?;
     let package_root = manifest.parent().unwrap_or_else(|| Path::new(""));
-    let content = fs::read_to_string(root.join(&manifest)).ok()?;
+    let content = crate::workspace_file::read_to_string(root, &manifest).ok()?;
     let name = dart_manifest_package_name(&content)?;
     Some(DartPackageContext {
         name,
@@ -1754,7 +1754,7 @@ fn go_module_context(
         .parent()
         .unwrap_or_else(|| Path::new(""))
         .to_path_buf();
-    let content = fs::read_to_string(root.join(&manifest)).ok()?;
+    let content = crate::workspace_file::read_to_string(root, &manifest).ok()?;
     let name = go_manifest_module_name(&content)?;
     Some(GoModuleContext { name, source_root })
 }
@@ -2552,9 +2552,59 @@ mod tests {
     use super::*;
     use std::fs;
 
+    fn canonical_tempdir() -> tempfile::TempDir {
+        tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manifest_contexts_reject_external_source_files() {
+        use std::os::unix::fs::symlink;
+        for (manifest, source, local, external) in [
+            (
+                "Cargo.toml",
+                "src/main.rs",
+                "[package]\nname='inside'\n",
+                "[package]\nname='outside'\n",
+            ),
+            (
+                "pubspec.yaml",
+                "lib/main.dart",
+                "name: inside\n",
+                "name: outside\n",
+            ),
+            ("go.mod", "main.go", "module inside\n", "module outside\n"),
+        ] {
+            let fixture = canonical_tempdir();
+            let root = fixture.path().join("workspace");
+            let outside = fixture.path().join("outside-manifest");
+            fs::create_dir(&root).unwrap();
+            fs::write(root.join(manifest), local).unwrap();
+            fs::write(&outside, external).unwrap();
+            let read_name =
+                || match manifest {
+                    "Cargo.toml" => rust_crate_context(&root, None, Path::new(source))
+                        .map(|context| context.name),
+                    "pubspec.yaml" => dart_package_context(&root, None, Path::new(source))
+                        .map(|context| context.name),
+                    "go.mod" => go_module_context(&root, None, Path::new(source))
+                        .map(|context| context.name),
+                    _ => unreachable!(),
+                };
+            assert_eq!(read_name().as_deref(), Some("inside"), "{manifest}");
+            fs::remove_file(root.join(manifest)).unwrap();
+            symlink(&outside, root.join(manifest)).unwrap();
+            assert!(
+                read_name().is_none(),
+                "external {manifest} must not supply dependency facts"
+            );
+            assert_eq!(fs::read_to_string(&outside).unwrap(), external);
+        }
+    }
+
     #[test]
     fn extracts_dependencies_tests_config_and_docs() {
-        let root = tempfile::tempdir().unwrap();
+        let root = canonical_tempdir();
         fs::create_dir_all(root.path().join("src")).unwrap();
         fs::create_dir_all(root.path().join("tests")).unwrap();
         fs::create_dir_all(root.path().join("docs")).unwrap();
@@ -2590,7 +2640,7 @@ mod tests {
 
     #[test]
     fn config_edges_follow_source_ecosystem() {
-        let root = tempfile::tempdir().unwrap();
+        let root = canonical_tempdir();
         fs::write(root.path().join("Cargo.toml"), "[package]\nname='demo'\n").unwrap();
         fs::write(root.path().join("package.json"), "{\"name\":\"demo\"}\n").unwrap();
 
@@ -2823,7 +2873,7 @@ mod tests {
 
     #[test]
     fn rust_package_import_resolves_local_library_module() {
-        let root = tempfile::tempdir().unwrap();
+        let root = canonical_tempdir();
         fs::create_dir_all(root.path().join("crates/core/src")).unwrap();
         fs::create_dir_all(root.path().join("crates/core/tests")).unwrap();
         fs::create_dir_all(root.path().join("src")).unwrap();
@@ -3305,7 +3355,7 @@ mod tests {
 
     #[test]
     fn dart_package_imports_resolve_within_nearest_package() {
-        let root = tempfile::tempdir().unwrap();
+        let root = canonical_tempdir();
         fs::create_dir_all(root.path().join("packages/app/lib/src")).unwrap();
         fs::create_dir_all(root.path().join("lib/src")).unwrap();
         fs::write(
@@ -4186,7 +4236,7 @@ const char *example = "\
 
     #[test]
     fn go_module_imports_do_not_bind_external_suffixes() {
-        let root = tempfile::tempdir().unwrap();
+        let root = canonical_tempdir();
         fs::create_dir_all(root.path().join("internal/auth")).unwrap();
         fs::create_dir_all(root.path().join("errors")).unwrap();
         fs::write(root.path().join("go.mod"), "module example.com/app\n").unwrap();

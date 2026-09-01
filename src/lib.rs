@@ -32,6 +32,7 @@ pub mod vector_store;
 pub mod walker;
 pub(crate) mod web;
 pub mod workspace;
+pub(crate) mod workspace_file;
 
 /// Legacy constant kept for tests. Prefer [`embedding::model_dimensions`].
 pub const EMBEDDING_DIMENSIONS: usize = 256;

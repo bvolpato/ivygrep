@@ -234,6 +234,7 @@ pub struct SearchContext {
     pub overlay_files: Arc<HashSet<String>>,
     file_contents: Arc<parking_lot::Mutex<FileContentCache>>,
     file_contents_epoch: u64,
+    workspace_root: PathBuf,
     glob_path_filters: RefCell<HashMap<GlobPathFilterCacheKey, GlobPathQueryFilter>>,
 }
 
@@ -323,6 +324,7 @@ impl SearchContext {
         emb_dim: Option<usize>,
         wants_neural_vectors: bool,
     ) -> Result<Self> {
+        workspace.ensure_current_index_format()?;
         anyhow::ensure!(
             !workspace.worktree_overlay_is_stale()?,
             "worktree overlay is stale for {}",
@@ -441,6 +443,7 @@ impl SearchContext {
                 overlay_files: Arc::new(overlay_files),
                 file_contents: FileContentCache::shared(),
                 file_contents_epoch,
+                workspace_root: workspace.root.clone(),
                 glob_path_filters: RefCell::new(HashMap::new()),
             })
         } else {
@@ -493,6 +496,7 @@ impl SearchContext {
                 overlay_files: Arc::default(),
                 file_contents: FileContentCache::shared(),
                 file_contents_epoch,
+                workspace_root: workspace.root.clone(),
                 glob_path_filters: RefCell::new(HashMap::new()),
             })
         }
@@ -635,7 +639,12 @@ impl SearchContext {
     }
 
     fn read_file_content(&self, path: &Path) -> Option<CachedFileContent> {
-        FileContentCache::read(&self.file_contents, path, self.file_contents_epoch)
+        FileContentCache::read(
+            &self.file_contents,
+            &self.workspace_root,
+            path,
+            self.file_contents_epoch,
+        )
     }
 }
 
@@ -759,9 +768,14 @@ pub fn literal_search_with_context(
     } else {
         let path_matcher = PathGlobMatcher::new(&options.include_globs, &options.exclude_globs)?;
         match substring_candidate_files(workspace, ctx, &runs, options, &path_matcher)? {
-            Some(candidate_paths) => {
-                literal_search_paths(&query_lower, context, max_hits, &candidate_paths, options)?
-            }
+            Some(candidate_paths) => literal_search_paths(
+                &workspace.root,
+                &query_lower,
+                context,
+                max_hits,
+                &candidate_paths,
+                options,
+            )?,
             None => literal_search_walk(workspace, &query_lower, options, max_hits)?,
         }
     };
@@ -810,6 +824,7 @@ fn literal_search_walk(
     }
 
     literal_search_paths(
+        &workspace.root,
         query_lower,
         options.bounded_context(),
         max_hits,
@@ -819,6 +834,7 @@ fn literal_search_walk(
 }
 
 fn literal_search_paths(
+    root: &Path,
     query_lower: &str,
     context: usize,
     max_hits: usize,
@@ -831,7 +847,7 @@ fn literal_search_paths(
             if options.is_cancelled() {
                 return Vec::new();
             }
-            let Ok(content) = fs::read_to_string(path) else {
+            let Ok(content) = crate::workspace_file::read_to_string(root, path) else {
                 return Vec::new();
             };
             let lines = content.lines().collect::<Vec<_>>();
@@ -7011,6 +7027,7 @@ mod tests {
         let path = tmp.path().join("cached.rs");
         std::fs::write(&path, "fn first() {}\n").unwrap();
         let workspace = Workspace::resolve(tmp.path()).unwrap();
+        let path = workspace.root.join("cached.rs");
         let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
         index_workspace(&workspace, &model).unwrap();
         let context = SearchContext::load(&workspace, None, false).unwrap();

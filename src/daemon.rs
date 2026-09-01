@@ -2440,7 +2440,7 @@ fn supervise_watchers(state: &DaemonState) {
         {
             continue;
         }
-        let workspace = match Workspace::resolve(&metadata.root) {
+        let workspace = match Workspace::resolve_registered(&metadata.root) {
             Ok(workspace) => workspace,
             Err(err) => {
                 // No resolved workspace (the root is missing or unreadable),
@@ -2489,7 +2489,7 @@ fn ensure_watcher(state: &DaemonState, workspace: &Workspace) -> Result<()> {
     if let Some(error) = state.watcher_backoff_error(&workspace.id) {
         anyhow::bail!("{error}");
     }
-    match register_watcher(state, &workspace.root) {
+    match register_resolved_watcher(state, workspace.clone()) {
         Ok(()) => {
             state.clear_watcher_failure(&workspace.id);
             Ok(())
@@ -2786,7 +2786,7 @@ async fn run_index_request(
         // Register before the scan so filesystem edits made during it remain
         // queued. A newly registered watcher cannot certify the old index.
         let watcher_error = watch
-            .then(|| register_watcher(&index_state, &index_workspace_target.root))
+            .then(|| register_resolved_watcher(&index_state, index_workspace_target.clone()))
             .and_then(Result::err)
             .map(|err| format!("indexed but failed to watch: {err:#}"));
         let control = index_state
@@ -3620,6 +3620,10 @@ async fn handle_request_with_cancellation(
                     crate::regex_search::expand_regex_context_absolute_with_options(
                         &mut outcome.hits,
                         options.bounded_context(),
+                        &workspaces
+                            .iter()
+                            .map(|workspace| workspace.root.clone())
+                            .collect::<Vec<_>>(),
                         &options,
                     );
                 }
@@ -3840,8 +3844,14 @@ async fn handle_request_with_cancellation(
     }
 }
 
+#[cfg(test)]
 fn register_watcher(state: &DaemonState, path: &std::path::Path) -> Result<()> {
     let workspace = Workspace::resolve(path)?;
+    register_resolved_watcher(state, workspace)
+}
+
+fn register_resolved_watcher(state: &DaemonState, workspace: Workspace) -> Result<()> {
+    crate::workspace_file::validate_root(&workspace.root)?;
 
     let mut watchers = state.watchers.lock();
     if let Some(registration) = watchers.get_mut(&workspace.id) {
@@ -6834,6 +6844,39 @@ mod tests {
                 .get(&workspace.id)
                 .map(|entry| entry.failures),
             Some(1)
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    #[cfg(unix)]
+    async fn supervisor_rejects_a_redirected_registered_root() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let fixture = tempdir().unwrap();
+        let root = fixture.path().join("workspace");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(root.join("source.rs"), "fn inside_workspace() {}\n").unwrap();
+        std::fs::write(outside.join("source.rs"), "fn outside_workspace() {}\n").unwrap();
+        let workspace = Workspace::resolve(&root).unwrap();
+        index_workspace(&workspace, create_hash_model().as_ref()).unwrap();
+        let mut metadata = workspace.read_metadata().unwrap().unwrap();
+        metadata.watch_enabled = true;
+        workspace.write_metadata(&metadata).unwrap();
+        let outside_workspace = Workspace::resolve(&outside).unwrap();
+        std::fs::rename(&root, fixture.path().join("original")).unwrap();
+        std::os::unix::fs::symlink(&outside, &root).unwrap();
+
+        let state = test_state();
+        supervise_watchers(&state);
+        assert!(state.watchers.lock().is_empty());
+        assert!(state.watcher_backoff_error(&workspace.id).is_some());
+        assert!(!outside_workspace.index_dir.exists());
+        assert_eq!(
+            workspace.read_metadata().unwrap().unwrap().root,
+            metadata.root
         );
     }
 

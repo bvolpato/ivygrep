@@ -29,8 +29,8 @@ pub struct Workspace {
     pub base_index_dir: Option<PathBuf>,
 }
 
-/// On-disk index format version. Bump when a stored-layout or chunking-semantic
-/// change makes an existing index incompatible with current code.
+/// On-disk index format version. Bump when stored layout, chunking semantics,
+/// or source-read guarantees invalidate existing indexed data.
 ///
 /// History:
 ///   1 — vector keys derived from content hash (implicit; pre-versioning)
@@ -57,7 +57,8 @@ pub struct Workspace {
 ///  22 — Symbols persist parser-derived names, owners, language, and kind
 ///  23 — Swift and Objective-C structural chunks use valid grammar captures
 ///  25: Python and Objective-C dependency graphs use source syntax
-pub const INDEX_FORMAT_VERSION: u32 = 25;
+///  26: Rebuild legacy payloads using contained source reads
+pub const INDEX_FORMAT_VERSION: u32 = 26;
 const COMPACTION_FREE_BYTES_THRESHOLD: u64 = 16 * 1024 * 1024;
 const COMPACTION_FREE_PERCENT_THRESHOLD: f64 = 20.0;
 
@@ -257,6 +258,14 @@ pub fn index_path_string(path: &Path) -> String {
 }
 
 impl Workspace {
+    pub(crate) fn resolve_registered(root: &Path) -> Result<Self> {
+        crate::workspace_file::validate_root(root)
+            .context("registered workspace root is no longer a safe directory")?;
+        let workspace = Self::resolve(root)?;
+        anyhow::ensure!(workspace.root == root, "registered workspace root changed");
+        Ok(workspace)
+    }
+
     pub fn resolve(path: &Path) -> Result<Self> {
         let root = detect_workspace_root(path)?;
         let id = workspace_id(&root);
@@ -433,6 +442,27 @@ impl Workspace {
             .ok()
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(0)
+    }
+
+    /// Stored source text is trusted only after all stores this workspace
+    /// inherits have been rebuilt with the current source-read guarantees.
+    pub(crate) fn ensure_current_index_format(&self) -> Result<()> {
+        let format_version = self.read_index_format_version();
+        anyhow::ensure!(
+            format_version == INDEX_FORMAT_VERSION,
+            "index format incompatible (v{format_version} != v{INDEX_FORMAT_VERSION}); rebuild required"
+        );
+        if let Some(base_dir) = &self.base_index_dir {
+            let base_format = fs::read_to_string(base_dir.join("index_format_version"))
+                .ok()
+                .and_then(|value| value.trim().parse::<u32>().ok())
+                .unwrap_or(0);
+            anyhow::ensure!(
+                base_format == INDEX_FORMAT_VERSION,
+                "base index format incompatible (v{base_format} != v{INDEX_FORMAT_VERSION}); rebuild required"
+            );
+        }
+        Ok(())
     }
 
     /// Records the current index format version. Call after a successful index

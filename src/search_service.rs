@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 
 use crate::protocol::SearchHit;
 use crate::workspace::{Workspace, list_indexed_workspace_roots};
@@ -29,7 +29,13 @@ where
     F: FnMut(&Path) -> Result<Workspace>,
 {
     let (roots, mut warnings) = list_indexed_workspace_roots()?;
-    let mut selected = resolve_workspace_roots(roots, &mut resolve);
+    let mut selected = resolve_workspace_roots(roots, |root| {
+        crate::workspace_file::validate_root(root)
+            .context("registered workspace root is no longer a safe directory")?;
+        let workspace = resolve(root)?;
+        ensure!(workspace.root == root, "registered workspace root changed");
+        Ok(workspace)
+    });
     warnings.append(&mut selected.warnings);
     selected.warnings = warnings;
     Ok(selected)
@@ -216,6 +222,30 @@ mod tests {
         assert_eq!(selection.warnings.len(), 1);
         assert!(selection.warnings[0].contains("/missing"));
         assert!(selection.warnings[0].contains("stale registry entry"));
+    }
+
+    #[test]
+    #[serial]
+    #[cfg(unix)]
+    fn all_workspace_selection_rejects_redirected_registered_roots() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let fixture = tempdir().unwrap();
+        let root = fixture.path().join("workspace");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(root.join("source.rs"), "fn inside_workspace() {}\n").unwrap();
+        let workspace = Workspace::resolve(&root).unwrap();
+        crate::indexer::index_workspace(&workspace, crate::embedding::create_hash_model().as_ref())
+            .unwrap();
+        std::fs::rename(&root, fixture.path().join("original")).unwrap();
+        std::os::unix::fs::symlink(&outside, &root).unwrap();
+
+        let selected = select_search_workspaces(&workspace, true).unwrap();
+        assert!(selected.workspaces.is_empty());
+        assert_eq!(selected.warnings.len(), 1);
+        assert!(selected.warnings[0].contains("registered workspace root"));
     }
 
     #[test]

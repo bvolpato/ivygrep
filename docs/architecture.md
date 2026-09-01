@@ -199,6 +199,12 @@ Format v25 refreshes Python and Objective-C dependency facts through a one-time
 full index rebuild, including unchanged files. This is not a graph-only migration;
 existing indexes pay the normal indexing and subsequent vector-enhancement costs.
 
+Format v26 also invalidates payloads indexed before contained source reads.
+Existing indexes rebuild from current workspace files before their stored text
+is trusted as a fallback, even when the source snapshot itself is unchanged.
+Direct indexed-source APIs reject incompatible local or inherited base formats
+until that rebuild completes.
+
 ## Search pipeline
 
 ### Workspace selection
@@ -282,6 +288,10 @@ including canonical context even when display context is zero. Training
 collectors must verify a fresh matching process/query record and reject
 missing, skipped, or ambiguous captures. With capture unset, no diagnostic
 records or feature copies are allocated or written.
+
+Live source reads use `workspace_file.rs` to open regular files beneath the
+selected workspace without following child symlinks. Preview metadata and text
+come from the same opened file; unavailable live previews use indexed text.
 
 Literal, regex, symbol, and caller commands have specialized paths where their
 contracts differ from hybrid semantic search. They still reuse workspace,

@@ -2164,7 +2164,7 @@ fn worktree_auto_indexes_base_when_missing() {
 
 #[test]
 #[serial]
-fn worktree_rebuilds_newer_base_index_format() {
+fn worktree_rejects_and_rebuilds_incompatible_base_index_formats() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();
 
@@ -2216,32 +2216,55 @@ fn worktree_rebuilds_newer_base_index_format() {
         "worktree should find inherited base content before migration"
     );
 
-    // Simulate a base index written by a newer, incompatible binary. The
-    // worktree serves base chunks/vectors, so it must rebuild the base before
-    // referencing it.
-    let newer_format = ivygrep::workspace::INDEX_FORMAT_VERSION + 1;
-    fs::write(
-        base_ws.index_format_version_path(),
-        newer_format.to_string(),
-    )
-    .unwrap();
-    assert_eq!(base_ws.read_index_format_version(), newer_format);
+    // The overlay's current format and generation do not make inherited
+    // source text safe. Reject both pre-containment and future base formats.
+    for incompatible_format in [25, ivygrep::workspace::INDEX_FORMAT_VERSION + 1] {
+        fs::write(
+            base_ws.index_format_version_path(),
+            incompatible_format.to_string(),
+        )
+        .unwrap();
+        assert_eq!(base_ws.read_index_format_version(), incompatible_format);
+        assert_eq!(
+            wt_ws.read_index_format_version(),
+            ivygrep::workspace::INDEX_FORMAT_VERSION
+        );
+        assert!(!wt_ws.worktree_overlay_is_stale().unwrap());
+        let expected = format!(
+            "base index format incompatible (v{incompatible_format} != v{}); rebuild required",
+            ivygrep::workspace::INDEX_FORMAT_VERSION
+        );
+        let error = SearchContext::load(&wt_ws, None, false)
+            .err()
+            .expect("a current overlay must not inherit incompatible source text");
+        assert_eq!(error.to_string(), expected);
+        let error =
+            hybrid_search(&wt_ws, "base_fn_2", None, &SearchOptions::default()).unwrap_err();
+        assert_eq!(error.to_string(), expected);
+        let error = ivygrep::symbols::search_symbols(
+            &wt_ws,
+            "base_fn_2",
+            ivygrep::symbols::SymbolSearchMode::Definitions,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), expected);
 
-    // Re-indexing the worktree rebuilds the incompatible base back to the
-    // current format and the inherited content remains searchable.
-    setup_and_index(&wt_path, home.path());
-    assert_eq!(
-        base_ws.read_index_format_version(),
-        ivygrep::workspace::INDEX_FORMAT_VERSION,
-        "incompatible base index should be rebuilt during worktree indexing"
-    );
-    let wt_ws = workspace_for(&wt_path);
-    assert!(
-        search_file_paths(&wt_ws, "base_fn_2")
-            .iter()
-            .any(|p| p.contains("base_2.rs")),
-        "worktree should still find inherited base content after base migration"
-    );
+        // Worktree indexing rebuilds the base and refreshes the overlay.
+        setup_and_index(&wt_path, home.path());
+        assert_eq!(
+            base_ws.read_index_format_version(),
+            ivygrep::workspace::INDEX_FORMAT_VERSION,
+            "incompatible base index should be rebuilt during worktree indexing"
+        );
+        assert!(
+            search_file_paths(&wt_ws, "base_fn_2")
+                .iter()
+                .any(|path| path.contains("base_2.rs")),
+            "worktree should still find inherited base content after base migration"
+        );
+    }
 
     git(
         root.path(),

@@ -2316,6 +2316,11 @@ fn local_regex_search_hits(
     options: &SearchOptions,
 ) -> Result<Vec<SearchHit>> {
     let workspace_set = select_search_workspaces(workspace, all_indices)?;
+    let workspace_roots = workspace_set
+        .workspaces
+        .iter()
+        .map(|workspace| workspace.root.clone())
+        .collect::<Vec<_>>();
     let mut batch = SearchBatch::new(workspace_set.warnings);
 
     for ws in workspace_set.workspaces {
@@ -2334,7 +2339,7 @@ fn local_regex_search_hits(
     }
     let mut hits = finish_local_search(batch, options.limit, HitOrdering::Preserve)?;
     if all_indices {
-        expand_regex_context_absolute(&mut hits, options.bounded_context());
+        expand_regex_context_absolute(&mut hits, options.bounded_context(), &workspace_roots);
     }
     Ok(hits)
 }

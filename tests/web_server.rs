@@ -206,6 +206,98 @@ fn paths_and_sources(search: &serde_json::Value) -> (Vec<String>, BTreeSet<Strin
     (paths, sources)
 }
 
+#[cfg(unix)]
+#[test]
+#[serial]
+fn web_search_previews_do_not_follow_replaced_parent_symlinks() {
+    let fixture = tempdir().unwrap();
+    let home = fixture.path().join("home");
+    let repo = fixture.path().join("workspace");
+    let outside = fixture.path().join("outside");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(repo.join("src/victim.rs"), "fn preview_boundary() {}\n").unwrap();
+    std::fs::write(outside.join("victim.rs"), "OUTSIDE_WEB_PREVIEW_SENTINEL\n").unwrap();
+    let add = Command::new(bin())
+        .arg("--add")
+        .arg(&repo)
+        .args(["--no-watch", "--hash"])
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .output()
+        .unwrap();
+    assert!(
+        add.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    std::fs::rename(repo.join("src"), repo.join("original")).unwrap();
+    std::os::unix::fs::symlink(&outside, repo.join("src")).unwrap();
+    let daemon = Command::new(bin())
+        .arg("--daemon")
+        .env("IVYGREP_HOME", &home)
+        .env("IVYGREP_NO_AUTOSPAWN", "1")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let _daemon_guard = ChildGuard(daemon);
+    let url = run_web_until_ready(&home, &repo, "preview_boundary");
+    let port = port_from_url(&url);
+    let root = percent_encode(&repo.canonicalize().unwrap().to_string_lossy());
+    let file = http_request(
+        port,
+        "GET",
+        &format!("/api/file?workspace={root}&path=src/victim.rs"),
+        &[],
+    );
+    assert_eq!(file.status, 400);
+    let response = http_request(
+        port,
+        "GET",
+        &format!("/api/search?workspace={root}&q=preview_boundary&context=2"),
+        &[],
+    );
+    assert_eq!(response.status, 200);
+    assert!(
+        !response.body.contains("OUTSIDE_WEB_PREVIEW_SENTINEL"),
+        "{}",
+        response.body
+    );
+    let search: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+    assert!(
+        !search["hits"].as_array().unwrap().is_empty(),
+        "{}",
+        response.body
+    );
+    assert_eq!(
+        std::fs::read_to_string(outside.join("victim.rs")).unwrap(),
+        "OUTSIDE_WEB_PREVIEW_SENTINEL\n"
+    );
+    std::fs::rename(&repo, fixture.path().join("original-root")).unwrap();
+    std::os::unix::fs::symlink(&outside, &repo).unwrap();
+    let redirected = http_request(
+        port,
+        "GET",
+        &format!("/api/file?workspace={root}&path=victim.rs"),
+        &[],
+    );
+    assert_eq!(redirected.status, 400, "{}", redirected.body);
+    assert!(!redirected.body.contains("OUTSIDE_WEB_PREVIEW_SENTINEL"));
+    let context = http_request(
+        port,
+        "GET",
+        &format!("/api/search?workspace={root}&mode=context&q=preview_boundary"),
+        &[],
+    );
+    assert!(
+        context.body.contains("workspace is not tracked"),
+        "{}",
+        context.body
+    );
+    assert!(!context.body.contains("OUTSIDE_WEB_PREVIEW_SENTINEL"));
+}
+
 #[test]
 #[serial]
 fn web_server_serves_status_search_and_file() {

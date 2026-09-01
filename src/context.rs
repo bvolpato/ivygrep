@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+#[cfg(test)]
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -516,13 +518,18 @@ fn context_seed_hit(root: &Path, seed: &ContextSeed, task: &str) -> Result<Optio
 
 fn context_seed_content(root: &Path, seed: &ContextSeed) -> Result<Option<String>> {
     const MAX_CONTEXT_FILE_BYTES: u64 = 4 * 1024 * 1024;
-    let path = root.join(&seed.file_path);
-    if path.is_file() {
-        if path.metadata()?.len() > MAX_CONTEXT_FILE_BYTES {
+    if let Ok(file) = crate::workspace_file::open(root, &seed.file_path) {
+        if file.metadata()?.len() > MAX_CONTEXT_FILE_BYTES {
             return Ok(None);
         }
-        return match fs::read_to_string(path) {
-            Ok(content) if !content.trim().is_empty() => Ok(Some(content)),
+        let mut content = String::new();
+        return match file
+            .take(MAX_CONTEXT_FILE_BYTES + 1)
+            .read_to_string(&mut content)
+        {
+            Ok(bytes) if bytes as u64 <= MAX_CONTEXT_FILE_BYTES && !content.trim().is_empty() => {
+                Ok(Some(content))
+            }
             Ok(_) => Ok(None),
             Err(error) if error.kind() == std::io::ErrorKind::InvalidData => Ok(None),
             Err(error) => Err(error.into()),
@@ -531,10 +538,10 @@ fn context_seed_content(root: &Path, seed: &ContextSeed) -> Result<Option<String
     let Some(revision) = seed.git_revision.as_deref() else {
         return Ok(None);
     };
-    let prefix = Command::new("git")
-        .args(["rev-parse", "--show-prefix"])
-        .current_dir(root)
-        .output()?;
+    let Ok(mut command) = git_seed_command(root) else {
+        return Ok(None);
+    };
+    let prefix = command.args(["rev-parse", "--show-prefix"]).output()?;
     if !prefix.status.success() {
         return Ok(None);
     }
@@ -543,10 +550,10 @@ fn context_seed_content(root: &Path, seed: &ContextSeed) -> Result<Option<String
         .to_string_lossy()
         .replace('\\', "/");
     let object = format!("{revision}:{repo_path}");
-    let size = Command::new("git")
-        .args(["cat-file", "-s", &object])
-        .current_dir(root)
-        .output()?;
+    let Ok(mut command) = git_seed_command(root) else {
+        return Ok(None);
+    };
+    let size = command.args(["cat-file", "-s", &object]).output()?;
     if !size.status.success()
         || String::from_utf8_lossy(&size.stdout)
             .trim()
@@ -555,10 +562,10 @@ fn context_seed_content(root: &Path, seed: &ContextSeed) -> Result<Option<String
     {
         return Ok(None);
     }
-    let output = Command::new("git")
-        .args(["cat-file", "blob", &object])
-        .current_dir(root)
-        .output()?;
+    let Ok(mut command) = git_seed_command(root) else {
+        return Ok(None);
+    };
+    let output = command.args(["cat-file", "blob", &object]).output()?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -567,6 +574,37 @@ fn context_seed_content(root: &Path, seed: &ContextSeed) -> Result<Option<String
         _ => return Ok(None),
     };
     Ok(Some(content))
+}
+
+#[cfg(unix)]
+fn git_seed_command(root: &Path) -> std::io::Result<Command> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+
+    let directory = crate::workspace_file::open_root(root)?;
+    let mut command = Command::new("git");
+    // SAFETY: fchdir is async-signal-safe. The closure owns the directory until
+    // exec, so the child never resolves a workspace pathname after validation.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fchdir(directory.as_raw_fd()) == 0 {
+                Ok(())
+            } else {
+                Err(std::io::Error::last_os_error())
+            }
+        });
+    }
+    Ok(command)
+}
+
+#[cfg(not(unix))]
+fn git_seed_command(_root: &Path) -> std::io::Result<Command> {
+    // Live files and indexed evidence remain available. A pathname-based cwd
+    // cannot safely supply a historical-only seed after root replacement.
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "contained Git-history reads are unavailable on this platform",
+    ))
 }
 
 fn seed_chunk_score(
@@ -2022,7 +2060,7 @@ mod tests {
         )
         .unwrap();
         let hit = context_seed_hit(
-            root.path(),
+            &root.path().canonicalize().unwrap(),
             &ContextSeed {
                 file_path: PathBuf::from("src/auth.rs"),
                 line: Some(2),
@@ -2037,6 +2075,107 @@ mod tests {
         .unwrap();
         assert!(hit.preview.contains("refresh_token_race_fix"));
         assert_eq!(hit.sources, ["task_input"]);
+    }
+
+    fn commit_seed_source(root: &Path, content: &str) {
+        fs::write(root.join("source.rs"), content).unwrap();
+        for args in [
+            vec!["init", "-q"],
+            vec!["add", "source.rs"],
+            vec![
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+        ] {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_seed_fallback_rejects_a_redirected_workspace_root() {
+        let fixture = tempfile::tempdir().unwrap();
+        let directory = fixture.path().canonicalize().unwrap();
+        let root = directory.join("workspace");
+        let outside = directory.join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        commit_seed_source(&outside, "OUTSIDE_GIT_SEED_SENTINEL\n");
+        fs::remove_file(outside.join("source.rs")).unwrap();
+        let seed = ContextSeed {
+            file_path: PathBuf::from("source.rs"),
+            line: None,
+            git_revision: Some("HEAD".to_string()),
+            reason: "deleted file".to_string(),
+            source: "git_diff".to_string(),
+            priority: 3,
+        };
+        assert_eq!(
+            context_seed_content(&outside, &seed).unwrap().as_deref(),
+            Some("OUTSIDE_GIT_SEED_SENTINEL\n")
+        );
+        fs::rename(&root, directory.join("original")).unwrap();
+        std::os::unix::fs::symlink(&outside, &root).unwrap();
+        assert!(context_seed_content(&root, &seed).unwrap().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_seed_command_keeps_its_opened_root_after_replacement() {
+        let fixture = tempfile::tempdir().unwrap();
+        let directory = fixture.path().canonicalize().unwrap();
+        let root = directory.join("workspace");
+        let outside = directory.join("outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        commit_seed_source(&root, "INSIDE_GIT_SEED_SENTINEL\n");
+        commit_seed_source(&outside, "OUTSIDE_GIT_SEED_SENTINEL\n");
+        fs::remove_file(root.join("source.rs")).unwrap();
+        fs::remove_file(outside.join("source.rs")).unwrap();
+
+        let mut command = git_seed_command(&root).unwrap();
+        fs::rename(&root, directory.join("original")).unwrap();
+        std::os::unix::fs::symlink(&outside, &root).unwrap();
+        let output = command
+            .args(["cat-file", "blob", "HEAD:source.rs"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"INSIDE_GIT_SEED_SENTINEL\n");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn git_seed_history_fails_closed_without_a_pinned_working_directory() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().canonicalize().unwrap();
+        commit_seed_source(&root, "HISTORICAL_GIT_SEED_SENTINEL\n");
+        fs::remove_file(root.join("source.rs")).unwrap();
+        let seed = ContextSeed {
+            file_path: PathBuf::from("source.rs"),
+            line: None,
+            git_revision: Some("HEAD".to_string()),
+            reason: "deleted file".to_string(),
+            source: "git_diff".to_string(),
+            priority: 3,
+        };
+        assert!(context_seed_content(&root, &seed).unwrap().is_none());
     }
 
     #[test]
