@@ -112,6 +112,14 @@ Static musl binaries need no alternate loader root. The workflow now explicitly
 passes `QEMU_LD_PREFIX=/` through cross into its test container; the product's
 containment checks are unchanged.
 
+The first override used cross's target-only passthrough variable. The pinned
+cross revision silently drops that list when no build-level list is present,
+so the full rerun repeated the original failures. Inspection of the exact
+container image and pinned configuration code identified the issue. The final
+setting uses build-level passthrough scoped to the musl test step and also
+forwards the intended no-autospawn setting. A real foreground CLI query now
+checks the runner's workspace access before the full test binaries compile.
+
 A local QEMU negative control reproduces the workspace-read failure with an
 empty alternate prefix. The same test binary passes all five workspace-file
 tests with the corrected prefix, including symlink, replacement, and

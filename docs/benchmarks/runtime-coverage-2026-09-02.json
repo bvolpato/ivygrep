@@ -2007,8 +2007,11 @@
     "url": "https://github.com/bvolpato/ivygrep/actions/runs/33632167202/job/100254030340"
   },
   "qemu_loader_prefix": {
+    "cross_passthrough_issue": "Pinned cross vec_from_config discards a target-only environment list when env.build is None. Use CROSS_BUILD_ENV_PASSTHROUGH scoped to this musl test step; the target-only override did not fix run 33691981362.",
+    "fail_fast_probe": "A real implicit-index literal query runs through cross before all test binaries compile.",
     "failed_run": "https://github.com/bvolpato/ivygrep/actions/runs/33688865573",
     "full_cross_musl_rerun": "pending",
+    "inspected_image_digest": "sha256:d82cdcbff5bdf41d55b9b06c45d8a1d779d45403cdf3d7ea3eb165cb8eee3484",
     "local_corrected_workspace_file_tests": 5,
     "local_negative_control": "Workspace-file read fails with ENOENT under an empty alternate QEMU loader prefix.",
     "negative_log_sha256": "0e217baf8853ccf939074486eb2f1be899164f0d0268bba65b221f0452442537",
