@@ -22,7 +22,7 @@ class DaemonEquivalenceFixtureTest(unittest.TestCase):
     def test_windows_rpc_authenticates_before_sending_query(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
-            token = "0123456789abcdef" * 2
+            token = bytes(range(16)).hex()
             endpoint = home / "daemon.port"
             endpoint.write_bytes(f"43123\r\n{token}\r\n".encode())
             response = {"type": "search_results", "hits": []}
