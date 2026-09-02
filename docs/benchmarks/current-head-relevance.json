@@ -1,6 +1,6 @@
 {
   "binary": {
-    "sha256": "d69a6c4738b6210eac5777d1802ecff78f14e5562fac58a9faeace89e9b85503",
+    "sha256": "58f52efcd1ac63b1b0304ff6d041d984efe2ba390c139b6b5462f311ae78a092",
     "version": "ivygrep 1.2.12"
   },
   "fixture": {
@@ -11,31 +11,30 @@
     "path": "scripts/eval_relevance.py",
     "sha256": "d7cbac47ac8c18c67fa6c0a5ab8393fd3243c9290e80ed3f28662faec348b32d"
   },
-  "ivygrep_commit": "fb8fe806b466d3a1045f03cdb34f539d940699a9",
+  "ivygrep_commit": "b0e3661d041ca7eb115fb1d58bdcb694c056d528",
   "modes": {
     "foreground": {
       "audit_stage_counts": {
         "after_filtering": 0,
         "before_fusion": 0,
         "candidate_budget": 0,
-        "first_useful_low": 2,
+        "first_useful_low": 1,
         "no_primary_judgment": 0,
         "not_audited": 0,
-        "satisfied": 21
+        "satisfied": 22
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 3721.2059469893575,
+      "elapsed_ms": 3624.767404049635,
       "filter_misses": [],
       "low_rank_misses": [
-        "vector-store",
-        "daemon-watch"
+        "vector-store"
       ],
       "mean_candidate_recall": 0.9782608695652174,
       "mean_hybrid_deep_recall": 0.9782608695652174,
-      "mean_mrr": 0.9565217391304348,
-      "mean_ndcg10": 0.9260314422864163,
-      "mean_p1": 0.9130434782608695,
+      "mean_mrr": 0.9782608695652174,
+      "mean_ndcg10": 0.9407512380126622,
+      "mean_p1": 0.9565217391304348,
       "mean_p5": 0.21739130434782608,
       "mean_recall5": 0.9565217391304348,
       "mode": "foreground",
@@ -45,31 +44,30 @@
       "no_hit_queries": 0,
       "queries": 23,
       "satisfaction_k": 1,
-      "satisfaction_rate": 0.9130434782608695
+      "satisfaction_rate": 0.9565217391304348
     },
     "hash-enriched": {
       "audit_stage_counts": {
         "after_filtering": 0,
         "before_fusion": 0,
         "candidate_budget": 0,
-        "first_useful_low": 2,
+        "first_useful_low": 1,
         "no_primary_judgment": 0,
         "not_audited": 0,
-        "satisfied": 21
+        "satisfied": 22
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 3905.271696858108,
+      "elapsed_ms": 3787.63266839087,
       "filter_misses": [],
       "low_rank_misses": [
-        "vector-store",
-        "daemon-watch"
+        "vector-store"
       ],
       "mean_candidate_recall": 0.9782608695652174,
       "mean_hybrid_deep_recall": 0.9782608695652174,
-      "mean_mrr": 0.9565217391304348,
-      "mean_ndcg10": 0.9260314422864163,
-      "mean_p1": 0.9130434782608695,
+      "mean_mrr": 0.9782608695652174,
+      "mean_ndcg10": 0.9407512380126622,
+      "mean_p1": 0.9565217391304348,
       "mean_p5": 0.21739130434782608,
       "mean_recall5": 0.9565217391304348,
       "mode": "hash-enriched",
@@ -79,7 +77,7 @@
       "no_hit_queries": 0,
       "queries": 23,
       "satisfaction_k": 1,
-      "satisfaction_rate": 0.9130434782608695
+      "satisfaction_rate": 0.9565217391304348
     },
     "neural": {
       "audit_stage_counts": {
@@ -88,19 +86,19 @@
         "candidate_budget": 0,
         "first_useful_low": 0,
         "no_primary_judgment": 0,
-        "not_audited": 2,
-        "satisfied": 21
+        "not_audited": 1,
+        "satisfied": 22
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 3151.9450107589364,
+      "elapsed_ms": 3137.372786179185,
       "filter_misses": [],
       "low_rank_misses": [],
       "mean_candidate_recall": 0.9782608695652174,
       "mean_hybrid_deep_recall": 0.0,
-      "mean_mrr": 0.9565217391304348,
-      "mean_ndcg10": 0.9215504875824057,
-      "mean_p1": 0.9130434782608695,
+      "mean_mrr": 0.9782608695652174,
+      "mean_ndcg10": 0.9362702833086516,
+      "mean_p1": 0.9565217391304348,
       "mean_p5": 0.21739130434782608,
       "mean_recall5": 0.9565217391304348,
       "mode": "neural",
@@ -110,7 +108,7 @@
       "no_hit_queries": 0,
       "queries": 23,
       "satisfaction_k": 1,
-      "satisfaction_rate": 0.9130434782608695
+      "satisfaction_rate": 0.9565217391304348
     }
   },
   "runtime": {
@@ -132,6 +130,6 @@
       "src",
       "vendor"
     ],
-    "sha256": "7e5a38f8aa850816d8b4f90d8e3fa9369995fc25f2e25a1ec48d6744635d1254"
+    "sha256": "a32cfdb4714ff68ff3161a748084deaa39867373f8f2b0a15084c72cf509f002"
   }
 }

@@ -1987,14 +1987,14 @@
   "debug_build": {
     "baseline": "Unchanged baseline fails with 11 fullfp16 assembler errors in gemm-f16 0.19.0 helpers.",
     "full_debug_tests_before_watcher_changes": 1084,
-    "instrumented_tests_after_all_changes": 1085,
+    "instrumented_tests_before_retry_followup": 1085,
     "workaround": "Dependency-only dev optimization level 1 for gemm-f16; no global FP16 target feature; application debug assertions retained."
   },
   "environment_limits": [
     "Initial coverage build exhausted memory-backed /tmp before tests. Stopped artifacts were moved to instance storage and the full run then passed.",
     "No local CUDA device and no registered GPU runner; CUDA execution remains unverified."
   ],
-  "final_release_source_inputs_sha256": "7e5a38f8aa850816d8b4f90d8e3fa9369995fc25f2e25a1ec48d6744635d1254",
+  "final_release_source_inputs_sha256": "a32cfdb4714ff68ff3161a748084deaa39867373f8f2b0a15084c72cf509f002",
   "old_cpu_execution": {
     "cpu": "cortex-a53",
     "passed": true,
@@ -2015,10 +2015,10 @@
     "positive_log_sha256": "16cf95f69d7c8c8f246e97f1158a689d6c5a6dfac13a03332954fecf0235ad79",
     "root_cause": "The loader sysroot remaps open(\"/\") but not descriptor-relative openat calls. Static musl tests must explicitly pass QEMU_LD_PREFIX=/ into the cross container. Product containment checks are unchanged."
   },
-  "release_binary_sha256": "d69a6c4738b6210eac5777d1802ecff78f14e5562fac58a9faeace89e9b85503",
+  "release_binary_sha256": "58f52efcd1ac63b1b0304ff6d041d984efe2ba390c139b6b5462f311ae78a092",
   "rust": "rustc 1.96.0 (ac68faa20 2026-05-25)",
   "schema_version": 1,
-  "source_note": "Coverage and native lifecycle evidence identify the pre-commit runtime source. A subsequent test-only cfg excludes unsupported macOS Accelerate F16 matmul; Linux test behavior is unchanged. Current-head relevance separately records the final release source.",
+  "source_note": "Coverage identifies the pre-retry runtime source; its original checksum and totals are retained. Later changes exclude unsupported macOS Accelerate F16 matmul and fix failed external-watch reattachment. Current-head relevance and final release fingerprints identify the final source, not a re-run of the old coverage snapshot.",
   "validation": {
     "cli_daemon_cases": 7,
     "clippy": "all targets, debug, features accelerate,metal, warnings denied",
@@ -2027,6 +2027,15 @@
     "neural_queries_executed": 23,
     "python_tests": 259,
     "worktree_checks": 116
+  },
+  "watcher_reattachment_retry": {
+    "explicit_stress_tests_passed": 11,
+    "final_debug_test_log_sha256": "444baaee0579c01c22e609a0663e4abc07b14cdef19571a364264b953bca9dad",
+    "final_debug_tests_passed": 1085,
+    "negative_control": "Injected replacement-watch attachment failure loses later exclude edits before the fix.",
+    "negative_log_sha256": "712e3a5015a9318e3a2250d5f5d0b89517e030ab157ee58aeb992b7e66dc25c8",
+    "positive_log_sha256": "1c560c2d8b154e6dcd168ac3989b32f5546fe9efefcc58a93a00123911c4d109",
+    "recovery": "Watch worker retries attachment failures using existing bounded backoff and full reconciliation; explicit refresh failures queue recovery and still return an error."
   },
   "watcher_replacement": {
     "fixed_native_test": "3 successive replacement cycles pass; excludes are applied and subsequently removed each cycle.",

@@ -50,10 +50,23 @@ the stable parent watch, although they do not trigger index updates. Unix
 keeps the narrower nonrecursive watch and pays an identity stat only when
 registering or reconciling it.
 
+Review also exposed a failed-attachment gap: after detaching an obsolete inode,
+a failed replacement watch was only logged, leaving no external event source
+to trigger recovery. The existing replacement test now injects that failure
+once. It fails before the follow-up fix and passes with watch-attachment errors
+routed through the existing bounded retry/backoff path. Recovery performs a
+full reconciliation, including changes made while the watch was unavailable.
+Explicit registration refresh failures also schedule recovery while still
+returning their error to the caller. No periodic full-repository polling is added.
+
 ## Measured coverage
 
 `cargo-llvm-cov 0.9.0` with Rust 1.96.0 ran all library, binary, and integration
 tests with default neural features on Linux ARM64:
+
+This coverage snapshot predates the attachment-retry follow-up. Its source
+checksum is retained separately from the final binary/source checksums; the
+percentages are not presented as a fresh coverage measurement of that follow-up.
 
 | Measure | Covered | Total | Percentage |
 | --- | ---: | ---: | ---: |
