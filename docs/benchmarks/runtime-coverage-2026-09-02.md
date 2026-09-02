@@ -25,6 +25,8 @@ The complete default-feature debug suite passed: 1,084 tests before the new
 F16 test, and 1,085 in the final instrumented run. The new CPU F16 matrix-multiply
 test also passed through `qemu-aarch64 -cpu cortex-a53`, checking execution on
 an older ARM CPU without FP16 arithmetic. This does not test every ARM CPU.
+The F16 regression is limited to portable CPU backends; macOS Accelerate
+explicitly does not support that operation and has separate neural acceptance.
 Native ARM neural CI and the default local test runner now use debug tests;
 release builds remain independently tested.
 

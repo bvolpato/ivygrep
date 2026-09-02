@@ -1190,7 +1190,9 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
-    #[cfg(feature = "neural")]
+    // macOS uses Accelerate, which does not support CPU F16 matmul. This
+    // regression exercises the GEMM implementation used by portable builds.
+    #[cfg(all(feature = "neural", not(target_os = "macos")))]
     #[test]
     fn cpu_f16_matmul_keeps_portable_runtime_dispatch() {
         use candle_core::{DType, Device, Tensor};

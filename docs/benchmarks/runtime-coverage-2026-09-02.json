@@ -1,6 +1,5 @@
 {
   "base_commit": "7413229df04a0657671aa323da5a8ff0e3682569",
-  "candidate_source_inputs_sha256": "3c08b34304be1844356dd79913b01281c0e69a6845bdfdb622b9bfd2af9b597e",
   "coverage": {
     "files": [
       {
@@ -1982,6 +1981,7 @@
       }
     }
   },
+  "coverage_source_inputs_sha256": "3c08b34304be1844356dd79913b01281c0e69a6845bdfdb622b9bfd2af9b597e",
   "coverage_tool": "cargo-llvm-cov 0.9.0",
   "date": "2026-09-02",
   "debug_build": {
@@ -1994,6 +1994,7 @@
     "Initial coverage build exhausted memory-backed /tmp before tests. Stopped artifacts were moved to instance storage and the full run then passed.",
     "No local CUDA device and no registered GPU runner; CUDA execution remains unverified."
   ],
+  "final_release_source_inputs_sha256": "7e5a38f8aa850816d8b4f90d8e3fa9369995fc25f2e25a1ec48d6744635d1254",
   "old_cpu_execution": {
     "cpu": "cortex-a53",
     "passed": true,
@@ -2008,7 +2009,7 @@
   "release_binary_sha256": "d69a6c4738b6210eac5777d1802ecff78f14e5562fac58a9faeace89e9b85503",
   "rust": "rustc 1.96.0 (ac68faa20 2026-05-25)",
   "schema_version": 1,
-  "source_note": "Pre-commit runtime candidate; source-input checksum identifies the tested Rust/Cargo/vendor inputs.",
+  "source_note": "Coverage and native lifecycle evidence identify the pre-commit runtime source. A subsequent test-only cfg excludes unsupported macOS Accelerate F16 matmul; Linux test behavior is unchanged. Current-head relevance separately records the final release source.",
   "validation": {
     "cli_daemon_cases": 7,
     "clippy": "all targets, debug, features accelerate,metal, warnings denied",

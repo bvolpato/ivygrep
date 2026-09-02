@@ -11,7 +11,7 @@
     "path": "scripts/eval_relevance.py",
     "sha256": "d7cbac47ac8c18c67fa6c0a5ab8393fd3243c9290e80ed3f28662faec348b32d"
   },
-  "ivygrep_commit": "7413229df04a0657671aa323da5a8ff0e3682569",
+  "ivygrep_commit": "fb8fe806b466d3a1045f03cdb34f539d940699a9",
   "modes": {
     "foreground": {
       "audit_stage_counts": {
@@ -25,7 +25,7 @@
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 3557.7887054532766,
+      "elapsed_ms": 3721.2059469893575,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
@@ -34,7 +34,7 @@
       "mean_candidate_recall": 0.9782608695652174,
       "mean_hybrid_deep_recall": 0.9782608695652174,
       "mean_mrr": 0.9565217391304348,
-      "mean_ndcg10": 0.9254253818475671,
+      "mean_ndcg10": 0.9260314422864163,
       "mean_p1": 0.9130434782608695,
       "mean_p5": 0.21739130434782608,
       "mean_recall5": 0.9565217391304348,
@@ -59,7 +59,7 @@
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 3744.989873841405,
+      "elapsed_ms": 3905.271696858108,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
@@ -68,7 +68,7 @@
       "mean_candidate_recall": 0.9782608695652174,
       "mean_hybrid_deep_recall": 0.9782608695652174,
       "mean_mrr": 0.9565217391304348,
-      "mean_ndcg10": 0.9254253818475671,
+      "mean_ndcg10": 0.9260314422864163,
       "mean_p1": 0.9130434782608695,
       "mean_p5": 0.21739130434782608,
       "mean_recall5": 0.9565217391304348,
@@ -93,16 +93,16 @@
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 3035.7354702427983,
+      "elapsed_ms": 3151.9450107589364,
       "filter_misses": [],
       "low_rank_misses": [],
       "mean_candidate_recall": 0.9782608695652174,
       "mean_hybrid_deep_recall": 0.0,
       "mean_mrr": 0.9565217391304348,
-      "mean_ndcg10": 0.9264742010190498,
+      "mean_ndcg10": 0.9215504875824057,
       "mean_p1": 0.9130434782608695,
-      "mean_p5": 0.22608695652173913,
-      "mean_recall5": 0.9782608695652174,
+      "mean_p5": 0.21739130434782608,
+      "mean_recall5": 0.9565217391304348,
       "mode": "neural",
       "neural_queries_executed": 23,
       "neural_queries_unobservable": 0,
@@ -132,6 +132,6 @@
       "src",
       "vendor"
     ],
-    "sha256": "3c08b34304be1844356dd79913b01281c0e69a6845bdfdb622b9bfd2af9b597e"
+    "sha256": "7e5a38f8aa850816d8b4f90d8e3fa9369995fc25f2e25a1ec48d6744635d1254"
   }
 }
