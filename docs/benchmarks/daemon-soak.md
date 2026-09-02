@@ -39,3 +39,12 @@ RPC queries, 51 content checks, and two restarts against main `7413229` on
 2026-09-02. All three process epochs passed the unchanged budgets; maximum
 steady-window RSS growth was 14.82 MiB, FD growth was zero or negative, and thread
 growth was at most one. This is short-run acceptance, not long-soak evidence.
+
+The [30-minute report](daemon-soak-linux-arm64-30m.json) also passed, with eight-core
+affinity and the same budgets. Across 1,800 loaded seconds plus per-process
+warmup/cooldown, it completed 716,956 RPC queries, 6,050 mutations, 465 exact-content
+checks, and two restarts, with zero query errors. Maximum steady-window RSS growth
+was 7.73 MiB; FD growth was nonpositive and thread growth was zero in every epoch.
+The source was clean main `7413229`, and the report's harness checksum matches this
+script. These windows bound observed growth; they do not prove absence of leaks
+slower than the thresholds.
