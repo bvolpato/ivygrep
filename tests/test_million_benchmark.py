@@ -5,6 +5,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -55,6 +56,97 @@ def artifact(
 
 
 class MillionBenchmarkTest(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == "linux", "Linux resource sampler")
+    def test_process_timing_excludes_polling_interval_and_sampler_cleanup(self):
+        clock = [10.0]
+        process = mock.Mock(pid=123)
+        process.poll.side_effect = [None, 0]
+
+        def wait():
+            clock[0] = max(clock[0], 10.012)
+            return 0
+
+        def delay(seconds):
+            clock[0] += seconds
+
+        process.wait.side_effect = wait
+        monitor = mock.Mock()
+        monitor.join.side_effect = lambda: delay(1.0)
+        with (
+            mock.patch.object(benchmark.subprocess, "Popen", return_value=process),
+            mock.patch.object(benchmark.threading, "Thread", return_value=monitor),
+            mock.patch.object(benchmark.time, "perf_counter", side_effect=lambda: clock[0]),
+            mock.patch.object(benchmark.time, "sleep", side_effect=delay),
+            mock.patch.object(Path, "read_text", side_effect=FileNotFoundError),
+        ):
+            _, metrics = benchmark.timed(["child"], ROOT, {})
+        self.assertAlmostEqual(metrics["wall_ms"], 12.0)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux resource sampler")
+    def test_timing_preserves_child_failure_and_output(self):
+        with self.assertRaises(subprocess.CalledProcessError) as caught:
+            benchmark.timed(
+                [sys.executable, "-c", "import sys; print('out'); print('err', file=sys.stderr); sys.exit(7)"],
+                ROOT, {},
+            )
+        self.assertEqual(caught.exception.returncode, 7)
+        self.assertEqual(caught.exception.output.strip(), "out")
+        self.assertEqual(caught.exception.stderr.strip(), "err")
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux resource sampler")
+    def test_sampler_preserves_counters_for_process_names_with_spaces_and_parentheses(self):
+        sampled = threading.Event()
+        process = mock.Mock(pid=123)
+        fields = ["0"] * 20
+        fields[0], fields[11], fields[12] = "S", "120", "80"
+
+        def read(path, *_args, **_kwargs):
+            if path.name == "status":
+                return "VmRSS: 32 kB\n"
+            if path.name == "io":
+                return "read_bytes: 3\nwrite_bytes: 4\n"
+            sampled.set()
+            return "123 (worker ) name) " + " ".join(fields)
+
+        def wait():
+            self.assertTrue(sampled.wait(2), "sampler did not run")
+            return 0
+
+        process.wait.side_effect = wait
+        with (
+            mock.patch.object(benchmark.subprocess, "Popen", return_value=process),
+            mock.patch.object(benchmark.os, "sysconf", return_value=100),
+            mock.patch.object(Path, "read_text", autospec=True, side_effect=read),
+        ):
+            _, metrics = benchmark.timed(["child"], ROOT, {})
+        self.assertEqual(metrics["cpu_ms"], 2000)
+        self.assertEqual(metrics["peak_rss_bytes"], 32 * 1024)
+        self.assertEqual(metrics["filesystem_read_bytes"], 3)
+        self.assertEqual(metrics["filesystem_write_bytes"], 4)
+        self.assertGreaterEqual(metrics["resource_samples"], 1)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux resource sampler")
+    def test_sampler_failure_is_reported_to_the_caller(self):
+        sampled = threading.Event()
+        process = mock.Mock(pid=123)
+
+        def read(*_args, **_kwargs):
+            sampled.set()
+            raise PermissionError("cannot sample child")
+
+        def wait():
+            self.assertTrue(sampled.wait(2), "sampler did not run")
+            return 0
+
+        process.wait.side_effect = wait
+        with (
+            mock.patch.object(benchmark.subprocess, "Popen", return_value=process),
+            mock.patch.object(Path, "read_text", side_effect=read),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "resource sampler failed") as caught:
+                benchmark.timed(["child"], ROOT, {})
+        self.assertIsInstance(caught.exception.__cause__, PermissionError)
+
     def test_windows_client_authenticates_each_connection(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
