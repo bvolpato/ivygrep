@@ -501,6 +501,19 @@ impl Workspace {
         self.index_dir.join("base_ref.json")
     }
 
+    pub fn index_incarnation_path(&self) -> PathBuf {
+        self.index_dir.join("index_incarnation")
+    }
+
+    pub(crate) fn read_index_incarnation(&self) -> Result<Option<String>> {
+        match fs::read_to_string(self.index_incarnation_path()) {
+            Ok(value) if !value.trim().is_empty() => Ok(Some(value.trim().to_owned())),
+            Ok(_) => Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).context("read index incarnation"),
+        }
+    }
+
     /// Returns whether this worktree overlay references an older base index
     /// generation. A malformed reference is an error: searching it could leak
     /// paths that no longer exist in the worktree.
@@ -546,7 +559,23 @@ impl Workspace {
         )
         .with_context(|| format!("failed to parse {}", metadata_path.display()))?;
 
-        Ok(metadata.index_generation != overlay_generation)
+        if metadata.index_generation != overlay_generation {
+            return Ok(true);
+        }
+        // Removal/recreation can reuse a generation number. Legacy overlays
+        // without an incarnation must reconcile before inheriting base data.
+        let Some(expected) = base_ref
+            .get("base_incarnation")
+            .and_then(|value| value.as_str())
+        else {
+            return Ok(true);
+        };
+        let current = fs::read_to_string(base_dir.join("index_incarnation"));
+        match current {
+            Ok(current) => Ok(current.trim().is_empty() || current.trim() != expected),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+            Err(error) => Err(error).context("read base index incarnation"),
+        }
     }
 
     /// PID file written by the background `--enhance-internal` process.

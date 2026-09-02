@@ -16,6 +16,20 @@ SPEC.loader.exec_module(check_daemon_equivalence)
 
 
 class DaemonEquivalenceFixtureTest(unittest.TestCase):
+    def test_worktree_comparison_preserves_content_spans_and_duplicates(self) -> None:
+        groups = [{"file_path": "src/shared.rs", "hits": [
+            {"start_line": 2, "end_line": 4, "preview": "branch content"}
+        ]}]
+        expected = check_daemon_equivalence.canonical_content(groups)
+        groups[0]["hits"][0]["preview"] = "stale base content"
+        self.assertNotEqual(check_daemon_equivalence.canonical_content(groups), expected)
+        groups[0]["hits"][0]["preview"] = "branch content"
+        groups[0]["hits"][0]["start_line"] = 1
+        self.assertNotEqual(check_daemon_equivalence.canonical_content(groups), expected)
+        groups[0]["hits"][0]["start_line"] = 2
+        groups[0]["hits"].append(dict(groups[0]["hits"][0]))
+        self.assertEqual(check_daemon_equivalence.canonical_content(groups), expected * 2)
+
     def test_subprocess_output_is_decoded_as_utf8(self) -> None:
         result = check_daemon_equivalence.run(
             [

@@ -105,6 +105,12 @@ This decoy documents packaging and command-line flags. It does not implement sou
 EOF
 
 if [ "$check_worktree" -eq 1 ]; then
+  cat > "$project/src/shadow.rs" <<'EOF'
+pub fn base_shadow_generation_marker() -> bool { false }
+EOF
+  cat > "$project/src/deleted.rs" <<'EOF'
+pub fn base_deleted_generation_marker() -> bool { false }
+EOF
   git -C "$project" init -q
   git -C "$project" config user.name "ivygrep neural smoke test"
   git -C "$project" config user.email "neural-smoke@example.invalid"
@@ -196,6 +202,10 @@ pub fn branch_local_semantic_retrieval_marker() -> bool {
     true
 }
 EOF
+  cat > "$worktree/src/shadow.rs" <<'EOF'
+pub fn overlay_shadow_generation_marker() -> bool { true }
+EOF
+  rm "$worktree/src/deleted.rs"
   for model in "$IVYGREP_HOME"/indexes/*/neural_model.json; do
     if [ -f "$model" ]; then
       sed 's/"revision": "[^"]*"/"revision": "stale-worktree-profile"/' \
@@ -225,6 +235,42 @@ EOF
     fail "worktree forced search did not execute neural retrieval"
   }
   echo "Worktree neural retrieval procedure passed: src/branch_local.rs"
+
+  for source in shadow inherited deleted; do
+    case "$source" in
+      shadow) query=overlay_shadow_generation_marker; expected=src/shadow.rs ;;
+      inherited) query=$semantic_query; expected=src/lib.rs ;;
+      deleted) query=base_deleted_generation_marker; expected='' ;;
+    esac
+    "$ig_bin" --json --force-neural --limit 5 "$query" "$worktree" > "$worktree_json"
+    python3 - "$worktree_json" "$expected" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+groups = json.loads(Path(sys.argv[1]).read_text())
+if sys.argv[2]:
+    assert any(group["file_path"] == sys.argv[2] and group["hits"] for group in groups), groups
+hits = [hit for group in groups for hit in group["hits"]]
+assert any(hit.get("neural_executed") is True for hit in hits), groups
+assert all(group["file_path"] != "src/deleted.rs" for group in groups), groups
+assert all("base_shadow_generation_marker" not in hit["preview"] for hit in hits), groups
+PY
+  done
+  "$ig_bin" --json --force-neural --limit 5 base_shadow_generation_marker "$project" > "$tmp_root/base-search.json"
+  python3 - "$tmp_root/base-search.json" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+groups = json.loads(Path(sys.argv[1]).read_text())
+hits = [hit for group in groups for hit in group["hits"]]
+assert any(hit.get("neural_executed") is True for hit in hits), groups
+assert any("base_shadow_generation_marker" in hit["preview"] for hit in hits), groups
+assert all("overlay_shadow_generation_marker" not in hit["preview"] for hit in hits), groups
+assert all(group["file_path"] != "src/branch_local.rs" for group in groups), groups
+PY
+  echo "Worktree neural inheritance, shadowing, deletion, and base isolation passed"
 fi
 
 echo "Neural backend procedure passed: $reported_backend"

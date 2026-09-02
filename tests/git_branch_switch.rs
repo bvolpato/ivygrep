@@ -3051,12 +3051,22 @@ fn worktree_overlay_staleness_invalidation() {
     // 5. Re-index worktree! Should detect staleness and REBUILD overlay.
     setup_and_index(&wt_path, home.path());
 
-    // It should now find base_v2 inherited from base!
-    let r2 = search_file_paths(&wt_ws, "base_v2");
+    // Reconciliation must preserve this checkout, not adopt the main branch.
+    let r2 = search_hits_for_file(&wt_ws, "base_v1", "base.rs");
     assert!(
-        r2.iter().any(|p| p.contains("base.rs")),
-        "Worktree overlay must find new base content after base updates and worktree re-indexes"
+        r2.iter().any(|(_, preview)| preview.contains("base_v1")),
+        "worktree must retain its original base content"
     );
+    assert!(r2.iter().all(|(_, preview)| !preview.contains("base_v2")));
+    let stored = stored_chunk_texts_at(&wt_ws.overlay_sqlite_path(), "base.rs");
+    assert!(
+        stored
+            .iter()
+            .any(|text| text.contains("pub fn base_v1() {}"))
+            && stored.iter().all(|text| !text.contains("base_v2")),
+        "the old base version must become an overlay delta: {stored:?}"
+    );
+    assert_only_overlay_stores(&wt_ws);
 
     // And make sure wt.rs is still there
     let r3 = search_file_paths(&wt_ws, "wt_only");
@@ -3173,6 +3183,81 @@ fn worktree_search_reconciles_base_only_additions_before_loading_context() {
         root.path(),
         &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
     );
+}
+
+#[test]
+#[serial]
+fn worktree_base_recreation_invalidates_reused_generation_and_legacy_reference() {
+    let root = tempdir().unwrap();
+    let home = tempdir().unwrap();
+    let linked = tempdir().unwrap();
+    let worktree = linked.path().join("branch");
+    init_git_repo(root.path());
+    fs::write(
+        root.path().join("retained.rs"),
+        "pub fn retained_in_branch() {}\n",
+    )
+    .unwrap();
+    git(root.path(), &["add", "."]);
+    git(root.path(), &["commit", "-qm", "base"]);
+    git(
+        root.path(),
+        &["worktree", "add", "--detach", worktree.to_str().unwrap()],
+    );
+    setup_and_index(root.path(), home.path());
+    setup_and_index(&worktree, home.path());
+    let base = workspace_for(root.path());
+    let overlay = workspace_for(&worktree);
+    let prior_generation = base.read_metadata().unwrap().unwrap().index_generation;
+    let prior_incarnation = fs::read(base.index_incarnation_path()).unwrap();
+
+    ivygrep::indexer::remove_workspace_index(&base).unwrap();
+    fs::remove_file(root.path().join("retained.rs")).unwrap();
+    fs::write(
+        root.path().join("main_only.rs"),
+        "pub fn absent_from_branch() {}\n",
+    )
+    .unwrap();
+    setup_and_index(root.path(), home.path());
+    assert_eq!(
+        base.read_metadata().unwrap().unwrap().index_generation,
+        prior_generation
+    );
+    assert_ne!(
+        fs::read(base.index_incarnation_path()).unwrap(),
+        prior_incarnation
+    );
+    assert!(overlay.worktree_overlay_is_stale().unwrap());
+
+    for legacy in [false, true] {
+        if legacy {
+            let mut reference: serde_json::Value =
+                serde_json::from_slice(&fs::read(overlay.base_ref_path()).unwrap()).unwrap();
+            reference
+                .as_object_mut()
+                .unwrap()
+                .remove("base_incarnation");
+            fs::write(
+                overlay.base_ref_path(),
+                serde_json::to_vec(&reference).unwrap(),
+            )
+            .unwrap();
+            assert!(overlay.worktree_overlay_is_stale().unwrap());
+        }
+        let model = HashEmbeddingModel::new(EMBEDDING_DIMENSIONS);
+        assert!(reconcile_worktree_overlay(&overlay, &model).unwrap());
+        assert!(!overlay.worktree_overlay_is_stale().unwrap());
+        assert_eq!(
+            indexed_files(&overlay),
+            HashSet::from(["retained.rs".to_owned()])
+        );
+        let hits = search_hits_for_file(&overlay, "retained_in_branch", "retained.rs");
+        assert!(
+            hits.iter()
+                .any(|(_, text)| text.contains("retained_in_branch"))
+        );
+        assert_only_overlay_stores(&overlay);
+    }
 }
 
 #[test]
@@ -3457,15 +3542,35 @@ fn worktree_overlay_auto_reindex_via_cli_e2e() {
     // Index base (bumps generation)
     setup_and_index(root.path(), home.path());
 
-    // Now NO explicit index in worktree!
-    // Just run a search using the IG CLI, which should detect staleness.
-    use assert_cmd::Command;
-    let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
-    cmd.current_dir(&wt_path)
-        .env("IVYGREP_HOME", home.path())
-        .env("IVYGREP_NO_AUTOSPAWN", "1")
-        .arg("base_v2_e2e")
-        .assert()
-        .success()
-        .stdout(predicates::str::contains("base.rs"));
+    let wt_workspace = workspace_for(&wt_path);
+    assert!(wt_workspace.worktree_overlay_is_stale().unwrap());
+    let query = |marker: &str| -> serde_json::Value {
+        let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+            .current_dir(&wt_path)
+            .env("IVYGREP_HOME", home.path())
+            .env("IVYGREP_NO_AUTOSPAWN", "1")
+            .args(["--json", "--hash", "--literal", marker])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        serde_json::from_slice(&output.stdout).unwrap()
+    };
+    // No explicit worktree indexing: the first query must reconcile base drift.
+    assert_eq!(query("base_v2_e2e"), serde_json::json!([]));
+    assert!(!wt_workspace.worktree_overlay_is_stale().unwrap());
+    for (marker, file) in [("base_v1", "base.rs"), ("wt_only_e2e", "wt.rs")] {
+        let result = query(marker);
+        assert!(
+            result.as_array().unwrap().iter().any(|group| {
+                group["file_path"] == file
+                    && group["hits"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|hit| hit["preview"].as_str().unwrap().contains(marker))
+            }),
+            "missing worktree-owned content for {marker}: {result}"
+        );
+    }
+    assert_only_overlay_stores(&wt_workspace);
 }

@@ -530,6 +530,7 @@ struct WorkspaceReadinessSignature {
     overlay_hash_vectors: Option<FileStamp>,
     base_ref: Option<FileStamp>,
     base_metadata: Option<FileStamp>,
+    base_incarnation: Option<FileStamp>,
     base_index_format: Option<FileStamp>,
     merkle: Option<FileStamp>,
     indexing_pid: Option<FileStamp>,
@@ -2807,11 +2808,9 @@ async fn run_index_request(
         }
         let hash_model = cached_hash_model();
         index_state.note_full_index_run_start(&index_workspace_target.id);
-        let summary = if reconcile_startup {
-            index_workspace_for_watcher(&index_workspace_target, hash_model.as_ref())?
-        } else {
-            index_workspace(&index_workspace_target, hash_model.as_ref())?
-        };
+        // An explicit Index request must cover edits still waiting in the
+        // watcher's debounce queue, not trust the presence of a live watcher.
+        let summary = index_workspace_for_watcher(&index_workspace_target, hash_model.as_ref())?;
         if summary.indexed_files > 0 || summary.deleted_files > 0 {
             index_state.clear_workspace_contexts(&index_workspace_target);
         }
@@ -4662,6 +4661,7 @@ fn workspace_readiness_signature_with_metadata(
         overlay_hash_vectors: file_stamp(&workspace.overlay_vector_path()),
         base_ref: file_stamp(&workspace.base_ref_path()),
         base_metadata: base_dir.and_then(|dir| file_stamp(&dir.join("workspace.json"))),
+        base_incarnation: base_dir.and_then(|dir| file_stamp(&dir.join("index_incarnation"))),
         base_index_format: base_dir.and_then(|dir| file_stamp(&dir.join("index_format_version"))),
         merkle: file_stamp(&workspace.merkle_snapshot_path()),
         indexing_pid: file_stamp(&workspace.indexing_pid_path()),
@@ -7444,7 +7444,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn explicit_index_satisfies_initial_watcher_reconciliation() {
+    async fn explicit_index_reconciles_startup_and_pending_watcher_edits() {
         let home = tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
         let repo = tempdir().unwrap();
@@ -7498,6 +7498,44 @@ mod tests {
                 .generation,
             1
         );
+        std::fs::write(
+            repo.path().join("added.rs"),
+            "pub fn explicit_added_marker() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.path().join("lib.rs"),
+            "pub fn explicit_updated_marker() {}\n",
+        )
+        .unwrap();
+        let response = handle_request(
+            state.clone(),
+            DaemonRequest::Index {
+                path: workspace.root.clone(),
+                watch: true,
+                skip_gitignore: false,
+            },
+        )
+        .await;
+        assert!(
+            matches!(response, DaemonResponse::Ack { .. }),
+            "{response:?}"
+        );
+        assert!(indexed_file_contains(
+            &workspace,
+            "added.rs",
+            "explicit_added_marker"
+        ));
+        assert!(indexed_file_contains(
+            &workspace,
+            "lib.rs",
+            "explicit_updated_marker"
+        ));
+        assert!(!indexed_file_contains(
+            &workspace,
+            "lib.rs",
+            "initial_index_marker"
+        ));
         stop_all_watchers(&state);
     }
 
