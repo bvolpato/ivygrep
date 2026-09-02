@@ -375,8 +375,13 @@ class DaemonClient:
 
     def _connect(self) -> None:
         if os.name == "nt":
-            port = int((self.home / "daemon.port").read_text(encoding="utf-8").strip())
+            endpoint = (self.home / "daemon.port").read_text(encoding="utf-8").splitlines()
+            port = int(endpoint[0].strip())
+            token = endpoint[1].strip() if len(endpoint) > 1 else ""
+            if len(token) != 32 or any(char not in "0123456789abcdefABCDEF" for char in token):
+                raise ValueError("invalid daemon authentication token")
             self.connection = socket.create_connection(("127.0.0.1", port), timeout=120)
+            self.connection.sendall(token.encode("ascii") + b"\n")
         else:
             self.connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             self.connection.settimeout(120)

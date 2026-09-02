@@ -5,6 +5,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -54,6 +55,31 @@ def artifact(
 
 
 class MillionBenchmarkTest(unittest.TestCase):
+    def test_windows_client_authenticates_each_connection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            token = "0123456789abcdef" * 2
+            endpoint = home / "daemon.port"
+            endpoint.write_bytes(f"43123\r\n{token}\r\n".encode())
+            client = benchmark.DaemonClient(home, home / "corpus")
+            connection = mock.MagicMock()
+            with (
+                mock.patch.object(benchmark, "os", SimpleNamespace(name="nt")),
+                mock.patch.object(benchmark.socket, "create_connection", return_value=connection) as connect,
+            ):
+                for _ in range(2):
+                    client._connect()
+                    client._close()
+                self.assertEqual(connect.call_count, 2)
+                connect.assert_called_with(("127.0.0.1", 43123), timeout=120)
+                self.assertEqual(connection.sendall.call_args_list, [mock.call(token.encode() + b"\n")] * 2)
+                for invalid in ("", "z" * 32, "a" * 31):
+                    endpoint.write_text(f"43123\n{invalid}\n")
+                    connect.reset_mock()
+                    with self.assertRaisesRegex(ValueError, "authentication token"):
+                        client._connect()
+                    connect.assert_not_called()
+
     def test_cli_neural_query_requires_observed_execution(self):
         result = subprocess.CompletedProcess(
             [], 0, stdout=json.dumps([

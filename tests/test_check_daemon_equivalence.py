@@ -1,5 +1,8 @@
 import importlib.util
+import io
+import json
 import os
+from types import SimpleNamespace
 from unittest import mock
 import sys
 import tempfile
@@ -16,6 +19,31 @@ SPEC.loader.exec_module(check_daemon_equivalence)
 
 
 class DaemonEquivalenceFixtureTest(unittest.TestCase):
+    def test_windows_rpc_authenticates_before_sending_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            token = "0123456789abcdef" * 2
+            endpoint = home / "daemon.port"
+            endpoint.write_bytes(f"43123\r\n{token}\r\n".encode())
+            response = {"type": "search_results", "hits": []}
+            connection = mock.MagicMock()
+            connection.makefile.return_value = io.BytesIO(json.dumps(response).encode() + b"\n")
+            with (
+                mock.patch.object(check_daemon_equivalence, "os", SimpleNamespace(name="nt")),
+                mock.patch.object(check_daemon_equivalence.socket, "create_connection", return_value=connection) as connect,
+            ):
+                self.assertEqual(check_daemon_equivalence.daemon_request(home, {"type": "status"}), response)
+                connect.assert_called_once_with(("127.0.0.1", 43123), timeout=30)
+                handshake, request = [call.args[0] for call in connection.sendall.call_args_list]
+                self.assertEqual(handshake, token.encode() + b"\n")
+                self.assertEqual(json.loads(request)["type"], "status")
+                for invalid in ("", "z" * 32, "a" * 31):
+                    endpoint.write_text(f"43123\n{invalid}\n")
+                    connect.reset_mock()
+                    with self.assertRaisesRegex(ValueError, "authentication token"):
+                        check_daemon_equivalence.daemon_request(home, {"type": "status"})
+                    connect.assert_not_called()
+
     def test_worktree_comparison_preserves_content_spans_and_duplicates(self) -> None:
         groups = [{"file_path": "src/shared.rs", "hits": [
             {"start_line": 2, "end_line": 4, "preview": "branch content"}

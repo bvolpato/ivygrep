@@ -265,13 +265,19 @@ def daemon_request(home: Path, request: dict[str, Any]) -> dict[str, Any]:
     protocol = (Path(__file__).resolve().parents[1] / "src/protocol.rs").read_text()
     version = int(re.search(r"DAEMON_PROTOCOL_VERSION: u32 = (\d+)", protocol)[1])
     if os.name == "nt":
-        port = int((home / "daemon.port").read_text().strip())
+        endpoint = (home / "daemon.port").read_text().splitlines()
+        port = int(endpoint[0].strip())
+        token = endpoint[1].strip() if len(endpoint) > 1 else ""
+        if not re.fullmatch(r"[0-9a-fA-F]{32}", token):
+            raise ValueError("invalid daemon authentication token")
         connection = socket.create_connection(("127.0.0.1", port), timeout=30)
     else:
         connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         connection.settimeout(30)
         connection.connect(str(home / "daemon.sock"))
     with connection:
+        if os.name == "nt":
+            connection.sendall(token.encode("ascii") + b"\n")
         connection.sendall(json.dumps({"protocol_version": version, **request}).encode() + b"\n")
         with connection.makefile("rb") as reader:
             response = json.loads(reader.readline())
