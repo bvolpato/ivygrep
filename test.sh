@@ -309,6 +309,8 @@ if ((do_python_tests)); then
 fi
 
 if ((run_e2e)); then
+  # Quick/library-only tests do not produce the CLI used by acceptance tests.
+  run cargo build "${profile_flags[@]}" "${cargo_flags[@]}" --bin ig
   target_dir="$(cargo metadata --format-version 1 --no-deps |
     python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
   e2e_binary="$target_dir/debug/ig"

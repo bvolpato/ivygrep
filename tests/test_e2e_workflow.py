@@ -22,13 +22,25 @@ class E2EWorkflowTest(unittest.TestCase):
             shutil.copy2(E2E_WORKFLOW.parents[2] / "test.sh", root / "test.sh")
             (root / "scripts").mkdir()
             runner = root / "scripts/e2e_all.sh"
-            runner.write_text('#!/bin/sh\nprintf "%s\\n" "$2" > "$E2E_RESULT"\n')
+            runner.write_text(
+                '#!/bin/sh\nset -eu\ntest -x "$2"\n'
+                'printf "%s\\n" "$2" > "$E2E_RESULT"\n'
+            )
             runner.chmod(0o755)
             bin_dir = root / "bin"
             bin_dir.mkdir()
             cargo = bin_dir / "cargo"
             cargo.write_text(
-                '#!/bin/sh\nif [ "$1" = metadata ]; then cat "$CARGO_METADATA"; fi\n'
+                '#!/bin/sh\nset -eu\n'
+                'if [ "$1" = metadata ]; then cat "$CARGO_METADATA"; fi\n'
+                'if [ "$1" = build ]; then\n'
+                '  printf "%s\\n" "$*" > "$CARGO_BUILD_RECORD"\n'
+                '  profile=debug\n'
+                '  for arg in "$@"; do if [ "$arg" = --release ]; then profile=release; fi; done\n'
+                '  mkdir -p "$CARGO_TEST_TARGET/$profile"\n'
+                '  touch "$CARGO_TEST_TARGET/$profile/ig"\n'
+                '  chmod +x "$CARGO_TEST_TARGET/$profile/ig"\n'
+                'fi\n'
             )
             cargo.chmod(0o755)
             target = root / "custom target"
@@ -40,6 +52,8 @@ class E2EWorkflowTest(unittest.TestCase):
                 "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
                 "CARGO_METADATA": str(metadata),
                 "E2E_RESULT": str(result),
+                "CARGO_TEST_TARGET": str(target),
+                "CARGO_BUILD_RECORD": str(root / "cargo-build"),
             }
             for profile in ("debug", "release"):
                 with self.subTest(profile=profile):
@@ -48,6 +62,9 @@ class E2EWorkflowTest(unittest.TestCase):
                         args.append("--release")
                     subprocess.run(args, cwd=root, env=env, check=True, capture_output=True)
                     self.assertEqual(result.read_text().strip(), str(target / profile / "ig"))
+                    build = (root / "cargo-build").read_text()
+                    self.assertIn("--no-default-features", build)
+                    self.assertIn("--bin ig", build)
 
     def test_aarch64_smoke_uses_git_and_python_images(self) -> None:
         workflow = E2E_WORKFLOW.read_text(encoding="utf-8")
