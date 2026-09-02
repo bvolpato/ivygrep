@@ -1670,6 +1670,110 @@
       }
     }
   },
+  "fit_disjoint_neural_candidate": {
+    "artifact_sha256": "2f79406c0dab8ccf72ec1fd2b3a0f7b5483283b326732c76372d470e09935d2c",
+    "datasets": {
+      "codefeedback-st": {
+        "neural": {
+          "mrr_at_10": 0.6134126984126984,
+          "ndcg_at_10": 0.6441365119121495,
+          "no_hit_rate": 0.0,
+          "recall_at_20": 0.74
+        }
+      },
+      "codetrans-contest": {
+        "neural": {
+          "mrr_at_10": 0.2936901186901187,
+          "ndcg_at_10": 0.3334900033322297,
+          "no_hit_rate": 0.0,
+          "recall_at_20": 0.4594594594594595
+        }
+      },
+      "codetrans-dl": {
+        "neural": {
+          "mrr_at_10": 0.13526234567901232,
+          "ndcg_at_10": 0.2274069917310759,
+          "no_hit_rate": 0.0,
+          "recall_at_20": 0.6203703703703703
+        }
+      },
+      "cosqa": {
+        "neural": {
+          "mrr_at_10": 0.10403623600834756,
+          "ndcg_at_10": 0.1436976025531275,
+          "no_hit_rate": 0.0,
+          "recall_at_20": 0.3745019920318725
+        }
+      }
+    },
+    "execution_source_commits": [
+      "3a933b6b676222861c601391e485687b8d36bc50"
+    ],
+    "fit_query_audit": {
+      "datasets": [
+        {
+          "dataset": "codetrans-dl",
+          "overlap_queries": 0,
+          "overlap_query_ids": [],
+          "queries": 108,
+          "query_repository": "CoIR-Retrieval/codetrans-dl-queries-corpus"
+        },
+        {
+          "dataset": "codetrans-contest",
+          "overlap_queries": 0,
+          "overlap_query_ids": [],
+          "queries": 111,
+          "query_repository": "CoIR-Retrieval/codetrans-contest-queries-corpus"
+        },
+        {
+          "dataset": "cosqa",
+          "overlap_queries": 0,
+          "overlap_query_ids": [],
+          "queries": 251,
+          "query_repository": "CoIR-Retrieval/cosqa-queries-corpus"
+        },
+        {
+          "dataset": "codefeedback-st",
+          "overlap_queries": 0,
+          "overlap_query_ids": [],
+          "queries": 50,
+          "query_repository": "CoIR-Retrieval/codefeedback-st-queries-corpus"
+        }
+      ],
+      "executed_binary": {
+        "applicability": "unverified",
+        "binary_sha256": "16c9dbfae4e542b4c231c44e3e64b460e9e3911112b909551bf5bc8a418b5743",
+        "observed_model_ids": [
+          "public-linear-reranker-v2"
+        ],
+        "reason": "No executed-model checksum attestation binds the binary to the checkout-reference model."
+      },
+      "overlap_queries": 0,
+      "queries": 520,
+      "query_role": "fit-disjoint-diagnostic",
+      "reference": {
+        "ledger_sha256": "9922bf01e102a8a0b3d680c555d2ce3452f02657e2228a22e1ea1e91d7d105d3",
+        "model_id": "public-linear-reranker-v2",
+        "model_sha256": "dedb2afa59d127be049f0ba1b1beb4e0cb8e2fabbbe13ad3e39bd58b9250bb1f",
+        "scope": "checkout-model",
+        "verified": true
+      },
+      "schema_version": 2,
+      "scope": "repository-qualified query-ID overlap against the checkout-reference model, not proof of executed-model disjointness, overfitting or semantic independence"
+    },
+    "manifest_sha256": "d84eb4264a104d5937df434c8f88cd6d73433233b1b17e7a0c3372cd8228120c",
+    "profile": "reranker-eval",
+    "queries": 520,
+    "repetitions": 1,
+    "summary": {
+      "neural": {
+        "mrr_at_10": 0.19998397435897436,
+        "ndcg_at_10": 0.24971590252553108,
+        "no_hit_rate": 0.0,
+        "recall_at_20": 0.47884615384615387
+      }
+    }
+  },
   "limitations": [
     "No state-of-the-art claim. Public-core contains fit-query overlap; fit-disjoint applicability is limited to the checkout reference ledger.",
     "The baseline public gate fails reproducibly for CoSQA forced-neural: nDCG@10 0.13750747938486976 < 0.14; recall@20 0.34 < 0.35. Thresholds are unchanged.",
