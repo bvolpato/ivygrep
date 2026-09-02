@@ -4,6 +4,37 @@
   "candidate_binary_sha256": "f34119d4bb46fc7429b034832a74e48e1a60d93faeff41692adb1934c1e3a9c8",
   "candidate_source_inputs_sha256": "2ac66024ab0d35e67ee82579f206b4192b64187e3b234305b3a96af9ad1aed13",
   "date": "2026-09-02",
+  "fit_disjoint_baseline_comparison": {
+    "binary_sha256": "603ce1c45512cc3449f0b58d46b624055bd7e4cf445b527775da7ffac735ed9b",
+    "executed_model_applicability": "unverified",
+    "matrix_sha256": "ad50276410ee39e9ce183b27f747083f81a9ae07d3c31181c1a6b5de9797869e",
+    "queries": 520,
+    "raw_result_files": [
+      {
+        "name": "codetrans-dl-neural-run-1.json",
+        "sha256": "9f47ff93deaa9ccfc00b63892fe484b3d755f703b99d821a30ae29228b3d6162"
+      },
+      {
+        "name": "codetrans-contest-neural-run-1.json",
+        "sha256": "09460da2e321e1df03678e1622596dbb23e4cf923ae9b885755c40ede78b6767"
+      },
+      {
+        "name": "cosqa-neural-run-1.json",
+        "sha256": "a8a850c736fc76c1ff43192fe562867dead88bcdab2d2d88670a3af518b045af"
+      },
+      {
+        "name": "codefeedback-st-neural-run-1.json",
+        "sha256": "89200db42fd780c9a4e37b2e45633b5b872f1e5057783f8cf541defd5a9c548d"
+      }
+    ],
+    "scope": "Fresh baseline quality comparison only. The old binary does not emit model checksums and is not upgraded to runtime-attested fit-disjoint evidence.",
+    "weighted_metrics": {
+      "mrr_at_10": 0.20083791208791207,
+      "ndcg_at_10": 0.2489422222272765,
+      "no_hit_rate": 0.0,
+      "recall_at_20": 0.47115384615384615
+    }
+  },
   "fit_disjoint_diagnostic": {
     "fit_query_audit": {
       "datasets": [

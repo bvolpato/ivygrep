@@ -50,7 +50,10 @@ The separate 520-query `reranker-eval` run has zero repository-qualified ID
 overlap with the unchanged model's 481 fit-query ledger. All four result files
 report the exact embedded model SHA-256 bound to that ledger and the selected
 binary SHA-256. `--require-fit-disjoint` passed. Weighted neural nDCG is
-0.253879, Recall@20 is 0.486538, and there are no no-hit queries.
+0.253879, Recall@20 is 0.486538, and there are no no-hit queries. A fresh
+baseline run scores 0.248942 and 0.471154 respectively; the old binary lacks
+runtime model attestation, so it is only a quality comparison, not upgraded
+fit-disjoint certification.
 
 The public-core panel is still regression evidence: 431 of its 1,000 queries
 overlap the fit ledger. The diagnostic's ID disjointness does not prove
