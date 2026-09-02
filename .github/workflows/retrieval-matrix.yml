@@ -1,0 +1,83 @@
+name: Pinned Retrieval Matrix
+
+on:
+  workflow_call:
+    inputs:
+      profile:
+        type: string
+        default: public-core
+      modes:
+        type: string
+        default: lexical,hash,hybrid,blended,neural
+      repetitions:
+        type: string
+        default: "3"
+      checkout_ref:
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    name: Run pinned public matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 720
+    env:
+      CARGO_TERM_COLOR: always
+      HF_HOME: ${{ github.workspace }}/.cache/huggingface
+      PROFILE: ${{ inputs.profile }}
+      MODES: ${{ inputs.modes }}
+      REPETITIONS: ${{ inputs.repetitions }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.checkout_ref || github.sha }}
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: false
+
+      - name: Validate retrieval tooling
+        run: python3 -m unittest tests.test_public_benchmark tests.test_public_relevance tests.test_eval_code_retrieval
+
+      - name: Run public retrieval matrix
+        run: |
+          uv run scripts/run_public_benchmark_matrix.py \
+            --profile "$PROFILE" --modes "$MODES" --runs "$REPETITIONS" \
+            --datasets-root "$RUNNER_TEMP/public-datasets" \
+            --work-root "$RUNNER_TEMP/public-results" \
+            --output public-code-retrieval-results.json
+
+      - name: Render report
+        run: |
+          baseline_args=()
+          if [[ "$PROFILE" == "public-core" ]]; then
+            baseline_args=(--baseline docs/benchmarks/public-code-retrieval-baseline-results.json)
+          fi
+          python3 scripts/render_public_benchmark.py \
+            --input public-code-retrieval-results.json \
+            "${baseline_args[@]}" --html public-code-retrieval.html
+          python3 scripts/check_public_benchmark_privacy.py \
+            public-code-retrieval-results.json public-code-retrieval.html
+
+      - name: Enforce per-dataset public relevance and query retention
+        if: inputs.profile == 'public-core'
+        run: |
+          python3 scripts/check_public_relevance.py \
+            --matrix public-code-retrieval-results.json \
+            --raw-results "$RUNNER_TEMP/public-results"
+
+      - name: Upload public benchmark evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: public-code-retrieval-${{ inputs.profile }}
+          path: |
+            public-code-retrieval-results.json
+            public-code-retrieval.html
+            ${{ runner.temp }}/public-results/*.json

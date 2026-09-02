@@ -79,6 +79,7 @@ class EvidenceDashboardTest(unittest.TestCase):
             )
         )
         report["source"]["sha256"] = current_head.source_inputs_sha256()
+        report["modes"].pop("neural", None)
         self.assertTrue(
             any(
                 "missing neural" in error

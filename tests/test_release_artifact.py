@@ -22,9 +22,72 @@ def load_script(name: str):
 
 
 verifier = load_script("verify_release_artifact")
+sys.path.insert(0, str(ROOT / "scripts"))
+readiness = load_script("check_release_readiness")
 
 
 class ReleaseArtifactTest(unittest.TestCase):
+    def release_fixture(self, root: Path) -> None:
+        files = {
+            "Cargo.toml": '[package]\nname = "ivygrep"\nversion = "1.2.13"\n',
+            "Cargo.lock": '[[package]]\nname = "ivygrep"\nversion = "1.2.13"\n',
+            "CHANGELOG.md": '## [1.2.13] - 2026-09-02\n\n- Tested release.\n',
+            "docs/index.html": "<span>v1.2.13</span>",
+            "src/lib.rs": "pub fn fixture() {}\n",
+            "scripts/eval_relevance.py": "# fixture harness\n",
+            "tests/fixtures/ivygrep_relevance_queries.json": '{"queries": [{"id": "one"}]}',
+            **{path: '{"version": "1.2.13"}' for path in readiness.PLUGIN_MANIFESTS},
+        }
+        for name, content in files.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content)
+        quality = {
+            "queries": 1, "mean_ndcg10": 1.0, "mean_mrr": 1.0,
+            "mean_candidate_recall": 1.0, "no_hit_queries": 0,
+            "neural_queries_executed": 1, "neural_queries_unobservable": 0,
+        }
+        report = {
+            "binary": {"version": "ivygrep 1.2.13"},
+            "source": {"sha256": readiness.relevance.source_inputs_sha256(root)},
+            "fixture": {"sha256": readiness.relevance.sha256_file(root / "tests/fixtures/ivygrep_relevance_queries.json")},
+            "harness": {"sha256": readiness.relevance.sha256_file(root / "scripts/eval_relevance.py")},
+            "modes": {mode: quality for mode in ("foreground", "hash-enriched", "neural")},
+        }
+        path = root / "docs/benchmarks/current-head-relevance.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(report))
+
+    def test_release_preflight_rejects_version_drift_and_empty_notes(self) -> None:
+        for file in ("Cargo.toml", "Cargo.lock", *readiness.PLUGIN_MANIFESTS, "docs/index.html", "CHANGELOG.md"):
+            with self.subTest(file=file), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                self.release_fixture(root)
+                self.assertEqual(readiness.validate_release(root, "v1.2.13"), [])
+                path = root / file
+                path.write_text(path.read_text().replace("1.2.13", "1.2.12"))
+                self.assertTrue(any(file in error for error in readiness.validate_release(root, "v1.2.13")))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.release_fixture(root)
+            (root / "CHANGELOG.md").write_text("## [1.2.13]\n\n### Fixed\n")
+            self.assertTrue(any("no release notes" in error for error in readiness.validate_release(root, "v1.2.13")))
+
+    def test_release_preflight_rejects_stale_source_and_missing_neural_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.release_fixture(root)
+            self.assertTrue(readiness.validate_release(root, "not-a-tag"))
+            source = root / "src/lib.rs"
+            source.write_text("pub fn changed() {}\n")
+            self.assertTrue(any("source SHA-256" in error for error in readiness.validate_release(root, "v1.2.13")))
+            source.write_text("pub fn fixture() {}\n")
+            path = root / "docs/benchmarks/current-head-relevance.json"
+            report = json.loads(path.read_text())
+            report["modes"].pop("neural")
+            path.write_text(json.dumps(report))
+            self.assertTrue(any("missing neural" in error for error in readiness.validate_release(root, "v1.2.13")))
+
     def test_checksum_requires_matching_archive_name_and_digest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
