@@ -65,6 +65,8 @@ All notable changes to ivygrep are documented in this file.
 - Index format bumped to v25; existing indexes rebuild once on first use so unchanged files also receive corrected dependency graphs. This is a full index rebuild, with the usual indexing and subsequent vector-enhancement costs.
 
 ### Testing
+
+- Context deletion acceptance checks the existing platform contract: Unix can hydrate deleted content through a pinned Git working directory; Windows retains deletion metadata and live-file context while refusing unsafe historical-only reads.
 - Public retrieval records the checkout-reference model's 481 fit-query IDs and labels public-core as regression evidence (431 of its unchanged 1,000 queries overlap). Declared fit-disjoint diagnostics check actual repository-qualified IDs against that reference; applicability to the executed model remains unverified. Model weights and acceptance gates are unchanged.
 - Reranker training consumes captured native feature vectors instead of reconstructing grouped search output. Benchmark reuse verifies dataset, binary, harness, configuration, and runtime fingerprints while retaining original execution provenance; legacy or incompatible results require a fresh run.
 - The Web UI "late search results" browser test tells its scripted streams apart by URL and releases the superseded search's results only after navigation completed, instead of racing a 100 ms timer against the runner.
