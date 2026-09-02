@@ -4327,6 +4327,8 @@ const char *example = "\
                     "user.name=ivygrep test",
                     "-c",
                     "user.email=ivygrep@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
                     "commit",
                     "-q",
                     "-m",

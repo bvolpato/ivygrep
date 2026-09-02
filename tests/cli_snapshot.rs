@@ -65,6 +65,7 @@ fn init_git_repo(root: &Path) {
 
 fn git_checked(root: &Path, args: &[&str]) {
     let output = std::process::Command::new("git")
+        .args(["-c", "commit.gpgsign=false"])
         .args(args)
         .current_dir(root)
         .output()
@@ -2194,7 +2195,7 @@ fn cli_context_bounds_changes_to_requested_scope_and_budget() {
 
 #[test]
 #[serial]
-fn cli_context_since_hydrates_deleted_files_and_callers() {
+fn cli_context_since_respects_platform_history_support() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("repo");
     let home = tmp.path().join("home");
@@ -2229,24 +2230,20 @@ fn cli_context_since_hydrates_deleted_files_and_callers() {
     git_checked(&root, &["add", "-u"]);
     git_checked(&root, &["commit", "-qm", "remove auth"]);
 
-    let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
-        .args([
-            "--json",
-            "--hash",
-            "context",
-            "--since",
-            "main",
-            "review this deletion",
-        ])
-        .arg(&root)
-        .env("IVYGREP_HOME", &home)
-        .env("IVYGREP_NO_AUTOSPAWN", "1")
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let bundle: serde_json::Value = serde_json::from_slice(&output).unwrap();
+    let context = |task: &str| -> serde_json::Value {
+        let output = Command::new(assert_cmd::cargo::cargo_bin!("ig"))
+            .args(["--json", "--hash", "context", "--since", "main", task])
+            .arg(&root)
+            .env("IVYGREP_HOME", &home)
+            .env("IVYGREP_NO_AUTOSPAWN", "1")
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice(&output).unwrap()
+    };
+    let bundle = context("review this deletion");
     assert!(
         bundle["change_scope"]["changes"]
             .as_array()
@@ -2254,6 +2251,7 @@ fn cli_context_since_hydrates_deleted_files_and_callers() {
             .iter()
             .any(|change| change["file_path"] == "src/auth.rs" && change["status"] == "deleted")
     );
+    #[cfg(unix)]
     assert!(
         bundle["items"].as_array().unwrap().iter().any(|item| {
             item["file_path"] == "src/auth.rs"
@@ -2266,6 +2264,7 @@ fn cli_context_since_hydrates_deleted_files_and_callers() {
         }),
         "deleted seed missing: {bundle:#}"
     );
+    #[cfg(unix)]
     assert!(
         bundle["items"].as_array().unwrap().iter().any(|item| {
             item["file_path"] == "src/server.rs"
@@ -2276,6 +2275,25 @@ fn cli_context_since_hydrates_deleted_files_and_callers() {
                     .any(|role| role == "caller" || role == "reference")
         }),
         "deleted callers missing: {bundle:#}"
+    );
+    #[cfg(not(unix))]
+    assert!(
+        bundle["items"].as_array().unwrap().iter().all(|item| {
+            !item["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|source| source == "git_deleted")
+        }),
+        "historical content was read without safe subprocess anchoring: {bundle:#}"
+    );
+    let live = context("review src/server.rs");
+    assert!(
+        live["items"].as_array().unwrap().iter().any(|item| {
+            item["file_path"] == "src/server.rs"
+                && item["preview"].as_str().unwrap().contains("login")
+        }),
+        "live context missing: {live:#}"
     );
 }
 

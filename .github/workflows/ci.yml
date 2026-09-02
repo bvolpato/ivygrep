@@ -95,6 +95,15 @@ jobs:
             cargo_flags: "--no-default-features"
             rust_flags: "-D warnings"
             name: "Linux (Hash-only)"
+          - os: ubuntu-24.04-arm
+            # Match the shipped profile; baseline ARM Candle debug assembly needs fullfp16.
+            cargo_flags: "--release"
+            rust_flags: "-D warnings"
+            name: "Linux ARM64 (Neural CPU)"
+          - os: ubuntu-24.04-arm
+            cargo_flags: "--no-default-features"
+            rust_flags: "-D warnings"
+            name: "Linux ARM64 (Hash-only)"
           - os: macos-latest
             cargo_flags: "--features accelerate"
             rust_flags: "-D warnings"
@@ -188,6 +197,16 @@ jobs:
             cargo_flags: "--no-default-features"
             rust_flags: "-D warnings"
             name: "Linux (Hash-only)"
+          - os: ubuntu-24.04-arm
+            cargo_flags: ""
+            rust_flags: "-D warnings"
+            name: "Linux ARM64 (Neural CPU)"
+            validate_backend: "StaticEmbedding token mean via Rust"
+            model_profile: "static"
+          - os: ubuntu-24.04-arm
+            cargo_flags: "--no-default-features"
+            rust_flags: "-D warnings"
+            name: "Linux ARM64 (Hash-only)"
           - os: macos-latest
             cargo_flags: "--features accelerate"
             rust_flags: "-D warnings"

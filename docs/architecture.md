@@ -158,6 +158,7 @@ stores and metadata agree.
 | Artifact | Purpose |
 | --- | --- |
 | `workspace.json` | Root, watch intent, timestamps, and index generation |
+| `index_incarnation` | Base-index identity that changes after removal/recreation, even if a generation number is reused |
 | `metadata.sqlite3` | Chunk text and metadata, symbols, graph edges, unresolved dependencies, statistics |
 | `tantivy/` | BM25, path, signature, language, kind, and trigram postings |
 | `vectors.usearch` | Lightweight hash-vector index |
@@ -367,8 +368,10 @@ A Git worktree does not copy its repository's complete index. It uses:
 
 Search merges base and overlay results, hides deleted or shadowed base paths, and
 rejects stale or malformed overlay references that could expose content absent
-from the active worktree. Base generation changes trigger reconciliation before
-overlay content is trusted.
+from the active worktree. Base generation or incarnation changes trigger
+reconciliation before overlay content is trusted. A base rebuild can reuse a
+generation number, so that counter alone is not an identity. Legacy references
+without an incarnation reconcile once; unchanged files still use the shared base.
 
 ## Daemon, watchers, and background work
 

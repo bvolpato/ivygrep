@@ -309,9 +309,13 @@ if ((do_python_tests)); then
 fi
 
 if ((run_e2e)); then
-  e2e_binary="$ROOT/target/debug/ig"
+  # Quick/library-only tests do not produce the CLI used by acceptance tests.
+  run cargo build "${profile_flags[@]}" "${cargo_flags[@]}" --bin ig
+  target_dir="$(cargo metadata --format-version 1 --no-deps |
+    python3 -c 'import json, sys; print(json.load(sys.stdin)["target_directory"])')"
+  e2e_binary="$target_dir/debug/ig"
   if ((${#profile_flags[@]})) && [[ "${profile_flags[*]}" == *--release* ]]; then
-    e2e_binary="$ROOT/target/release/ig"
+    e2e_binary="$target_dir/release/ig"
   fi
   run scripts/e2e_all.sh --binary "$e2e_binary"
 fi

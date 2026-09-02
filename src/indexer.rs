@@ -502,6 +502,14 @@ fn index_workspace_with_options(
     if index_health.needs_rebuild() && (!workspace.is_worktree() || preserved_metadata.is_none()) {
         rebuild_index_storage(workspace, preserved_metadata.as_ref())?;
     }
+    // The index lock serializes creation. A new incarnation survives ordinary
+    // incremental indexing, but removal/recreation must invalidate old overlays.
+    if !workspace.is_worktree() && workspace.read_index_incarnation()?.is_none() {
+        fs::write(
+            workspace.index_incarnation_path(),
+            uuid::Uuid::new_v4().to_string(),
+        )?;
+    }
     let mut rebuild_main = false;
     if index_health.is_queryable()
         && let Err(error) = validate_existing_index_storage(workspace)
@@ -881,7 +889,9 @@ fn index_workspace_inner(
             // The overlay may inherit base paths only after the base index
             // reflects its current files. This is incremental and avoids
             // silently inheriting stale chunks from an unindexed base edit.
-            if !base_refreshed && !refresh_clean_base_metadata(&base_ws)? {
+            if base_ws.read_index_incarnation()?.is_none()
+                || (!base_refreshed && !refresh_clean_base_metadata(&base_ws)?)
+            {
                 let _ = index_workspace_for_watcher(&base_ws, embedding_model)?;
             }
             let base_generation = base_ws
@@ -892,6 +902,8 @@ fn index_workspace_inner(
                 "base_index_dir": base_dir.to_string_lossy(),
                 "base_workspace_root": main_root.to_string_lossy(),
                 "base_generation": base_generation,
+                "base_incarnation": base_ws.read_index_incarnation()?
+                    .context("base index has no incarnation after indexing")?,
                 "created_at_unix": SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()

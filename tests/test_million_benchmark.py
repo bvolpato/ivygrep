@@ -5,6 +5,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -54,6 +55,100 @@ def artifact(
 
 
 class MillionBenchmarkTest(unittest.TestCase):
+    def test_windows_client_authenticates_each_connection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            token = bytes(range(16)).hex()
+            endpoint = home / "daemon.port"
+            endpoint.write_bytes(f"43123\r\n{token}\r\n".encode())
+            client = benchmark.DaemonClient(home, home / "corpus")
+            connection = mock.MagicMock()
+            with (
+                mock.patch.object(benchmark, "os", SimpleNamespace(name="nt")),
+                mock.patch.object(benchmark.socket, "create_connection", return_value=connection) as connect,
+            ):
+                for _ in range(2):
+                    client._connect()
+                    client._close()
+                self.assertEqual(connect.call_count, 2)
+                connect.assert_called_with(("127.0.0.1", 43123), timeout=120)
+                self.assertEqual(connection.sendall.call_args_list, [mock.call(token.encode() + b"\n")] * 2)
+                for invalid in ("", "z" * 32, "a" * 31):
+                    endpoint.write_text(f"43123\n{invalid}\n")
+                    connect.reset_mock()
+                    with self.assertRaisesRegex(ValueError, "authentication token"):
+                        client._connect()
+                    connect.assert_not_called()
+
+    def test_cli_neural_query_requires_observed_execution(self):
+        result = subprocess.CompletedProcess(
+            [], 0, stdout=json.dumps([
+                {"file_path": "source.rs", "hits": [{"neural_executed": True}]}
+            ])
+        )
+        with mock.patch.object(benchmark.subprocess, "run", return_value=result) as run:
+            measured = benchmark.run_query(
+                Path("ig"), Path("corpus"), "query", {}, force_neural=True
+            )
+        self.assertTrue(measured["neural_executed"])
+        self.assertIn("--force-neural", run.call_args.args[0])
+        self.assertNotIn("--hash", run.call_args.args[0])
+        result.stdout = json.dumps([{"file_path": "source.rs", "hits": [{}]}])
+        with mock.patch.object(benchmark.subprocess, "run", return_value=result):
+            with self.assertRaisesRegex(RuntimeError, "did not report neural execution"):
+                benchmark.run_query(Path("ig"), Path("corpus"), "query", {}, force_neural=True)
+            self.assertFalse(
+                benchmark.run_query(Path("ig"), Path("corpus"), "query", {})["neural_executed"]
+            )
+
+    def test_daemon_neural_query_requires_observed_execution(self):
+        client = benchmark.DaemonClient(Path("home"), Path("corpus"), force_neural=True)
+        response = {
+            "type": "search_results",
+            "hits": [{"file_path": "source.rs", "neural_executed": True}],
+        }
+        with mock.patch.object(client, "_send", return_value=(response, 1.0)) as send:
+            self.assertTrue(client.query("query")["neural_executed"])
+        self.assertIs(send.call_args.args[0]["force_neural"], True)
+        for observed in (False, None, 1):
+            response["hits"][0]["neural_executed"] = observed
+            with mock.patch.object(client, "_send", return_value=(response, 1.0)):
+                with self.assertRaisesRegex(RuntimeError, "did not report neural execution"):
+                    client.query("query")
+
+    def test_neural_suite_propagates_mode_to_every_query_path(self):
+        measured = {
+            "elapsed_ms": 1.0,
+            "hit_count": 1,
+            "paths": ["source.rs"],
+            "neural_executed": True,
+        }
+        client = mock.MagicMock()
+        client.__enter__.return_value = client
+        client.query.return_value = measured
+
+        def query(*_args, **kwargs):
+            self.assertIs(kwargs["force_neural"], True)
+            return measured
+
+        with (
+            mock.patch.object(benchmark, "run_query", side_effect=query),
+            mock.patch.object(benchmark, "run_daemon_query", side_effect=query),
+            mock.patch.object(benchmark, "DaemonClient", return_value=client) as constructor,
+            mock.patch.object(benchmark, "start_daemon", return_value=(None, None, None)),
+            mock.patch.object(benchmark, "stop_daemon"),
+            mock.patch.object(benchmark, "profile_query_phases", return_value={}) as profile,
+        ):
+            result = benchmark.query_suite(
+                Path("ig"), Path("corpus"), {"IVYGREP_HOME": "home"},
+                2, 100, 10, force_neural=True,
+            )
+        constructor.assert_called_once_with(Path("home"), Path("corpus"), True)
+        self.assertIs(profile.call_args.args[-1], True)
+        for name, metrics in result.items():
+            if name != "phase_timings":
+                self.assertEqual(metrics["neural_queries_executed"], metrics["samples"])
+
     def test_latest_measured_release_snapshot_matches_trial_medians(self):
         snapshot = json.loads(
             (ROOT / "docs/benchmarks/public-million-current.json").read_text(

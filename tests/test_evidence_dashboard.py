@@ -320,6 +320,9 @@ class EvidenceDashboardTest(unittest.TestCase):
             )
             git = renderer.subprocess
             git.run(["git", "init", "-q"], cwd=root, check=True)
+            git.run(
+                ["git", "config", "commit.gpgsign", "false"], cwd=root, check=True
+            )
             git.run(["git", "add", "."], cwd=root, check=True)
             git.run(
                 [

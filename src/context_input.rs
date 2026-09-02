@@ -860,6 +860,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
             let status = Command::new("git")
+                .args(["-c", "commit.gpgsign=false"])
                 .args(args)
                 .current_dir(root.path())
                 .status()

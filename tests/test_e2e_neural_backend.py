@@ -270,7 +270,11 @@ class NeuralBackendE2ETest(unittest.TestCase):
                 ;;
               --json)
                 [ "$2" = "--force-neural" ] || exit 7
-                echo '{"hits":[{"file_path":"src/branch_local.rs","neural_executed":true}]}'
+                if [ "$5" = base_shadow_generation_marker ]; then
+                  echo '[{"file_path":"src/shadow.rs","hits":[{"preview":"base_shadow_generation_marker","neural_executed":true}]}]'
+                else
+                  echo '[{"file_path":"src/branch_local.rs","hits":[{"preview":"branch_local_semantic_retrieval_marker","neural_executed":true}]},{"file_path":"src/shadow.rs","hits":[{"preview":"overlay_shadow_generation_marker","neural_executed":true}]},{"file_path":"src/lib.rs","hits":[{"preview":"retrieve_local_semantic_result","neural_executed":true}]}]'
+                fi
                 exit 0
                 ;;
             esac

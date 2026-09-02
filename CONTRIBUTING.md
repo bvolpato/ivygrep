@@ -164,6 +164,30 @@ controls the disposable destination; the shell installer also accepts
 
 Temporary fixtures must use isolated directories and `IVYGREP_HOME`.
 
+### Layered worktree correctness
+
+Keep coverage at four levels:
+
+1. Store and daemon unit tests check publication rollback, tombstones, mutation
+   leases, cache invalidation, and explicit indexing while watcher events are pending.
+2. `tests/git_branch_switch.rs` exercises real Git branches/worktrees, thin overlays,
+   sparse and ignored files, stale bases, index recreation, and legacy references.
+3. `scripts/check_daemon_equivalence.py`, included in normal E2E, compares real CLI
+   and direct daemon RPC results with a freshly indexed, independent copy of each
+   checkout. It covers additions, modifications, empty replacements, deletions,
+   renames, branch switches, sibling isolation, base rebuilds, daemon restarts,
+   and live watcher updates. It checks paths, line spans, previews, duplicates,
+   cache replay, and physical delta-only storage. Hash cases require observed
+   vector retrieval; filename presence alone is not sufficient evidence.
+4. `scripts/e2e_neural_backend.sh --check-worktree` uses the actual configured model
+   to verify inherited and modified content, deleted-file exclusion, and base
+   isolation. It requires reported neural execution and stays opt-in/offline-cacheable.
+
+The independent-index comparison checks visible content, not equality of BM25 scores
+or a universal ranking guarantee: separate layers can have different term statistics.
+Use the relevance benchmarks for rank quality. A newer main checkout must never
+silently replace the contents of an older worktree.
+
 ## Performance and relevance changes
 
 Claims need comparable before/after evidence:

@@ -500,6 +500,7 @@ struct DirStamp {
 
 struct CachedSearchContext {
     signature: SearchContextSignature,
+    base_index_dir: Option<PathBuf>,
     pool: Arc<SearchContextPool>,
 }
 
@@ -530,6 +531,7 @@ struct WorkspaceReadinessSignature {
     overlay_hash_vectors: Option<FileStamp>,
     base_ref: Option<FileStamp>,
     base_metadata: Option<FileStamp>,
+    base_incarnation: Option<FileStamp>,
     base_index_format: Option<FileStamp>,
     merkle: Option<FileStamp>,
     indexing_pid: Option<FileStamp>,
@@ -2019,6 +2021,7 @@ impl DaemonState {
                     key,
                     CachedSearchContext {
                         signature,
+                        base_index_dir: workspace.base_index_dir.clone(),
                         pool: pool.clone(),
                     },
                 );
@@ -2175,31 +2178,42 @@ impl DaemonState {
     }
 
     fn clear_workspace_contexts(&self, workspace: &Workspace) {
+        let mut affected = HashSet::from([workspace.id.clone()]);
         {
             let mut contexts = self.search_contexts.lock();
             let keys = contexts
                 .iter()
-                .filter(|(key, _)| key.workspace_id == workspace.id)
-                .map(|(key, _)| key.clone())
+                .filter(|(key, cached)| {
+                    key.workspace_id == workspace.id
+                        || cached.base_index_dir.as_ref() == Some(&workspace.index_dir)
+                })
+                .map(|(key, _)| {
+                    affected.insert(key.workspace_id.clone());
+                    key.clone()
+                })
                 .collect::<Vec<_>>();
             for key in keys {
                 contexts.pop(&key);
             }
         }
-        self.neural_statuses.lock().pop(&workspace.id);
-        self.watchers.lock().policies.pop(&workspace.id);
+        for id in &affected {
+            self.neural_statuses.lock().pop(id);
+            self.watchers.lock().policies.pop(id);
+        }
         {
             let mut ready = self.ready_workspaces.lock();
             let keys = ready
                 .iter()
-                .filter(|(key, _)| key.workspace_id == workspace.id)
+                .filter(|(key, _)| affected.contains(&key.workspace_id))
                 .map(|(key, _)| key.clone())
                 .collect::<Vec<_>>();
             for key in keys {
                 ready.pop(&key);
             }
         }
-        self.query_results.lock().remove_workspace(&workspace.id);
+        for id in &affected {
+            self.query_results.lock().remove_workspace(id);
+        }
     }
 
     fn refresh_workspace_watcher(&self, workspace: &Workspace) -> Result<()> {
@@ -2807,11 +2821,9 @@ async fn run_index_request(
         }
         let hash_model = cached_hash_model();
         index_state.note_full_index_run_start(&index_workspace_target.id);
-        let summary = if reconcile_startup {
-            index_workspace_for_watcher(&index_workspace_target, hash_model.as_ref())?
-        } else {
-            index_workspace(&index_workspace_target, hash_model.as_ref())?
-        };
+        // An explicit Index request must cover edits still waiting in the
+        // watcher's debounce queue, not trust the presence of a live watcher.
+        let summary = index_workspace_for_watcher(&index_workspace_target, hash_model.as_ref())?;
         if summary.indexed_files > 0 || summary.deleted_files > 0 {
             index_state.clear_workspace_contexts(&index_workspace_target);
         }
@@ -3766,7 +3778,6 @@ async fn handle_request_with_cancellation(
         }
         DaemonRequest::Remove { path } => match Workspace::resolve(&path) {
             Ok(workspace) => {
-                let workspace_for_cache = workspace.clone();
                 let remove_state = state.clone();
                 match tokio::task::spawn_blocking(move || {
                     let leases =
@@ -3778,18 +3789,18 @@ async fn handle_request_with_cancellation(
                         metadata.watch_enabled = false;
                         let _ = workspace.write_metadata(&metadata);
                     }
+                    // Cached base/worktree readers must release their handles
+                    // before unlinking stores, particularly on Windows.
+                    remove_state.clear_workspace_contexts(&workspace);
                     remove_workspace_index(&workspace)?;
                     Result::<_, anyhow::Error>::Ok(leases)
                 })
                 .await
                 .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())))
                 {
-                    Ok(_leases) => {
-                        state.clear_workspace_contexts(&workspace_for_cache);
-                        DaemonResponse::Ack {
-                            message: format!("removed workspace index {}", path.display()),
-                        }
-                    }
+                    Ok(_leases) => DaemonResponse::Ack {
+                        message: format!("removed workspace index {}", path.display()),
+                    },
                     Err(err) => DaemonResponse::Error {
                         message: err.to_string(),
                     },
@@ -4662,6 +4673,7 @@ fn workspace_readiness_signature_with_metadata(
         overlay_hash_vectors: file_stamp(&workspace.overlay_vector_path()),
         base_ref: file_stamp(&workspace.base_ref_path()),
         base_metadata: base_dir.and_then(|dir| file_stamp(&dir.join("workspace.json"))),
+        base_incarnation: base_dir.and_then(|dir| file_stamp(&dir.join("index_incarnation"))),
         base_index_format: base_dir.and_then(|dir| file_stamp(&dir.join("index_format_version"))),
         merkle: file_stamp(&workspace.merkle_snapshot_path()),
         indexing_pid: file_stamp(&workspace.indexing_pid_path()),
@@ -6319,6 +6331,52 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn clearing_base_contexts_releases_worktree_readers_but_preserves_unrelated_pools() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repositories = tempdir().unwrap();
+        let main = repositories.path().join("main");
+        let linked = repositories.path().join("linked");
+        let unrelated = repositories.path().join("unrelated");
+        std::fs::create_dir(&main).unwrap();
+        std::fs::create_dir(&unrelated).unwrap();
+        git(&main, &["init", "-b", "main"]);
+        std::fs::write(main.join("lib.rs"), "pub fn shared_base_reader() {}\n").unwrap();
+        std::fs::write(unrelated.join("lib.rs"), "pub fn unrelated_reader() {}\n").unwrap();
+        git(&main, &["add", "."]);
+        git(&main, &["commit", "-qm", "base"]);
+        git(
+            &main,
+            &["worktree", "add", "--detach", linked.to_str().unwrap()],
+        );
+        let base = Workspace::resolve(&main).unwrap();
+        let overlay = Workspace::resolve(&linked).unwrap();
+        let other = Workspace::resolve(&unrelated).unwrap();
+        let model = create_hash_model();
+        for workspace in [&base, &overlay, &other] {
+            index_workspace(workspace, model.as_ref()).unwrap();
+        }
+        let state = test_state();
+        let reader = state.cached_search_context(&overlay, None, false).unwrap();
+        let shared_pool = Arc::downgrade(&reader.pool);
+        drop(reader);
+        let reader = state.cached_search_context(&other, None, false).unwrap();
+        let unrelated_pool = Arc::downgrade(&reader.pool);
+        drop(reader);
+        assert!(shared_pool.upgrade().is_some());
+        state.clear_workspace_contexts(&base);
+        assert!(
+            shared_pool.upgrade().is_none(),
+            "worktree readers still retain the base store"
+        );
+        assert!(
+            unrelated_pool.upgrade().is_some(),
+            "unrelated workspace cache was evicted"
+        );
+    }
+
+    #[test]
     fn cancelled_neural_precompute_joins_without_populating_cache() {
         let state = test_state();
         let cancellation = Arc::new(AtomicBool::new(false));
@@ -7444,7 +7502,7 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn explicit_index_satisfies_initial_watcher_reconciliation() {
+    async fn explicit_index_reconciles_startup_and_pending_watcher_edits() {
         let home = tempdir().unwrap();
         unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
         let repo = tempdir().unwrap();
@@ -7498,6 +7556,44 @@ mod tests {
                 .generation,
             1
         );
+        std::fs::write(
+            repo.path().join("added.rs"),
+            "pub fn explicit_added_marker() {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            repo.path().join("lib.rs"),
+            "pub fn explicit_updated_marker() {}\n",
+        )
+        .unwrap();
+        let response = handle_request(
+            state.clone(),
+            DaemonRequest::Index {
+                path: workspace.root.clone(),
+                watch: true,
+                skip_gitignore: false,
+            },
+        )
+        .await;
+        assert!(
+            matches!(response, DaemonResponse::Ack { .. }),
+            "{response:?}"
+        );
+        assert!(indexed_file_contains(
+            &workspace,
+            "added.rs",
+            "explicit_added_marker"
+        ));
+        assert!(indexed_file_contains(
+            &workspace,
+            "lib.rs",
+            "explicit_updated_marker"
+        ));
+        assert!(!indexed_file_contains(
+            &workspace,
+            "lib.rs",
+            "initial_index_marker"
+        ));
         stop_all_watchers(&state);
     }
 

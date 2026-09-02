@@ -6,9 +6,11 @@ All notable changes to ivygrep are documented in this file.
 
 ### Added
 
+- Pull-request CI validates native Linux ARM64 hash-only and neural CPU builds, including offline static-model retrieval and browser acceptance.
 - Opt-in `IVYGREP_RERANKER_CAPTURE=1` emits versioned native pre-learned candidates and features to stderr for diagnostics and training. Records include query text and source previews; normal search output is unchanged.
 
 ### Performance
+- ARM64 exact vector scoring uses runtime-selected NEON math and coarser parallel batches. On a Neoverse V2 host, controlled eight-core scoring was 16–42% faster across 500–50,000 eligible vectors; at the default 32 threads, small batches improved by 42% while larger batches were roughly unchanged. See the [Linux validation report](docs/benchmarks/linux-arm64-2026-09-02.md) for trial data and limits.
 - Vector count and availability checks read native headers and stream node levels without allocating native views or key lookup tables, reducing bookkeeping memory. The fast path checks structural bounds, not full payload integrity; deep health checks and USearch serialization are unchanged. Hash enhancement rebuilds dimension-mismatched stores before filling missing keys.
 - Reference and caller searches reuse one search context across bounded candidate-widening passes, avoiding repeated store setup when early matches are rejected. The existing per-request source-matching cache is unchanged.
 - Daemon startup-readiness checks reuse bounded, metadata-stamped watch policies for workspaces without registered watchers, avoiding repeated JSON parsing on warm queries.
@@ -24,6 +26,11 @@ All notable changes to ivygrep are documented in this file.
 - MCP no longer blocks a tool call on a whole first index. `ig_search` enqueues the run on the daemon (`StartIndex`), waits at most `IVYGREP_MCP_INDEX_WAIT_SECS` (default 20), and otherwise returns a non-error `status: indexing` payload with progress and `retry_after_secs`; the MCP process never indexes locally while a daemon answers (including after a lost reply), and `ig_status` reports runs still queued on the daemon. Daemon protocol version 7; older daemons restart on the next request.
 
 ### Fixed
+
+- Worktree references track the base index's incarnation as well as its generation, so daemon-driven forced rebuilds and remove/re-add cycles cannot silently reuse stale overlays. Legacy references reconcile once without materializing a full base copy. Explicit daemon reindex requests scan pending edits instead of returning early while a live watcher's debounce queue still contains changes.
+- Removing a base index releases its cached worktree readers before deleting stores, preserving unrelated caches and avoiding retained file handles during Windows rebuilds.
+- Direct daemon clients in worktree E2E and million-chunk benchmarks authenticate Windows TCP connections using the daemon endpoint token before sending requests.
+- Local E2E validation uses Cargo's configured target directory, including `CARGO_TARGET_DIR`, instead of looking for an unrelated binary under `./target`. Temporary Rust and Python test repositories no longer inherit commit or tag signing requirements.
 - Linux worker liveness reads the process leader's start time, preventing false dead-worker reports when user-mode emulation returns different start times to different threads. PID-reuse checks remain enabled.
 - Python dependency extraction uses parsed imports, excluding examples in docstrings and strings while preserving relative, multiline, and aliased imports. Objective-C graphs follow quoted local `#import` and `#include` directives without treating strings or comments as dependencies, including C++ raw strings in `.mm` files.
 - Indexing validates primary store structure and SQLite/Tantivy counts before no-op shortcuts, including worktree base stores. Invalid stores trigger complete staged recovery even when no source file changed.
@@ -62,6 +69,10 @@ All notable changes to ivygrep are documented in this file.
 - Index format bumped to v25; existing indexes rebuild once on first use so unchanged files also receive corrected dependency graphs. This is a full index rebuild, with the usual indexing and subsequent vector-enhancement costs.
 
 ### Testing
+
+- Layered worktree E2E compares CLI and direct daemon RPC results with independent full indexes through edits, deletions, empty files, renames, branch switches, base rebuilds, sibling worktrees, restarts, and live watcher updates. Real hash and neural retrieval checks cover inheritance and shadowing; filename-only stale-base assertions now verify source content and thin overlay storage.
+- The million-chunk harness now forces neural queries after `--enhance-neural` and requires execution evidence from both CLI and daemon responses. Enrichment readiness alone no longer qualifies as a neural query measurement.
+- Context deletion acceptance checks the existing platform contract: Unix can hydrate deleted content through a pinned Git working directory; Windows retains deletion metadata and live-file context while refusing unsafe historical-only reads.
 - Public retrieval records the checkout-reference model's 481 fit-query IDs and labels public-core as regression evidence (431 of its unchanged 1,000 queries overlap). Declared fit-disjoint diagnostics check actual repository-qualified IDs against that reference; applicability to the executed model remains unverified. Model weights and acceptance gates are unchanged.
 - Reranker training consumes captured native feature vectors instead of reconstructing grouped search output. Benchmark reuse verifies dataset, binary, harness, configuration, and runtime fingerprints while retaining original execution provenance; legacy or incompatible results require a fresh run.
 - The Web UI "late search results" browser test tells its scripted streams apart by URL and releases the superseded search's results only after navigation completed, instead of racing a 100 ms timer against the runner.
