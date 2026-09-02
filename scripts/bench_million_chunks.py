@@ -240,6 +240,11 @@ def timed(
                         resource_samples += 1
                     except (FileNotFoundError, ProcessLookupError):
                         pass  # The child may exit between individual /proc reads.
+                    except PermissionError:
+                        # Linux can deny /proc/PID/io once the child is exiting.
+                        # A denied read on a live child is still a real failure.
+                        if process.poll() is None:
+                            raise
                     now = time.monotonic()
                     if monitor_path is not None and now - last_disk_sample >= 0.5:
                         peak_disk_bytes = max(peak_disk_bytes, directory_size(monitor_path))
