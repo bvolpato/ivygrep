@@ -53,7 +53,7 @@ class DistributionPackagesTest(unittest.TestCase):
         expected = {
             "candle_embed": ("ivygrep-candle-embed", "=0.1.4-ivygrep.2"),
             "hf-hub": ("ivygrep-hf-hub", "=0.3.2-ivygrep.2"),
-            "usearch": ("ivygrep-usearch", "=2.24.0-ivygrep.1"),
+            "usearch": ("ivygrep-usearch", "=2.24.0-ivygrep.2"),
             "tree-sitter-haskell": (
                 "ivygrep-tree-sitter-haskell",
                 "=0.23.1-ivygrep.1",
