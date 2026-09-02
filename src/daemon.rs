@@ -500,6 +500,7 @@ struct DirStamp {
 
 struct CachedSearchContext {
     signature: SearchContextSignature,
+    base_index_dir: Option<PathBuf>,
     pool: Arc<SearchContextPool>,
 }
 
@@ -2020,6 +2021,7 @@ impl DaemonState {
                     key,
                     CachedSearchContext {
                         signature,
+                        base_index_dir: workspace.base_index_dir.clone(),
                         pool: pool.clone(),
                     },
                 );
@@ -2176,31 +2178,42 @@ impl DaemonState {
     }
 
     fn clear_workspace_contexts(&self, workspace: &Workspace) {
+        let mut affected = HashSet::from([workspace.id.clone()]);
         {
             let mut contexts = self.search_contexts.lock();
             let keys = contexts
                 .iter()
-                .filter(|(key, _)| key.workspace_id == workspace.id)
-                .map(|(key, _)| key.clone())
+                .filter(|(key, cached)| {
+                    key.workspace_id == workspace.id
+                        || cached.base_index_dir.as_ref() == Some(&workspace.index_dir)
+                })
+                .map(|(key, _)| {
+                    affected.insert(key.workspace_id.clone());
+                    key.clone()
+                })
                 .collect::<Vec<_>>();
             for key in keys {
                 contexts.pop(&key);
             }
         }
-        self.neural_statuses.lock().pop(&workspace.id);
-        self.watchers.lock().policies.pop(&workspace.id);
+        for id in &affected {
+            self.neural_statuses.lock().pop(id);
+            self.watchers.lock().policies.pop(id);
+        }
         {
             let mut ready = self.ready_workspaces.lock();
             let keys = ready
                 .iter()
-                .filter(|(key, _)| key.workspace_id == workspace.id)
+                .filter(|(key, _)| affected.contains(&key.workspace_id))
                 .map(|(key, _)| key.clone())
                 .collect::<Vec<_>>();
             for key in keys {
                 ready.pop(&key);
             }
         }
-        self.query_results.lock().remove_workspace(&workspace.id);
+        for id in &affected {
+            self.query_results.lock().remove_workspace(id);
+        }
     }
 
     fn refresh_workspace_watcher(&self, workspace: &Workspace) -> Result<()> {
@@ -3765,7 +3778,6 @@ async fn handle_request_with_cancellation(
         }
         DaemonRequest::Remove { path } => match Workspace::resolve(&path) {
             Ok(workspace) => {
-                let workspace_for_cache = workspace.clone();
                 let remove_state = state.clone();
                 match tokio::task::spawn_blocking(move || {
                     let leases =
@@ -3777,18 +3789,18 @@ async fn handle_request_with_cancellation(
                         metadata.watch_enabled = false;
                         let _ = workspace.write_metadata(&metadata);
                     }
+                    // Cached base/worktree readers must release their handles
+                    // before unlinking stores, particularly on Windows.
+                    remove_state.clear_workspace_contexts(&workspace);
                     remove_workspace_index(&workspace)?;
                     Result::<_, anyhow::Error>::Ok(leases)
                 })
                 .await
                 .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())))
                 {
-                    Ok(_leases) => {
-                        state.clear_workspace_contexts(&workspace_for_cache);
-                        DaemonResponse::Ack {
-                            message: format!("removed workspace index {}", path.display()),
-                        }
-                    }
+                    Ok(_leases) => DaemonResponse::Ack {
+                        message: format!("removed workspace index {}", path.display()),
+                    },
                     Err(err) => DaemonResponse::Error {
                         message: err.to_string(),
                     },
@@ -6315,6 +6327,52 @@ mod tests {
         assert_ne!(
             original, changed,
             "base neural identity changes must invalidate worktree search caches"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn clearing_base_contexts_releases_worktree_readers_but_preserves_unrelated_pools() {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let repositories = tempdir().unwrap();
+        let main = repositories.path().join("main");
+        let linked = repositories.path().join("linked");
+        let unrelated = repositories.path().join("unrelated");
+        std::fs::create_dir(&main).unwrap();
+        std::fs::create_dir(&unrelated).unwrap();
+        git(&main, &["init", "-b", "main"]);
+        std::fs::write(main.join("lib.rs"), "pub fn shared_base_reader() {}\n").unwrap();
+        std::fs::write(unrelated.join("lib.rs"), "pub fn unrelated_reader() {}\n").unwrap();
+        git(&main, &["add", "."]);
+        git(&main, &["commit", "-qm", "base"]);
+        git(
+            &main,
+            &["worktree", "add", "--detach", linked.to_str().unwrap()],
+        );
+        let base = Workspace::resolve(&main).unwrap();
+        let overlay = Workspace::resolve(&linked).unwrap();
+        let other = Workspace::resolve(&unrelated).unwrap();
+        let model = create_hash_model();
+        for workspace in [&base, &overlay, &other] {
+            index_workspace(workspace, model.as_ref()).unwrap();
+        }
+        let state = test_state();
+        let reader = state.cached_search_context(&overlay, None, false).unwrap();
+        let shared_pool = Arc::downgrade(&reader.pool);
+        drop(reader);
+        let reader = state.cached_search_context(&other, None, false).unwrap();
+        let unrelated_pool = Arc::downgrade(&reader.pool);
+        drop(reader);
+        assert!(shared_pool.upgrade().is_some());
+        state.clear_workspace_contexts(&base);
+        assert!(
+            shared_pool.upgrade().is_none(),
+            "worktree readers still retain the base store"
+        );
+        assert!(
+            unrelated_pool.upgrade().is_some(),
+            "unrelated workspace cache was evicted"
         );
     }
 

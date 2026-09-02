@@ -317,7 +317,7 @@ def check_worktree_equivalence(binary: Path, parent: Path, env: dict[str, str]) 
 
         def index_dir(path: Path) -> Path:
             for metadata in (home / "indexes").glob("*/workspace.json"):
-                if Path(json.loads(metadata.read_text())["root"]).resolve() == path.resolve():
+                if Path(json.loads(metadata.read_text())["root"]).samefile(path):
                     return metadata.parent
             raise AssertionError(f"workspace was not indexed: {path}")
 
@@ -325,7 +325,7 @@ def check_worktree_equivalence(binary: Path, parent: Path, env: dict[str, str]) 
             directory = index_dir(path)
             base = index_dir(main)
             reference = json.loads((directory / "base_ref.json").read_text())
-            assert Path(reference["base_index_dir"]).resolve() == base.resolve()
+            assert Path(reference["base_index_dir"]).samefile(base)
             assert reference["base_generation"] == json.loads((base / "workspace.json").read_text())["index_generation"]
             assert reference["base_incarnation"] == (base / "index_incarnation").read_text().strip()
             for full_store in ("metadata.sqlite3", "tantivy", "vectors.usearch"):

@@ -10,6 +10,10 @@ model_profile=""
 expected_file=""
 check_worktree=0
 semantic_query="where is the routine that matches user intent to source after a warm model load"
+python=python3
+if [ "${RUNNER_OS:-}" = "Windows" ]; then
+  python=python
+fi
 
 usage() {
   cat <<'EOF'
@@ -243,7 +247,7 @@ EOF
       deleted) query=base_deleted_generation_marker; expected='' ;;
     esac
     "$ig_bin" --json --force-neural --limit 5 "$query" "$worktree" > "$worktree_json"
-    python3 - "$worktree_json" "$expected" <<'PY'
+    "$python" - "$worktree_json" "$expected" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -258,7 +262,7 @@ assert all("base_shadow_generation_marker" not in hit["preview"] for hit in hits
 PY
   done
   "$ig_bin" --json --force-neural --limit 5 base_shadow_generation_marker "$project" > "$tmp_root/base-search.json"
-  python3 - "$tmp_root/base-search.json" <<'PY'
+  "$python" - "$tmp_root/base-search.json" <<'PY'
 import json
 from pathlib import Path
 import sys
