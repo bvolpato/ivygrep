@@ -79,6 +79,52 @@ fn git_checked(root: &Path, args: &[&str]) {
 
 #[test]
 #[serial]
+fn cli_boolean_error_explains_how_to_search_pasted_code() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    let home = tmp.path().join("home");
+    init_git_repo(&root);
+    std::fs::write(
+        root.join("query.sql"),
+        "SELECT * FROM records WHERE ready = 1 AND active = 1;\n",
+    )
+    .unwrap();
+    let query = "SELECT * FROM records WHERE ready = 1 AND";
+    let search = |query: &str| {
+        let mut command = Command::new(assert_cmd::cargo::cargo_bin!("ig"));
+        command
+            .args(["--json", "--hash", "--no-watch", query])
+            .arg(&root)
+            .env("IVYGREP_HOME", &home)
+            .env("IVYGREP_NO_AUTOSPAWN", "1");
+        command
+    };
+    search(query).assert().failure().stderr(
+        predicates::str::contains("invalid or unsupported Boolean query").and(
+            predicates::str::contains("matching backticks or a fenced code block"),
+        ),
+    );
+    for escaped in [format!("`{query}`"), format!("```sql\n{query}\n```")] {
+        let output = search(&escaped)
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        let groups: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert!(groups.as_array().unwrap().iter().any(|group| {
+            group["file_path"] == "query.sql"
+                && group["hits"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|hit| hit["preview"].as_str().unwrap().contains("AND active"))
+        }));
+    }
+}
+
+#[test]
+#[serial]
 fn cli_force_add_preserves_watch_intent_without_daemon() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("repo");

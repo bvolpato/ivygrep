@@ -495,10 +495,11 @@ fn public_boolean_constraints_reject_unsupported_syntax_without_relaxing() {
     )
     .unwrap();
     for query in ["alpha AND", "(alpha OR beta", "\"alpha beta\" AND gamma"] {
-        assert!(
-            hybrid_search(&workspace, query, None, &SearchOptions::default()).is_err(),
-            "unsupported Boolean input was relaxed: {query}"
-        );
+        let error = hybrid_search(&workspace, query, None, &SearchOptions::default())
+            .expect_err("unsupported Boolean input must not be relaxed");
+        let message = error.to_string();
+        assert!(message.contains("invalid or unsupported Boolean query"));
+        assert!(message.contains("matching backticks or a fenced code block"));
     }
     for query in ["alpha beta", "\"rock AND roll\"", "Token::OR", "AND"] {
         assert!(
