@@ -1951,6 +1951,7 @@ impl AccountManager {
         for args in [
             vec!["config", "user.email", "test@example.com"],
             vec!["config", "user.name", "Test"],
+            vec!["config", "commit.gpgsign", "false"],
             vec!["add", "."],
             vec!["commit", "-qm", "base"],
             vec!["branch", "-M", "main"],

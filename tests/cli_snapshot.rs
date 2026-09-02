@@ -65,6 +65,7 @@ fn init_git_repo(root: &Path) {
 
 fn git_checked(root: &Path, args: &[&str]) {
     let output = std::process::Command::new("git")
+        .args(["-c", "commit.gpgsign=false"])
         .args(args)
         .current_dir(root)
         .output()

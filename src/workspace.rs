@@ -2368,6 +2368,7 @@ mod tests {
             &["init", "-q"][..],
             &["config", "user.email", "test@example.com"][..],
             &["config", "user.name", "Test User"][..],
+            &["config", "commit.gpgsign", "false"][..],
         ] {
             assert!(
                 Command::new("git")
@@ -2448,6 +2449,7 @@ mod tests {
             &["init", "-q"][..],
             &["config", "user.email", "test@example.com"][..],
             &["config", "user.name", "Test User"][..],
+            &["config", "commit.gpgsign", "false"][..],
         ] {
             assert!(
                 Command::new("git")

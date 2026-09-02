@@ -1,5 +1,10 @@
-import unittest
+import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
+import tempfile
+import unittest
 
 
 E2E_WORKFLOW = (
@@ -11,6 +16,39 @@ E2E_WORKFLOW = (
 
 
 class E2EWorkflowTest(unittest.TestCase):
+    def test_local_e2e_uses_cargo_target_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            shutil.copy2(E2E_WORKFLOW.parents[2] / "test.sh", root / "test.sh")
+            (root / "scripts").mkdir()
+            runner = root / "scripts/e2e_all.sh"
+            runner.write_text('#!/bin/sh\nprintf "%s\\n" "$2" > "$E2E_RESULT"\n')
+            runner.chmod(0o755)
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            cargo = bin_dir / "cargo"
+            cargo.write_text(
+                '#!/bin/sh\nif [ "$1" = metadata ]; then cat "$CARGO_METADATA"; fi\n'
+            )
+            cargo.chmod(0o755)
+            target = root / "custom target"
+            metadata = root / "metadata.json"
+            metadata.write_text(json.dumps({"target_directory": str(target)}))
+            result = root / "e2e-result"
+            env = {
+                **os.environ,
+                "PATH": str(bin_dir) + os.pathsep + os.environ["PATH"],
+                "CARGO_METADATA": str(metadata),
+                "E2E_RESULT": str(result),
+            }
+            for profile in ("debug", "release"):
+                with self.subTest(profile=profile):
+                    args = ["bash", "test.sh", "--quick", "--hash-only", "--e2e"]
+                    if profile == "release":
+                        args.append("--release")
+                    subprocess.run(args, cwd=root, env=env, check=True, capture_output=True)
+                    self.assertEqual(result.read_text().strip(), str(target / profile / "ig"))
+
     def test_aarch64_smoke_uses_git_and_python_images(self) -> None:
         workflow = E2E_WORKFLOW.read_text(encoding="utf-8")
         arm = workflow.split("cross-linux-aarch64:", maxsplit=1)[1].split(

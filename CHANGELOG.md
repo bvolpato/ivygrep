@@ -6,6 +6,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Added
 
+- Pull-request CI validates native Linux ARM64 hash-only and neural CPU builds, including offline static-model retrieval and browser acceptance.
 - Opt-in `IVYGREP_RERANKER_CAPTURE=1` emits versioned native pre-learned candidates and features to stderr for diagnostics and training. Records include query text and source previews; normal search output is unchanged.
 
 ### Performance
@@ -24,6 +25,8 @@ All notable changes to ivygrep are documented in this file.
 - MCP no longer blocks a tool call on a whole first index. `ig_search` enqueues the run on the daemon (`StartIndex`), waits at most `IVYGREP_MCP_INDEX_WAIT_SECS` (default 20), and otherwise returns a non-error `status: indexing` payload with progress and `retry_after_secs`; the MCP process never indexes locally while a daemon answers (including after a lost reply), and `ig_status` reports runs still queued on the daemon. Daemon protocol version 7; older daemons restart on the next request.
 
 ### Fixed
+
+- Local E2E validation uses Cargo's configured target directory, including `CARGO_TARGET_DIR`, instead of looking for an unrelated binary under `./target`. Temporary Rust and Python test repositories no longer inherit commit or tag signing requirements.
 - Linux worker liveness reads the process leader's start time, preventing false dead-worker reports when user-mode emulation returns different start times to different threads. PID-reuse checks remain enabled.
 - Python dependency extraction uses parsed imports, excluding examples in docstrings and strings while preserving relative, multiline, and aliased imports. Objective-C graphs follow quoted local `#import` and `#include` directives without treating strings or comments as dependencies, including C++ raw strings in `.mm` files.
 - Indexing validates primary store structure and SQLite/Tantivy counts before no-op shortcuts, including worktree base stores. Invalid stores trigger complete staged recovery even when no source file changed.

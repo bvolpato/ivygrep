@@ -114,6 +114,10 @@ class MemoryBenchmarkProvenanceTest(unittest.TestCase):
             root = Path(temporary)
             subprocess = render_memory_benchmark.subprocess
             subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            for setting in ("commit.gpgsign", "tag.gpgsign"):
+                subprocess.run(
+                    ["git", "config", setting, "false"], cwd=root, check=True
+                )
             (root / "src").mkdir()
             (root / "src" / "lib.rs").write_text("before\n", encoding="utf-8")
             subprocess.run(["git", "add", "."], cwd=root, check=True)
