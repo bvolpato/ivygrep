@@ -34,11 +34,13 @@ for slow leaks; do not increase resource budgets just to turn a failure green.
 
 ## Linux ARM64 acceptance run
 
-The [short-run report](daemon-soak-linux-arm64-short.json) records 79,870 successful
+The [short-run report](daemon-soak-linux-arm64-short.json) records 79,753 successful
 RPC queries, 51 content checks, and two restarts against main `7413229` on
 2026-09-02. All three process epochs passed the unchanged budgets; maximum
-steady-window RSS growth was 14.82 MiB, FD growth was zero or negative, and thread
-growth was at most one. This is short-run acceptance, not long-soak evidence.
+steady-window RSS growth was 7.94 MiB, FD growth was zero or negative, and thread
+growth was zero or negative. This refreshed report uses the exact committed
+harness, including platform and CPU-affinity metadata. This is short-run
+acceptance, not long-soak evidence.
 
 The [30-minute report](daemon-soak-linux-arm64-30m.json) also passed, with eight-core
 affinity and the same budgets. Across 1,800 loaded seconds plus per-process
