@@ -10,6 +10,7 @@ All notable changes to ivygrep are documented in this file.
 - Opt-in `IVYGREP_RERANKER_CAPTURE=1` emits versioned native pre-learned candidates and features to stderr for diagnostics and training. Records include query text and source previews; normal search output is unchanged.
 
 ### Performance
+- ARM64 exact vector scoring uses runtime-selected NEON math and coarser parallel batches. On a Neoverse V2 host, controlled eight-core scoring was 16–42% faster across 500–50,000 eligible vectors; at the default 32 threads, small batches improved by 42% while larger batches were roughly unchanged. See the [Linux validation report](docs/benchmarks/linux-arm64-2026-09-02.md) for trial data and limits.
 - Vector count and availability checks read native headers and stream node levels without allocating native views or key lookup tables, reducing bookkeeping memory. The fast path checks structural bounds, not full payload integrity; deep health checks and USearch serialization are unchanged. Hash enhancement rebuilds dimension-mismatched stores before filling missing keys.
 - Reference and caller searches reuse one search context across bounded candidate-widening passes, avoiding repeated store setup when early matches are rejected. The existing per-request source-matching cache is unchanged.
 - Daemon startup-readiness checks reuse bounded, metadata-stamped watch policies for workspaces without registered watchers, avoiding repeated JSON parsing on warm queries.
@@ -66,6 +67,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Testing
 
+- The million-chunk harness now forces neural queries after `--enhance-neural` and requires execution evidence from both CLI and daemon responses. Enrichment readiness alone no longer qualifies as a neural query measurement.
 - Context deletion acceptance checks the existing platform contract: Unix can hydrate deleted content through a pinned Git working directory; Windows retains deletion metadata and live-file context while refusing unsafe historical-only reads.
 - Public retrieval records the checkout-reference model's 481 fit-query IDs and labels public-core as regression evidence (431 of its unchanged 1,000 queries overlap). Declared fit-disjoint diagnostics check actual repository-qualified IDs against that reference; applicability to the executed model remains unverified. Model weights and acceptance gates are unchanged.
 - Reranker training consumes captured native feature vectors instead of reconstructing grouped search output. Benchmark reuse verifies dataset, binary, harness, configuration, and runtime fingerprints while retaining original execution provenance; legacy or incompatible results require a fresh run.

@@ -319,10 +319,11 @@ def run_query(
     query: str,
     env: dict[str, str],
     extra: list[str] | None = None,
+    force_neural: bool = False,
 ) -> dict:
     command = [
         str(binary),
-        "--hash",
+        "--force-neural" if force_neural else "--hash",
         "--json",
         "-n",
         "20",
@@ -343,17 +344,27 @@ def run_query(
     )
     elapsed_ms = (time.perf_counter() - started) * 1000.0
     output = json.loads(result.stdout)
+    hits = [hit for item in output for hit in item.get("hits", [])]
     return {
         "elapsed_ms": elapsed_ms,
-        "hit_count": sum(len(item.get("hits", [])) for item in output),
+        "hit_count": len(hits),
         "paths": [item["file_path"] for item in output],
+        "neural_executed": neural_execution(hits, force_neural),
     }
 
 
+def neural_execution(hits: list[dict], required: bool) -> bool:
+    executed = any(hit.get("neural_executed") is True for hit in hits)
+    if required and not executed:
+        raise RuntimeError("forced-neural benchmark query did not report neural execution")
+    return executed
+
+
 class DaemonClient:
-    def __init__(self, home: Path, corpus: Path):
+    def __init__(self, home: Path, corpus: Path, force_neural: bool = False):
         self.home = home
         self.corpus = corpus
+        self.force_neural = force_neural
         self.protocol_version = DAEMON_PROTOCOL_VERSION
         self.connection: socket.socket | None = None
         self.reader = None
@@ -436,6 +447,8 @@ class DaemonClient:
                 "scope_is_file": False,
                 "skip_gitignore": False,
             }
+            if self.force_neural:
+                request["force_neural"] = True
             response, elapsed_ms = self._send(request)
             if response.get("type") != "error":
                 break
@@ -453,6 +466,7 @@ class DaemonClient:
             "elapsed_ms": elapsed_ms,
             "hit_count": len(hits),
             "paths": paths,
+            "neural_executed": neural_execution(hits, self.force_neural),
         }
 
 
@@ -461,8 +475,9 @@ def run_daemon_query(
     corpus: Path,
     query: str,
     type_filter: str | None = None,
+    force_neural: bool = False,
 ) -> dict:
-    with DaemonClient(home, corpus) as client:
+    with DaemonClient(home, corpus, force_neural) as client:
         return client.query(query, type_filter)
 
 
@@ -503,6 +518,7 @@ def summarize_queries(records: list[dict]) -> dict:
         "mean_hits": statistics.mean(record["hit_count"] for record in records),
         "expected_recall_at_20": expected_found / len(records),
         "expected_mrr_at_20": statistics.mean(reciprocal_ranks),
+        "neural_queries_executed": sum(record.get("neural_executed", False) for record in records),
     }
 
 
@@ -571,6 +587,7 @@ def profile_query_phases(
     corpus: Path,
     env: dict[str, str],
     cases: list[tuple[str, str]],
+    force_neural: bool = False,
 ) -> dict:
     trace_env = {**env, "RUST_LOG": "ivygrep::search=trace"}
     daemon, log, log_path = start_daemon(
@@ -581,7 +598,7 @@ def profile_query_phases(
         "million-benchmark-trace.log",
     )
     try:
-        with DaemonClient(Path(env["IVYGREP_HOME"]), corpus) as client:
+        with DaemonClient(Path(env["IVYGREP_HOME"]), corpus, force_neural) as client:
             client.query("warmup generated operation")
             for query, _ in cases[: min(20, len(cases))]:
                 client.query(query)
@@ -597,6 +614,7 @@ def query_suite(
     samples: int,
     total_chunks: int,
     chunks_per_file: int,
+    force_neural: bool = False,
 ) -> dict:
     cases = query_cases(samples, total_chunks, chunks_per_file)
 
@@ -618,6 +636,7 @@ def query_suite(
                 corpus,
                 query,
                 {**env, "IVYGREP_NO_AUTOSPAWN": "1"},
+                force_neural=force_neural,
             ),
             "expected_path": expected_path,
         }
@@ -625,14 +644,14 @@ def query_suite(
     ]
     daemon, log, _ = start_daemon(binary, corpus, env, Path(env["IVYGREP_HOME"]))
     try:
-        with DaemonClient(Path(env["IVYGREP_HOME"]), corpus) as client:
+        with DaemonClient(Path(env["IVYGREP_HOME"]), corpus, force_neural) as client:
             client.query("warmup generated operation")
             distinct = [measure(client, case) for case in cases]
             replay = [measure(client, cases[0]) for _ in range(samples)]
             filtered = [measure(client, case, "rust") for case in cases]
         cli_warm = [
             {
-                **run_query(binary, corpus, query, env),
+                **run_query(binary, corpus, query, env, force_neural=force_neural),
                 "expected_path": expected_path,
             }
             for query, expected_path in cases[: min(20, samples)]
@@ -647,6 +666,7 @@ def query_suite(
                     Path(env["IVYGREP_HOME"]),
                     corpus,
                     query,
+                    force_neural=force_neural,
                 ),
                 "expected_path": expected_path,
             }
@@ -671,7 +691,7 @@ def query_suite(
             "wall_ms": concurrent_wall_ms,
             "queries_per_second": len(concurrent) / (concurrent_wall_ms / 1000.0),
         },
-        "phase_timings": profile_query_phases(binary, corpus, env, cases),
+        "phase_timings": profile_query_phases(binary, corpus, env, cases, force_neural),
     }
 
 
@@ -703,7 +723,7 @@ def main() -> int:
     parser.add_argument(
         "--enhance-neural",
         action="store_true",
-        help="measure foreground hash + neural enhancement before running queries",
+        help="measure foreground hash + neural enhancement, then require neural query execution",
     )
     parser.add_argument(
         "--source-commit",
@@ -820,6 +840,7 @@ def main() -> int:
             > 0,
             "neural_ready": bool(workspace.get("has_neural_vectors")),
         },
+        "neural_execution_required": args.enhance_neural,
         "queries": query_suite(
             binary,
             corpus,
@@ -827,6 +848,7 @@ def main() -> int:
             args.query_samples,
             manifest["expected_chunks"],
             manifest["chunks_per_file"],
+            force_neural=args.enhance_neural,
         ),
     }
     args.output.write_text(

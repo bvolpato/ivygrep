@@ -40,7 +40,48 @@ fn select_dot_and_norm_squared() -> DotAndNormSquared {
     if std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma") {
         return dot_and_norm_squared_avx2_dispatch;
     }
+    #[cfg(target_arch = "aarch64")]
+    if std::arch::is_aarch64_feature_detected!("neon") {
+        return dot_and_norm_squared_neon_dispatch;
+    }
     scalar_dot_and_norm_squared
+}
+
+#[cfg(target_arch = "aarch64")]
+fn dot_and_norm_squared_neon_dispatch(left: &[f32], right: &[f32]) -> (f32, f32) {
+    // SAFETY: selector checks NEON; scoring callers allocate the stored-vector
+    // buffer with the query's length, so both slices have equal dimensions.
+    unsafe { dot_and_norm_squared_neon(left, right) }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn dot_and_norm_squared_neon(left: &[f32], right: &[f32]) -> (f32, f32) {
+    use std::arch::aarch64::*;
+
+    let mut dot = vdupq_n_f32(0.0);
+    let mut norm = vdupq_n_f32(0.0);
+    let mut offset = 0;
+    while offset + 4 <= left.len() {
+        // SAFETY: scoring callers pass equal-length slices, and the loop
+        // bounds guarantee four readable values from each slice.
+        let (left_values, right_values) = unsafe {
+            (
+                vld1q_f32(left.as_ptr().add(offset)),
+                vld1q_f32(right.as_ptr().add(offset)),
+            )
+        };
+        dot = vfmaq_f32(dot, left_values, right_values);
+        norm = vfmaq_f32(norm, left_values, left_values);
+        offset += 4;
+    }
+
+    let mut totals = (vaddvq_f32(dot), vaddvq_f32(norm));
+    for offset in offset..left.len() {
+        totals.0 += left[offset] * right[offset];
+        totals.1 += left[offset] * left[offset];
+    }
+    totals
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -485,7 +526,14 @@ impl VectorStore {
 
         let threads = rayon::current_num_threads();
         if keys.len() >= PARALLEL_SCORE_MIN_KEYS && threads > 1 {
-            let chunk_size = keys.len().div_ceil(threads * 4).max(256);
+            // Coarse ARM partitions keep shared key lookups from dominating
+            // the shorter NEON scoring loop.
+            let partitions = if cfg!(target_arch = "aarch64") {
+                threads.min(4)
+            } else {
+                threads * 4
+            };
+            let chunk_size = keys.len().div_ceil(partitions).max(256);
             let local_matches = keys
                 .par_chunks(chunk_size)
                 .flat_map_iter(score_chunk)
@@ -706,6 +754,33 @@ mod tests {
         let actual = select_dot_and_norm_squared()(&left, &right);
         assert!((actual.0 - expected.0).abs() < 1e-4);
         assert!((actual.1 - expected.1).abs() < 1e-4);
+    }
+
+    #[test]
+    fn selected_vector_math_handles_short_and_unaligned_inputs() {
+        let left = (0..770)
+            .map(|index| (index as f32 * 0.03125).sin())
+            .collect::<Vec<_>>();
+        let right = (0..770)
+            .map(|index| (index as f32 * 0.0625).cos())
+            .collect::<Vec<_>>();
+        for start in [0, 1] {
+            for dimensions in [0, 1, 3, 4, 7, 8, 16, 255, 256, 259, 768] {
+                let left = &left[start..start + dimensions];
+                let right = &right[start..start + dimensions];
+                let expected_dot: f64 = left
+                    .iter()
+                    .zip(right)
+                    .map(|(&a, &b)| f64::from(a) * f64::from(b))
+                    .sum();
+                let expected_norm: f64 = left.iter().map(|&a| f64::from(a).powi(2)).sum();
+                let actual = select_dot_and_norm_squared()(left, right);
+                assert!((f64::from(actual.0) - expected_dot).abs() < 1e-4);
+                assert!(
+                    (f64::from(actual.1) - expected_norm).abs() < 1e-6 * expected_norm.max(1.0)
+                );
+            }
+        }
     }
 
     #[test]
