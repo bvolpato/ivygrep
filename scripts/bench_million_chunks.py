@@ -242,8 +242,11 @@ def timed(
                         pass  # The child may exit between individual /proc reads.
                     except PermissionError:
                         # Linux can deny /proc/PID/io once the child is exiting.
-                        # A denied read on a live child is still a real failure.
-                        if process.poll() is None:
+                        # The exit may not be waitable yet. Allow one sampling
+                        # interval for completion, without extending wall_ms.
+                        # Persistent denial on a live child remains a failure.
+                        if (process.poll() is None and not finished.wait(0.05)
+                                and process.poll() is None):
                             raise
                     now = time.monotonic()
                     if monitor_path is not None and now - last_disk_sample >= 0.5:

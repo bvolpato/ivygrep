@@ -127,22 +127,28 @@ class MillionBenchmarkTest(unittest.TestCase):
 
     @unittest.skipUnless(sys.platform == "linux", "Linux resource sampler")
     def test_sampler_failure_is_reported_to_the_caller(self):
-        sampled = threading.Event()
+        monitor_done = threading.Event()
         process = mock.Mock(pid=123)
         process.poll.return_value = None
+        thread = threading.Thread
 
-        def read(*_args, **_kwargs):
-            sampled.set()
-            raise PermissionError("cannot sample child")
+        def monitor(*, target, **kwargs):
+            def run():
+                try:
+                    target()
+                finally:
+                    monitor_done.set()
+            return thread(target=run, **kwargs)
 
         def wait():
-            self.assertTrue(sampled.wait(2), "sampler did not run")
+            self.assertTrue(monitor_done.wait(2), "persistent sampler failure was not detected")
             return 0
 
         process.wait.side_effect = wait
         with (
             mock.patch.object(benchmark.subprocess, "Popen", return_value=process),
-            mock.patch.object(Path, "read_text", side_effect=read),
+            mock.patch.object(benchmark.threading, "Thread", side_effect=monitor),
+            mock.patch.object(Path, "read_text", side_effect=PermissionError("cannot sample live child")),
         ):
             with self.assertRaisesRegex(RuntimeError, "resource sampler failed") as caught:
                 benchmark.timed(["child"], ROOT, {})
@@ -152,7 +158,8 @@ class MillionBenchmarkTest(unittest.TestCase):
     def test_sampler_accepts_permission_race_after_child_exit(self):
         sampled = threading.Event()
         process = mock.Mock(pid=123)
-        process.poll.return_value = 0
+        # The kernel can revoke /proc access before waitpid observes the exit.
+        process.poll.return_value = None
 
         def read(path, *_args, **_kwargs):
             if path.name == "status":
