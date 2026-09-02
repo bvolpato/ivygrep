@@ -2006,6 +2006,15 @@
     "scope": "Earlier main commit; runtime PR removes CPU fallback from its Metal CI acceptance and needs a fresh check.",
     "url": "https://github.com/bvolpato/ivygrep/actions/runs/33632167202/job/100254030340"
   },
+  "qemu_loader_prefix": {
+    "failed_run": "https://github.com/bvolpato/ivygrep/actions/runs/33688865573",
+    "full_cross_musl_rerun": "pending",
+    "local_corrected_workspace_file_tests": 5,
+    "local_negative_control": "Workspace-file read fails with ENOENT under an empty alternate QEMU loader prefix.",
+    "negative_log_sha256": "0e217baf8853ccf939074486eb2f1be899164f0d0268bba65b221f0452442537",
+    "positive_log_sha256": "16cf95f69d7c8c8f246e97f1158a689d6c5a6dfac13a03332954fecf0235ad79",
+    "root_cause": "The loader sysroot remaps open(\"/\") but not descriptor-relative openat calls. Static musl tests must explicitly pass QEMU_LD_PREFIX=/ into the cross container. Product containment checks are unchanged."
+  },
   "release_binary_sha256": "d69a6c4738b6210eac5777d1802ecff78f14e5562fac58a9faeace89e9b85503",
   "rust": "rustc 1.96.0 (ac68faa20 2026-05-25)",
   "schema_version": 1,

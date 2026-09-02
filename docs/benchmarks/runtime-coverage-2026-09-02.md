@@ -91,6 +91,20 @@ builds are substantially larger than the release binary.
 
 ## Remaining hardware scope
 
+The full cross/musl run exposed a QEMU runner configuration error: its default
+loader prefix redirects `open("/")` into the toolchain sysroot, while subsequent
+descriptor-relative `openat()` calls do not receive the same translation. The
+result was 208 cascading test failures, including the safe workspace opener.
+Static musl binaries need no alternate loader root. The workflow now explicitly
+passes `QEMU_LD_PREFIX=/` through cross into its test container; the product's
+containment checks are unchanged.
+
+A local QEMU negative control reproduces the workspace-read failure with an
+empty alternate prefix. The same test binary passes all five workspace-file
+tests with the corrected prefix, including symlink, replacement, and
+execute-only-ancestor checks. The complete cross/musl rerun remains a separate
+remote acceptance check, not inferred from that targeted local pass.
+
 An earlier main CI job executed real Candle Metal successfully; this change
 removes the Metal job's accepted CPU fallback so a fresh green result must
 prove Metal again. The QEMU/musl workflow tests its own current build, not a

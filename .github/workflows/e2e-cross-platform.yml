@@ -194,6 +194,11 @@ jobs:
       # cover its recovery test.
       - name: Run release-profile tests with cross
         if: github.event.inputs.test_scope != 'smoke'
+        env:
+          # Static musl needs no guest loader prefix. cross's default sysroot
+          # remaps open("/") but not relative openat(), breaking anchored
+          # workspace reads. Explicitly pass the real root into the container.
+          CROSS_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_ENV_PASSTHROUGH: "QEMU_LD_PREFIX=/"
         run: cross test --locked --release --lib --bins --tests --target aarch64-unknown-linux-musl -- --skip query_revives_watcher_after_daemon_goes_offline
 
       - name: E2E smoke test (QEMU)
