@@ -1208,7 +1208,7 @@
       "sha256": "decc0e34a6b0f940cf2fbe6e891f37f155800c1e4094513298922f1e912bf031",
       "source_commit": null,
       "summary": {
-        "artifact_acceptance": false,
+        "artifact_acceptance": true,
         "provenance": true,
         "release_archives": 7,
         "release_targets": 6,

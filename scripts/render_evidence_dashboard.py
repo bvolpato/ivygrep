@@ -84,6 +84,26 @@ def mean_metric(summary: dict, mode: str, metric: str) -> float | None:
     return value.get("mean") if value else None
 
 
+def release_waits_for_artifact_acceptance(text: str) -> bool:
+    # Summarize the literal dependency declared by the release job, not a
+    # mention in another job or comment. Workflow validity is checked by CI.
+    release = re.search(
+        r"^  release:[ \t]*\n((?:(?: {4}[^\n]*)?\n)*)", text, re.MULTILINE
+    )
+    if not release:
+        return False
+    needs = re.search(
+        r"^    needs:[ \t]*([^\n]*(?:\n {6,}-[^\n]*)*)",
+        release.group(1), re.MULTILINE,
+    )
+    if not needs:
+        return False
+    dependencies = "\n".join(line.split("#", 1)[0] for line in needs.group(1).splitlines())
+    if "${{" in dependencies:
+        return False  # An expression is not evidence of a literal dependency.
+    return "artifact-acceptance" in re.findall(r"[A-Za-z_][A-Za-z0-9_-]*", dependencies)
+
+
 def summarize(evidence_id: str, path: Path) -> tuple[str | None, dict]:
     if path.suffix not in {".json"}:
         text = path.read_text(encoding="utf-8")
@@ -104,13 +124,15 @@ def summarize(evidence_id: str, path: Path) -> tuple[str | None, dict]:
         )
         required_tokens = (
             "artifact-acceptance:",
-            "needs: artifact-acceptance",
             "scripts/verify_release_artifact.py",
             "scripts/e2e_x86_baseline.sh",
             "scripts/e2e_cached_model.sh",
         )
         return None, {
-            "artifact_acceptance": all(token in text for token in required_tokens),
+            "artifact_acceptance": (
+                release_waits_for_artifact_acceptance(text)
+                and all(token in text for token in required_tokens)
+            ),
             "release_targets": len(targets),
             "release_archives": len(archives),
             "sbom": "anchore/sbom-action@" in text,
