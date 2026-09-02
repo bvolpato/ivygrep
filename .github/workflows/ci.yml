@@ -96,8 +96,7 @@ jobs:
             rust_flags: "-D warnings"
             name: "Linux (Hash-only)"
           - os: ubuntu-24.04-arm
-            # Match the shipped profile; baseline ARM Candle debug assembly needs fullfp16.
-            cargo_flags: "--release"
+            cargo_flags: ""
             rust_flags: "-D warnings"
             name: "Linux ARM64 (Neural CPU)"
           - os: ubuntu-24.04-arm
@@ -220,7 +219,6 @@ jobs:
             rust_flags: "-D warnings"
             name: "macOS ARM (Metal opt-in)"
             validate_backend: "Candle Metal"
-            allow_backend: "Candle CPU (Accelerate)"
             model_profile: "general"
           - os: macos-latest
             cargo_flags: "--no-default-features"

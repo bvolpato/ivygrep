@@ -81,7 +81,6 @@ filter=()
 test_args=()
 extra_args=()
 wants_cuda=0
-hash_only=0
 force_release=0
 run_e2e=0
 
@@ -118,17 +117,6 @@ configure_cuda_compute_cap() {
 configure_build_profile() {
   if ((force_release)); then
     profile_flags=(--release)
-    return
-  fi
-
-  local system machine
-  system="$(uname -s)"
-  machine="$(uname -m)"
-  if [[ "$system" == "Linux" ]] &&
-    [[ "$machine" == "aarch64" || "$machine" == "arm64" ]] &&
-    ((!hash_only)); then
-    profile_flags=(--release)
-    echo "Using release profile for neural tests on Linux ARM64"
   fi
 }
 
@@ -197,7 +185,6 @@ while (($#)); do
       ;;
     --hash-only)
       cargo_flags+=(--no-default-features)
-      hash_only=1
       ;;
     --features)
       [[ $# -ge 2 ]] || { echo "--features needs value" >&2; exit 2; }

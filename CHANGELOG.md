@@ -27,6 +27,9 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 
+- Neural debug builds on baseline ARM64 use a dependency-scoped GEMM optimization workaround without requiring FP16 arithmetic globally. The default local and native ARM CI tests now retain application debug assertions.
+- Linked-worktree watchers reattach when an external Git `info/` directory is replaced at the same pathname; Windows watches its stable common-directory parent. Repeated replacement tests verify both hide and restore operations.
+
 - Worktree references track the base index's incarnation as well as its generation, so daemon-driven forced rebuilds and remove/re-add cycles cannot silently reuse stale overlays. Legacy references reconcile once without materializing a full base copy. Explicit daemon reindex requests scan pending edits instead of returning early while a live watcher's debounce queue still contains changes.
 - Removing a base index releases its cached worktree readers before deleting stores, preserving unrelated caches and avoiding retained file handles during Windows rebuilds.
 - Direct daemon clients in worktree E2E and million-chunk benchmarks authenticate Windows TCP connections using the daemon endpoint token before sending requests.
@@ -70,6 +73,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Testing
 
+- Added default-neural ARM64 source-coverage artifacts and an older-CPU F16 execution regression. QEMU Python worktree E2E now installs Git, and Metal CI no longer accepts CPU fallback as a GPU pass.
 - Layered worktree E2E compares CLI and direct daemon RPC results with independent full indexes through edits, deletions, empty files, renames, branch switches, base rebuilds, sibling worktrees, restarts, and live watcher updates. Real hash and neural retrieval checks cover inheritance and shadowing; filename-only stale-base assertions now verify source content and thin overlay storage.
 - The million-chunk harness now forces neural queries after `--enhance-neural` and requires execution evidence from both CLI and daemon responses. Enrichment readiness alone no longer qualifies as a neural query measurement.
 - Context deletion acceptance checks the existing platform contract: Unix can hydrate deleted content through a pinned Git working directory; Windows retains deletion metadata and live-file context while refusing unsafe historical-only reads.

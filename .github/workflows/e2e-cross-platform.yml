@@ -189,8 +189,7 @@ jobs:
       - name: Build with cross
         run: cross build --locked --release --target aarch64-unknown-linux-musl
 
-      # Match the shipped ARM binary profile; Candle's debug build emits
-      # fullfp16-only assembly for a baseline aarch64 target. Daemon autospawn
+      # Match the shipped ARM binary profile. Daemon autospawn
       # uses current_exe(), which identifies QEMU under emulation; native jobs
       # cover its recovery test.
       - name: Run release-profile tests with cross
@@ -226,6 +225,7 @@ jobs:
             -e IG="/workspace/${BINARY_REL}" \
             python:3.13-alpine sh -c '
               set -eu
+              apk add --no-cache git
               python3 scripts/check_daemon_equivalence.py \
                 --skip-build \
                 --binary "$IG" \

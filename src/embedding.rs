@@ -1190,6 +1190,26 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    #[cfg(feature = "neural")]
+    #[test]
+    fn cpu_f16_matmul_keeps_portable_runtime_dispatch() {
+        use candle_core::{DType, Device, Tensor};
+
+        let left = Tensor::new(&[[1f32, 2.0], [3.0, 4.0]], &Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::F16)
+            .unwrap();
+        let right = Tensor::new(&[[5f32, 6.0], [7.0, 8.0]], &Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::F16)
+            .unwrap();
+        let actual = left.matmul(&right).unwrap().to_dtype(DType::F32).unwrap();
+        assert_eq!(
+            actual.to_vec2::<f32>().unwrap(),
+            [[19.0, 22.0], [43.0, 50.0]]
+        );
+    }
+
     #[test]
     #[serial]
     fn neural_profile_selection_is_explicit_and_stable() {

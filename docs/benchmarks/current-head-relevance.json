@@ -1,6 +1,6 @@
 {
   "binary": {
-    "sha256": "d5b0de460eb5cd64e9a2361297c616886e846bd7684153beb8f179dfda33affb",
+    "sha256": "d69a6c4738b6210eac5777d1802ecff78f14e5562fac58a9faeace89e9b85503",
     "version": "ivygrep 1.2.12"
   },
   "fixture": {
@@ -11,30 +11,31 @@
     "path": "scripts/eval_relevance.py",
     "sha256": "d7cbac47ac8c18c67fa6c0a5ab8393fd3243c9290e80ed3f28662faec348b32d"
   },
-  "ivygrep_commit": "a9cadd927688fdf120ba072959c79c40eb11dbb9",
+  "ivygrep_commit": "7413229df04a0657671aa323da5a8ff0e3682569",
   "modes": {
     "foreground": {
       "audit_stage_counts": {
         "after_filtering": 0,
         "before_fusion": 0,
         "candidate_budget": 0,
-        "first_useful_low": 1,
+        "first_useful_low": 2,
         "no_primary_judgment": 0,
         "not_audited": 0,
-        "satisfied": 22
+        "satisfied": 21
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 23541.138750006212,
+      "elapsed_ms": 3557.7887054532766,
       "filter_misses": [],
       "low_rank_misses": [
-        "vector-store"
+        "vector-store",
+        "daemon-watch"
       ],
       "mean_candidate_recall": 0.9782608695652174,
       "mean_hybrid_deep_recall": 0.9782608695652174,
-      "mean_mrr": 0.9782608695652174,
-      "mean_ndcg10": 0.9400041224591915,
-      "mean_p1": 0.9565217391304348,
+      "mean_mrr": 0.9565217391304348,
+      "mean_ndcg10": 0.9254253818475671,
+      "mean_p1": 0.9130434782608695,
       "mean_p5": 0.21739130434782608,
       "mean_recall5": 0.9565217391304348,
       "mode": "foreground",
@@ -44,30 +45,31 @@
       "no_hit_queries": 0,
       "queries": 23,
       "satisfaction_k": 1,
-      "satisfaction_rate": 0.9565217391304348
+      "satisfaction_rate": 0.9130434782608695
     },
     "hash-enriched": {
       "audit_stage_counts": {
         "after_filtering": 0,
         "before_fusion": 0,
         "candidate_budget": 0,
-        "first_useful_low": 1,
+        "first_useful_low": 2,
         "no_primary_judgment": 0,
         "not_audited": 0,
-        "satisfied": 22
+        "satisfied": 21
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 18617.172958998708,
+      "elapsed_ms": 3744.989873841405,
       "filter_misses": [],
       "low_rank_misses": [
-        "vector-store"
+        "vector-store",
+        "daemon-watch"
       ],
       "mean_candidate_recall": 0.9782608695652174,
       "mean_hybrid_deep_recall": 0.9782608695652174,
-      "mean_mrr": 0.9782608695652174,
-      "mean_ndcg10": 0.9400041224591915,
-      "mean_p1": 0.9565217391304348,
+      "mean_mrr": 0.9565217391304348,
+      "mean_ndcg10": 0.9254253818475671,
+      "mean_p1": 0.9130434782608695,
       "mean_p5": 0.21739130434782608,
       "mean_recall5": 0.9565217391304348,
       "mode": "hash-enriched",
@@ -77,16 +79,47 @@
       "no_hit_queries": 0,
       "queries": 23,
       "satisfaction_k": 1,
-      "satisfaction_rate": 0.9565217391304348
+      "satisfaction_rate": 0.9130434782608695
+    },
+    "neural": {
+      "audit_stage_counts": {
+        "after_filtering": 0,
+        "before_fusion": 0,
+        "candidate_budget": 0,
+        "first_useful_low": 0,
+        "no_primary_judgment": 0,
+        "not_audited": 2,
+        "satisfied": 21
+      },
+      "candidate_budget_misses": [],
+      "candidate_recall_misses": [],
+      "elapsed_ms": 3035.7354702427983,
+      "filter_misses": [],
+      "low_rank_misses": [],
+      "mean_candidate_recall": 0.9782608695652174,
+      "mean_hybrid_deep_recall": 0.0,
+      "mean_mrr": 0.9565217391304348,
+      "mean_ndcg10": 0.9264742010190498,
+      "mean_p1": 0.9130434782608695,
+      "mean_p5": 0.22608695652173913,
+      "mean_recall5": 0.9782608695652174,
+      "mode": "neural",
+      "neural_queries_executed": 23,
+      "neural_queries_unobservable": 0,
+      "neural_queries_with_results": 16,
+      "no_hit_queries": 0,
+      "queries": 23,
+      "satisfaction_k": 1,
+      "satisfaction_rate": 0.9130434782608695
     }
   },
   "runtime": {
-    "machine": "arm64",
-    "release": "25.4.0",
-    "system": "Darwin"
+    "machine": "aarch64",
+    "release": "6.8.0-1057-aws",
+    "system": "Linux"
   },
   "schema_version": 1,
-  "scope": "Labeled self-repository retrieval screen with source-level candidate recall auditing. This is not a public-code, million-chunk, neural, or agent-task benchmark.",
+  "scope": "Labeled self-repository retrieval screen with source-level candidate recall auditing and verified neural execution. This is not a public-code, million-chunk, or agent-task benchmark.",
   "source": {
     "inputs": [
       ".cargo",
@@ -99,6 +132,6 @@
       "src",
       "vendor"
     ],
-    "sha256": "c0549b4d151f7429f34e95db9a0275378b5f52c8bd721af2ce5350cf00a5cbc1"
+    "sha256": "3c08b34304be1844356dd79913b01281c0e69a6845bdfdb622b9bfd2af9b597e"
   }
 }
