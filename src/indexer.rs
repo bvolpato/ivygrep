@@ -503,7 +503,13 @@ fn index_workspace_with_options(
     let index_health = workspace.quick_index_health();
     let mut reset_worktree_overlay =
         reset_worktree_overlay || (workspace.is_worktree() && index_health.needs_rebuild());
-    if index_health.needs_rebuild() && (!workspace.is_worktree() || preserved_metadata.is_none()) {
+    if index_health.needs_rebuild()
+        && (!workspace.is_worktree()
+            || preserved_metadata.is_none()
+            || workspace.index_layout_changed())
+    {
+        // A reused path may now require the opposite store layout. Clear its
+        // obsolete stores and base reference under the existing index lock.
         rebuild_index_storage(workspace, preserved_metadata.as_ref())?;
     }
     // The index lock serializes creation. A new incarnation survives ordinary

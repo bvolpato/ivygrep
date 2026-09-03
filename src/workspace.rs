@@ -501,6 +501,17 @@ impl Workspace {
         self.is_worktree() && self.overlay_sqlite_path().exists()
     }
 
+    /// A directory can be replaced without changing its path-derived index ID.
+    /// Its saved stores must still match the freshly resolved checkout role.
+    pub(crate) fn index_layout_changed(&self) -> bool {
+        let saved_overlay = self.overlay_sqlite_path().exists() || self.base_ref_path().exists();
+        if self.is_worktree() {
+            !saved_overlay && self.sqlite_path().exists()
+        } else {
+            saved_overlay
+        }
+    }
+
     /// Path to the base reference JSON file recording which base we seeded from.
     pub fn base_ref_path(&self) -> PathBuf {
         self.index_dir.join("base_ref.json")
@@ -1060,6 +1071,10 @@ impl Workspace {
 
         if metadata.is_none() {
             issues.push("missing workspace metadata".to_string());
+        }
+
+        if self.index_layout_changed() {
+            issues.push("workspace checkout role changed; rebuild required".to_string());
         }
 
         if self.is_worktree() && self.indexing_incomplete_path().exists() {

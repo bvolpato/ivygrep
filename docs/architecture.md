@@ -107,6 +107,12 @@ Git worktrees share a repository identifier. A secondary worktree records the
 main worktree's index directory as its base and stores only divergent state in
 its own index directory.
 
+Because index IDs follow canonical paths, replacing a directory can change its
+checkout role while retaining its saved index. Health checks reject a saved
+main/overlay layout that disagrees with the resolved role. Indexing clears that
+obsolete layout under the index lock, preserves workspace settings, and rebuilds
+the appropriate stores before local queries use them.
+
 ## Index lifecycle
 
 ### Initial indexing
