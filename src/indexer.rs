@@ -5037,8 +5037,8 @@ mod tests {
             (
                 "entry.py",
                 "import widget\ndef run(): return widget.work()\n",
-                "widget/__init__.py",
                 "widget.py",
+                "widget/__init__.py",
             ),
             (
                 "entry.ts",
@@ -5108,6 +5108,15 @@ mod tests {
             assert_target(fallback);
             fs::write(root.path().join(preferred), "// preferred target again\n").unwrap();
             index_workspace(&workspace, &model).unwrap();
+            assert_target(preferred);
+            fs::remove_file(root.path().join(fallback)).unwrap();
+            index_workspace(&workspace, &model).unwrap();
+            assert_target(preferred);
+            fs::write(root.path().join(fallback), "// fallback reintroduced\n").unwrap();
+            assert_eq!(
+                index_workspace(&workspace, &model).unwrap().indexed_files,
+                1
+            );
             assert_target(preferred);
             assert_eq!(
                 index_workspace(&workspace, &model).unwrap().indexed_files,

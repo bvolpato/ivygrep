@@ -1461,14 +1461,19 @@ fn resolve_local_dependency(
 
     let source_extension = source_path.extension().and_then(|value| value.to_str());
     let mut suffixes = vec![PathBuf::new()];
+    // Python searches a regular package before a same-named module in each
+    // source root. A directory without __init__.py still falls through.
+    if language == "python" {
+        suffixes.extend(module_index_names(language).iter().map(PathBuf::from));
+    }
     for extension in source_extension
         .into_iter()
         .chain(common_extensions(language).iter().copied())
     {
         suffixes.push(PathBuf::from(format!(".{extension}")));
     }
-    for index_name in module_index_names(language) {
-        suffixes.push(PathBuf::from(index_name));
+    if language != "python" {
+        suffixes.extend(module_index_names(language).iter().map(PathBuf::from));
     }
 
     let mut tried = HashSet::new();
@@ -3816,6 +3821,33 @@ mod tests {
             edge.kind == FileEdgeKind::Dependency
                 && edge.target_path == Path::new("lib/MyApp/Auth.ex")
         }));
+    }
+
+    #[test]
+    fn python_package_initializers_take_precedence_over_modules() {
+        let root = tempfile::tempdir().unwrap();
+        for module in ["widget", "app/widget"] {
+            fs::create_dir_all(root.path().join(module)).unwrap();
+            fs::write(root.path().join(format!("{module}.py")), "value = 1\n").unwrap();
+            fs::write(root.path().join(format!("{module}.pyi")), "value: int\n").unwrap();
+            let spec = module.replace('/', ".");
+            // A namespace directory alone does not displace a module. Keep
+            // existing source/stub preference for the importer's extension.
+            for (source, extension) in [("entry.py", "py"), ("entry.pyi", "pyi")] {
+                assert_eq!(
+                    resolve_dependency_spec(root.path(), None, Path::new(source), "python", &spec),
+                    Some(PathBuf::from(format!("{module}.{extension}")))
+                );
+            }
+            let initializer = format!("{module}/__init__.py");
+            fs::write(root.path().join(&initializer), "value = 2\n").unwrap();
+            for source in ["entry.py", "entry.pyi"] {
+                assert_eq!(
+                    resolve_dependency_spec(root.path(), None, Path::new(source), "python", &spec),
+                    Some(PathBuf::from(&initializer))
+                );
+            }
+        }
     }
 
     #[test]
