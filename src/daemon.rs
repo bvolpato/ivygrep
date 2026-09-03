@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -13,6 +13,7 @@ use anyhow::Result;
 use lru::LruCache;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::{Condvar, Mutex};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Notify;
 use tracing::{error, info, warn};
@@ -307,6 +308,13 @@ enum WatchChange {
 struct PendingWatchWork {
     change: WatchChange,
     backend_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum ExternalGitExcludeState {
+    Missing,
+    Readable([u8; 32]),
+    Unreadable,
 }
 
 #[derive(Clone)]
@@ -4048,6 +4056,37 @@ fn external_git_watch_target(common_dir: &Path) -> Option<PathBuf> {
     }
 }
 
+fn registered_external_git_exclude_path(
+    state: &DaemonState,
+    workspace: &Workspace,
+) -> Option<PathBuf> {
+    state
+        .watchers
+        .lock()
+        .get(&workspace.id)
+        .and_then(|registration| registration.external_git_common_dir.as_ref())
+        .map(|common_dir| common_dir.join("info/exclude"))
+}
+
+fn external_git_exclude_state(path: &Path) -> ExternalGitExcludeState {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ExternalGitExcludeState::Missing;
+        }
+        Err(_) => return ExternalGitExcludeState::Unreadable,
+    };
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => return ExternalGitExcludeState::Readable(digest.finalize().into()),
+            Ok(read) => digest.update(&buffer[..read]),
+            Err(_) => return ExternalGitExcludeState::Unreadable,
+        }
+    }
+}
+
 fn external_git_watch_mode() -> RecursiveMode {
     if cfg!(windows) {
         RecursiveMode::Recursive
@@ -4367,14 +4406,20 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                 update_watcher_job(&control, update);
 
                 let workspace = control.workspace.clone();
-                let watch_reconciliation =
-                    if matches!(&pending_work.change, WatchChange::FullReconciliation)
-                        || control.initial_scan_required.load(Ordering::Relaxed)
-                    {
-                        reconcile_external_git_watch(&state, &workspace)
-                    } else {
-                        Ok(())
-                    };
+                let full_reconciliation =
+                    matches!(&pending_work.change, WatchChange::FullReconciliation)
+                        || control.initial_scan_required.load(Ordering::Relaxed);
+                let external_git_exclude_path = full_reconciliation
+                    .then(|| registered_external_git_exclude_path(&state, &workspace))
+                    .flatten();
+                let external_git_exclude_before = external_git_exclude_path
+                    .as_deref()
+                    .map(external_git_exclude_state);
+                let watch_reconciliation = if full_reconciliation {
+                    reconcile_external_git_watch(&state, &workspace)
+                } else {
+                    Ok(())
+                };
                 let startup_only = matches!(&pending_work.change, WatchChange::None);
                 let changed_paths = match pending_work.change {
                     WatchChange::Paths(paths) => paths.into_iter().collect(),
@@ -4453,6 +4498,16 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
 
                 match result {
                     Ok(changed) => {
+                        if external_git_exclude_path.as_deref().is_some_and(|path| {
+                            external_git_exclude_before.as_ref()
+                                != Some(&external_git_exclude_state(path))
+                        }) {
+                            daemon_log(&format!(
+                                "external Git exclude changed during reconciliation for {}; scheduling follow-up",
+                                control.workspace.root.display()
+                            ));
+                            control.mark_full_reconciliation(None);
+                        }
                         consecutive_failures = 0;
                         if changed {
                             state.clear_workspace_contexts(&control.workspace);
@@ -10294,6 +10349,28 @@ mod tests {
             );
         }
         stop_all_watchers(&state);
+    }
+
+    #[test]
+    fn external_git_exclude_state_tracks_missing_and_same_size_replacements() {
+        let directory = tempdir().unwrap();
+        let exclude = directory.path().join("exclude");
+        assert_eq!(
+            external_git_exclude_state(&exclude),
+            ExternalGitExcludeState::Missing
+        );
+
+        std::fs::write(&exclude, "first\n").unwrap();
+        let first = external_git_exclude_state(&exclude);
+        std::fs::write(&exclude, "other\n").unwrap();
+        let other = external_git_exclude_state(&exclude);
+        assert_ne!(first, other);
+
+        std::fs::remove_file(&exclude).unwrap();
+        assert_eq!(
+            external_git_exclude_state(&exclude),
+            ExternalGitExcludeState::Missing
+        );
     }
 
     #[test]
