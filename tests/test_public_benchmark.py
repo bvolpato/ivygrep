@@ -501,6 +501,38 @@ class PublicBenchmarkTest(unittest.TestCase):
         self.assertIn("unverified", renderer.query_evidence_label(matrix))
         self.assertIn("executed", renderer.query_evidence_note(matrix).lower())
 
+    def test_fit_disjoint_attestation_requires_every_runtime_model_checksum(self):
+        audit = {
+            "schema_version": 2, "queries": 2, "overlap_queries": 0,
+            "reference": {"verified": True, "model_id": "fixture", "model_sha256": "a" * 64},
+        }
+        result = {
+            "binary": {"sha256": "b" * 64},
+            "index_configuration": {"reranker_mode": "learned", "reranker_model": "fixture",
+                                    "reranker_model_sha256": "a" * 64},
+        }
+        verified = contracts.attest_executed_fit_model(copy.deepcopy(audit), [result, result], "b" * 64)
+        self.assertTrue(contracts.verified_fit_disjoint(verified))
+        matrix = {"profile": "reranker-eval", "fit_query_audit": verified}
+        self.assertEqual(renderer.query_evidence_label(matrix), "verified fit-disjoint diagnostic queries")
+        self.assertIn("development-time exposure", renderer.query_evidence_note(matrix))
+        for key, value in (("reranker_model_sha256", None), ("reranker_model_sha256", "c" * 64),
+                           ("reranker_model", "different"), ("reranker_mode", "deterministic")):
+            bad = copy.deepcopy(result)
+            bad["index_configuration"][key] = value
+            observed = contracts.attest_executed_fit_model(copy.deepcopy(audit), [result, bad], "b" * 64)
+            self.assertFalse(contracts.verified_fit_disjoint(observed), (key, value))
+        wrong_binary = copy.deepcopy(result)
+        wrong_binary["binary"]["sha256"] = "c" * 64
+        for results in ([], [wrong_binary]):
+            observed = contracts.attest_executed_fit_model(copy.deepcopy(audit), results, "b" * 64)
+            self.assertFalse(contracts.verified_fit_disjoint(observed))
+        verified["overlap_queries"] = 1
+        self.assertFalse(contracts.verified_fit_disjoint(verified))
+        verified["overlap_queries"] = 0
+        verified["executed_binary"] = {"applicability": "verified"}
+        self.assertFalse(contracts.verified_fit_disjoint(verified))
+
     def test_disjoint_claim_requires_a_model_bound_ledger(self):
         manifest = {
             "profiles": {"diagnostic": {"query_role": "fit-disjoint-diagnostic"}}
