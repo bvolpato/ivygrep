@@ -83,7 +83,7 @@ pub(crate) fn parse_symbol_query(raw: &str) -> SymbolQuery<'_> {
             owner: None,
         };
     };
-    let name = &candidate[index + width..];
+    let name = canonical_symbol(&candidate[index + width..]);
     let owner = candidate[..index]
         .rsplit([':', '.', '#', '-', '>'])
         .find(|part| !part.is_empty());
@@ -100,9 +100,7 @@ pub(crate) fn parse_symbol_query(raw: &str) -> SymbolQuery<'_> {
 }
 
 fn is_symbol_identifier(value: &str) -> bool {
-    value
-        .chars()
-        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '$'))
+    value.chars().all(is_identifier_character)
 }
 
 fn owner_tier(requested: Option<&str>, stored: Option<&str>) -> u8 {
@@ -899,7 +897,7 @@ fn matching_symbol_lines(
 }
 
 fn is_identifier_character(character: char) -> bool {
-    character.is_alphanumeric() || matches!(character, '_' | '$')
+    unicode_ident::is_xid_continue(character) || matches!(character, '$' | '\u{200c}' | '\u{200d}')
 }
 
 fn qualifier_matches(
@@ -1880,8 +1878,7 @@ fn exported_names_from_clause(clause: &str) -> Vec<String> {
                 .rsplit("::")
                 .next()?
                 .trim();
-            let name = public_name
-                .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '$');
+            let name = public_name.trim_matches(|ch| !is_identifier_character(ch));
             (!name.is_empty()).then(|| name.to_string())
         })
         .collect()
@@ -1942,10 +1939,7 @@ fn definition_name_from_signature(
 fn identifier_prefix(value: &str) -> &str {
     let end = value
         .char_indices()
-        .find_map(|(index, character)| {
-            (!character.is_ascii_alphanumeric() && character != '_' && character != '$')
-                .then_some(index)
-        })
+        .find_map(|(index, character)| (!is_identifier_character(character)).then_some(index))
         .unwrap_or(value.len());
     &value[..end]
 }
@@ -1955,9 +1949,11 @@ fn normalize_symbol(value: &str) -> String {
 }
 
 fn canonical_symbol(value: &str) -> &str {
+    // Keep Unicode letters, combining marks, and JavaScript joiners intact.
+    // Leading/trailing dollar sigils retain their established bare-name alias.
     value
         .trim()
-        .trim_matches(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .trim_matches(|character| character == '$' || !is_identifier_character(character))
 }
 
 fn file_stem_matches_symbol(chunk: &IndexedChunk, name: &str) -> bool {
@@ -2765,6 +2761,166 @@ void phantomCpp() {}
         assert_eq!(callers[0].start_line, 2);
         assert!(callers[0].preview.contains("fn run()"));
         assert!(callers[0].preview.contains("parse();"));
+    }
+
+    #[test]
+    #[serial]
+    fn unicode_symbol_queries_preserve_identifiers_and_exclude_non_code() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let names = [
+            "处理",
+            "café",
+            "cafè",
+            "caf",
+            "éclair",
+            "e\u{301}clair",
+            "cafe\u{301}",
+            "Δrun",
+            "a·b",
+        ];
+        for (index, name) in names.iter().enumerate() {
+            std::fs::write(
+                root.path().join(format!("case_{index}.py")),
+                format!("def {name}():\n    return 1\n\ndef caller_{index}():\n    return {name}()\n# {name}()\nexample = \"{name}()\"\ndef {name}_other():\n    return 2\n"),
+            ).unwrap();
+        }
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        crate::indexer::index_workspace(&workspace, &model).unwrap();
+        for (index, name) in names.iter().enumerate() {
+            for (mode, expected_line) in [
+                (SymbolSearchMode::Definitions, 1),
+                (SymbolSearchMode::References, 5),
+                (SymbolSearchMode::Callers, 4),
+            ] {
+                let hits = search_symbols(&workspace, name, mode, None, None).unwrap();
+                assert_eq!(hits.len(), 1, "{name} {mode:?}: {hits:?}");
+                assert_eq!(
+                    hits[0].file_path,
+                    PathBuf::from(format!("case_{index}.py")),
+                    "{name} {mode:?}"
+                );
+                assert_eq!(hits[0].start_line, expected_line, "{name} {mode:?}");
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn unicode_qualified_symbol_queries_preserve_owner_and_method() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        for (file, owner) in [("wanted.py", "处理器"), ("other.py", "别的类")] {
+            std::fs::write(root.path().join(file), format!("class {owner}:\n    def 执行(self):\n        return 1\n\ndef caller():\n    return {owner}.执行(None)\n")).unwrap();
+        }
+        std::fs::write(
+            root.path().join("qualified.js"),
+            "class Owner { static $执行$() {} }\nfunction caller() { Owner.$执行$(); }\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        crate::indexer::index_workspace(&workspace, &model).unwrap();
+        for mode in [
+            SymbolSearchMode::Definitions,
+            SymbolSearchMode::References,
+            SymbolSearchMode::Callers,
+        ] {
+            let hits = search_symbols(&workspace, "处理器.执行", mode, None, None).unwrap();
+            assert_eq!(hits.len(), 1, "{mode:?}: {hits:?}");
+            assert_eq!(hits[0].file_path, PathBuf::from("wanted.py"), "{mode:?}");
+            let hits = search_symbols(&workspace, "Owner.$执行$", mode, None, None).unwrap();
+            assert_eq!(hits.len(), 1, "{mode:?}: {hits:?}");
+            assert_eq!(hits[0].file_path, PathBuf::from("qualified.js"), "{mode:?}");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn unicode_javascript_symbols_keep_sigils_joiners_and_boundaries() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let names = ["$处理$", "$Ascii$", "处\u{200c}理", "处\u{200d}理"];
+        for (index, name) in names.iter().enumerate() {
+            std::fs::write(root.path().join(format!("case_{index}.js")), format!("function {name}() {{}}\nfunction caller_{index}() {{ {name}(); }}\nconst example = \"{name}()\";\n// {name}()\nfunction other_{index}() {{ {name}Extra(); }}\n")).unwrap();
+        }
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        crate::indexer::index_workspace(&workspace, &model).unwrap();
+        for (index, queries) in [
+            ["$处理$", "处理"],
+            ["$Ascii$", "Ascii"],
+            ["处\u{200c}理", "处\u{200c}理"],
+            ["处\u{200d}理", "处\u{200d}理"],
+        ]
+        .iter()
+        .enumerate()
+        {
+            for query in queries {
+                for (mode, expected_line) in [
+                    (SymbolSearchMode::Definitions, 1),
+                    (SymbolSearchMode::References, 2),
+                    (SymbolSearchMode::Callers, 2),
+                ] {
+                    let hits = search_symbols(&workspace, query, mode, None, None).unwrap();
+                    assert_eq!(hits.len(), 1, "{query} {mode:?}: {hits:?}");
+                    assert_eq!(
+                        hits[0].file_path,
+                        PathBuf::from(format!("case_{index}.js")),
+                        "{query} {mode:?}"
+                    );
+                    assert_eq!(hits[0].start_line, expected_line, "{query} {mode:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn unicode_symbol_format_migration_rebuilds_unchanged_definitions() {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        std::fs::write(
+            root.path().join("example.py"),
+            "def 处理():\n    return 1\n",
+        )
+        .unwrap();
+        let workspace = Workspace::resolve(root.path()).unwrap();
+        let model = crate::embedding::HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        crate::indexer::index_workspace(&workspace, &model).unwrap();
+        let snapshot = std::fs::read(workspace.merkle_snapshot_path()).unwrap();
+        {
+            let conn = crate::indexer::open_sqlite(&workspace.sqlite_path()).unwrap();
+            // Version 26 stored a completely non-ASCII name as an empty key.
+            conn.execute("UPDATE symbols SET normalized_name = ?1, name = NULL", [""])
+                .unwrap();
+        }
+        std::fs::write(workspace.index_format_version_path(), "26").unwrap();
+        let summary = crate::indexer::index_workspace(&workspace, &model).unwrap();
+        assert_eq!(summary.indexed_files, 1);
+        assert_eq!(
+            std::fs::read(workspace.merkle_snapshot_path()).unwrap(),
+            snapshot
+        );
+        assert_eq!(
+            workspace.read_index_format_version(),
+            crate::workspace::INDEX_FORMAT_VERSION
+        );
+        let hits = search_symbols(
+            &workspace,
+            "处理",
+            SymbolSearchMode::Definitions,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].start_line, 1);
     }
 
     #[test]

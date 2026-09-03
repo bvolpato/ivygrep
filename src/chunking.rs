@@ -1862,9 +1862,10 @@ fn is_identifier_token(token: &str) -> bool {
     let mut characters = token.chars();
     characters
         .next()
-        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_' || first == '$')
+        .is_some_and(|first| unicode_ident::is_xid_start(first) || matches!(first, '_' | '$'))
         && characters.all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '_' | '$' | '\'' | '?' | '!')
+            unicode_ident::is_xid_continue(character)
+                || matches!(character, '$' | '\u{200c}' | '\u{200d}' | '\'' | '?' | '!')
         })
 }
 

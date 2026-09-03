@@ -1011,6 +1011,29 @@ fn collect_literal_candidates(
         literal_queries_need_specificity_ranking(&candidate_queries),
     )?;
 
+    // The lexical analyzer drops non-ASCII letters and long tokens. Exact
+    // symbol relationships must still verify those names against indexed
+    // chunks, respecting the same eligibility and candidate ceilings.
+    if literal_candidate_terms(query).is_empty() {
+        let candidates = collect_literal_candidate_chunks(
+            ctx,
+            &candidate_queries,
+            path_matcher,
+            glob_path_filter,
+            options,
+            candidate_limit,
+            false,
+            None,
+            true,
+        )?;
+        return Ok(verify_literal_batch(
+            candidates,
+            &candidate_queries,
+            &matcher,
+            target_hits,
+        ));
+    }
+
     collect_literal_candidates_for_queries(
         ctx,
         &candidate_queries,
@@ -1047,6 +1070,7 @@ fn collect_literal_candidates_for_queries(
                 candidate_limit,
                 false,
                 allowed_keys,
+                false,
             )?;
             let verified =
                 verify_literal_batch(candidates, candidate_queries, matcher, target_hits);
@@ -1072,6 +1096,7 @@ fn collect_literal_candidates_for_queries(
         candidate_limit,
         false,
         allowed_keys,
+        false,
     )?;
     let verified = verify_literal_batch(candidates, candidate_queries, matcher, target_hits);
     if !verified.chunks.is_empty() || !literal_queries_have_relaxed_variant(candidate_queries) {
@@ -1087,6 +1112,7 @@ fn collect_literal_candidates_for_queries(
         candidate_limit,
         true,
         allowed_keys,
+        false,
     )?;
     Ok(verify_literal_batch(
         candidates,
@@ -1106,6 +1132,7 @@ fn collect_literal_candidate_chunks(
     candidate_limit: usize,
     relaxed: bool,
     allowed_keys: Option<&Arc<HashSet<u64>>>,
+    tokenless_fallback: bool,
 ) -> Result<LiteralChunkBatch> {
     let mut found_ids = HashSet::<u64>::new();
     let mut exhausted = true;
@@ -1113,6 +1140,9 @@ fn collect_literal_candidate_chunks(
     let mut candidates: Vec<IndexedChunk> = Vec::new();
     'outer: for lexical_query in candidate_queries {
         let Some(parsed_query) = literal_candidate_query(&ctx.fields, lexical_query, relaxed)
+            .or_else(|| {
+                tokenless_fallback.then(|| Box::new(tantivy::query::AllQuery) as Box<dyn Query>)
+            })
         else {
             continue;
         };

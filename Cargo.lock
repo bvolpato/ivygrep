@@ -2661,6 +2661,7 @@ dependencies = [
  "tree-sitter-typescript",
  "tree-sitter-zig",
  "tui-input",
+ "unicode-ident",
  "uuid",
  "windows-sys 0.61.2",
  "xxhash-rust",

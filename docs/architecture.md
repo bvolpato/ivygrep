@@ -316,6 +316,11 @@ receive corrected structural chunks and parser-derived symbol names/owners.
 This uses the normal full-index rebuild path, including vector regeneration;
 there is no parser-specific partial migration.
 
+Format v27 rebuilds previously truncated Unicode symbol keys, including unchanged
+files. Symbol normalization preserves Unicode identifier characters, combining
+marks, and JavaScript joiners; case-insensitive lookup still folds ASCII only.
+Leading and trailing dollar sigils retain their existing bare-name aliases.
+
 Reference searches use indexed identifier candidates, then verify source syntax.
 `--refs` includes non-call uses such as callbacks and function values; `--callers`
 returns chunks containing calls. Whitespace, newlines, and generic arguments do
