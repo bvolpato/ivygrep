@@ -907,16 +907,13 @@ fn index_workspace_inner(
             {
                 let _ = index_workspace_for_watcher(&base_ws, embedding_model)?;
             }
-            let base_generation = base_ws
-                .read_metadata()?
-                .map(|m| m.index_generation)
-                .unwrap_or(0);
+            let (base_generation, base_incarnation, indexed_base) =
+                capture_base_overlay_state(&base_ws)?;
             let base_ref = serde_json::json!({
                 "base_index_dir": base_dir.to_string_lossy(),
                 "base_workspace_root": main_root.to_string_lossy(),
                 "base_generation": base_generation,
-                "base_incarnation": base_ws.read_index_incarnation()?
-                    .context("base index has no incarnation after indexing")?,
+                "base_incarnation": base_incarnation,
                 "created_at_unix": SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
@@ -926,7 +923,6 @@ fn index_workspace_inner(
                 workspace.indexing_progress_path(),
                 "scanning (content-based)",
             );
-            let indexed_base = MerkleSnapshot::load(&base_merkle)?;
             let old = MerkleSnapshot::build_content_based(&main_root, skip_gitignore)?;
             // Capture metadata before content. Recording metadata from a later
             // edit could make that edit look indexed even when the earlier
@@ -1645,6 +1641,35 @@ fn initial_overlay_diff(
         added_or_modified,
         deleted,
     }
+}
+
+fn capture_base_overlay_state(workspace: &Workspace) -> Result<(u64, String, MerkleSnapshot)> {
+    let lock_path = workspace.lock_path();
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open base index lock {}", lock_path.display()))?;
+    fs2::FileExt::lock_exclusive(&lock_file)
+        .with_context(|| format!("failed to acquire base index lock {}", lock_path.display()))?;
+
+    let state: Result<(u64, String, MerkleSnapshot)> = (|| {
+        let generation = workspace
+            .read_metadata()?
+            .map(|metadata| metadata.index_generation)
+            .unwrap_or(0);
+        let incarnation = workspace
+            .read_index_incarnation()?
+            .context("base index has no incarnation after indexing")?;
+        let snapshot = MerkleSnapshot::load(&workspace.merkle_snapshot_path())?;
+        Ok((generation, incarnation, snapshot))
+    })();
+    let unlock_result = fs2::FileExt::unlock(&lock_file)
+        .with_context(|| format!("failed to release base index lock {}", lock_path.display()));
+    let state = state?;
+    unlock_result?;
+    Ok(state)
 }
 
 fn validate_overlay_snapshot(

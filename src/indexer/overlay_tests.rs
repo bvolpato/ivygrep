@@ -417,6 +417,82 @@ fn initial_overlay_diff_does_not_inherit_changed_base_metadata() {
 }
 
 #[test]
+#[serial]
+fn base_overlay_state_waits_for_coherent_publication() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let root = tempdir().unwrap();
+    fs::write(root.path().join("before.rs"), "pub fn before() {}\n").unwrap();
+    let workspace = Workspace::resolve(root.path()).unwrap();
+    workspace.ensure_dirs().unwrap();
+    workspace
+        .write_metadata(&WorkspaceMetadata {
+            id: workspace.id.clone(),
+            root: workspace.root.clone(),
+            created_at_unix: 1,
+            last_indexed_at_unix: Some(1),
+            watch_enabled: false,
+            skip_gitignore: false,
+            index_generation: 1,
+        })
+        .unwrap();
+    fs::write(workspace.index_incarnation_path(), "before").unwrap();
+    MerkleSnapshot::build(root.path(), false)
+        .unwrap()
+        .save(&workspace.merkle_snapshot_path())
+        .unwrap();
+
+    let publication_lock = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(workspace.lock_path())
+        .unwrap();
+    fs2::FileExt::lock_exclusive(&publication_lock).unwrap();
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let capture_workspace = workspace.clone();
+    let handle = std::thread::spawn(move || {
+        sender
+            .send(capture_base_overlay_state(&capture_workspace))
+            .unwrap();
+    });
+    assert!(
+        receiver
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err(),
+        "base state capture must wait for publication"
+    );
+
+    fs::write(root.path().join("after.rs"), "pub fn after() {}\n").unwrap();
+    let expected_snapshot = MerkleSnapshot::build(root.path(), false).unwrap();
+    workspace
+        .write_metadata(&WorkspaceMetadata {
+            id: workspace.id.clone(),
+            root: workspace.root.clone(),
+            created_at_unix: 1,
+            last_indexed_at_unix: Some(2),
+            watch_enabled: false,
+            skip_gitignore: false,
+            index_generation: 2,
+        })
+        .unwrap();
+    fs::write(workspace.index_incarnation_path(), "after").unwrap();
+    expected_snapshot
+        .save(&workspace.merkle_snapshot_path())
+        .unwrap();
+    fs2::FileExt::unlock(&publication_lock).unwrap();
+    let (generation, incarnation, snapshot) = receiver
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    handle.join().unwrap();
+    assert_eq!(generation, 2);
+    assert_eq!(incarnation, "after");
+    assert_eq!(snapshot, expected_snapshot);
+}
+
+#[test]
 fn overlay_snapshot_rejects_edits_between_metadata_and_content_capture() {
     let root = tempdir().unwrap();
     let path = root.path().join("shared.rs");
