@@ -630,6 +630,10 @@ impl Workspace {
         self.index_dir.join(".indexing.pid")
     }
 
+    pub(crate) fn indexing_incomplete_path(&self) -> PathBuf {
+        self.index_dir.join(".indexing.incomplete")
+    }
+
     pub fn indexing_progress_path(&self) -> PathBuf {
         self.index_dir.join(".indexing.progress")
     }
@@ -1053,6 +1057,11 @@ impl Workspace {
 
         if metadata.is_none() {
             issues.push("missing workspace metadata".to_string());
+        }
+
+        if self.indexing_incomplete_path().exists() {
+            issues
+                .push("incremental index publication is incomplete; rebuild required".to_string());
         }
 
         // Detect crashed indexing: if .indexing.pid exists but the process is

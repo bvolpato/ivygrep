@@ -614,18 +614,27 @@ fn index_workspace_with_options(
     });
 
     let result = retry_transient_tantivy_writes(|| {
+        // SQLite may have committed before Tantivy or the snapshot failed.
+        // If inputs change before a retry, replaying their old Merkle diff can
+        // incorrectly become a no-op over those partially published stores.
+        let incomplete = workspace.indexing_incomplete_path().try_exists()?;
         index_workspace_inner(
             workspace,
             embedding_model,
             trust_live_watcher,
             watcher_paths,
             skip_gitignore,
-            reset_worktree_overlay,
-            rebuild_main,
+            reset_worktree_overlay || (incomplete && workspace.is_worktree()),
+            rebuild_main || (incomplete && !workspace.is_worktree()),
         )
     });
     let result = result.and_then(|summary| {
         record_indexed_skip_gitignore(workspace, skip_gitignore)?;
+        match fs::remove_file(workspace.indexing_incomplete_path()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
         Ok(summary)
     });
     if result.is_ok() && tracks_reusable_base_state {
@@ -1081,6 +1090,15 @@ fn index_workspace_inner(
     let use_overlay =
         initializing_overlay || workspace.has_overlay() || workspace.base_ref_path().exists();
     let is_fresh_index = initializing_overlay || rebuild_main || !workspace_is_indexed(workspace);
+    if !is_fresh_index {
+        // Leave this marker on every failed/aborted incremental publication.
+        // Fresh builds already isolate writes in staging. No-op scans return
+        // above without touching this marker or any index stores.
+        fs::write(
+            workspace.indexing_incomplete_path(),
+            b"publication pending\n",
+        )?;
+    }
     if !use_overlay && is_fresh_index {
         // A snapshot can outlive another store or an interrupted recovery.
         // Never use its incremental delta to populate a fresh store. Ordinary

@@ -293,6 +293,64 @@ fn recreated_overlay_retries_failed_tantivy_publication() {
 
 #[test]
 #[serial]
+fn incremental_overlay_recovers_when_ignore_edit_is_reverted_after_partial_commit() {
+    let home = tempdir().unwrap();
+    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+    let parent = tempdir().unwrap();
+    let (base_root, linked_root) = linked_workspace(&parent.path().canonicalize().unwrap());
+    let workspace = Workspace::resolve(&linked_root).unwrap();
+    let model = HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+    let snapshot = fs::read(workspace.merkle_snapshot_path()).unwrap();
+    let exclude = base_root.join(".git/info/exclude");
+    fs::write(&exclude, "stable.rs\n").unwrap();
+
+    let failure = fail_tantivy_commits(&workspace.index_dir);
+    let error = index_workspace_for_watcher(&workspace, &model).unwrap_err();
+    assert!(format!("{error:#}").contains("injected Tantivy metadata publication failure"));
+    assert!(workspace.quick_index_health().needs_rebuild());
+    assert_eq!(
+        fs::read(workspace.merkle_snapshot_path()).unwrap(),
+        snapshot
+    );
+    // SQLite has committed, but Tantivy and the source snapshot have not.
+    let sqlite = open_sqlite_readonly(&workspace.overlay_sqlite_path()).unwrap();
+    assert_eq!(
+        sqlite
+            .query_row(
+                "SELECT COUNT(*) FROM tombstones WHERE file_path = 'stable.rs'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        1
+    );
+    drop(sqlite);
+    drop(failure);
+
+    // The input now matches the old snapshot. A normal Merkle diff is empty,
+    // but the partially committed deletion still needs to be repaired.
+    fs::write(&exclude, "").unwrap();
+    index_workspace_for_watcher(&workspace, &model).unwrap();
+    assert!(!workspace.indexing_incomplete_path().exists());
+    assert_eq!(
+        literal_search(
+            &workspace,
+            "shared_overlay_marker",
+            &SearchOptions::default()
+        )
+        .unwrap()
+        .len(),
+        1
+    );
+    assert_eq!(
+        MerkleSnapshot::load(&workspace.merkle_snapshot_path()).unwrap(),
+        MerkleSnapshot::build(&workspace.root, false).unwrap()
+    );
+}
+
+#[test]
+#[serial]
 fn fresh_overlay_rolls_back_failed_completion_publication() {
     assert_overlay_publication_recovers(false, PublicationFailure::Completion);
 }
