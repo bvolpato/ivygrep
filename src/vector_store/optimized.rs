@@ -948,6 +948,43 @@ mod tests {
     }
 
     #[test]
+    fn f16_storage_round_trips_every_finite_half_value() {
+        // Independent exact powers-of-two reference, including both signed
+        // zeros and every subnormal. Do not use the native conversion to
+        // generate its own expected values.
+        let expected = (0..=u16::MAX)
+            .filter_map(|bits| {
+                let exponent = (bits >> 10) & 31;
+                if exponent == 31 {
+                    return None; // VectorStore rejects infinities and NaNs.
+                }
+                let sign = if bits & 0x8000 == 0 { 1.0 } else { -1.0 };
+                let fraction = (bits & 1023) as f32;
+                Some(if exponent == 0 {
+                    sign * fraction * 2.0f32.powi(-24)
+                } else {
+                    sign * (1024.0 + fraction) * 2.0f32.powi(exponent as i32 - 25)
+                })
+            })
+            .collect::<Vec<_>>();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("finite-halves.usearch");
+        let mut store =
+            VectorStore::open(&path, expected.len(), ScalarKind::F16, VectorTier::Neural).unwrap();
+        store.upsert(1, expected.clone()).unwrap();
+        store.save().unwrap();
+        drop(store);
+        let store =
+            VectorStore::open_readonly(&path, expected.len(), ScalarKind::F16, VectorTier::Neural)
+                .unwrap();
+        let mut actual = vec![0.0f32; expected.len()];
+        assert_eq!(store.index.get(1, &mut actual).unwrap(), 1);
+        for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+            assert_eq!(actual.to_bits(), expected.to_bits(), "finite half {index}");
+        }
+    }
+
+    #[test]
     fn score_returns_similarity() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("vectors.bin");

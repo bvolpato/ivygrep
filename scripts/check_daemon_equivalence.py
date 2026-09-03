@@ -7,6 +7,7 @@ import argparse
 from contextlib import closing
 import json
 import os
+import random
 import re
 import shutil
 import signal
@@ -286,7 +287,24 @@ def daemon_request(home: Path, request: dict[str, Any]) -> dict[str, Any]:
     return response
 
 
-def check_worktree_equivalence(binary: Path, parent: Path, env: dict[str, str]) -> int:
+def lifecycle_operations(seed: int, steps: int) -> list[tuple[str, str, str]]:
+    """Shuffle complete operation cycles, then vary worktree and file independently."""
+    rng = random.Random(seed)
+    operations = ["write", "delete", "rename", "empty", "checkout", "restart",
+                  "base-force", "base-incremental", "live"]
+    result = []
+    while len(result) < steps:
+        rng.shuffle(operations)
+        for operation in operations:
+            result.append((operation, rng.choice(("branch", "sibling")),
+                           rng.choice(("shared", "deleted", "empty", "slot_0", "slot_1"))))
+            if len(result) == steps:
+                break
+    return result
+
+
+def check_worktree_equivalence(binary: Path, parent: Path, env: dict[str, str], *,
+                              seeds: list[int] | None = None, steps: int = 0) -> int:
     checks = 0
     for transport in ("local", "daemon"):
         fixture = parent / f"layers-{transport}"
@@ -348,7 +366,7 @@ def check_worktree_equivalence(binary: Path, parent: Path, env: dict[str, str]) 
             assert actual == divergent, f"{path.name}: overlay {actual} != delta {divergent}"
             assert tombstones == hidden, f"{path.name}: tombstones {tombstones} != hidden {hidden}"
 
-        def compare(path: Path, stage: str) -> None:
+        def compare(path: Path, stage: str, *, scoped_vectors: bool = False) -> None:
             nonlocal checks
             # A fresh ordinary repository has no shared Git/index state with the worktree.
             with tempfile.TemporaryDirectory(prefix="oracle-", dir=fixture) as temporary:
@@ -372,8 +390,18 @@ def check_worktree_equivalence(binary: Path, parent: Path, env: dict[str, str]) 
                 ]
                 if transport == "local":
                     cases.append(("lexical", ["--lexical-only"], "orchard", {}))
+                if scoped_vectors:
+                    # Layer-local BM25 statistics legitimately change broad-query
+                    # top-k selection. Check vector content for each visible AND
+                    # deleted base path without mistaking ranking differences for
+                    # corruption. Literal/regex retain exhaustive unscoped checks.
+                    cases = [case for case in cases if case[0] != "hash"]
+                    for file in sorted(source_files(main).keys() | source_files(path).keys()):
+                        cases.append(("hash", ["--include", file], "orchard shared values",
+                                      {"include_globs": [file]}))
+                vectors_prepared = False
                 for name, flags, query, filters in cases:
-                    if name == "hash":
+                    if name == "hash" and not vectors_prepared:
                         # Preserve the first unprepared queries above, then exercise
                         # real hash vectors rather than only the lexical fallback.
                         targets = [(main, environment), (oracle, oracle_env)]
@@ -382,6 +410,7 @@ def check_worktree_equivalence(binary: Path, parent: Path, env: dict[str, str]) 
                         for target, target_env in targets:
                             run([str(binary), "--enhance-hash-internal", str(target)],
                                 cwd=main, env=target_env)
+                        vectors_prepared = True
                     model_flags = [] if name == "lexical" else ["--hash"]
                     command = [str(binary), "--json", *model_flags, "-n", "50", "-C", "2", *flags, query]
                     expected = normalize_output(run([*command, str(oracle), "--no-watch"],
@@ -403,11 +432,11 @@ def check_worktree_equivalence(binary: Path, parent: Path, env: dict[str, str]) 
                         assert replay["hits"] == response["hits"], f"unstable cache: {stage}/{name}"
                     actual_content, expected_content = canonical_content(observed), canonical_content(expected)
                     assert actual_content == expected_content, (
-                        f"{transport}/{stage}/{path.name}/{name}: layered != standalone\n"
+                        f"{transport}/{stage}/{path.name}/{name}/{filters}: layered != standalone\n"
                         f"layered={actual_content}\nstandalone={expected_content}"
                     )
                     assert len(actual_content) == len(set(actual_content)), "duplicate layer hits"
-                    if name == "hash":
+                    if name == "hash" and expected_content:
                         assert any("semantic" in hit.get("sources", [])
                                    for group in observed for hit in group["hits"]), (
                             f"{transport}/{stage}: hash-vector retrieval was not observed"
@@ -418,6 +447,38 @@ def check_worktree_equivalence(binary: Path, parent: Path, env: dict[str, str]) 
                     checks += 1
             if path != main:
                 assert_layers(path)
+
+        def await_live_snapshot(path: Path) -> None:
+            # Observe exact contents, including deletions, without an explicit
+            # reindex that could conceal a broken watcher or stale result cache.
+            expected = {(name, text.strip()) for name, text in source_files(path).items()
+                        if "orchard" in text}
+            deadline = time.monotonic() + 20
+            while True:
+                response = daemon_request(home, {
+                    "type": "literal_search", "path": str(path), "query": "orchard",
+                    "context": 2, "limit": 50, "type_filter": None, "scope_path": None,
+                })
+                actual = {(hit["file_path"].replace("\\", "/"), hit["preview"].strip())
+                          for hit in response["hits"]}
+                if actual == expected:
+                    # Literal previews can read current filesystem contents before
+                    # the debounced index update commits. Also fence on the indexed
+                    # hybrid results whose cached chunk text the oracle will check.
+                    indexed = set()
+                    for file in sorted(source_files(main).keys() | source_files(path).keys()):
+                        response = daemon_request(home, {
+                            "type": "search", "path": str(path), "query": "orchard shared values",
+                            "include_globs": [file], "context": 2, "limit": 50,
+                            "type_filter": None, "scope_path": None,
+                        })
+                        indexed.update((hit["file_path"].replace("\\", "/"), hit["preview"].strip())
+                                       for hit in response["hits"])
+                    if indexed == expected:
+                        return
+                    actual = indexed
+                assert time.monotonic() < deadline, f"watcher snapshot: {actual} != {expected}"
+                time.sleep(0.05)
 
         try:
             git(main, "init", "-q")
@@ -501,6 +562,66 @@ def check_worktree_equivalence(binary: Path, parent: Path, env: dict[str, str]) 
                     time.sleep(0.05)
                 compare(branch, "live-watcher-update")
                 compare(sibling, "sibling-after-live-update")
+
+            for seed_index, seed in enumerate(seeds or []):
+                journal = {"seed": seed, "replay_seeds": seeds[:seed_index + 1],
+                           "steps_per_seed": steps, "transport": transport, "operations": []}
+                journal_path = fixture / f"lifecycle-{seed}.json"
+                for step, (operation, target, name) in enumerate(lifecycle_operations(seed, steps)):
+                    path = branch if target == "branch" else sibling
+                    entry = {"step": step, "operation": operation, "target": target,
+                             "file": name, "passed": False}
+                    journal["operations"].append(entry)
+                    journal_path.write_text(json.dumps(journal, indent=2) + "\n")
+                    stage = f"seed={seed}/step={step}/{operation}"
+                    try:
+                        changed = path / f"src/{name}.rs"
+                        marker = f"orchard_random_{seed}_{step}"
+                        if operation == "checkout":
+                            git(path, "add", "-A")
+                            git(path, "commit", "--allow-empty", "-qm", stage)
+                            git(path, "checkout", "--detach", "main" if step % 2 else "HEAD~1")
+                        elif operation.startswith("base-"):
+                            source(main / f"src/{name}.rs", marker)
+                            git(main, "add", "-A")
+                            git(main, "commit", "-qm", stage)
+                            index(main, force=operation == "base-force")
+                        elif operation == "restart":
+                            if daemon is not None:
+                                daemon.stop()
+                                daemon = None
+                            source(changed, marker)
+                            if transport == "daemon":
+                                daemon = start_daemon(binary, cwd=main, env=environment, bench_home=home)
+                        elif operation == "delete":
+                            # Ensure this really tests deleting an indexed file.
+                            source(changed, marker)
+                            index(path)
+                            changed.unlink()
+                        elif operation == "empty":
+                            source(changed, marker)
+                            index(path)
+                            changed.write_text("")
+                        elif operation == "rename":
+                            source(changed, marker)
+                            index(path)
+                            changed.replace(path / f"src/moved_{name}.rs")
+                        else:
+                            source(changed, marker)
+
+                        if not operation.startswith("base-"):
+                            if transport == "daemon" and operation in ("live", "restart"):
+                                await_live_snapshot(path)
+                            else:
+                                index(path)
+                        # Check the untouched sibling and base too: shared-reader
+                        # invalidation must not leak one worktree's delta to another.
+                        for current in (branch, sibling, main):
+                            compare(current, stage, scoped_vectors=True)
+                        entry["passed"] = True
+                        journal_path.write_text(json.dumps(journal, indent=2) + "\n")
+                    except Exception as error:
+                        raise AssertionError(f"{transport}/{stage}; replay journal: {journal_path}") from error
         finally:
             if daemon is not None:
                 daemon.stop()
@@ -516,7 +637,13 @@ def main() -> int:
     parser.add_argument("--bench-home", type=Path, default=DEFAULT_HOME)
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--skip-build", action="store_true")
+    parser.add_argument("--worktree-seed", type=int, action="append",
+                        help="repeat to run additional reproducible lifecycle campaigns")
+    parser.add_argument("--worktree-steps", type=int, default=9,
+                        help="randomized steps per seed and transport; 0 skips the campaign")
     args = parser.parse_args()
+    if args.worktree_steps < 0:
+        parser.error("--worktree-steps must be nonnegative")
 
     repo_root = Path(__file__).resolve().parent.parent
     bench_home = ensure_bench_home_under_tmp(args.bench_home)
@@ -595,7 +722,10 @@ def main() -> int:
     metrics = {
         "equivalence_cases": len(cases) + 1,
         "equivalence_failures": len(failures),
-        "worktree_equivalence_checks": check_worktree_equivalence(binary, bench_home, env),
+        "worktree_equivalence_checks": check_worktree_equivalence(
+            binary, bench_home, env, seeds=args.worktree_seed or [20260902], steps=args.worktree_steps),
+        "worktree_seeds": args.worktree_seed or [20260902],
+        "worktree_steps_per_seed": args.worktree_steps,
     }
     print(json.dumps(metrics, sort_keys=True))
     if failures:

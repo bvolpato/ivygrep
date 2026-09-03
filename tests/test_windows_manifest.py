@@ -12,7 +12,7 @@ class WindowsManifestTest(unittest.TestCase):
         usearch = manifest["dependencies"]["usearch"]
 
         self.assertEqual(usearch["package"], "ivygrep-usearch")
-        self.assertEqual(usearch["version"], "=2.24.0-ivygrep.1")
+        self.assertEqual(usearch["version"], "=2.24.0-ivygrep.2")
         self.assertFalse(usearch["default-features"])
         self.assertEqual(usearch["features"], ["fp16lib"])
 

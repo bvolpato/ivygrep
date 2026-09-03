@@ -19,6 +19,7 @@ import socket
 import statistics
 import subprocess
 import tempfile
+import threading
 import time
 
 
@@ -184,6 +185,11 @@ def timed(
     env: dict[str, str],
     monitor_path: Path | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], dict]:
+    """Time child completion independently of sampled Linux resource estimates.
+
+    A zero resource_samples count means the child exited before a complete
+    sample was available, not that it consumed no CPU or memory.
+    """
     with (
         tempfile.NamedTemporaryFile() as stdout,
         tempfile.NamedTemporaryFile() as stderr,
@@ -201,40 +207,72 @@ def timed(
         write_bytes = 0
         cpu_seconds = 0.0
         peak_disk_bytes = 0
-        last_disk_sample = 0.0
+        resource_samples = 0
+        sampling_errors: list[Exception] = []
+        finished = threading.Event()
         clock_ticks = os.sysconf("SC_CLK_TCK")
-        while process.poll() is None:
+
+        def sample_resources() -> None:
+            nonlocal peak_rss_bytes, read_bytes, write_bytes, cpu_seconds, peak_disk_bytes, resource_samples
+            last_disk_sample = 0.0
             try:
-                status = Path(f"/proc/{process.pid}/status").read_text()
-                for line in status.splitlines():
-                    if line.startswith("VmRSS:"):
-                        peak_rss_bytes = max(
-                            peak_rss_bytes, int(line.split()[1]) * 1024
+                while not finished.is_set():
+                    try:
+                        status = Path(f"/proc/{process.pid}/status").read_text()
+                        for line in status.splitlines():
+                            if line.startswith("VmRSS:"):
+                                peak_rss_bytes = max(
+                                    peak_rss_bytes, int(line.split()[1]) * 1024
+                                )
+                                break
+                        io = Path(f"/proc/{process.pid}/io").read_text()
+                        counters = {
+                            line.split(":", 1)[0]: int(line.split(":", 1)[1])
+                            for line in io.splitlines()
+                        }
+                        read_bytes = max(read_bytes, counters.get("read_bytes", 0))
+                        write_bytes = max(write_bytes, counters.get("write_bytes", 0))
+                        # comm may contain spaces or closing parentheses.
+                        stat = Path(f"/proc/{process.pid}/stat").read_text().rpartition(")")[2].split()
+                        cpu_seconds = max(
+                            cpu_seconds, (int(stat[11]) + int(stat[12])) / clock_ticks
                         )
-                        break
-                io = Path(f"/proc/{process.pid}/io").read_text()
-                counters = {
-                    line.split(":", 1)[0]: int(line.split(":", 1)[1])
-                    for line in io.splitlines()
-                }
-                read_bytes = max(read_bytes, counters.get("read_bytes", 0))
-                write_bytes = max(write_bytes, counters.get("write_bytes", 0))
-                stat = Path(f"/proc/{process.pid}/stat").read_text().split()
-                cpu_seconds = max(
-                    cpu_seconds, (int(stat[13]) + int(stat[14])) / clock_ticks
-                )
-            except (FileNotFoundError, PermissionError, ProcessLookupError):
-                pass
-            now = time.monotonic()
-            if monitor_path is not None and now - last_disk_sample >= 0.5:
-                peak_disk_bytes = max(
-                    peak_disk_bytes,
-                    directory_size(monitor_path),
-                )
-                last_disk_sample = now
-            time.sleep(0.05)
-        return_code = process.wait()
-        wall_ms = (time.perf_counter() - started) * 1000.0
+                        resource_samples += 1
+                    except (FileNotFoundError, ProcessLookupError):
+                        pass  # The child may exit between individual /proc reads.
+                    except PermissionError:
+                        # Linux can deny /proc/PID/io once the child is exiting.
+                        # The exit may not be waitable yet. Allow one sampling
+                        # interval for completion, without extending wall_ms.
+                        # Persistent denial on a live child remains a failure.
+                        if (process.poll() is None and not finished.wait(0.05)
+                                and process.poll() is None):
+                            raise
+                    now = time.monotonic()
+                    if monitor_path is not None and now - last_disk_sample >= 0.5:
+                        peak_disk_bytes = max(peak_disk_bytes, directory_size(monitor_path))
+                        last_disk_sample = now
+                    finished.wait(0.05)
+            except Exception as error:
+                sampling_errors.append(error)
+
+        monitor = threading.Thread(target=sample_resources, name="benchmark-resource-sampler")
+        monitor_started = False
+        try:
+            monitor.start()
+            monitor_started = True
+            return_code = process.wait()
+            # Record the blocking wait immediately, before sampler cleanup or
+            # disk accounting can inflate short commands by a sampling interval.
+            wall_ms = (time.perf_counter() - started) * 1000.0
+        except BaseException:
+            process.kill()
+            process.wait()
+            raise
+        finally:
+            finished.set()
+            if monitor_started:
+                monitor.join()
         if monitor_path is not None:
             peak_disk_bytes = max(peak_disk_bytes, directory_size(monitor_path))
         stdout.seek(0)
@@ -252,6 +290,8 @@ def timed(
                 output=result.stdout,
                 stderr=result.stderr,
             )
+        if sampling_errors:
+            raise RuntimeError("benchmark resource sampler failed") from sampling_errors[0]
     return result, {
         "wall_ms": wall_ms,
         "peak_rss_bytes": peak_rss_bytes,
@@ -259,6 +299,7 @@ def timed(
         "filesystem_write_bytes": write_bytes,
         "cpu_ms": cpu_seconds * 1000.0,
         "peak_disk_bytes": peak_disk_bytes,
+        "resource_samples": resource_samples,
     }
 
 

@@ -8250,6 +8250,35 @@ export function registerCommands(p: Plugin) {
     }
 
     #[test]
+    #[serial]
+    fn raw_cosine_corroboration_cannot_overwhelm_strong_lexical_evidence() {
+        let direct = make_chunk_with_path(
+            "direct",
+            "src/a.rs",
+            "fn a() { /* process image capture */ }",
+        );
+        let related = make_chunk_with_path(
+            "related",
+            "src/b.rs",
+            "fn b() { /* process image capture */ }",
+        );
+        let ranked = fuse_rrf(
+            FusionCandidates {
+                lexical: vec![(direct, 20.0), (related.clone(), 5.0)],
+                semantic: vec![(related, 1.0, HashSet::from(["neural"]))],
+                literal: vec![],
+                path: vec![],
+                path_weight: 1.5,
+                symbols: vec![],
+            },
+            1.0,
+            "process image capture",
+            Some(10),
+        );
+        assert_eq!(ranked[0].0.chunk_id, "direct", "{ranked:#?}");
+    }
+
+    #[test]
     fn inferred_symbol_survives_architecture_distractors() {
         let mut router = make_chunk_with_path(
             "router",

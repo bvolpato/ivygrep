@@ -1,6 +1,6 @@
 {
   "binary": {
-    "sha256": "097d96a7d48a45a3cfb45c802aa38f81970db931b545a7817bff5d55c3e12d74",
+    "sha256": "0b758c6e9bac47797eae33d42856590afba218699c2df0369773e898f17177d8",
     "version": "ivygrep 1.2.13"
   },
   "fixture": {
@@ -11,33 +11,34 @@
     "path": "scripts/eval_relevance.py",
     "sha256": "d7cbac47ac8c18c67fa6c0a5ab8393fd3243c9290e80ed3f28662faec348b32d"
   },
-  "ivygrep_commit": "7413229df04a0657671aa323da5a8ff0e3682569",
+  "ivygrep_commit": "d69e0d9b6bf377a56ac74924fdbf2030dc646605",
   "modes": {
     "foreground": {
       "audit_stage_counts": {
         "after_filtering": 0,
         "before_fusion": 0,
         "candidate_budget": 0,
-        "first_useful_low": 2,
+        "first_useful_low": 3,
         "no_primary_judgment": 0,
         "not_audited": 0,
-        "satisfied": 21
+        "satisfied": 20
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 3489.6014481782913,
+      "elapsed_ms": 3858.3107739686966,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
-        "daemon-watch"
+        "daemon-watch",
+        "identifier-tokenization"
       ],
       "mean_candidate_recall": 0.9782608695652174,
       "mean_hybrid_deep_recall": 0.9782608695652174,
-      "mean_mrr": 0.9565217391304348,
-      "mean_ndcg10": 0.9254253818475671,
-      "mean_p1": 0.9130434782608695,
-      "mean_p5": 0.21739130434782608,
-      "mean_recall5": 0.9565217391304348,
+      "mean_mrr": 0.9275362318840579,
+      "mean_ndcg10": 0.9008601763191058,
+      "mean_p1": 0.8695652173913043,
+      "mean_p5": 0.22608695652173913,
+      "mean_recall5": 0.9782608695652174,
       "mode": "foreground",
       "neural_queries_executed": 0,
       "neural_queries_unobservable": 0,
@@ -45,33 +46,34 @@
       "no_hit_queries": 0,
       "queries": 23,
       "satisfaction_k": 1,
-      "satisfaction_rate": 0.9130434782608695
+      "satisfaction_rate": 0.8695652173913043
     },
     "hash-enriched": {
       "audit_stage_counts": {
         "after_filtering": 0,
         "before_fusion": 0,
         "candidate_budget": 0,
-        "first_useful_low": 2,
+        "first_useful_low": 3,
         "no_primary_judgment": 0,
         "not_audited": 0,
-        "satisfied": 21
+        "satisfied": 20
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 3640.812687575817,
+      "elapsed_ms": 4030.954523012042,
       "filter_misses": [],
       "low_rank_misses": [
         "vector-store",
-        "daemon-watch"
+        "daemon-watch",
+        "identifier-tokenization"
       ],
       "mean_candidate_recall": 0.9782608695652174,
       "mean_hybrid_deep_recall": 0.9782608695652174,
-      "mean_mrr": 0.9565217391304348,
-      "mean_ndcg10": 0.9254253818475671,
-      "mean_p1": 0.9130434782608695,
-      "mean_p5": 0.21739130434782608,
-      "mean_recall5": 0.9565217391304348,
+      "mean_mrr": 0.9275362318840579,
+      "mean_ndcg10": 0.9008601763191058,
+      "mean_p1": 0.8695652173913043,
+      "mean_p5": 0.22608695652173913,
+      "mean_recall5": 0.9782608695652174,
       "mode": "hash-enriched",
       "neural_queries_executed": 0,
       "neural_queries_unobservable": 0,
@@ -79,7 +81,7 @@
       "no_hit_queries": 0,
       "queries": 23,
       "satisfaction_k": 1,
-      "satisfaction_rate": 0.9130434782608695
+      "satisfaction_rate": 0.8695652173913043
     },
     "neural": {
       "audit_stage_counts": {
@@ -88,29 +90,29 @@
         "candidate_budget": 0,
         "first_useful_low": 0,
         "no_primary_judgment": 0,
-        "not_audited": 2,
-        "satisfied": 21
+        "not_audited": 3,
+        "satisfied": 20
       },
       "candidate_budget_misses": [],
       "candidate_recall_misses": [],
-      "elapsed_ms": 3015.063488855958,
+      "elapsed_ms": 3192.2295028343797,
       "filter_misses": [],
       "low_rank_misses": [],
       "mean_candidate_recall": 0.9782608695652174,
       "mean_hybrid_deep_recall": 0.0,
-      "mean_mrr": 0.9565217391304348,
-      "mean_ndcg10": 0.9254253818475671,
-      "mean_p1": 0.9130434782608695,
-      "mean_p5": 0.21739130434782608,
-      "mean_recall5": 0.9565217391304348,
+      "mean_mrr": 0.9275362318840579,
+      "mean_ndcg10": 0.9008601763191058,
+      "mean_p1": 0.8695652173913043,
+      "mean_p5": 0.22608695652173913,
+      "mean_recall5": 0.9782608695652174,
       "mode": "neural",
       "neural_queries_executed": 23,
       "neural_queries_unobservable": 0,
-      "neural_queries_with_results": 15,
+      "neural_queries_with_results": 13,
       "no_hit_queries": 0,
       "queries": 23,
       "satisfaction_k": 1,
-      "satisfaction_rate": 0.9130434782608695
+      "satisfaction_rate": 0.8695652173913043
     }
   },
   "runtime": {
@@ -132,6 +134,6 @@
       "src",
       "vendor"
     ],
-    "sha256": "94b51280cd352698709a1e042d05afdfe9282f727f15b321764438aa5b99fc95"
+    "sha256": "ed79b09e9adf551b76e4cace63f133786db49e161900405a0f6a0eb10e2a8404"
   }
 }

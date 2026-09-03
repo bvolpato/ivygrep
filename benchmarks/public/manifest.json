@@ -122,7 +122,7 @@
     },
     "reranker-eval": {
       "query_role": "fit-disjoint-diagnostic",
-      "description": "Separately named checkout-reference query-ID diagnostic. IDs are checked against the checksum-bound reference fit ledger; executed-model applicability remains unverified. This does not replace the public-core release gate.",
+      "description": "Separately named query-ID diagnostic against the checksum-bound fit ledger. Use --require-fit-disjoint to require a matching runtime-reported model checksum; this is not proof of unseen-query generalization and does not replace the public-core release gate.",
       "minimum_queries": 450,
       "tasks": [
         "codetrans-dl",

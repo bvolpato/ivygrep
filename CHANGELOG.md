@@ -12,6 +12,7 @@ All notable changes to ivygrep are documented in this file.
 - Opt-in `IVYGREP_RERANKER_CAPTURE=1` emits versioned native pre-learned candidates and features to stderr for diagnostics and training. Records include query text and source previews; normal search output is unchanged.
 
 ### Performance
+- AArch64 USearch uses native half-to-single conversion without optional FP16 arithmetic. Four paired eight-core Linux trials reduced hash/neural vector-enrichment time by 54%/52%, with a smaller 6% warm-query improvement. Stored vector representation is unchanged; see the [profile and validation report](docs/benchmarks/native-f16-arm64-2026-09-02.md).
 - ARM64 exact vector scoring uses runtime-selected NEON math and coarser parallel batches. On a Neoverse V2 host, controlled eight-core scoring was 16–42% faster across 500–50,000 eligible vectors; at the default 32 threads, small batches improved by 42% while larger batches were roughly unchanged. See the [Linux validation report](docs/benchmarks/linux-arm64-2026-09-02.md) for trial data and limits.
 - Vector count and availability checks read native headers and stream node levels without allocating native views or key lookup tables, reducing bookkeeping memory. The fast path checks structural bounds, not full payload integrity; deep health checks and USearch serialization are unchanged. Hash enhancement rebuilds dimension-mismatched stores before filling missing keys.
 - Reference and caller searches reuse one search context across bounded candidate-widening passes, avoiding repeated store setup when early matches are rejected. The existing per-request source-matching cache is unchanged.
@@ -29,6 +30,12 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 
+- Failed incremental worktree publications retain a recovery marker, so a reverted edit cannot make a retry skip partially committed deletion markers. Recovery rebuilds the thin overlay in staging and preserves base-index publication behavior. Fresh overlays verify persisted base coverage and reject edits made between metadata and content capture.
+- Neural debug builds on baseline ARM64 use a dependency-scoped GEMM optimization workaround without requiring FP16 arithmetic globally. The default local and native ARM CI tests now retain application debug assertions.
+- Linked-worktree watchers reattach when an external Git `info/` directory is replaced at the same pathname; Windows watches its stable common-directory parent. Repeated replacement tests verify both hide and restore operations.
+
+- Bound raw cosine corroboration of direct search candidates to one semantic rank vote, preserving semantic-only discovery. The unchanged CoSQA gates now pass; the public evidence records per-dataset ranking tradeoffs.
+- Invalid Boolean queries now explain how to search pasted code or prose using matching backticks or a fenced code block. Invalid constraints still fail rather than silently falling back to relaxed search.
 - Worktree references track the base index's incarnation as well as its generation, so daemon-driven forced rebuilds and remove/re-add cycles cannot silently reuse stale overlays. Legacy references reconcile once without materializing a full base copy. Explicit daemon reindex requests scan pending edits instead of returning early while a live watcher's debounce queue still contains changes.
 - Removing a base index releases its cached worktree readers before deleting stores, preserving unrelated caches and avoiding retained file handles during Windows rebuilds.
 - Direct daemon clients in worktree E2E and million-chunk benchmarks authenticate Windows TCP connections using the daemon endpoint token before sending requests.
@@ -72,10 +79,13 @@ All notable changes to ivygrep are documented in this file.
 
 ### Testing
 
+- Added default-neural ARM64 source-coverage artifacts and an older-CPU F16 execution regression. QEMU Python worktree E2E now installs Git, and Metal CI no longer accepts CPU fallback as a GPU pass.
+- Benchmark reports preserve missing process-resource observations as unknown and avoid resource ratios with zero baselines; incomplete observations cannot substantiate the indexing-ceiling explanation.
+- Public matrices can require fit-disjoint queries against the executed reranker model SHA-256, not only its name. Runtime status and doctor expose the embedded model digest; older binaries remain unverified.
 - Layered worktree E2E compares CLI and direct daemon RPC results with independent full indexes through edits, deletions, empty files, renames, branch switches, base rebuilds, sibling worktrees, restarts, and live watcher updates. Real hash and neural retrieval checks cover inheritance and shadowing; filename-only stale-base assertions now verify source content and thin overlay storage.
 - The million-chunk harness now forces neural queries after `--enhance-neural` and requires execution evidence from both CLI and daemon responses. Enrichment readiness alone no longer qualifies as a neural query measurement.
 - Context deletion acceptance checks the existing platform contract: Unix can hydrate deleted content through a pinned Git working directory; Windows retains deletion metadata and live-file context while refusing unsafe historical-only reads.
-- Public retrieval records the checkout-reference model's 481 fit-query IDs and labels public-core as regression evidence (431 of its unchanged 1,000 queries overlap). Declared fit-disjoint diagnostics check actual repository-qualified IDs against that reference; applicability to the executed model remains unverified. Model weights and acceptance gates are unchanged.
+- Public retrieval records the checkout-reference model's 481 fit-query IDs and labels public-core as regression evidence (431 of its unchanged 1,000 queries overlap). Declared fit-disjoint diagnostics check actual repository-qualified IDs against that reference; older runs without executed-model checksums remain unverified. Model weights and acceptance gates are unchanged.
 - Reranker training consumes captured native feature vectors instead of reconstructing grouped search output. Benchmark reuse verifies dataset, binary, harness, configuration, and runtime fingerprints while retaining original execution provenance; legacy or incompatible results require a fresh run.
 - The Web UI "late search results" browser test tells its scripted streams apart by URL and releases the superseded search's results only after navigation completed, instead of racing a 100 ms timer against the runner.
 - The `incremental_reindex_no_change` guard uses an absolute budget (`benchmark_guard.py --max-median-ms 25`, confirmed by a second head measurement) instead of a paired ratio: identical code measured 1.5-1.8x apart within one shared-runner job for this 3 ms benchmark, so the ratio carried no signal, while a fast path that starts doing real work still blows the budget. The larger benches keep their ratio guards, and the neural-tier ANN graph (`neural_vector_search_in_50k_hot`) is guarded alongside the hash-tier one.

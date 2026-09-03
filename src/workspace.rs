@@ -139,6 +139,8 @@ pub struct WorkspaceStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reranker_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reranker_model_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reranker_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub neural_backend: Option<String>,
@@ -628,6 +630,10 @@ impl Workspace {
         self.index_dir.join(".indexing.pid")
     }
 
+    pub(crate) fn indexing_incomplete_path(&self) -> PathBuf {
+        self.index_dir.join(".indexing.incomplete")
+    }
+
     pub fn indexing_progress_path(&self) -> PathBuf {
         self.index_dir.join(".indexing.progress")
     }
@@ -1051,6 +1057,12 @@ impl Workspace {
 
         if metadata.is_none() {
             issues.push("missing workspace metadata".to_string());
+        }
+
+        if self.is_worktree() && self.indexing_incomplete_path().exists() {
+            issues.push(
+                "incremental overlay publication is incomplete; rebuild required".to_string(),
+            );
         }
 
         // Detect crashed indexing: if .indexing.pid exists but the process is
@@ -1716,6 +1728,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
                 reranker_candidate_limit: crate::search::rerank_candidate_limit(),
                 reranker_mode: reranker.mode.clone(),
                 reranker_model: reranker.model_id.clone(),
+                reranker_model_sha256: reranker.model_sha256.clone(),
                 reranker_error: reranker.error.clone(),
                 neural_backend,
                 enhancing_in_progress,

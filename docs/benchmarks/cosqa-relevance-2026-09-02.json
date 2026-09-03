@@ -1,0 +1,1770 @@
+{
+  "base_commit": "7413229df04a0657671aa323da5a8ff0e3682569",
+  "baseline_binary_sha256": "603ce1c45512cc3449f0b58d46b624055bd7e4cf445b527775da7ffac735ed9b",
+  "candidate_binary_sha256": "f34119d4bb46fc7429b034832a74e48e1a60d93faeff41692adb1934c1e3a9c8",
+  "candidate_source_inputs_sha256": "2ac66024ab0d35e67ee82579f206b4192b64187e3b234305b3a96af9ad1aed13",
+  "date": "2026-09-02",
+  "fit_disjoint_baseline_comparison": {
+    "binary_sha256": "603ce1c45512cc3449f0b58d46b624055bd7e4cf445b527775da7ffac735ed9b",
+    "executed_model_applicability": "unverified",
+    "matrix_sha256": "ad50276410ee39e9ce183b27f747083f81a9ae07d3c31181c1a6b5de9797869e",
+    "queries": 520,
+    "raw_result_files": [
+      {
+        "name": "codetrans-dl-neural-run-1.json",
+        "sha256": "9f47ff93deaa9ccfc00b63892fe484b3d755f703b99d821a30ae29228b3d6162"
+      },
+      {
+        "name": "codetrans-contest-neural-run-1.json",
+        "sha256": "09460da2e321e1df03678e1622596dbb23e4cf923ae9b885755c40ede78b6767"
+      },
+      {
+        "name": "cosqa-neural-run-1.json",
+        "sha256": "a8a850c736fc76c1ff43192fe562867dead88bcdab2d2d88670a3af518b045af"
+      },
+      {
+        "name": "codefeedback-st-neural-run-1.json",
+        "sha256": "89200db42fd780c9a4e37b2e45633b5b872f1e5057783f8cf541defd5a9c548d"
+      }
+    ],
+    "scope": "Fresh baseline quality comparison only. The old binary does not emit model checksums and is not upgraded to runtime-attested fit-disjoint evidence.",
+    "weighted_metrics": {
+      "mrr_at_10": 0.20083791208791207,
+      "ndcg_at_10": 0.2489422222272765,
+      "no_hit_rate": 0.0,
+      "recall_at_20": 0.47115384615384615
+    }
+  },
+  "fit_disjoint_diagnostic": {
+    "fit_query_audit": {
+      "datasets": [
+        {
+          "dataset": "codetrans-dl",
+          "overlap_queries": 0,
+          "overlap_query_ids": [],
+          "queries": 108,
+          "query_repository": "CoIR-Retrieval/codetrans-dl-queries-corpus"
+        },
+        {
+          "dataset": "codetrans-contest",
+          "overlap_queries": 0,
+          "overlap_query_ids": [],
+          "queries": 111,
+          "query_repository": "CoIR-Retrieval/codetrans-contest-queries-corpus"
+        },
+        {
+          "dataset": "cosqa",
+          "overlap_queries": 0,
+          "overlap_query_ids": [],
+          "queries": 251,
+          "query_repository": "CoIR-Retrieval/cosqa-queries-corpus"
+        },
+        {
+          "dataset": "codefeedback-st",
+          "overlap_queries": 0,
+          "overlap_query_ids": [],
+          "queries": 50,
+          "query_repository": "CoIR-Retrieval/codefeedback-st-queries-corpus"
+        }
+      ],
+      "executed_binary": {
+        "applicability": "verified",
+        "attestation": "runtime-reported-embedded-model-sha256",
+        "attested_results": 4,
+        "binary_sha256": "f34119d4bb46fc7429b034832a74e48e1a60d93faeff41692adb1934c1e3a9c8",
+        "observed_model_ids": [
+          "public-linear-reranker-v2"
+        ],
+        "observed_model_sha256": [
+          "dedb2afa59d127be049f0ba1b1beb4e0cb8e2fabbbe13ad3e39bd58b9250bb1f"
+        ],
+        "reason": "Every result reports the model bytes bound to the fit ledger; this does not attest invocation on every query.",
+        "results": 4
+      },
+      "overlap_queries": 0,
+      "queries": 520,
+      "query_role": "fit-disjoint-diagnostic",
+      "reference": {
+        "ledger_sha256": "9922bf01e102a8a0b3d680c555d2ce3452f02657e2228a22e1ea1e91d7d105d3",
+        "model_id": "public-linear-reranker-v2",
+        "model_sha256": "dedb2afa59d127be049f0ba1b1beb4e0cb8e2fabbbe13ad3e39bd58b9250bb1f",
+        "scope": "checkout-model",
+        "verified": true
+      },
+      "schema_version": 2,
+      "scope": "repository-qualified query-ID overlap against the checkout-reference model, not proof of executed-model disjointness, overfitting or semantic independence"
+    },
+    "generated_at": "2026-09-02T21:45:42.345667+00:00",
+    "harness_sha256": {
+      "eval_code_retrieval.py": "e2ddaf96768595fa1234178b744725f52f640147bdda855068e08cd7dcf8fc17",
+      "export_public_retrieval.py": "b09301b27223a0413f2e2956b0312c8e356d6419f50114d58247a9561fdf545f",
+      "public_retrieval_contracts.py": "c8f30e61b613ca466e38c02cbdda3e3089413b51ea05188ce9aa88be3d96f5cd",
+      "run_public_benchmark_matrix.py": "fe59e7f3915d21afa7253865d47a4ac237d05b66b75531f3c3623323d018383b"
+    },
+    "manifest_sha256": "42890f31b00e2f512375d0ae61e829f17f89da8e405f811a6dd342a3598a69f2",
+    "matrix_sha256": "595aebdd2272d23f6975090a1d4c99cce5f4eb7a09c9754f7eb3e3e5a0c71389",
+    "modes": [
+      "neural"
+    ],
+    "profile": "reranker-eval",
+    "queries": 520,
+    "raw_result_files": [
+      {
+        "name": "codetrans-dl-neural-run-1.json",
+        "sha256": "efe8ea02b1dd78941740d853025971427a2d61533cad2fad4d01ed9728172e88"
+      },
+      {
+        "name": "codetrans-contest-neural-run-1.json",
+        "sha256": "057c9b8737e0c168d0de244611bac5a284930e34b7e23635fd8162183874449d"
+      },
+      {
+        "name": "cosqa-neural-run-1.json",
+        "sha256": "ddce716a0813c1f19032dcf50b1f5d2e0ae3b25aab602ca4287f28589bbb9250"
+      },
+      {
+        "name": "codefeedback-st-neural-run-1.json",
+        "sha256": "bafb33606aaf76129841b334e58fc77c2307341030384033945e6d78f9f3a308"
+      }
+    ],
+    "repetitions": 1,
+    "runtime": {
+      "cpu_model": "aarch64",
+      "logical_cpus": 32,
+      "machine": "aarch64",
+      "physical_memory_bytes": 132651511808,
+      "python": "3.14.5",
+      "release": "6.8.0-1057-aws",
+      "system": "Linux"
+    },
+    "task_metrics": {
+      "codefeedback-st": {
+        "neural": {
+          "mrr_at_10": 0.6243333333333333,
+          "ndcg_at_10": 0.6523490029318226,
+          "no_hit_rate": 0.0,
+          "recall_at_20": 0.76
+        }
+      },
+      "codetrans-contest": {
+        "neural": {
+          "mrr_at_10": 0.29292864292864296,
+          "ndcg_at_10": 0.33323279220852114,
+          "no_hit_rate": 0.0,
+          "recall_at_20": 0.4594594594594595
+        }
+      },
+      "codetrans-dl": {
+        "neural": {
+          "mrr_at_10": 0.13564814814814816,
+          "ndcg_at_10": 0.22316014202785214,
+          "no_hit_rate": 0.0,
+          "recall_at_20": 0.6018518518518519
+        }
+      },
+      "cosqa": {
+        "neural": {
+          "mrr_at_10": 0.10981787137165623,
+          "ndcg_at_10": 0.1526277197420718,
+          "no_hit_rate": 0.0,
+          "recall_at_20": 0.3944223107569721
+        }
+      }
+    },
+    "weighted_metrics": {
+      "neural": {
+        "mrr_at_10": 0.20374236874236876,
+        "ndcg_at_10": 0.25387912130000967,
+        "no_hit_rate": 0.0,
+        "recall_at_20": 0.48653846153846153
+      }
+    }
+  },
+  "public_core": {
+    "baseline": {
+      "fit_query_audit": {
+        "datasets": [
+          {
+            "dataset": "codetrans-dl",
+            "overlap_queries": 72,
+            "overlap_query_ids": [
+              "638",
+              "639",
+              "640",
+              "645",
+              "649",
+              "650",
+              "651",
+              "652",
+              "654",
+              "655",
+              "656",
+              "658",
+              "661",
+              "663",
+              "667",
+              "673",
+              "676",
+              "679",
+              "682",
+              "685",
+              "687",
+              "690",
+              "692",
+              "696",
+              "698",
+              "699",
+              "701",
+              "707",
+              "715",
+              "718",
+              "720",
+              "721",
+              "722",
+              "724",
+              "725",
+              "726",
+              "727",
+              "730",
+              "731",
+              "736",
+              "738",
+              "739",
+              "740",
+              "742",
+              "745",
+              "746",
+              "748",
+              "756",
+              "757",
+              "758",
+              "761",
+              "766",
+              "768",
+              "770",
+              "774",
+              "777",
+              "778",
+              "780",
+              "781",
+              "783",
+              "784",
+              "786",
+              "788",
+              "793",
+              "795",
+              "796",
+              "797",
+              "798",
+              "799",
+              "804",
+              "807",
+              "808"
+            ],
+            "queries": 180,
+            "query_repository": "CoIR-Retrieval/codetrans-dl-queries-corpus"
+          },
+          {
+            "dataset": "codetrans-contest",
+            "overlap_queries": 110,
+            "overlap_query_ids": [
+              "q101",
+              "q104",
+              "q105",
+              "q107",
+              "q108",
+              "q109",
+              "q111",
+              "q113",
+              "q114",
+              "q117",
+              "q118",
+              "q122",
+              "q126",
+              "q129",
+              "q135",
+              "q136",
+              "q137",
+              "q138",
+              "q142",
+              "q143",
+              "q144",
+              "q147",
+              "q148",
+              "q149",
+              "q152",
+              "q154",
+              "q155",
+              "q157",
+              "q159",
+              "q160",
+              "q162",
+              "q163",
+              "q166",
+              "q167",
+              "q170",
+              "q171",
+              "q172",
+              "q175",
+              "q177",
+              "q179",
+              "q182",
+              "q186",
+              "q187",
+              "q191",
+              "q192",
+              "q194",
+              "q205",
+              "q207",
+              "q208",
+              "q209",
+              "q210",
+              "q214",
+              "q215",
+              "q218",
+              "q219",
+              "q252",
+              "q263",
+              "q268",
+              "q285",
+              "q286",
+              "q287",
+              "q289",
+              "q294",
+              "q295",
+              "q296",
+              "q300",
+              "q301",
+              "q302",
+              "q305",
+              "q307",
+              "q311",
+              "q313",
+              "q315",
+              "q317",
+              "q318",
+              "q321",
+              "q323",
+              "q381",
+              "q382",
+              "q383",
+              "q449",
+              "q450",
+              "q451",
+              "q454",
+              "q457",
+              "q458",
+              "q459",
+              "q460",
+              "q462",
+              "q463",
+              "q467",
+              "q468",
+              "q469",
+              "q47",
+              "q472",
+              "q473",
+              "q475",
+              "q478",
+              "q480",
+              "q481",
+              "q483",
+              "q484",
+              "q486",
+              "q487",
+              "q488",
+              "q93",
+              "q95",
+              "q96",
+              "q97",
+              "q99"
+            ],
+            "queries": 221,
+            "query_repository": "CoIR-Retrieval/codetrans-contest-queries-corpus"
+          },
+          {
+            "dataset": "cosqa",
+            "overlap_queries": 249,
+            "overlap_query_ids": [
+              "q20105",
+              "q20106",
+              "q20107",
+              "q20108",
+              "q20111",
+              "q20113",
+              "q20115",
+              "q20116",
+              "q20119",
+              "q20122",
+              "q20126",
+              "q20128",
+              "q20130",
+              "q20132",
+              "q20133",
+              "q20134",
+              "q20135",
+              "q20138",
+              "q20140",
+              "q20142",
+              "q20147",
+              "q20148",
+              "q20149",
+              "q20151",
+              "q20153",
+              "q20155",
+              "q20156",
+              "q20158",
+              "q20160",
+              "q20161",
+              "q20162",
+              "q20163",
+              "q20164",
+              "q20168",
+              "q20169",
+              "q20170",
+              "q20181",
+              "q20182",
+              "q20184",
+              "q20185",
+              "q20186",
+              "q20188",
+              "q20189",
+              "q20193",
+              "q20195",
+              "q20201",
+              "q20203",
+              "q20205",
+              "q20207",
+              "q20209",
+              "q20210",
+              "q20211",
+              "q20213",
+              "q20216",
+              "q20217",
+              "q20219",
+              "q20221",
+              "q20224",
+              "q20227",
+              "q20228",
+              "q20234",
+              "q20235",
+              "q20236",
+              "q20238",
+              "q20239",
+              "q20240",
+              "q20241",
+              "q20243",
+              "q20244",
+              "q20245",
+              "q20247",
+              "q20248",
+              "q20253",
+              "q20254",
+              "q20255",
+              "q20257",
+              "q20259",
+              "q20260",
+              "q20264",
+              "q20265",
+              "q20266",
+              "q20270",
+              "q20271",
+              "q20272",
+              "q20275",
+              "q20277",
+              "q20284",
+              "q20285",
+              "q20286",
+              "q20287",
+              "q20288",
+              "q20289",
+              "q20290",
+              "q20293",
+              "q20298",
+              "q20302",
+              "q20305",
+              "q20306",
+              "q20308",
+              "q20309",
+              "q20312",
+              "q20313",
+              "q20314",
+              "q20316",
+              "q20319",
+              "q20321",
+              "q20324",
+              "q20325",
+              "q20327",
+              "q20329",
+              "q20332",
+              "q20333",
+              "q20337",
+              "q20338",
+              "q20340",
+              "q20342",
+              "q20344",
+              "q20345",
+              "q20346",
+              "q20347",
+              "q20349",
+              "q20350",
+              "q20353",
+              "q20357",
+              "q20358",
+              "q20360",
+              "q20361",
+              "q20362",
+              "q20363",
+              "q20364",
+              "q20365",
+              "q20366",
+              "q20367",
+              "q20369",
+              "q20371",
+              "q20374",
+              "q20376",
+              "q20377",
+              "q20378",
+              "q20379",
+              "q20380",
+              "q20381",
+              "q20382",
+              "q20385",
+              "q20386",
+              "q20388",
+              "q20390",
+              "q20394",
+              "q20396",
+              "q20398",
+              "q20402",
+              "q20403",
+              "q20406",
+              "q20411",
+              "q20412",
+              "q20413",
+              "q20414",
+              "q20419",
+              "q20420",
+              "q20422",
+              "q20426",
+              "q20427",
+              "q20428",
+              "q20429",
+              "q20431",
+              "q20432",
+              "q20433",
+              "q20434",
+              "q20435",
+              "q20440",
+              "q20441",
+              "q20442",
+              "q20451",
+              "q20453",
+              "q20454",
+              "q20456",
+              "q20457",
+              "q20458",
+              "q20459",
+              "q20460",
+              "q20461",
+              "q20464",
+              "q20465",
+              "q20470",
+              "q20472",
+              "q20473",
+              "q20474",
+              "q20478",
+              "q20480",
+              "q20482",
+              "q20483",
+              "q20490",
+              "q20493",
+              "q20495",
+              "q20498",
+              "q20499",
+              "q20501",
+              "q20502",
+              "q20506",
+              "q20507",
+              "q20512",
+              "q20513",
+              "q20514",
+              "q20515",
+              "q20516",
+              "q20519",
+              "q20520",
+              "q20525",
+              "q20526",
+              "q20530",
+              "q20534",
+              "q20535",
+              "q20539",
+              "q20541",
+              "q20543",
+              "q20544",
+              "q20547",
+              "q20548",
+              "q20549",
+              "q20550",
+              "q20551",
+              "q20552",
+              "q20553",
+              "q20556",
+              "q20557",
+              "q20559",
+              "q20564",
+              "q20568",
+              "q20569",
+              "q20572",
+              "q20573",
+              "q20574",
+              "q20575",
+              "q20576",
+              "q20580",
+              "q20581",
+              "q20582",
+              "q20583",
+              "q20585",
+              "q20586",
+              "q20587",
+              "q20588",
+              "q20589",
+              "q20590",
+              "q20592",
+              "q20595",
+              "q20598",
+              "q20599",
+              "q20602"
+            ],
+            "queries": 500,
+            "query_repository": "CoIR-Retrieval/cosqa-queries-corpus"
+          },
+          {
+            "dataset": "codefeedback-st",
+            "overlap_queries": 0,
+            "overlap_query_ids": [],
+            "queries": 99,
+            "query_repository": "CoIR-Retrieval/codefeedback-st-queries-corpus"
+          }
+        ],
+        "executed_binary": {
+          "applicability": "unverified",
+          "attestation": "runtime-reported-embedded-model-sha256",
+          "attested_results": 0,
+          "binary_sha256": "603ce1c45512cc3449f0b58d46b624055bd7e4cf445b527775da7ffac735ed9b",
+          "observed_model_ids": [
+            "public-linear-reranker-v2"
+          ],
+          "observed_model_sha256": [],
+          "reason": "A model checksum, model ID, enabled mode, binary identity, or verified fit ledger is missing or mismatched.",
+          "results": 20
+        },
+        "overlap_queries": 431,
+        "queries": 1000,
+        "query_role": "regression",
+        "reference": {
+          "ledger_sha256": "9922bf01e102a8a0b3d680c555d2ce3452f02657e2228a22e1ea1e91d7d105d3",
+          "model_id": "public-linear-reranker-v2",
+          "model_sha256": "dedb2afa59d127be049f0ba1b1beb4e0cb8e2fabbbe13ad3e39bd58b9250bb1f",
+          "scope": "checkout-model",
+          "verified": true
+        },
+        "schema_version": 2,
+        "scope": "repository-qualified query-ID overlap against the checkout-reference model, not proof of executed-model disjointness, overfitting or semantic independence"
+      },
+      "generated_at": "2026-09-02T21:59:58.505223+00:00",
+      "harness_sha256": {
+        "eval_code_retrieval.py": "e2ddaf96768595fa1234178b744725f52f640147bdda855068e08cd7dcf8fc17",
+        "export_public_retrieval.py": "b09301b27223a0413f2e2956b0312c8e356d6419f50114d58247a9561fdf545f",
+        "public_retrieval_contracts.py": "c8f30e61b613ca466e38c02cbdda3e3089413b51ea05188ce9aa88be3d96f5cd",
+        "run_public_benchmark_matrix.py": "fe59e7f3915d21afa7253865d47a4ac237d05b66b75531f3c3623323d018383b"
+      },
+      "manifest_sha256": "42890f31b00e2f512375d0ae61e829f17f89da8e405f811a6dd342a3598a69f2",
+      "matrix_sha256": "2863f18dc92a046e1db572717d680c832f85dbe09c7de0439295a47323f2fdde",
+      "modes": [
+        "lexical",
+        "hash",
+        "hybrid",
+        "neural",
+        "blended"
+      ],
+      "profile": "public-core",
+      "queries": 1000,
+      "raw_result_files": [
+        {
+          "name": "codetrans-dl-lexical-run-1.json",
+          "sha256": "27976e07efa1c913615637983881979915034c423c1033fb9584084438e6f8b8"
+        },
+        {
+          "name": "codetrans-dl-hash-run-1.json",
+          "sha256": "62fbafbe983aff8c59f314e4215d9e388315ef503d777088885fc3f9f4e74324"
+        },
+        {
+          "name": "codetrans-dl-hybrid-run-1.json",
+          "sha256": "64912acaaf9d30a58457c88ab3baa8d0d9c52b8b593c02a60d00684633baa120"
+        },
+        {
+          "name": "codetrans-dl-neural-run-1.json",
+          "sha256": "936d0c8abce5969a6dfee212becccba0a4b9e948b5109c33089e4f8dc81fedbc"
+        },
+        {
+          "name": "codetrans-dl-blended-run-1.json",
+          "sha256": "6815b70cba22cee159fb9435a43c9bf0779416a8b469ad42e85bc54cd4267ddf"
+        },
+        {
+          "name": "codetrans-contest-lexical-run-1.json",
+          "sha256": "4d17e5fd9d2a85eee4bc203aa8ebc15b7203830b3c61ad6ea3ec2de1ce01bb40"
+        },
+        {
+          "name": "codetrans-contest-hash-run-1.json",
+          "sha256": "4513225202120b4783843bcdbd1afbd8e24809fd13675036aff9159423a49f64"
+        },
+        {
+          "name": "codetrans-contest-hybrid-run-1.json",
+          "sha256": "d4910e0fc040c8dce4288cc9a83fa4a5bfe6b5b6f4987cf31626b7e691f0c439"
+        },
+        {
+          "name": "codetrans-contest-neural-run-1.json",
+          "sha256": "e3ef31075d81da2e3f215ad3ee826e7ca62eabe9e7221c8ba9c166d143d461b7"
+        },
+        {
+          "name": "codetrans-contest-blended-run-1.json",
+          "sha256": "149b850a80e84969a3e19b689b950cb16386983857572622f336078ea3bde591"
+        },
+        {
+          "name": "cosqa-lexical-run-1.json",
+          "sha256": "04da33b83461e750155d4ad4ca858a9f678d7dd9a60d918f0c75776db5ef2eb4"
+        },
+        {
+          "name": "cosqa-hash-run-1.json",
+          "sha256": "427a79e00659cb70f4367ebbd4067e996137e60c74663eae839e6df8ae873ea6"
+        },
+        {
+          "name": "cosqa-hybrid-run-1.json",
+          "sha256": "778ff547d837974e3a24be5104518a331e3cb9d602fb29dd32895e3092bcd870"
+        },
+        {
+          "name": "cosqa-neural-run-1.json",
+          "sha256": "301dc77fb6b30b774e1169a024b50620162327e3f0712d980d96417e2b68c96d"
+        },
+        {
+          "name": "cosqa-blended-run-1.json",
+          "sha256": "2ce4d158d76764b0c7cf51bd55480cfe60bec67ff2702cb0f356b3f816c40269"
+        },
+        {
+          "name": "codefeedback-st-lexical-run-1.json",
+          "sha256": "b709596149933068dd8382a4fa56046a8003b27833a861473bb4d437f1a72e5e"
+        },
+        {
+          "name": "codefeedback-st-hash-run-1.json",
+          "sha256": "8abb0bcea65edd7a37476dc65b0376c3082737614cf2e3c34e739d6985a172d4"
+        },
+        {
+          "name": "codefeedback-st-hybrid-run-1.json",
+          "sha256": "6f5a4d1cb5f0968c45601efc6a15c5bec8ef1ac917ae2878e0de08f2590072b6"
+        },
+        {
+          "name": "codefeedback-st-neural-run-1.json",
+          "sha256": "7bdee3952ed6c68d9f57390f412978eaa1a6871bb91422d3b4b3c99f0591b6c0"
+        },
+        {
+          "name": "codefeedback-st-blended-run-1.json",
+          "sha256": "8e9f45e23e5c927deff9f2ffac910f82aaf818d8e0c0172c96745bed739eaa16"
+        }
+      ],
+      "repetitions": 1,
+      "runtime": {
+        "cpu_model": "aarch64",
+        "logical_cpus": 32,
+        "machine": "aarch64",
+        "physical_memory_bytes": 132651511808,
+        "python": "3.14.5",
+        "release": "6.8.0-1057-aws",
+        "system": "Linux"
+      },
+      "task_metrics": {
+        "codefeedback-st": {
+          "blended": {
+            "mrr_at_10": 0.5920995670995671,
+            "ndcg_at_10": 0.6249389478698214,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.7272727272727273
+          },
+          "hash": {
+            "mrr_at_10": 0.5920995670995671,
+            "ndcg_at_10": 0.6249389478698214,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.7272727272727273
+          },
+          "hybrid": {
+            "mrr_at_10": 0.5920995670995671,
+            "ndcg_at_10": 0.6249389478698214,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.7272727272727273
+          },
+          "lexical": {
+            "mrr_at_10": 0.5920995670995671,
+            "ndcg_at_10": 0.6249389478698214,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.7272727272727273
+          },
+          "neural": {
+            "mrr_at_10": 0.6631313131313132,
+            "ndcg_at_10": 0.6915579250033351,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.7878787878787878
+          }
+        },
+        "codetrans-contest": {
+          "blended": {
+            "mrr_at_10": 0.3346925949867126,
+            "ndcg_at_10": 0.37526570305163126,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.5067873303167421
+          },
+          "hash": {
+            "mrr_at_10": 0.3352402499461323,
+            "ndcg_at_10": 0.3757714863360738,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.5067873303167421
+          },
+          "hybrid": {
+            "mrr_at_10": 0.33517740429505133,
+            "ndcg_at_10": 0.37570617013190305,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.5067873303167421
+          },
+          "lexical": {
+            "mrr_at_10": 0.33954427925016156,
+            "ndcg_at_10": 0.37887621035658503,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.5067873303167421
+          },
+          "neural": {
+            "mrr_at_10": 0.3443259355024061,
+            "ndcg_at_10": 0.3843995833720922,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.5158371040723982
+          }
+        },
+        "codetrans-dl": {
+          "blended": {
+            "mrr_at_10": 0.14675705467372133,
+            "ndcg_at_10": 0.23211988339961012,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.5777777777777777
+          },
+          "hash": {
+            "mrr_at_10": 0.1544620811287478,
+            "ndcg_at_10": 0.23825885514340506,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.5777777777777777
+          },
+          "hybrid": {
+            "mrr_at_10": 0.14780202821869487,
+            "ndcg_at_10": 0.23328257329774885,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.5777777777777777
+          },
+          "lexical": {
+            "mrr_at_10": 0.14862874779541446,
+            "ndcg_at_10": 0.23620354480150196,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.5888888888888889
+          },
+          "neural": {
+            "mrr_at_10": 0.14097663139329805,
+            "ndcg_at_10": 0.22643551887588395,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.5666666666666667
+          }
+        },
+        "cosqa": {
+          "blended": {
+            "mrr_at_10": 0.10490396825396826,
+            "ndcg_at_10": 0.14068574130153308,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.35
+          },
+          "hash": {
+            "mrr_at_10": 0.11577777777777777,
+            "ndcg_at_10": 0.15330534739766183,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.368
+          },
+          "hybrid": {
+            "mrr_at_10": 0.11527777777777777,
+            "ndcg_at_10": 0.15290484100666568,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.368
+          },
+          "lexical": {
+            "mrr_at_10": 0.10743650793650794,
+            "ndcg_at_10": 0.1459351242473577,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.366
+          },
+          "neural": {
+            "mrr_at_10": 0.10246031746031746,
+            "ndcg_at_10": 0.13750747938486976,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.34
+          }
+        }
+      },
+      "weighted_metrics": {
+        "blended": {
+          "mrr_at_10": 0.21145317460317462,
+          "ndcg_at_10": 0.2569271258762192,
+          "no_hit_rate": 0.0,
+          "recall_at_20": 0.463
+        },
+        "hash": {
+          "mrr_at_10": 0.21839801587301588,
+          "ndcg_at_10": 0.2644537219440285,
+          "no_hit_rate": 0.0,
+          "recall_at_20": 0.472
+        },
+        "hybrid": {
+          "mrr_at_10": 0.21693531746031747,
+          "ndcg_at_10": 0.2633433031351905,
+          "no_hit_rate": 0.0,
+          "recall_at_20": 0.472
+        },
+        "lexical": {
+          "mrr_at_10": 0.21412857142857145,
+          "ndcg_at_10": 0.2610847985158668,
+          "no_hit_rate": 0.0,
+          "recall_at_20": 0.473
+        },
+        "neural": {
+          "mrr_at_10": 0.21835198412698412,
+          "ndcg_at_10": 0.2629286755906566,
+          "no_hit_rate": 0.0,
+          "recall_at_20": 0.464
+        }
+      }
+    },
+    "candidate": {
+      "fit_query_audit": {
+        "datasets": [
+          {
+            "dataset": "codetrans-dl",
+            "overlap_queries": 72,
+            "overlap_query_ids": [
+              "638",
+              "639",
+              "640",
+              "645",
+              "649",
+              "650",
+              "651",
+              "652",
+              "654",
+              "655",
+              "656",
+              "658",
+              "661",
+              "663",
+              "667",
+              "673",
+              "676",
+              "679",
+              "682",
+              "685",
+              "687",
+              "690",
+              "692",
+              "696",
+              "698",
+              "699",
+              "701",
+              "707",
+              "715",
+              "718",
+              "720",
+              "721",
+              "722",
+              "724",
+              "725",
+              "726",
+              "727",
+              "730",
+              "731",
+              "736",
+              "738",
+              "739",
+              "740",
+              "742",
+              "745",
+              "746",
+              "748",
+              "756",
+              "757",
+              "758",
+              "761",
+              "766",
+              "768",
+              "770",
+              "774",
+              "777",
+              "778",
+              "780",
+              "781",
+              "783",
+              "784",
+              "786",
+              "788",
+              "793",
+              "795",
+              "796",
+              "797",
+              "798",
+              "799",
+              "804",
+              "807",
+              "808"
+            ],
+            "queries": 180,
+            "query_repository": "CoIR-Retrieval/codetrans-dl-queries-corpus"
+          },
+          {
+            "dataset": "codetrans-contest",
+            "overlap_queries": 110,
+            "overlap_query_ids": [
+              "q101",
+              "q104",
+              "q105",
+              "q107",
+              "q108",
+              "q109",
+              "q111",
+              "q113",
+              "q114",
+              "q117",
+              "q118",
+              "q122",
+              "q126",
+              "q129",
+              "q135",
+              "q136",
+              "q137",
+              "q138",
+              "q142",
+              "q143",
+              "q144",
+              "q147",
+              "q148",
+              "q149",
+              "q152",
+              "q154",
+              "q155",
+              "q157",
+              "q159",
+              "q160",
+              "q162",
+              "q163",
+              "q166",
+              "q167",
+              "q170",
+              "q171",
+              "q172",
+              "q175",
+              "q177",
+              "q179",
+              "q182",
+              "q186",
+              "q187",
+              "q191",
+              "q192",
+              "q194",
+              "q205",
+              "q207",
+              "q208",
+              "q209",
+              "q210",
+              "q214",
+              "q215",
+              "q218",
+              "q219",
+              "q252",
+              "q263",
+              "q268",
+              "q285",
+              "q286",
+              "q287",
+              "q289",
+              "q294",
+              "q295",
+              "q296",
+              "q300",
+              "q301",
+              "q302",
+              "q305",
+              "q307",
+              "q311",
+              "q313",
+              "q315",
+              "q317",
+              "q318",
+              "q321",
+              "q323",
+              "q381",
+              "q382",
+              "q383",
+              "q449",
+              "q450",
+              "q451",
+              "q454",
+              "q457",
+              "q458",
+              "q459",
+              "q460",
+              "q462",
+              "q463",
+              "q467",
+              "q468",
+              "q469",
+              "q47",
+              "q472",
+              "q473",
+              "q475",
+              "q478",
+              "q480",
+              "q481",
+              "q483",
+              "q484",
+              "q486",
+              "q487",
+              "q488",
+              "q93",
+              "q95",
+              "q96",
+              "q97",
+              "q99"
+            ],
+            "queries": 221,
+            "query_repository": "CoIR-Retrieval/codetrans-contest-queries-corpus"
+          },
+          {
+            "dataset": "cosqa",
+            "overlap_queries": 249,
+            "overlap_query_ids": [
+              "q20105",
+              "q20106",
+              "q20107",
+              "q20108",
+              "q20111",
+              "q20113",
+              "q20115",
+              "q20116",
+              "q20119",
+              "q20122",
+              "q20126",
+              "q20128",
+              "q20130",
+              "q20132",
+              "q20133",
+              "q20134",
+              "q20135",
+              "q20138",
+              "q20140",
+              "q20142",
+              "q20147",
+              "q20148",
+              "q20149",
+              "q20151",
+              "q20153",
+              "q20155",
+              "q20156",
+              "q20158",
+              "q20160",
+              "q20161",
+              "q20162",
+              "q20163",
+              "q20164",
+              "q20168",
+              "q20169",
+              "q20170",
+              "q20181",
+              "q20182",
+              "q20184",
+              "q20185",
+              "q20186",
+              "q20188",
+              "q20189",
+              "q20193",
+              "q20195",
+              "q20201",
+              "q20203",
+              "q20205",
+              "q20207",
+              "q20209",
+              "q20210",
+              "q20211",
+              "q20213",
+              "q20216",
+              "q20217",
+              "q20219",
+              "q20221",
+              "q20224",
+              "q20227",
+              "q20228",
+              "q20234",
+              "q20235",
+              "q20236",
+              "q20238",
+              "q20239",
+              "q20240",
+              "q20241",
+              "q20243",
+              "q20244",
+              "q20245",
+              "q20247",
+              "q20248",
+              "q20253",
+              "q20254",
+              "q20255",
+              "q20257",
+              "q20259",
+              "q20260",
+              "q20264",
+              "q20265",
+              "q20266",
+              "q20270",
+              "q20271",
+              "q20272",
+              "q20275",
+              "q20277",
+              "q20284",
+              "q20285",
+              "q20286",
+              "q20287",
+              "q20288",
+              "q20289",
+              "q20290",
+              "q20293",
+              "q20298",
+              "q20302",
+              "q20305",
+              "q20306",
+              "q20308",
+              "q20309",
+              "q20312",
+              "q20313",
+              "q20314",
+              "q20316",
+              "q20319",
+              "q20321",
+              "q20324",
+              "q20325",
+              "q20327",
+              "q20329",
+              "q20332",
+              "q20333",
+              "q20337",
+              "q20338",
+              "q20340",
+              "q20342",
+              "q20344",
+              "q20345",
+              "q20346",
+              "q20347",
+              "q20349",
+              "q20350",
+              "q20353",
+              "q20357",
+              "q20358",
+              "q20360",
+              "q20361",
+              "q20362",
+              "q20363",
+              "q20364",
+              "q20365",
+              "q20366",
+              "q20367",
+              "q20369",
+              "q20371",
+              "q20374",
+              "q20376",
+              "q20377",
+              "q20378",
+              "q20379",
+              "q20380",
+              "q20381",
+              "q20382",
+              "q20385",
+              "q20386",
+              "q20388",
+              "q20390",
+              "q20394",
+              "q20396",
+              "q20398",
+              "q20402",
+              "q20403",
+              "q20406",
+              "q20411",
+              "q20412",
+              "q20413",
+              "q20414",
+              "q20419",
+              "q20420",
+              "q20422",
+              "q20426",
+              "q20427",
+              "q20428",
+              "q20429",
+              "q20431",
+              "q20432",
+              "q20433",
+              "q20434",
+              "q20435",
+              "q20440",
+              "q20441",
+              "q20442",
+              "q20451",
+              "q20453",
+              "q20454",
+              "q20456",
+              "q20457",
+              "q20458",
+              "q20459",
+              "q20460",
+              "q20461",
+              "q20464",
+              "q20465",
+              "q20470",
+              "q20472",
+              "q20473",
+              "q20474",
+              "q20478",
+              "q20480",
+              "q20482",
+              "q20483",
+              "q20490",
+              "q20493",
+              "q20495",
+              "q20498",
+              "q20499",
+              "q20501",
+              "q20502",
+              "q20506",
+              "q20507",
+              "q20512",
+              "q20513",
+              "q20514",
+              "q20515",
+              "q20516",
+              "q20519",
+              "q20520",
+              "q20525",
+              "q20526",
+              "q20530",
+              "q20534",
+              "q20535",
+              "q20539",
+              "q20541",
+              "q20543",
+              "q20544",
+              "q20547",
+              "q20548",
+              "q20549",
+              "q20550",
+              "q20551",
+              "q20552",
+              "q20553",
+              "q20556",
+              "q20557",
+              "q20559",
+              "q20564",
+              "q20568",
+              "q20569",
+              "q20572",
+              "q20573",
+              "q20574",
+              "q20575",
+              "q20576",
+              "q20580",
+              "q20581",
+              "q20582",
+              "q20583",
+              "q20585",
+              "q20586",
+              "q20587",
+              "q20588",
+              "q20589",
+              "q20590",
+              "q20592",
+              "q20595",
+              "q20598",
+              "q20599",
+              "q20602"
+            ],
+            "queries": 500,
+            "query_repository": "CoIR-Retrieval/cosqa-queries-corpus"
+          },
+          {
+            "dataset": "codefeedback-st",
+            "overlap_queries": 0,
+            "overlap_query_ids": [],
+            "queries": 99,
+            "query_repository": "CoIR-Retrieval/codefeedback-st-queries-corpus"
+          }
+        ],
+        "executed_binary": {
+          "applicability": "verified",
+          "attestation": "runtime-reported-embedded-model-sha256",
+          "attested_results": 20,
+          "binary_sha256": "f34119d4bb46fc7429b034832a74e48e1a60d93faeff41692adb1934c1e3a9c8",
+          "observed_model_ids": [
+            "public-linear-reranker-v2"
+          ],
+          "observed_model_sha256": [
+            "dedb2afa59d127be049f0ba1b1beb4e0cb8e2fabbbe13ad3e39bd58b9250bb1f"
+          ],
+          "reason": "Every result reports the model bytes bound to the fit ledger; this does not attest invocation on every query.",
+          "results": 20
+        },
+        "overlap_queries": 431,
+        "queries": 1000,
+        "query_role": "regression",
+        "reference": {
+          "ledger_sha256": "9922bf01e102a8a0b3d680c555d2ce3452f02657e2228a22e1ea1e91d7d105d3",
+          "model_id": "public-linear-reranker-v2",
+          "model_sha256": "dedb2afa59d127be049f0ba1b1beb4e0cb8e2fabbbe13ad3e39bd58b9250bb1f",
+          "scope": "checkout-model",
+          "verified": true
+        },
+        "schema_version": 2,
+        "scope": "repository-qualified query-ID overlap against the checkout-reference model, not proof of executed-model disjointness, overfitting or semantic independence"
+      },
+      "generated_at": "2026-09-02T21:59:53.531787+00:00",
+      "harness_sha256": {
+        "eval_code_retrieval.py": "e2ddaf96768595fa1234178b744725f52f640147bdda855068e08cd7dcf8fc17",
+        "export_public_retrieval.py": "b09301b27223a0413f2e2956b0312c8e356d6419f50114d58247a9561fdf545f",
+        "public_retrieval_contracts.py": "c8f30e61b613ca466e38c02cbdda3e3089413b51ea05188ce9aa88be3d96f5cd",
+        "run_public_benchmark_matrix.py": "fe59e7f3915d21afa7253865d47a4ac237d05b66b75531f3c3623323d018383b"
+      },
+      "manifest_sha256": "42890f31b00e2f512375d0ae61e829f17f89da8e405f811a6dd342a3598a69f2",
+      "matrix_sha256": "0298bd5c868dd9e2ec3256661537520f0365c867fbe25f8785d7025bee053d0d",
+      "modes": [
+        "lexical",
+        "hash",
+        "hybrid",
+        "neural",
+        "blended"
+      ],
+      "profile": "public-core",
+      "queries": 1000,
+      "raw_result_files": [
+        {
+          "name": "codetrans-dl-lexical-run-1.json",
+          "sha256": "ea427e6d17822d07c7d272a930382c9db442c90eb52739d22865c58db114c828"
+        },
+        {
+          "name": "codetrans-dl-hash-run-1.json",
+          "sha256": "45957f383f7f959c4fca9119425e42cab1b364777347a85d48c45ca42bae7039"
+        },
+        {
+          "name": "codetrans-dl-hybrid-run-1.json",
+          "sha256": "c5ad6bcd837c2a2396e2cf330e3d42aa8eb7d81e064d9e396e4ed177a0c3e64e"
+        },
+        {
+          "name": "codetrans-dl-neural-run-1.json",
+          "sha256": "217dfb80a59ab368f0003dc118e4f9bd110cae710a012180c592340fdfd855ac"
+        },
+        {
+          "name": "codetrans-dl-blended-run-1.json",
+          "sha256": "54720987fd8fcdda3d0d4df678cc9971720431129818f82d63954903bf85d9bb"
+        },
+        {
+          "name": "codetrans-contest-lexical-run-1.json",
+          "sha256": "83cb03c5e794a3c82de2d2c6996cbd660c3b31e3aa6e2d17bd67652b80e7db49"
+        },
+        {
+          "name": "codetrans-contest-hash-run-1.json",
+          "sha256": "5e9ab324c2bade9d6c5f525c65c1b51b63c03160f095ac20bfaf77621df419fe"
+        },
+        {
+          "name": "codetrans-contest-hybrid-run-1.json",
+          "sha256": "894998f0f1c07b1dc273edac9ebef8604134d47b9d484dbd166744a79dd46403"
+        },
+        {
+          "name": "codetrans-contest-neural-run-1.json",
+          "sha256": "6f500959ae114dd7bd311a6984c0605edd481123ad631c8a05d9efa05aef268b"
+        },
+        {
+          "name": "codetrans-contest-blended-run-1.json",
+          "sha256": "8352cbcc2e3a79848f122b77d64d2c11098faadede276d285b8d4627f76e2b13"
+        },
+        {
+          "name": "cosqa-lexical-run-1.json",
+          "sha256": "8a005fc3665ba62dc5569ff199d186f5e551c5f7ff61b99604db1dc03554ebbf"
+        },
+        {
+          "name": "cosqa-hash-run-1.json",
+          "sha256": "b33526cc61bb033bfea78789a8c3d281e10faef3eb959e7d3bc4afd3dfc92188"
+        },
+        {
+          "name": "cosqa-hybrid-run-1.json",
+          "sha256": "ac352240be33ff014ee9aaf356241acefce9ada632822bded81f5a9730546be2"
+        },
+        {
+          "name": "cosqa-neural-run-1.json",
+          "sha256": "318354c53a2d04fa9574511e3ce4831e3d52b0088fde4eda4ec93e4627c57994"
+        },
+        {
+          "name": "cosqa-blended-run-1.json",
+          "sha256": "a60e6e6375f556665f941e3cf413acddfe4f93cdfd6ab1ecdc00be76497fbf95"
+        },
+        {
+          "name": "codefeedback-st-lexical-run-1.json",
+          "sha256": "6fc03ae059a9f26d5df3736a466353423cb042d3e158fd4946a1b0dc06cfabcb"
+        },
+        {
+          "name": "codefeedback-st-hash-run-1.json",
+          "sha256": "1e2eb7e447c1edd38dc87be7740b884338bc51b6abe979711c39761997b3f5b1"
+        },
+        {
+          "name": "codefeedback-st-hybrid-run-1.json",
+          "sha256": "b65c4360816507907eb2011a43620da623f4fcd446305fd7957b430c23964be2"
+        },
+        {
+          "name": "codefeedback-st-neural-run-1.json",
+          "sha256": "cc1c27afeff27d21d1ccb7fc18f3f5d852e103d50779f028aa98ceed10d63151"
+        },
+        {
+          "name": "codefeedback-st-blended-run-1.json",
+          "sha256": "9661b82f1a58c01e8c551a4031bb0a225d076f5223b6605d39356447afe0fec4"
+        }
+      ],
+      "repetitions": 1,
+      "runtime": {
+        "cpu_model": "aarch64",
+        "logical_cpus": 32,
+        "machine": "aarch64",
+        "physical_memory_bytes": 132651511808,
+        "python": "3.14.5",
+        "release": "6.8.0-1057-aws",
+        "system": "Linux"
+      },
+      "task_metrics": {
+        "codefeedback-st": {
+          "blended": {
+            "mrr_at_10": 0.5920995670995671,
+            "ndcg_at_10": 0.6249389478698214,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.7272727272727273
+          },
+          "hash": {
+            "mrr_at_10": 0.5920995670995671,
+            "ndcg_at_10": 0.6249389478698214,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.7272727272727273
+          },
+          "hybrid": {
+            "mrr_at_10": 0.5937830687830689,
+            "ndcg_at_10": 0.6262614706331695,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.7272727272727273
+          },
+          "lexical": {
+            "mrr_at_10": 0.5920995670995671,
+            "ndcg_at_10": 0.6249389478698214,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.7272727272727273
+          },
+          "neural": {
+            "mrr_at_10": 0.6434343434343435,
+            "ndcg_at_10": 0.6740221195016852,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.7676767676767676
+          }
+        },
+        "codetrans-contest": {
+          "blended": {
+            "mrr_at_10": 0.33468541262658913,
+            "ndcg_at_10": 0.37527320403598796,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.5067873303167421
+          },
+          "hash": {
+            "mrr_at_10": 0.3351702219349278,
+            "ndcg_at_10": 0.3757136711162597,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.5067873303167421
+          },
+          "hybrid": {
+            "mrr_at_10": 0.3349762982115923,
+            "ndcg_at_10": 0.37551336112976447,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.5067873303167421
+          },
+          "lexical": {
+            "mrr_at_10": 0.33946347769877183,
+            "ndcg_at_10": 0.37879535761202576,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.5067873303167421
+          },
+          "neural": {
+            "mrr_at_10": 0.34631365366659483,
+            "ndcg_at_10": 0.3862443474868419,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.5158371040723982
+          }
+        },
+        "codetrans-dl": {
+          "blended": {
+            "mrr_at_10": 0.14094356261022928,
+            "ndcg_at_10": 0.22634714467516182,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.5777777777777777
+          },
+          "hash": {
+            "mrr_at_10": 0.15529541446208112,
+            "ndcg_at_10": 0.24175837070772233,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.5888888888888889
+          },
+          "hybrid": {
+            "mrr_at_10": 0.1508289241622575,
+            "ndcg_at_10": 0.2333275406647944,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.5722222222222222
+          },
+          "lexical": {
+            "mrr_at_10": 0.1519863315696649,
+            "ndcg_at_10": 0.23755017140173224,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.5833333333333334
+          },
+          "neural": {
+            "mrr_at_10": 0.14391754850088181,
+            "ndcg_at_10": 0.22741413435716953,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.5722222222222222
+          }
+        },
+        "cosqa": {
+          "blended": {
+            "mrr_at_10": 0.10915000000000001,
+            "ndcg_at_10": 0.14680002598381867,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.36
+          },
+          "hash": {
+            "mrr_at_10": 0.11357777777777778,
+            "ndcg_at_10": 0.15125093675931187,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.368
+          },
+          "hybrid": {
+            "mrr_at_10": 0.11357777777777778,
+            "ndcg_at_10": 0.15125093675931187,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.368
+          },
+          "lexical": {
+            "mrr_at_10": 0.10743650793650794,
+            "ndcg_at_10": 0.1459351242473577,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.366
+          },
+          "neural": {
+            "mrr_at_10": 0.10753730158730158,
+            "ndcg_at_10": 0.14513843068805488,
+            "no_hit_rate": 0.0,
+            "recall_at_20": 0.356
+          }
+        }
+      },
+      "weighted_metrics": {
+        "blended": {
+          "mrr_at_10": 0.2125281746031746,
+          "ndcg_at_10": 0.2589468329645041,
+          "no_hit_rate": 0.0,
+          "recall_at_20": 0.468
+        },
+        "hash": {
+          "mrr_at_10": 0.2174325396825397,
+          "ndcg_at_10": 0.26404365226285165,
+          "no_hit_rate": 0.0,
+          "recall_at_20": 0.474
+        },
+        "hybrid": {
+          "mrr_at_10": 0.21675238095238095,
+          "ndcg_at_10": 0.26261276410168066,
+          "no_hit_rate": 0.0,
+          "recall_at_20": 0.471
+        },
+        "lexical": {
+          "mrr_at_10": 0.21471507936507936,
+          "ndcg_at_10": 0.26130932284736064,
+          "no_hit_rate": 0.0,
+          "recall_at_20": 0.472
+        },
+        "neural": {
+          "mrr_at_10": 0.21990912698412696,
+          "ndcg_at_10": 0.26559195015357684,
+          "no_hit_rate": 0.0,
+          "recall_at_20": 0.471
+        }
+      }
+    }
+  },
+  "query_retention": {
+    "codefeedback-st": {
+      "neural_gained_at_20": [],
+      "neural_lost_at_20": [
+        "q82302",
+        "q94089"
+      ]
+    },
+    "codetrans-contest": {
+      "neural_gained_at_20": [],
+      "neural_lost_at_20": []
+    },
+    "codetrans-dl": {
+      "neural_gained_at_20": [
+        "643",
+        "733",
+        "760",
+        "809"
+      ],
+      "neural_lost_at_20": [
+        "730",
+        "746",
+        "775"
+      ]
+    },
+    "cosqa": {
+      "neural_gained_at_20": [
+        "q20135",
+        "q20146",
+        "q20156",
+        "q20180",
+        "q20259",
+        "q20273",
+        "q20428",
+        "q20491",
+        "q20518",
+        "q20604"
+      ],
+      "neural_lost_at_20": [
+        "q20327",
+        "q20447"
+      ]
+    }
+  },
+  "schema_version": 1,
+  "scope": "Single-run quality regression evidence, not a latency benchmark or state-of-the-art claim. Independent runs overlapped other work on disjoint CPU affinities. ANN/index tie variation can affect individual results, including lexical results.",
+  "source_note": "The candidate was built from uncommitted changes over base_commit. Its exact source-input hash and binary hash distinguish it from the clean baseline. Matrix commit labels record the base, not a claim that the candidate equals that commit.",
+  "unchanged_gates_passed": true,
+  "validation": {
+    "current_head_neural_queries": 23,
+    "daemon_equivalence_cases": 7,
+    "explicit_stress_tests": 11,
+    "python_tests": 260,
+    "rust_tests": 1085,
+    "worktree_equivalence_checks": 116
+  }
+}

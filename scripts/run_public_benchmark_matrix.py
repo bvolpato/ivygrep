@@ -363,6 +363,8 @@ def main() -> int:
     parser.add_argument("--max-query-chars", type=int)
     parser.add_argument("--skip-build", action="store_true")
     parser.add_argument("--skip-export", action="store_true")
+    parser.add_argument("--require-fit-disjoint", action="store_true",
+                        help="require zero fit-ID overlap and a runtime model checksum matching the fit ledger")
     parser.add_argument(
         "--source-commit",
         help="Commit used to build --binary; defaults to the current checkout.",
@@ -404,6 +406,12 @@ def main() -> int:
     fit_query_audit = contracts.audit_public_profile(
         manifest, args.profile, dataset_paths, args.manifest
     )
+    if args.require_fit_disjoint and (
+        fit_query_audit.get("reference", {}).get("verified") is not True
+        or fit_query_audit.get("overlap_queries") != 0
+        or fit_query_audit.get("queries", 0) <= 0
+    ):
+        raise ValueError("requested fit-disjoint profile lacks a verified zero-overlap fit-ID ledger")
     subprocess.run(
         [
             sys.executable,
@@ -477,24 +485,9 @@ def main() -> int:
     for dataset in dataset_paths:
         if contracts.dataset_fingerprint(dataset) != dataset_content[dataset.name]:
             raise ValueError("dataset content changed during matrix assembly")
-    # Observed IDs and binary bytes do not attest which model bytes it embeds.
-    fit_query_audit["executed_binary"].update(
-        {
-            "binary_sha256": binary_sha256,
-            "observed_model_ids": sorted(
-                {
-                    model_id
-                    for result in results
-                    if isinstance(
-                        model_id := result.get("index_configuration", {}).get(
-                            "reranker_model"
-                        ),
-                        str,
-                    )
-                }
-            ),
-        }
-    )
+    fit_query_audit = contracts.attest_executed_fit_model(fit_query_audit, results, binary_sha256)
+    if args.require_fit_disjoint and not contracts.verified_fit_disjoint(fit_query_audit):
+        raise ValueError("fit-disjoint validation requires zero overlap and matching executed-model checksum attestation")
     aggregation = {
         "source_commit": benchmark_revision(root, None),
         "runtime": eval_code_retrieval.runtime_metadata(),
