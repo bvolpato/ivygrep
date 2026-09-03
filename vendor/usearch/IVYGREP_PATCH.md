@@ -20,6 +20,12 @@ This metadata path does not validate full vector or node payload integrity.
 Search and deep health checks still open the native store. The serialized
 USearch format is unchanged.
 
+On AArch64 GCC/Clang builds, half-to-single conversion uses the compiler's
+`__fp16` conversion instead of the software bit-manipulation path. This does not
+enable optional FP16 arithmetic or change the stored representation. ivygrep's
+vector-store tests round-trip every finite half value, including signed zeros
+and subnormals. Other architectures keep the existing portable conversion.
+
 Upstream drafts cover reserve sizing in
 [unum-cloud/USearch#777](https://github.com/unum-cloud/USearch/pull/777) and
 Cargo-selected Windows CRT linkage in

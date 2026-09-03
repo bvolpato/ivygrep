@@ -60,7 +60,7 @@ fn main() {
     println!("cargo:rerun-if-changed=rust/lib.rs");
     println!("cargo:rerun-if-changed=rust/lib.cpp");
     println!("cargo:rerun-if-changed=rust/lib.hpp");
-    println!("cargo:rerun-if-changed=include/index_plugins.hpp");
-    println!("cargo:rerun-if-changed=include/index_dense.hpp");
+    println!("cargo:rerun-if-changed=include/usearch/index_plugins.hpp");
+    println!("cargo:rerun-if-changed=include/usearch/index_dense.hpp");
     println!("cargo:rerun-if-changed=include/usearch/index.hpp");
 }

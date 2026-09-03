@@ -282,10 +282,19 @@ jobs:
           fi
           BENCH_ROOT="$("$PYTHON" -c 'import tempfile; print(tempfile.gettempdir())')"
           BENCH_HOME="$BENCH_ROOT/ivygrep-daemon-equivalence"
+          echo "EQUIVALENCE_HOME=$BENCH_HOME" >> "$GITHUB_ENV"
           "$PYTHON" scripts/check_daemon_equivalence.py \
             --skip-build \
             --binary "$IG_BIN" \
             --bench-home "$BENCH_HOME"
+
+      - name: Preserve failing worktree replay journals
+        if: failure() && env.EQUIVALENCE_HOME != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: worktree-replay-${{ strategy.job-index }}
+          path: ${{ env.EQUIVALENCE_HOME }}/layers-*/lifecycle-*.json
+          if-no-files-found: ignore
 
       - name: Install uv for neural model caching
         if: matrix.validate_backend != ''

@@ -139,6 +139,8 @@ pub struct WorkspaceStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reranker_model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reranker_model_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reranker_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub neural_backend: Option<String>,
@@ -1716,6 +1718,7 @@ pub fn list_workspaces() -> Result<Vec<WorkspaceStatus>> {
                 reranker_candidate_limit: crate::search::rerank_candidate_limit(),
                 reranker_mode: reranker.mode.clone(),
                 reranker_model: reranker.model_id.clone(),
+                reranker_model_sha256: reranker.model_sha256.clone(),
                 reranker_error: reranker.error.clone(),
                 neural_backend,
                 enhancing_in_progress,

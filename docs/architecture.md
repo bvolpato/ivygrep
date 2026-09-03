@@ -531,6 +531,24 @@ release workflows. Neural backend acceptance separately forces neural retrieval
 and requires `neural_executed: true`; model caches can be pre-populated for
 offline checks.
 
+The daemon/local equivalence harness also runs a seeded worktree lifecycle
+campaign (nine steps by default). Every step checks the base and both worktrees
+against freshly built standalone indexes, including overlay/tombstone storage
+invariants. Live edits and offline edits followed by a daemon restart must become
+visible without an explicit reindex. For a longer reproducible campaign:
+
+```bash
+python3 scripts/check_daemon_equivalence.py --skip-build --binary target/release/ig \
+  --bench-home /tmp/ivygrep-lifecycle --worktree-seed 42 --worktree-seed 20260902 \
+  --worktree-steps 90
+```
+
+Operation journals under the benchmark home identify the seed and failing step.
+Literal and regex comparisons are exhaustive; randomized vector comparisons
+cover each visible or deleted path separately. Broad-query top-k equality is
+not an invariant because BM25 statistics differ between layers and a full index.
+This campaign checks content visibility, not equivalence of relevance scores.
+
 Performance and relevance changes need comparable before/after evidence. Keep
 hardware, corpus, model, build profile, query set, warmup, and concurrency fixed.
 Synthetic scale measurements are not semantic-quality evidence.

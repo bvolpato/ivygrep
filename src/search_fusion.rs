@@ -111,7 +111,8 @@ pub(super) fn fuse_rrf_with_context(
         // Hash vectors are a cheap provisional recall tier. Keep full strength
         // for semantic-only discovery, but do not let hash collisions overrule
         // direct evidence. Neural vectors use semantic_direct_weight=1.0.
-        let direct_weight = if direct_ids.contains(&chunk.vector_key) {
+        let has_direct_evidence = direct_ids.contains(&chunk.vector_key);
+        let direct_weight = if has_direct_evidence {
             semantic_direct_weight
         } else {
             1.0
@@ -121,10 +122,19 @@ pub(super) fn fuse_rrf_with_context(
             .fold(source_bit("semantic"), |mask, source| {
                 mask | source_bit(source)
             });
+        let rank_vote = SEMANTIC_WEIGHT / (K + rank as f32 + 1.0);
+        let similarity_bonus = normalize_semantic_score(semantic_score) * SEMANTIC_SCORE_WEIGHT;
+        // Cosine scales vary across models and corpora. When corroborating a
+        // direct candidate, the raw score is a tie-breaker, not several extra
+        // rank votes. Preserve full confidence scoring for semantic-only recall.
+        let similarity_bonus = if has_direct_evidence {
+            similarity_bonus.min(rank_vote)
+        } else {
+            similarity_bonus
+        };
         add_entry(
             chunk,
-            direct_weight * SEMANTIC_WEIGHT / (K + rank as f32 + 1.0)
-                + direct_weight * normalize_semantic_score(semantic_score) * SEMANTIC_SCORE_WEIGHT,
+            direct_weight * (rank_vote + similarity_bonus),
             semantic_source_mask,
         );
     }

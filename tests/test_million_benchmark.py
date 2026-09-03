@@ -5,6 +5,7 @@ import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -55,6 +56,224 @@ def artifact(
 
 
 class MillionBenchmarkTest(unittest.TestCase):
+    def report_inputs(self):
+        names = {
+            "index_baseline": "index-baseline",
+            "index_current": "index-current",
+            "system_baseline": "system-baseline",
+            "system_current": "system-current",
+            "paired_baseline": "query-baseline",
+            "paired_current": "query-current",
+            "quality_baseline": "quality-current",
+            "quality_current": "quality-current",
+        }
+        return {
+            name: json.loads((ROOT / "docs/benchmarks" / f"public-million-{suffix}.json").read_text())
+            for name, suffix in names.items()
+        }
+
+    def test_report_does_not_turn_unobserved_resources_into_improvements(self):
+        inputs = self.report_inputs()
+        for name in ("index_current", "system_current"):
+            inputs[name]["index"]["metrics"].update(
+                resource_samples=0, peak_rss_bytes=0, cpu_ms=0,
+                filesystem_read_bytes=0, filesystem_write_bytes=0,
+            )
+        with mock.patch.object(comparator, "bootstrap_p95_ratio", return_value={
+            "observed": 0.4, "ci95_lower": 0.35, "ci95_upper": 0.45,
+        }):
+            report = renderer.build_report(**inputs)
+        for name in ("peak_rss_bytes", "filesystem_read_bytes", "filesystem_write_bytes"):
+            self.assertIsNone(report["indexing"][name]["current"])
+            self.assertIsNone(report["indexing"][name]["ratio"])
+        self.assertIsNone(report["saturated_full_run"]["current_index_cpu_ms"])
+        self.assertEqual(report["indexing"]["wall_ms"]["current"],
+                         inputs["index_current"]["index"]["metrics"]["wall_ms"])
+        # Final disk accounting is measured separately from process sampling.
+        self.assertEqual(report["indexing"]["peak_disk_bytes"]["current"],
+                         inputs["index_current"]["index"]["metrics"]["peak_disk_bytes"])
+        self.assertFalse(report["gate"]["indexing_ceiling_documented"])
+        markdown = renderer.render_markdown(report)
+        self.assertIn("unobserved", markdown)
+        self.assertIn("(n/a)", markdown)
+        self.assertNotIn("reduced\nwrites", markdown)
+        self.assertIn("FAIL", renderer.render_html(report))
+
+    def test_report_handles_observed_zero_resource_baselines(self):
+        inputs = self.report_inputs()
+        inputs["index_baseline"]["index"]["metrics"].update(
+            resource_samples=3, peak_rss_bytes=0, peak_disk_bytes=0,
+            filesystem_read_bytes=0, filesystem_write_bytes=0,
+        )
+        with mock.patch.object(comparator, "bootstrap_p95_ratio", return_value={
+            "observed": 0.4, "ci95_lower": 0.35, "ci95_upper": 0.45,
+        }):
+            report = renderer.build_report(**inputs)
+        for name in (
+            "peak_rss_bytes", "peak_disk_bytes", "filesystem_read_bytes", "filesystem_write_bytes",
+        ):
+            self.assertEqual(report["indexing"][name]["baseline"], 0)
+            self.assertIsNone(report["indexing"][name]["ratio"])
+        markdown = renderer.render_markdown(report)
+        self.assertIn("(n/a)", markdown)
+        self.assertNotIn("unobserved", markdown)
+        self.assertNotIn("reduced\nwrites", markdown)
+        renderer.render_html(report)
+
+    def test_comparison_requires_observed_nonzero_resource_baselines(self):
+        for missing_side in (
+            "baseline", "current", "zero_baseline", "mixed_current", "legacy", "observed_zero",
+        ):
+            with self.subTest(missing_side=missing_side):
+                baseline, current = artifact([100.0] * 40), artifact([100.0] * 40)
+                if missing_side == "mixed_current":
+                    current = [current, artifact([100.0] * 40)]
+                    missing = current[-1]
+                else:
+                    missing = current if missing_side in ("current", "observed_zero") else baseline
+                if missing_side != "legacy":
+                    missing["index"]["metrics"].update(
+                        resource_samples=3 if missing_side in ("zero_baseline", "observed_zero") else 0,
+                        peak_rss_bytes=0,
+                    )
+                result = comparator.compare_runs(
+                    [baseline], current if isinstance(current, list) else [current],
+                    significant_regression_ratio=1.15,
+                    required_warm_ratio=None, required_index_ratio=None,
+                    maximum_quality_loss=0.0,
+                )
+                if missing_side in ("legacy", "observed_zero"):
+                    self.assertEqual(result["peak_rss_ratio"], 1.0 if missing_side == "legacy" else 0.0)
+                else:
+                    self.assertIsNone(result["peak_rss_ratio"])
+                self.assertEqual(result["peak_disk_ratio"], 1.0)
+                self.assertTrue(result["passed"])
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux resource sampler")
+    def test_process_timing_excludes_polling_interval_and_sampler_cleanup(self):
+        clock = [10.0]
+        process = mock.Mock(pid=123)
+        process.poll.side_effect = [None, 0]
+
+        def wait():
+            clock[0] = max(clock[0], 10.012)
+            return 0
+
+        def delay(seconds):
+            clock[0] += seconds
+
+        process.wait.side_effect = wait
+        monitor = mock.Mock()
+        monitor.join.side_effect = lambda: delay(1.0)
+        with (
+            mock.patch.object(benchmark.subprocess, "Popen", return_value=process),
+            mock.patch.object(benchmark.threading, "Thread", return_value=monitor),
+            mock.patch.object(benchmark.time, "perf_counter", side_effect=lambda: clock[0]),
+            mock.patch.object(benchmark.time, "sleep", side_effect=delay),
+            mock.patch.object(Path, "read_text", side_effect=FileNotFoundError),
+        ):
+            _, metrics = benchmark.timed(["child"], ROOT, {})
+        self.assertAlmostEqual(metrics["wall_ms"], 12.0)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux resource sampler")
+    def test_timing_preserves_child_failure_and_output(self):
+        with self.assertRaises(subprocess.CalledProcessError) as caught:
+            benchmark.timed(
+                [sys.executable, "-c", "import sys; print('out'); print('err', file=sys.stderr); sys.exit(7)"],
+                ROOT, {},
+            )
+        self.assertEqual(caught.exception.returncode, 7)
+        self.assertEqual(caught.exception.output.strip(), "out")
+        self.assertEqual(caught.exception.stderr.strip(), "err")
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux resource sampler")
+    def test_sampler_preserves_counters_for_process_names_with_spaces_and_parentheses(self):
+        sampled = threading.Event()
+        process = mock.Mock(pid=123)
+        fields = ["0"] * 20
+        fields[0], fields[11], fields[12] = "S", "120", "80"
+
+        def read(path, *_args, **_kwargs):
+            if path.name == "status":
+                return "VmRSS: 32 kB\n"
+            if path.name == "io":
+                return "read_bytes: 3\nwrite_bytes: 4\n"
+            sampled.set()
+            return "123 (worker ) name) " + " ".join(fields)
+
+        def wait():
+            self.assertTrue(sampled.wait(2), "sampler did not run")
+            return 0
+
+        process.wait.side_effect = wait
+        with (
+            mock.patch.object(benchmark.subprocess, "Popen", return_value=process),
+            mock.patch.object(benchmark.os, "sysconf", return_value=100),
+            mock.patch.object(Path, "read_text", autospec=True, side_effect=read),
+        ):
+            _, metrics = benchmark.timed(["child"], ROOT, {})
+        self.assertEqual(metrics["cpu_ms"], 2000)
+        self.assertEqual(metrics["peak_rss_bytes"], 32 * 1024)
+        self.assertEqual(metrics["filesystem_read_bytes"], 3)
+        self.assertEqual(metrics["filesystem_write_bytes"], 4)
+        self.assertGreaterEqual(metrics["resource_samples"], 1)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux resource sampler")
+    def test_sampler_failure_is_reported_to_the_caller(self):
+        monitor_done = threading.Event()
+        process = mock.Mock(pid=123)
+        process.poll.return_value = None
+        thread = threading.Thread
+
+        def monitor(*, target, **kwargs):
+            def run():
+                try:
+                    target()
+                finally:
+                    monitor_done.set()
+            return thread(target=run, **kwargs)
+
+        def wait():
+            self.assertTrue(monitor_done.wait(2), "persistent sampler failure was not detected")
+            return 0
+
+        process.wait.side_effect = wait
+        with (
+            mock.patch.object(benchmark.subprocess, "Popen", return_value=process),
+            mock.patch.object(benchmark.threading, "Thread", side_effect=monitor),
+            mock.patch.object(Path, "read_text", side_effect=PermissionError("cannot sample live child")),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "resource sampler failed") as caught:
+                benchmark.timed(["child"], ROOT, {})
+        self.assertIsInstance(caught.exception.__cause__, PermissionError)
+
+    @unittest.skipUnless(sys.platform == "linux", "Linux resource sampler")
+    def test_sampler_accepts_permission_race_after_child_exit(self):
+        sampled = threading.Event()
+        process = mock.Mock(pid=123)
+        # The kernel can revoke /proc access before waitpid observes the exit.
+        process.poll.return_value = None
+
+        def read(path, *_args, **_kwargs):
+            if path.name == "status":
+                return "VmRSS: 32 kB\n"
+            sampled.set()
+            raise PermissionError("exiting process io is no longer readable")
+
+        def wait():
+            self.assertTrue(sampled.wait(2), "sampler did not run")
+            return 0
+
+        process.wait.side_effect = wait
+        with (
+            mock.patch.object(benchmark.subprocess, "Popen", return_value=process),
+            mock.patch.object(Path, "read_text", autospec=True, side_effect=read),
+        ):
+            result, metrics = benchmark.timed(["child"], ROOT, {})
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(metrics["resource_samples"], 0)
+        self.assertEqual(metrics["peak_rss_bytes"], 32 * 1024)
+
     def test_windows_client_authenticates_each_connection(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)

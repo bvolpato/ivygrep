@@ -396,7 +396,13 @@ inline expected_gt<metric_kind_t> metric_from_name(char const* name) {
  *  @brief Convenience function to upcast a half-precision floating point number to a single-precision one.
  */
 inline float f16_to_f32(std::uint16_t u16) noexcept {
-#if USEARCH_USE_FP16LIB
+#if defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+    // ARMv8-A supports half-to-single conversion without optional FP16 arithmetic.
+    // Keep the stored bits unchanged and let the compiler vectorize distance loops.
+    __fp16 value;
+    std::memcpy(&value, &u16, sizeof(u16));
+    return static_cast<float>(value);
+#elif USEARCH_USE_FP16LIB
     return fp16_ieee_to_fp32_value(u16);
 #elif USEARCH_USE_SIMSIMD
     return simsimd_f16_to_f32((simsimd_f16_t const*)&u16);
