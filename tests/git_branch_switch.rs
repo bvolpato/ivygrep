@@ -3381,6 +3381,102 @@ fn worktree_context_graph_prefers_overlay_dependencies() {
 
 #[test]
 #[serial]
+fn worktree_resolved_dependencies_follow_target_precedence_changes() {
+    for base_has_preferred in [false, true] {
+        let root = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        let worktrees = tempdir().unwrap();
+        init_git_repo(root.path());
+        fs::create_dir_all(root.path().join("widget")).unwrap();
+        let importer =
+            "import { work } from './widget';\nexport function run() { return work(); }\n";
+        let preferred = "export function work() { return 'preferred'; }\n";
+        fs::write(root.path().join("entry.ts"), importer).unwrap();
+        fs::write(
+            root.path().join("widget/index.ts"),
+            "export function work() { return 'fallback'; }\n",
+        )
+        .unwrap();
+        if base_has_preferred {
+            fs::write(root.path().join("widget.ts"), preferred).unwrap();
+        }
+        git(root.path(), &["add", "."]);
+        git(root.path(), &["commit", "-m", "base dependencies"]);
+        setup_and_index(root.path(), home.path());
+        let base_workspace = workspace_for(root.path());
+        let wt_path = worktrees.path().join("wt");
+        git(
+            root.path(),
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "dependency-precedence",
+                wt_path.to_str().unwrap(),
+            ],
+        );
+        // Exercise both an inherited successful resolution and a newly created
+        // overlay that must re-resolve the base import after removing its target.
+        if base_has_preferred {
+            fs::remove_file(wt_path.join("widget.ts")).unwrap();
+        }
+        setup_and_index(&wt_path, home.path());
+        let workspace = workspace_for(&wt_path);
+        let assert_target = |path: &std::path::Path, expected: &str| {
+            let conn = open_sqlite(path).unwrap();
+            let targets = conn.prepare("SELECT target_path FROM file_edges WHERE source_path = 'entry.ts' AND kind = 1").unwrap()
+                .query_map([], |row| row.get::<_, String>(0)).unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            assert_eq!(targets, [expected]);
+            let importers = conn
+                .prepare("SELECT source_path FROM file_edges WHERE target_path = ?1 AND kind = 1")
+                .unwrap()
+                .query_map([expected], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            assert_eq!(importers, ["entry.ts"]);
+        };
+        fs::write(wt_path.join("widget.ts"), preferred).unwrap();
+        setup_and_index(&wt_path, home.path());
+        assert_target(&workspace.overlay_sqlite_path(), "widget.ts");
+        // Returning importer contents to the base does not imply that its graph
+        // can be inherited: this worktree can still resolve the same spec differently.
+        fs::write(
+            wt_path.join("entry.ts"),
+            format!("{importer}// edited importer\n"),
+        )
+        .unwrap();
+        setup_and_index(&wt_path, home.path());
+        fs::write(wt_path.join("entry.ts"), importer).unwrap();
+        setup_and_index(&wt_path, home.path());
+        if !base_has_preferred {
+            assert_target(&workspace.overlay_sqlite_path(), "widget.ts");
+        }
+        fs::remove_file(wt_path.join("widget.ts")).unwrap();
+        setup_and_index(&wt_path, home.path());
+        assert_target(&workspace.overlay_sqlite_path(), "widget/index.ts");
+        fs::write(wt_path.join("widget.ts"), preferred).unwrap();
+        setup_and_index(&wt_path, home.path());
+        assert_target(&workspace.overlay_sqlite_path(), "widget.ts");
+        assert_target(
+            &base_workspace.sqlite_path(),
+            if base_has_preferred {
+                "widget.ts"
+            } else {
+                "widget/index.ts"
+            },
+        );
+        assert_eq!(setup_and_index(&wt_path, home.path()).indexed_files, 0);
+        git(
+            root.path(),
+            &["worktree", "remove", wt_path.to_str().unwrap(), "--force"],
+        );
+    }
+}
+
+#[test]
+#[serial]
 fn worktree_restored_dependency_wakes_overlay_importer() {
     let root = tempdir().unwrap();
     let home = tempdir().unwrap();

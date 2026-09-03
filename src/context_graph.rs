@@ -96,7 +96,7 @@ pub(crate) struct FileEdge {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
-pub(crate) struct UnresolvedDependency {
+pub(crate) struct DependencySpec {
     pub source_path: PathBuf,
     pub language: String,
     pub spec: String,
@@ -106,7 +106,8 @@ pub(crate) struct UnresolvedDependency {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FileGraphExtraction {
     pub edges: Vec<FileEdge>,
-    pub unresolved_dependencies: Vec<UnresolvedDependency>,
+    pub unresolved_dependencies: Vec<DependencySpec>,
+    pub resolved_dependencies: Vec<(DependencySpec, PathBuf)>,
 }
 
 struct RustCrateContext {
@@ -181,6 +182,7 @@ pub(crate) fn extract_file_graph(
 ) -> FileGraphExtraction {
     let mut edges = BTreeSet::new();
     let mut unresolved_dependencies = BTreeSet::new();
+    let mut resolved_dependencies = BTreeSet::new();
     let language = language_for_path(rel_path).unwrap_or("text");
     let local_rust_crate = (language == "rust")
         .then(|| rust_crate_context(root, snapshot, rel_path))
@@ -206,9 +208,20 @@ pub(crate) fn extract_file_graph(
                 local_go_module.as_ref(),
             ) {
                 insert_edge(&mut edges, rel_path, &target_path, FileEdgeKind::Dependency);
+                for lookup_key in dependency_lookup_keys(&spec) {
+                    resolved_dependencies.insert((
+                        DependencySpec {
+                            source_path: rel_path.to_path_buf(),
+                            language: language.to_string(),
+                            spec: spec.clone(),
+                            lookup_key,
+                        },
+                        target_path.clone(),
+                    ));
+                }
             } else {
                 for lookup_key in dependency_lookup_keys(&spec) {
-                    unresolved_dependencies.insert(UnresolvedDependency {
+                    unresolved_dependencies.insert(DependencySpec {
                         source_path: rel_path.to_path_buf(),
                         language: language.to_string(),
                         spec: spec.clone(),
@@ -242,7 +255,7 @@ pub(crate) fn extract_file_graph(
         } else if late_bound_tests.contains(&related)
             && let Some(lookup_key) = late_bound_owner_lookup_key(rel_path)
         {
-            unresolved_dependencies.insert(UnresolvedDependency {
+            unresolved_dependencies.insert(DependencySpec {
                 source_path: rel_path.to_path_buf(),
                 language: "context_test".to_string(),
                 spec: "conventional_test".to_string(),
@@ -259,9 +272,20 @@ pub(crate) fn extract_file_graph(
                 resolve_local_dependency(root, snapshot, rel_path, "markdown", &spec, None, None)
             {
                 insert_edge(&mut edges, rel_path, &target, FileEdgeKind::Documentation);
+                for lookup_key in dependency_lookup_keys(&spec) {
+                    resolved_dependencies.insert((
+                        DependencySpec {
+                            source_path: rel_path.to_path_buf(),
+                            language: language.to_string(),
+                            spec: spec.clone(),
+                            lookup_key,
+                        },
+                        target.clone(),
+                    ));
+                }
             } else {
                 for lookup_key in dependency_lookup_keys(&spec) {
-                    unresolved_dependencies.insert(UnresolvedDependency {
+                    unresolved_dependencies.insert(DependencySpec {
                         source_path: rel_path.to_path_buf(),
                         language: language.to_string(),
                         spec: spec.clone(),
@@ -274,6 +298,7 @@ pub(crate) fn extract_file_graph(
 
     FileGraphExtraction {
         edges: edges.into_iter().take(MAX_EDGES_PER_FILE).collect(),
+        resolved_dependencies: resolved_dependencies.into_iter().collect(),
         unresolved_dependencies: unresolved_dependencies
             .into_iter()
             .take(MAX_UNRESOLVED_DEPENDENCIES_PER_FILE)
@@ -334,6 +359,11 @@ pub(crate) fn dependency_lookup_keys(value: &str) -> BTreeSet<String> {
             keys.insert(segments.concat());
         }
     }
+    // Directory-only imports ("./", "../") have no identifier component.
+    // Keep a sentinel so additions can still reconsider their index file.
+    if keys.is_empty() {
+        keys.insert(String::new());
+    }
     keys
 }
 
@@ -353,6 +383,7 @@ pub(crate) fn path_lookup_keys(path: &Path) -> BTreeSet<String> {
             crate::text::split_identifier_segments(&format!("{singular_test}Test")).join("_"),
         );
     }
+    keys.insert(String::new());
     keys
 }
 

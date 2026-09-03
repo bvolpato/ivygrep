@@ -60,7 +60,8 @@ pub struct Workspace {
 ///  26: Rebuild legacy payloads using contained source reads
 ///  27: Preserve Unicode symbol names and identifier boundaries
 ///  28: Rust dependency paths respect Cargo package and target roots
-pub const INDEX_FORMAT_VERSION: u32 = 28;
+///  29: Retain resolved dependency specs for incremental target precedence changes
+pub const INDEX_FORMAT_VERSION: u32 = 29;
 const COMPACTION_FREE_BYTES_THRESHOLD: u64 = 16 * 1024 * 1024;
 const COMPACTION_FREE_PERCENT_THRESHOLD: f64 = 20.0;
 
@@ -1936,6 +1937,8 @@ fn sqlite_tier_bytes(path: &Path) -> (u64, u64) {
             "idx_symbols_chunk_key",
             "file_edges",
             "idx_file_edges_target",
+            "resolved_file_dependencies",
+            "idx_resolved_file_dependencies_lookup",
             "unresolved_file_dependencies",
             "idx_unresolved_file_dependencies_lookup",
             "symbol_edges",

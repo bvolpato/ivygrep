@@ -294,6 +294,15 @@ pub(super) fn create_tables_schema(conn: &Connection, create_indexes: bool) -> R
             PRIMARY KEY (source_path, language, spec, lookup_key)
         ) WITHOUT ROWID;
 
+        CREATE TABLE IF NOT EXISTS resolved_file_dependencies (
+            source_path TEXT NOT NULL,
+            language TEXT NOT NULL,
+            spec TEXT NOT NULL,
+            lookup_key TEXT NOT NULL,
+            target_path TEXT NOT NULL,
+            PRIMARY KEY (source_path, language, spec, lookup_key)
+        ) WITHOUT ROWID;
+
         CREATE TABLE IF NOT EXISTS manifest_resolution_signatures (
             file_path TEXT PRIMARY KEY,
             signature TEXT NOT NULL
@@ -391,6 +400,8 @@ pub(super) fn create_secondary_indexes(conn: &Connection) -> Result<()> {
             ON included_file_dependencies(included_path);
         CREATE INDEX IF NOT EXISTS idx_file_edges_target
             ON file_edges(target_path, source_path);
+        CREATE INDEX IF NOT EXISTS idx_resolved_file_dependencies_lookup
+            ON resolved_file_dependencies(lookup_key, source_path);
         CREATE INDEX IF NOT EXISTS idx_unresolved_file_dependencies_lookup
             ON unresolved_file_dependencies(lookup_key, source_path);
         "#,

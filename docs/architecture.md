@@ -353,9 +353,11 @@ of evidence helps an agent implement a task safely?
 5. Markdown and JSON output include paths, line ranges, roles, reasons, signals,
    change coverage, and budget use.
 
-Dependency extraction is deliberately bounded. Unresolved imports are stored so
-later file or manifest changes can resolve them incrementally. Missing an edge
-does not prove no relationship exists.
+Dependency extraction is deliberately bounded. Resolved and unresolved import
+specifications are stored with lookup keys so newly added files can replace
+lower-priority targets without reparsing every unchanged source. Content-only
+target edits retain existing edges; deletions, restoration, and manifest changes
+refresh affected owners. Missing an edge does not prove no relationship exists.
 
 Python imports and Objective-C quoted local `#import`/`#include` directives are
 extracted from parsed syntax. Strings, docstrings, and comments do not create
