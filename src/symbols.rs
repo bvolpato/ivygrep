@@ -1203,12 +1203,12 @@ fn is_call_reference(node: tree_sitter::Node<'_>, go_generic_function: bool) -> 
 }
 
 fn go_generic_callee_name(mut node: tree_sitter::Node<'_>) -> Option<tree_sitter::Node<'_>> {
-    // Go's grammar parses f[T](x) as a conversion and f[T]() as an indexed
-    // call. Only unwrap these forms for an indexed generic-function definition:
+    // Go's grammar parses f[T](x) as a conversion, f[T]() as an indexed call,
+    // and (f[T, U])() as a type instantiation. Require a generic-function definition:
     // the same syntax can also convert a type or call a collection element.
     loop {
         node = match node.kind() {
-            "generic_type" => node.child_by_field_name("type")?,
+            "generic_type" | "type_instantiation_expression" => node.child_by_field_name("type")?,
             "index_expression" => node.child_by_field_name("operand")?,
             "parenthesized_type" | "parenthesized_expression" => node.named_child(0)?,
             _ => return terminal_name(node),

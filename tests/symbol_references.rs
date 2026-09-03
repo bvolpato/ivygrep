@@ -163,6 +163,66 @@ func external() { _ = slices.Clone[[]int]([]int{1}) }
 
 #[test]
 #[serial]
+fn go_parenthesized_generic_callers_distinguish_values_and_conversions() {
+    let root = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("lib")).unwrap();
+    fs::write(
+        root.path().join("go.mod"),
+        "module example.test/parenthesized\n\ngo 1.23\n",
+    )
+    .unwrap();
+    let declarations = "func PairTarget[T, U any](values ...T) {}\nfunc SingleTarget[T any](values ...T) {}\ntype PairType[T, U any] []T\n";
+    for (path, package) in [("target.go", "fixture"), ("lib/target.go", "lib")] {
+        fs::write(
+            root.path().join(path),
+            format!("package {package}\n{declarations}"),
+        )
+        .unwrap();
+    }
+    let source = r#"package fixture
+import "example.test/parenthesized/lib"
+func direct() { PairTarget[int, string]() }
+func parenthesized() { (PairTarget[int, string])() }
+func qualified() { (lib.PairTarget[int, string])() }
+func nested() { ((PairTarget[int, string]))() }
+func arguments() { (PairTarget[int, string])(1, 2) }
+func callback() { _ = (PairTarget[int, string]) }
+func qualifiedCallback() { _ = (lib.PairTarget[int, string]) }
+func conversion() { _ = (PairType[int, string])([]int{1}) }
+func qualifiedConversion() { _ = (lib.PairType[int, string])([]int{1}) }
+func singleComposite() { (SingleTarget[[]int])() }
+func singlePointer() { (SingleTarget[*int])() }
+func singleCallback() { _ = (SingleTarget[[]int]) }
+func typeArgument() { (PairTarget[PairType[int, string], string])() }
+"#;
+    fs::write(root.path().join("calls.go"), source).unwrap();
+    let workspace = index(root.path(), home.path());
+    for (query, expected_callers, expected_references) in [
+        (
+            "PairTarget",
+            vec![3, 4, 5, 6, 7, 15],
+            vec![3, 4, 5, 6, 7, 8, 9, 15],
+        ),
+        ("lib.PairTarget", vec![5], vec![5, 9]),
+        ("SingleTarget", vec![12, 13], vec![12, 13, 14]),
+        ("PairType", vec![], vec![10, 11, 15]),
+        ("lib.PairType", vec![], vec![11]),
+    ] {
+        for (mode, expected) in [
+            (SymbolSearchMode::Callers, expected_callers),
+            (SymbolSearchMode::References, expected_references),
+        ] {
+            let hits = search_symbols(&workspace, query, mode, None, None).unwrap();
+            let mut lines = hits.iter().map(|hit| hit.start_line).collect::<Vec<_>>();
+            lines.sort_unstable();
+            assert_eq!(lines, expected, "{query}, {mode:?}: {hits:?}");
+        }
+    }
+}
+
+#[test]
+#[serial]
 fn go_type_references_exclude_declarations_and_preserve_type_uses() {
     let root = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
