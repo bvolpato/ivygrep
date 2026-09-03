@@ -19,6 +19,7 @@ jobs:
         with:
           shared-key: "test"
           cache-bin: "false"
+          cache-on-failure: "true"
       - name: Repeat real watcher lifecycle with event tracing
         shell: bash
         run: |

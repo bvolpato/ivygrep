@@ -294,65 +294,144 @@ fn recreated_overlay_retries_failed_tantivy_publication() {
 #[test]
 #[serial]
 fn incremental_overlay_recovers_when_ignore_edit_is_reverted_after_partial_commit() {
-    let home = tempdir().unwrap();
-    unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
-    let parent = tempdir().unwrap();
-    let (base_root, linked_root) = linked_workspace(&parent.path().canonicalize().unwrap());
-    let workspace = Workspace::resolve(&linked_root).unwrap();
-    let model = HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
-    index_workspace_for_watcher(&workspace, &model).unwrap();
-    let snapshot = fs::read(workspace.merkle_snapshot_path()).unwrap();
-    let exclude = base_root.join(".git/info/exclude");
-    fs::write(&exclude, "stable.rs\n").unwrap();
+    // Cover both a stale deletion marker and a missing deletion marker.
+    for initially_visible in [true, false] {
+        let home = tempdir().unwrap();
+        unsafe { std::env::set_var("IVYGREP_HOME", home.path()) };
+        let parent = tempdir().unwrap();
+        let (base_root, linked_root) = linked_workspace(&parent.path().canonicalize().unwrap());
+        let workspace = Workspace::resolve(&linked_root).unwrap();
+        let model = HashEmbeddingModel::new(crate::EMBEDDING_DIMENSIONS);
+        index_workspace_for_watcher(&workspace, &model).unwrap();
+        let exclude = base_root.join(".git/info/exclude");
+        let initial_rule = if initially_visible { "" } else { "stable.rs\n" };
+        if !initially_visible {
+            fs::write(&exclude, initial_rule).unwrap();
+            index_workspace_for_watcher(&workspace, &model).unwrap();
+        }
+        let snapshot = fs::read(workspace.merkle_snapshot_path()).unwrap();
+        let attempted_rule = if initially_visible { "stable.rs\n" } else { "" };
+        fs::write(&exclude, attempted_rule).unwrap();
 
-    let failure = fail_tantivy_commits(&workspace.index_dir);
-    let error = index_workspace_for_watcher(&workspace, &model).unwrap_err();
-    assert!(format!("{error:#}").contains("injected Tantivy metadata publication failure"));
-    assert!(workspace.quick_index_health().needs_rebuild());
-    assert_eq!(
-        fs::read(workspace.merkle_snapshot_path()).unwrap(),
-        snapshot
-    );
-    // SQLite has committed, but Tantivy and the source snapshot have not.
-    let sqlite = open_sqlite_readonly(&workspace.overlay_sqlite_path()).unwrap();
-    assert_eq!(
-        sqlite
-            .query_row(
-                "SELECT COUNT(*) FROM tombstones WHERE file_path = 'stable.rs'",
-                [],
-                |row| row.get::<_, i64>(0)
+        let failure = fail_tantivy_commits(&workspace.index_dir);
+        let error = index_workspace_for_watcher(&workspace, &model).unwrap_err();
+        assert!(format!("{error:#}").contains("injected Tantivy metadata publication failure"));
+        assert!(workspace.quick_index_health().needs_rebuild());
+        assert_eq!(
+            fs::read(workspace.merkle_snapshot_path()).unwrap(),
+            snapshot
+        );
+        // SQLite has committed, but Tantivy and the source snapshot have not.
+        let sqlite = open_sqlite_readonly(&workspace.overlay_sqlite_path()).unwrap();
+        assert_eq!(
+            sqlite
+                .query_row(
+                    "SELECT COUNT(*) FROM tombstones WHERE file_path = 'stable.rs'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            if initially_visible { 1 } else { 0 }
+        );
+        drop(sqlite);
+        drop(failure);
+
+        // The input now matches the old snapshot. A normal Merkle diff is empty,
+        // but the partially committed deletion state still needs to be repaired.
+        fs::write(&exclude, initial_rule).unwrap();
+        index_workspace_for_watcher(&workspace, &model).unwrap();
+        assert!(!workspace.indexing_incomplete_path().exists());
+        assert_eq!(
+            literal_search(
+                &workspace,
+                "shared_overlay_marker",
+                &SearchOptions::default()
             )
-            .unwrap(),
-        1
-    );
-    drop(sqlite);
-    drop(failure);
-
-    // The input now matches the old snapshot. A normal Merkle diff is empty,
-    // but the partially committed deletion still needs to be repaired.
-    fs::write(&exclude, "").unwrap();
-    index_workspace_for_watcher(&workspace, &model).unwrap();
-    assert!(!workspace.indexing_incomplete_path().exists());
-    assert_eq!(
-        literal_search(
-            &workspace,
-            "shared_overlay_marker",
-            &SearchOptions::default()
-        )
-        .unwrap()
-        .len(),
-        1
-    );
-    assert_eq!(
-        MerkleSnapshot::load(&workspace.merkle_snapshot_path()).unwrap(),
-        MerkleSnapshot::build(&workspace.root, false).unwrap()
-    );
+            .unwrap()
+            .len(),
+            if initially_visible { 1 } else { 0 }
+        );
+        assert_eq!(
+            MerkleSnapshot::load(&workspace.merkle_snapshot_path()).unwrap(),
+            MerkleSnapshot::build(&workspace.root, false).unwrap()
+        );
+    }
 }
 
 #[test]
 #[serial]
 fn fresh_overlay_rolls_back_failed_completion_publication() {
     assert_overlay_publication_recovers(false, PublicationFailure::Completion);
+}
+
+#[test]
+fn initial_overlay_diff_uses_persisted_base_coverage() {
+    let parent = tempdir().unwrap();
+    let base = parent.path().join("base");
+    let linked = parent.path().join("linked");
+    fs::create_dir_all(&base).unwrap();
+    fs::create_dir_all(&linked).unwrap();
+    for root in [&base, &linked] {
+        fs::write(root.join("shared.rs"), "pub fn shared() {}\n").unwrap();
+    }
+    let live_base = MerkleSnapshot::build_content_based(&base, false).unwrap();
+    let worktree = MerkleSnapshot::build_content_based(&linked, false).unwrap();
+    assert_eq!(live_base, worktree);
+    // The live checkouts agree, but the persisted base did not index this file.
+    let diff = initial_overlay_diff(&base, &MerkleSnapshot::empty(), &live_base, &worktree);
+    assert_eq!(
+        diff.added_or_modified,
+        vec![(PathBuf::from("shared.rs"), false)]
+    );
+
+    let indexed_base = MerkleSnapshot::build(&base, false).unwrap();
+    for root in [&base, &linked] {
+        fs::remove_file(root.join("shared.rs")).unwrap();
+    }
+    let live_base = MerkleSnapshot::build_content_based(&base, false).unwrap();
+    let worktree = MerkleSnapshot::build_content_based(&linked, false).unwrap();
+    let diff = initial_overlay_diff(&base, &indexed_base, &live_base, &worktree);
+    assert_eq!(diff.deleted, vec![PathBuf::from("shared.rs")]);
+}
+
+#[test]
+fn initial_overlay_diff_does_not_inherit_changed_base_metadata() {
+    let parent = tempdir().unwrap();
+    let base = parent.path().join("base");
+    let linked = parent.path().join("linked");
+    fs::create_dir_all(&base).unwrap();
+    fs::create_dir_all(&linked).unwrap();
+    fs::write(base.join("shared.rs"), "pub fn before() {}\n").unwrap();
+    let indexed_base = MerkleSnapshot::build(&base, false).unwrap();
+    for root in [&base, &linked] {
+        fs::write(root.join("shared.rs"), "pub fn after() {}\n").unwrap();
+    }
+    let live_base = MerkleSnapshot::build_content_based(&base, false).unwrap();
+    let worktree = MerkleSnapshot::build_content_based(&linked, false).unwrap();
+    assert_eq!(live_base, worktree);
+    let diff = initial_overlay_diff(&base, &indexed_base, &live_base, &worktree);
+    assert_eq!(
+        diff.added_or_modified,
+        vec![(PathBuf::from("shared.rs"), false)]
+    );
+}
+
+#[test]
+fn overlay_snapshot_rejects_edits_between_metadata_and_content_capture() {
+    let root = tempdir().unwrap();
+    let path = root.path().join("shared.rs");
+    fs::write(&path, "pub fn before() {}\n").unwrap();
+    let metadata = MerkleSnapshot::build(root.path(), false).unwrap();
+    let original = MerkleSnapshot::build_content_based(root.path(), false).unwrap();
+    validate_overlay_snapshot(root.path(), &metadata, &original).unwrap();
+
+    fs::write(&path, "pub fn changed_content() {}\n").unwrap();
+    let changed = MerkleSnapshot::build_content_based(root.path(), false).unwrap();
+    assert!(validate_overlay_snapshot(root.path(), &metadata, &changed).is_err());
+
+    fs::remove_file(path).unwrap();
+    let missing = MerkleSnapshot::build_content_based(root.path(), false).unwrap();
+    assert!(validate_overlay_snapshot(root.path(), &metadata, &missing).is_err());
 }
 
 #[test]

@@ -1059,9 +1059,10 @@ impl Workspace {
             issues.push("missing workspace metadata".to_string());
         }
 
-        if self.indexing_incomplete_path().exists() {
-            issues
-                .push("incremental index publication is incomplete; rebuild required".to_string());
+        if self.is_worktree() && self.indexing_incomplete_path().exists() {
+            issues.push(
+                "incremental overlay publication is incomplete; rebuild required".to_string(),
+            );
         }
 
         // Detect crashed indexing: if .indexing.pid exists but the process is

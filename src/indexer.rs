@@ -614,10 +614,11 @@ fn index_workspace_with_options(
     });
 
     let result = retry_transient_tantivy_writes(|| {
-        // SQLite may have committed before Tantivy or the snapshot failed.
+        // Overlay SQLite may have committed before Tantivy or the snapshot failed.
         // If inputs change before a retry, replaying their old Merkle diff can
         // incorrectly become a no-op over those partially published stores.
-        let incomplete = workspace.indexing_incomplete_path().try_exists()?;
+        let incomplete =
+            workspace.is_worktree() && workspace.indexing_incomplete_path().try_exists()?;
         index_workspace_inner(
             workspace,
             embedding_model,
@@ -625,15 +626,17 @@ fn index_workspace_with_options(
             watcher_paths,
             skip_gitignore,
             reset_worktree_overlay || (incomplete && workspace.is_worktree()),
-            rebuild_main || (incomplete && !workspace.is_worktree()),
+            rebuild_main,
         )
     });
     let result = result.and_then(|summary| {
         record_indexed_skip_gitignore(workspace, skip_gitignore)?;
-        match fs::remove_file(workspace.indexing_incomplete_path()) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
+        if workspace.is_worktree() {
+            match fs::remove_file(workspace.indexing_incomplete_path()) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
         }
         Ok(summary)
     });
@@ -810,6 +813,7 @@ fn index_workspace_inner(
     // If this is a git worktree and the base has a fresh index, create a
     // thin overlay containing only divergent files instead of copying the
     // entire base. The base index is referenced by path, not copied.
+    let mut captured_base_snapshot = None;
     let overlay_mode = if let Some(ref base_dir) = workspace.base_index_dir {
         let base_sqlite = base_dir.join("metadata.sqlite3");
         let base_merkle = base_dir.join("merkle_snapshot.json");
@@ -922,9 +926,16 @@ fn index_workspace_inner(
                 workspace.indexing_progress_path(),
                 "scanning (content-based)",
             );
+            let indexed_base = MerkleSnapshot::load(&base_merkle)?;
             let old = MerkleSnapshot::build_content_based(&main_root, skip_gitignore)?;
+            // Capture metadata before content. Recording metadata from a later
+            // edit could make that edit look indexed even when the earlier
+            // content comparison delegated the path to the base.
+            let mtime_snapshot = MerkleSnapshot::build(&workspace.root, skip_gitignore)?;
             let new = MerkleSnapshot::build_content_based(&workspace.root, skip_gitignore)?;
-            let diff = old.diff(&new);
+            validate_overlay_snapshot(&workspace.root, &mtime_snapshot, &new)?;
+            let diff = initial_overlay_diff(&main_root, &indexed_base, &old, &new);
+            captured_base_snapshot = Some(indexed_base);
 
             eprintln!(
                 "  ⚡ overlay delta: {} added/modified, {} deleted",
@@ -937,8 +948,6 @@ fn index_workspace_inner(
             // produce correct deltas. The content-based snapshots above were
             // only needed for the initial cross-worktree diff; persisting them
             // would cause every file's hash to differ on the next watcher tick.
-            let mtime_snapshot = MerkleSnapshot::build(&workspace.root, skip_gitignore)?;
-
             Some((diff, mtime_snapshot, base_ref))
         } else {
             // Existing overlays use their committed snapshot below.
@@ -949,16 +958,19 @@ fn index_workspace_inner(
     };
 
     let initializing_overlay = overlay_mode.is_some();
-    let overlay_base_snapshot =
-        if (initializing_overlay || workspace.has_overlay() || workspace.base_ref_path().exists())
-            && let Some(base_dir) = &workspace.base_index_dir
-        {
-            Some(MerkleSnapshot::load(
-                &base_dir.join("merkle_snapshot.json"),
-            )?)
-        } else {
-            None
-        };
+    let overlay_base_snapshot = if let Some(snapshot) = captured_base_snapshot {
+        Some(snapshot)
+    } else if (initializing_overlay
+        || workspace.has_overlay()
+        || workspace.base_ref_path().exists())
+        && let Some(base_dir) = &workspace.base_index_dir
+    {
+        Some(MerkleSnapshot::load(
+            &base_dir.join("merkle_snapshot.json"),
+        )?)
+    } else {
+        None
+    };
     let base_ignored_status = |rel_path: &Path| {
         overlay_base_snapshot.as_ref().and_then(|snapshot| {
             snapshot
@@ -981,8 +993,6 @@ fn index_workspace_inner(
             let _ = fs::write(workspace.indexing_progress_path(), "scanning");
             let new = MerkleSnapshot::build(&workspace.root, skip_gitignore)?;
             let mut d = old.diff(&new);
-            #[cfg(test)]
-            eprintln!("overlay reconciliation old={old:?} new={new:?} diff={d:?}");
             let mut clear_overlay_paths = Vec::new();
 
             // Keep the overlay relative to the base after branch switches or local
@@ -1090,8 +1100,8 @@ fn index_workspace_inner(
     let use_overlay =
         initializing_overlay || workspace.has_overlay() || workspace.base_ref_path().exists();
     let is_fresh_index = initializing_overlay || rebuild_main || !workspace_is_indexed(workspace);
-    if !is_fresh_index {
-        // Leave this marker on every failed/aborted incremental publication.
+    if use_overlay && !is_fresh_index {
+        // Leave this marker on every failed/aborted incremental overlay publication.
         // Fresh builds already isolate writes in staging. No-op scans return
         // above without touching this marker or any index stores.
         fs::write(
@@ -1601,6 +1611,59 @@ fn index_workspace_inner(
             metadata_ms,
         },
     })
+}
+
+fn initial_overlay_diff(
+    base_root: &Path,
+    indexed_base: &MerkleSnapshot,
+    live_base: &MerkleSnapshot,
+    worktree: &MerkleSnapshot,
+) -> MerkleDiff {
+    let added_or_modified = worktree
+        .files
+        .iter()
+        .filter_map(|(path, content)| {
+            let is_ignored = content.ends_with("-1");
+            let inherited = indexed_base.files.get(path).is_some_and(|indexed| {
+                indexed.ends_with("-1") == is_ignored
+                    && MerkleSnapshot::path_matches_metadata_snapshot(
+                        &base_root.join(path),
+                        indexed,
+                    )
+                    && live_base.files.get(path) == Some(content)
+            });
+            (!inherited).then(|| (PathBuf::from(path), is_ignored))
+        })
+        .collect();
+    let deleted = indexed_base
+        .files
+        .keys()
+        .filter(|path| !worktree.files.contains_key(*path))
+        .map(PathBuf::from)
+        .collect();
+    MerkleDiff {
+        added_or_modified,
+        deleted,
+    }
+}
+
+fn validate_overlay_snapshot(
+    root: &Path,
+    metadata: &MerkleSnapshot,
+    content: &MerkleSnapshot,
+) -> Result<()> {
+    anyhow::ensure!(
+        metadata.files.len() == content.files.len()
+            && content.files.iter().all(|(path, hash)| {
+                metadata.files.get(path).is_some_and(|stamp| {
+                    stamp.ends_with("-1") == hash.ends_with("-1")
+                        && MerkleSnapshot::path_matches_metadata_snapshot(&root.join(path), stamp)
+                })
+            }),
+        "worktree changed while capturing overlay snapshots: {}; retry indexing",
+        root.display()
+    );
+    Ok(())
 }
 
 fn finalize_workspace_index_state(
