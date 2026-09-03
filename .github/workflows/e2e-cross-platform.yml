@@ -189,13 +189,35 @@ jobs:
       - name: Build with cross
         run: cross build --locked --release --target aarch64-unknown-linux-musl
 
-      # Match the shipped ARM binary profile; Candle's debug build emits
-      # fullfp16-only assembly for a baseline aarch64 target. Daemon autospawn
+      # Match the shipped ARM binary profile. Daemon autospawn
       # uses current_exe(), which identifies QEMU under emulation; native jobs
       # cover its recovery test.
       - name: Run release-profile tests with cross
         if: github.event.inputs.test_scope != 'smoke'
-        run: cross test --locked --release --lib --bins --tests --target aarch64-unknown-linux-musl -- --skip query_revives_watcher_after_daemon_goes_offline
+        env:
+          # Static musl needs no guest loader prefix. cross's default sysroot
+          # remaps open("/") but not relative openat(), breaking anchored
+          # workspace reads. Explicitly pass the real root into the container.
+          # This pinned cross revision drops target-only passthrough lists
+          # unless a build-level list exists. Scope the build-level setting
+          # to this one musl test step instead.
+          CROSS_BUILD_ENV_PASSTHROUGH: "QEMU_LD_PREFIX=/ IVYGREP_NO_AUTOSPAWN=1"
+        run: |
+          # Exercise the actual Cargo runner before compiling every test binary.
+          mkdir -p benchmark-results/qemu-workspace-probe/src
+          git init --quiet benchmark-results/qemu-workspace-probe
+          printf 'pub fn qemu_workspace_root_probe() {}\n' > benchmark-results/qemu-workspace-probe/src/lib.rs
+          CROSS_BUILD_ENV_PASSTHROUGH="$CROSS_BUILD_ENV_PASSTHROUGH IVYGREP_HOME=/tmp/ivygrep-qemu-root-probe" \
+            cross run --locked --release --target aarch64-unknown-linux-musl --bin ig -- \
+              --literal --json qemu_workspace_root_probe benchmark-results/qemu-workspace-probe \
+              > target/qemu-workspace-probe.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          hits = json.loads(Path("target/qemu-workspace-probe.json").read_text())
+          assert any(group["file_path"] == "src/lib.rs" for group in hits), hits
+          PY
+          cross test --locked --release --lib --bins --tests --target aarch64-unknown-linux-musl -- --skip query_revives_watcher_after_daemon_goes_offline
 
       - name: E2E smoke test (QEMU)
         run: |
@@ -226,6 +248,7 @@ jobs:
             -e IG="/workspace/${BINARY_REL}" \
             python:3.13-alpine sh -c '
               set -eu
+              apk add --no-cache git
               python3 scripts/check_daemon_equivalence.py \
                 --skip-build \
                 --binary "$IG" \

@@ -28,6 +28,9 @@ All notable changes to ivygrep are documented in this file.
 
 ### Fixed
 
+- Neural debug builds on baseline ARM64 use a dependency-scoped GEMM optimization workaround without requiring FP16 arithmetic globally. The default local and native ARM CI tests now retain application debug assertions.
+- Linked-worktree watchers reattach when an external Git `info/` directory is replaced at the same pathname; Windows watches its stable common-directory parent. Repeated replacement tests verify both hide and restore operations.
+
 - Bound raw cosine corroboration of direct search candidates to one semantic rank vote, preserving semantic-only discovery. The unchanged CoSQA gates now pass; the public evidence records per-dataset ranking tradeoffs.
 - Invalid Boolean queries now explain how to search pasted code or prose using matching backticks or a fenced code block. Invalid constraints still fail rather than silently falling back to relaxed search.
 - Worktree references track the base index's incarnation as well as its generation, so daemon-driven forced rebuilds and remove/re-add cycles cannot silently reuse stale overlays. Legacy references reconcile once without materializing a full base copy. Explicit daemon reindex requests scan pending edits instead of returning early while a live watcher's debounce queue still contains changes.
@@ -73,6 +76,7 @@ All notable changes to ivygrep are documented in this file.
 
 ### Testing
 
+- Added default-neural ARM64 source-coverage artifacts and an older-CPU F16 execution regression. QEMU Python worktree E2E now installs Git, and Metal CI no longer accepts CPU fallback as a GPU pass.
 - Benchmark reports preserve missing process-resource observations as unknown and avoid resource ratios with zero baselines; incomplete observations cannot substantiate the indexing-ceiling explanation.
 - Public matrices can require fit-disjoint queries against the executed reranker model SHA-256, not only its name. Runtime status and doctor expose the embedded model digest; older binaries remain unverified.
 - Layered worktree E2E compares CLI and direct daemon RPC results with independent full indexes through edits, deletions, empty files, renames, branch switches, base rebuilds, sibling worktrees, restarts, and live watcher updates. Real hash and neural retrieval checks cover inheritance and shadowing; filename-only stale-base assertions now verify source content and thin overlay storage.

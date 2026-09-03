@@ -1,0 +1,2050 @@
+{
+  "base_commit": "7413229df04a0657671aa323da5a8ff0e3682569",
+  "coverage": {
+    "files": [
+      {
+        "path": "src/agent.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 65,
+            "covered": 49,
+            "percent": 75.38461538461539
+          },
+          "instantiations": {
+            "count": 124,
+            "covered": 54,
+            "percent": 43.54838709677419
+          },
+          "lines": {
+            "count": 586,
+            "covered": 481,
+            "percent": 82.08191126279864
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 1026,
+            "covered": 825,
+            "notcovered": 201,
+            "percent": 80.4093567251462
+          }
+        }
+      },
+      {
+        "path": "src/chunking.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 355,
+            "covered": 328,
+            "percent": 92.3943661971831
+          },
+          "instantiations": {
+            "count": 578,
+            "covered": 475,
+            "percent": 82.17993079584777
+          },
+          "lines": {
+            "count": 3029,
+            "covered": 2685,
+            "percent": 88.64311654011225
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 4588,
+            "covered": 4144,
+            "notcovered": 444,
+            "percent": 90.32258064516128
+          }
+        }
+      },
+      {
+        "path": "src/cli.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 106,
+            "covered": 71,
+            "percent": 66.98113207547169
+          },
+          "instantiations": {
+            "count": 211,
+            "covered": 104,
+            "percent": 49.28909952606635
+          },
+          "lines": {
+            "count": 2004,
+            "covered": 1308,
+            "percent": 65.26946107784431
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 2909,
+            "covered": 1883,
+            "notcovered": 1026,
+            "percent": 64.73014781711929
+          }
+        }
+      },
+      {
+        "path": "src/config.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 22,
+            "covered": 21,
+            "percent": 95.45454545454545
+          },
+          "instantiations": {
+            "count": 41,
+            "covered": 32,
+            "percent": 78.04878048780488
+          },
+          "lines": {
+            "count": 95,
+            "covered": 89,
+            "percent": 93.6842105263158
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 161,
+            "covered": 148,
+            "notcovered": 13,
+            "percent": 91.92546583850931
+          }
+        }
+      },
+      {
+        "path": "src/context.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 187,
+            "covered": 176,
+            "percent": 94.11764705882352
+          },
+          "instantiations": {
+            "count": 340,
+            "covered": 295,
+            "percent": 86.76470588235294
+          },
+          "lines": {
+            "count": 2285,
+            "covered": 2186,
+            "percent": 95.66739606126916
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 3246,
+            "covered": 3085,
+            "notcovered": 161,
+            "percent": 95.04004929143562
+          }
+        }
+      },
+      {
+        "path": "src/context_graph.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 416,
+            "covered": 391,
+            "percent": 93.99038461538461
+          },
+          "instantiations": {
+            "count": 671,
+            "covered": 599,
+            "percent": 89.26974664679582
+          },
+          "lines": {
+            "count": 3969,
+            "covered": 3839,
+            "percent": 96.72461577223483
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 6485,
+            "covered": 6241,
+            "notcovered": 244,
+            "percent": 96.23747108712413
+          }
+        }
+      },
+      {
+        "path": "src/context_input.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 93,
+            "covered": 86,
+            "percent": 92.47311827956989
+          },
+          "instantiations": {
+            "count": 180,
+            "covered": 154,
+            "percent": 85.55555555555556
+          },
+          "lines": {
+            "count": 836,
+            "covered": 765,
+            "percent": 91.50717703349281
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 1245,
+            "covered": 1136,
+            "notcovered": 109,
+            "percent": 91.24497991967873
+          }
+        }
+      },
+      {
+        "path": "src/daemon.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 628,
+            "covered": 550,
+            "percent": 87.57961783439491
+          },
+          "instantiations": {
+            "count": 1108,
+            "covered": 776,
+            "percent": 70.03610108303249
+          },
+          "lines": {
+            "count": 7881,
+            "covered": 7099,
+            "percent": 90.07740134500698
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 12550,
+            "covered": 11355,
+            "notcovered": 1195,
+            "percent": 90.4780876494024
+          }
+        }
+      },
+      {
+        "path": "src/doctor.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 22,
+            "covered": 20,
+            "percent": 90.9090909090909
+          },
+          "instantiations": {
+            "count": 36,
+            "covered": 30,
+            "percent": 83.33333333333334
+          },
+          "lines": {
+            "count": 386,
+            "covered": 332,
+            "percent": 86.01036269430051
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 656,
+            "covered": 565,
+            "notcovered": 91,
+            "percent": 86.1280487804878
+          }
+        }
+      },
+      {
+        "path": "src/embedding.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 153,
+            "covered": 100,
+            "percent": 65.359477124183
+          },
+          "instantiations": {
+            "count": 334,
+            "covered": 164,
+            "percent": 49.101796407185624
+          },
+          "lines": {
+            "count": 1045,
+            "covered": 720,
+            "percent": 68.89952153110048
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 1638,
+            "covered": 1128,
+            "notcovered": 510,
+            "percent": 68.86446886446886
+          }
+        }
+      },
+      {
+        "path": "src/hardware.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 29,
+            "covered": 20,
+            "percent": 68.96551724137932
+          },
+          "instantiations": {
+            "count": 51,
+            "covered": 25,
+            "percent": 49.01960784313725
+          },
+          "lines": {
+            "count": 228,
+            "covered": 175,
+            "percent": 76.75438596491229
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 333,
+            "covered": 267,
+            "notcovered": 66,
+            "percent": 80.18018018018019
+          }
+        }
+      },
+      {
+        "path": "src/indexer.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 344,
+            "covered": 323,
+            "percent": 93.8953488372093
+          },
+          "instantiations": {
+            "count": 559,
+            "covered": 504,
+            "percent": 90.16100178890876
+          },
+          "lines": {
+            "count": 4839,
+            "covered": 4542,
+            "percent": 93.86236825790454
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 8278,
+            "covered": 7664,
+            "notcovered": 614,
+            "percent": 92.58274945639043
+          }
+        }
+      },
+      {
+        "path": "src/indexer/compression.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 13,
+            "covered": 12,
+            "percent": 92.3076923076923
+          },
+          "instantiations": {
+            "count": 22,
+            "covered": 18,
+            "percent": 81.81818181818183
+          },
+          "lines": {
+            "count": 66,
+            "covered": 65,
+            "percent": 98.48484848484848
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 120,
+            "covered": 117,
+            "notcovered": 3,
+            "percent": 97.5
+          }
+        }
+      },
+      {
+        "path": "src/indexer/git_state.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 23,
+            "covered": 22,
+            "percent": 95.65217391304348
+          },
+          "instantiations": {
+            "count": 46,
+            "covered": 43,
+            "percent": 93.47826086956522
+          },
+          "lines": {
+            "count": 232,
+            "covered": 213,
+            "percent": 91.8103448275862
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 350,
+            "covered": 306,
+            "notcovered": 44,
+            "percent": 87.42857142857143
+          }
+        }
+      },
+      {
+        "path": "src/indexer/resources.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 51,
+            "covered": 47,
+            "percent": 92.15686274509804
+          },
+          "instantiations": {
+            "count": 86,
+            "covered": 62,
+            "percent": 72.09302325581395
+          },
+          "lines": {
+            "count": 413,
+            "covered": 392,
+            "percent": 94.91525423728814
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 561,
+            "covered": 525,
+            "notcovered": 36,
+            "percent": 93.58288770053476
+          }
+        }
+      },
+      {
+        "path": "src/indexer/staging.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 25,
+            "covered": 22,
+            "percent": 88.0
+          },
+          "instantiations": {
+            "count": 43,
+            "covered": 33,
+            "percent": 76.74418604651163
+          },
+          "lines": {
+            "count": 301,
+            "covered": 278,
+            "percent": 92.35880398671095
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 554,
+            "covered": 518,
+            "notcovered": 36,
+            "percent": 93.50180505415162
+          }
+        }
+      },
+      {
+        "path": "src/indexer/storage.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 55,
+            "covered": 53,
+            "percent": 96.36363636363636
+          },
+          "instantiations": {
+            "count": 92,
+            "covered": 87,
+            "percent": 94.56521739130436
+          },
+          "lines": {
+            "count": 529,
+            "covered": 491,
+            "percent": 92.81663516068053
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 698,
+            "covered": 614,
+            "notcovered": 84,
+            "percent": 87.96561604584528
+          }
+        }
+      },
+      {
+        "path": "src/ipc.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 36,
+            "covered": 21,
+            "percent": 58.333333333333336
+          },
+          "instantiations": {
+            "count": 65,
+            "covered": 35,
+            "percent": 53.84615384615385
+          },
+          "lines": {
+            "count": 228,
+            "covered": 128,
+            "percent": 56.14035087719298
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 369,
+            "covered": 208,
+            "notcovered": 161,
+            "percent": 56.36856368563685
+          }
+        }
+      },
+      {
+        "path": "src/jobs.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 57,
+            "covered": 49,
+            "percent": 85.96491228070175
+          },
+          "instantiations": {
+            "count": 123,
+            "covered": 100,
+            "percent": 81.30081300813008
+          },
+          "lines": {
+            "count": 434,
+            "covered": 416,
+            "percent": 95.85253456221197
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 691,
+            "covered": 653,
+            "notcovered": 38,
+            "percent": 94.50072358900144
+          }
+        }
+      },
+      {
+        "path": "src/launcher.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 30,
+            "covered": 19,
+            "percent": 63.33333333333333
+          },
+          "instantiations": {
+            "count": 59,
+            "covered": 22,
+            "percent": 37.28813559322034
+          },
+          "lines": {
+            "count": 304,
+            "covered": 215,
+            "percent": 70.72368421052632
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 442,
+            "covered": 317,
+            "notcovered": 125,
+            "percent": 71.71945701357465
+          }
+        }
+      },
+      {
+        "path": "src/main.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 3,
+            "covered": 3,
+            "percent": 100.0
+          },
+          "instantiations": {
+            "count": 6,
+            "covered": 3,
+            "percent": 50.0
+          },
+          "lines": {
+            "count": 11,
+            "covered": 11,
+            "percent": 100.0
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 9,
+            "covered": 9,
+            "notcovered": 0,
+            "percent": 100.0
+          }
+        }
+      },
+      {
+        "path": "src/mcp.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 126,
+            "covered": 115,
+            "percent": 91.26984126984127
+          },
+          "instantiations": {
+            "count": 192,
+            "covered": 146,
+            "percent": 76.04166666666666
+          },
+          "lines": {
+            "count": 2381,
+            "covered": 2195,
+            "percent": 92.18815623687526
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 3578,
+            "covered": 3294,
+            "notcovered": 284,
+            "percent": 92.06260480715484
+          }
+        }
+      },
+      {
+        "path": "src/merkle.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 65,
+            "covered": 64,
+            "percent": 98.46153846153847
+          },
+          "instantiations": {
+            "count": 102,
+            "covered": 97,
+            "percent": 95.09803921568627
+          },
+          "lines": {
+            "count": 838,
+            "covered": 820,
+            "percent": 97.85202863961814
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 1746,
+            "covered": 1698,
+            "notcovered": 48,
+            "percent": 97.2508591065292
+          }
+        }
+      },
+      {
+        "path": "src/neural_metadata.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 6,
+            "covered": 4,
+            "percent": 66.66666666666666
+          },
+          "instantiations": {
+            "count": 12,
+            "covered": 8,
+            "percent": 66.66666666666666
+          },
+          "lines": {
+            "count": 31,
+            "covered": 25,
+            "percent": 80.64516129032258
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 58,
+            "covered": 45,
+            "notcovered": 13,
+            "percent": 77.58620689655173
+          }
+        }
+      },
+      {
+        "path": "src/path_glob.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 21,
+            "covered": 20,
+            "percent": 95.23809523809523
+          },
+          "instantiations": {
+            "count": 31,
+            "covered": 28,
+            "percent": 90.32258064516128
+          },
+          "lines": {
+            "count": 146,
+            "covered": 140,
+            "percent": 95.8904109589041
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 275,
+            "covered": 268,
+            "notcovered": 7,
+            "percent": 97.45454545454545
+          }
+        }
+      },
+      {
+        "path": "src/protocol.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 21,
+            "covered": 21,
+            "percent": 100.0
+          },
+          "instantiations": {
+            "count": 31,
+            "covered": 31,
+            "percent": 100.0
+          },
+          "lines": {
+            "count": 214,
+            "covered": 211,
+            "percent": 98.5981308411215
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 321,
+            "covered": 318,
+            "notcovered": 3,
+            "percent": 99.06542056074767
+          }
+        }
+      },
+      {
+        "path": "src/query_aliases.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 14,
+            "covered": 14,
+            "percent": 100.0
+          },
+          "instantiations": {
+            "count": 23,
+            "covered": 21,
+            "percent": 91.30434782608695
+          },
+          "lines": {
+            "count": 107,
+            "covered": 107,
+            "percent": 100.0
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 254,
+            "covered": 254,
+            "notcovered": 0,
+            "percent": 100.0
+          }
+        }
+      },
+      {
+        "path": "src/regex_search.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 72,
+            "covered": 69,
+            "percent": 95.83333333333334
+          },
+          "instantiations": {
+            "count": 132,
+            "covered": 102,
+            "percent": 77.27272727272727
+          },
+          "lines": {
+            "count": 977,
+            "covered": 906,
+            "percent": 92.73285568065508
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 1685,
+            "covered": 1579,
+            "notcovered": 106,
+            "percent": 93.70919881305639
+          }
+        }
+      },
+      {
+        "path": "src/reranker.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 66,
+            "covered": 61,
+            "percent": 92.42424242424242
+          },
+          "instantiations": {
+            "count": 134,
+            "covered": 104,
+            "percent": 77.61194029850746
+          },
+          "lines": {
+            "count": 582,
+            "covered": 536,
+            "percent": 92.09621993127148
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 924,
+            "covered": 859,
+            "notcovered": 65,
+            "percent": 92.96536796536796
+          }
+        }
+      },
+      {
+        "path": "src/search.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 694,
+            "covered": 666,
+            "percent": 95.96541786743516
+          },
+          "instantiations": {
+            "count": 1171,
+            "covered": 1044,
+            "percent": 89.15456874466268
+          },
+          "lines": {
+            "count": 7561,
+            "covered": 7227,
+            "percent": 95.58259489485518
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 12219,
+            "covered": 11578,
+            "notcovered": 641,
+            "percent": 94.75407152794828
+          }
+        }
+      },
+      {
+        "path": "src/search_boolean.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 18,
+            "covered": 18,
+            "percent": 100.0
+          },
+          "instantiations": {
+            "count": 36,
+            "covered": 25,
+            "percent": 69.44444444444444
+          },
+          "lines": {
+            "count": 186,
+            "covered": 182,
+            "percent": 97.84946236559139
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 297,
+            "covered": 285,
+            "notcovered": 12,
+            "percent": 95.95959595959596
+          }
+        }
+      },
+      {
+        "path": "src/search_eligibility.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 25,
+            "covered": 25,
+            "percent": 100.0
+          },
+          "instantiations": {
+            "count": 46,
+            "covered": 44,
+            "percent": 95.65217391304348
+          },
+          "lines": {
+            "count": 216,
+            "covered": 213,
+            "percent": 98.61111111111111
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 308,
+            "covered": 305,
+            "notcovered": 3,
+            "percent": 99.02597402597402
+          }
+        }
+      },
+      {
+        "path": "src/search_execution.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 46,
+            "covered": 40,
+            "percent": 86.95652173913044
+          },
+          "instantiations": {
+            "count": 92,
+            "covered": 79,
+            "percent": 85.86956521739131
+          },
+          "lines": {
+            "count": 642,
+            "covered": 562,
+            "percent": 87.53894080996885
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 1093,
+            "covered": 937,
+            "notcovered": 156,
+            "percent": 85.72735590118937
+          }
+        }
+      },
+      {
+        "path": "src/search_file_cache.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 14,
+            "covered": 14,
+            "percent": 100.0
+          },
+          "instantiations": {
+            "count": 23,
+            "covered": 23,
+            "percent": 100.0
+          },
+          "lines": {
+            "count": 226,
+            "covered": 225,
+            "percent": 99.5575221238938
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 460,
+            "covered": 453,
+            "notcovered": 7,
+            "percent": 98.47826086956522
+          }
+        }
+      },
+      {
+        "path": "src/search_fusion.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 27,
+            "covered": 21,
+            "percent": 77.77777777777779
+          },
+          "instantiations": {
+            "count": 54,
+            "covered": 37,
+            "percent": 68.51851851851852
+          },
+          "lines": {
+            "count": 380,
+            "covered": 367,
+            "percent": 96.57894736842105
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 550,
+            "covered": 514,
+            "notcovered": 36,
+            "percent": 93.45454545454545
+          }
+        }
+      },
+      {
+        "path": "src/search_presentation.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 19,
+            "covered": 19,
+            "percent": 100.0
+          },
+          "instantiations": {
+            "count": 37,
+            "covered": 35,
+            "percent": 94.5945945945946
+          },
+          "lines": {
+            "count": 292,
+            "covered": 269,
+            "percent": 92.12328767123287
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 378,
+            "covered": 360,
+            "notcovered": 18,
+            "percent": 95.23809523809523
+          }
+        }
+      },
+      {
+        "path": "src/search_routing.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 14,
+            "covered": 14,
+            "percent": 100.0
+          },
+          "instantiations": {
+            "count": 28,
+            "covered": 28,
+            "percent": 100.0
+          },
+          "lines": {
+            "count": 156,
+            "covered": 156,
+            "percent": 100.0
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 147,
+            "covered": 147,
+            "notcovered": 0,
+            "percent": 100.0
+          }
+        }
+      },
+      {
+        "path": "src/search_semantic_visibility.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 11,
+            "covered": 11,
+            "percent": 100.0
+          },
+          "instantiations": {
+            "count": 22,
+            "covered": 18,
+            "percent": 81.81818181818183
+          },
+          "lines": {
+            "count": 122,
+            "covered": 111,
+            "percent": 90.98360655737704
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 194,
+            "covered": 170,
+            "notcovered": 24,
+            "percent": 87.62886597938144
+          }
+        }
+      },
+      {
+        "path": "src/search_service.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 19,
+            "covered": 17,
+            "percent": 89.47368421052632
+          },
+          "instantiations": {
+            "count": 37,
+            "covered": 30,
+            "percent": 81.0810810810811
+          },
+          "lines": {
+            "count": 191,
+            "covered": 181,
+            "percent": 94.76439790575915
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 323,
+            "covered": 310,
+            "notcovered": 13,
+            "percent": 95.9752321981424
+          }
+        }
+      },
+      {
+        "path": "src/symbols.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 222,
+            "covered": 217,
+            "percent": 97.74774774774774
+          },
+          "instantiations": {
+            "count": 405,
+            "covered": 342,
+            "percent": 84.44444444444444
+          },
+          "lines": {
+            "count": 2559,
+            "covered": 2480,
+            "percent": 96.91285658460336
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 3623,
+            "covered": 3442,
+            "notcovered": 181,
+            "percent": 95.0041402152912
+          }
+        }
+      },
+      {
+        "path": "src/system_resources.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 39,
+            "covered": 33,
+            "percent": 84.61538461538461
+          },
+          "instantiations": {
+            "count": 76,
+            "covered": 49,
+            "percent": 64.47368421052632
+          },
+          "lines": {
+            "count": 240,
+            "covered": 206,
+            "percent": 85.83333333333333
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 397,
+            "covered": 339,
+            "notcovered": 58,
+            "percent": 85.3904282115869
+          }
+        }
+      },
+      {
+        "path": "src/text.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 49,
+            "covered": 47,
+            "percent": 95.91836734693877
+          },
+          "instantiations": {
+            "count": 79,
+            "covered": 75,
+            "percent": 94.93670886075948
+          },
+          "lines": {
+            "count": 510,
+            "covered": 489,
+            "percent": 95.88235294117648
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 772,
+            "covered": 735,
+            "notcovered": 37,
+            "percent": 95.20725388601036
+          }
+        }
+      },
+      {
+        "path": "src/tui.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 163,
+            "covered": 118,
+            "percent": 72.39263803680981
+          },
+          "instantiations": {
+            "count": 242,
+            "covered": 118,
+            "percent": 48.760330578512395
+          },
+          "lines": {
+            "count": 1967,
+            "covered": 963,
+            "percent": 48.95780376207422
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 3097,
+            "covered": 1520,
+            "notcovered": 1577,
+            "percent": 49.079754601226995
+          }
+        }
+      },
+      {
+        "path": "src/vector_store.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 9,
+            "covered": 8,
+            "percent": 88.88888888888889
+          },
+          "instantiations": {
+            "count": 33,
+            "covered": 23,
+            "percent": 69.6969696969697
+          },
+          "lines": {
+            "count": 49,
+            "covered": 45,
+            "percent": 91.83673469387756
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 65,
+            "covered": 58,
+            "notcovered": 7,
+            "percent": 89.23076923076925
+          }
+        }
+      },
+      {
+        "path": "src/vector_store/metadata.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 13,
+            "covered": 13,
+            "percent": 100.0
+          },
+          "instantiations": {
+            "count": 18,
+            "covered": 18,
+            "percent": 100.0
+          },
+          "lines": {
+            "count": 207,
+            "covered": 207,
+            "percent": 100.0
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 449,
+            "covered": 438,
+            "notcovered": 11,
+            "percent": 97.55011135857461
+          }
+        }
+      },
+      {
+        "path": "src/vector_store/optimized.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 103,
+            "covered": 102,
+            "percent": 99.02912621359224
+          },
+          "instantiations": {
+            "count": 150,
+            "covered": 138,
+            "percent": 92.0
+          },
+          "lines": {
+            "count": 901,
+            "covered": 869,
+            "percent": 96.44839067702554
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 1816,
+            "covered": 1728,
+            "notcovered": 88,
+            "percent": 95.15418502202643
+          }
+        }
+      },
+      {
+        "path": "src/vector_store/portable.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 43,
+            "covered": 38,
+            "percent": 88.37209302325581
+          },
+          "instantiations": {
+            "count": 43,
+            "covered": 38,
+            "percent": 88.37209302325581
+          },
+          "lines": {
+            "count": 377,
+            "covered": 317,
+            "percent": 84.08488063660478
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 706,
+            "covered": 598,
+            "notcovered": 108,
+            "percent": 84.70254957507082
+          }
+        }
+      },
+      {
+        "path": "src/walker.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 22,
+            "covered": 22,
+            "percent": 100.0
+          },
+          "instantiations": {
+            "count": 29,
+            "covered": 27,
+            "percent": 93.10344827586206
+          },
+          "lines": {
+            "count": 166,
+            "covered": 166,
+            "percent": 100.0
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 374,
+            "covered": 372,
+            "notcovered": 2,
+            "percent": 99.46524064171123
+          }
+        }
+      },
+      {
+        "path": "src/web.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 144,
+            "covered": 56,
+            "percent": 38.88888888888889
+          },
+          "instantiations": {
+            "count": 274,
+            "covered": 56,
+            "percent": 20.437956204379564
+          },
+          "lines": {
+            "count": 1180,
+            "covered": 411,
+            "percent": 34.83050847457627
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 1979,
+            "covered": 660,
+            "notcovered": 1319,
+            "percent": 33.35017685699848
+          }
+        }
+      },
+      {
+        "path": "src/workspace.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 235,
+            "covered": 219,
+            "percent": 93.19148936170212
+          },
+          "instantiations": {
+            "count": 435,
+            "covered": 388,
+            "percent": 89.19540229885058
+          },
+          "lines": {
+            "count": 2337,
+            "covered": 2202,
+            "percent": 94.22336328626444
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 3687,
+            "covered": 3430,
+            "notcovered": 257,
+            "percent": 93.0295633306211
+          }
+        }
+      },
+      {
+        "path": "src/workspace_file.rs",
+        "summary": {
+          "branches": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "functions": {
+            "count": 16,
+            "covered": 15,
+            "percent": 93.75
+          },
+          "instantiations": {
+            "count": 27,
+            "covered": 23,
+            "percent": 85.18518518518519
+          },
+          "lines": {
+            "count": 168,
+            "covered": 162,
+            "percent": 96.42857142857143
+          },
+          "mcdc": {
+            "count": 0,
+            "covered": 0,
+            "notcovered": 0,
+            "percent": 0.0
+          },
+          "regions": {
+            "count": 387,
+            "covered": 371,
+            "notcovered": 16,
+            "percent": 95.8656330749354
+          }
+        }
+      }
+    ],
+    "ignored_stress_tests": 11,
+    "raw_report_sha256": "11dccec55b06e1cd0d258866eeb5a21d1411fbcf184d9d9aff4b1df02360912c",
+    "scope": "Default neural features; all lib/bin/integration tests. Rust src includes inline test modules; integration-test source and vendor paths excluded. Native C/C++, GPU, Python, browser execution, ignored stress tests and stable-toolchain branch coverage are not measured. Child processes killed before profile flush may be undercounted.",
+    "tests_passed": 1085,
+    "totals": {
+      "branches": {
+        "count": 0,
+        "covered": 0,
+        "notcovered": 0,
+        "percent": 0
+      },
+      "functions": {
+        "count": 5049,
+        "covered": 4484,
+        "percent": 88.8096652802535
+      },
+      "instantiations": {
+        "count": 8789,
+        "covered": 6810,
+        "percent": 77.48321765843669
+      },
+      "lines": {
+        "count": 55610,
+        "covered": 49380,
+        "percent": 88.79697896061859
+      },
+      "mcdc": {
+        "count": 0,
+        "covered": 0,
+        "notcovered": 0,
+        "percent": 0
+      },
+      "regions": {
+        "count": 89071,
+        "covered": 78773,
+        "notcovered": 10298,
+        "percent": 88.4384367527029
+      }
+    }
+  },
+  "coverage_source_inputs_sha256": "3c08b34304be1844356dd79913b01281c0e69a6845bdfdb622b9bfd2af9b597e",
+  "coverage_tool": "cargo-llvm-cov 0.9.0",
+  "date": "2026-09-02",
+  "debug_build": {
+    "baseline": "Unchanged baseline fails with 11 fullfp16 assembler errors in gemm-f16 0.19.0 helpers.",
+    "full_debug_tests_before_watcher_changes": 1084,
+    "instrumented_tests_before_retry_followup": 1085,
+    "workaround": "Dependency-only dev optimization level 1 for gemm-f16; no global FP16 target feature; application debug assertions retained."
+  },
+  "environment_limits": [
+    "Initial coverage build exhausted memory-backed /tmp before tests. Stopped artifacts were moved to instance storage and the full run then passed.",
+    "No local CUDA device and no registered GPU runner; CUDA execution remains unverified."
+  ],
+  "final_release_source_inputs_sha256": "a32cfdb4714ff68ff3161a748084deaa39867373f8f2b0a15084c72cf509f002",
+  "old_cpu_execution": {
+    "cpu": "cortex-a53",
+    "passed": true,
+    "runtime": "qemu-aarch64",
+    "test": "embedding::tests::cpu_f16_matmul_keeps_portable_runtime_dispatch"
+  },
+  "prior_metal_execution": {
+    "passed": true,
+    "scope": "Earlier main commit; runtime PR removes CPU fallback from its Metal CI acceptance and needs a fresh check.",
+    "url": "https://github.com/bvolpato/ivygrep/actions/runs/33632167202/job/100254030340"
+  },
+  "qemu_loader_prefix": {
+    "cross_passthrough_issue": "Pinned cross vec_from_config discards a target-only environment list when env.build is None. Use CROSS_BUILD_ENV_PASSTHROUGH scoped to this musl test step; the target-only override did not fix run 33691981362.",
+    "fail_fast_probe": "A real implicit-index literal query runs through cross before all test binaries compile.",
+    "failed_run": "https://github.com/bvolpato/ivygrep/actions/runs/33688865573",
+    "full_cross_musl_rerun": "pending",
+    "inspected_image_digest": "sha256:d82cdcbff5bdf41d55b9b06c45d8a1d779d45403cdf3d7ea3eb165cb8eee3484",
+    "local_corrected_workspace_file_tests": 5,
+    "local_negative_control": "Workspace-file read fails with ENOENT under an empty alternate QEMU loader prefix.",
+    "negative_log_sha256": "0e217baf8853ccf939074486eb2f1be899164f0d0268bba65b221f0452442537",
+    "positive_log_sha256": "16cf95f69d7c8c8f246e97f1158a689d6c5a6dfac13a03332954fecf0235ad79",
+    "root_cause": "The loader sysroot remaps open(\"/\") but not descriptor-relative openat calls. Static musl tests must explicitly pass QEMU_LD_PREFIX=/ into the cross container. Product containment checks are unchanged."
+  },
+  "release_binary_sha256": "58f52efcd1ac63b1b0304ff6d041d984efe2ba390c139b6b5462f311ae78a092",
+  "rust": "rustc 1.96.0 (ac68faa20 2026-05-25)",
+  "schema_version": 1,
+  "source_note": "Coverage identifies the pre-retry runtime source; its original checksum and totals are retained. Later changes exclude unsupported macOS Accelerate F16 matmul and fix failed external-watch reattachment. Current-head relevance and final release fingerprints identify the final source, not a re-run of the old coverage snapshot.",
+  "validation": {
+    "cli_daemon_cases": 7,
+    "clippy": "all targets, debug, features accelerate,metal, warnings denied",
+    "current_head_queries_per_mode": 23,
+    "fmt_shellcheck": "passed",
+    "neural_queries_executed": 23,
+    "python_tests": 259,
+    "worktree_checks": 116
+  },
+  "watcher_reattachment_retry": {
+    "explicit_stress_tests_passed": 11,
+    "final_debug_test_log_sha256": "444baaee0579c01c22e609a0663e4abc07b14cdef19571a364264b953bca9dad",
+    "final_debug_tests_passed": 1085,
+    "negative_control": "Injected replacement-watch attachment failure loses later exclude edits before the fix.",
+    "negative_log_sha256": "712e3a5015a9318e3a2250d5f5d0b89517e030ab157ee58aeb992b7e66dc25c8",
+    "positive_log_sha256": "1c560c2d8b154e6dcd168ac3989b32f5546fe9efefcc58a93a00123911c4d109",
+    "recovery": "Watch worker retries attachment failures using existing bounded backoff and full reconciliation; explicit refresh failures queue recovery and still return an error."
+  },
+  "watcher_replacement": {
+    "fixed_native_test": "3 successive replacement cycles pass; excludes are applied and subsequently removed each cycle.",
+    "negative_control": "Repeated same-path Git info-directory replacement loses the old Unix inode watch. New E2E failed at cycle 0 before reattachment fix.",
+    "negative_log_sha256": "b5d10ec789d99f539a5d43b0f5c5f920ff6e7bf76c6c4534000748bd61bb9fe2",
+    "positive_log_sha256": "e990d7ae8fb6c2152a431a61a73334e0ea6d48a0125dcb7cedd969f5a77dc411",
+    "windows_validation": "pending CI; stable recursive common-directory watch avoids disposable info-directory handles"
+  }
+}

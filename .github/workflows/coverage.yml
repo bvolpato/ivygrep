@@ -1,0 +1,77 @@
+name: Rust Coverage
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "vendor/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
+      - ".cargo/**"
+      - "rust-toolchain.toml"
+      - ".github/workflows/coverage.yml"
+  workflow_dispatch:
+  schedule:
+    - cron: "43 5 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  coverage:
+    name: ARM64 neural Rust coverage
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      RUST_TEST_THREADS: "2"
+      IVYGREP_NO_AUTOSPAWN: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install pinned coverage tool
+        run: cargo install cargo-llvm-cov --version 0.9.0 --locked
+
+      - name: Run instrumented unit and integration tests
+        run: |
+          cargo llvm-cov --locked --lib --bins --tests \
+            --ignore-filename-regex '/(tests|vendor)/' \
+            --lcov --output-path coverage.lcov
+          cargo llvm-cov report --json --summary-only \
+            --ignore-filename-regex '/(tests|vendor)/' \
+            --output-path coverage-summary.json
+
+      - name: Describe coverage scope
+        run: |
+          {
+            echo '## Rust source coverage'
+            echo 'Default neural features, ARM64 debug profile, unit and integration tests.'
+            echo 'Includes inline Rust test modules. Excludes integration-test source and vendor source.'
+            echo 'Does not measure native C/C++, GPU execution, Python, browser E2E, or ignored stress tests.'
+            echo 'Coverage is evidence, not a correctness or relevance gate.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: rust-coverage-${{ github.sha }}
+          path: |
+            coverage.lcov
+            coverage-summary.json
+          retention-days: 14
+          if-no-files-found: warn

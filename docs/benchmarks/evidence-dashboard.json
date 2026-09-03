@@ -8,10 +8,10 @@
       "path": "docs/benchmarks/current-head-relevance.json",
       "publication_commit": null,
       "publication_status": "not pinned to an immutable revision",
-      "sha256": "3fa1c40c5288c1959dbf3da8594823ffdc18410205194685441857d227fb9a4c",
-      "source_commit": "470eddb0043cac48b8247f5028b5e67a7995288c",
+      "sha256": "168a7bcc6d05bac77bfaf6be0014d4788b7880c827248d2212299cfa529033f8",
+      "source_commit": "ee70cf56bc89024b2b35f51e901e8ae226d3da50",
       "summary": {
-        "binary_sha256": "c1b406466858ef0bbb1d6a2c9ff86dfdc864da15ced32c3dca49685868d60189",
+        "binary_sha256": "0467a0b09267fdb8a5120182538d45cc650a854acf18048f4f5f94769ac36b98",
         "fixture": {
           "path": "tests/fixtures/ivygrep_relevance_queries.json",
           "sha256": "40e5b778fd620a4315b0e405def180527ffbfa7254c63f5bd4525b8ef6b1fb7e"
@@ -33,7 +33,7 @@
             },
             "candidate_budget_misses": [],
             "candidate_recall_misses": [],
-            "elapsed_ms": 1439.0345867723227,
+            "elapsed_ms": 1434.954317752272,
             "filter_misses": [],
             "low_rank_misses": [
               "vector-store",
@@ -67,7 +67,7 @@
             },
             "candidate_budget_misses": [],
             "candidate_recall_misses": [],
-            "elapsed_ms": 1617.5297647714615,
+            "elapsed_ms": 1725.2048556692898,
             "filter_misses": [],
             "low_rank_misses": [
               "vector-store",
@@ -101,13 +101,13 @@
             },
             "candidate_budget_misses": [],
             "candidate_recall_misses": [],
-            "elapsed_ms": 2060.3246553801,
+            "elapsed_ms": 2009.6779088489711,
             "filter_misses": [],
             "low_rank_misses": [],
             "mean_candidate_recall": 0.9782608695652174,
             "mean_hybrid_deep_recall": 0.0,
             "mean_mrr": 0.9347826086956522,
-            "mean_ndcg10": 0.9141084451167947,
+            "mean_ndcg10": 0.9133256077564952,
             "mean_p1": 0.8695652173913043,
             "mean_p5": 0.21739130434782608,
             "mean_recall5": 0.9565217391304348,

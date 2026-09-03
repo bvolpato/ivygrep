@@ -55,15 +55,17 @@ class E2EWorkflowTest(unittest.TestCase):
                 "CARGO_TEST_TARGET": str(target),
                 "CARGO_BUILD_RECORD": str(root / "cargo-build"),
             }
-            for profile in ("debug", "release"):
-                with self.subTest(profile=profile):
-                    args = ["bash", "test.sh", "--quick", "--hash-only", "--e2e"]
+            for profile, hash_only in (("debug", True), ("release", True), ("debug", False)):
+                with self.subTest(profile=profile, hash_only=hash_only):
+                    args = ["bash", "test.sh", "--quick", "--e2e"]
+                    if hash_only:
+                        args.append("--hash-only")
                     if profile == "release":
                         args.append("--release")
                     subprocess.run(args, cwd=root, env=env, check=True, capture_output=True)
                     self.assertEqual(result.read_text().strip(), str(target / profile / "ig"))
                     build = (root / "cargo-build").read_text()
-                    self.assertIn("--no-default-features", build)
+                    self.assertEqual("--no-default-features" in build, hash_only)
                     self.assertIn("--bin ig", build)
 
     def test_aarch64_smoke_uses_git_and_python_images(self) -> None:
@@ -77,7 +79,9 @@ class E2EWorkflowTest(unittest.TestCase):
         self.assertIn("alpine/git@sha256:", arm)
         self.assertIn("python:3.13-alpine", arm)
         self.assertNotIn("alpine:latest", arm)
-        self.assertNotIn("apk add", arm)
+        offline_container, python_container = arm.split("python:3.13-alpine", maxsplit=1)
+        self.assertNotIn("apk add", offline_container)
+        self.assertIn("apk add --no-cache git", python_container)
         self.assertLess(
             arm.index("alpine/git@sha256:"),
             arm.index('sh scripts/e2e_procedures.sh --binary "$IG"'),

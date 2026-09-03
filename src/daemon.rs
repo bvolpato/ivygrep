@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
@@ -13,6 +13,7 @@ use anyhow::Result;
 use lru::LruCache;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::{Condvar, Mutex};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Notify;
 use tracing::{error, info, warn};
@@ -282,6 +283,9 @@ struct WatchRegistration {
     event_filter: Arc<Mutex<WatchEventFilter>>,
     external_git_common_dir: Option<PathBuf>,
     external_git_watch: Option<PathBuf>,
+    external_git_watch_identity: Option<(u64, u64)>,
+    #[cfg(test)]
+    fail_next_external_git_watch: bool,
 }
 
 #[derive(Clone)]
@@ -304,6 +308,13 @@ enum WatchChange {
 struct PendingWatchWork {
     change: WatchChange,
     backend_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+enum ExternalGitExcludeState {
+    Missing,
+    Readable([u8; 32]),
+    Unreadable,
 }
 
 #[derive(Clone)]
@@ -3866,7 +3877,15 @@ fn register_resolved_watcher(state: &DaemonState, workspace: Workspace) -> Resul
 
     let mut watchers = state.watchers.lock();
     if let Some(registration) = watchers.get_mut(&workspace.id) {
-        refresh_watch_registration(&workspace, registration)?;
+        if let Err(error) = refresh_watch_registration(&workspace, registration) {
+            // Refresh may already have detached an obsolete inode watch.
+            // The caller still gets the error, but recovery cannot require
+            // another external event from a watch that no longer exists.
+            registration
+                .control
+                .requeue_failed_index(format!("failed refreshing watch registration: {error:#}"));
+            return Err(error);
+        }
         return Ok(());
     }
 
@@ -3921,7 +3940,7 @@ fn register_resolved_watcher(state: &DaemonState, workspace: Workspace) -> Resul
     }
     if let Some(git_watch) = &external_git_watch {
         watcher
-            .watch(git_watch, RecursiveMode::NonRecursive)
+            .watch(git_watch, external_git_watch_mode())
             .map_err(|err| {
                 anyhow::anyhow!(
                     "failed watching external Git metadata directory {}: {err:#}",
@@ -3941,7 +3960,10 @@ fn register_resolved_watcher(state: &DaemonState, workspace: Workspace) -> Resul
             control: control.clone(),
             event_filter,
             external_git_common_dir,
+            external_git_watch_identity: external_git_watch_identity(external_git_watch.as_deref()),
             external_git_watch,
+            #[cfg(test)]
+            fail_next_external_git_watch: false,
         },
     );
     drop(watchers);
@@ -3983,18 +4005,17 @@ fn refresh_watch_registration(
     let desired_watch = desired_common_dir
         .as_deref()
         .and_then(external_git_watch_target);
+    let desired_identity = external_git_watch_identity(desired_watch.as_deref());
+    detach_replaced_external_git_watch(registration, &desired_watch, desired_identity)?;
 
     if registration.external_git_watch != desired_watch {
         if let Some(desired) = &desired_watch {
-            registration
-                .watcher
-                .watch(desired, RecursiveMode::NonRecursive)
-                .map_err(|error| {
-                    anyhow::anyhow!(
-                        "failed watching external Git metadata directory {}: {error:#}",
-                        desired.display()
-                    )
-                })?;
+            attach_external_git_watch(registration, desired).map_err(|error| {
+                anyhow::anyhow!(
+                    "failed watching external Git metadata directory {}: {error:#}",
+                    desired.display()
+                )
+            })?;
         }
 
         if let Some(current) = &registration.external_git_watch
@@ -4013,11 +4034,18 @@ fn refresh_watch_registration(
 
     registration.external_git_common_dir = desired_common_dir;
     registration.external_git_watch = desired_watch;
+    registration.external_git_watch_identity = desired_identity;
     *registration.event_filter.lock() = desired_filter;
     Ok(())
 }
 
 fn external_git_watch_target(common_dir: &Path) -> Option<PathBuf> {
+    // ReadDirectoryChangesW can retire a deleted directory's watch
+    // asynchronously. Keep a stable parent handle across info/ replacement;
+    // WatchEventFilter still rejects unrelated Git metadata events.
+    if cfg!(windows) {
+        return common_dir.is_dir().then(|| common_dir.to_path_buf());
+    }
     let info = common_dir.join("info");
     if info.is_dir() {
         Some(info)
@@ -4026,6 +4054,82 @@ fn external_git_watch_target(common_dir: &Path) -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+fn registered_external_git_exclude_path(
+    state: &DaemonState,
+    workspace: &Workspace,
+) -> Option<PathBuf> {
+    state
+        .watchers
+        .lock()
+        .get(&workspace.id)
+        .and_then(|registration| registration.external_git_common_dir.as_ref())
+        .map(|common_dir| common_dir.join("info/exclude"))
+}
+
+fn external_git_exclude_state(path: &Path) -> ExternalGitExcludeState {
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ExternalGitExcludeState::Missing;
+        }
+        Err(_) => return ExternalGitExcludeState::Unreadable,
+    };
+    let mut digest = Sha256::new();
+    let mut buffer = [0u8; 8192];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => return ExternalGitExcludeState::Readable(digest.finalize().into()),
+            Ok(read) => digest.update(&buffer[..read]),
+            Err(_) => return ExternalGitExcludeState::Unreadable,
+        }
+    }
+}
+
+fn external_git_watch_mode() -> RecursiveMode {
+    if cfg!(windows) {
+        RecursiveMode::Recursive
+    } else {
+        RecursiveMode::NonRecursive
+    }
+}
+
+fn external_git_watch_identity(path: Option<&Path>) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = path?.metadata().ok()?;
+        Some((metadata.dev(), metadata.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        None
+    }
+}
+
+fn detach_replaced_external_git_watch(
+    registration: &mut WatchRegistration,
+    desired: &Option<PathBuf>,
+    identity: Option<(u64, u64)>,
+) -> Result<()> {
+    if registration.external_git_watch == *desired
+        && registration.external_git_watch_identity != identity
+        && let Some(current) = &registration.external_git_watch
+    {
+        // A pathname can now name a new inode while inotify still watches the
+        // renamed directory. Remove the old registration before adding that
+        // same pathname again, or unwatch would remove the new registration.
+        if let Err(error) = registration.watcher.unwatch(current)
+            && !is_missing_watch_error(&error)
+        {
+            return Err(error.into());
+        }
+        registration.external_git_watch = None;
+        registration.external_git_watch_identity = None;
+    }
+    Ok(())
 }
 
 fn is_missing_watch_error(error: &notify::Error) -> bool {
@@ -4053,18 +4157,17 @@ fn log_external_git_watch_error(
     ));
 }
 
-fn reconcile_external_git_watch(state: &DaemonState, workspace: &Workspace) {
+fn reconcile_external_git_watch(state: &DaemonState, workspace: &Workspace) -> Result<()> {
     let mut watchers = state.watchers.lock();
     let Some(registration) = watchers.get_mut(&workspace.id) else {
-        return;
+        return Ok(());
     };
     let Some(common_dir) = registration.external_git_common_dir.clone() else {
-        return;
+        return Ok(());
     };
     let desired = external_git_watch_target(&common_dir);
-    if registration.external_git_watch == desired {
-        return;
-    }
+    let desired_identity = external_git_watch_identity(desired.as_deref());
+    detach_replaced_external_git_watch(registration, &desired, desired_identity)?;
 
     let Some(target) = desired else {
         if let Some(current) = registration.external_git_watch.as_ref()
@@ -4072,22 +4175,29 @@ fn reconcile_external_git_watch(state: &DaemonState, workspace: &Workspace) {
             && !is_missing_watch_error(&error)
         {
             log_external_git_watch_error(workspace, "removing", current, &error);
-            return;
+            return Err(error.into());
         }
         registration.external_git_watch = None;
-        return;
+        registration.external_git_watch_identity = None;
+        anyhow::bail!(
+            "external Git metadata directory is unavailable: {}",
+            common_dir.display()
+        );
     };
-    if let Err(error) = registration
-        .watcher
-        .watch(&target, RecursiveMode::NonRecursive)
-    {
-        log_external_git_watch_error(workspace, "adding", &target, &error);
-        return;
+    if registration.external_git_watch.as_ref() == Some(&target) {
+        return Ok(());
     }
+    attach_external_git_watch(registration, &target).map_err(|error| {
+        anyhow::anyhow!(
+            "failed adding external Git metadata watch {}: {error:#}",
+            target.display()
+        )
+    })?;
 
     let Some(current) = registration.external_git_watch.as_ref() else {
         registration.external_git_watch = Some(target);
-        return;
+        registration.external_git_watch_identity = desired_identity;
+        return Ok(());
     };
     if let Err(error) = registration.watcher.unwatch(current)
         && !is_missing_watch_error(&error)
@@ -4098,9 +4208,26 @@ fn reconcile_external_git_watch(state: &DaemonState, workspace: &Workspace) {
         {
             log_external_git_watch_error(workspace, "rolling back", &target, &rollback_error);
         }
-        return;
+        return Err(error.into());
     }
     registration.external_git_watch = Some(target);
+    registration.external_git_watch_identity = desired_identity;
+    Ok(())
+}
+
+fn attach_external_git_watch(
+    registration: &mut WatchRegistration,
+    target: &Path,
+) -> notify::Result<()> {
+    #[cfg(test)]
+    if std::mem::take(&mut registration.fail_next_external_git_watch) {
+        return Err(notify::Error::generic(
+            "injected external Git watch failure",
+        ));
+    }
+    registration
+        .watcher
+        .watch(target, external_git_watch_mode())
 }
 
 fn complete_initial_watch_reconciliation(control: &WatchControl) {
@@ -4279,11 +4406,20 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                 update_watcher_job(&control, update);
 
                 let workspace = control.workspace.clone();
-                if matches!(&pending_work.change, WatchChange::FullReconciliation)
-                    || control.initial_scan_required.load(Ordering::Relaxed)
-                {
-                    reconcile_external_git_watch(&state, &workspace);
-                }
+                let full_reconciliation =
+                    matches!(&pending_work.change, WatchChange::FullReconciliation)
+                        || control.initial_scan_required.load(Ordering::Relaxed);
+                let external_git_exclude_path = full_reconciliation
+                    .then(|| registered_external_git_exclude_path(&state, &workspace))
+                    .flatten();
+                let external_git_exclude_before = external_git_exclude_path
+                    .as_deref()
+                    .map(external_git_exclude_state);
+                let watch_reconciliation = if full_reconciliation {
+                    reconcile_external_git_watch(&state, &workspace)
+                } else {
+                    Ok(())
+                };
                 let startup_only = matches!(&pending_work.change, WatchChange::None);
                 let changed_paths = match pending_work.change {
                     WatchChange::Paths(paths) => paths.into_iter().collect(),
@@ -4301,21 +4437,28 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
                 let lease_state = state.clone();
                 let lease_workspace = workspace.clone();
                 let lease_control = control.clone();
-                let mode_leases = tokio::task::spawn_blocking(move || {
-                    if lease_control.initial_scan_required.load(Ordering::Relaxed) {
-                        return Ok(lease_state
-                            .acquire_workspace_mutations(std::slice::from_ref(&lease_workspace)));
-                    }
-                    let skip_gitignore = lease_workspace
-                        .read_metadata()?
-                        .is_some_and(|metadata| metadata.skip_gitignore);
-                    Result::<_, anyhow::Error>::Ok(lease_state.acquire_workspace_modes(
-                        std::slice::from_ref(&lease_workspace),
-                        skip_gitignore,
-                    ))
-                })
-                .await
-                .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string())));
+                // A failed attachment can leave no external event source. Feed
+                // it through the existing bounded retry/backoff path so a full
+                // reconciliation catches changes made while the watch was down.
+                let mode_leases = match watch_reconciliation {
+                    Err(error) => Err(error),
+                    Ok(()) => tokio::task::spawn_blocking(move || {
+                        if lease_control.initial_scan_required.load(Ordering::Relaxed) {
+                            return Ok(lease_state.acquire_workspace_mutations(
+                                std::slice::from_ref(&lease_workspace),
+                            ));
+                        }
+                        let skip_gitignore = lease_workspace
+                            .read_metadata()?
+                            .is_some_and(|metadata| metadata.skip_gitignore);
+                        Result::<_, anyhow::Error>::Ok(lease_state.acquire_workspace_modes(
+                            std::slice::from_ref(&lease_workspace),
+                            skip_gitignore,
+                        ))
+                    })
+                    .await
+                    .unwrap_or_else(|join_err| Err(anyhow::anyhow!(join_err.to_string()))),
+                };
                 let result = match mode_leases {
                     Err(err) => Err(err),
                     Ok(mode_leases) => {
@@ -4355,6 +4498,16 @@ fn spawn_watch_worker(state: DaemonState, control: Arc<WatchControl>) {
 
                 match result {
                     Ok(changed) => {
+                        if external_git_exclude_path.as_deref().is_some_and(|path| {
+                            external_git_exclude_before.as_ref()
+                                != Some(&external_git_exclude_state(path))
+                        }) {
+                            daemon_log(&format!(
+                                "external Git exclude changed during reconciliation for {}; scheduling follow-up",
+                                control.workspace.root.display()
+                            ));
+                            control.mark_full_reconciliation(None);
+                        }
                         consecutive_failures = 0;
                         if changed {
                             state.clear_workspace_contexts(&control.workspace);
@@ -10082,6 +10235,7 @@ mod tests {
 
         let common_dir = crate::workspace::git_common_dir(&linked).unwrap();
         let info = common_dir.join("info");
+        let expected_info_watch = if cfg!(windows) { &common_dir } else { &info };
         std::fs::remove_dir_all(&info).unwrap();
         assert!(!info.exists());
 
@@ -10118,7 +10272,7 @@ mod tests {
                 .lock()
                 .get(&workspace.id)
                 .and_then(|registration| registration.external_git_watch.as_deref()),
-            Some(info.as_path())
+            Some(expected_info_watch.as_path())
         );
 
         std::fs::remove_dir_all(&info).unwrap();
@@ -10148,14 +10302,75 @@ mod tests {
                 .lock()
                 .get(&workspace.id)
                 .and_then(|registration| registration.external_git_watch.as_deref()),
-            Some(info.as_path())
+            Some(expected_info_watch.as_path())
         );
         std::fs::write(&exclude, "").unwrap();
         assert!(
             wait_for_literal_visibility(&workspace, "missing_external_git_info_marker", true).await,
             "toggling recreated external info/exclude did not restore linked-worktree result"
         );
+
+        for cycle in 0..3 {
+            // Lose the replacement attachment once, after the old inode watch
+            // is detached. Recovery must not depend on another source event.
+            #[cfg(unix)]
+            if cycle == 1 {
+                state
+                    .watchers
+                    .lock()
+                    .get_mut(&workspace.id)
+                    .unwrap()
+                    .fail_next_external_git_watch = true;
+            }
+            let previous = common_dir.join(format!("info-previous-{cycle}"));
+            std::fs::rename(&info, &previous).unwrap();
+            std::fs::create_dir(&info).unwrap();
+            std::fs::write(&exclude, "shared.rs\n").unwrap();
+            assert!(
+                wait_for_literal_visibility(&workspace, "missing_external_git_info_marker", false)
+                    .await,
+                "replacement cycle {cycle} did not apply external exclude"
+            );
+            #[cfg(unix)]
+            assert!(
+                !state
+                    .watchers
+                    .lock()
+                    .get(&workspace.id)
+                    .unwrap()
+                    .fail_next_external_git_watch,
+                "attachment failure injection was not reached"
+            );
+            std::fs::write(&exclude, "").unwrap();
+            assert!(
+                wait_for_literal_visibility(&workspace, "missing_external_git_info_marker", true)
+                    .await,
+                "replacement cycle {cycle} lost the external exclude watch"
+            );
+        }
         stop_all_watchers(&state);
+    }
+
+    #[test]
+    fn external_git_exclude_state_tracks_missing_and_same_size_replacements() {
+        let directory = tempdir().unwrap();
+        let exclude = directory.path().join("exclude");
+        assert_eq!(
+            external_git_exclude_state(&exclude),
+            ExternalGitExcludeState::Missing
+        );
+
+        std::fs::write(&exclude, "first\n").unwrap();
+        let first = external_git_exclude_state(&exclude);
+        std::fs::write(&exclude, "other\n").unwrap();
+        let other = external_git_exclude_state(&exclude);
+        assert_ne!(first, other);
+
+        std::fs::remove_file(&exclude).unwrap();
+        assert_eq!(
+            external_git_exclude_state(&exclude),
+            ExternalGitExcludeState::Missing
+        );
     }
 
     #[test]

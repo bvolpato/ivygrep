@@ -96,8 +96,7 @@ jobs:
             rust_flags: "-D warnings"
             name: "Linux (Hash-only)"
           - os: ubuntu-24.04-arm
-            # Match the shipped profile; baseline ARM Candle debug assembly needs fullfp16.
-            cargo_flags: "--release"
+            cargo_flags: ""
             rust_flags: "-D warnings"
             name: "Linux ARM64 (Neural CPU)"
           - os: ubuntu-24.04-arm
@@ -220,7 +219,6 @@ jobs:
             rust_flags: "-D warnings"
             name: "macOS ARM (Metal opt-in)"
             validate_backend: "Candle Metal"
-            allow_backend: "Candle CPU (Accelerate)"
             model_profile: "general"
           - os: macos-latest
             cargo_flags: "--no-default-features"
@@ -319,9 +317,6 @@ jobs:
             --binary "$PWD/target/release/ig${EXE_SUFFIX}"
             --expect-backend "$EXPECTED_BACKEND"
           )
-          if [[ -n "$ALLOWED_BACKEND" ]]; then
-            args+=(--allow-backend "$ALLOWED_BACKEND")
-          fi
           args+=(--expect-file "src/lib.rs" --check-worktree)
           HTTP_PROXY=http://127.0.0.1:9 \
           HTTPS_PROXY=http://127.0.0.1:9 \
@@ -329,7 +324,6 @@ jobs:
           NO_PROXY='' \
             ./scripts/e2e_neural_backend.sh "${args[@]}"
         env:
-          ALLOWED_BACKEND: ${{ matrix.allow_backend }}
           EXPECTED_BACKEND: ${{ matrix.validate_backend }}
           IVYGREP_MODEL_PROFILE: ${{ matrix.model_profile }}
           MODEL_PROFILE: ${{ matrix.model_profile }}
