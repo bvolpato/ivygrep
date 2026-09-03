@@ -821,6 +821,8 @@ fn handle_watch_result(
     event_filter: &Mutex<WatchEventFilter>,
     result: notify::Result<notify::Event>,
 ) {
+    #[cfg(test)]
+    eprintln!("{} received watch event: {result:?}", daemon_timestamp());
     match result {
         Ok(event) if event.need_rescan() => {
             event_filter.lock().refresh();
@@ -834,7 +836,17 @@ fn handle_watch_result(
             ));
             control.mark_full_reconciliation(None);
         }
-        Ok(event) => match event_filter.lock().change_for_event(&event) {
+        Ok(event) => match {
+            let mut filter = event_filter.lock();
+            let change = filter.change_for_event(&event);
+            #[cfg(test)]
+            eprintln!(
+                "{} classified watch event: {change:?}, exclude={:?}",
+                daemon_timestamp(),
+                filter.git_exclude_path
+            );
+            change
+        } {
             WatchChange::None => {}
             WatchChange::Paths(paths) => control.mark_paths_dirty(paths),
             WatchChange::FullReconciliation => control.mark_full_reconciliation(None),
